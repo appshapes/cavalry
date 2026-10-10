@@ -17,3 +17,6 @@ user-visible change, added in the same commit as the change. The format follows
   `just lint` and `just test`, then commits, pulls and pushes to `master`;
   `/trello-create` and `/trello-read` work the Cavalry list on the AppShapes board;
   `/playwright-cli` drives a browser.
+- Cargo workspace with the nine crates from the repository map, one shared version
+  0.1.0, edition 2024, `publish = false` on every crate. `cavalry` builds a binary
+  that prints "not built yet" and exits 1.

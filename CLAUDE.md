@@ -90,9 +90,9 @@ crates/
   cavalry-driver/     the daemon: conductor, sender, receiver, idle strategies  data plane
   cavalry-client/     client API implementation, re-exported by `cavalry`      data plane
   cavalry-log/        durable log, recording, replay                            data plane
-  cavalry-raft/       replicated state machine on top of cavalry-log            control + data
+  cavalry-raft/       replicated state machine on top of cavalry-log            data plane
   cavalry-control/    admin API, discovery, OTel export, config                 control plane, async allowed
-  cavalry-ffi/        extern "C" ABI and cbindgen header                        the other unsafe crate
+  cavalry-ffi/        extern "C" ABI and cbindgen header                        data plane, the other unsafe crate
 clients/              thin clients generated over the C ABI: python, node, dotnet, jvm, go
 bench/                harness, baseline.json, results/
 conformance/          protocol conformance suite and upgrade tests

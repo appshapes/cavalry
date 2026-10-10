@@ -1,0 +1,28 @@
+[package]
+name = "cavalry"
+description = "Aeron-class latency without Aeron-class expertise: the client API, an embeddable driver and the cavalry binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# crates.io holds a 0.0.0 placeholder for this name (ADR 0002). Nothing is releasable
+# until the first release (ADR 0003).
+publish = false
+
+# Control-plane and CLI dependencies sit behind `cli`, default on, so that
+# `cargo install cavalry` needs no flag and `cargo add cavalry --no-default-features`
+# is the lean library build (ADR 0002). Empty until those dependencies exist.
+[features]
+default = ["cli"]
+cli = []
+
+[[bin]]
+name = "cavalry"
+path = "src/main.rs"
+required-features = ["cli"]
+
+# Read by `just lint`. A data-plane crate gets the lock, async and dependency rules
+# from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.
+[package.metadata.cavalry]
+data_plane = false

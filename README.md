@@ -7,9 +7,10 @@ replication, written in Rust. One daemon per host; clients map shared-memory log
 buffers; IPC and UDP share one API. Encrypted, observable and highly available in the
 open core, with first-class clients in every language.
 
-**Status:** pre-code. This repository holds the invariants, the decisions and the
-competitive brief that the implementation will be built from. There is nothing to run
-yet.
+**Status:** scaffold. The Cargo workspace exists with the nine crates from the
+repository map in `CLAUDE.md`, all empty. The `cavalry` binary reports that it is not
+built yet and exits 1. The invariants, the decisions and the competitive brief are what
+the implementation will be built from.
 
 ## Start here
 

@@ -1,0 +1,13 @@
+# Cavalry workspace. CLAUDE.md's repository map says what each crate is; ADR 0003
+# (docs/decisions/) records the decisions behind this file.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# One version for the whole family: `cavalry` is the product version (ADR 0002).
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/appshapes/cavalry"

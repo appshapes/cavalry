@@ -1,0 +1,17 @@
+[package]
+name = "cavalry-client"
+description = "Client API implementation, re-exported by the cavalry crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# crates.io holds a 0.0.0 placeholder for this name (ADR 0002). Nothing is releasable
+# until the first release (ADR 0003).
+publish = false
+
+# Read by `just lint`. A data-plane crate gets the lock, async and dependency rules
+# from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.
+[package.metadata.cavalry]
+data_plane = true
+allowed-dependencies = []

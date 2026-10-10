@@ -4,8 +4,9 @@ paths:
   - "crates/cavalry-shm/**"
   - "crates/cavalry-driver/**"
   - "crates/cavalry-client/**"
-  - "crates/cavalry/src/**"
   - "crates/cavalry-log/**"
+  - "crates/cavalry-raft/**"
+  - "crates/cavalry-ffi/**"
 ---
 
 # Data-plane checklist
@@ -49,12 +50,14 @@ below and say so in the commit message.
 - Term buffer sizes, MTU, and shm size are validated against each other at startup
   with an error that says which value to change.
 
-## Unsafe (cavalry-shm only)
+## Unsafe (cavalry-shm and cavalry-ffi only)
 
 - `// SAFETY:` on every block, naming the invariant and where it is established.
-- A `loom` test for every new interleaving the change introduces.
-- Run `just miri` on the crate before committing. Miri cannot see across processes,
-  so describe the cross-process invariant in the commit message as well.
+- `cavalry-shm`: a `loom` test for every new interleaving the change introduces, and
+  `just miri` on the crate before committing. Miri cannot see across processes, so
+  describe the cross-process invariant in the commit message as well.
+- `cavalry-ffi`: buffer lifetimes across the C ABI are by convention, not the borrow
+  checker, so debug builds poison released buffers (CLAUDE.md, Unsafe).
 
 ## Evidence in the commit message
 
