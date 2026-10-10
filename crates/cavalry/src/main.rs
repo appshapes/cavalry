@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     eprintln!(
-        "cavalry {}: not built yet; see README.md",
+        "cavalry {}: not built yet; see crates/cavalry/README.md",
         env!("CARGO_PKG_VERSION")
     );
     ExitCode::FAILURE

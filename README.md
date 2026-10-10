@@ -21,6 +21,7 @@ the implementation will be built from.
 | Understand why Cavalry exists and what it must beat | [`docs/explanation/why-cavalry.md`](docs/explanation/why-cavalry.md) |
 | Work on the code, human or agent | [`CLAUDE.md`](CLAUDE.md), the invariants and gates |
 | Know what a word means | [`docs/glossary.md`](docs/glossary.md) |
+| Know what each crate does and must never do | [`crates/*/README.md`](crates/) |
 | Know why something was decided | [`docs/decisions/`](docs/decisions/) |
 | Write documentation | [`.claude/rules/docs.md`](.claude/rules/docs.md) |
 

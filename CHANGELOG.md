@@ -27,3 +27,6 @@ user-visible change, added in the same commit as the change. The format follows
 - GitHub Actions runs `just lint` and `just test` on Ubuntu and macOS for every push
   to `master` and every pull request. Actions are pinned to commit SHAs; Dependabot
   opens a weekly pull request to move them.
+- A README in every crate says what it does and what it must never do, and is the
+  crate's rustdoc front page. The example and reading list say "not yet" and link
+  ADR 0003.

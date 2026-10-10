@@ -1,5 +1,2 @@
-//! The admin API, discovery, OpenTelemetry export and configuration.
-//!
-//! Control plane: `async` is allowed here, and nothing a message passes through lives
-//! here.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
