@@ -1,0 +1,14 @@
+{
+  "team_name": "appshapes",
+  "version": 1,
+  "adapter": "supabase",
+  "url": "https://wmgtaraqmoufmrnyojzf.supabase.co",
+  "publishable_key": "sb_publishable_qUEiHdtSB2fXSmgVManc-g_c-uZOyWj",
+  "team_ref": "3b8904c6-6b11-41aa-a0e7-36bc3986c666",
+  "sync": {
+    "adapter": "syncthing",
+    "folders": [
+      ".brigade"
+    ]
+  }
+}

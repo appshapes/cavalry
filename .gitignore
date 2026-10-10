@@ -17,3 +17,7 @@ Cargo.lock.orig
 # Claude Code local-only files
 CLAUDE.local.md
 .claude/settings.local.json
+
+# other
+.ignored/
+.brigade/

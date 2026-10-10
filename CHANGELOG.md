@@ -13,3 +13,7 @@ user-visible change, added in the same commit as the change. The format follows
   (`docs/explanation/why-cavalry.md`).
 - ADR 0002: `cavalry` is the one crate users add and install; `cavalry-cli` is
   removed from the crate map; the crate family is reserved on crates.io.
+- Claude Code skills under `.claude/skills/`, ported from Brigade: `/commit` runs
+  `just lint` and `just test`, then commits, pulls and pushes to `master`;
+  `/trello-create` and `/trello-read` work the Cavalry list on the AppShapes board;
+  `/playwright-cli` drives a browser.
