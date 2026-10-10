@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Benchmarks: results are published per release, not committed per run.
+/bench/results/
+
+# mdBook output
+/docs/book/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+
+# Claude Code local-only files
+CLAUDE.local.md
+.claude/settings.local.json
