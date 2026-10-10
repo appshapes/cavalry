@@ -30,3 +30,6 @@ user-visible change, added in the same commit as the change. The format follows
 - A README in every crate says what it does and what it must never do, and is the
   crate's rustdoc front page. The example and reading list say "not yet" and link
   ADR 0003.
+- ADR 0003: one workspace version, `publish = false` until the first release, where
+  each lint lives and why, why crate README examples are deferred, and that bots and
+  agent workflows use pull requests while developers commit to `master`.
