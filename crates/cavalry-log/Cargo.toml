@@ -10,6 +10,10 @@ repository.workspace = true
 # until the first release (ADR 0003).
 publish = false
 
+# Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
+[lints]
+workspace = true
+
 # Read by `just lint`. A data-plane crate gets the lock, async and dependency rules
 # from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.
 [package.metadata.cavalry]

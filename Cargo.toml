@@ -11,3 +11,9 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/appshapes/cavalry"
+
+# `unsafe` is permitted in cavalry-shm and cavalry-ffi only (CLAUDE.md, "Unsafe").
+# Every other crate inherits this table with `[lints] workspace = true`; those two
+# carry their own [lints.rust] table instead. `just lint-workspace` checks both.
+[workspace.lints.rust]
+unsafe_code = "deny"

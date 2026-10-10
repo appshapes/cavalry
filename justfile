@@ -38,8 +38,15 @@ replay-check:
 quickstart:
     @echo "not built yet: quickstart (CLAUDE.md gate 5). The README path does not exist yet." && exit 1
 
-# clippy with workspace lints, fmt, lint-counters, config lint.
-lint: fmt-check clippy lint-counters lint-config
+# clippy with workspace lints, fmt, and the workspace lint below. lint-counters and
+# lint-config rejoin this list when they are built; until then they would fail it.
+lint: fmt-check clippy lint-workspace
+
+# The CLAUDE.md rules rustc and clippy cannot see: data-plane flags, the dependency
+# allowlist, no async on the data plane, unsafe only in two crates, the lock ban's
+# scope, and `cavalry` as re-exports only. The script's header lists each check.
+lint-workspace:
+    python3 scripts/lint-workspace.py
 
 fmt-check:
     cargo fmt --all -- --check

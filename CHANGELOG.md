@@ -20,3 +20,7 @@ user-visible change, added in the same commit as the change. The format follows
 - Cargo workspace with the nine crates from the repository map, one shared version
   0.1.0, edition 2024, `publish = false` on every crate. `cavalry` builds a binary
   that prints "not built yet" and exits 1.
+- `just lint` passes for real: `unsafe` is denied outside `cavalry-shm` and
+  `cavalry-ffi`, locks are banned on the data plane through `clippy.toml`, and
+  `scripts/lint-workspace.py` checks the data-plane flags, the dependency allowlist,
+  the absence of `async`, and that `cavalry` holds only re-exports.

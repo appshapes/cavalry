@@ -1,0 +1,15 @@
+# Data-plane rule: no lock on the hot path (CLAUDE.md, invariant 2; the per-message
+# checklist in .claude/rules/data-plane.md). Clippy reads the nearest clippy.toml for
+# each crate and does not merge, so this file applies to every crate except the ones
+# that override it with a clippy.toml of their own: exactly the crates whose Cargo.toml
+# says data_plane = false. `just lint-workspace` keeps those two sets equal.
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "no lock on the data plane; use the SPSC/MPSC queues in cavalry-shm" },
+    { path = "std::sync::RwLock", reason = "no lock on the data plane; use the SPSC/MPSC queues in cavalry-shm" },
+    { path = "parking_lot::Mutex", reason = "no lock on the data plane; use the SPSC/MPSC queues in cavalry-shm" },
+    { path = "parking_lot::RwLock", reason = "no lock on the data plane; use the SPSC/MPSC queues in cavalry-shm" },
+]
+disallowed-methods = [
+    { path = "futures::executor::block_on", reason = "no async on the data plane, not even driven from synchronous code" },
+    { path = "tokio::runtime::Runtime::block_on", reason = "no async on the data plane, not even driven from synchronous code" },
+]

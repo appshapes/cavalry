@@ -10,6 +10,12 @@ repository.workspace = true
 # until the first release (ADR 0003).
 publish = false
 
+# One of the two crates where `unsafe` is permitted (CLAUDE.md, "Unsafe"). It cannot
+# inherit the workspace table, which denies unsafe_code, so it carries its own. Every
+# `unsafe` block here needs a `// SAFETY:` comment; see .claude/rules/data-plane.md.
+[lints.rust]
+unsafe_code = "allow"
+
 # Read by `just lint`. A data-plane crate gets the lock, async and dependency rules
 # from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.
 [package.metadata.cavalry]
