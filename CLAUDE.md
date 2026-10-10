@@ -83,15 +83,15 @@ histograms in the PR. A performance claim without a histogram is not a claim.
 spec/                 wire protocol, counters and log format specs; read these before crates/
 docs/                 mdBook: tutorials/, how-to/, reference/ (generated), explanation/, decisions/ (ADRs), glossary.md
 crates/
+  cavalry/            the one crate users touch: `cargo add` gives the client API and an embeddable driver; `cargo install` gives the `cavalry` binary (run, doctor, replay, console). ADR 0002
   cavalry-proto/      wire types, zerocopy frames, version negotiation          data plane
   cavalry-shm/        memory-mapped log buffers, ring buffers, counters file    data plane, the unsafe crate
   cavalry-driver/     the daemon: conductor, sender, receiver, idle strategies  data plane
-  cavalry-client/     Rust client API: publication, subscription, claim/commit  data plane
+  cavalry-client/     client API implementation, re-exported by `cavalry`      data plane
   cavalry-log/        durable log, recording, replay                            data plane
   cavalry-raft/       replicated state machine on top of cavalry-log            control + data
   cavalry-control/    admin API, discovery, OTel export, config                 control plane, async allowed
   cavalry-ffi/        extern "C" ABI and cbindgen header                        the other unsafe crate
-  cavalry-cli/        the `cavalry` binary: run, doctor, replay, console
 clients/              thin clients generated over the C ABI: python, node, dotnet, jvm, go
 bench/                harness, baseline.json, results/
 conformance/          protocol conformance suite and upgrade tests

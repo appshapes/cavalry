@@ -4,6 +4,7 @@ paths:
   - "crates/cavalry-shm/**"
   - "crates/cavalry-driver/**"
   - "crates/cavalry-client/**"
+  - "crates/cavalry/src/**"
   - "crates/cavalry-log/**"
 ---
 

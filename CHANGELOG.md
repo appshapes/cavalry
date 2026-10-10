@@ -11,3 +11,5 @@ user-visible change, added in the same pull request as the change. The format fo
 - Repository scaffold: `CLAUDE.md` invariants and gates, documentation rules, ADR
   template and ADR 0001, glossary, and the competitive brief
   (`docs/explanation/why-cavalry.md`).
+- ADR 0002: `cavalry` is the one crate users add and install; `cavalry-cli` is
+  removed from the crate map; the crate family is reserved on crates.io.
