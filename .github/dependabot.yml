@@ -1,0 +1,15 @@
+# Keeps the SHA-pinned actions in .github/workflows/ current. Dependabot opens one pull
+# request a week when any pinned action has a new release; ci.yml runs on it, and a
+# human merges it with a merge commit. Bot pull requests are the exception to
+# committing straight to master (CLAUDE.md, "Working rules for agents"; ADR 0003).
+# A cargo entry joins this file when the workspace has dependencies.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"

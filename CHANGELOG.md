@@ -24,3 +24,6 @@ user-visible change, added in the same commit as the change. The format follows
   `cavalry-ffi`, locks are banned on the data plane through `clippy.toml`, and
   `scripts/lint-workspace.py` checks the data-plane flags, the dependency allowlist,
   the absence of `async`, and that `cavalry` holds only re-exports.
+- GitHub Actions runs `just lint` and `just test` on Ubuntu and macOS for every push
+  to `master` and every pull request. Actions are pinned to commit SHAs; Dependabot
+  opens a weekly pull request to move them.

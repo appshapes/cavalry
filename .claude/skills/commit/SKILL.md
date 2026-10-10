@@ -5,9 +5,10 @@ argument-hint: "[card number]"
 ---
 
 Commit the current working tree to `master` with this repository's commit sequence.
-There are no branches or pull requests (CLAUDE.md, "Working rules for agents").
-`master` is green after every commit, and the commit message is the review record:
-what changed, which invariant it serves, and the evidence.
+Developers commit directly to `master`; only bots and agent workflows use branches and
+pull requests (CLAUDE.md, "Working rules for agents"). `master` is green after every
+commit, and the commit message is the review record: what changed, which invariant it
+serves, and the evidence.
 
 The sequence is the `gcp` script (`git add`, `git commit`, `git pull --no-edit`,
 `git push`) with the two gates CLAUDE.md requires in front of it:

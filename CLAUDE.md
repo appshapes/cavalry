@@ -170,10 +170,10 @@ and receiver threads. Everything else is control plane.
 ## Working rules for agents
 
 - Read `spec/` before `crates/`. Read the crate's `README.md` before its code.
-- Trunk-based: commit directly to `master`; there are no branches or pull requests.
-  `master` is green after every commit, so run `just lint` and `just test` before
-  each one; `/commit` does. The commit message is the review record: what changed,
-  which invariant it serves, and the evidence.
+- Trunk-based by default: developers commit directly to `master`. Bots and agent
+  workflows use branches and pull requests. `master` is green after every commit,
+  so run `just lint` and `just test` before each one; `/commit` does. The commit
+  message is the review record: what changed, which invariant, and the evidence.
 - One crate per commit where possible. Keep data-plane and control-plane changes in
   separate commits.
 - Before claiming a change is faster, run `just bench-compare`. Before claiming it

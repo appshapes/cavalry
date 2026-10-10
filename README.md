@@ -1,5 +1,7 @@
 # Cavalry
 
+[![ci](https://github.com/appshapes/cavalry/actions/workflows/ci.yml/badge.svg)](https://github.com/appshapes/cavalry/actions/workflows/ci.yml)
+
 Send in the cavalry. Aeron-class latency without Aeron-class expertise.
 
 Cavalry is a brokerless, low-latency message transport with a durable log and Raft

@@ -1,0 +1,44 @@
+# Continuous integration: the CLAUDE.md gates that exist today, on both operating
+# systems the ten-minute path promises (CLAUDE.md, invariant 5). It runs on every push
+# to master, on every pull request, and by hand.
+#
+# Every action is pinned to a full commit SHA with its version in a trailing comment.
+# Tags are mutable: the tj-actions compromise of March 2025 was delivered by moving
+# tags. Dependabot (.github/dependabot.yml) opens a pull request when a pinned action
+# has a new release; this workflow runs on that pull request before a human merges it.
+#
+# The job name is stable on purpose: "gates (ubuntu-latest)" and "gates (macos-latest)"
+# are what branch protection or an auto-merge rule can require.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gates:
+    name: gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: just lint
+      - run: just test
