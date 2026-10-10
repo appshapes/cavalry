@@ -54,7 +54,7 @@ needs it. Do not ship around a missing gate.
 | 3 Bounded | Every collection in the driver is built with explicit capacity and has a test at capacity. Fault-injection tests cover loss, reordering, CPU throttling and shm exhaustion. `conformance/upgrade/` runs N and N+1 together. |
 | 4 Counters | Counters are generated from `counters.toml`. `just lint-counters` fails on a state transition with no counter. Each known pathology has a `doctor` test. |
 | 5 Defaults | `just quickstart` runs the README's ten-minute path end to end in CI on Linux and macOS. Config keys live in `config.toml` with a non-empty `why_not_default` field, linted. |
-| 6 Understandable | `#![deny(missing_docs, rustdoc::broken_intra_doc_links)]` on every public crate. `just docs` builds rustdoc and the mdBook with warnings denied, runs every code block, and checks links. Reference pages are generated from `spec/`, `counters.toml` and `config.toml`, never hand-written. `just lint-docs` fails a PR that changes a public item, counter, config key or `spec/` without touching `docs/` or a README. A change to `spec/`, the on-disk log format or the C ABI needs an accepted ADR in `docs/decisions/`. |
+| 6 Understandable | `#![deny(missing_docs, rustdoc::broken_intra_doc_links)]` on every public crate. `just docs` builds rustdoc and the mdBook with warnings denied, runs every code block, and checks links. Reference pages are generated from `spec/`, `counters.toml` and `config.toml`, never hand-written. `just lint-docs` fails a commit that changes a public item, counter, config key or `spec/` without touching `docs/` or a README. A change to `spec/`, the on-disk log format or the C ABI needs an accepted ADR in `docs/decisions/`. |
 
 ## Commands
 
@@ -74,8 +74,9 @@ just lint-docs      # fail if code changed without its docs (what CI runs)
 just doctor         # run cavalry doctor against the local driver
 ```
 
-Run `just bench` before and after any change under a data-plane crate and paste both
-histograms in the PR. A performance claim without a histogram is not a claim.
+Run `just bench` before and after any change under a data-plane crate and put both
+histograms in the commit message. A performance claim without a histogram is not a
+claim.
 
 ## Repository map
 
@@ -106,19 +107,17 @@ and receiver threads. Everything else is control plane.
 ### Data plane
 
 - Dedicated threads, pinned when the OS allows; busy-spin, yield and backoff idle
-  strategies selectable at runtime. Default is backoff; `doctor` recommends
-  busy-spin when it detects isolated cores.
+  strategies, default backoff; `doctor` recommends busy-spin on isolated cores.
 - Lock-free SPSC/MPSC queues, 64-byte alignment on shared state, `#[repr(C)]`
   layouts with a versioned header. A layout change is a wire-protocol change.
-- The full per-message checklist is in `.claude/rules/data-plane.md`; it loads when
-  you open a data-plane crate.
+- The per-message checklist is `.claude/rules/data-plane.md`, loaded on demand.
 
 ### Unsafe
 
 - `unsafe` is permitted in `cavalry-shm` and `cavalry-ffi` only; a workspace lint
   denies it elsewhere. Every block carries a `// SAFETY:` comment naming the
   invariant and where it is established.
-- New `unsafe` in `cavalry-shm` needs a `loom` test in the same PR. FFI buffer
+- New `unsafe` in `cavalry-shm` needs a `loom` test in the same commit. FFI buffer
   lifetimes are by convention, so debug builds poison released buffers.
 
 ### Protocol
@@ -128,14 +127,12 @@ and receiver threads. Everything else is control plane.
 - Unspecified behaviour is a bug in the spec, not a freedom in the code.
 - Keep Aeron's vocabulary where the concept matches: publication, subscription,
   image, term, position, NAK, status message, flow control (max, min, tagged),
-  stream id, session id, channel URI. Do not invent synonyms for things Aeron
-  already named.
+  stream id, session id, channel URI. Do not invent synonyms for Aeron's names.
 
 ### Configuration and defaults
 
 - Zero configuration is the primary supported configuration. Tune by detection
-  (`doctor`), not by documentation.
-- Never add a knob to make a benchmark pass. Fix the default or fix the code.
+  (`doctor`), not by documentation. Never add a knob to make a benchmark pass.
 - Every key has a `why_not_default`, a `doctor` check, and a line in the config
   reference, or it does not merge.
 
@@ -155,8 +152,8 @@ and receiver threads. Everything else is control plane.
 
 ### Documentation
 
-- Docs ship in the same PR as the code they describe. "Docs to follow" is a
-  rejected PR.
+- Docs ship in the same commit as the code they describe. A commit whose message
+  says "docs to follow" gets reverted.
 - `docs/` has four kinds of page and they do not mix: tutorial (learn by doing),
   how-to (one task), reference (generated, exhaustive), explanation (why). A page
   that is two kinds gets split. Detail in `.claude/rules/docs.md`.
@@ -165,20 +162,24 @@ and receiver threads. Everything else is control plane.
 - Every crate README answers four questions: what this does, what it must never do,
   a twenty-line example that is also a doctest, and what to read next.
 - Decisions live in `docs/decisions/` as numbered ADRs, immutable once accepted and
-  superseded by a new one. A decision made in chat, a call or a PR thread does not
-  exist until it is an ADR.
+  superseded by a new one. A decision made in chat, a call or a commit message does
+  not exist until it is an ADR.
 - Every error message and every `doctor` finding names the docs anchor that explains
   it, so the first search result is ours.
 
 ## Working rules for agents
 
 - Read `spec/` before `crates/`. Read the crate's `README.md` before its code.
-- One crate per PR where possible. Keep the data plane and the control plane in
-  separate PRs.
+- Trunk-based: commit directly to `master`; there are no branches or pull requests.
+  `master` is green after every commit, so run `just lint` and `just test` before
+  each one. The commit message is the review record: what changed, which invariant
+  it serves, and the evidence.
+- One crate per commit where possible. Keep data-plane and control-plane changes in
+  separate commits.
 - Before claiming a change is faster, run `just bench-compare`. Before claiming it
   is correct, run `just conformance` and `just replay-check`.
-- Do not add a dependency to a data-plane crate without a justification in the PR
-  description. Data-plane crates have a dependency allowlist in `Cargo.toml`
+- Do not add a dependency to a data-plane crate without a justification in the
+  commit message. Data-plane crates have a dependency allowlist in `Cargo.toml`
   metadata; `just lint` checks it.
 - Ask before: changing the wire format, adding `unsafe` outside the two permitted
   crates, adding a configuration key, adding a dependency to a data-plane crate,
@@ -193,8 +194,7 @@ and receiver threads. Everything else is control plane.
 ## When in doubt
 
 - Copy Aeron's semantics and name.
-- Make it bounded first, then fast.
-- Measure at p99.99. Never quote a mean.
+- Make it bounded first, then fast. Measure at p99.99. Never quote a mean.
 - A counter beats a log line. A `doctor` check beats a documentation page.
 - If a decision cannot be undone (wire format, on-disk log format, C ABI), stop and
   write it up instead of choosing.

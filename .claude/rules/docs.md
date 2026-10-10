@@ -70,16 +70,16 @@ that.
   anything a new team member would ask "why" about.
 - Record the alternatives that lost and the evidence (histograms, measurements,
   links). A decision without alternatives is a preference.
-- A conversation in chat, a call or a PR thread is not a decision. Write the ADR and
-  link the conversation from it.
+- A conversation in chat, a call or a commit message is not a decision. Write the
+  ADR and link the conversation from it.
 
 ## Changelog
 
 `CHANGELOG.md` follows Keep a Changelog. Every user-visible change adds a line under
-`Unreleased` in the same PR, in the reader's words ("`cavalry doctor` now reports
+`Unreleased` in the same commit, in the reader's words ("`cavalry doctor` now reports
 cgroup CPU throttling"), linking the ADR or docs page where one exists.
 
-## Before opening the PR
+## Before committing
 
 1. `just docs` passes with no warnings.
 2. `just lint-docs` passes.

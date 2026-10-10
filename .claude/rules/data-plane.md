@@ -10,8 +10,8 @@ paths:
 
 # Data-plane checklist
 
-You are editing code a message passes through. Before opening the PR, confirm each
-line below and say so in the description.
+You are editing code a message passes through. Before committing, confirm each line
+below and say so in the commit message.
 
 ## Per-message hot path
 
@@ -53,10 +53,10 @@ line below and say so in the description.
 
 - `// SAFETY:` on every block, naming the invariant and where it is established.
 - A `loom` test for every new interleaving the change introduces.
-- Run `just miri` on the crate before the PR. Miri cannot see across processes, so
-  describe the cross-process invariant in the PR as well.
+- Run `just miri` on the crate before committing. Miri cannot see across processes,
+  so describe the cross-process invariant in the commit message as well.
 
-## Evidence to attach
+## Evidence in the commit message
 
 1. `just bench-compare` output: p50, p99, p99.99, max, before and after.
 2. `just test -p <crate>` and `just conformance` green.

@@ -33,4 +33,4 @@ would make us revisit this decision.
 
 ## References
 
-Links to the PR, the spec section, the docs pages, and any outside discussion.
+Links to the commit, the spec section, the docs pages, and any outside discussion.
