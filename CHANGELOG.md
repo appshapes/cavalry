@@ -49,4 +49,5 @@ user-visible change, added in the same commit as the change. The format follows
 - ADR 0005 (proposed): the reviewer runs in the base repository's context, so a pull
   request that changes the reviewer's own workflow file, Dependabot's bumps of its pins
   included, is agent-reviewed, and Dependabot's pull requests are reviewed directly;
-  the hand-off workflow is gone.
+  the hand-off workflow is gone, and so is the "cannot run on this pull request"
+  comment.
