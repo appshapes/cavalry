@@ -26,6 +26,13 @@ test *ARGS:
 bench *ARGS:
     cargo run --release -p cavalry-bench -- {{ARGS}}
 
+# The same harness with the data-plane checks built out, `cfg(cavalry_unchecked)`, for
+# one purpose: what ADR 0010's checks cost at p99.99. The profile gets the suffix
+# -unchecked, so it compares against its own baseline. Its own target directory keeps
+# the flag from rebuilding the default one. Never run anything else with this cfg.
+bench-unchecked *ARGS:
+    RUSTFLAGS="--cfg cavalry_unchecked" cargo run --release -p cavalry-bench --target-dir target/unchecked -- --profile-suffix -unchecked {{ARGS}}
+
 # Diff the newest result in bench/results/ against bench/baseline.json for its profile;
 # fail on a p99.99 regression over 5 percent on any benchmark. What CI runs after bench.
 bench-compare:

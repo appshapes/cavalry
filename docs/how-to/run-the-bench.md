@@ -38,10 +38,16 @@ invariant 2 and the gates table; why the harness measures what it measures is
    | `timer` | Two `Instant::now()` calls back to back: the harness's own overhead, present in every other row. |
    | `claim_commit_<body>` | The publisher's `try_claim`, writing the body, and `commit`, for a body of that many bytes. |
    | `one_way_<body>` | From the publisher's timestamp before its claim to the subscriber's handler receiving the frame, across two threads. |
-   | `slot_padding_<spacing>` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
+   | `slot_padding_<spacing>_load` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
+   | `slot_padding_<spacing>_store` | The other side of the same pair: one store while the other thread loads. |
 
    The last line says how many allocations the measured loops made per message. It is 0
    or the run has failed: the gate requires zero allocations per message.
+
+   `just bench-unchecked` runs the same harness with the data-plane checks built out,
+   under its own profile, `<profile>-unchecked`, and its own baseline: the difference
+   between the two is what the checks cost (ADR 0010). Nothing else is ever built with
+   that flag.
 
 3. Compare with the baseline:
 

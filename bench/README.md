@@ -15,8 +15,10 @@ nothing depends on it.
   `timer` row reports the harness's own overhead.
 - Measures the publisher's claim and commit, the one-way latency from the publisher's
   timestamp to the subscriber's handler, for the exclusive and the concurrent log type,
-  and a slot-padding microbench that loads a word while another thread stores 0, 64 or
-  128 bytes away (ADR 0011).
+  and a slot-padding microbench that times a load of a word and a store to a word 0, 64
+  or 128 bytes away, from two threads (ADR 0011). `just bench-unchecked` runs it all
+  again with the data-plane checks built out, under a profile of its own, to price
+  ADR 0010's checks.
 - Runs the measured loops under a counting allocator and fails the run when they
   allocate: the zero-allocations-per-message assertion of the gate.
 - Writes `bench/results/<profile>-<unix time>.json`; `scripts/bench-compare.py` fails a

@@ -44,6 +44,7 @@ struct Options {
     body: usize,
     term_length: u32,
     profile: String,
+    profile_suffix: String,
     out: Option<PathBuf>,
 }
 
@@ -56,6 +57,7 @@ Options:
   --body N          body bytes per message, at least 8 for the timestamp (default 32)
   --term-length N   term length of the log buffer, a power of two from 65536 (default 4194304)
   --profile NAME    the baseline profile; default $CAVALRY_BENCH_PROFILE or local-<os>-<arch>
+  --profile-suffix S  appended to the profile; `just bench-unchecked` passes -unchecked
   --out DIR         where the result JSON goes (default bench/results); --no-write writes none
   --help            this text
 
@@ -70,6 +72,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         profile: std::env::var("CAVALRY_BENCH_PROFILE").unwrap_or_else(|_| {
             format!("local-{}-{}", std::env::consts::OS, std::env::consts::ARCH)
         }),
+        profile_suffix: String::new(),
         out: Some(PathBuf::from("bench/results")),
     };
     let mut iter = args.iter();
@@ -100,6 +103,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .map_err(|e| format!("--term-length: {e}"))?;
             }
             "--profile" => options.profile = value("--profile")?.clone(),
+            "--profile-suffix" => options.profile_suffix = value("--profile-suffix")?.clone(),
             "--out" => options.out = Some(PathBuf::from(value("--out")?)),
             "--no-write" => options.out = None,
             "--help" | "-h" => return Err(USAGE.to_string()),
@@ -114,6 +118,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if options.messages == 0 {
         return Err("--messages must be at least 1".to_string());
     }
+    options.profile.push_str(&options.profile_suffix);
     Ok(options)
 }
 
@@ -359,31 +364,46 @@ struct Words {
     words: [AtomicI64; 32],
 }
 
-/// One thread stores to word 0 as fast as it can, as a subscriber stores its position;
-/// another loads the word `spacing` bytes away and times each load, as a publisher
-/// loads its limit. 0 shares the cache line, 64 shares the 128-byte pair the prefetcher
-/// moves, 128 shares nothing (ADR 0011).
-fn bench_slot(options: &Options, spacing: usize) -> Summary {
+/// One thread stores to word 0 and times each store, as a subscriber stores its
+/// position; another loads the word `spacing` bytes away and times each load, as a
+/// publisher loads its limit, until the stores are done. 0 shares the cache line, 64
+/// shares the 128-byte pair the prefetcher moves, 128 shares nothing (ADR 0011). Returns
+/// the load and the store summaries.
+fn bench_slot(options: &Options, spacing: usize) -> (Summary, Summary) {
     let words = Arc::new(Words {
         words: std::array::from_fn(|_| AtomicI64::new(0)),
     });
     let done = Arc::new(AtomicBool::new(false));
+    let total = options.warmup + options.messages;
     let writer = {
         let words = Arc::clone(&words);
         let done = Arc::clone(&done);
+        let warmup = options.warmup;
         thread::spawn(move || {
-            let mut i: i64 = 0;
-            while !done.load(Ordering::Relaxed) {
-                words.words[0].store(i, Ordering::Release);
-                i = i.wrapping_add(1);
+            let mut hist = histogram();
+            let mut start = Instant::now();
+            for i in 0..total {
+                if i == warmup {
+                    start = Instant::now();
+                }
+                let t0 = Instant::now();
+                words.words[0].store(i as i64, Ordering::Release);
+                let t1 = Instant::now();
+                if i >= warmup {
+                    hist.saturating_record(span_ns(t0, t1));
+                }
             }
+            let elapsed = start.elapsed();
+            done.store(true, Ordering::Release);
+            summarize(&hist, elapsed)
         })
     };
     let index = spacing / 8;
     let mut hist = histogram();
     let mut sink: i64 = 0;
+    let mut i: u64 = 0;
     let mut start = Instant::now();
-    for i in 0..options.warmup + options.messages {
+    while !done.load(Ordering::Acquire) {
         if i == options.warmup {
             start = Instant::now();
         }
@@ -393,12 +413,12 @@ fn bench_slot(options: &Options, spacing: usize) -> Summary {
         if i >= options.warmup {
             hist.saturating_record(span_ns(t0, t1));
         }
+        i += 1;
     }
     let elapsed = start.elapsed();
-    done.store(true, Ordering::Relaxed);
-    writer.join().expect("the writer thread");
+    let stores = writer.join().expect("the writer thread");
     std::hint::black_box(sink);
-    summarize(&hist, elapsed)
+    (summarize(&hist, elapsed), stores)
 }
 
 fn git_sha() -> String {
@@ -478,10 +498,9 @@ fn main() -> ExitCode {
         }
     }
     for spacing in [0usize, 64, 128] {
-        benchmarks.insert(
-            format!("slot_padding_{spacing}"),
-            bench_slot(&options, spacing),
-        );
+        let (loads, stores) = bench_slot(&options, spacing);
+        benchmarks.insert(format!("slot_padding_{spacing}_load"), loads);
+        benchmarks.insert(format!("slot_padding_{spacing}_store"), stores);
     }
 
     let messages_measured = 2 * options.messages;

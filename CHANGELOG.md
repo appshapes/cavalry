@@ -140,3 +140,7 @@ user-visible change, added in the same commit as the change. The format follows
   `just bench-compare` fails a p99.99 regression over 5 percent against
   `bench/baseline.json` for the runner's profile, and CI runs both and keeps the result
   as an artifact. `docs/how-to/run-the-bench.md` is the page (ADR 0015).
+- `just bench-unchecked` runs the harness with the data-plane checks built out, under
+  the profile `<profile>-unchecked`, so that what ADR 0010's checks cost is measured on
+  every CI run; the slot-padding microbench now times the store side as well as the
+  load side (ADR 0011).
