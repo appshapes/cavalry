@@ -62,3 +62,8 @@ user-visible change, added in the same commit as the change. The format follows
   with the README's ten-minute path as its test, built as five features in a fixed
   order, the data frame header first; UDP, the durable log, Raft and the language
   clients wait for the next slice.
+- `docs/explanation/should-zigbolt-inform-cavalry.md` answers whether ZigBolt's
+  design should inform Cavalry's: no, except two shared-memory layout points,
+  proposed as ADR 0008 (validate every peer-written shared-memory field before
+  using it) and ADR 0009 (pad peer-shared hot fields to 128 bytes). The frame
+  header of ADR 0007 is unchanged.

@@ -6,6 +6,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 # Explanation
 
 - [Why Cavalry, and why not Aeron](explanation/why-cavalry.md)
+- [Should ZigBolt's design inform Cavalry's?](explanation/should-zigbolt-inform-cavalry.md)
 
 # How-to
 
@@ -25,3 +26,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0005. Review pull requests in the base repository's context](decisions/0005-review-in-the-base-context.md)
 - [0006. Build the documentation gate from mdBook, rustdoc and a link script](decisions/0006-build-the-docs-gate.md)
 - [0007. Build publish/subscribe over shared memory first, in five features](decisions/0007-build-ipc-pub-sub-first.md)
+- [0008. Validate every peer-written field of a shared-memory layout before using it](decisions/0008-validate-peer-written-shared-memory.md)
+- [0009. Pad peer-shared hot fields to 128 bytes](decisions/0009-pad-peer-shared-fields-to-128-bytes.md)
