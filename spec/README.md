@@ -32,3 +32,4 @@ Protocol).
 | Page | Version | Decided in |
 | --- | --- | --- |
 | `frame.md`, the data frame header | 0 | ADR 0008 |
+| `counters-file.md`, the counters file | 0 | ADR 0012 |

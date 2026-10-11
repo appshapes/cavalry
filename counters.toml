@@ -1,0 +1,31 @@
+# Every counter Cavalry has, in one place (CLAUDE.md, invariant 4; spec/counters-file.md;
+# ADR 0012). docs/reference/counters.md and the constants in cavalry-shm are generated
+# from this file; `just lint-counters` fails when they are stale or an entry lacks a
+# field. Edit here, never there.
+#
+# id:     stable and never reused; the type id in the counters file's metadata record.
+# name:   lowercase, dotted, the layout or component first; the label of a static
+#         counter, and the prefix of an instance counter's label.
+# kind:   "counter" never decreases while allocated; "gauge" moves both ways.
+# scope:  "static", one counter allocated when the driver starts, in the record whose
+#         type id is this id; "instance", one per key, allocated with the instance,
+#         with the key's layout stated in doc.
+# doc:    one sentence for the reference page: what a change in the value means.
+# doctor: what an operator does when this counter says something is wrong, or "".
+schema = 0
+
+[[counter]]
+id = 0
+name = "counters.allocated"
+kind = "gauge"
+scope = "static"
+doc = "Metadata records in the allocated state, this counter's own record included."
+doctor = ""
+
+[[counter]]
+id = 1
+name = "counters.allocation_failed"
+kind = "counter"
+scope = "static"
+doc = "Counter allocations refused because every record was in use: the counters file is full, and whatever needed the counter was refused with it."
+doctor = "Restart the driver with a larger counters file capacity; until then new publications and subscriptions are refused."

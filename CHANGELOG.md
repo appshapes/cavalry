@@ -87,3 +87,10 @@ user-visible change, added in the same commit as the change. The format follows
   `master`, for people and agents, with the data frame header (card 80) as the worked
   example, commit by commit. The README's "Start here" table and the writer agent's
   brief point at it.
+- `spec/counters-file.md` specifies the counters file at version 0: a 128-byte header
+  written magic-last, Aeron's counter metadata records at 256 bytes, a 128-byte value
+  slot per counter, a writer, reader and bound for every field, the checks a reader
+  runs in order, and what happens when the file is full. Its 21 vectors come from
+  `spec/vectors/counters-file.py`, and the book includes the page (ADR 0012).
+- `counters.toml` is the single source of every counter, starting with
+  `counters.allocated` and `counters.allocation_failed` (ADR 0012).

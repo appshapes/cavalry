@@ -29,7 +29,10 @@ pages elsewhere mention Aeron at most once.
 | flow control (max, min, tagged) | The policy deciding how a sender treats a group of receivers: fastest receiver sets the pace (max), slowest does (min), or a tagged subset does (tagged). | flow control strategies | `docs/reference/flow-control.md` |
 | back-pressure | The result code a publication returns when the receiver window or log buffer is full. The caller decides what to do; the driver never buffers more. | `BACK_PRESSURED` | `docs/reference/client.md` |
 | idle strategy | What a data-plane thread does when it has no work: busy-spin, yield or backoff. | idle strategy | `docs/reference/driver.md` |
-| counters file | The shared-memory file where the driver publishes every counter; the primary instrument for `doctor` and for OTel export. | CnC file / counters | `docs/reference/counters.md` |
+| counters file | The shared-memory file where the driver publishes every counter; the primary instrument for `doctor` and for OTel export. | CnC file / counters | `docs/reference/counters-file.md` |
+| counter | One 64-bit value in the counters file, owned by one driver thread and moved by a state transition; its kind is `counter`, which never decreases, or `gauge`. Every counter is listed in `counters.toml`. | counter | `docs/reference/counters-file.md` |
+| metadata record | The 256-byte description of one counter in the counters file: state, type id, key and label. | counter metadata record | `docs/reference/counters-file.md` |
+| value slot | The 128-byte slot in the counters file that holds one counter's value and nothing else's. | counter value | `docs/reference/counters-file.md` |
 | doctor | The `cavalry doctor` command: reads counters and host state and explains any latency or loss problem with a recommended action. | none (AeronStat shows counters; no diagnosis) | `docs/reference/cli.md` |
 | log (durable) | The on-disk, ordered, replayable record of a stream, written by the driver. | Archive recording | `docs/reference/durable-log.md` |
 | replay | Reading a durable log back into a subscription from a given position, at original or maximum speed. | Archive replay | `docs/reference/durable-log.md` |
