@@ -11,6 +11,27 @@ pub const COUNTERS_ALLOCATED: CounterId = CounterId(0);
 /// `counters.allocation_failed`, a static counter: Counter allocations refused because every record was in use: the counters file is full, and whatever needed the counter was refused with it.
 pub const COUNTERS_ALLOCATION_FAILED: CounterId = CounterId(1);
 
+/// `publication.position`, a instance gauge: The producer position of one publication's log buffer, written by the driver on its duty cycle; key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated.
+pub const PUBLICATION_POSITION: CounterId = CounterId(2);
+
+/// `publication.limit`, a instance gauge: The position up to which one publication may write: the slowest subscriber's position plus the publication window, written by the driver; key and label as publication.position.
+pub const PUBLICATION_LIMIT: CounterId = CounterId(3);
+
+/// `subscription.position`, a instance gauge: How far one subscription has read one publication's stream, written by the subscriber after each poll with a release store; key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated.
+pub const SUBSCRIPTION_POSITION: CounterId = CounterId(4);
+
+/// `publication.unblocked`, a static counter: Stale claims the driver turned into padding frames because a publisher claimed and did not commit within the unblock timeout (spec/log-buffer.md, The driver).
+pub const PUBLICATION_UNBLOCKED: CounterId = CounterId(5);
+
+/// `log_buffer.rejected_position`, a static counter: Subscriber positions the driver found outside the spec's bounds and refused to use; the client that wrote one is evicted (ADR 0010).
+pub const LOG_BUFFER_REJECTED_POSITION: CounterId = CounterId(6);
+
+/// `log_buffer.rejected_tail`, a static counter: Tail counters the driver found inconsistent with the active term count and refused to use; the publication is closed (ADR 0010).
+pub const LOG_BUFFER_REJECTED_TAIL: CounterId = CounterId(7);
+
+/// `log_buffer.rejected_frame`, a static counter: Frames a subscriber found outside spec/frame.md's bounds in a term and reported; nothing after such a frame is delivered on that image.
+pub const LOG_BUFFER_REJECTED_FRAME: CounterId = CounterId(8);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -28,5 +49,61 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Counter allocations refused because every record was in use: the counters file is full, and whatever needed the counter was refused with it.",
         doctor: "Restart the driver with a larger counters file capacity; until then new publications and subscriptions are refused.",
+    },
+    CounterDef {
+        id: PUBLICATION_POSITION,
+        name: "publication.position",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The producer position of one publication's log buffer, written by the driver on its duty cycle; key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated.",
+        doctor: "",
+    },
+    CounterDef {
+        id: PUBLICATION_LIMIT,
+        name: "publication.limit",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The position up to which one publication may write: the slowest subscriber's position plus the publication window, written by the driver; key and label as publication.position.",
+        doctor: "If publication.position sits at publication.limit, a subscriber is slow or stopped: compare the subscription.position counters of the stream and look at that subscriber.",
+    },
+    CounterDef {
+        id: SUBSCRIPTION_POSITION,
+        name: "subscription.position",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "How far one subscription has read one publication's stream, written by the subscriber after each poll with a release store; key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated.",
+        doctor: "A subscription.position that does not move while publication.position does is a subscriber that stopped polling; its publisher will be back-pressured when it reaches the window.",
+    },
+    CounterDef {
+        id: PUBLICATION_UNBLOCKED,
+        name: "publication.unblocked",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Stale claims the driver turned into padding frames because a publisher claimed and did not commit within the unblock timeout (spec/log-buffer.md, The driver).",
+        doctor: "A publisher process died or stalled between claim and commit; find it from the publication whose position stopped moving, and keep claim and commit on one thread with nothing blocking between them.",
+    },
+    CounterDef {
+        id: LOG_BUFFER_REJECTED_POSITION,
+        name: "log_buffer.rejected_position",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Subscriber positions the driver found outside the spec's bounds and refused to use; the client that wrote one is evicted (ADR 0010).",
+        doctor: "A client wrote an impossible position: a buggy binding or a hostile process. The driver's log names the client; rebuild or remove it.",
+    },
+    CounterDef {
+        id: LOG_BUFFER_REJECTED_TAIL,
+        name: "log_buffer.rejected_tail",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Tail counters the driver found inconsistent with the active term count and refused to use; the publication is closed (ADR 0010).",
+        doctor: "A publisher wrote an impossible tail: a buggy binding or a hostile process. The driver's log names the publication; rebuild or remove the client.",
+    },
+    CounterDef {
+        id: LOG_BUFFER_REJECTED_FRAME,
+        name: "log_buffer.rejected_frame",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Frames a subscriber found outside spec/frame.md's bounds in a term and reported; nothing after such a frame is delivered on that image.",
+        doctor: "A publisher wrote a corrupt frame, or a term was overwritten: check publication.unblocked and the driver's log for the publication.",
     },
 ];

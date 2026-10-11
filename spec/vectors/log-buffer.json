@@ -1,0 +1,685 @@
+{
+  "spec": "spec/log-buffer.md",
+  "version": 0,
+  "generated_by": "spec/vectors/log-buffer.py; do not edit by hand",
+  "vectors": [
+    {
+      "name": "header-64k-concurrent",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "fields": {
+        "magic": "43564c594c4f4742",
+        "version": 0,
+        "type": 0,
+        "correlation_id": 42,
+        "initial_term_id": -5,
+        "term_length": 65536,
+        "mtu_length": 1408,
+        "publication_window_length": 32768,
+        "default_frame_header": "0000000000c001000000000001000000e9030000fbffffff0000000000000000",
+        "session_id": 1,
+        "stream_id": 1001
+      }
+    },
+    {
+      "name": "header-1g-exclusive",
+      "region": "header",
+      "bytes": "43564c594c4f47420000000001000000ffffffffffffffffffffff7f00000040e0ff0000010000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000ffffff7f00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 3221229568,
+      "fields": {
+        "magic": "43564c594c4f4742",
+        "version": 0,
+        "type": 1,
+        "correlation_id": -1,
+        "initial_term_id": 2147483647,
+        "term_length": 1073741824,
+        "mtu_length": 65504,
+        "publication_window_length": 1,
+        "default_frame_header": "0000000000c001000000000001000000e9030000ffffff7f0000000000000000",
+        "session_id": 1,
+        "stream_id": 1001
+      }
+    },
+    {
+      "name": "header-window-one",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000010000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "fields": {
+        "magic": "43564c594c4f4742",
+        "version": 0,
+        "type": 0,
+        "correlation_id": 42,
+        "initial_term_id": -5,
+        "term_length": 65536,
+        "mtu_length": 1408,
+        "publication_window_length": 1,
+        "default_frame_header": "0000000000c001000000000001000000e9030000fbffffff0000000000000000",
+        "session_id": 1,
+        "stream_id": 1001
+      }
+    },
+    {
+      "name": "too-short-file",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4095,
+      "error": "too-short"
+    },
+    {
+      "name": "too-short-bytes",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "too-short"
+    },
+    {
+      "name": "not-ready",
+      "region": "header",
+      "bytes": "000000000000000000000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "not-ready"
+    },
+    {
+      "name": "magic-counters-file",
+      "region": "header",
+      "bytes": "43564c59434e545200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "magic"
+    },
+    {
+      "name": "version-1",
+      "region": "header",
+      "bytes": "43564c594c4f474201000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "version"
+    },
+    {
+      "name": "type-2",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000020000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "type"
+    },
+    {
+      "name": "term-length-not-power-of-two",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffffa08601008005000050c300000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 304096,
+      "error": "term-length"
+    },
+    {
+      "name": "term-length-below-minimum",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0080000080050000004000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 102400,
+      "error": "term-length"
+    },
+    {
+      "name": "term-length-above-maximum",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000008080050000000000c00000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "term-length"
+    },
+    {
+      "name": "mtu-not-aligned",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010078050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "mtu"
+    },
+    {
+      "name": "mtu-too-small",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010020000000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "mtu"
+    },
+    {
+      "name": "mtu-too-large",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010000000100008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "mtu"
+    },
+    {
+      "name": "window-zero",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000000000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "window"
+    },
+    {
+      "name": "window-over-half",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000018000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "window"
+    },
+    {
+      "name": "frame-header-wrong-type",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c000000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "frame-header"
+    },
+    {
+      "name": "frame-header-wrong-term-id",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fcffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "frame-header"
+    },
+    {
+      "name": "frame-header-nonzero-length",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000002000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200704,
+      "error": "frame-header"
+    },
+    {
+      "name": "length-short",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 200703,
+      "error": "length"
+    },
+    {
+      "name": "length-long",
+      "region": "header",
+      "bytes": "43564c594c4f474200000000000000002a00000000000000fbffffff0000010080050000008000000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 204800,
+      "error": "length"
+    },
+    {
+      "name": "version-before-term-length",
+      "region": "header",
+      "bytes": "43564c594c4f474201000000000000002a00000000000000fbffffffa08601008005000050c300000000000000000000000000000000000000000000000000000000000000c001000000000001000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 304096,
+      "error": "version"
+    },
+    {
+      "name": "tail-start",
+      "region": "tail",
+      "bytes": "00000000fbffffff",
+      "term_length": 65536,
+      "fields": {
+        "term_id": -5,
+        "term_offset": 0
+      }
+    },
+    {
+      "name": "tail-mid-term",
+      "region": "tail",
+      "bytes": "00100000fbffffff",
+      "term_length": 65536,
+      "fields": {
+        "term_id": -5,
+        "term_offset": 4096
+      }
+    },
+    {
+      "name": "tail-at-end",
+      "region": "tail",
+      "bytes": "00000100fcffffff",
+      "term_length": 65536,
+      "fields": {
+        "term_id": -4,
+        "term_offset": 65536
+      }
+    },
+    {
+      "name": "tail-past-end-is-clamped",
+      "region": "tail",
+      "bytes": "40000100fcffffff",
+      "term_length": 65536,
+      "fields": {
+        "term_id": -4,
+        "term_offset": 65536
+      }
+    },
+    {
+      "name": "tail-term-id-max",
+      "region": "tail",
+      "bytes": "20000000ffffff7f",
+      "term_length": 65536,
+      "fields": {
+        "term_id": 2147483647,
+        "term_offset": 32
+      }
+    },
+    {
+      "name": "tail-term-id-min",
+      "region": "tail",
+      "bytes": "2000000000000080",
+      "term_length": 65536,
+      "fields": {
+        "term_id": -2147483648,
+        "term_offset": 32
+      }
+    },
+    {
+      "name": "tail-offset-high-bit",
+      "region": "tail",
+      "bytes": "f0ffffff07000000",
+      "term_length": 1073741824,
+      "fields": {
+        "term_id": 7,
+        "term_offset": 1073741824
+      }
+    },
+    {
+      "name": "position-first-term",
+      "region": "position",
+      "inputs": {
+        "initial_term_id": -5,
+        "term_length": 65536,
+        "term_id": -5,
+        "term_offset": 0
+      },
+      "fields": {
+        "term_count": 0,
+        "term_id": -5,
+        "term_offset": 0,
+        "position": 0,
+        "partition": 0
+      }
+    },
+    {
+      "name": "position-second-term",
+      "region": "position",
+      "inputs": {
+        "initial_term_id": -5,
+        "term_length": 65536,
+        "term_id": -4,
+        "term_offset": 96
+      },
+      "fields": {
+        "term_count": 1,
+        "term_id": -4,
+        "term_offset": 96,
+        "position": 65632,
+        "partition": 1
+      }
+    },
+    {
+      "name": "position-fourth-term-wraps-partition",
+      "region": "position",
+      "inputs": {
+        "initial_term_id": -5,
+        "term_length": 65536,
+        "term_id": -2,
+        "term_offset": 32
+      },
+      "fields": {
+        "term_count": 3,
+        "term_id": -2,
+        "term_offset": 32,
+        "position": 196640,
+        "partition": 0
+      }
+    },
+    {
+      "name": "position-term-id-wraps-past-max",
+      "region": "position",
+      "inputs": {
+        "initial_term_id": 2147483646,
+        "term_length": 65536,
+        "term_id": -2147483648,
+        "term_offset": 64
+      },
+      "fields": {
+        "term_count": 2,
+        "term_id": -2147483648,
+        "term_offset": 64,
+        "position": 131136,
+        "partition": 2
+      }
+    },
+    {
+      "name": "position-inverse-start",
+      "region": "position",
+      "inputs": {
+        "initial_term_id": -5,
+        "term_length": 65536,
+        "position": 0
+      },
+      "fields": {
+        "term_count": 0,
+        "term_id": -5,
+        "term_offset": 0,
+        "position": 0,
+        "partition": 0
+      }
+    },
+    {
+      "name": "position-inverse-third-term",
+      "region": "position",
+      "inputs": {
+        "initial_term_id": -5,
+        "term_length": 65536,
+        "position": 132096
+      },
+      "fields": {
+        "term_count": 2,
+        "term_id": -3,
+        "term_offset": 1024,
+        "position": 132096,
+        "partition": 2
+      }
+    },
+    {
+      "name": "position-inverse-largest-term",
+      "region": "position",
+      "inputs": {
+        "initial_term_id": 0,
+        "term_length": 1073741824,
+        "position": 2305843009213693920
+      },
+      "fields": {
+        "term_count": 2147483647,
+        "term_id": 2147483647,
+        "term_offset": 1073741792,
+        "position": 2305843009213693920,
+        "partition": 1
+      }
+    },
+    {
+      "name": "claim-fits",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 0,
+        "tail": "00000000fbffffff",
+        "frame_length": 64,
+        "limit": 32768,
+        "is_connected": 1
+      },
+      "fields": {
+        "position_before": 0,
+        "aligned_length": 64,
+        "tail_after": "40000000fbffffff",
+        "result": "claimed",
+        "term_id": -5,
+        "term_offset": 0,
+        "position_after": 64
+      }
+    },
+    {
+      "name": "claim-aligns-length",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 0,
+        "tail": "00000000fbffffff",
+        "frame_length": 33,
+        "limit": 32768,
+        "is_connected": 1
+      },
+      "fields": {
+        "position_before": 0,
+        "aligned_length": 64,
+        "tail_after": "40000000fbffffff",
+        "result": "claimed",
+        "term_id": -5,
+        "term_offset": 0,
+        "position_after": 64
+      }
+    },
+    {
+      "name": "claim-exact-end-of-term",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 0,
+        "tail": "c0ff0000fbffffff",
+        "frame_length": 64,
+        "limit": 65536,
+        "is_connected": 1
+      },
+      "fields": {
+        "position_before": 65472,
+        "aligned_length": 64,
+        "tail_after": "00000100fbffffff",
+        "result": "claimed",
+        "term_id": -5,
+        "term_offset": 65472,
+        "position_after": 65536
+      }
+    },
+    {
+      "name": "claim-back-pressured",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 0,
+        "tail": "00800000fbffffff",
+        "frame_length": 64,
+        "limit": 32768,
+        "is_connected": 1
+      },
+      "fields": {
+        "position_before": 32768,
+        "aligned_length": 64,
+        "result": "back-pressured"
+      }
+    },
+    {
+      "name": "claim-not-connected",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 0,
+        "tail": "00800000fbffffff",
+        "frame_length": 64,
+        "limit": 32768,
+        "is_connected": 0
+      },
+      "fields": {
+        "position_before": 32768,
+        "aligned_length": 64,
+        "result": "not-connected"
+      }
+    },
+    {
+      "name": "claim-end-of-term-pads-and-rotates",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 0,
+        "tail": "e0ff0000fbffffff",
+        "frame_length": 64,
+        "limit": 65536,
+        "is_connected": 1,
+        "next_tail": "00000000f9ffffff"
+      },
+      "fields": {
+        "position_before": 65504,
+        "aligned_length": 64,
+        "tail_after": "20000100fbffffff",
+        "padding": {
+          "term_offset": 65504,
+          "frame_length": 32
+        },
+        "result": "admin-action",
+        "reason": "end-of-term",
+        "rotation": {
+          "partition": 1,
+          "tail": "00000000fcffffff",
+          "active_term_count": 1
+        }
+      }
+    },
+    {
+      "name": "claim-end-of-term-already-full",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 0,
+        "tail": "00000100fbffffff",
+        "frame_length": 64,
+        "limit": 131072,
+        "is_connected": 1,
+        "next_tail": "00000000f9ffffff"
+      },
+      "fields": {
+        "position_before": 65536,
+        "aligned_length": 64,
+        "tail_after": "40000100fbffffff",
+        "padding": null,
+        "result": "admin-action",
+        "reason": "end-of-term",
+        "rotation": {
+          "partition": 1,
+          "tail": "00000000fcffffff",
+          "active_term_count": 1
+        }
+      }
+    },
+    {
+      "name": "claim-end-of-term-already-rotated",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 0,
+        "tail": "e0ff0000fbffffff",
+        "frame_length": 64,
+        "limit": 65536,
+        "is_connected": 1,
+        "next_tail": "60000000fcffffff"
+      },
+      "fields": {
+        "position_before": 65504,
+        "aligned_length": 64,
+        "tail_after": "20000100fbffffff",
+        "padding": {
+          "term_offset": 65504,
+          "frame_length": 32
+        },
+        "result": "admin-action",
+        "reason": "end-of-term",
+        "rotation": {
+          "partition": 1,
+          "tail": "60000000fcffffff",
+          "active_term_count": 1
+        }
+      }
+    },
+    {
+      "name": "claim-tail-raced-a-rotation",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": -5,
+        "active_term_count": 1,
+        "tail": "00000000fbffffff",
+        "frame_length": 64,
+        "limit": 65536,
+        "is_connected": 1
+      },
+      "fields": {
+        "result": "admin-action",
+        "reason": "tail"
+      }
+    },
+    {
+      "name": "claim-max-position-exceeded",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": 0,
+        "active_term_count": 2147483647,
+        "tail": "e0ff0000ffffff7f",
+        "frame_length": 64,
+        "limit": 140737488420864,
+        "is_connected": 1
+      },
+      "fields": {
+        "position_before": 140737488355296,
+        "aligned_length": 64,
+        "tail_after": "20000100ffffff7f",
+        "padding": {
+          "term_offset": 65504,
+          "frame_length": 32
+        },
+        "result": "max-position-exceeded"
+      }
+    },
+    {
+      "name": "claim-max-position-at-limit",
+      "region": "claim",
+      "inputs": {
+        "term_length": 65536,
+        "initial_term_id": 0,
+        "active_term_count": 2147483647,
+        "tail": "e0ff0000ffffff7f",
+        "frame_length": 64,
+        "limit": 140737488355296,
+        "is_connected": 1
+      },
+      "fields": {
+        "position_before": 140737488355296,
+        "aligned_length": 64,
+        "result": "max-position-exceeded"
+      }
+    },
+    {
+      "name": "claim-header-first-frame",
+      "region": "claim-header",
+      "inputs": {
+        "default_frame_header": "0000000000c001000000000001000000e9030000fbffffff0000000000000000",
+        "term_offset": 0,
+        "frame_length": 64,
+        "term_id": -5,
+        "reserved_value": 0
+      },
+      "bytes": "c0ffffff00c001000000000001000000e9030000fbffffff0000000000000000",
+      "fields": {
+        "committed": "4000000000c001000000000001000000e9030000fbffffff0000000000000000",
+        "aborted": "4000000000c000000000000001000000e9030000fbffffff0000000000000000"
+      }
+    },
+    {
+      "name": "claim-header-mid-term",
+      "region": "claim-header",
+      "inputs": {
+        "default_frame_header": "0000000000c001000000000001000000e9030000fbffffff0000000000000000",
+        "term_offset": 4096,
+        "frame_length": 1440,
+        "term_id": -4,
+        "reserved_value": 7
+      },
+      "bytes": "60faffff00c001000010000001000000e9030000fcffffff0700000000000000",
+      "fields": {
+        "committed": "a005000000c001000010000001000000e9030000fcffffff0700000000000000",
+        "aborted": "a005000000c000000010000001000000e9030000fcffffff0700000000000000"
+      }
+    },
+    {
+      "name": "claim-header-padding-length",
+      "region": "claim-header",
+      "inputs": {
+        "default_frame_header": "0000000000c001000000000001000000e9030000fbffffff0000000000000000",
+        "term_offset": 65504,
+        "frame_length": 32,
+        "term_id": -5,
+        "reserved_value": 0
+      },
+      "bytes": "e0ffffff00c00100e0ff000001000000e9030000fbffffff0000000000000000",
+      "fields": {
+        "committed": "2000000000c00100e0ff000001000000e9030000fbffffff0000000000000000",
+        "aborted": "2000000000c00000e0ff000001000000e9030000fbffffff0000000000000000"
+      }
+    }
+  ]
+}

@@ -16,8 +16,8 @@ pages elsewhere mention Aeron at most once.
 | image | A subscription's view of one publisher's stream; one image per connected publication. | image | `docs/reference/client.md` |
 | session | One publication's identity on a stream, so a subscription can tell publishers apart. | session (session id) | `docs/reference/protocol.md` |
 | claim / commit | The zero-copy publish API: claim a slice of the log buffer, write into it, commit it. | `tryClaim` / `commit` | `docs/reference/client.md` |
-| term | One fixed-size region of a log buffer. A stream's log is a ring of terms. | term | `docs/reference/log-buffers.md` |
-| position | A byte offset into a stream's log, monotonically increasing across terms. | position | `docs/reference/log-buffers.md` |
+| term | One fixed-size region of a log buffer. A stream's log is a ring of terms. | term | `docs/reference/log-buffer.md` |
+| position | A byte offset into a stream's log, monotonically increasing across terms. | position | `docs/reference/log-buffer.md` |
 | fragment | One wire-sized piece of a message larger than the MTU; the receiver reassembles fragments. | fragment | `docs/reference/protocol.md` |
 | frame | The unit of a log buffer and of the wire: a 32-byte header, then a body, at a 32-byte-aligned offset. A data frame carries a fragment; a padding frame fills space. | frame | `docs/reference/frame.md` |
 | padding frame | A frame of type 0 that fills the end of a term, or an abandoned claim. A subscriber skips it and delivers nothing. | padding frame | `docs/reference/frame.md` |
@@ -33,6 +33,18 @@ pages elsewhere mention Aeron at most once.
 | counter | One 64-bit value in the counters file, owned by one driver thread and moved by a state transition; its kind is `counter`, which never decreases, or `gauge`. Every counter is listed in `counters.toml`. | counter | `docs/reference/counters-file.md` |
 | metadata record | The 256-byte description of one counter in the counters file: state, type id, key and label. | counter metadata record | `docs/reference/counters-file.md` |
 | value slot | The 128-byte slot in the counters file that holds one counter's value and nothing else's. | counter value | `docs/reference/counters-file.md` |
+| log buffer | The shared-memory file that carries one publication's stream: three term buffers and a metadata page. | log buffer | `docs/reference/log-buffer.md` |
+| partition | One of the three term buffers of a log buffer; term count modulo 3 says which holds a term. | partition | `docs/reference/log-buffer.md` |
+| tail counter | The 64-bit field per partition that packs the term id and the term offset of the next free byte; a claim advances it. | raw tail | `docs/reference/log-buffer.md` |
+| active term count | How many terms the stream has rotated through; the partition of the active term is this modulo 3. | active term count | `docs/reference/log-buffer.md` |
+| initial term id | The term id of the stream's first term, chosen by the driver; term count 0. | initial term id | `docs/reference/log-buffer.md` |
+| correlation id | The id the driver gives a publication or subscription when it is registered; names its log buffer file and keys its counters. | correlation id (registration id) | `docs/reference/log-buffer.md` |
+| rotation | Moving a stream to the next partition when a term is full: the next tail and the active term count are compare-and-swapped, and the caller retries with `admin action`. | log rotation | `docs/reference/log-buffer.md` |
+| publication window | How far a publisher may run ahead of the slowest subscriber; at most half a term. | term window length | `docs/reference/log-buffer.md` |
+| publisher limit | The position a publisher may write up to: the slowest subscriber's position plus the publication window, a counter the driver maintains. | publisher limit (`pub-lmt`) | `docs/reference/log-buffer.md` |
+| end of stream position | The metadata field the driver sets to the final position when a publication closes; a subscriber at or past it has seen everything. | end of stream position | `docs/reference/log-buffer.md` |
+| unblock | The driver turning a claim that was never committed into a padding frame after a timeout, so the stream moves on. | unblock | `docs/reference/log-buffer.md` |
+| admin action | The claim result that says a rotation happened and the caller retries. | `ADMIN_ACTION` | `docs/reference/log-buffer.md` |
 | doctor | The `cavalry doctor` command: reads counters and host state and explains any latency or loss problem with a recommended action. | none (AeronStat shows counters; no diagnosis) | `docs/reference/cli.md` |
 | log (durable) | The on-disk, ordered, replayable record of a stream, written by the driver. | Archive recording | `docs/reference/durable-log.md` |
 | replay | Reading a durable log back into a subscription from a given position, at original or maximum speed. | Archive replay | `docs/reference/durable-log.md` |

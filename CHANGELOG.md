@@ -108,3 +108,14 @@ user-visible change, added in the same commit as the change. The format follows
   Rust constants from `counters.toml`; `just lint-counters` fails when they are stale and
   is part of `just lint`. `just loom` checks the publish protocols and `just miri` the
   layout layer (ADR 0012).
+- `spec/log-buffer.md` specifies the log buffer at version 0: Aeron's three term
+  buffers and metadata page, with Cavalry's magic-last header, a 128-byte slot for every
+  field written after creation, the claim, commit, abort, rotation and reading
+  protocols, the driver's duties, and the eleven checks a reader runs in order. Its
+  vectors come from `spec/vectors/log-buffer.py`, and the book includes the page
+  (ADR 0013).
+- The log buffer's positions are counters: `publication.position`, `publication.limit`
+  and `subscription.position` in `counters.toml`, written by their owners, the driver or
+  a client, with release stores; `spec/counters-file.md` now says so, and the one-writer
+  rule of ADR 0012 is amended by ADR 0013. `publication.unblocked` and three
+  `log_buffer.rejected_*` counters count the driver's unblocks and refusals.

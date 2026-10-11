@@ -2,8 +2,9 @@
 
 The counters file is the shared-memory file where the driver publishes every counter:
 the primary instrument, cheaper than a log line, and it survives a crash (invariant 4).
-The driver creates it and is the only writer. Clients, `cavalry doctor` and the control
-plane map it read-only. In Aeron, this is the counters metadata and values buffers of
+The driver creates it and is the only writer of its header and its metadata records; a
+counter's value is written by the counter's owner, the driver or the client the driver
+allocated it for (ADR 0013). `cavalry doctor` and the control plane map it read-only. In Aeron, this is the counters metadata and values buffers of
 the CnC file, `cnc.dat` (ADR 0012; `docs/glossary.md`). It is the first layout written
 under ADR 0010 and ADR 0011: every field below names its writer, its readers and the
 bound a reader checks, and every counter value has a 128-byte slot of its own.
@@ -71,12 +72,14 @@ counters never share the 128 bytes a core moves at once (ADR 0011).
 
 | Offset | Size | Field | Type | Writer | Readers | Bound |
 | --- | --- | --- | --- | --- | --- | --- |
-| 0 | 8 | value | i64 | the one thread that owns the counter, with relaxed stores or adds | everyone, with relaxed loads | any value; a counter of kind `counter` never decreases while allocated, a `gauge` moves both ways |
+| 0 | 8 | value | i64 | the one thread that owns the counter, with relaxed stores or adds; a position (`spec/log-buffer.md`) with release stores | everyone, with relaxed loads; the driver loads a position with an acquire load | any value; a counter of kind `counter` never decreases while allocated, a `gauge` moves both ways |
 | 8 | 120 | reserved | bytes | the driver | nobody | written as 0 at allocation, never read |
 
 Nobody branches on a value on the data plane, so relaxed ordering is enough
-(`.claude/rules/data-plane.md`). A reader that needs a consistent pair of counters
-reads each twice and retries when they moved.
+(`.claude/rules/data-plane.md`), with one exception: a position is stored with a release
+store by its owner and loaded with an acquire load by the driver, which branches on it
+before it cleans a term (`spec/log-buffer.md`, ADR 0013). A reader that needs a
+consistent pair of counters reads each twice and retries when they moved.
 
 ## `counters.toml`
 

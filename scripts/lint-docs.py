@@ -16,9 +16,10 @@ Checks:
           and a Status of Proposed, Accepted, Superseded by NNNN or Rejected; numbers
           are unique
   glossary
-          the first dotted segment of every counter name in counters.toml is a term in
-          docs/glossary.md or the first word of one (`counters.allocated` needs
-          "counters file"), so every counter name has a row (.claude/rules/docs.md,
+          the first dotted segment of every counter name in counters.toml, underscores
+          read as spaces, is a term in docs/glossary.md or the first word of one
+          (`counters.allocated` needs "counters file", `log_buffer.rejected_frame` needs
+          "log buffer"), so every counter name has a row (.claude/rules/docs.md,
           Glossary; CLAUDE.md, invariant 6)
   change  over the range: a change to a public item (a line with `pub ` in a crate's
           src/), to spec/, counters.toml or config.toml needs a change under docs/ or to
@@ -206,7 +207,7 @@ def check_glossary() -> int:
     first_words = {t.split()[0] for t in terms if t}
     names = re.findall(r'^name\s*=\s*"([^"]+)"', COUNTERS.read_text(encoding="utf-8"), re.M)
     for name in names:
-        segment = name.split(".", 1)[0]
+        segment = name.split(".", 1)[0].replace("_", " ")
         if segment not in terms and segment not in first_words:
             find(f"glossary: counter `{name}` begins with `{segment}`, which is not a term in "
                  "docs/glossary.md or the first word of one; add a row (.claude/rules/docs.md, "

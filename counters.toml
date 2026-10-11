@@ -29,3 +29,59 @@ kind = "counter"
 scope = "static"
 doc = "Counter allocations refused because every record was in use: the counters file is full, and whatever needed the counter was refused with it."
 doctor = "Restart the driver with a larger counters file capacity; until then new publications and subscriptions are refused."
+
+[[counter]]
+id = 2
+name = "publication.position"
+kind = "gauge"
+scope = "instance"
+doc = "The producer position of one publication's log buffer, written by the driver on its duty cycle; key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated."
+doctor = ""
+
+[[counter]]
+id = 3
+name = "publication.limit"
+kind = "gauge"
+scope = "instance"
+doc = "The position up to which one publication may write: the slowest subscriber's position plus the publication window, written by the driver; key and label as publication.position."
+doctor = "If publication.position sits at publication.limit, a subscriber is slow or stopped: compare the subscription.position counters of the stream and look at that subscriber."
+
+[[counter]]
+id = 4
+name = "subscription.position"
+kind = "gauge"
+scope = "instance"
+doc = "How far one subscription has read one publication's stream, written by the subscriber after each poll with a release store; key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated."
+doctor = "A subscription.position that does not move while publication.position does is a subscriber that stopped polling; its publisher will be back-pressured when it reaches the window."
+
+[[counter]]
+id = 5
+name = "publication.unblocked"
+kind = "counter"
+scope = "static"
+doc = "Stale claims the driver turned into padding frames because a publisher claimed and did not commit within the unblock timeout (spec/log-buffer.md, The driver)."
+doctor = "A publisher process died or stalled between claim and commit; find it from the publication whose position stopped moving, and keep claim and commit on one thread with nothing blocking between them."
+
+[[counter]]
+id = 6
+name = "log_buffer.rejected_position"
+kind = "counter"
+scope = "static"
+doc = "Subscriber positions the driver found outside the spec's bounds and refused to use; the client that wrote one is evicted (ADR 0010)."
+doctor = "A client wrote an impossible position: a buggy binding or a hostile process. The driver's log names the client; rebuild or remove it."
+
+[[counter]]
+id = 7
+name = "log_buffer.rejected_tail"
+kind = "counter"
+scope = "static"
+doc = "Tail counters the driver found inconsistent with the active term count and refused to use; the publication is closed (ADR 0010)."
+doctor = "A publisher wrote an impossible tail: a buggy binding or a hostile process. The driver's log names the publication; rebuild or remove the client."
+
+[[counter]]
+id = 8
+name = "log_buffer.rejected_frame"
+kind = "counter"
+scope = "static"
+doc = "Frames a subscriber found outside spec/frame.md's bounds in a term and reported; nothing after such a frame is delivered on that image."
+doctor = "A publisher wrote a corrupt frame, or a term was overwritten: check publication.unblocked and the driver's log for the publication."

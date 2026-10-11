@@ -18,6 +18,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Data frame header](reference/frame.md)
 - [Counters file](reference/counters-file.md)
 - [Counters](reference/counters.md)
+- [Log buffer](reference/log-buffer.md)
 - [Glossary](glossary.md)
 
 # Decisions
@@ -35,3 +36,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0010. Validate every peer-written field of a shared-memory layout before using it](decisions/0010-validate-peer-written-shared-memory.md)
 - [0011. Pad peer-shared hot fields to 128 bytes](decisions/0011-pad-peer-shared-fields-to-128-bytes.md)
 - [0012. Lay out the counters file as Aeron's counter records behind a Cavalry header](decisions/0012-lay-out-the-counters-file.md)
+- [0013. Lay out the log buffer as Aeron's three terms and a metadata page](decisions/0013-lay-out-the-log-buffer.md)

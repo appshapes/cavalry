@@ -22,8 +22,10 @@ Protocol).
   Python script beside it. The script is the page's reference encoder, independent of
   the Rust code, so the two must agree. Each vector is a name, the bytes as hex, and
   either the fields a conforming reader decodes or the error a conforming reader
-  reports. `just conformance` runs every implementation against every vector;
-  `just test` runs the Rust one on every commit.
+  reports. A vector may carry `inputs` instead of bytes: an arithmetic vector, whose
+  fields a conforming implementation computes from the inputs, for the position and
+  claim arithmetic a layout defines. `just conformance` runs every implementation
+  against every vector; `just test` runs the Rust one on every commit.
 - The book's reference section includes these pages unchanged, from
   `docs/reference/`. Edit here, never there.
 
@@ -33,3 +35,4 @@ Protocol).
 | --- | --- | --- |
 | `frame.md`, the data frame header | 0 | ADR 0008 |
 | `counters-file.md`, the counters file | 0 | ADR 0012 |
+| `log-buffer.md`, the log buffer | 0 | ADR 0013 |

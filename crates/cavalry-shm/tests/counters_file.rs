@@ -45,6 +45,19 @@ impl Drop for Dir {
 /// stores a type id without checking it against the table.
 const INSTANCE: CounterId = CounterId(7);
 
+/// The records of a file of `capacity` that no static counter occupies, in order: a
+/// static counter sits in the record whose index is its id, so the free records need
+/// not be contiguous.
+fn free_records(capacity: u32) -> Vec<u32> {
+    (0..capacity)
+        .filter(|record| {
+            !COUNTERS
+                .iter()
+                .any(|def| def.scope == Scope::Static && def.id.record() == *record)
+        })
+        .collect()
+}
+
 fn statics() -> usize {
     COUNTERS
         .iter()
@@ -68,17 +81,15 @@ fn the_full_case_before_anything_else() {
     let capacity = 64;
     let mut file = CountersFile::create(dir.path(), capacity).unwrap();
     let statics = statics();
-    assert_eq!(
-        statics, 2,
-        "counters.toml has two static counters today; update this test with it"
-    );
     let reader = CountersReader::open(dir.path()).unwrap();
     assert_eq!(
         reader.read(COUNTERS_ALLOCATED.record()).unwrap(),
         statics as i64
     );
 
-    for n in 0..capacity as usize - statics {
+    let free = free_records(capacity);
+    assert_eq!(free.len(), capacity as usize - statics);
+    for (n, &expected) in free.iter().enumerate() {
         let counter = file
             .allocate(
                 INSTANCE,
@@ -87,9 +98,9 @@ fn the_full_case_before_anything_else() {
             )
             .unwrap_or_else(|error| panic!("allocation {n} refused: {error}"));
         assert_eq!(
-            counter.id() as usize,
-            statics + n,
-            "records are handed out in order"
+            counter.id(),
+            expected,
+            "free records are handed out in order"
         );
         counter.increment();
     }
@@ -121,7 +132,7 @@ fn the_full_case_before_anything_else() {
         i64::from(capacity),
         "nothing was allocated"
     );
-    for id in statics as u32..capacity {
+    for id in free {
         assert_eq!(reader.read(id).unwrap(), 1, "counter {id} kept its value");
     }
 }
@@ -170,8 +181,8 @@ fn create_then_open_round_trips_the_header_and_the_bytes_are_the_specs() {
     let slot = header.slot_offset(COUNTERS_ALLOCATED.record()).unwrap();
     assert_eq!(
         &bytes[slot..slot + 8],
-        &2i64.to_le_bytes(),
-        "slot 0 holds counters.allocated, 2"
+        &(statics() as i64).to_le_bytes(),
+        "slot 0 holds counters.allocated"
     );
     assert!(
         bytes[slot + 8..slot + SLOT_LENGTH].iter().all(|&b| b == 0),
@@ -214,8 +225,8 @@ fn static_counters_are_present_with_their_labels() {
     );
     assert_eq!(reader.read(COUNTERS_ALLOCATION_FAILED.record()).unwrap(), 0);
     assert!(
-        reader.record(statics() as u32).unwrap().is_none(),
-        "the first record after the statics is unused"
+        reader.record(free_records(64)[0]).unwrap().is_none(),
+        "the first free record is unused"
     );
 }
 
@@ -393,14 +404,15 @@ fn unallocated_when_the_record_holds_no_counter() {
     let dir = Dir::new("unallocated");
     let mut file = CountersFile::create(dir.path(), 64).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
-    assert!(reader.record(5).unwrap().is_none());
+    let unused = free_records(64)[0];
+    assert!(reader.record(unused).unwrap().is_none());
     for error in [
-        reader.read(5).unwrap_err(),
-        file.counter(5).unwrap_err(),
-        file.free(5, 0).unwrap_err(),
+        reader.read(unused).unwrap_err(),
+        file.counter(unused).unwrap_err(),
+        file.free(unused, 0).unwrap_err(),
     ] {
         assert!(
-            matches!(error, CountersError::Unallocated { id: 5 }),
+            matches!(error, CountersError::Unallocated { id } if id == unused),
             "{error}"
         );
         assert_eq!(error.reason(), "unallocated");
@@ -413,49 +425,49 @@ fn free_then_reuse_after_the_deadline() {
     let dir = Dir::new("free");
     let mut file = CountersFile::create(dir.path(), 64).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
+    let statics = statics() as i64;
+    let free = free_records(64);
+    let (a, b) = (free[0], free[1]);
     let first = file.allocate(INSTANCE, &[1], "image.gaps 1").unwrap();
-    assert_eq!(first.id(), 2);
+    assert_eq!(first.id(), a, "the first free record");
     first.add(5);
-    assert_eq!(reader.read(COUNTERS_ALLOCATED.record()).unwrap(), 3);
-
-    file.free(2, i64::MAX).unwrap();
     assert_eq!(
         reader.read(COUNTERS_ALLOCATED.record()).unwrap(),
-        2,
+        statics + 1
+    );
+
+    file.free(a, i64::MAX).unwrap();
+    assert_eq!(
+        reader.read(COUNTERS_ALLOCATED.record()).unwrap(),
+        statics,
         "the gauge drops"
     );
     assert!(
-        reader.record(2).unwrap().is_none(),
+        reader.record(a).unwrap().is_none(),
         "a reclaimed record is not a counter"
     );
-    assert!(matches!(
-        reader.read(2).unwrap_err(),
-        CountersError::Unallocated { id: 2 }
-    ));
+    assert!(matches!(reader.read(a).unwrap_err(), CountersError::Unallocated { id } if id == a));
     assert!(
-        matches!(
-            file.free(2, 0).unwrap_err(),
-            CountersError::Unallocated { id: 2 }
-        ),
+        matches!(file.free(a, 0).unwrap_err(), CountersError::Unallocated { id } if id == a),
         "freeing twice"
     );
 
     let second = file.allocate(INSTANCE, &[2], "image.gaps 2").unwrap();
     assert_eq!(
         second.id(),
-        3,
-        "record 2 is reclaimed with its deadline ahead, so the next record is taken"
+        b,
+        "the freed record's deadline is ahead, so the next free record is taken"
     );
 
-    file.free(3, 0).unwrap();
+    file.free(b, 0).unwrap();
     let third = file.allocate(INSTANCE, &[3], "image.gaps 3").unwrap();
     assert_eq!(
         third.id(),
-        3,
-        "record 3 is reclaimed with its deadline passed, so it is reused"
+        b,
+        "a reclaimed record whose deadline passed is reused"
     );
-    assert_eq!(reader.read(3).unwrap(), 0, "a reused slot starts at 0");
-    let record = reader.record(3).unwrap().unwrap();
+    assert_eq!(reader.read(b).unwrap(), 0, "a reused slot starts at 0");
+    let record = reader.record(b).unwrap().unwrap();
     assert_eq!(record.label(), "image.gaps 3");
     assert_eq!(record.key()[0], 3);
     assert_eq!(
@@ -463,7 +475,10 @@ fn free_then_reuse_after_the_deadline() {
         0,
         "allocation rewrites every field"
     );
-    assert_eq!(reader.read(COUNTERS_ALLOCATED.record()).unwrap(), 3);
+    assert_eq!(
+        reader.read(COUNTERS_ALLOCATED.record()).unwrap(),
+        statics + 1
+    );
 }
 
 #[test]
@@ -522,7 +537,7 @@ fn allocate_refuses_a_long_key_or_label_without_touching_the_file() {
         statics() as i64
     );
     assert_eq!(reader.read(COUNTERS_ALLOCATION_FAILED.record()).unwrap(), 0);
-    assert!(reader.record(statics() as u32).unwrap().is_none());
+    assert!(reader.record(free_records(64)[0]).unwrap().is_none());
 
     let widest = file
         .allocate(INSTANCE, &[0u8; 112], &"z".repeat(MAX_LABEL_LENGTH))

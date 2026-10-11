@@ -45,8 +45,8 @@ The driver creates the counters file and allocates a counter; a reader opens the
 and reads the counter back; the file fills up and says so. This is the crate's doctest.
 
 ```rust
-use cavalry_shm::counters::generated::{COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED};
-use cavalry_shm::counters::{CounterId, CountersError, CountersFile, CountersReader};
+use cavalry_shm::counters::generated::{COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED};
+use cavalry_shm::counters::{CounterId, CountersError, CountersFile, CountersReader, Scope};
 
 fn main() -> Result<(), CountersError> {
     // The driver's directory. The file inside it is named `counters`.
@@ -56,6 +56,7 @@ fn main() -> Result<(), CountersError> {
     // The driver creates the file once, with room for 64 counters. Every static counter
     // in counters.toml is allocated with it, in the record whose index is its id.
     let mut driver = CountersFile::create(&dir, 64)?;
+    let statics = COUNTERS.iter().filter(|def| def.scope == Scope::Static).count() as i64;
 
     // An instance counter: one per publication, image or whatever it counts. The type id
     // is the counters.toml id of the entry a later feature adds; the key and the label
@@ -66,13 +67,13 @@ fn main() -> Result<(), CountersError> {
     // Everyone else opens the file read-only. A reader checks the header before it trusts
     // anything, and a record's state before its value.
     let reader = CountersReader::open(&dir)?;
-    assert_eq!(reader.read(COUNTERS_ALLOCATED.record())?, 3); // two statics and `gaps`
+    assert_eq!(reader.read(COUNTERS_ALLOCATED.record())?, statics + 1); // the statics and `gaps`
     assert_eq!(reader.read(gaps.id())?, 1);
     assert_eq!(reader.record(gaps.id())?.map(|r| r.label().to_owned()), Some("image.gaps 1001".into()));
 
     // The capacity is fixed at creation. When every record is in use, an allocation fails
     // with `full`, counters.allocation_failed moves, and whatever needed it is refused.
-    for n in 3..64 {
+    for n in (statics + 1)..64 {
         driver.allocate(CounterId(7), &[], &format!("image.gaps {n}"))?;
     }
     let full = driver.allocate(CounterId(7), &[], "image.gaps 64").unwrap_err();
