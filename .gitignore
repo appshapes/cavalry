@@ -6,8 +6,7 @@ Cargo.lock.orig
 # Benchmarks: results are published per release, not committed per run.
 /bench/results/
 
-# mdBook output
-/docs/book/
+# mdBook output is under /target/book/ (book.toml), covered by /target/ above
 
 # Editors and OS
 .idea/

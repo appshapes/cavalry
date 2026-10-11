@@ -1,6 +1,6 @@
 ---
 name: commit
-description: Commit, pull and push the working tree to master after just lint and just test, with a commit message that is the review record
+description: Commit, pull and push the working tree to master after just lint, just test, just docs and just lint-docs, with a commit message that is the review record
 argument-hint: "[card number]"
 ---
 
@@ -11,11 +11,13 @@ commit, and the commit message is the review record: what changed, which invaria
 serves, and the evidence.
 
 The sequence is the `gcp` script (`git add`, `git commit`, `git pull --no-edit`,
-`git push`) with the two gates CLAUDE.md requires in front of it:
+`git push`) with the gates CLAUDE.md and `.claude/rules/docs.md` require in front of it:
 
 ```
 just lint
 just test
+just docs
+just lint-docs
 git add --verbose :/ .
 git commit -m "<message>"
 git pull --no-edit
@@ -72,7 +74,9 @@ they confirm the files are safe.
 
 ## 4. Run the gates
 
-Run `just lint`, then `just test`. Both must pass before the commit.
+Run `just lint`, `just test`, `just docs`, then `just lint-docs`. All four must pass
+before the commit. `just lint-docs` on a dirty tree checks the change about to be
+committed; on a clean tree it checks the last commit.
 
 - A recipe that prints `not built yet` is a gate that does not exist yet, not a pass.
   If the change touches what that gate would check, building the gate is part of the
@@ -115,7 +119,7 @@ git pull --no-edit
 git push
 ```
 
-If `git pull --no-edit` created a merge commit, run `just lint` and `just test` again
+If `git pull --no-edit` created a merge commit, run the four gates again
 before `git push`. If either fails, stop and report; do not push.
 
 ## 8. Report the result

@@ -52,3 +52,9 @@ user-visible change, added in the same commit as the change. The format follows
   agent-reviewed, Dependabot's pull requests are reviewed directly, and the hand-off
   workflow is gone, and so is the "cannot run on this pull request" comment. The
   `review pr` run is on the Actions tab, not among the pull request's checks.
+- `just docs` builds rustdoc with warnings denied and the mdBook under `target/book`,
+  runs the book's Rust code blocks, and checks every relative link and anchor in
+  `docs/` and the READMEs. `just lint-docs` fails a change to a public item, `spec/`,
+  `counters.toml` or `config.toml` that touches no documentation, a page missing from
+  `docs/SUMMARY.md`, a malformed ADR, or an edit to an accepted ADR. CI runs both
+  (ADR 0006, proposed).

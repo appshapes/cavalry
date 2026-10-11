@@ -62,13 +62,33 @@ lint-counters:
 lint-config:
     @echo "not built yet: lint-config (CLAUDE.md gate 5)." && exit 1
 
-# rustdoc + mdBook, warnings denied, code blocks run, links checked.
+# rustdoc with warnings denied; the mdBook under target/book with any warning denied;
+# the book's Rust code blocks; and every relative link and anchor in docs/ and the
+# READMEs (scripts/lint-docs.py links). External links are `just docs-links`, not a
+# gate: a site going down is not a bug in this repository (ADR 0006). The mdbook
+# version named below is the one CI pins in .github/workflows/ci.yml; bump both.
 docs:
-    @echo "not built yet: docs build (CLAUDE.md gate 6). Needs mdbook, mdbook test, lychee or equivalent, and RUSTDOCFLAGS=-Dwarnings." && exit 1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v mdbook >/dev/null || { echo "docs: mdbook is not installed. brew install mdbook, or cargo install --locked mdbook@0.5.4" >&2; exit 1; }
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+    out=$(mdbook build 2>&1) || { printf '%s\n' "$out" >&2; exit 1; }
+    printf '%s\n' "$out"
+    if grep -qE '(^ *|\[)(WARN|ERROR)(\]| )' <<<"$out"; then echo "docs: mdbook warned; warnings are denied" >&2; exit 1; fi
+    mdbook test
+    python3 scripts/lint-docs.py links
 
-# Fail if a public item, counter, config key or spec/ changed without docs.
+# Fail if a public item, counter, config key or spec/ changed without docs, a page is
+# missing from docs/SUMMARY.md, an ADR is malformed, or an accepted ADR was edited. The
+# range it checks is described in the script's header. What CI runs.
 lint-docs:
-    @echo "not built yet: lint-docs (CLAUDE.md gate 6)." && exit 1
+    python3 scripts/lint-docs.py
+
+# External links in docs/ and the READMEs, checked online. Not a gate: run it before a
+# release, and when a source in docs/explanation/why-cavalry.md looks stale.
+docs-links:
+    command -v lychee >/dev/null || { echo "docs-links: lychee is not installed. brew install lychee, or cargo install --locked lychee" >&2; exit 1; }
+    lychee --no-progress docs README.md crates/*/README.md
 
 # Run cavalry doctor against the local driver.
 doctor:

@@ -37,6 +37,8 @@ its code. The per-message checklist for data-plane code is `.claude/rules/data-p
 ```sh
 just lint
 just test
+just docs
+just lint-docs
 ```
 
 A recipe that prints `not built yet` is a gate that does not exist yet, not a pass. If your

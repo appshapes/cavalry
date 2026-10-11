@@ -1,0 +1,18 @@
+# The mdBook that `just docs` builds from docs/ (CLAUDE.md, invariant 6; ADR 0006). The
+# output goes under target/, with the rest of the build products. `create-missing` is off
+# so that a page listed in docs/SUMMARY.md but absent from disk fails the build instead
+# of being created as an empty stub.
+[book]
+title = "Cavalry"
+description = "A brokerless, low-latency message transport with a durable log and Raft replication"
+authors = ["AppShapes"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/appshapes/cavalry"
+edit-url-template = "https://github.com/appshapes/cavalry/edit/master/docs/{path}"
