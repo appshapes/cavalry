@@ -267,6 +267,17 @@ impl DataFrameHeader {
     /// the whole frame: [`DataFrameHeader::frame_length`] bytes. Alignment padding after
     /// the frame need not be present.
     pub fn parse(bytes: &[u8]) -> Result<Self, FrameError> {
+        Self::parse_within(bytes, bytes.len())
+    }
+
+    /// [`DataFrameHeader::parse`] for a caller that holds the header's bytes and knows
+    /// how many bytes the frame may occupy: `available` is the number of bytes from the
+    /// frame's start to the end of its term or packet, and the `length` check runs
+    /// against it instead of `bytes.len()`. A log buffer reader loads a header through
+    /// its own cells and passes the bytes left in the term (`spec/log-buffer.md`,
+    /// "Reading"). `bytes` still needs [`HEADER_LENGTH`] bytes, or the error is
+    /// [`FrameError::TooShort`].
+    pub fn parse_within(bytes: &[u8], available: usize) -> Result<Self, FrameError> {
         let Ok((raw, _)) = Raw::ref_from_prefix(bytes) else {
             return Err(FrameError::TooShort { given: bytes.len() });
         };
@@ -275,11 +286,11 @@ impl DataFrameHeader {
         }
         let frame_type = FrameType::try_from(raw.frame_type.get())?;
         let frame_length = raw.frame_length.get();
-        let fits = usize::try_from(frame_length).is_ok_and(|length| length <= bytes.len());
+        let fits = usize::try_from(frame_length).is_ok_and(|length| length <= available);
         if frame_length < MIN_FRAME_LENGTH || !fits {
             return Err(FrameError::Length {
                 found: i64::from(frame_length),
-                limit: bytes.len(),
+                limit: available,
             });
         }
         Ok(Self {
@@ -430,6 +441,33 @@ mod tests {
                 found: i64::MAX,
                 limit: i32::MAX as usize
             })
+        );
+    }
+
+    #[test]
+    fn parse_within_bounds_the_length_by_the_bytes_available() {
+        let header = DataFrameHeader::new(FrameType::Data, Flags::UNFRAGMENTED, 64).unwrap();
+        let bytes = header.to_bytes();
+        assert_eq!(
+            DataFrameHeader::parse(&bytes).map(|_| ()),
+            Err(FrameError::Length {
+                found: 64,
+                limit: 32
+            }),
+            "the slice alone is too short for the frame"
+        );
+        assert_eq!(DataFrameHeader::parse_within(&bytes, 64), Ok(header));
+        assert_eq!(DataFrameHeader::parse_within(&bytes, 4096), Ok(header));
+        assert_eq!(
+            DataFrameHeader::parse_within(&bytes, 63).map(|_| ()),
+            Err(FrameError::Length {
+                found: 64,
+                limit: 63
+            })
+        );
+        assert_eq!(
+            DataFrameHeader::parse_within(&bytes[..31], 64).map(|_| ()),
+            Err(FrameError::TooShort { given: 31 })
         );
     }
 

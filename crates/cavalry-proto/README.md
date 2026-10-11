@@ -13,7 +13,9 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   protocol version between peers so that mixed versions run during an upgrade. Today
   that is the data frame header, `spec/frame.md`; the other frames arrive with their
   pages of `spec/`.
-- Is the one place bytes are shuffled by hand. Every other crate uses its types.
+- Is the one place bytes are shuffled by hand. Every other crate uses its types. A
+  reader that holds only a frame's header, as the log buffer's does, passes the bytes
+  left in its term to `parse_within`, and the same four checks run against them.
 
 In Aeron, this is the transport protocol specification and its frame layouts
 ([glossary](../../docs/glossary.md)).

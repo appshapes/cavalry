@@ -119,3 +119,6 @@ user-visible change, added in the same commit as the change. The format follows
   a client, with release stores; `spec/counters-file.md` now says so, and the one-writer
   rule of ADR 0012 is amended by ADR 0013. `publication.unblocked` and three
   `log_buffer.rejected_*` counters count the driver's unblocks and refusals.
+- `DataFrameHeader::parse_within` runs the frame checks for a reader that holds the
+  header's bytes and knows how many bytes the frame may occupy, which is how the log
+  buffer's reader checks a frame in a term (ADR 0013).
