@@ -29,10 +29,11 @@ serde_json = "1"
 # One of the two crates where `unsafe` is permitted (CLAUDE.md, "Unsafe"). It cannot
 # inherit the workspace table, which denies unsafe_code, so it carries its own. Every
 # `unsafe` block here needs a `// SAFETY:` comment; see .claude/rules/data-plane.md.
-# `cfg(loom)` is set by `just loom`, which swaps the atomics for loom's.
+# `cfg(loom)` is set by `just loom`, which swaps the atomics for loom's;
+# `cfg(cavalry_unchecked)` by `just bench-unchecked` alone, to measure the checks (ADR 0010).
 [lints.rust]
 unsafe_code = "allow"
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(cavalry_unchecked)"] }
 
 # Read by `just lint`. A data-plane crate gets the lock, async and dependency rules
 # from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.

@@ -170,12 +170,16 @@ impl Mapped {
         let count = meta.active_term_count.load();
         let tail = meta.tails[Positions::partition_of_count(count)].load();
         let expected = self.positions.initial_term_id().wrapping_add(count);
+        // Built out only to measure the check's cost (ADR 0010; `just bench-unchecked`).
+        #[cfg(not(cavalry_unchecked))]
         if tail.term_id() != expected {
             return Err(LogError::Tail {
                 found: tail.term_id(),
                 expected,
             });
         }
+        #[cfg(cavalry_unchecked)]
+        let _ = expected;
         Ok((count, tail))
     }
 
@@ -998,7 +1002,11 @@ impl TermReader {
                 break;
             }
             let bytes = frame.header(word);
+            // The spec's checks, built out only to measure their cost (ADR 0010).
+            #[cfg(not(cavalry_unchecked))]
             let header = DataFrameHeader::parse_within(&bytes, (term_length - offset) as usize)?;
+            #[cfg(cavalry_unchecked)]
+            let header = DataFrameHeader::decode_unchecked(&bytes);
             let frame_length = header.frame_length() as u32;
             if header.frame_type() == FrameType::Data {
                 let body = self.mapped.body(partition, offset, frame_length);
