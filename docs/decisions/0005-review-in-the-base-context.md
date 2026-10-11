@@ -1,6 +1,6 @@
 # 0005. Review pull requests in the base repository's context
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-11
 - **Invariants affected:** 6; the reviewer's enforcement of 1 to 5 is unchanged
 - **Supersedes:** the reviewer's trigger and the Dependabot hand-off of ADR 0004; the
@@ -59,10 +59,9 @@ write contents, and a review that is posted with the App token as `claude[bot]`,
 the `pull_request_review` event that arms auto-merge and the fixer is unchanged.
 Dependabot's pull requests reach the reviewer through the dispatcher like any other,
 and `dependabot-review.yml` is deleted. The guard that compared the workflow file
-with `master` cannot fire on a dispatched run; it stays until the first pull request
-that edits the file is reviewed and merged by the loop, which is the proof of this
-decision, and that pull request removes it. This ADR is Proposed until that happens,
-and Rejected, with the trigger reverted, if the exchange refuses the dispatched run.
+with `master` could not fire on a dispatched run; it stayed until the first pull
+request that edited the file, pull request 4, was reviewed and merged by the loop,
+which was the proof of this decision, and that pull request removed it.
 
 ## Alternatives considered
 
@@ -114,10 +113,16 @@ and Rejected, with the trigger reverted, if the exchange refuses the dispatched 
   permissions.ts` strips a trailing `[bot]` when matching `allowed_bots`.
 - `gh release list` for the action on 2026-10-11: v1.0.238 on 2026-09-30 through
   v1.0.248 on 2026-10-09.
-- Not yet proven, and added here before acceptance: the first pull request that edits
-  `review-pull-request.yml` under the dispatcher passes the exchange, is reviewed, and
-  merges through the loop. The Dependabot path cannot be proven today: every pinned
-  action was at its latest release on 2026-10-11.
+- The proof, pull request 4, which removed the guard and so edited
+  `review-pull-request.yml`: dispatch run 38115409465 on its `opened` event started
+  reviewer run 38115417542 on `master` at 05:38:06Z on 2026-10-11 (the `labeled` run
+  38115409684 for the `auto-merge` label skipped itself); the exchange issued the App
+  token at 05:38:22Z with `github-actions[bot]` as the run's actor; the session took
+  36 s and approved head 5962f82 at 05:38:59Z as `claude[bot]`; auto-merge run
+  38115466161 merged it at 05:39:15Z as squash commit b9b5e93, whose message is the
+  pull request body with no trailer and no footer.
+- Not proven: the Dependabot path. Every pinned action was at its latest release on
+  2026-10-11, so the first Dependabot pull request is its test.
 
 ## Consequences
 
