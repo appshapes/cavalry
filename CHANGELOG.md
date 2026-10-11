@@ -122,3 +122,14 @@ user-visible change, added in the same commit as the change. The format follows
 - `DataFrameHeader::parse_within` runs the frame checks for a reader that holds the
   header's bytes and knows how many bytes the frame may occupy, which is how the log
   buffer's reader checks a frame in a term (ADR 0013).
+- `cavalry-shm` builds the log buffer. `LogBuffers::create` lays out the file of
+  `spec/log-buffer.md` and `open` runs the spec's checks in order; a `TermAppender`
+  claims a frame in place with one fetch-and-add and commits it with one release store,
+  offers a message by copy with fragmentation, pads and rotates at the end of a term and
+  refuses a claim by name at the limit; a `TermReader` reads committed frames where its
+  position says after the checks of `spec/frame.md`; the driver's duties, the producer
+  position, cleaning, unblocking, the connected flag and the end of stream position, are
+  methods on the log. A position counter is stored with release and loaded with acquire
+  through `Counter::store_release` and `CountersReader::read_acquire`. The 51 spec
+  vectors run on every `just test`, `just loom` checks the claim protocol and the tail,
+  and the README example is the log buffer (ADR 0013).

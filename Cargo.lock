@@ -51,6 +51,7 @@ version = "0.1.0"
 name = "cavalry-shm"
 version = "0.1.0"
 dependencies = [
+ "cavalry-proto",
  "loom",
  "memmap2",
  "serde_json",

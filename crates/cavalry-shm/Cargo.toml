@@ -11,6 +11,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The frames a term holds are cavalry-proto's; the log buffer's reader checks each one
+# with DataFrameHeader::parse_within (spec/log-buffer.md, "Reading"; ADR 0013).
+cavalry-proto = { path = "../cavalry-proto" }
 # The memory map behind every shared layout (ADR 0012). Nothing else on the data plane.
 memmap2 = "0.9.11"
 # The derives that make a layout struct its spec table (ADR 0009): the header and record

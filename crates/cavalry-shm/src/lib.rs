@@ -2,4 +2,5 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 pub mod counters;
+pub mod log;
 pub(crate) mod sync;

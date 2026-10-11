@@ -226,6 +226,18 @@ impl SlotCells {
     pub(crate) fn get(&self) -> i64 {
         self.value.load(Ordering::Relaxed)
     }
+
+    /// Stores a position with a release store: the owner's reads of what it consumed
+    /// happen before the store (`spec/log-buffer.md`, "Reading"; ADR 0013).
+    pub(crate) fn set_release(&self, value: i64) {
+        self.value.store(value, Ordering::Release);
+    }
+
+    /// Loads a position with an acquire load: the driver branches on it before it
+    /// cleans a term (`spec/log-buffer.md`, "The driver"; ADR 0013).
+    pub(crate) fn get_acquire(&self) -> i64 {
+        self.value.load(Ordering::Acquire)
+    }
 }
 
 // The spec's offsets and sizes, checked at compile time. Under loom the atomics are

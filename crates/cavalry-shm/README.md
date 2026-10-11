@@ -5,8 +5,13 @@ the two crates where `unsafe` is permitted.
 
 ## What this does
 
-- Maps the log buffers that clients and the driver share: a stream's log is a ring of
-  fixed-size terms, and a position is a byte offset into it that increases across terms.
+- Maps the log buffers that clients and the driver share: a stream's log is three
+  fixed-size terms and a metadata page, and a position is a byte offset into the stream
+  that increases across terms. `LogBuffers` creates and opens one, a `TermAppender`
+  claims a frame in place and commits it with one release store, a `TermReader` reads
+  committed frames where its position says, and the driver's duties, the limit, cleaning,
+  unblocking and end of stream, are methods on the log
+  ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
 - Provides the lock-free SPSC and MPSC queues every data-plane thread uses to talk to
   another, with 64-byte alignment on shared state so that two threads never share a
   cache line by accident, and a 128-byte slot of its own for every field one party
@@ -41,45 +46,47 @@ In Aeron, this is the log buffer layout and the CnC file, which Agrona provides
 
 ## Example
 
-The driver creates the counters file and allocates a counter; a reader opens the file
-and reads the counter back; the file fills up and says so. This is the crate's doctest.
+The driver creates a log, a publisher claims a frame in place and commits it, a
+subscriber reads it back, and a claim at the limit is refused by name. This is the
+crate's doctest.
 
 ```rust
-use cavalry_shm::counters::generated::{COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED};
-use cavalry_shm::counters::{CounterId, CountersError, CountersFile, CountersReader, Scope};
+use cavalry_shm::log::{HeaderFields, LogBuffers, LogType};
 
-fn main() -> Result<(), CountersError> {
-    // The driver's directory. The file inside it is named `counters`.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The driver's directory. A log lives at publications/<correlation id>.logbuffer.
     let dir = std::env::temp_dir().join(format!("cavalry-shm-readme-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
 
-    // The driver creates the file once, with room for 64 counters. Every static counter
-    // in counters.toml is allocated with it, in the record whose index is its id.
-    let mut driver = CountersFile::create(&dir, 64)?;
-    let statics = COUNTERS.iter().filter(|def| def.scope == Scope::Static).count() as i64;
+    // The driver creates the log of publication 7, session 1 on stream 1001: 64 KiB terms,
+    // frames of at most 1408 bytes, a window of half a term; then a subscriber connects.
+    let fields = HeaderFields::new(LogType::Exclusive, 7, 0, 65_536, 1408, 32_768, 1, 1001)?;
+    let log = LogBuffers::create(&dir, &fields)?;
+    log.set_connected(true)?;
 
-    // An instance counter: one per publication, image or whatever it counts. The type id
-    // is the counters.toml id of the entry a later feature adds; the key and the label
-    // say which instance. Moving it is one relaxed add, the data plane's only operation.
-    let gaps = driver.allocate(CounterId(7), &1001i32.to_le_bytes(), "image.gaps 1001")?;
-    gaps.increment();
+    // The publisher claims a frame in place, writes the body and commits with one release
+    // store, while its position is below the limit the driver maintains in a counter.
+    let publisher = LogBuffers::open(&dir, 7, true)?;
+    let mut appender = publisher.appender()?;
+    let limit = i64::from(fields.publication_window_length());
+    let mut claim = appender.try_claim(8, limit)?;
+    claim.body().copy_from_slice(b"cavalry!");
+    assert_eq!(claim.commit(), 64); // a 40-byte frame, aligned to 32
 
-    // Everyone else opens the file read-only. A reader checks the header before it trusts
-    // anything, and a record's state before its value.
-    let reader = CountersReader::open(&dir)?;
-    assert_eq!(reader.read(COUNTERS_ALLOCATED.record())?, statics + 1); // the statics and `gaps`
-    assert_eq!(reader.read(gaps.id())?, 1);
-    assert_eq!(reader.record(gaps.id())?.map(|r| r.label().to_owned()), Some("image.gaps 1001".into()));
+    // The subscriber maps the log read-only and reads the frame where its position says,
+    // checked as spec/frame.md says before the body is handed over.
+    let subscriber = LogBuffers::open(&dir, 7, false)?;
+    let mut reader = subscriber.reader(0)?;
+    let poll = reader.poll(16, |body, header| {
+        assert_eq!(body, b"cavalry!");
+        assert_eq!(header.stream_id(), 1001);
+    })?;
+    assert_eq!((poll.fragments, poll.position), (1, 64));
 
-    // The capacity is fixed at creation. When every record is in use, an allocation fails
-    // with `full`, counters.allocation_failed moves, and whatever needed it is refused.
-    for n in (statics + 1)..64 {
-        driver.allocate(CounterId(7), &[], &format!("image.gaps {n}"))?;
-    }
-    let full = driver.allocate(CounterId(7), &[], "image.gaps 64").unwrap_err();
-    assert_eq!(full.reason(), "full");
-    assert_eq!(reader.read(COUNTERS_ALLOCATION_FAILED.record())?, 1);
-    println!("{full}");
+    // At the limit the claim is refused by name and nothing is written; the driver raises
+    // the limit as the slowest subscriber advances.
+    let refused = appender.try_claim(8, 64).unwrap_err();
+    println!("{refused}");
 
     std::fs::remove_dir_all(&dir)?;
     Ok(())
@@ -90,11 +97,22 @@ Running it prints one line, the refusal with its reason, what to do and the docs
 anchor:
 
 ```text
-counter refused (full): every one of 64 records is in use; restart the driver with a larger counters file capacity, new publications and subscriptions are refused until then; see docs/reference/counters-file.md#when-the-file-is-full
+claim refused (back-pressured): the slowest subscriber is a window behind; try again later, and read subscription.position to find it; see docs/reference/log-buffer.md#claim-commit-and-abort
 ```
+
+The counters file has its own example, the doctest of the `counters` module.
 
 ## What to read next
 
+- [`spec/log-buffer.md`](../../spec/log-buffer.md): the layout, who writes and who reads
+  every field, the claim, commit, abort and rotation protocols, the reader, the driver's
+  duties and the checks a reader runs, in order. The book shows the same page as
+  [`docs/reference/log-buffer.md`](../../docs/reference/log-buffer.md).
+  [ADR 0013](../../docs/decisions/0013-lay-out-the-log-buffer.md) is why the layout is
+  Aeron's and why positions are counters.
+  [`spec/vectors/log-buffer.json`](../../spec/vectors/log-buffer.json) runs in
+  `tests/log_buffer_conformance.rs` on every `just test`; `tests/log_buffer.rs` is the
+  file on disk, the full term first.
 - [`spec/counters-file.md`](../../spec/counters-file.md): the layout, who writes and
   who reads every field, the creation and allocation protocols, and the checks a reader
   runs, in order. The book shows the same page as
