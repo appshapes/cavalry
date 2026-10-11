@@ -24,3 +24,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0004. Run agents on branches, with the owner's token out of every agent's job](decisions/0004-run-agents-on-branches.md)
 - [0005. Review pull requests in the base repository's context](decisions/0005-review-in-the-base-context.md)
 - [0006. Build the documentation gate from mdBook, rustdoc and a link script](decisions/0006-build-the-docs-gate.md)
+- [0007. Build publish/subscribe over shared memory first, in five features](decisions/0007-build-ipc-pub-sub-first.md)

@@ -58,3 +58,7 @@ user-visible change, added in the same commit as the change. The format follows
   `counters.toml` or `config.toml` that touches no documentation, a page missing from
   `docs/SUMMARY.md`, a malformed ADR, or an edit to an accepted ADR. CI runs both
   (ADR 0006).
+- ADR 0007: the first slice is publish/subscribe over shared memory on one host,
+  with the README's ten-minute path as its test, built as five features in a fixed
+  order, the data frame header first; UDP, the durable log, Raft and the language
+  clients wait for the next slice.
