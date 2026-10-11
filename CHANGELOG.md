@@ -46,7 +46,9 @@ user-visible change, added in the same commit as the change. The format follows
 - A pull request labelled `auto-merge` squash-merges on its own once the reviewer
   approves its head and the two CI checks pass; the commit's subject and body are the
   pull request's. Dependabot labels its pull requests `auto-merge` (ADR 0004).
-- ADR 0005 (proposed): the reviewer runs in the base repository's context, so a pull
-  request that changes the reviewer's own workflow file, Dependabot's bumps of its pins
-  included, is agent-reviewed, and Dependabot's pull requests are reviewed directly;
-  the hand-off workflow is gone.
+- ADR 0005 (proposed): the reviewer runs on `master`, started by a small dispatcher
+  from each same-repository pull request's events, so a pull request that changes the
+  reviewer's own workflow file, Dependabot's bumps of its pins included, is
+  agent-reviewed, Dependabot's pull requests are reviewed directly, and the hand-off
+  workflow is gone. The `review pr` run is on the Actions tab, not among the pull
+  request's checks.

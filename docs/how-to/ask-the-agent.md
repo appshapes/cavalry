@@ -26,7 +26,9 @@ first one. Why the loop is built this way is in ADR 0004
      works;
    - a pull request opens, titled with your issue title, its body built from the
      agent's commit messages and ending with `Closes #<issue>`;
-   - a `review pr` run reviews it and either approves or requests changes;
+   - a `dispatch review` run on the pull request starts a `review pr` run, listed on
+     the Actions tab rather than among the pull request's checks because it runs on
+     `master`, which either approves or requests changes;
    - on requested changes, a second `claude` run applies the blockers on the same
      branch and pushes, which starts a new review, up to three times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
@@ -58,8 +60,9 @@ approved, waiting for you to merge it.
 - **"Autonomous fix cap reached."** The reviewer requested changes three times. The
   pull request is yours now: fix it by hand, or write `@claude` with instructions in
   a review to start the loop again.
-- **No review arrived.** The `review pr` run is red with the reason in its last step.
-  Pull requests from forks are not reviewed by the agent, only by a person.
+- **No review arrived.** The `review pr` run on the Actions tab is red with the reason
+  in its last step. Pull requests from forks are not reviewed by the agent, only by a
+  person.
 - **"The reviewer agent cannot run on this pull request."** The pull request's copy of
   the reviewer workflow file differs from the one on `master`, and the Claude action
   refuses such a run. A pull request that changes that file, which a Dependabot bump

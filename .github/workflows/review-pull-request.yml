@@ -5,41 +5,43 @@
 # edit tools by default, so the denial has to be written out. A reviewer that can push
 # is not a reviewer.
 #
-# It runs in the base repository's context, `pull_request_target` (ADR 0005): the
-# workflow file is master's copy, so the Claude action's validation of that file passes
-# on every pull request, including one that changes this file, and Dependabot's own
-# events carry the secrets, so its pull requests are reviewed directly. The objection
-# to this trigger is a fork's code running with the base's secrets. Two things answer
-# it here, and both must stay true. First, the job runs only for a pull request whose
-# head is in this repository (the `if` below); a fork pull request gets CI and a human.
-# Second, the root checkout is master and the pull request's head sits under pr-head/,
-# which nothing executes: no `just`, no `cargo`, no write tool, and the agent's own
-# configuration is master's. Adding the `review` label by hand runs the reviewer again
-# on any pull request.
+# It runs on master, not on the pull request's own event (ADR 0005): dispatch-review.yml
+# starts it with the pull request's number and head commit. Three things follow. The
+# workflow file is master's copy, which the Claude action's token exchange validates
+# against master and accepts, including for a pull request that changes this file. The
+# OIDC token is a plain branch token, which the exchange accepts where it refuses a
+# `pull_request_target` one (run 38114955728; claude-code-action issues 713 and 1886).
+# And Dependabot's pull requests reach it like any other, because the dispatcher runs
+# with the permissions Dependabot's own events withhold. The root checkout is master and
+# the pull request's head sits under pr-head/, which nothing executes: no `just`, no
+# `cargo`, no write tool, and the agent's own configuration is master's. Only a workflow
+# of this repository or a person with write access can dispatch it, and the first step
+# refuses a pull request whose head is not in this repository. Adding the `review` label
+# to a pull request runs it again, through the dispatcher.
 name: review pr
 
 on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Number of the pull request to review
+        required: true
+        type: string
+      head_sha:
+        description: The pull request's head commit, the one the review is for
+        required: true
+        type: string
 
 # One reviewer per pull request, and the newest head wins: the fixer can push more than
 # once per cycle, and each stale changes-requested verdict would spend a slot of the
-# writer's fix cap on work already superseded. A `labeled` event for any label but
-# `review` gets a group of its own, keyed by run id, so it cancels nothing: the writer
-# opens its pull request with the `auto-merge` label already on, which raises a
-# `labeled` run a second after `opened`, and in one shared group that run cancelled
-# the review and then skipped itself (run 38102254513, pull request 2).
+# writer's fix cap on work already superseded. Every dispatch for a pull request lands
+# in its group, so a later dispatch cancels an earlier run, and nothing else shares it.
 concurrency:
-  group: review-pr-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'review') && github.run_id || 'head' }}
+  group: review-pr-${{ inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
   review:
-    # The first clause is a security boundary under pull_request_target, not a filter: a
-    # fork's run would hold the secrets (ADR 0005). Removing it is a new ADR.
-    if: |
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (github.event.action != 'labeled' || github.event.label.name == 'review')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     # Brigade's bound (ADR 0004, Evidence): fifteen reviewer sessions finished inside
     # six minutes, so thirty is more than five times the longest. Re-measure after the
@@ -47,33 +49,55 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read           # the reviewer must not be able to push; this is the boundary
-      pull-requests: write     # `gh pr edit --remove-label` below
+      pull-requests: read      # the verify step reads the reviews; the review itself is posted with the App token
       id-token: write          # claude-code-action's OIDC exchange for the Claude App token
       actions: read
     steps:
-      # The label is a trigger, not a state: take it off first so that adding it again
-      # raises a new event. A job-token write raises no workflow event, so this chains
-      # to nothing.
-      - name: Take the review label off
-        if: contains(github.event.pull_request.labels.*.name, 'review')
+      # The inputs come from dispatch-review.yml or from a person with write access.
+      # Check their shape before they reach a command line; refuse a pull request whose
+      # head is not in this repository, since its code would meet the secrets; and stop
+      # quietly when the head has moved on, because the dispatch for the new head is
+      # the one that reviews it.
+      - name: Check the pull request
+        id: pr
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: gh pr edit "$PR_NUMBER" --remove-label review
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::pr_number must be digits, got '$PR_NUMBER'"; exit 1
+          fi
+          if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::head_sha must be a full commit SHA, got '$HEAD_SHA'"; exit 1
+          fi
+          IFS=$'\t' read -r head_repo head_now < <(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '[.head.repo.full_name, .head.sha] | @tsv')
+          if [ "$head_repo" != "$GH_REPO" ]; then
+            echo "::error::pull request $PR_NUMBER is from $head_repo, not this repository; the reviewer does not run on forks (ADR 0005)"; exit 1
+          fi
+          if [ "$head_now" != "$HEAD_SHA" ]; then
+            echo "::notice::pull request $PR_NUMBER moved from $HEAD_SHA to $head_now; the run dispatched for the new head reviews it"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
 
       # Base at the root, head in a subdirectory: the pattern the action's own security
-      # doc prescribes for pull_request_target (ADR 0005). The root is master, so the
-      # working directory, CLAUDE.md and .claude/ are master's. The pull request's head
-      # commit, the one the verify step below checks the review against, is under
-      # pr-head/ for reading, with full history so `git log` and `git diff` work there,
-      # and without the job token in its .git/config, since nothing writes from there.
+      # doc prescribes whenever the head is not the trusted ref (ADR 0005). The root is
+      # master, so the working directory, CLAUDE.md and .claude/ are master's. The pull
+      # request's head commit, the one the verify step below checks the review against,
+      # is under pr-head/ for reading, with full history so `git log` and `git diff` work
+      # there, and without the job token in its .git/config, since nothing writes from
+      # there.
       - name: Checkout master
+        if: steps.pr.outputs.proceed == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Checkout the pull request head under pr-head/
+        if: steps.pr.outputs.proceed == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ inputs.head_sha }}
           path: pr-head
           fetch-depth: 0       # the reviewer diffs against the merge base; a depth-1 clone has none
           persist-credentials: false
@@ -87,15 +111,15 @@ jobs:
       # file, which a Dependabot pin bump does, can never be agent-reviewed: a person
       # reviews and merges it (ADR 0004).
       #
-      # Under pull_request_target (ADR 0005) HEAD here is master, so the step has nothing
+      # Dispatched on master (ADR 0005) the run's commit is master, so the step has nothing
       # to compare and does not run. It stays until the first pull request that edits this
-      # file proves the trigger, and that pull request removes it.
+      # file proves the dispatch, and that pull request removes it.
       - name: Guard this workflow file against master
-        if: github.event_name != 'pull_request_target'
+        if: github.event_name != 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}      # a job-token comment raises no workflow event
           GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
           file=.github/workflows/review-pull-request.yml
@@ -108,6 +132,7 @@ jobs:
 
       - name: Review
         id: review                # the verify step below reads this step's outcome into its error line
+        if: steps.pr.outputs.proceed == 'true'
         # The verify step at the end of this job decides it, not this step's exit status:
         # the action fails a step whose agent exceeded --max-turns even after it has
         # submitted its review (Brigade, four times in its first week). With this line a
@@ -120,14 +145,13 @@ jobs:
         #   (an annotated tag needs one more hop: gh api .../git/tags/<sha> --jq '.object.sha')
         uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
         with:
-          # After the fixer pushes, the resulting `synchronize` run's actor is a bot; without
-          # its name the action rejects the run and the loop dead-ends unreviewed. Brigade
-          # measured that GitHub attributes the fixer's push to `github-actions[bot]`, not
-          # `claude[bot]`, so both names are needed. `github-actions` events can only come
-          # from this repository's own workflow tokens. `dependabot` because its own
-          # `opened` and `synchronize` events run this job (ADR 0005); the action strips a
-          # trailing `[bot]` when matching. An explicit list, never '*'.
-          allowed_bots: "claude,github-actions,dependabot"
+          # A dispatched run's actor is the identity that asked for it: github-actions[bot]
+          # when dispatch-review.yml did, with the job token, or a person who ran it by
+          # hand. Without its name the action rejects the run and the loop dead-ends
+          # unreviewed. `github-actions` events can only come from this repository's own
+          # workflow tokens. `claude` stays for a run a Claude App identity raises. An
+          # explicit list, never '*'.
+          allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # --max-turns is a hard stop on a wandering session. 70 is Brigade's measured
           # bound: 1.5 times its largest observed reviewer session (42 turns), rounded up.
@@ -139,7 +163,7 @@ jobs:
           prompt: |
             You are the reviewer agent. Read `.claude/agents/reviewer.md` for your
             operating instructions and review pull request
-            #${{ github.event.pull_request.number }}.
+            #${{ inputs.pr_number }}.
 
             The working directory is `master`, the base of the pull request. The
             pull request's head commit is checked out under `pr-head/`: read the
@@ -147,9 +171,9 @@ jobs:
             and `gh pr checks` work from the working directory.
 
             You MUST end your session by actually executing
-            `gh pr review ${{ github.event.pull_request.number }} --approve --body "<summary>"`
+            `gh pr review ${{ inputs.pr_number }} --approve --body "<summary>"`
             or
-            `gh pr review ${{ github.event.pull_request.number }} --request-changes --body "<findings>"`.
+            `gh pr review ${{ inputs.pr_number }} --request-changes --body "<findings>"`.
             Your final text response is discarded: a verdict not submitted via
             `gh pr review` does not exist, and this job fails if no review lands.
             If the submission command errors, retry it, and surface a persistent
@@ -201,11 +225,12 @@ jobs:
       # auto-merge never armed). This step is the job's verdict: a claude review at the
       # head SHA passes, none fails, whatever the action reported.
       - name: Verify a review was submitted
+        if: steps.pr.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           REVIEW_OUTCOME: ${{ steps.review.outcome }}
         run: |
           set -euo pipefail

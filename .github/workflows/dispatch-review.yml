@@ -1,0 +1,57 @@
+# Starts the reviewer, review-pull-request.yml, for a pull request, on master (ADR 0005).
+# It runs on `pull_request_target`, in the base repository's context, for one reason: a
+# run that Dependabot's own events raise on `pull_request` gets a read-only token and no
+# secrets, while this one gets the permissions declared below, so Dependabot's pull
+# requests reach the reviewer like any other. The trigger's reputation comes from
+# workflows that check out and execute a fork's code with the base's secrets. This one
+# holds no secret, checks out nothing and executes nothing from the pull request: it
+# reads the number and the head commit from the event, takes the `review` label off if
+# it is on, and asks GitHub to run the reviewer with those two values. Keep it that way;
+# add a checkout or a build step here and the pull request's code runs in this context.
+# Same-repository pull requests only; a fork pull request gets CI and a human.
+#
+# The dispatch uses the job's own token. A write made with that token raises no workflow
+# event, with two documented exceptions, and `workflow_dispatch` is one of them: that is
+# what lets this run without the owner's token. A `labeled` event counts only for the
+# `review` label; the writer opens its pull requests with `auto-merge` already on, and
+# that event must not start a second review.
+name: dispatch review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
+
+jobs:
+  dispatch:
+    if: |
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'labeled' || github.event.label.name == 'review')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5          # two API calls; not a p90, a floor
+    permissions:
+      actions: write            # `gh workflow run`
+      pull-requests: write      # `gh pr edit --remove-label`
+    steps:
+      # The label is a trigger, not a state: take it off first so that adding it again
+      # raises a new event. A job-token write raises no workflow event, so this chains
+      # to nothing.
+      - name: Take the review label off
+        if: contains(github.event.pull_request.labels.*.name, 'review')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr edit "$PR_NUMBER" --remove-label review
+
+      - name: Start the reviewer on master
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          gh workflow run review-pull-request.yml --ref "$DEFAULT_BRANCH" \
+            -f "pr_number=$PR_NUMBER" -f "head_sha=$HEAD_SHA"
+          echo "dispatched review pr for pull request $PR_NUMBER at $HEAD_SHA on $DEFAULT_BRANCH"
