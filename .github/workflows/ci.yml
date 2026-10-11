@@ -7,9 +7,9 @@
 # tags. Dependabot (.github/dependabot.yml) opens a pull request when a pinned action
 # has a new release; this workflow runs on that pull request before it merges.
 #
-# The jobs run on Blacksmith runners, the same two labels Brigade's CI uses. Blacksmith
-# serves the GitHub Actions cache API from its own backend, so the Rust cache action
-# below works unchanged; the restore lines in a run's log are the proof.
+# The jobs run on Blacksmith runners (ADR 0004), the two labels Brigade's CI uses.
+# Blacksmith serves the GitHub Actions cache API from its own backend, so the Rust
+# cache action below works unchanged; the restore lines in a run's log are the proof.
 #
 # The job names are stable on purpose: "gates (linux)" and "gates (macos)" are the two
 # checks branch protection on master requires, so renaming a job means updating the

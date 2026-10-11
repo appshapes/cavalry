@@ -33,3 +33,6 @@ user-visible change, added in the same commit as the change. The format follows
 - ADR 0003: one workspace version, `publish = false` until the first release, where
   each lint lives and why, why crate README examples are deferred, and that bots and
   agent workflows use pull requests while developers commit to `master`.
+- ADR 0004 (proposed): bots and agents work on branches; the writer, reviewer and
+  auto-merge workflows, which token each job holds and why, squash merges whose
+  message is the pull request body, and Blacksmith runners for every job.
