@@ -134,4 +134,4 @@ conformance/          protocol conformance suite and upgrade tests
 - If a decision cannot be undone (wire format, on-disk log format, C ABI), stop and write it up instead of choosing.
 
 # Overrides
-- @./CLAUDE.user.md
+- @./.brigade/CLAUDE.brigade.md
