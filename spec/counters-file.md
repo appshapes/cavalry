@@ -72,13 +72,14 @@ counters never share the 128 bytes a core moves at once (ADR 0011).
 
 | Offset | Size | Field | Type | Writer | Readers | Bound |
 | --- | --- | --- | --- | --- | --- | --- |
-| 0 | 8 | value | i64 | the one thread that owns the counter, with relaxed stores or adds; a position (`spec/log-buffer.md`) with release stores | everyone, with relaxed loads; the driver loads a position with an acquire load | any value; a counter of kind `counter` never decreases while allocated, a `gauge` moves both ways |
+| 0 | 8 | value | i64 | the one thread that owns the counter, with relaxed stores or adds; a position (`spec/log-buffer.md`) with release stores | everyone, with relaxed loads; whoever branches on a position loads it with an acquire load | any value; a counter of kind `counter` never decreases while allocated, a `gauge` moves both ways |
 | 8 | 120 | reserved | bytes | the driver | nobody | written as 0 at allocation, never read |
 
 Nobody branches on a value on the data plane, so relaxed ordering is enough
 (`.claude/rules/data-plane.md`), with one exception: a position is stored with a release
-store by its owner and loaded with an acquire load by the driver, which branches on it
-before it cleans a term (`spec/log-buffer.md`, ADR 0013). A reader that needs a
+store by its owner and loaded with an acquire load by whoever branches on it, the driver
+on a subscriber's position before it cleans a term, the publisher on its limit before it
+writes into a term the driver cleaned (`spec/log-buffer.md`, ADR 0013). A reader that needs a
 consistent pair of counters reads each twice and retries when they moved.
 
 ## `counters.toml`

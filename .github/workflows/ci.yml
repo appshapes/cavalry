@@ -67,13 +67,13 @@ jobs:
       # The latency gate (CLAUDE.md, gate 2; ADR 0015): the harness, then the comparison
       # with bench/baseline.json for this runner's profile. The result is kept as an
       # artifact, which is how a runner's baseline is recorded (docs/how-to/run-the-bench.md).
-      - run: just bench
+      - run: just bench --messages 5000000
         env:
           CAVALRY_BENCH_PROFILE: ${{ matrix.name }}
       - run: just bench-compare
       # The same run with the checks built out, so that ADR 0010's cost is measured on
       # every commit; its profile is <runner>-unchecked, with a baseline of its own.
-      - run: just bench-unchecked
+      - run: just bench-unchecked --messages 5000000
         env:
           CAVALRY_BENCH_PROFILE: ${{ matrix.name }}
       - run: just bench-compare

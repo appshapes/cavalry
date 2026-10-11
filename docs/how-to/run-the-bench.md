@@ -23,7 +23,7 @@ invariant 2 and the gates table; why the harness measures what it measures is
 
    It builds `cavalry-bench` in release, creates a log buffer and a counters file under
    the system's temporary directory, and runs the benchmarks for one million messages
-   each after a warm-up. It prints one table and writes one file,
+   each after a warm-up; CI runs five million, which steadies p99.99 on a shared runner. It prints one table and writes one file,
    `bench/results/<profile>-<unix time>.json`. The profile is `$CAVALRY_BENCH_PROFILE`
    when set, as CI sets `linux` or `macos`, and `local-<os>-<arch>` otherwise. Pass
    arguments after the recipe: `just bench --messages 5000000` runs longer and makes

@@ -144,3 +144,11 @@ user-visible change, added in the same commit as the change. The format follows
   the profile `<profile>-unchecked`, so that what ADR 0010's checks cost is measured on
   every CI run; the slot-padding microbench now times the store side as well as the
   load side (ADR 0011).
+- ADRs 0010 and 0011 are Accepted on the bench's evidence from both CI runners: the
+  per-frame and per-claim checks cost nothing measurable at p99.99, and a field 64 bytes
+  from a hot store pays for the prefetcher's pair while 128 bytes does not. The data-plane
+  rules and the explanation page now say 128 bytes for a peer-shared hot field, and
+  `just lint` refuses an atomic in an `align(64)` wrapper. `bench/baseline.json` holds
+  the runners' baselines, checked and unchecked, so `just bench-compare` now fails a
+  regression in CI. Both specs say that whoever branches on a position, the driver or
+  the publisher, loads it with an acquire load.
