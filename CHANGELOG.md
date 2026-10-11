@@ -40,3 +40,6 @@ user-visible change, added in the same commit as the change. The format follows
   approves or requests changes; the job fails if no review lands. The `review` label
   runs it again, and a Dependabot pull request is handed to it with that label. The
   briefs for the reviewer and the writer are in `.claude/agents/` (ADR 0004).
+- A writer agent implements an issue labelled `claude` on a branch and opens the
+  pull request, answers `@claude` comments, and applies the reviewer's blockers up to
+  three times. `docs/how-to/ask-the-agent.md` is the page for asking (ADR 0004).
