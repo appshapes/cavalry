@@ -99,3 +99,12 @@ user-visible change, added in the same commit as the change. The format follows
   0007), the gates that print `not built yet`, Proposed ADRs, fired Revisit clauses and
   the active sessions. `/next-task 3` lists three, in order, with what each waits on,
   and every task names its source.
+- `cavalry-shm` has its first public items: the counters file. `CountersFile::create`
+  lays out the file of `spec/counters-file.md`, allocates every static counter and
+  publishes the header magic-last; `allocate` hands out a `Counter` whose `increment` is
+  one relaxed add, and fails with `full` when every record is in use;
+  `CountersReader::open` runs the spec's checks in order and names the reason it
+  rejects a file. `scripts/gen-counters.py` writes `docs/reference/counters.md` and the
+  Rust constants from `counters.toml`; `just lint-counters` fails when they are stale and
+  is part of `just lint`. `just loom` checks the publish protocols and `just miri` the
+  layout layer (ADR 0012).

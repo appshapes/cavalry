@@ -27,10 +27,12 @@ bench-compare:
     @echo "not built yet: bench-compare (CLAUDE.md gate 2)." && exit 1
 
 # Wire-spec conformance: every implementation against every vector in spec/vectors/
-# (spec/README.md). Today the one implementation is cavalry-proto's, whose vector test
-# also runs in `just test`; a client in clients/ joins here with its own runner.
+# (spec/README.md). Today the implementations are cavalry-proto's (the frame header)
+# and cavalry-shm's (the counters file); both vector tests also run in `just test`. A
+# client in clients/ joins here with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
+    cargo test -p cavalry-shm --test conformance
 
 # Deterministic replay test: replay a recorded log twice and diff the state.
 replay-check:
@@ -40,9 +42,9 @@ replay-check:
 quickstart:
     @echo "not built yet: quickstart (CLAUDE.md gate 5). The README path does not exist yet." && exit 1
 
-# clippy with workspace lints, fmt, and the workspace lint below. lint-counters and
-# lint-config rejoin this list when they are built; until then they would fail it.
-lint: fmt-check clippy lint-workspace
+# clippy with workspace lints, fmt, the workspace lint and the counters lint below.
+# lint-config rejoins this list when it is built; until then it would fail it.
+lint: fmt-check clippy lint-workspace lint-counters
 
 # The CLAUDE.md rules rustc and clippy cannot see: data-plane flags, the dependency
 # allowlist, no async on the data plane, unsafe only in two crates, the lock ban's
@@ -56,9 +58,15 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# Fail on a state transition with no counter in counters.toml.
+# counters.toml is the single source of every counter (ADR 0012). gen-counters checks
+# it and writes docs/reference/counters.md and the constants in cavalry-shm from it;
+# lint-counters runs the same checks and fails when either generated file is stale.
+# The state-transition check CLAUDE.md names arrives with the first state machine.
+gen-counters:
+    python3 scripts/gen-counters.py
+
 lint-counters:
-    @echo "not built yet: lint-counters (CLAUDE.md gate 4)." && exit 1
+    python3 scripts/gen-counters.py --check
 
 # Fail on a config key without why_not_default, a doctor check and a reference line.
 lint-config:
@@ -96,9 +104,18 @@ docs-links:
 doctor:
     @echo "not built yet: cavalry doctor." && exit 1
 
-# Miri on the unsafe crate.
+# Miri on the unsafe crate: the layout, cell and conformance tests, which run on plain
+# memory. Miri has no file-backed mapping, so the file tests carry
+# `#[cfg_attr(miri, ignore)]` and the README's doctest, which creates a file, is left
+# out by naming the lib and test targets. Needs `rustup +nightly component add miri`.
 miri:
-    cargo +nightly miri test -p cavalry-shm
+    cargo +nightly miri test -p cavalry-shm --lib --tests
+
+# loom on the publish protocols of the counters file (crates/cavalry-shm/src/counters/
+# cells.rs): `cfg(loom)` swaps the atomics for loom's, which explores every interleaving
+# of the writer and a reader. Run it after any change to a protocol in cavalry-shm.
+loom:
+    RUSTFLAGS="--cfg loom" cargo test -p cavalry-shm --lib --release
 
 # cargo-fuzz over every parser in cavalry-proto, a minute each, on nightly. Not in CI
 # (ADR 0008): the no-panic tests in `just test` cover the same property on every

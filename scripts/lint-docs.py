@@ -15,6 +15,11 @@ Checks:
   adrs    every file in docs/decisions/ is NNNN-title.md with a matching "# NNNN." title
           and a Status of Proposed, Accepted, Superseded by NNNN or Rejected; numbers
           are unique
+  glossary
+          the first dotted segment of every counter name in counters.toml is a term in
+          docs/glossary.md or the first word of one (`counters.allocated` needs
+          "counters file"), so every counter name has a row (.claude/rules/docs.md,
+          Glossary; CLAUDE.md, invariant 6)
   change  over the range: a change to a public item (a line with `pub ` in a crate's
           src/), to spec/, counters.toml or config.toml needs a change under docs/ or to
           a README; a change to spec/ needs an ADR in the same change whose Status is
@@ -41,6 +46,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
 SUMMARY = DOCS / "SUMMARY.md"
 DECISIONS = DOCS / "decisions"
+GLOSSARY = DOCS / "glossary.md"
+COUNTERS = ROOT / "counters.toml"
 
 STATUSES = re.compile(r"^- \*\*Status:\*\* (Proposed|Accepted|Superseded by \d{4}|Rejected)\s*$")
 ADR_NAME = re.compile(r"^(\d{4})-[a-z0-9-]+\.md$")
@@ -172,6 +179,41 @@ def check_adrs() -> int:
     return len(files)
 
 
+# ---- glossary ---------------------------------------------------------------------
+
+def glossary_terms() -> set[str]:
+    """The first column of the glossary table, lowercased, each alternative of a
+    "claim / commit" row on its own."""
+    terms: set[str] = set()
+    if not GLOSSARY.exists():
+        return terms
+    for line in GLOSSARY.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\|\s*([^|]+?)\s*\|", line)
+        if not m:
+            continue
+        cell = m.group(1).strip().strip("`").lower()
+        if cell in ("cavalry term", "---") or not cell:
+            continue
+        for term in re.split(r"\s*/\s*", cell):
+            terms.add(term.strip())
+    return terms
+
+
+def check_glossary() -> int:
+    if not COUNTERS.exists():
+        return 0
+    terms = glossary_terms()
+    first_words = {t.split()[0] for t in terms if t}
+    names = re.findall(r'^name\s*=\s*"([^"]+)"', COUNTERS.read_text(encoding="utf-8"), re.M)
+    for name in names:
+        segment = name.split(".", 1)[0]
+        if segment not in terms and segment not in first_words:
+            find(f"glossary: counter `{name}` begins with `{segment}`, which is not a term in "
+                 "docs/glossary.md or the first word of one; add a row (.claude/rules/docs.md, "
+                 "Glossary)")
+    return len(names)
+
+
 # ---- change -----------------------------------------------------------------------
 
 def pick_range() -> tuple[str | None, str | None]:
@@ -286,7 +328,8 @@ def main(argv: list[str]) -> int:
     pages = check_pages()
     links = check_links()
     adrs = check_adrs()
-    summary = f"{pages} pages, {links} links, {adrs} ADRs"
+    counters = check_glossary()
+    summary = f"{pages} pages, {links} links, {adrs} ADRs, {counters} counters"
     if mode == "all":
         label, n = check_change()
         summary += f", {n} files changed in {label}"

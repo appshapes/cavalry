@@ -10,14 +10,29 @@ repository.workspace = true
 # until the first release (ADR 0003).
 publish = false
 
+[dependencies]
+# The memory map behind every shared layout (ADR 0012). Nothing else on the data plane.
+memmap2 = "0.9.11"
+# The derives that make a layout struct its spec table (ADR 0009): the header and record
+# encodings of spec/counters-file.md are little-endian views over plain bytes.
+zerocopy = { version = "0.8.62", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+# Model checker for the publish protocols in src/counters/cells.rs: `just loom`.
+loom = "0.7"
+# Reads spec/vectors/*.json in tests/conformance.rs. Dev only, never on the data plane.
+serde_json = "1"
+
 # One of the two crates where `unsafe` is permitted (CLAUDE.md, "Unsafe"). It cannot
 # inherit the workspace table, which denies unsafe_code, so it carries its own. Every
 # `unsafe` block here needs a `// SAFETY:` comment; see .claude/rules/data-plane.md.
+# `cfg(loom)` is set by `just loom`, which swaps the atomics for loom's.
 [lints.rust]
 unsafe_code = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 # Read by `just lint`. A data-plane crate gets the lock, async and dependency rules
 # from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.
 [package.metadata.cavalry]
 data_plane = true
-allowed-dependencies = []
+allowed-dependencies = ["memmap2", "zerocopy"]

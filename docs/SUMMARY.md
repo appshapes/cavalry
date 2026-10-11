@@ -17,6 +17,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 
 - [Data frame header](reference/frame.md)
 - [Counters file](reference/counters-file.md)
+- [Counters](reference/counters.md)
 - [Glossary](glossary.md)
 
 # Decisions
