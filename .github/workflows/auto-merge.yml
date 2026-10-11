@@ -47,6 +47,12 @@ jobs:
       # `gh pr checks --required`: the token is an admin's and bypasses the rule, so a bare
       # merge would land past the required checks on ANY `--auto` error. The guard costs
       # nothing on the already-green path and refuses every other.
+      #
+      # The subject and body are passed explicitly rather than left to the repository
+      # setting, for one reason: the Blacksmith Codesmith app appends an HTML footer to every
+      # pull request body (seen on pull request 2), and a squash that took the body verbatim
+      # would carry that footer into the commit on master. The footer sits between two
+      # marker comments; everything between them is dropped, nothing else is touched.
       - name: Merge when green
         env:
           # The owner's token. This job runs NO agent, which is the only reason the token may
@@ -54,4 +60,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-        run: gh pr merge "$PR" --squash --auto --repo "$REPO" || { gh pr checks "$PR" --required --repo "$REPO" && gh pr merge "$PR" --squash --repo "$REPO"; }
+        run: |
+          set -euo pipefail
+          subject=$(gh pr view "$PR" --repo "$REPO" --json title --jq '.title')
+          body="$RUNNER_TEMP/squash-body.md"
+          gh pr view "$PR" --repo "$REPO" --json body --jq '.body' \
+            | sed '/<!-- codesmith:footer -->/,/<!-- \/codesmith:footer -->/d' \
+            | cat -s > "$body"
+          gh pr merge "$PR" --squash --auto --repo "$REPO" --subject "$subject" --body-file "$body" \
+            || { gh pr checks "$PR" --required --repo "$REPO" && gh pr merge "$PR" --squash --repo "$REPO" --subject "$subject" --body-file "$body"; }

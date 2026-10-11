@@ -21,9 +21,13 @@ on:
 
 # One reviewer per pull request, and the newest head wins: the fixer can push more than
 # once per cycle, and each stale changes-requested verdict would spend a slot of the
-# writer's fix cap on work already superseded.
+# writer's fix cap on work already superseded. A `labeled` event for any label but
+# `review` gets a group of its own, keyed by run id, so it cancels nothing: the writer
+# opens its pull request with the `auto-merge` label already on, which raises a
+# `labeled` run a second after `opened`, and in one shared group that run cancelled
+# the review and then skipped itself (run 38102254513, pull request 2).
 concurrency:
-  group: review-pr-${{ github.event.pull_request.number }}
+  group: review-pr-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'review') && github.run_id || 'head' }}
   cancel-in-progress: true
 
 jobs:

@@ -204,6 +204,7 @@ jobs:
             actions: read
           settings: |
             {
+              "includeCoAuthoredBy": false,
               "permissions": {
                 "allow": [
                   "Bash(just:*)",
@@ -252,6 +253,9 @@ jobs:
           # rail, not a boundary. The boundaries are the job's `permissions:` block and the
           # token scopes. The general edit tools (Write, Edit) come from the action's own
           # defaults, which is how this agent edits a Rust file at all.
+          # `includeCoAuthoredBy: false`: the commit message is the review record, and a
+          # trailer is not evidence. The action still asks the agent to co-author the person
+          # who triggered it; `open-pr` drops those lines when it builds the body.
 
       # The fixer can end green without its push landing: a narrated-only fix, or a remote
       # rejection. No push means no `synchronize`, no re-review, and a silently parked pull
@@ -345,15 +349,20 @@ jobs:
           # The body is the review record, built from the branch's commit messages, because
           # squash_merge_commit_message=PR_BODY makes it the commit message on master. One
           # commit: its body as written. Several: each subject as a heading over its body.
+          # Co-author trailers are dropped (the action asks the agent to add one for the
+          # person who triggered it), and `Closes #N` is appended once, unless the agent
+          # already wrote it (pull request 2 had it twice).
           compare="repos/${GITHUB_REPOSITORY}/compare/master...${BRANCH}"
           count=$(gh api "$compare" --jq '.commits | length')
           body="$RUNNER_TEMP/pr-body.md"
           if [ "$count" -eq 1 ]; then
-            gh api "$compare" --jq '.commits[0].commit.message | split("\n") | .[1:] | join("\n") | ltrimstr("\n")' > "$body"
+            gh api "$compare" --jq '.commits[0].commit.message | split("\n") | .[1:] | join("\n") | ltrimstr("\n")'
           else
-            gh api "$compare" --jq '.commits[] | .commit.message | split("\n") as $l | "### \($l[0])\n\n\($l[1:] | join("\n") | ltrimstr("\n"))\n"' > "$body"
+            gh api "$compare" --jq '.commits[] | .commit.message | split("\n") as $l | "### \($l[0])\n\n\($l[1:] | join("\n") | ltrimstr("\n"))\n"'
+          fi | grep -viE '^Co-authored-by:' | cat -s > "$body"
+          if ! grep -qiE "^Closes #${ISSUE_NUMBER}\b" "$body"; then
+            printf '\nCloses #%s\n' "$ISSUE_NUMBER" >> "$body"
           fi
-          printf '\nCloses #%s\n' "$ISSUE_NUMBER" >> "$body"
           # Labels are copied from the ISSUE, where the policy decision was made: `auto-merge`
           # means the reviewer's approval plus green CI merges it with no human step.
           LABELS=()

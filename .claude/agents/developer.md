@@ -58,6 +58,8 @@ Never invent a number.
   (ADR 0004). After a fix, bring the body up to date with `gh pr edit <n> --body-file`.
 - One crate per commit where possible; data-plane and control-plane changes in separate
   pull requests. Several commits on a branch are fine.
+- No trailers: no `Co-authored-by`, no `Closes #N` (the workflow adds that one). The body is
+  the review record and nothing else.
 - **Merges only, never rebase.** No `git rebase` in any form, no force push, no rewriting
   pushed history. On a merge conflict, stop and hand it back in a pull request comment.
 
