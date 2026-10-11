@@ -62,8 +62,15 @@ user-visible change, added in the same commit as the change. The format follows
   with the README's ten-minute path as its test, built as five features in a fixed
   order, the data frame header first; UDP, the durable log, Raft and the language
   clients wait for the next slice.
+- `spec/` exists. `spec/README.md` states the conventions, and `spec/frame.md`
+  specifies the 32-byte data frame header at version 0, Aeron's layout field for
+  field, with the checks a reader runs and the reason it reports. Its 18 test
+  vectors are written by a reference encoder, `spec/vectors/frame.py`, and the book
+  includes the page as its first reference page (ADR 0008).
+- ADR 0009: `cavalry-proto` reads and writes wire structs through `zerocopy`, its
+  first dependency, so that a struct is the layout table.
 - `docs/explanation/should-zigbolt-inform-cavalry.md` answers whether ZigBolt's
   design should inform Cavalry's: no, except two shared-memory layout points,
-  proposed as ADR 0008 (validate every peer-written shared-memory field before
-  using it) and ADR 0009 (pad peer-shared hot fields to 128 bytes). The frame
-  header of ADR 0007 is unchanged.
+  proposed as ADR 0010 (validate every peer-written shared-memory field before
+  using it) and ADR 0011 (pad peer-shared hot fields to 128 bytes). The data
+  frame header of ADR 0008 is unchanged.

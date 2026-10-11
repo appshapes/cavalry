@@ -1,4 +1,4 @@
-# 0008. Validate every peer-written field of a shared-memory layout before using it
+# 0010. Validate every peer-written field of a shared-memory layout before using it
 
 - **Status:** Proposed
 - **Date:** 2026-10-11

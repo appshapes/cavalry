@@ -18,21 +18,22 @@ adaptations rather than copies:
    write, before using it in any index or pointer, and fail with a counter and an
    error.** ZigBolt does the validation and carries the tests that show why it
    matters; it then reports a corrupt header as "no data", which Cavalry must not.
-   Proposed as [ADR 0008](../decisions/0008-validate-peer-written-shared-memory.md),
+   Proposed as [ADR 0010](../decisions/0010-validate-peer-written-shared-memory.md),
    for `cavalry-shm` and the log buffer and counters file sections of `spec/`.
 2. **Pad a field that one party writes and another party spins on to 128 bytes,
    not 64.** ZigBolt pads to 128 because Zig's standard library does; Aeron and
    Agrona pad their counters and ring-buffer positions to two cache lines;
    Cavalry's data-plane rule says 64. Proposed as
-   [ADR 0009](../decisions/0009-pad-peer-shared-fields-to-128-bytes.md), for every
+   [ADR 0011](../decisions/0011-pad-peer-shared-fields-to-128-bytes.md), for every
    shared layout in `cavalry-shm`.
 
 Everything else is rejected, with the reason recorded below so that nobody asks
 twice. Where ZigBolt is right, it is Aeron's design with fewer fields. Where it
 differs from Aeron, the difference loses to an invariant. Nothing in this verdict
-changes the data frame header, so card 80 proceeds as
-[ADR 0007](../decisions/0007-build-ipc-pub-sub-first.md) planned it, and that ADR's
-revisit clause does not fire. The comparison also produced requirements for
+changes the data frame header that
+[ADR 0008](../decisions/0008-adopt-aeron-data-frame-header.md) adopted from Aeron,
+so the revisit clause in [ADR 0007](../decisions/0007-build-ipc-pub-sub-first.md)
+does not fire. The comparison also produced requirements for
 Cavalry's own benchmark harness and on-disk log format. They adopt nothing from
 ZigBolt, so they need no ADR; they are listed under
 [What this page changes](#what-this-page-changes).
@@ -45,12 +46,12 @@ ZigBolt, so they need no ADR; they are listed under
 | SPSC and MPSC queues | Reject | `cavalry-shm` | A copy per message on read, a byte loop on write, and an MPSC that wedges forever when a producer dies; Agrona's ring buffers unblock. |
 | Broadcast buffer | Reject | `cavalry-driver`, control plane only | A port of Agrona's lossy broadcast buffer. Loss with no per-subscriber position breaks invariant 1 on the data plane; Aeron uses it only for driver-to-client events, and so will Cavalry. |
 | Claim and commit protocol | Reject | `spec/` log buffer section | A CAS loop on an absolute tail, zero meaning uncommitted, no abort. Aeron's fetch-and-add on a packed tail, negative length while claimed, and `abort` do more. |
-| Frame padding and alignment | Reject | `spec/` data frame section | 8-byte alignment and a sign-flagged padding frame; Aeron aligns to 32 bytes and types its padding so the same frame goes on the wire. |
-| Counter padding | **Adapt** | [ADR 0009](../decisions/0009-pad-peer-shared-fields-to-128-bytes.md), every shared layout | 128-byte slots for peer-shared fields. Aeron, Agrona, Zig and crossbeam agree; Cavalry's rule says 64. |
+| Frame padding and alignment | Reject | `spec/frame.md` | 8-byte alignment and a sign-flagged padding frame; Aeron aligns to 32 bytes and types its padding so the same frame goes on the wire. |
+| Counter padding | **Adapt** | [ADR 0011](../decisions/0011-pad-peer-shared-fields-to-128-bytes.md), every shared layout | 128-byte slots for peer-shared fields. Aeron, Agrona, Zig and crossbeam agree; Cavalry's rule says 64. |
 | Batching | Reject | `cavalry-client` | Nothing beyond Aeron's one position store per poll batch. |
 | Behaviour when full | Reject | `spec/` log buffer section | A two-term window computed on the publisher's hot path from the reader's position. Aeron's publisher reads a limit the driver maintains. |
 | Slow or dead reader | Reject | `cavalry-driver` | No liveness, no timeout, no eviction, no counter. Aeron's untethered subscriptions and liveness timeouts are the model. |
-| Cross-process safety of the shared header | **Adapt** | [ADR 0008](../decisions/0008-validate-peer-written-shared-memory.md), `spec/`, `cavalry-shm` | Bounds-checked, re-checked after mapping, tested with forged positions; but a corrupt header reads as "no data" with no counter. |
+| Cross-process safety of the shared header | **Adapt** | [ADR 0010](../decisions/0010-validate-peer-written-shared-memory.md), `spec/`, `cavalry-shm` | Bounds-checked, re-checked after mapping, tested with forged positions; but a corrupt header reads as "no data" with no counter. |
 | Wire framing and flyweights | Reject | `cavalry-proto` | The Aeron-layout flyweights are unused. The UDP path has its own 32-byte header with sequence numbers, a version equality check and no negotiation. |
 | Codec choice | Reject | `cavalry-proto` | "Comptime SBE" has no schema compiler and no user in the tree. The packed-struct codec is what `zerocopy` derives give Rust. |
 | Archive and replay | Reject | `cavalry-log` | Headerless, unversioned segment files holding a record that is not the wire frame; index, catalog and compression unwired; no determinism test. |
@@ -243,7 +244,7 @@ Frames in ZigBolt are 8-byte aligned (`src/platform/config.zig:22`,
 aligns every frame to 32 bytes (`FrameDescriptor.FRAME_ALIGNMENT`, source 18) and
 types its padding frame `HDR_TYPE_PAD` with a positive length, so the frame in the
 log is the frame on the wire and the unblocker can write one. Verdict: reject;
-card 80's frame header keeps Aeron's alignment and type.
+`spec/frame.md` keeps Aeron's alignment and padding type (ADR 0008).
 
 The positions are a different matter. ZigBolt aligns and pads each one to
 `std.atomic.cache_line`, which Zig 0.15.1 defines as 128 bytes on x86-64 and
@@ -255,7 +256,7 @@ file a slot of `CACHE_LINE_LENGTH * 2` "to avoid false sharing"
 fields at offsets 0, 128 and 256 (source 10). Rust's `crossbeam-utils` pads to 128
 bytes on x86-64, aarch64 and powerpc64 because "spatial prefetcher is pulling
 pairs of 64-byte cache lines at a time" (source 22). Cavalry's data-plane rule says
-64 bytes. Verdict: adapt, as [ADR 0009](../decisions/0009-pad-peer-shared-fields-to-128-bytes.md).
+64 bytes. Verdict: adapt, as [ADR 0011](../decisions/0011-pad-peer-shared-fields-to-128-bytes.md).
 The idea is not ZigBolt's, but the comparison is what surfaced the gap.
 
 ### Batching
@@ -330,7 +331,7 @@ counter (`ipc.zig:293-296`); only `publish` reports `error.CorruptChannel`
 (`ipc.zig:191`). A reader that spins on "no data" forever, with nothing in the
 [counters file](../glossary.md) to say why, breaks invariants 1 and 4 at once.
 
-Verdict: adapt, as [ADR 0008](../decisions/0008-validate-peer-written-shared-memory.md).
+Verdict: adapt, as [ADR 0010](../decisions/0010-validate-peer-written-shared-memory.md).
 Cavalry's driver outlives every client, maps files that any attached client can
 write, and sells memory safety as a compliance feature (`why-cavalry.md`, Build).
 Every peer-written field gets a bound in the spec, a check before use, a counter
@@ -358,7 +359,7 @@ rest on.
 
 Verdict: reject. `cavalry-proto` writes Aeron's data frame header, 32 bytes with
 version, flags, type, term offset, session id, stream id, term id and reserved
-value, 32-byte aligned (source 25), as card 80 specifies. Version negotiation is
+value, 32-byte aligned (source 25), as `spec/frame.md` specifies (ADR 0008). Version negotiation is
 Cavalry's own work, since neither ZigBolt nor the Aeron wiki page describes one
 beyond "Current version is 0".
 
@@ -370,7 +371,8 @@ and a size that is a multiple of 8, then casts a buffer to it
 compiled out in release builds (`wire.zig:60`, `75`, `91`); a checked variant
 tests the length and nothing else. In Rust that is what the `zerocopy` derives
 provide, with the bounds check kept in release, and `cavalry-proto` already
-requires them (`.claude/rules/data-plane.md`, Memory and layout). The "SBE codec"
+takes them as its first dependency
+([ADR 0009](../decisions/0009-read-wire-structs-with-zerocopy.md)). The "SBE codec"
 has SBE's message and group headers and a streaming encoder and decoder, but no
 schema, no XML, no code generation, a variable-length field whose length type is
 fixed at `u32` where the standard makes it schema-defined, and no caller anywhere
@@ -508,11 +510,11 @@ lessons are requirements for Cavalry's harness rather than adoptions:
 ## What this page changes
 
 - `why-cavalry.md`, Build: the "isolate the unsafe" and "no locks on the hot
-  path" rules now point at ADR 0008 and ADR 0009 and link this page.
-- ADR 0007 is untouched: the frame header, card 80, is unchanged.
+  path" rules now point at ADR 0010 and ADR 0011 and link this page.
+- ADR 0007 and ADR 0008 are untouched: the data frame header stands as adopted.
 - The log buffer feature that follows card 78 writes Aeron's layout into `spec/`
-  and adds, from this page: the validation table of ADR 0008, the 128-byte slots
-  of ADR 0009 if accepted, an unblock protocol and consumer heartbeat for every
+  and adds, from this page: the validation table of ADR 0010, the 128-byte slots
+  of ADR 0011 if accepted, an unblock protocol and consumer heartbeat for every
   many-to-one ring, and a counter for every slow-reader transition.
 - The on-disk log format ADR, when written, requires: the record is the frame; a
   versioned file header; a named checksum option as Aeron offers; truncation of a

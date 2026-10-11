@@ -1,4 +1,4 @@
-# 0009. Pad peer-shared hot fields to 128 bytes
+# 0011. Pad peer-shared hot fields to 128 bytes
 
 - **Status:** Proposed
 - **Date:** 2026-10-11

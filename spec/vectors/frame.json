@@ -1,0 +1,177 @@
+{
+  "spec": "spec/frame.md",
+  "version": 0,
+  "generated_by": "spec/vectors/frame.py; do not edit by hand",
+  "vectors": [
+    {
+      "name": "data-single-frame",
+      "bytes": "2800000000c001000000000001000000e9030000000000000000000000000000636176616c727921",
+      "header": {
+        "frame_length": 40,
+        "version": 0,
+        "flags": 192,
+        "type": 1,
+        "term_offset": 0,
+        "session_id": 1,
+        "stream_id": 1001,
+        "term_id": 0,
+        "reserved_value": 0
+      }
+    },
+    {
+      "name": "data-begin-fragment",
+      "bytes": "400000000080010040000000feffffff0a0000000500000008070605040302014242424242424242424242424242424242424242424242424242424242424242",
+      "header": {
+        "frame_length": 64,
+        "version": 0,
+        "flags": 128,
+        "type": 1,
+        "term_offset": 64,
+        "session_id": -2,
+        "stream_id": 10,
+        "term_id": 5,
+        "reserved_value": 72623859790382856
+      }
+    },
+    {
+      "name": "data-end-fragment-eos",
+      "bytes": "210000000060010080000000ffffff7fffffffffffffff7fffffffffffffffffff",
+      "header": {
+        "frame_length": 33,
+        "version": 0,
+        "flags": 96,
+        "type": 1,
+        "term_offset": 128,
+        "session_id": 2147483647,
+        "stream_id": -1,
+        "term_id": 2147483647,
+        "reserved_value": -1
+      }
+    },
+    {
+      "name": "data-empty-body",
+      "bytes": "2000000000c001000000000001000000e9030000000000000000000000000000",
+      "header": {
+        "frame_length": 32,
+        "version": 0,
+        "flags": 192,
+        "type": 1,
+        "term_offset": 0,
+        "session_id": 1,
+        "stream_id": 1001,
+        "term_id": 0,
+        "reserved_value": 0
+      }
+    },
+    {
+      "name": "data-reserved-flag-bits-ignored",
+      "bytes": "2800000000df01000000000001000000e9030000000000000000000000000000636176616c727921",
+      "header": {
+        "frame_length": 40,
+        "version": 0,
+        "flags": 223,
+        "type": 1,
+        "term_offset": 0,
+        "session_id": 1,
+        "stream_id": 1001,
+        "term_id": 0,
+        "reserved_value": 0
+      }
+    },
+    {
+      "name": "data-then-alignment-padding",
+      "bytes": "2800000000c001000000000001000000e9030000000000000000000000000000636176616c727921000000000000000000000000000000000000000000000000",
+      "header": {
+        "frame_length": 40,
+        "version": 0,
+        "flags": 192,
+        "type": 1,
+        "term_offset": 0,
+        "session_id": 1,
+        "stream_id": 1001,
+        "term_id": 0,
+        "reserved_value": 0
+      }
+    },
+    {
+      "name": "padding",
+      "bytes": "4000000000000000c0ff000001000000e90300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "header": {
+        "frame_length": 64,
+        "version": 0,
+        "flags": 0,
+        "type": 0,
+        "term_offset": 65472,
+        "session_id": 1,
+        "stream_id": 1001,
+        "term_id": 0,
+        "reserved_value": 0
+      }
+    },
+    {
+      "name": "padding-minimum",
+      "bytes": "2000000000000000e0ff000001000000e9030000000000000000000000000000",
+      "header": {
+        "frame_length": 32,
+        "version": 0,
+        "flags": 0,
+        "type": 0,
+        "term_offset": 65504,
+        "session_id": 1,
+        "stream_id": 1001,
+        "term_id": 0,
+        "reserved_value": 0
+      }
+    },
+    {
+      "name": "too-short",
+      "bytes": "2800000000c001000000000001000000e90300000000000000000000000000",
+      "error": "too-short"
+    },
+    {
+      "name": "version-1",
+      "bytes": "2000000001c001000000000001000000e9030000000000000000000000000000",
+      "error": "version"
+    },
+    {
+      "name": "version-negative",
+      "bytes": "20000000ffc001000000000001000000e9030000000000000000000000000000",
+      "error": "version"
+    },
+    {
+      "name": "type-nak",
+      "bytes": "20000000000002000000000001000000e9030000000000000000000000000000",
+      "error": "type"
+    },
+    {
+      "name": "type-unknown",
+      "bytes": "200000000000ff7f0000000001000000e9030000000000000000000000000000",
+      "error": "type"
+    },
+    {
+      "name": "length-below-header",
+      "bytes": "1000000000c001000000000001000000e9030000000000000000000000000000",
+      "error": "length"
+    },
+    {
+      "name": "length-negative",
+      "bytes": "d8ffffff00c001000000000001000000e9030000000000000000000000000000",
+      "error": "length"
+    },
+    {
+      "name": "length-truncated",
+      "bytes": "2800000000c001000000000001000000e903000000000000000000000000000063617661",
+      "error": "length"
+    },
+    {
+      "name": "version-before-type",
+      "bytes": "20000000010002000000000001000000e9030000000000000000000000000000",
+      "error": "version"
+    },
+    {
+      "name": "type-before-length",
+      "bytes": "10000000000002000000000001000000e9030000000000000000000000000000",
+      "error": "type"
+    }
+  ]
+}

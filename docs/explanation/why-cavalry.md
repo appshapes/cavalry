@@ -269,10 +269,10 @@ heroics and clears the bar Aeron set.
   `#[repr(C)]` layouts, explicit `Acquire`/`Release` atomics, a versioned layout
   header. Put them in one crate, fuzz it, test it under `loom`, run Miri where it
   can. Treat every field another process can write as untrusted input and
-  validate it before use (proposed ADR 0008).
+  validate it before use (proposed ADR 0010).
 - **No locks on the hot path.** SPSC and MPSC lock-free queues, `#[repr(align(64))]`
   padding against false sharing, no `Arc<Mutex>` anywhere a message passes through.
-  A field two parties share gets a 128-byte slot (proposed ADR 0009).
+  A field two parties share gets a 128-byte slot (proposed ADR 0011).
 - **Stable ABI only at the C boundary.** Rust-to-Rust integration goes through crates
   with semver. Everything else goes through the C ABI, which is the one surface
   frozen between releases.
