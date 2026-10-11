@@ -1,0 +1,39 @@
+# The hand-off that lets the reviewer run on a Dependabot pull request (ADR 0004). A
+# workflow run that Dependabot's own events raise gets no repository secrets and a
+# read-only job token, so review-pull-request.yml skips those runs. This workflow runs
+# in the base repository's context instead (`pull_request_target`), which does carry
+# the secrets, and does exactly one thing with them: it adds the `review` label with
+# the owner's token. That write raises a `pull_request: labeled` event whose actor is
+# the owner, and the reviewer runs on that event with everything it needs.
+#
+# `pull_request_target` is safe here for one reason only, and it must stay true: this
+# job checks out NOTHING and executes NOTHING from the pull request. It reads the pull
+# request number from the event and calls the API. Add a checkout or a build step
+# here and the pull request's code runs with the owner's token.
+name: dependabot review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  handoff:
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5          # two API calls; not a p90, a floor
+    permissions: {}             # the job token does nothing here; the label is added with GH_ACTIONS_TOKEN
+    steps:
+      - name: Hand the pull request to the reviewer
+        env:
+          # The owner's token, in a job that runs no agent (ADR 0004). Its write raises the
+          # event; a job-token write would raise none.
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Off, then on: adding a label that is already present raises no event, and a
+          # rebase by Dependabot arrives as `synchronize` while the label from the
+          # previous round may still be on.
+          gh pr edit "$PR_NUMBER" --remove-label review
+          gh pr edit "$PR_NUMBER" --add-label review

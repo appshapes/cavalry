@@ -36,3 +36,7 @@ user-visible change, added in the same commit as the change. The format follows
 - ADR 0004 (proposed): bots and agents work on branches; the writer, reviewer and
   auto-merge workflows, which token each job holds and why, squash merges whose
   message is the pull request body, and Blacksmith runners for every job.
+- A reviewer agent reviews every same-repository pull request, read-only, and
+  approves or requests changes; the job fails if no review lands. The `review` label
+  runs it again, and a Dependabot pull request is handed to it with that label. The
+  briefs for the reviewer and the writer are in `.claude/agents/` (ADR 0004).

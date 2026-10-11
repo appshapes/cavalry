@@ -1,0 +1,173 @@
+# The reviewer half of the loop (ADR 0004). Read-only because the job's GITHUB_TOKEN is
+# `contents: read`: a merge and a push are both content writes, so no tool the agent
+# holds can perform one. The `deny` list below is the belt: an `allow` list that merely
+# omits Write and Edit withholds nothing, because the action grants the edit tools by
+# default, so the denial has to be written out. A reviewer that can push is not a
+# reviewer.
+#
+# Same-repository pull requests only, and not the runs Dependabot's own events raise.
+# A fork pull request cannot read `secrets.CLAUDE_CODE_OAUTH_TOKEN`, so a reviewer job
+# on one would fail at authentication on every drive-by contribution and teach everyone
+# to ignore a red X; fork pull requests get CI and a human. A run that Dependabot
+# triggers (actor `dependabot[bot]`) gets no repository secrets either, although its
+# branch lives here, so dependabot-review.yml re-raises the event as the owner by
+# adding the `review` label, and that `labeled` event is what this workflow runs on.
+# Adding the `review` label by hand runs the reviewer again on any pull request.
+name: review pr
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+# One reviewer per pull request, and the newest head wins: the fixer can push more than
+# once per cycle, and each stale changes-requested verdict would spend a slot of the
+# writer's fix cap on work already superseded.
+concurrency:
+  group: review-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: |
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]' &&
+      (github.event.action != 'labeled' || github.event.label.name == 'review')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Brigade's bound (ADR 0004, Evidence): fifteen reviewer sessions finished inside
+    # six minutes, so thirty is more than five times the longest. Re-measure after the
+    # first ten Cavalry sessions and keep it at twice the longest observed.
+    timeout-minutes: 30
+    permissions:
+      contents: read           # the reviewer must not be able to push; this is the boundary
+      pull-requests: write     # `gh pr edit --remove-label` below
+      id-token: write          # claude-code-action's OIDC exchange for the Claude App token
+      actions: read
+    steps:
+      # The label is a trigger, not a state: take it off first so that adding it again
+      # raises a new event. A job-token write raises no workflow event, so this chains
+      # to nothing.
+      - name: Take the review label off
+        if: contains(github.event.pull_request.labels.*.name, 'review')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr edit "$PR_NUMBER" --remove-label review
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0       # the reviewer diffs against the merge base; a depth-1 clone has none
+
+      - name: Review
+        id: review                # the verify step below reads this step's outcome into its error line
+        # The verify step at the end of this job decides it, not this step's exit status:
+        # the action fails a step whose agent exceeded --max-turns even after it has
+        # submitted its review (Brigade, four times in its first week). With this line a
+        # submitted review counts; a missing one still fails loud, below.
+        continue-on-error: true
+        # Pinned by SHA like every action here (ADR 0003), and this one matters most: it
+        # runs a model with repository access, so a moving tag would change what an agent
+        # does, not how a step behaves. Re-resolve the current `v1` when bumping:
+        #   gh api repos/anthropics/claude-code-action/git/ref/tags/v1 --jq '.object.sha'
+        #   (an annotated tag needs one more hop: gh api .../git/tags/<sha> --jq '.object.sha')
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        with:
+          # After the fixer pushes, the resulting `synchronize` run's actor is a bot; without
+          # its name the action rejects the run and the loop dead-ends unreviewed. Brigade
+          # measured that GitHub attributes the fixer's push to `github-actions[bot]`, not
+          # `claude[bot]`, so both names are needed. `github-actions` events can only come
+          # from this repository's own workflow tokens. An explicit list, never '*'.
+          allowed_bots: "claude,github-actions"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # --max-turns is a hard stop on a wandering session. 70 is Brigade's measured
+          # bound: 1.5 times its largest observed reviewer session (42 turns), rounded up.
+          # Re-measure when a Cavalry session reaches 47 turns or the pin moves.
+          claude_args: "--model claude-opus-5-5 --max-turns 70"
+          # Public repository: run logs are world readable. Keep the agent's output out.
+          show_full_output: false
+          prompt: |
+            You are the reviewer agent. Read `.claude/agents/reviewer.md` for your
+            operating instructions and review pull request
+            #${{ github.event.pull_request.number }}.
+
+            You MUST end your session by actually executing
+            `gh pr review ${{ github.event.pull_request.number }} --approve --body "<summary>"`
+            or
+            `gh pr review ${{ github.event.pull_request.number }} --request-changes --body "<findings>"`.
+            Your final text response is discarded: a verdict not submitted via
+            `gh pr review` does not exist, and this job fails if no review lands.
+            If the submission command errors, retry it, and surface a persistent
+            failure with `gh pr comment` before ending the session.
+
+            When requesting changes, end the review body with the following
+            line, written as plain text on its own line. Do NOT wrap it in
+            backticks or quotes, or the fixer's mention detection will not
+            match it:
+
+            @claude Read `.claude/agents/developer.md`, then address every blocker in this review: apply the fixes directly on this PR branch and push.
+
+            That line is the only place in the loop that hands the fixer its
+            rules file, so never shorten it. Never put an @claude mention in an
+            approval body: it would start a needless fix run.
+          settings: |
+            {
+              "permissions": {
+                "allow": [
+                  "Bash(gh:*)",
+                  "Bash(git:*)",
+                  "Bash(ls:*)",
+                  "Bash(cat:*)",
+                  "Bash(find:*)",
+                  "Bash(grep:*)",
+                  "Bash(rg:*)",
+                  "Bash(jq:*)"
+                ],
+                "deny": [
+                  "Write",
+                  "Edit",
+                  "MultiEdit",
+                  "NotebookEdit",
+                  "Read(./.env)",
+                  "Read(./.env.*)"
+                ]
+              }
+            }
+          # `Bash(gh:*)` includes `gh pr merge`. It cannot merge: the job's GITHUB_TOKEN is
+          # `contents: read`, and a merge is a content write. No `just`, no `cargo`: a
+          # reviewer that can run the build can also write files through a build script;
+          # CI runs the gates on the pull request and the reviewer reads the result.
+          # No WebFetch and no WebSearch: a reviewer reads a diff in a checkout it already
+          # has, and the token in its environment is reachable to anything it runs.
+          # Reviewing a hostile diff is this agent's whole job, so it gets no fetch verb.
+
+      # A reviewer session can end "successfully" without ever submitting the review
+      # (observed in Brigade's reference repositories: green check, zero reviews,
+      # auto-merge never armed). This step is the job's verdict: a claude review at the
+      # head SHA passes, none fails, whatever the action reported.
+      - name: Verify a review was submitted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+        run: |
+          set -euo pipefail
+          # One line per claude review at head: "STATE<TAB>has-trailer". Paginated so a
+          # long-lived pull request cannot hide the newest review.
+          reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+            --jq ".[] | select((.user.login // \"\" | startswith(\"claude\")) and .commit_id == \"$HEAD_SHA\") | [.state, (.body // \"\" | contains(\"@claude\") | tostring)] | @tsv")
+          if [ -z "$reviews" ]; then
+            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA (the Review step's outcome was '$REVIEW_OUTCOME'; its log says why)"
+            exit 1
+          fi
+          last=$(printf '%s\n' "$reviews" | tail -n 1)
+          state=${last%%$'\t'*}
+          has_trailer=${last##*$'\t'}
+          # A changes-requested verdict without the '@claude' trailer never arms the fixer:
+          # the pull request would silently park, so fail loud.
+          if [ "$state" = "CHANGES_REQUESTED" ] && [ "$has_trailer" != "true" ]; then
+            echo "::error::CHANGES_REQUESTED review at $HEAD_SHA lacks the @claude fixer trailer; the fix loop will not arm"
+            exit 1
+          fi
