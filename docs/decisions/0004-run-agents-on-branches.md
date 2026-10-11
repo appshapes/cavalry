@@ -1,6 +1,6 @@
 # 0004. Run agents on branches, with the owner's token out of every agent's job
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-10
 - **Invariants affected:** 1, 5, 6
 - **Supersedes:** the bot pull request merge path of ADR 0003 (a merge commit by a
@@ -108,9 +108,29 @@ list, no web tools, and a deny list covering `.github/workflows/`, `.claude/`,
 - Brigade measured on 2026-09-17 that GitHub holds the runs a fixer's push raises at
   `action_required` whatever the fork approval policy says (Brigade pull request 22),
   which is why the writer workflow carries the approving job.
-- Cavalry CI run 38101583751 passed on both Blacksmith labels on 2026-10-11.
-- The first runs of each workflow on Cavalry are added here when this decision is
-  accepted.
+- Cavalry CI run 38101583751 passed on both Blacksmith labels on 2026-10-11, in
+  16 s and 19 s.
+- The writer: issue 1, labelled `auto-merge` then `claude` on 2026-10-11, started run
+  38102182969; the agent session took 28 s, pushed its branch, and the owner's token
+  opened pull request 2 with the commit message as the body and the `auto-merge`
+  label copied from the issue.
+- The reviewer, three runs. The run on `opened` was cancelled by the `labeled` run
+  the label raised a second later, which then skipped itself (runs 38102254513 and
+  38102254543; fixed in 8332c55 by giving such runs their own concurrency group).
+  The run on the `review` label was refused by the action's token exchange, which
+  validates the workflow file at the run's commit against the copy on `master` (run
+  38102414890; the guard in 13694fb now says so on the pull request). After `master`
+  was merged into the branch, run 38102518090 approved at 54795fd in 58 s, as
+  `claude[bot]`.
+- Auto-merge: run 38102567988 merged pull request 2 six seconds after the approval
+  as squash commit abe9eb8, through the already-green fallback, since CI had passed
+  before the review began. Issue 1 closed and the branch was deleted.
+- The squash commit's message is the pull request body. The HTML footer the
+  Blacksmith Codesmith app appends to every pull request body was stripped by
+  `auto-merge.yml`; the co-author trailers and the second `Closes #1` in that one
+  commit came from a body built before a55d36b dropped them.
+- The Dependabot hand-off has not run: every pinned action was at its latest release
+  on 2026-10-11.
 
 ## Consequences
 
@@ -122,13 +142,24 @@ files and this page.
 Harder: a workflow change needs a developer, since agents may not edit
 `.github/workflows/`; a fork contribution waits for a human reviewer; the owner's
 token is rotated on any odd run, and so is the Claude token, because the agent's
-environment is reachable from anything it executes.
+environment is reachable from anything it executes. A pull request whose copy of
+`review-pull-request.yml` differs from the one on `master` cannot be agent-reviewed,
+because the action's token exchange refuses it: a Dependabot bump that touches that
+file is merged by a person, and a branch cut before a change to it needs `master`
+merged in. The Blacksmith Codesmith app edits pull request bodies; `auto-merge.yml`
+strips its footer, and turning Codesmith off for this repository would remove the
+need.
 
 Revisit: when the action supports scrubbing without admitting strangers; when the
 personal access token's reach grows beyond the owner's own repositories; when the
 first measured Cavalry runs justify tighter turn or time bounds; when `spec/` exists
 and the reviewer needs a deterministic guard for it, as Brigade has for its release
-pins.
+pins. One candidate is written here so it is not lost: running the reviewer on
+`pull_request_target`, which takes the workflow file from `master`, would pass the
+action's validation on every pull request, review Dependabot bumps of the reviewer's
+own pins, and remove the hand-off. The reviewer checks out nothing executable and
+holds a read-only job token, so the usual objection to that trigger does not apply
+as it stands, but it is a change to this security model and gets its own ADR.
 
 ## References
 
