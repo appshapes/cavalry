@@ -268,9 +268,11 @@ heroics and clears the bar Aeron set.
 - **Isolate the unsafe.** Cross-process ring buffers are inherently `unsafe`:
   `#[repr(C)]` layouts, explicit `Acquire`/`Release` atomics, a versioned layout
   header. Put them in one crate, fuzz it, test it under `loom`, run Miri where it
-  can.
+  can. Treat every field another process can write as untrusted input and
+  validate it before use (proposed ADR 0010).
 - **No locks on the hot path.** SPSC and MPSC lock-free queues, `#[repr(align(64))]`
   padding against false sharing, no `Arc<Mutex>` anywhere a message passes through.
+  A field two parties share gets a 128-byte slot (proposed ADR 0011).
 - **Stable ABI only at the C boundary.** Rust-to-Rust integration goes through crates
   with semver. Everything else goes through the C ABI, which is the one surface
   frozen between releases.
@@ -280,6 +282,11 @@ heroics and clears the bar Aeron set.
   degrades gracefully.
 - **Measure like Aeron does.** HdrHistogram at p50, p99, p99.9, p99.99 and max.
   Benchmarks in CI with the hardware named. A regression in p99.99 fails the build.
+
+The ZigBolt comparison,
+[should-zigbolt-inform-cavalry.md](should-zigbolt-inform-cavalry.md), confirmed these
+rules and sharpened two of them, the unsafe rule and the locks rule; its other
+verdicts changed nothing on this page.
 
 ### Risks to plan for
 

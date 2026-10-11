@@ -69,3 +69,8 @@ user-visible change, added in the same commit as the change. The format follows
   includes the page as its first reference page (ADR 0008).
 - ADR 0009: `cavalry-proto` reads and writes wire structs through `zerocopy`, its
   first dependency, so that a struct is the layout table.
+- `docs/explanation/should-zigbolt-inform-cavalry.md` answers whether ZigBolt's
+  design should inform Cavalry's: no, except two shared-memory layout points,
+  proposed as ADR 0010 (validate every peer-written shared-memory field before
+  using it) and ADR 0011 (pad peer-shared hot fields to 128 bytes). The data
+  frame header of ADR 0008 is unchanged.
