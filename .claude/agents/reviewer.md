@@ -96,12 +96,16 @@ checked out under `pr-head/`, so read the changed files and their surroundings t
   no force push, no rewritten history.
 - **Paths an agent may not touch.** On a branch the writer made (`claude/...`), a change
   under `.github/workflows/` or `.claude/`, to `spec/` without an ADR, or to
-  `bench/baseline.json` is a blocker. A Dependabot branch (`dependabot/...`) moves action
-  pins under `.github/workflows/` and nothing else: for each moved pin, check that the new
-  SHA is the commit the version comment names
+  `bench/baseline.json` is a blocker. A Dependabot branch (`dependabot/...`) moves pins
+  and nothing else. For an actions bump under `.github/workflows/`, check for each moved
+  pin that the new SHA is the commit the version comment names
   (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`; an annotated tag needs one more hop
-  through `git/tags/<sha>`), and that nothing else changed. A person's branch may change
-  these paths; judge such a change on its merits against `CLAUDE.md` and the ADR it cites.
+  through `git/tags/<sha>`). For a cargo bump in `Cargo.toml` files and `Cargo.lock`,
+  check that every crate it moves was already a dependency, that a data-plane crate's
+  direct dependencies are still exactly its `allowed-dependencies` (ADR 0003, ADR 0009),
+  and that nothing else changed; whether the new version builds is CI's to decide. A
+  person's branch may change these paths; judge such a change on its merits against
+  `CLAUDE.md` and the ADR it cites.
 - **CI hygiene.** Every job sets `timeout-minutes`; every action is pinned to a full commit
   SHA with its version in a trailing comment.
 

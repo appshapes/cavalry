@@ -4,8 +4,11 @@
 # review-pull-request.yml, ADR 0005) and checks each new SHA against the version it
 # names, and the `auto-merge` label below lets auto-merge.yml squash-merge it when the
 # reviewer approves and CI is green (ADR 0004). Bot pull requests are the exception to
-# committing straight to master (CLAUDE.md, "Working rules for agents"; ADR 0003). A
-# cargo entry joins this file when the workspace has dependencies.
+# committing straight to master (CLAUDE.md, "Working rules for agents"; ADR 0003). The
+# cargo entry moves the workspace's crates the same way, one grouped pull request a
+# week, and the fuzz crate's, which has its own manifest (ADR 0009): a data-plane
+# crate's dependencies are on its allowlist, so a bump never adds one, and a bump that
+# breaks the build fails CI and does not merge.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -16,5 +19,17 @@ updates:
       - auto-merge
     groups:
       github-actions:
+        patterns:
+          - "*"
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /crates/cavalry-proto/fuzz
+    schedule:
+      interval: weekly
+    labels:
+      - auto-merge
+    groups:
+      cargo:
         patterns:
           - "*"
