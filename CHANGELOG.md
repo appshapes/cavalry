@@ -83,3 +83,7 @@ user-visible change, added in the same commit as the change. The format follows
 - Dependabot moves Cargo dependencies as it moves action pins: one grouped pull
   request a week for the workspace and one for the fuzz crate, reviewed by the agent
   and merged when CI is green (ADR 0009).
+- `docs/how-to/implement-a-feature.md`: the four steps from a card to commits on
+  `master`, for people and agents, with the data frame header (card 80) as the worked
+  example, commit by commit. The README's "Start here" table and the writer agent's
+  brief point at it.

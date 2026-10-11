@@ -11,6 +11,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 # How-to
 
 - [Ask the agent to make a change](how-to/ask-the-agent.md)
+- [Implement a feature, from card to commit](how-to/implement-a-feature.md)
 
 # Reference
 

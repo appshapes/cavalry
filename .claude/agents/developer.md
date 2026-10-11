@@ -22,7 +22,8 @@ its code. The per-message checklist for data-plane code is `.claude/rules/data-p
 
 ## Three jobs
 
-- **Implement a labelled issue.** The issue body is your brief. Do what it asks and nothing
+- **Implement a labelled issue.** The issue body is your brief, and
+  `docs/how-to/implement-a-feature.md` is the order of work. Do what it asks and nothing
   more. Push a branch; the workflow opens the pull request for you, titled with the issue's
   title, and fills its body from your commit messages.
 - **Fix a review.** The reviewer's changes-requested body lists blockers. Apply **every** one

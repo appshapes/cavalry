@@ -25,6 +25,7 @@ the implementation will be built from.
 | Know why something was decided | [`docs/decisions/`](docs/decisions/) |
 | Write documentation | [`.claude/rules/docs.md`](.claude/rules/docs.md) |
 | Ask the agent to make a change | [`docs/how-to/ask-the-agent.md`](docs/how-to/ask-the-agent.md) |
+| Implement a feature, from card to commit | [`docs/how-to/implement-a-feature.md`](docs/how-to/implement-a-feature.md) |
 | Read the documentation as a book | `just docs`, then open `target/book/index.html` |
 
 ## The ten-minute path
