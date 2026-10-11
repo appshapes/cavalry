@@ -5,10 +5,15 @@
 # Every action is pinned to a full commit SHA with its version in a trailing comment.
 # Tags are mutable: the tj-actions compromise of March 2025 was delivered by moving
 # tags. Dependabot (.github/dependabot.yml) opens a pull request when a pinned action
-# has a new release; this workflow runs on that pull request before a human merges it.
+# has a new release; this workflow runs on that pull request before it merges.
 #
-# The job name is stable on purpose: "gates (ubuntu-latest)" and "gates (macos-latest)"
-# are what branch protection or an auto-merge rule can require.
+# The jobs run on Blacksmith runners, the same two labels Brigade's CI uses. Blacksmith
+# serves the GitHub Actions cache API from its own backend, so the Rust cache action
+# below works unchanged; the restore lines in a run's log are the proof.
+#
+# The job names are stable on purpose: "gates (linux)" and "gates (macos)" are the two
+# checks branch protection on master requires, so renaming a job means updating the
+# protection rule in the same change.
 name: ci
 
 on:
@@ -26,12 +31,20 @@ concurrency:
 
 jobs:
   gates:
-    name: gates (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: gates (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    # A bound for a hung runner, not a measurement: the gates took 8 s to 37 s per job
+    # on the empty workspace (runs 38048302932, 38048579016 and 38048705479). Re-measure
+    # when the first crate has code, and keep this at twice the slowest observed job.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - name: linux
+            runner: blacksmith-4vcpu-ubuntu-2404
+          - name: macos
+            runner: blacksmith-6vcpu-macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
