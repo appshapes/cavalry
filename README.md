@@ -24,6 +24,7 @@ the implementation will be built from.
 | Know what each crate does and must never do | [`crates/*/README.md`](crates/) |
 | Know why something was decided | [`docs/decisions/`](docs/decisions/) |
 | Write documentation | [`.claude/rules/docs.md`](.claude/rules/docs.md) |
+| Ask the agent to make a change | [`docs/how-to/ask-the-agent.md`](docs/how-to/ask-the-agent.md) |
 
 ## The ten-minute path
 
