@@ -110,14 +110,17 @@ def record(name, length, type_, message=b"", capacity=MIN_CAPACITY, index=0):
 # ---- claim ------------------------------------------------------------------------
 
 def tail_error(tail, head):
-    """The `tail` check a party runs against a head it has loaded: head ≤ tail ≤ head +
-    capacity is the caller's to add; here the common part."""
-    return tail % RECORD_ALIGNMENT != 0 or head % RECORD_ALIGNMENT != 0 or tail < head
+    """The `tail` check a party runs against the position it loaded before the tail: the
+    head cache for a producer, its own head for the consumer. Both are multiples of 8, 0
+    or more, and the tail is at least the other; the consumer adds the capacity bound."""
+    return tail % RECORD_ALIGNMENT != 0 or head % RECORD_ALIGNMENT != 0 or head < 0 or tail < head
 
 
 def claim(name, capacity, tail, head, head_cache, message_length):
     """One claim as spec/command-ring.md, "Claim, commit and abort", computes it from a
-    producer's loads: the tail, the head cache, and the head position when it re-reads it."""
+    producer's loads: the head cache, the tail, and the head position when it loads it.
+    The head may be beyond a stale tail; the compare-and-swap that follows then fails,
+    which a static vector cannot show, so the plan is what the producer would try."""
     inputs = {"capacity": capacity, "tail": tail, "head": head, "head_cache": head_cache,
               "message_length": message_length}
     vector = {"name": name, "region": "claim", "inputs": inputs}
@@ -134,9 +137,6 @@ def claim(name, capacity, tail, head, head_cache, message_length):
     cached = head_cache
     reread = False
     if required > capacity - (tail - cached):
-        if tail_error(tail, head) or tail - head > capacity:
-            vector["error"] = "tail"
-            return vector
         reread = True
         if required > capacity - (tail - head):
             fields.update(result="full", tail_after=tail, head_cache_after=head_cache, padding=None)
@@ -153,9 +153,6 @@ def claim(name, capacity, tail, head, head_cache, message_length):
         head_index = cached & mask
         write_index = 0
         if required > head_index:
-            if not reread and (tail_error(tail, head) or tail - head > capacity):
-                vector["error"] = "tail"
-                return vector
             head_index = head & mask
             if required > head_index:
                 result = "full"
@@ -305,7 +302,7 @@ VECTORS = [
     claim("claim-wraps-after-rereading-head", C, C - 8, 2048, 16, 16),
     claim("claim-wraps-but-the-head-blocks", C, C - 8, 16, 16, 16),
     claim("claim-tail-below-head-cache", C, 0, 0, 8, 16),
-    claim("claim-tail-too-far-ahead", C, 2 * C, 0, 0, 16),
+    claim("claim-tail-far-ahead-reads-as-full", C, 2 * C, 0, 0, 16),
     claim("claim-tail-not-aligned", C, 12, 0, 0, 16),
     # unblock
     unblock("unblock-nothing-when-empty", C, 0, 0, []),

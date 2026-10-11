@@ -637,7 +637,7 @@
       "error": "record"
     },
     {
-      "name": "receive-tail-behind-cursor",
+      "name": "receive-tail-not-above-cursor-is-nothing",
       "region": "receive",
       "inputs": {
         "capacity": 4096,
@@ -649,7 +649,55 @@
         "record_at_zero": null,
         "tail_intent_after": null
       },
-      "error": "tail"
+      "fields": {
+        "result": "none",
+        "cursor": 48,
+        "next_record": 48
+      }
+    },
+    {
+      "name": "receive-tail-intent-far-ahead-is-a-lap",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 4128,
+        "latest": 0,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "fields": {
+        "result": "lapped",
+        "cursor": 0,
+        "next_record": 0
+      }
+    },
+    {
+      "name": "receive-latest-at-tail-is-a-transmit-in-progress",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 24,
+        "record": [
+          24,
+          1
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "fields": {
+        "result": "message",
+        "cursor": 0,
+        "index": 0,
+        "next_record": 24,
+        "type": 1,
+        "message_length": 16
+      }
     },
     {
       "name": "receive-tail-intent-below-tail",
@@ -667,29 +715,14 @@
       "error": "tail"
     },
     {
-      "name": "receive-tail-intent-too-far-ahead",
+      "name": "receive-latest-below-tail-minus-capacity",
       "region": "receive",
       "inputs": {
         "capacity": 4096,
         "next_record": 0,
-        "tail": 24,
-        "tail_intent": 4128,
+        "tail": 8192,
+        "tail_intent": 8192,
         "latest": 0,
-        "record": null,
-        "record_at_zero": null,
-        "tail_intent_after": null
-      },
-      "error": "tail"
-    },
-    {
-      "name": "receive-latest-at-tail",
-      "region": "receive",
-      "inputs": {
-        "capacity": 4096,
-        "next_record": 0,
-        "tail": 24,
-        "tail_intent": 24,
-        "latest": 24,
         "record": null,
         "record_at_zero": null,
         "tail_intent_after": null
@@ -705,6 +738,21 @@
         "tail": 20,
         "tail_intent": 24,
         "latest": 0,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "tail"
+    },
+    {
+      "name": "receive-latest-not-aligned",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 4,
         "record": null,
         "record_at_zero": null,
         "tail_intent_after": null

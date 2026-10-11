@@ -94,17 +94,19 @@ A producer writes a record in place:
 2. It loads the tail position with an acquire load. A tail that is not a multiple of 8 or
    is below the head cache is `tail`, and nothing is written.
 3. If the aligned length is more than capacity − (tail − head cache), it loads the head
-   position with an acquire load: a tail that is below the head or more than capacity
-   above it is `tail`; if the aligned length is still more than capacity − (tail − head),
-   the result is `full` and nothing is written; otherwise it stores the head it loaded in
-   the head cache with a release store.
+   position with an acquire load; if the aligned length is still more than capacity −
+   (tail − head), the result is `full` and nothing is written; otherwise it stores the
+   head it loaded in the head cache with a release store. The head it loads may be
+   beyond the tail it loaded, when the tail is stale: the compare-and-swap of step 5
+   then fails and the producer goes back to step 2. Only the consumer, which owns the
+   head, checks the tail against it ("Unblocking").
 4. The record would begin at the tail's index. If the aligned length is more than the
    bytes from there to the end of the ring, the record begins at index 0 instead, and the
    bytes to the end become a padding record. The bytes free at the start of the ring are
    the head's index: if the aligned length is more than the head cache's index, the
-   producer loads the head position with an acquire load, with the checks of step 3, and
-   stores it in the head cache; if the aligned length is more than the head's index too,
-   the result is `full`, and the producer claims only the padding.
+   producer loads the head position with an acquire load and stores it in the head
+   cache; if the aligned length is more than the head's index too, the result is `full`,
+   and the producer claims only the padding.
 5. It compare-and-swaps the tail position from the value it loaded to tail + aligned
    length + the padding's length, or to tail + the padding's length when the result is
    `full`; on failure it goes back to step 2.
@@ -215,8 +217,9 @@ fails, by the name in the first column.
 | `length` | The file length is not capacity + 768. |
 | `changed` | The header read through the final mapping differs from the first read. |
 
-In use: `tail` when a tail position is not a multiple of 8, is below the head position
-or the head cache, or is more than capacity above the head position; `record` when a
+In use: `tail` when a tail position is not a multiple of 8 or, as a producer loads it
+after the head cache, is below the head cache or, as the consumer loads it after its own
+head, is below the head or more than capacity above it; `record` when a
 record's length or type is outside the bounds of "Record"; `full` when a claim finds
 fewer free bytes than it needs; `message` when a producer is given a message longer than
 capacity ÷ 8, and `type` when it is given a type below 1, both refused before anything

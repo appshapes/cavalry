@@ -487,7 +487,7 @@
       "error": "tail"
     },
     {
-      "name": "claim-tail-too-far-ahead",
+      "name": "claim-tail-far-ahead-reads-as-full",
       "region": "claim",
       "inputs": {
         "capacity": 4096,
@@ -496,7 +496,14 @@
         "head_cache": 0,
         "message_length": 16
       },
-      "error": "tail"
+      "fields": {
+        "record_length": 24,
+        "aligned_length": 24,
+        "result": "full",
+        "tail_after": 8192,
+        "head_cache_after": 0,
+        "padding": null
+      }
     },
     {
       "name": "claim-tail-not-aligned",

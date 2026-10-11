@@ -126,15 +126,12 @@ def transmit(name, capacity, tail, message_length):
 
 # ---- receive ----------------------------------------------------------------------
 
-def tail_error(capacity, next_record, tail, tail_intent, latest):
-    """The `tail` check a receiver runs on the three trailer fields before it uses them."""
+def tail_error(capacity, tail, tail_intent, latest):
+    """The `tail` check a receiver runs on the three trailer fields, loaded in this order,
+    before it uses them: the bounds that hold for any values loaded in that order."""
     if tail < 0 or tail % RECORD_ALIGNMENT or latest % RECORD_ALIGNMENT or tail_intent % RECORD_ALIGNMENT:
         return True
-    if tail_intent < tail or tail_intent > tail + capacity:
-        return True
-    if tail == 0:
-        return latest != 0
-    return latest >= tail or latest < tail - capacity or next_record > tail
+    return tail_intent < tail or latest < 0 or latest < tail - capacity
 
 
 def receive(name, capacity, next_record, tail, tail_intent, latest, record=None, record_at_zero=None,
@@ -147,10 +144,10 @@ def receive(name, capacity, next_record, tail, tail_intent, latest, record=None,
               "latest": latest, "record": record, "record_at_zero": record_at_zero,
               "tail_intent_after": tail_intent_after}
     vector = {"name": name, "region": "receive", "inputs": inputs}
-    if tail_error(capacity, next_record, tail, tail_intent, latest):
+    if tail_error(capacity, tail, tail_intent, latest):
         vector["error"] = "tail"
         return vector
-    if tail == next_record:
+    if tail <= next_record:
         vector["fields"] = {"result": "none", "cursor": next_record, "next_record": next_record}
         return vector
     lapped = {"result": "lapped", "cursor": latest, "next_record": latest}
@@ -243,11 +240,13 @@ VECTORS = [
     receive("receive-record-length-below-header", C, 0, 24, 24, 0, record=(4, 1)),
     receive("receive-record-type-zero", C, 0, 24, 24, 0, record=(24, 0)),
     receive("receive-padding-not-to-the-end", C, 0, 32, 32, 0, record=(16, PADDING)),
-    receive("receive-tail-behind-cursor", C, 48, 24, 24, 0),
+    receive("receive-tail-not-above-cursor-is-nothing", C, 48, 24, 24, 0),
+    receive("receive-tail-intent-far-ahead-is-a-lap", C, 0, 24, C + 32, 0),
+    receive("receive-latest-at-tail-is-a-transmit-in-progress", C, 0, 24, 24, 24, record=(24, 1)),
     receive("receive-tail-intent-below-tail", C, 0, 24, 16, 0),
-    receive("receive-tail-intent-too-far-ahead", C, 0, 24, C + 32, 0),
-    receive("receive-latest-at-tail", C, 0, 24, 24, 24),
+    receive("receive-latest-below-tail-minus-capacity", C, 0, 2 * C, 2 * C, 0),
     receive("receive-tail-not-aligned", C, 0, 20, 24, 0),
+    receive("receive-latest-not-aligned", C, 0, 24, 24, 4),
 ]
 
 

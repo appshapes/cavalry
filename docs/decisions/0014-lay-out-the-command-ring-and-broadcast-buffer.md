@@ -80,9 +80,9 @@ at claim, commit, abort, padding and unblock, so a reader never sees a length wi
 its type. The command ring's protocols are `ManyToOneRingBuffer`'s, claim by
 compare-and-swap with the head cache, read to a non-positive length or the end of the
 ring with the bytes read zeroed before the head is released, unblock after the client
-liveness timeout, heartbeat and correlation ids, with two additions: the producer checks
-the tail against the head before it uses it and the consumer checks the tail and every
-record against the bounds of ADR 0010, counting `command_ring.rejected_tail` and
+liveness timeout, heartbeat and correlation ids, with two additions: each party checks the tail against the position it loaded
+before it, the head cache for a producer and its own head for the consumer, and the
+consumer checks every record against the bounds of ADR 0010, counting `command_ring.rejected_tail` and
 `command_ring.rejected_record`, and a corrupt record stops the ring, since the ring is
 anonymous and the driver cannot evict its writer; and an unblock that reaches its limit
 with only zeros pads the gap, as `TermUnblocker` does, counted in
@@ -93,7 +93,8 @@ heartbeat when it closes, as Aeron's does, so a client tells `driver-closed` fro
 record, latest then tail released after it; a receiver joins at the latest record, is
 `lapped` when its cursor is capacity or more behind the tail intent, copies a record out
 and validates with an acquire fence and the tail intent again, and checks the three
-trailer fields and every record against their bounds, where a failing record is `lapped`
+trailer fields, loaded tail first, against the bounds that hold for values loaded in
+that order, and every record against its bounds, where a failing record is `lapped`
 if the tail intent has moved past the cursor and `record` otherwise. Record bytes in the
 broadcast buffer are written and read with relaxed atomic operations a word at a time,
 since a lapped receiver races the transmitter by design. The lapped client closes, as

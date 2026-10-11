@@ -63,9 +63,18 @@ overwriting or has overwritten.
 | Offset | Size | Field | Type | Writer | Readers | Bound |
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 128 | header | bytes | the creator | everyone | the table above |
-| 128 | 8 | tail intent | i64 | the transmitter, with a release store followed by a release fence, before it writes a record | receivers, with acquire loads, and after an acquire fence once they have copied a record | a multiple of 8, from the tail position to the tail position + capacity |
-| 256 | 8 | tail position | i64 | the transmitter, with a release store, after it has written a record | receivers, with acquire loads; `doctor` | a multiple of 8, 0 or more; at least the receiver's cursor |
-| 384 | 8 | latest record | i64 | the transmitter, with a release store, after it has written a record and before the tail | receivers, with acquire loads, when they are lapped and when they join | a multiple of 8; 0 while the tail is 0, otherwise below the tail position and at least the tail position − capacity |
+| 128 | 8 | tail intent | i64 | the transmitter, with a release store followed by a release fence, before it writes a record | receivers, with acquire loads, and after an acquire fence once they have copied a record | a multiple of 8, at least the tail position loaded before it |
+| 256 | 8 | tail position | i64 | the transmitter, with a release store, after it has written a record | receivers, with acquire loads; `doctor` | a multiple of 8, 0 or more |
+| 384 | 8 | latest record | i64 | the transmitter, with a release store, after it has written a record and before the tail | receivers, with acquire loads, when they are lapped and when they join | a multiple of 8, 0 or more, at least the tail position loaded before it − capacity |
+
+A receiver loads the tail position first, then the tail intent, then the latest record,
+each with an acquire load, and the bounds above are the ones that hold for any three
+values loaded in that order: the transmitter stores the tail intent before a record and
+the latest record before the tail, so the tail intent and the latest record a receiver
+loads are at least the ones stored before the tail it loaded, and may be later ones. A
+latest record at or past the tail, or a tail intent far past it, is a transmit in
+progress, not a fault; a tail intent below the tail, or a latest record more than a
+capacity behind it, is one.
 
 To create the buffer the driver sizes the file to its full length, writes zero
 everywhere, fills the header fields after the magic, and writes the magic last with a
@@ -112,9 +121,10 @@ A receiver joins by loading the latest record with an acquire load, after the ch
 "What a reader rejects", and setting its cursor and its next record to it, so the first
 record it receives is the latest. Then, each time it is asked for a record:
 
-1. It loads the tail position, the tail intent and the latest record with acquire loads
-   and checks them against their bounds: a failure is `tail`. A tail equal to the next
-   record means nothing is available.
+1. It loads the tail position, the tail intent and the latest record, in that order,
+   with acquire loads, and checks them against their bounds: a failure is `tail`. A tail
+   that is not above the next record means nothing is available; a tail below it is a
+   stale load after a lap, which the next receive catches up on.
 2. Its cursor becomes the next record. If cursor + capacity is not above the tail intent,
    the receiver has been lapped: the result is `lapped`, nothing is delivered, and the
    cursor and the next record become the latest record, so that the next call continues
@@ -165,7 +175,7 @@ fails, by the name in the first column.
 | `changed` | The header read through the final mapping differs from the first read. |
 
 In use: `tail` when the tail position, the tail intent or the latest record is outside
-its bound in "Trailer", or the tail is below the receiver's next record; `lapped` when a
+its bound in "Trailer"; `lapped` when a
 receiver's cursor + capacity is not above the tail intent, before or after it read a
 record; `record` when a record's length or type is outside the bounds of "Record" and the
 receiver was not lapped; `message` when the transmitter is given a message longer than
@@ -187,10 +197,11 @@ reference encoder. Each vector has a `region`:
   lengths, the tail intent, the padding record written if any, the record's index, the
   latest record and the tail after; or the `error`.
 - `receive`: an arithmetic vector: the capacity, the receiver's next record, the tail,
-  tail intent and latest record it loads, the length and type at the cursor's index and
-  at index 0, and the tail intent it loads after copying when that moved; and the
-  `fields`: the result (`none`, `message` or `lapped`), the cursor and the next record
-  after, and for a message its index, type and message length; or the `error`.
+  tail intent and latest record it loads, in that order, the length and type at the
+  cursor's index and at index 0, and the tail intent it loads after copying when that
+  moved; and the `fields`: the result (`none`, `message` or `lapped`), the cursor and
+  the next record after, and for a message its index, type and message length; or the
+  `error`.
 
 A conforming implementation decodes every valid vector to its fields, encodes those
 fields to the same bytes, computes every arithmetic vector's fields from its inputs, and
