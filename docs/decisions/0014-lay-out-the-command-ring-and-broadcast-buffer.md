@@ -83,10 +83,11 @@ ring with the bytes read zeroed before the head is released, unblock after the c
 liveness timeout, heartbeat and correlation ids, with two additions: each party checks the tail against the position it loaded
 before it, the head cache for a producer and its own head for the consumer, and the
 consumer checks every record against the bounds of ADR 0010, counting `command_ring.rejected_tail` and
-`command_ring.rejected_record`, and a corrupt record stops the ring, since the ring is
-anonymous and the driver cannot evict its writer; and an unblock that reaches its limit
-with only zeros pads the gap, as `TermUnblocker` does, counted in
-`command_ring.unblocked` like every unblock. The driver stores −1 in the consumer
+`command_ring.rejected_record`, and a corrupt record or tail stops the ring, since the ring is anonymous and the driver
+cannot evict its writer; and an unblock that reaches the end of the ring with only zeros
+pads the gap to the end, as `TermUnblocker` pads a term, where Agrona's returns without
+writing, while a gap that ends at the tail's index waits for the next claim to bound it,
+as Agrona's does; every unblock counts in `command_ring.unblocked`. The driver stores −1 in the consumer
 heartbeat when it closes, as Aeron's does, so a client tells `driver-closed` from
 `driver-timeout`. The broadcast buffer's protocols are `BroadcastTransmitter`'s and
 `BroadcastReceiver`'s: tail intent with a release store and a release fence before the
@@ -133,10 +134,13 @@ and receive arithmetic of the buffer.
   nothing.
 - **Agrona's two-store record header.** Lost: one 8-byte store costs the same and
   removes a state, a length with no type, from the layout.
-- **Agrona's `unblock` as it is, returning without writing at the limit.** Lost: a dead
-  claim at the end of the ring would block every client on the host until a restart,
-  with nothing a counter could say; Aeron's `TermUnblocker` already pads to the end of a
-  term in that case.
+- **Agrona's `unblock` as it is, returning without writing at the end of the ring.**
+  Lost: a dead claim at the end of the ring would block every client on the host until
+  a restart, with nothing a counter could say; Aeron's `TermUnblocker` already pads to
+  the end of a term in that case. Padding a gap that ends at the tail's index as well
+  was considered and lost: the next claim bounds that gap a moment later, and padding
+  it at once would cover a live client's fresh claim that the later scan would have
+  spared.
 - **Skipping a corrupt command record as padding, or discarding the ring to the tail.**
   Lost: the corrupt field is the length, so the record's end is unknown, and zeroing
   claimed space under live producers leaves stale records that a later lap reads as
@@ -192,8 +196,10 @@ block the driver's events; a stranger reads two pages and knows who writes every
 Agrona's documentation and twelve years of production explain both rings; every client
 language implements the same vectors.
 
-Harder: a corrupt command record stops the whole host's command ring until the driver
-restarts, because the ring is anonymous; a lapped client is a closed client; the
+Harder: a corrupt command record or tail stops the whole host's command ring until the
+driver restarts, because the ring is anonymous, and `doctor` can only say to restart and
+then stop clients one at a time; an unblock may cover the fresh claim of a live client in
+the gap, whose command is lost and whose response timeout reports it; a lapped client is a closed client; the
 broadcast receiver copies every event; two more files in the driver's directory; the
 client's `full`, `lapped`, `driver-closed` and `driver-timeout` have no counter until
 clients own counters.

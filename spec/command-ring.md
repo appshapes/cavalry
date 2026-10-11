@@ -153,8 +153,10 @@ the tail is beyond it, the driver unblocks:
 
 1. It loads the head and the tail with acquire loads. A tail that is not a multiple of 8,
    is below the head or is more than capacity above it is `tail`: one is added to
-   `command_ring.rejected_tail` and nothing is written. A tail equal to the head means
-   nothing is blocked.
+   `command_ring.rejected_tail`, nothing is written, and the ring is corrupt from here as
+   it is after `record`: every later read and unblock reports `tail` without reading the
+   ring, the driver reports it, and restarting the driver recreates the file. A tail
+   equal to the head means nothing is blocked.
 2. It loads the length and type at the head's index, the consumer index, with an acquire
    load. A positive length is a committed record the next read will take: nothing is
    blocked. A negative length is the stale claim: after the checks of "Record", whose
@@ -164,11 +166,17 @@ the tail is beyond it, the driver unblocks:
 3. A length of 0 means the claimant died before its first store. The driver scans forward
    in 8-byte steps from the consumer index to a limit: the tail's index when it is above
    the consumer index, else the end of the ring. It stops at the first index whose length
-   word is not 0, or at the limit when every word was 0; then it scans back to the
-   consumer index to confirm every word between is still 0, since a claim may have landed
-   meanwhile, and if so stores the gap's length, that index − consumer index, and type −1
-   in one release store at the consumer index. The limit case is Cavalry's (ADR 0014): a
-   dead claim at the end of the ring would otherwise block it for good.
+   word is not 0; then it scans back to the consumer index to confirm every word between
+   is still 0, since a claim may have landed meanwhile, and if so stores the gap's
+   length, that index − consumer index, and type −1 in one release store at the consumer
+   index. If it reaches the limit with every word 0, what it does depends on the limit:
+   at the tail's index it writes nothing, since the next claim will bound the gap, as in
+   the design this page copies; at the end of the ring it scans back the same way and
+   covers the gap to the end, because no later claim can bound it and the ring would
+   otherwise stay blocked for good (ADR 0014). A claim in the gap that landed just before
+   the driver loaded the tail belongs to a live client, and its command is lost under the
+   padding; only the record at the consumer index is known to be older than the unblock
+   timeout, and the client's own response timeout reports the loss.
 
 Each record an unblock writes adds one to `command_ring.unblocked`. The unblock timeout
 is the driver's to specify; it is the client liveness timeout, 10 s in Aeron, so that a
@@ -187,9 +195,13 @@ and puts it in the command it then claims; the driver's reply on the broadcast b
 
 ## When the ring is full
 
-A claim that finds fewer free bytes than it needs fails with `full`, and nothing is
-written (steps 3 and 4). The producer returns `full` to its caller with an error that
-names this page; the caller retries after the consumer has read, or gives up. The driver
+A claim that finds fewer free bytes than it needs fails with `full`. From step 3, when
+the whole ring has fewer free bytes than the record needs, nothing is written. From step
+4, when the record fits neither before the end of the ring nor at its start, the producer
+claims and writes only the padding record to the end, so that the next claim begins at
+index 0; the design this page copies does the same (ADR 0014). Either way the record is
+not written, and the producer returns `full` to its caller with an error that names this
+page; the caller retries after the consumer has read, or gives up. The driver
 reads the ring on every duty cycle, so a ring that stays full means the driver is stalled,
 which the consumer heartbeat shows, or that clients issue commands faster than one
 conductor reads them. `doctor` reads the tail and head positions from the file and reports
@@ -221,7 +233,8 @@ In use: `tail` when a tail position is not a multiple of 8 or, as a producer loa
 after the head cache, is below the head cache or, as the consumer loads it after its own
 head, is below the head or more than capacity above it; `record` when a
 record's length or type is outside the bounds of "Record"; `full` when a claim finds
-fewer free bytes than it needs; `message` when a producer is given a message longer than
+fewer free bytes than it needs, with nothing written from step 3 and only the padding to
+the end of the ring written from step 4; `message` when a producer is given a message longer than
 capacity ÷ 8, and `type` when it is given a type below 1, both refused before anything
 is written; `driver-closed` when the consumer heartbeat is −1, and `driver-timeout` when
 it is older than the driver timeout.

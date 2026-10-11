@@ -203,7 +203,11 @@ def unblock(name, capacity, head, tail, lengths):
     index = consumer_index + RECORD_ALIGNMENT
     while index < limit and length_at(index) == 0:
         index += RECORD_ALIGNMENT
-    # A nonzero word at `index`, or the limit reached with only zeros: either way the gap
+    if index == limit and limit == producer_index:
+        # Only zeros up to the tail's index: the next claim bounds the gap; nothing is written.
+        vector["fields"] = {"unblocked": False, "record": None}
+        return vector
+    # A nonzero word at `index`, or the end of the ring reached with only zeros: the gap
     # from the consumer index to `index` was claimed and never written.
     vector["fields"] = {"unblocked": True,
                         "record": {"index": consumer_index, "length": index - consumer_index, "type": PADDING}}
@@ -309,7 +313,7 @@ VECTORS = [
     unblock("unblock-nothing-when-committed", C, 0, 24, [24]),
     unblock("unblock-claimed-record", C, 0, 24, [-24]),
     unblock("unblock-gap-before-the-next-record", C, 0, 48, [0, 0, 0, -24]),
-    unblock("unblock-gap-to-the-producer", C, 0, 24, [0, 0, 0]),
+    unblock("unblock-gap-to-the-producer-waits", C, 0, 24, [0, 0, 0]),
     unblock("unblock-gap-to-the-end", C, C - 16, C + 24, [0, 0]),
     unblock("unblock-claimed-record-past-the-end", C, C - 16, C + 24, [-32]),
     unblock("unblock-tail-behind-head", C, 24, 0, []),

@@ -99,13 +99,13 @@ id = 10
 name = "command_ring.rejected_tail"
 kind = "counter"
 scope = "static"
-doc = "Tail positions the driver found outside the command ring's bounds when it unblocked and refused to use (ADR 0010): the ring is corrupt and the driver reads nothing more from it."
-doctor = "A client wrote an impossible tail: a buggy binding or a hostile process. Every client's commands now time out; restart the driver, which recreates the ring, and find the client from the driver's log."
+doc = "Tail positions the driver found outside the command ring's bounds when it unblocked and refused to use (ADR 0010): the ring is corrupt and the driver reads nothing more from it (spec/command-ring.md, Unblocking)."
+doctor = "A client wrote an impossible tail: a buggy binding or a hostile process, which the ring cannot name. Every client's commands now time out. Restart the driver, which recreates the ring; if the counter climbs again, stop clients one at a time until it stops, and look for a binding that was upgraded or does not conform to spec/command-ring.md."
 
 [[counter]]
 id = 11
 name = "command_ring.rejected_record"
 kind = "counter"
 scope = "static"
-doc = "Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring."
-doctor = "A client wrote a corrupt command: a buggy binding or a hostile process. Every client's commands now time out; restart the driver, which recreates the ring, and rebuild or remove the client the driver's log names."
+doc = "Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring (spec/command-ring.md, Reading)."
+doctor = "A client wrote a corrupt command: a buggy binding or a hostile process, which the ring cannot name. Every client's commands now time out. Restart the driver, which recreates the ring; if the counter climbs again, stop clients one at a time until it stops, and look for a binding that was upgraded or does not conform to spec/command-ring.md."

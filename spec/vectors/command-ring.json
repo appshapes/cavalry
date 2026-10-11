@@ -591,7 +591,7 @@
       }
     },
     {
-      "name": "unblock-gap-to-the-producer",
+      "name": "unblock-gap-to-the-producer-waits",
       "region": "unblock",
       "inputs": {
         "capacity": 4096,
@@ -604,12 +604,8 @@
         ]
       },
       "fields": {
-        "unblocked": true,
-        "record": {
-          "index": 0,
-          "length": 24,
-          "type": -1
-        }
+        "unblocked": false,
+        "record": null
       }
     },
     {
