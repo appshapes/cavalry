@@ -1,0 +1,5 @@
+{
+  "note": "p99.99 baselines per profile, read by scripts/bench-compare.py; set from a runner's own run with --update (ADR 0015). Empty until the first CI run's artifact is recorded.",
+  "profiles": {},
+  "schema": 0
+}

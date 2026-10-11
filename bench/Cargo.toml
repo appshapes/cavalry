@@ -1,0 +1,31 @@
+[package]
+name = "cavalry-bench"
+description = "The latency and throughput harness behind `just bench`"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published: it is a gate, not a library (ADR 0003).
+publish = false
+
+[[bin]]
+name = "cavalry-bench"
+path = "src/main.rs"
+
+[dependencies]
+cavalry-shm = { path = "../crates/cavalry-shm" }
+# The histograms every number comes from: p50, p99, p99.99 and max, never a mean
+# (CLAUDE.md, invariant 2; ADR 0015). Fixed bounds, so recording never allocates.
+hdrhistogram = "7"
+# The counting allocator behind the zero-allocations-per-message assertion (CLAUDE.md,
+# gate 2). It carries the `unsafe` a global allocator needs, so this crate carries none.
+stats_alloc = "0.1"
+
+# Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
+[lints]
+workspace = true
+
+# Read by `just lint`. The harness is not on the data plane: it measures it.
+[package.metadata.cavalry]
+data_plane = false

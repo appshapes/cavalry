@@ -2,7 +2,7 @@
 # (docs/decisions/) records the decisions behind this file.
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "bench"]
 
 # One version for the whole family: `cavalry` is the product version (ADR 0002).
 [workspace.package]

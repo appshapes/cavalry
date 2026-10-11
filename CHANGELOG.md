@@ -133,3 +133,10 @@ user-visible change, added in the same commit as the change. The format follows
   through `Counter::store_release` and `CountersReader::read_acquire`. The 51 spec
   vectors run on every `just test`, `just loom` checks the claim protocol and the tail,
   and the README example is the log buffer (ADR 0013).
+- `just bench` is real: `cavalry-bench` under `bench/` drives a publisher, a
+  subscriber and a conductor thread over a real log buffer and counters file and
+  reports HdrHistogram p50, p99, p99.99 and max of claim and commit, of publish to
+  delivery and of a slot-padding microbench, with zero allocations per message asserted;
+  `just bench-compare` fails a p99.99 regression over 5 percent against
+  `bench/baseline.json` for the runner's profile, and CI runs both and keeps the result
+  as an artifact. `docs/how-to/run-the-bench.md` is the page (ADR 0015).

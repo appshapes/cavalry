@@ -18,13 +18,18 @@ build:
 test *ARGS:
     cargo test --workspace --exclude cavalry-bench --exclude cavalry-conformance {{ARGS}}
 
-# Latency and throughput harness; prints histograms; writes bench/results/.
-bench:
-    @echo "not built yet: bench harness (CLAUDE.md gate 2). Must emit HdrHistogram p50/p99/p99.99/max to bench/results/." && exit 1
+# Latency and throughput harness (CLAUDE.md, gate 2; ADR 0015): HdrHistogram p50, p99,
+# p99.99 and max of claim and commit, of publish to delivery, and of the slot-padding
+# microbench, with zero allocations per message asserted; writes
+# bench/results/<profile>-<unix time>.json. Arguments pass through:
+# `just bench --messages 5000000`. docs/how-to/run-the-bench.md is the page.
+bench *ARGS:
+    cargo run --release -p cavalry-bench -- {{ARGS}}
 
-# Diff latest bench results against bench/baseline.json; fail on >5% p99.99 regression.
+# Diff the newest result in bench/results/ against bench/baseline.json for its profile;
+# fail on a p99.99 regression over 5 percent on any benchmark. What CI runs after bench.
 bench-compare:
-    @echo "not built yet: bench-compare (CLAUDE.md gate 2)." && exit 1
+    python3 scripts/bench-compare.py
 
 # Wire-spec conformance: every implementation against every vector in spec/vectors/
 # (spec/README.md). Today the implementations are cavalry-proto's (the frame header)

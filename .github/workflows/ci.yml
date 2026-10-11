@@ -64,3 +64,16 @@ jobs:
       - run: just test
       - run: just docs
       - run: just lint-docs
+      # The latency gate (CLAUDE.md, gate 2; ADR 0015): the harness, then the comparison
+      # with bench/baseline.json for this runner's profile. The result is kept as an
+      # artifact, which is how a runner's baseline is recorded (docs/how-to/run-the-bench.md).
+      - run: just bench
+        env:
+          CAVALRY_BENCH_PROFILE: ${{ matrix.name }}
+      - run: just bench-compare
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: bench-results-${{ matrix.name }}
+          path: bench/results/
+          if-no-files-found: ignore

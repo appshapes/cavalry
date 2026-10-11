@@ -12,6 +12,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 
 - [Ask the agent to make a change](how-to/ask-the-agent.md)
 - [Implement a feature, from card to commit](how-to/implement-a-feature.md)
+- [Run the bench and compare it with the baseline](how-to/run-the-bench.md)
 
 # Reference
 
@@ -37,3 +38,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0011. Pad peer-shared hot fields to 128 bytes](decisions/0011-pad-peer-shared-fields-to-128-bytes.md)
 - [0012. Lay out the counters file as Aeron's counter records behind a Cavalry header](decisions/0012-lay-out-the-counters-file.md)
 - [0013. Lay out the log buffer as Aeron's three terms and a metadata page](decisions/0013-lay-out-the-log-buffer.md)
+- [0015. Measure the data plane in process, with a baseline per runner](decisions/0015-measure-in-process-with-per-runner-baselines.md)
