@@ -1,0 +1,23 @@
+# cargo-fuzz targets for cavalry-proto's parsers (ADR 0008). Its own workspace, so the
+# root workspace neither builds nor lints it; `just fuzz` runs it on nightly.
+[package]
+name = "cavalry-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cavalry-proto = { path = ".." }
+
+[[bin]]
+name = "frame_header"
+path = "fuzz_targets/frame_header.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

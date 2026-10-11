@@ -10,6 +10,15 @@ repository.workspace = true
 # until the first release (ADR 0003).
 publish = false
 
+[dependencies]
+# The derives that make a wire struct its layout table (ADR 0009). No default
+# features: the derive is all the data plane needs.
+zerocopy = { version = "0.8.62", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+# Reads spec/vectors/*.json in tests/conformance.rs. Dev only, never on the data plane.
+serde_json = "1"
+
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]
 workspace = true
@@ -18,4 +27,4 @@ workspace = true
 # from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.
 [package.metadata.cavalry]
 data_plane = true
-allowed-dependencies = []
+allowed-dependencies = ["zerocopy"]

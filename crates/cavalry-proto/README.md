@@ -5,12 +5,14 @@ Wire types, zero-copy frames and version negotiation. Data plane.
 ## What this does
 
 - Defines every frame on the wire as a `#[repr(C)]` struct with a versioned header,
-  using `zerocopy` or `bytemuck` derives, so a frame is read and written in place with
-  no copy and no allocation.
+  using `zerocopy` derives (ADR 0009), so a frame is read and written in place with no
+  copy and no allocation.
 - Parses and builds the frames that carry data fragments (the wire-sized pieces of a
   message larger than the MTU), NAKs (a receiver's report of a gap) and status messages
   (a receiver's position and window, which drive flow control), and negotiates the
-  protocol version between peers so that mixed versions run during an upgrade.
+  protocol version between peers so that mixed versions run during an upgrade. Today
+  that is the data frame header, `spec/frame.md`; the other frames arrive with their
+  pages of `spec/`.
 - Is the one place bytes are shuffled by hand. Every other crate uses its types.
 
 In Aeron, this is the transport protocol specification and its frame layouts
@@ -31,16 +33,55 @@ In Aeron, this is the transport protocol specification and its frame layouts
 
 ## Example
 
-Not yet. This crate has no public item to show, and a crate README's example is also
-its doctest, so an example written now would invent an API.
-[ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md) records why the example
-rule is deferred for scaffold crates. The example arrives in the same commit as the
-first public item.
+A publisher writes one message as one frame, a header then a body, into a slot of a
+term. A subscriber reads the header back in place and checks it before it trusts the
+body. This is the crate's doctest.
+
+```rust
+use cavalry_proto::frame::{DataFrameHeader, Flags, FrameError, FrameType, HEADER_LENGTH};
+
+fn main() -> Result<(), FrameError> {
+    // The publisher: an 8-byte message that fits in one frame.
+    let body = b"cavalry!";
+    let header = DataFrameHeader::new(FrameType::Data, Flags::UNFRAGMENTED, HEADER_LENGTH + body.len())?
+        .with_session_id(1)
+        .with_stream_id(1001);
+    let mut frame = [0u8; 64]; // a slot in a term, 32-byte aligned
+    header.write(&mut frame)?;
+    frame[HEADER_LENGTH..HEADER_LENGTH + body.len()].copy_from_slice(body);
+
+    // The subscriber: read the header in place and check it before touching the body.
+    let read = DataFrameHeader::parse(&frame)?;
+    assert_eq!(read.frame_type(), FrameType::Data);
+    assert_eq!(read.stream_id(), 1001);
+    assert_eq!(read.body_length(), body.len());
+    assert_eq!(&frame[HEADER_LENGTH..][..read.body_length()], body);
+    assert_eq!(read.aligned_length(), 64); // where the next frame begins
+
+    // A frame from a version this reader does not know is rejected, never trusted.
+    frame[4] = 1;
+    let rejected = DataFrameHeader::parse(&frame).unwrap_err();
+    assert_eq!(rejected.reason(), "version");
+    println!("{rejected}");
+    Ok(())
+}
+```
+
+Running it prints one line, the rejection with its reason, what to do and the docs
+anchor:
+
+```text
+frame rejected (version): version 1, this reader knows 0; the writer runs another Cavalry version, upgrade the older side; see docs/reference/frame.md#what-a-reader-rejects
+```
 
 ## What to read next
 
-Not yet: the pages this crate will point at, its section of `spec/` and its reference
-page, do not exist. Until they do, read [`CLAUDE.md`](../../CLAUDE.md) for the
-invariants and the gates, and
-[ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md) for how the workspace is
-laid out.
+- [`spec/frame.md`](../../spec/frame.md): the layout, the flags, the padding frame and
+  the four checks a reader runs, in order. The book shows the same page as
+  [`docs/reference/frame.md`](../../docs/reference/frame.md).
+- [ADR 0008](../../docs/decisions/0008-adopt-aeron-data-frame-header.md), why the
+  header is Aeron's, and [ADR 0009](../../docs/decisions/0009-read-wire-structs-with-zerocopy.md),
+  why `zerocopy`.
+- [`spec/vectors/frame.json`](../../spec/vectors/frame.json), which
+  `tests/conformance.rs` runs on every `just test`; `tests/no_panic.rs` and `fuzz/`,
+  which feed the parser bytes it must never panic on.

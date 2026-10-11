@@ -23,6 +23,7 @@ pages elsewhere mention Aeron at most once.
 | padding frame | A frame of type 0 that fills the end of a term, or an abandoned claim. A subscriber skips it and delivers nothing. | padding frame | `docs/reference/frame.md` |
 | term offset | The byte offset of a frame from the start of its term. | term offset | `docs/reference/frame.md` |
 | reserved value | The 64-bit field of a data frame header that travels from publisher to subscriber unchanged, for the application's use. | reserved value | `docs/reference/frame.md` |
+| end of stream (EOS) | The flag on a data frame saying the publication closed and nothing follows on its session. | EOS flag | `docs/reference/frame.md` |
 | NAK | A negative acknowledgement sent by a receiver that detected a gap; the sender retransmits from its own term buffer. | NAK | `docs/reference/protocol.md` |
 | status message | A receiver-to-sender message carrying the receiver's position and window, used for flow control. | status message | `docs/reference/protocol.md` |
 | flow control (max, min, tagged) | The policy deciding how a sender treats a group of receivers: fastest receiver sets the pace (max), slowest does (min), or a tagged subset does (tagged). | flow control strategies | `docs/reference/flow-control.md` |

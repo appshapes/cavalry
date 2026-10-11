@@ -26,9 +26,11 @@ bench:
 bench-compare:
     @echo "not built yet: bench-compare (CLAUDE.md gate 2)." && exit 1
 
-# Wire-spec conformance suite against every client in clients/.
+# Wire-spec conformance: every implementation against every vector in spec/vectors/
+# (spec/README.md). Today the one implementation is cavalry-proto's, whose vector test
+# also runs in `just test`; a client in clients/ joins here with its own runner.
 conformance:
-    @echo "not built yet: conformance suite (CLAUDE.md gate 1)." && exit 1
+    cargo test -p cavalry-proto --test conformance
 
 # Deterministic replay test: replay a recorded log twice and diff the state.
 replay-check:
@@ -97,3 +99,10 @@ doctor:
 # Miri on the unsafe crate.
 miri:
     cargo +nightly miri test -p cavalry-shm
+
+# cargo-fuzz over every parser in cavalry-proto, a minute each, on nightly. Not in CI
+# (ADR 0008): the no-panic tests in `just test` cover the same property on every
+# commit; run this after a parser change and before a release. Needs
+# `rustup toolchain install nightly` and `cargo install cargo-fuzz`.
+fuzz:
+    cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz frame_header -- -max_total_time=60
