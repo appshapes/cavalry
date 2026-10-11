@@ -1,0 +1,715 @@
+{
+  "spec": "spec/broadcast-buffer.md",
+  "version": 0,
+  "generated_by": "spec/vectors/broadcast-buffer.py; do not edit by hand",
+  "vectors": [
+    {
+      "name": "header-capacity-4096",
+      "region": "header",
+      "bytes": "43564c5942435354000000000010000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4608,
+      "fields": {
+        "magic": "43564c5942435354",
+        "version": 0,
+        "capacity": 4096,
+        "creator_pid": 4242,
+        "start_timestamp": 1760000000000000000
+      }
+    },
+    {
+      "name": "header-capacity-1g",
+      "region": "header",
+      "bytes": "43564c5942435354000000000000004001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 1073742336,
+      "fields": {
+        "magic": "43564c5942435354",
+        "version": 0,
+        "capacity": 1073741824,
+        "creator_pid": 1,
+        "start_timestamp": 0
+      }
+    },
+    {
+      "name": "too-short-file",
+      "region": "header",
+      "bytes": "43564c5942435354000000000010000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 511,
+      "error": "too-short"
+    },
+    {
+      "name": "too-short-bytes",
+      "region": "header",
+      "bytes": "43564c5942435354000000000010000092100000000000000000b0d4acc66c180000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4608,
+      "error": "too-short"
+    },
+    {
+      "name": "not-ready",
+      "region": "header",
+      "bytes": "0000000000000000000000000010000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4608,
+      "error": "not-ready"
+    },
+    {
+      "name": "magic-counters-file",
+      "region": "header",
+      "bytes": "43564c59434e5452000000000010000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4608,
+      "error": "magic"
+    },
+    {
+      "name": "magic-command-ring",
+      "region": "header",
+      "bytes": "43564c59434d4452000000000010000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4608,
+      "error": "magic"
+    },
+    {
+      "name": "version-1",
+      "region": "header",
+      "bytes": "43564c5942435354010000000010000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4608,
+      "error": "version"
+    },
+    {
+      "name": "capacity-not-power-of-two",
+      "region": "header",
+      "bytes": "43564c5942435354000000000110000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4609,
+      "error": "capacity"
+    },
+    {
+      "name": "capacity-below-minimum",
+      "region": "header",
+      "bytes": "43564c5942435354000000000008000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 2560,
+      "error": "capacity"
+    },
+    {
+      "name": "capacity-above-maximum",
+      "region": "header",
+      "bytes": "43564c5942435354000000000000008092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4608,
+      "error": "capacity"
+    },
+    {
+      "name": "capacity-negative",
+      "region": "header",
+      "bytes": "43564c59424353540000000000f0ffff92100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4608,
+      "error": "capacity"
+    },
+    {
+      "name": "length-short",
+      "region": "header",
+      "bytes": "43564c5942435354000000000010000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4607,
+      "error": "length"
+    },
+    {
+      "name": "length-long",
+      "region": "header",
+      "bytes": "43564c5942435354000000000010000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4616,
+      "error": "length"
+    },
+    {
+      "name": "version-before-capacity",
+      "region": "header",
+      "bytes": "43564c5942435354010000000110000092100000000000000000b0d4acc66c18000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "file_length": 4609,
+      "error": "version"
+    },
+    {
+      "name": "record-message",
+      "region": "record",
+      "bytes": "18000000010000007075626c69636174696f6e2072656164",
+      "capacity": 4096,
+      "index": 0,
+      "fields": {
+        "length": 24,
+        "type": 1,
+        "state": "message",
+        "aligned_length": 24,
+        "message_length": 16
+      }
+    },
+    {
+      "name": "record-message-aligns",
+      "region": "record",
+      "bytes": "0d0000000700000068656c6c6f000000",
+      "capacity": 4096,
+      "index": 0,
+      "fields": {
+        "length": 13,
+        "type": 7,
+        "state": "message",
+        "aligned_length": 16,
+        "message_length": 5
+      }
+    },
+    {
+      "name": "record-message-empty",
+      "region": "record",
+      "bytes": "0800000003000000",
+      "capacity": 4096,
+      "index": 0,
+      "fields": {
+        "length": 8,
+        "type": 3,
+        "state": "message",
+        "aligned_length": 8,
+        "message_length": 0
+      }
+    },
+    {
+      "name": "record-message-max",
+      "region": "record",
+      "bytes": "08020000020000006d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d",
+      "capacity": 4096,
+      "index": 0,
+      "fields": {
+        "length": 520,
+        "type": 2,
+        "state": "message",
+        "aligned_length": 520,
+        "message_length": 512
+      }
+    },
+    {
+      "name": "record-padding-to-the-end",
+      "region": "record",
+      "bytes": "08000000ffffffff",
+      "capacity": 4096,
+      "index": 4088,
+      "fields": {
+        "length": 8,
+        "type": -1,
+        "state": "padding",
+        "aligned_length": 8
+      }
+    },
+    {
+      "name": "record-padding-long",
+      "region": "record",
+      "bytes": "00080000ffffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "capacity": 4096,
+      "index": 2048,
+      "fields": {
+        "length": 2048,
+        "type": -1,
+        "state": "padding",
+        "aligned_length": 2048
+      }
+    },
+    {
+      "name": "record-length-zero",
+      "region": "record",
+      "bytes": "0000000000000000",
+      "capacity": 4096,
+      "index": 0,
+      "error": "record"
+    },
+    {
+      "name": "record-length-below-header",
+      "region": "record",
+      "bytes": "0400000001000000",
+      "capacity": 4096,
+      "index": 0,
+      "error": "record"
+    },
+    {
+      "name": "record-length-past-the-end",
+      "region": "record",
+      "bytes": "10000000010000003132333435363738",
+      "capacity": 4096,
+      "index": 4088,
+      "error": "record"
+    },
+    {
+      "name": "record-type-zero",
+      "region": "record",
+      "bytes": "18000000000000007075626c69636174696f6e2072656164",
+      "capacity": 4096,
+      "index": 0,
+      "error": "record"
+    },
+    {
+      "name": "record-type-below-padding",
+      "region": "record",
+      "bytes": "18000000feffffff7075626c69636174696f6e2072656164",
+      "capacity": 4096,
+      "index": 0,
+      "error": "record"
+    },
+    {
+      "name": "record-padding-not-to-the-end",
+      "region": "record",
+      "bytes": "10000000ffffffff0000000000000000",
+      "capacity": 4096,
+      "index": 2048,
+      "error": "record"
+    },
+    {
+      "name": "record-message-over-maximum",
+      "region": "record",
+      "bytes": "09020000020000006d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d00000000000000",
+      "capacity": 4096,
+      "index": 0,
+      "error": "record"
+    },
+    {
+      "name": "transmit-first-record",
+      "region": "transmit",
+      "inputs": {
+        "capacity": 4096,
+        "tail": 0,
+        "message_length": 16
+      },
+      "fields": {
+        "record_length": 24,
+        "aligned_length": 24,
+        "tail_intent": 24,
+        "padding": null,
+        "index": 0,
+        "latest": 0,
+        "tail_after": 24
+      }
+    },
+    {
+      "name": "transmit-aligns-length",
+      "region": "transmit",
+      "inputs": {
+        "capacity": 4096,
+        "tail": 24,
+        "message_length": 13
+      },
+      "fields": {
+        "record_length": 21,
+        "aligned_length": 24,
+        "tail_intent": 48,
+        "padding": null,
+        "index": 24,
+        "latest": 24,
+        "tail_after": 48
+      }
+    },
+    {
+      "name": "transmit-empty-message",
+      "region": "transmit",
+      "inputs": {
+        "capacity": 4096,
+        "tail": 48,
+        "message_length": 0
+      },
+      "fields": {
+        "record_length": 8,
+        "aligned_length": 8,
+        "tail_intent": 56,
+        "padding": null,
+        "index": 48,
+        "latest": 48,
+        "tail_after": 56
+      }
+    },
+    {
+      "name": "transmit-max-message",
+      "region": "transmit",
+      "inputs": {
+        "capacity": 4096,
+        "tail": 56,
+        "message_length": 512
+      },
+      "fields": {
+        "record_length": 520,
+        "aligned_length": 520,
+        "tail_intent": 576,
+        "padding": null,
+        "index": 56,
+        "latest": 56,
+        "tail_after": 576
+      }
+    },
+    {
+      "name": "transmit-message-too-long",
+      "region": "transmit",
+      "inputs": {
+        "capacity": 4096,
+        "tail": 56,
+        "message_length": 513
+      },
+      "error": "message"
+    },
+    {
+      "name": "transmit-wraps-with-padding",
+      "region": "transmit",
+      "inputs": {
+        "capacity": 4096,
+        "tail": 4088,
+        "message_length": 16
+      },
+      "fields": {
+        "record_length": 24,
+        "aligned_length": 24,
+        "tail_intent": 4120,
+        "padding": {
+          "index": 4088,
+          "length": 8
+        },
+        "index": 0,
+        "latest": 4096,
+        "tail_after": 4120
+      }
+    },
+    {
+      "name": "transmit-fits-exactly-at-the-end",
+      "region": "transmit",
+      "inputs": {
+        "capacity": 4096,
+        "tail": 4072,
+        "message_length": 16
+      },
+      "fields": {
+        "record_length": 24,
+        "aligned_length": 24,
+        "tail_intent": 4096,
+        "padding": null,
+        "index": 4072,
+        "latest": 4072,
+        "tail_after": 4096
+      }
+    },
+    {
+      "name": "transmit-second-lap",
+      "region": "transmit",
+      "inputs": {
+        "capacity": 4096,
+        "tail": 13312,
+        "message_length": 16
+      },
+      "fields": {
+        "record_length": 24,
+        "aligned_length": 24,
+        "tail_intent": 13336,
+        "padding": null,
+        "index": 1024,
+        "latest": 13312,
+        "tail_after": 13336
+      }
+    },
+    {
+      "name": "receive-nothing",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 24,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 0,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "fields": {
+        "result": "none",
+        "cursor": 24,
+        "next_record": 24
+      }
+    },
+    {
+      "name": "receive-first-record",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 0,
+        "record": [
+          24,
+          1
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "fields": {
+        "result": "message",
+        "cursor": 0,
+        "index": 0,
+        "next_record": 24,
+        "type": 1,
+        "message_length": 16
+      }
+    },
+    {
+      "name": "receive-second-record",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 24,
+        "tail": 48,
+        "tail_intent": 48,
+        "latest": 24,
+        "record": [
+          21,
+          7
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "fields": {
+        "result": "message",
+        "cursor": 24,
+        "index": 24,
+        "next_record": 48,
+        "type": 7,
+        "message_length": 13
+      }
+    },
+    {
+      "name": "receive-joins-at-latest",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 4120,
+        "tail": 4144,
+        "tail_intent": 4144,
+        "latest": 4120,
+        "record": [
+          24,
+          1
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "fields": {
+        "result": "message",
+        "cursor": 4120,
+        "index": 24,
+        "next_record": 4144,
+        "type": 1,
+        "message_length": 16
+      }
+    },
+    {
+      "name": "receive-skips-padding",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 4088,
+        "tail": 4120,
+        "tail_intent": 4120,
+        "latest": 4096,
+        "record": [
+          8,
+          -1
+        ],
+        "record_at_zero": [
+          24,
+          1
+        ],
+        "tail_intent_after": null
+      },
+      "fields": {
+        "result": "message",
+        "cursor": 4096,
+        "index": 0,
+        "next_record": 4120,
+        "type": 1,
+        "message_length": 16
+      }
+    },
+    {
+      "name": "receive-lapped",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 8192,
+        "tail_intent": 8192,
+        "latest": 8168,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "fields": {
+        "result": "lapped",
+        "cursor": 8168,
+        "next_record": 8168
+      }
+    },
+    {
+      "name": "receive-lapped-while-copying",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 0,
+        "record": [
+          24,
+          1
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": 4096
+      },
+      "fields": {
+        "result": "lapped",
+        "cursor": 0,
+        "next_record": 0
+      }
+    },
+    {
+      "name": "receive-lapped-record-looks-corrupt",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 0,
+        "record": [
+          4,
+          1
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": 4104
+      },
+      "fields": {
+        "result": "lapped",
+        "cursor": 0,
+        "next_record": 0
+      }
+    },
+    {
+      "name": "receive-record-length-below-header",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 0,
+        "record": [
+          4,
+          1
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "record"
+    },
+    {
+      "name": "receive-record-type-zero",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 0,
+        "record": [
+          24,
+          0
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "record"
+    },
+    {
+      "name": "receive-padding-not-to-the-end",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 32,
+        "tail_intent": 32,
+        "latest": 0,
+        "record": [
+          16,
+          -1
+        ],
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "record"
+    },
+    {
+      "name": "receive-tail-behind-cursor",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 48,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 0,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "tail"
+    },
+    {
+      "name": "receive-tail-intent-below-tail",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 16,
+        "latest": 0,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "tail"
+    },
+    {
+      "name": "receive-tail-intent-too-far-ahead",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 4128,
+        "latest": 0,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "tail"
+    },
+    {
+      "name": "receive-latest-at-tail",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 24,
+        "tail_intent": 24,
+        "latest": 24,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "tail"
+    },
+    {
+      "name": "receive-tail-not-aligned",
+      "region": "receive",
+      "inputs": {
+        "capacity": 4096,
+        "next_record": 0,
+        "tail": 20,
+        "tail_intent": 24,
+        "latest": 0,
+        "record": null,
+        "record_at_zero": null,
+        "tail_intent_after": null
+      },
+      "error": "tail"
+    }
+  ]
+}

@@ -32,6 +32,15 @@ pub const LOG_BUFFER_REJECTED_TAIL: CounterId = CounterId(7);
 /// `log_buffer.rejected_frame`, a static counter: Frames a subscriber found outside spec/frame.md's bounds in a term and reported; nothing after such a frame is delivered on that image.
 pub const LOG_BUFFER_REJECTED_FRAME: CounterId = CounterId(8);
 
+/// `command_ring.unblocked`, a static counter: Padding records the driver wrote over a claim in the command ring that a client made and did not commit within the unblock timeout (spec/command-ring.md, Unblocking).
+pub const COMMAND_RING_UNBLOCKED: CounterId = CounterId(9);
+
+/// `command_ring.rejected_tail`, a static counter: Tail positions the driver found outside the command ring's bounds when it unblocked and refused to use (ADR 0010): the ring is corrupt and the driver reads nothing more from it.
+pub const COMMAND_RING_REJECTED_TAIL: CounterId = CounterId(10);
+
+/// `command_ring.rejected_record`, a static counter: Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring.
+pub const COMMAND_RING_REJECTED_RECORD: CounterId = CounterId(11);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -105,5 +114,29 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Frames a subscriber found outside spec/frame.md's bounds in a term and reported; nothing after such a frame is delivered on that image.",
         doctor: "A publisher wrote a corrupt frame, or a term was overwritten: check publication.unblocked and the driver's log for the publication.",
+    },
+    CounterDef {
+        id: COMMAND_RING_UNBLOCKED,
+        name: "command_ring.unblocked",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Padding records the driver wrote over a claim in the command ring that a client made and did not commit within the unblock timeout (spec/command-ring.md, Unblocking).",
+        doctor: "A client process died or stalled between claiming and committing a command; its own driver timeout closes it. If this repeats, find the client that keeps restarting and look at what stops it between claim and commit.",
+    },
+    CounterDef {
+        id: COMMAND_RING_REJECTED_TAIL,
+        name: "command_ring.rejected_tail",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Tail positions the driver found outside the command ring's bounds when it unblocked and refused to use (ADR 0010): the ring is corrupt and the driver reads nothing more from it.",
+        doctor: "A client wrote an impossible tail: a buggy binding or a hostile process. Every client's commands now time out; restart the driver, which recreates the ring, and find the client from the driver's log.",
+    },
+    CounterDef {
+        id: COMMAND_RING_REJECTED_RECORD,
+        name: "command_ring.rejected_record",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring.",
+        doctor: "A client wrote a corrupt command: a buggy binding or a hostile process. Every client's commands now time out; restart the driver, which recreates the ring, and rebuild or remove the client the driver's log names.",
     },
 ];

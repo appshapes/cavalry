@@ -119,3 +119,14 @@ user-visible change, added in the same commit as the change. The format follows
   a client, with release stores; `spec/counters-file.md` now says so, and the one-writer
   rule of ADR 0012 is amended by ADR 0013. `publication.unblocked` and three
   `log_buffer.rejected_*` counters count the driver's unblocks and refusals.
+- `spec/command-ring.md` specifies the command ring at version 0: the many-to-one ring
+  through which every client sends the driver its commands, with Cavalry's magic-last
+  header, a 128-byte slot per trailer field, the claim, commit, abort, read, unblock and
+  heartbeat protocols, and the seven checks a reader runs in order. Three counters,
+  `command_ring.unblocked`, `command_ring.rejected_tail` and `command_ring.rejected_record`,
+  count the driver's unblocks and refusals. Its vectors come from
+  `spec/vectors/command-ring.py`, and the book includes the page (ADR 0014).
+- `spec/broadcast-buffer.md` specifies the broadcast buffer at version 0: the one-to-many
+  ring through which the driver sends every client its events, lossy by design and so
+  control plane only; a receiver that falls a ring behind is told `lapped`. Its vectors
+  come from `spec/vectors/broadcast-buffer.py`, and the book includes the page (ADR 0014).

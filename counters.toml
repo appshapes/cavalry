@@ -85,3 +85,27 @@ kind = "counter"
 scope = "static"
 doc = "Frames a subscriber found outside spec/frame.md's bounds in a term and reported; nothing after such a frame is delivered on that image."
 doctor = "A publisher wrote a corrupt frame, or a term was overwritten: check publication.unblocked and the driver's log for the publication."
+
+[[counter]]
+id = 9
+name = "command_ring.unblocked"
+kind = "counter"
+scope = "static"
+doc = "Padding records the driver wrote over a claim in the command ring that a client made and did not commit within the unblock timeout (spec/command-ring.md, Unblocking)."
+doctor = "A client process died or stalled between claiming and committing a command; its own driver timeout closes it. If this repeats, find the client that keeps restarting and look at what stops it between claim and commit."
+
+[[counter]]
+id = 10
+name = "command_ring.rejected_tail"
+kind = "counter"
+scope = "static"
+doc = "Tail positions the driver found outside the command ring's bounds when it unblocked and refused to use (ADR 0010): the ring is corrupt and the driver reads nothing more from it."
+doctor = "A client wrote an impossible tail: a buggy binding or a hostile process. Every client's commands now time out; restart the driver, which recreates the ring, and find the client from the driver's log."
+
+[[counter]]
+id = 11
+name = "command_ring.rejected_record"
+kind = "counter"
+scope = "static"
+doc = "Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring."
+doctor = "A client wrote a corrupt command: a buggy binding or a hostile process. Every client's commands now time out; restart the driver, which recreates the ring, and rebuild or remove the client the driver's log names."
