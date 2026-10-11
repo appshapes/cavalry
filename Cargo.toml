@@ -17,3 +17,6 @@ repository = "https://github.com/appshapes/cavalry"
 # carry their own [lints.rust] table instead. `just lint-workspace` checks both.
 [workspace.lints.rust]
 unsafe_code = "deny"
+# `cfg(cavalry_unchecked)` builds the data-plane checks out, to measure what they cost
+# (ADR 0010). Only `just bench-unchecked` sets it; no shipped build has it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(cavalry_unchecked)"] }

@@ -28,7 +28,9 @@ In Aeron, this is the transport protocol specification and its frame layouts
 - Change a layout without changing its version. A layout change is a wire-protocol
   change.
 - Trust an incoming frame. Frame parsers are fuzzed; a malformed frame is rejected with
-  a counter, never a panic.
+  a counter, never a panic. The one decoder without checks, `decode_unchecked`, exists
+  only in a build made with `--cfg cavalry_unchecked`, which `just bench-unchecked` makes
+  to measure what the checks cost (ADR 0010); no shipped build has it.
 - Allocate, lock, make a syscall, await or panic per message (invariant 2).
 - Invent a name. The vocabulary is the glossary's: publication, subscription, image,
   term, position, NAK, status message, stream id, session id.
