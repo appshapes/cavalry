@@ -74,7 +74,8 @@ in the spec answers "why 128".
 
 Harder: the counters file is 128 bytes per counter; the data-plane rule and
 `why-cavalry.md` carry two figures, 64 and 128, with the rule for which applies;
-a lint must know which fields the spec calls peer-shared.
+a lint must know which fields the spec calls peer-shared, and the log buffer
+feature builds that lint as the first feature to need it (`CLAUDE.md`, Gates).
 
 Revisit: if the measurement above shows no difference at p99.99 on either runner;
 if a target platform appears with a different prefetch pair size.
@@ -86,6 +87,8 @@ if a target platform appears with a different prefetch pair size.
 - `docs/explanation/should-zigbolt-inform-cavalry.md`
 - `docs/explanation/why-cavalry.md`, Build
 - ADR 0007 (the log buffer and counters file features that apply this decision)
+- ADR 0008 and `spec/frame.md`: the data frame header that fills the terms
+  whose tail counters take these slots
 - Agrona and Aeron at 32e531c: <https://github.com/aeron-io/aeron>,
   <https://github.com/aeron-io/agrona>
 - Zig `std.atomic.cache_line`:

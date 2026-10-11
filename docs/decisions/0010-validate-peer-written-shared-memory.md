@@ -110,6 +110,9 @@ can express.
 - `docs/explanation/should-zigbolt-inform-cavalry.md`
 - `docs/explanation/why-cavalry.md`, Build
 - ADR 0007 (the log buffer feature that applies this decision)
+- ADR 0008 and `spec/frame.md`: the data frame header the log buffer's terms
+  hold, whose reader checks run in the same order this decision asks of every
+  layout
 - ZigBolt `src/channel/ipc.zig` and `src/platform/memory.zig` at b7eeb6b:
   <https://github.com/suenot/zigbolt>
 - Aeron `LogBufferDescriptor.java`, `TermReader.java` at 32e531c:
