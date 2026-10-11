@@ -129,6 +129,7 @@ impl RecordCells {
         // same bound as Aeron's free-for-reuse deadline. That bound is in time, which
         // loom cannot model; the loom test below covers the first allocation.
         self.type_id.with_mut(|p| unsafe { p.write(type_id) });
+        // SAFETY: as above.
         self.tail.with_mut(|p| unsafe { p.write(tail) });
         self.reclaim_deadline
             .store(fields.reclaim_deadline(), Ordering::Relaxed);

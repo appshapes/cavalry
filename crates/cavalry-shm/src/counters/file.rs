@@ -51,6 +51,7 @@ struct Mapped {
 // through it are the atomics and the publish protocols of `cells`, whose types are
 // `Sync`; the pointer itself is never written after `new`.
 unsafe impl Send for Mapped {}
+// SAFETY: as above.
 unsafe impl Sync for Mapped {}
 
 impl Mapped {
