@@ -50,5 +50,5 @@ user-visible change, added in the same commit as the change. The format follows
   from each same-repository pull request's events, so a pull request that changes the
   reviewer's own workflow file, Dependabot's bumps of its pins included, is
   agent-reviewed, Dependabot's pull requests are reviewed directly, and the hand-off
-  workflow is gone. The `review pr` run is on the Actions tab, not among the pull
-  request's checks.
+  workflow is gone, and so is the "cannot run on this pull request" comment. The
+  `review pr` run is on the Actions tab, not among the pull request's checks.

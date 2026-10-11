@@ -63,10 +63,5 @@ approved, waiting for you to merge it.
 - **No review arrived.** The `review pr` run on the Actions tab is red with the reason
   in its last step. Pull requests from forks are not reviewed by the agent, only by a
   person.
-- **"The reviewer agent cannot run on this pull request."** The pull request's copy of
-  the reviewer workflow file differs from the one on `master`, and the Claude action
-  refuses such a run. A pull request that changes that file, which a Dependabot bump
-  of a pinned action does, is reviewed and merged by a person. Any other pull request
-  needs `master` merged into its branch, then the `review` label.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
   label, or a required check failed. `gh pr checks <number>` shows which.
