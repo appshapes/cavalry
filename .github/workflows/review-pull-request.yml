@@ -1,22 +1,25 @@
-# The reviewer half of the loop (ADR 0004). Read-only because the job's GITHUB_TOKEN is
-# `contents: read`: a merge and a push are both content writes, so no tool the agent
-# holds can perform one. The `deny` list below is the belt: an `allow` list that merely
-# omits Write and Edit withholds nothing, because the action grants the edit tools by
-# default, so the denial has to be written out. A reviewer that can push is not a
-# reviewer.
+# The reviewer half of the loop (ADR 0004, ADR 0005). Read-only because the job's
+# GITHUB_TOKEN is `contents: read`: a merge and a push are both content writes, so no
+# tool the agent holds can perform one. The `deny` list below is the belt: an `allow`
+# list that merely omits Write and Edit withholds nothing, because the action grants the
+# edit tools by default, so the denial has to be written out. A reviewer that can push
+# is not a reviewer.
 #
-# Same-repository pull requests only, and not the runs Dependabot's own events raise.
-# A fork pull request cannot read `secrets.CLAUDE_CODE_OAUTH_TOKEN`, so a reviewer job
-# on one would fail at authentication on every drive-by contribution and teach everyone
-# to ignore a red X; fork pull requests get CI and a human. A run that Dependabot
-# triggers (actor `dependabot[bot]`) gets no repository secrets either, although its
-# branch lives here, so dependabot-review.yml re-raises the event as the owner by
-# adding the `review` label, and that `labeled` event is what this workflow runs on.
-# Adding the `review` label by hand runs the reviewer again on any pull request.
+# It runs in the base repository's context, `pull_request_target` (ADR 0005): the
+# workflow file is master's copy, so the Claude action's validation of that file passes
+# on every pull request, including one that changes this file, and Dependabot's own
+# events carry the secrets, so its pull requests are reviewed directly. The objection
+# to this trigger is a fork's code running with the base's secrets. Two things answer
+# it here, and both must stay true. First, the job runs only for a pull request whose
+# head is in this repository (the `if` below); a fork pull request gets CI and a human.
+# Second, the root checkout is master and the pull request's head sits under pr-head/,
+# which nothing executes: no `just`, no `cargo`, no write tool, and the agent's own
+# configuration is master's. Adding the `review` label by hand runs the reviewer again
+# on any pull request.
 name: review pr
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, labeled]
 
 # One reviewer per pull request, and the newest head wins: the fixer can push more than
@@ -32,9 +35,10 @@ concurrency:
 
 jobs:
   review:
+    # The first clause is a security boundary under pull_request_target, not a filter: a
+    # fork's run would hold the secrets (ADR 0005). Removing it is a new ADR.
     if: |
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 'dependabot[bot]' &&
       (github.event.action != 'labeled' || github.event.label.name == 'review')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     # Brigade's bound (ADR 0004, Evidence): fifteen reviewer sessions finished inside
@@ -58,10 +62,21 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: gh pr edit "$PR_NUMBER" --remove-label review
 
-      - name: Checkout
+      # Base at the root, head in a subdirectory: the pattern the action's own security
+      # doc prescribes for pull_request_target (ADR 0005). The root is master, so the
+      # working directory, CLAUDE.md and .claude/ are master's. The pull request's head
+      # commit, the one the verify step below checks the review against, is under
+      # pr-head/ for reading, with full history so `git log` and `git diff` work there,
+      # and without the job token in its .git/config, since nothing writes from there.
+      - name: Checkout master
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout the pull request head under pr-head/
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-head
           fetch-depth: 0       # the reviewer diffs against the merge base; a depth-1 clone has none
+          persist-credentials: false
 
       # The action's token exchange validates the workflow file: the copy at the run's commit
       # must be identical to the copy on master, or the exchange is refused and the action
@@ -71,7 +86,12 @@ jobs:
       # checks the same thing first and says what to do. A pull request that changes this
       # file, which a Dependabot pin bump does, can never be agent-reviewed: a person
       # reviews and merges it (ADR 0004).
+      #
+      # Under pull_request_target (ADR 0005) HEAD here is master, so the step has nothing
+      # to compare and does not run. It stays until the first pull request that edits this
+      # file proves the trigger, and that pull request removes it.
       - name: Guard this workflow file against master
+        if: github.event_name != 'pull_request_target'
         env:
           GH_TOKEN: ${{ github.token }}      # a job-token comment raises no workflow event
           GH_REPO: ${{ github.repository }}
@@ -104,19 +124,27 @@ jobs:
           # its name the action rejects the run and the loop dead-ends unreviewed. Brigade
           # measured that GitHub attributes the fixer's push to `github-actions[bot]`, not
           # `claude[bot]`, so both names are needed. `github-actions` events can only come
-          # from this repository's own workflow tokens. An explicit list, never '*'.
-          allowed_bots: "claude,github-actions"
+          # from this repository's own workflow tokens. `dependabot` because its own
+          # `opened` and `synchronize` events run this job (ADR 0005); the action strips a
+          # trailing `[bot]` when matching. An explicit list, never '*'.
+          allowed_bots: "claude,github-actions,dependabot"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # --max-turns is a hard stop on a wandering session. 70 is Brigade's measured
           # bound: 1.5 times its largest observed reviewer session (42 turns), rounded up.
           # Re-measure when a Cavalry session reaches 47 turns or the pin moves.
-          claude_args: "--model claude-opus-5-5 --max-turns 70"
+          # --add-dir pr-head: the pull request's tree, checked out above (ADR 0005).
+          claude_args: "--model claude-opus-5-5 --max-turns 70 --add-dir pr-head"
           # Public repository: run logs are world readable. Keep the agent's output out.
           show_full_output: false
           prompt: |
             You are the reviewer agent. Read `.claude/agents/reviewer.md` for your
             operating instructions and review pull request
             #${{ github.event.pull_request.number }}.
+
+            The working directory is `master`, the base of the pull request. The
+            pull request's head commit is checked out under `pr-head/`: read the
+            changed files and their surroundings there. `gh pr view`, `gh pr diff`
+            and `gh pr checks` work from the working directory.
 
             You MUST end your session by actually executing
             `gh pr review ${{ github.event.pull_request.number }} --approve --body "<summary>"`

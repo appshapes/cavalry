@@ -1,14 +1,11 @@
 # Keeps the SHA-pinned actions in .github/workflows/ current. Dependabot opens one pull
 # request a week when any pinned action has a new release. ci.yml runs on it, the
-# reviewer agent is handed the pull request by dependabot-review.yml and checks each
-# new SHA against the version it names, and the `auto-merge` label below lets
-# auto-merge.yml squash-merge it when the reviewer approves and CI is green (ADR
-# 0004). One exception: a bump that changes review-pull-request.yml itself cannot be
-# agent-reviewed, because the Claude action refuses a workflow file that differs from
-# master's; the reviewer run says so on the pull request, and a person merges it. Bot
-# pull requests are the exception to committing straight to master (CLAUDE.md,
-# "Working rules for agents"; ADR 0003). A cargo entry joins this file when the
-# workspace has dependencies.
+# reviewer agent reviews it in the base repository's context (review-pull-request.yml,
+# ADR 0005) and checks each new SHA against the version it names, and the `auto-merge`
+# label below lets auto-merge.yml squash-merge it when the reviewer approves and CI is
+# green (ADR 0004). Bot pull requests are the exception to committing straight to
+# master (CLAUDE.md, "Working rules for agents"; ADR 0003). A cargo entry joins this
+# file when the workspace has dependencies.
 version: 2
 updates:
   - package-ecosystem: github-actions

@@ -23,7 +23,10 @@ Read `spec/` before `crates/` once `spec/` exists, and a crate's `README.md` bef
 ## How to review
 
 Read the intent (`gh pr view <n>`), the diff (`gh pr diff <n>`), the CI result
-(`gh pr checks <n>`), and enough surrounding code to judge the change. Approve with
+(`gh pr checks <n>`), and enough surrounding code to judge the change. The working
+directory is `master`, the base of the pull request; the pull request's head commit is
+checked out under `pr-head/`, so read the changed files and their surroundings there, and
+`git -C pr-head log origin/master..HEAD` lists its commits (ADR 0005). Approve with
 `gh pr review <n> --approve --body "<summary>"` or request changes with
 `gh pr review <n> --request-changes --body "<findings>"`.
 
@@ -91,12 +94,14 @@ Read the intent (`gh pr view <n>`), the diff (`gh pr diff <n>`), the CI result
 - **Commits and merges.** Pull request title `<card>: <Imperative subject>` when the issue
   names a card, otherwise an imperative subject; body as above. Merges only, never rebase,
   no force push, no rewritten history.
-- **Paths an agent may not touch.** `.github/workflows/`, `.claude/`, `spec/` without an
-  ADR, and `bench/baseline.json`. A Dependabot pull request is the one exception for
-  `.github/workflows/`: it moves action pins. For each moved pin, check that the new SHA is
-  the commit the version comment names (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`;
-  an annotated tag needs one more hop through `git/tags/<sha>`), and that nothing else
-  changed.
+- **Paths an agent may not touch.** On a branch the writer made (`claude/...`), a change
+  under `.github/workflows/` or `.claude/`, to `spec/` without an ADR, or to
+  `bench/baseline.json` is a blocker. A Dependabot branch (`dependabot/...`) moves action
+  pins under `.github/workflows/` and nothing else: for each moved pin, check that the new
+  SHA is the commit the version comment names
+  (`gh api repos/<owner>/<repo>/git/ref/tags/<tag>`; an annotated tag needs one more hop
+  through `git/tags/<sha>`), and that nothing else changed. A person's branch may change
+  these paths; judge such a change on its merits against `CLAUDE.md` and the ADR it cites.
 - **CI hygiene.** Every job sets `timeout-minutes`; every action is pinned to a full commit
   SHA with its version in a trailing comment.
 

@@ -38,11 +38,15 @@ user-visible change, added in the same commit as the change. The format follows
   message is the pull request body, and Blacksmith runners for every job.
 - A reviewer agent reviews every same-repository pull request, read-only, and
   approves or requests changes; the job fails if no review lands. The `review` label
-  runs it again, and a Dependabot pull request is handed to it with that label. The
-  briefs for the reviewer and the writer are in `.claude/agents/` (ADR 0004).
+  runs it again. The briefs for the reviewer and the writer are in `.claude/agents/`
+  (ADR 0004).
 - A writer agent implements an issue labelled `claude` on a branch and opens the
   pull request, answers `@claude` comments, and applies the reviewer's blockers up to
   three times. `docs/how-to/ask-the-agent.md` is the page for asking (ADR 0004).
 - A pull request labelled `auto-merge` squash-merges on its own once the reviewer
   approves its head and the two CI checks pass; the commit's subject and body are the
   pull request's. Dependabot labels its pull requests `auto-merge` (ADR 0004).
+- ADR 0005 (proposed): the reviewer runs in the base repository's context, so a pull
+  request that changes the reviewer's own workflow file, Dependabot's bumps of its pins
+  included, is agent-reviewed, and Dependabot's pull requests are reviewed directly;
+  the hand-off workflow is gone.
