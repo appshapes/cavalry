@@ -43,3 +43,6 @@ user-visible change, added in the same commit as the change. The format follows
 - A writer agent implements an issue labelled `claude` on a branch and opens the
   pull request, answers `@claude` comments, and applies the reviewer's blockers up to
   three times. `docs/how-to/ask-the-agent.md` is the page for asking (ADR 0004).
+- A pull request labelled `auto-merge` squash-merges on its own once the reviewer
+  approves its head and the two CI checks pass; the commit's subject and body are the
+  pull request's. Dependabot labels its pull requests `auto-merge` (ADR 0004).

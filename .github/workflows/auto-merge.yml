@@ -1,0 +1,57 @@
+# Arms a merge when, and only when, the reviewer agent approved the CURRENT head of a pull
+# request labelled `auto-merge` (ADR 0004). It does not merge: `--auto` hands the pull request
+# to GitHub, which merges it when the branch protection's required checks, `gates (linux)`
+# and `gates (macos)`, pass. The protection rule is what makes "auto" mean "when green"
+# instead of "now".
+#
+# The merging identity is GH_ACTIONS_TOKEN, the owner's personal access token, and the
+# owner is a repository admin whom the rule lets bypass. So the wait does not rest on the
+# rule REFUSING this merger; it rests on `gh pr merge --auto` choosing to wait for the
+# required checks anyway, which it does, and on the fallback below being guarded. Brigade
+# runs the same shape on the same kind of token.
+name: auto merge
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  auto-merge:
+    # The commit_id clause pins the approval to the CURRENT head: with the fixer pushing to
+    # pull request branches, an approval from a reviewer session that started on an older
+    # head must never arm a merge for commits it never reviewed. The label clause is the
+    # policy switch: a person sets it on the issue, the writer copies it to the pull request,
+    # and Dependabot sets it on its own pull requests (.github/dependabot.yml).
+    if: |
+      github.event.review.state == 'approved' &&
+      startsWith(github.event.review.user.login, 'claude') &&
+      contains(github.event.pull_request.labels.*.name, 'auto-merge') &&
+      github.event.review.commit_id == github.event.pull_request.head.sha
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5          # one or two API calls; not a p90, a floor
+    # The job's own GITHUB_TOKEN does nothing here: the merge authenticates with
+    # GH_ACTIONS_TOKEN below. Declaring an empty block rather than inheriting the default
+    # is the point.
+    permissions: {}
+    steps:
+      # --squash: the commit on master takes its subject from the pull request title and
+      # its body from the pull request body, because the repository is configured with
+      # squash_merge_commit_title=PR_TITLE and squash_merge_commit_message=PR_BODY (ADR
+      # 0004). GitHub's defaults would use the single commit's own message on a one-commit
+      # pull request and the review record would hold only by luck.
+      #
+      # The `||` fallback is the COMMON path, not defensive noise: `--auto` calls GitHub's
+      # enablePullRequestAutoMerge mutation, which errors with "Pull request is in clean
+      # status" when the pull request is already mergeable, and here it usually is, since CI
+      # finishes long before a reviewer session does. The fallback is GUARDED by
+      # `gh pr checks --required`: the token is an admin's and bypasses the rule, so a bare
+      # merge would land past the required checks on ANY `--auto` error. The guard costs
+      # nothing on the already-green path and refuses every other.
+      - name: Merge when green
+        env:
+          # The owner's token. This job runs NO agent, which is the only reason the token may
+          # appear in it (ADR 0004).
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: gh pr merge "$PR" --squash --auto --repo "$REPO" || { gh pr checks "$PR" --required --repo "$REPO" && gh pr merge "$PR" --squash --repo "$REPO"; }
