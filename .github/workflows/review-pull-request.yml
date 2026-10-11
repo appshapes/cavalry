@@ -63,6 +63,29 @@ jobs:
         with:
           fetch-depth: 0       # the reviewer diffs against the merge base; a depth-1 clone has none
 
+      # The action's token exchange validates the workflow file: the copy at the run's commit
+      # must be identical to the copy on master, or the exchange is refused and the action
+      # skips itself with a warning (run 38102414890 on pull request 2, whose merge commit
+      # still carried the previous version of this file). A skipped action leaves the verify
+      # step below to fail with "no review", which is true but names no fix. This guard
+      # checks the same thing first and says what to do. A pull request that changes this
+      # file, which a Dependabot pin bump does, can never be agent-reviewed: a person
+      # reviews and merges it (ADR 0004).
+      - name: Guard this workflow file against master
+        env:
+          GH_TOKEN: ${{ github.token }}      # a job-token comment raises no workflow event
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          file=.github/workflows/review-pull-request.yml
+          if git diff --quiet origin/master HEAD -- "$file"; then
+            exit 0
+          fi
+          gh pr comment "$PR_NUMBER" --body "The reviewer agent cannot run on this pull request: \`$file\` at this pull request's merge commit differs from the copy on \`master\`, and the Claude action refuses to run a workflow file that does not match the default branch. If this pull request changes that file (a Dependabot pin bump does), a person reviews and merges it. Otherwise merge \`master\` into the branch and add the \`review\` label to run the reviewer again."
+          echo "::error::$file differs from master at this merge commit; the action would refuse the run (see the comment on the pull request)"
+          exit 1
+
       - name: Review
         id: review                # the verify step below reads this step's outcome into its error line
         # The verify step at the end of this job decides it, not this step's exit status:
