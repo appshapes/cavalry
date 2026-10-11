@@ -1,6 +1,6 @@
 # 0006. Build the documentation gate from mdBook, rustdoc and a link script
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-11
 - **Invariants affected:** 6
 - **Supersedes:** none
@@ -80,8 +80,15 @@ commit or a push. `docs/SUMMARY.md` is grouped by the four kinds of page; the ro
 ## Evidence
 
 - Laptop, 2026-10-11, mdbook 0.5.4 and lychee 0.24.2 from Homebrew: `just docs` and
-  `just lint-docs` pass on this commit; the numbers are in the commit message.
-- Added at acceptance: the CI run ids on both runners with their times.
+  `just lint-docs` pass on commit 27194b8, reporting 10 pages, 54 links and 6 ADRs.
+- Planted violations on the same laptop, after 27194b8, each reverted: a link to a
+  missing page, a link to a missing heading, a page not in `docs/SUMMARY.md` and a
+  paragraph added to accepted ADR 0001 gave four findings in one run; a `pub fn` added
+  to `cavalry-proto` with no doc change and a file under `spec/` with no accepted ADR
+  gave two findings in a second run. The clean tree then passed over `HEAD~1..HEAD`.
+- CI run 38117225595 on 27194b8: `gates (linux)` passed in 17 s and `gates (macos)` in
+  22 s, job start to end, with `mdbook v0.5.4` installed by the pinned action and
+  `just lint-docs` checking the push range `1a44333..27194b8` on both.
 
 ## Consequences
 

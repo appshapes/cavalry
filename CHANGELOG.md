@@ -57,4 +57,4 @@ user-visible change, added in the same commit as the change. The format follows
   `docs/` and the READMEs. `just lint-docs` fails a change to a public item, `spec/`,
   `counters.toml` or `config.toml` that touches no documentation, a page missing from
   `docs/SUMMARY.md`, a malformed ADR, or an edit to an accepted ADR. CI runs both
-  (ADR 0006, proposed).
+  (ADR 0006).
