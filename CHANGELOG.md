@@ -94,3 +94,8 @@ user-visible change, added in the same commit as the change. The format follows
   `spec/vectors/counters-file.py`, and the book includes the page (ADR 0012).
 - `counters.toml` is the single source of every counter, starting with
   `counters.allocated` and `counters.allocation_failed` (ADR 0012).
+- `/next-task` says what the next task is, read from the repository alone: `master`'s
+  CI, open pull requests and issues, the Cavalry list, the slice's feature order (ADR
+  0007), the gates that print `not built yet`, Proposed ADRs, fired Revisit clauses and
+  the active sessions. `/next-task 3` lists three, in order, with what each waits on,
+  and every task names its source.

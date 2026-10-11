@@ -8,7 +8,8 @@ feature that followed this page, commit by commit.
 
 ## Prerequisites
 
-- A card on the Cavalry list of the AppShapes Trello board, one per feature;
+- A card on the Cavalry list of the AppShapes Trello board, one per feature.
+  `/next-task` says which feature is next and whether it has a card, and
   `/trello-create` makes one. Its number prefixes every commit of the feature.
 - The four gates pass on a clean `master`: `just lint`, `just test`, `just docs` and
   `just lint-docs`. `just docs` needs `mdbook` 0.5.4 (`brew install mdbook`), and the
