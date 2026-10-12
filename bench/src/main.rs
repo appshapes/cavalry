@@ -40,12 +40,18 @@ const MAX_NS: u64 = 60_000_000_000;
 
 struct Options {
     messages: u64,
-    warmup: u64,
+    /// `--warmup`, or `None` for the default of one rotation (`Options::warmup()`).
+    warmup_option: Option<u64>,
     body: usize,
     term_length: u32,
     profile: String,
     profile_suffix: String,
     out: Option<PathBuf>,
+    /// The CPUs of the publisher, the subscriber and the conductor, from `--pin`.
+    pin: Option<[usize; 3]>,
+    /// How many times every benchmark runs; the reported run is the median by p99.99,
+    /// and the result lists every run's.
+    repeat: u32,
 }
 
 const USAGE: &str = "\
@@ -53,12 +59,18 @@ cavalry-bench: the latency harness of `just bench` (CLAUDE.md, gate 2; ADR 0015)
 
 Options:
   --messages N      messages per benchmark after the warm-up (default 1000000)
-  --warmup N        messages before recording starts (default 100000)
+  --warmup N        messages before recording starts; the default is one rotation through
+                    all three terms, so no measured message first-touches a page (196608
+                    for the default body and term)
   --body N          body bytes per message, at least 8 for the timestamp (default 32)
   --term-length N   term length of the log buffer, a power of two from 65536 (default 4194304)
   --profile NAME    the baseline profile; default $CAVALRY_BENCH_PROFILE or local-<os>-<arch>
   --profile-suffix S  appended to the profile; `just bench-unchecked` passes -unchecked
   --out DIR         where the result JSON goes (default bench/results); --no-write writes none
+  --pin P,S,C       pin the publisher, the subscriber and the conductor to CPUs P, S and C,
+                    three distinct CPUs, Linux only; the bench host passes 8,10,12 (ADR 0016)
+  --repeat N        run every benchmark N times, report each one's median run by p99.99,
+                    and list every run's p99.99 in the result (default 1; CI passes 21)
   --help            this text
 
 Exit code 1 when a measured loop allocated, or a benchmark could not run.";
@@ -66,7 +78,7 @@ Exit code 1 when a measured loop allocated, or a benchmark could not run.";
 fn parse(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
         messages: 1_000_000,
-        warmup: 100_000,
+        warmup_option: None,
         body: 32,
         term_length: 4 * 1024 * 1024,
         profile: std::env::var("CAVALRY_BENCH_PROFILE").unwrap_or_else(|_| {
@@ -74,6 +86,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
         }),
         profile_suffix: String::new(),
         out: Some(PathBuf::from("bench/results")),
+        pin: None,
+        repeat: 1,
     };
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -88,9 +102,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .map_err(|e| format!("--messages: {e}"))?
             }
             "--warmup" => {
-                options.warmup = value("--warmup")?
-                    .parse()
-                    .map_err(|e| format!("--warmup: {e}"))?
+                options.warmup_option = Some(
+                    value("--warmup")?
+                        .parse()
+                        .map_err(|e| format!("--warmup: {e}"))?,
+                )
             }
             "--body" => {
                 options.body = value("--body")?
@@ -106,6 +122,12 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--profile-suffix" => options.profile_suffix = value("--profile-suffix")?.clone(),
             "--out" => options.out = Some(PathBuf::from(value("--out")?)),
             "--no-write" => options.out = None,
+            "--pin" => options.pin = Some(parse_pin(value("--pin")?)?),
+            "--repeat" => {
+                options.repeat = value("--repeat")?
+                    .parse()
+                    .map_err(|e| format!("--repeat: {e}"))?
+            }
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown option {other}\n\n{USAGE}")),
         }
@@ -118,8 +140,83 @@ fn parse(args: &[String]) -> Result<Options, String> {
     if options.messages == 0 {
         return Err("--messages must be at least 1".to_string());
     }
+    if options.repeat == 0 {
+        return Err("--repeat must be at least 1".to_string());
+    }
+    if options.pin.is_some() && !cfg!(target_os = "linux") {
+        return Err(
+            "--pin needs Linux: macOS has no call that binds a thread to a CPU (ADR 0015)"
+                .to_string(),
+        );
+    }
     options.profile.push_str(&options.profile_suffix);
     Ok(options)
+}
+
+impl Options {
+    /// Messages before recording starts: `--warmup`, or enough to rotate once through all
+    /// three terms, so that every page of the log is mapped and dirty before a sample is
+    /// taken. A first touch of a page is a fault of microseconds, and 1,500 of them in a
+    /// 5,000,000-message run are the whole p99.99; a driver pre-touches its log at
+    /// creation, so the gate measures what comes after.
+    fn warmup(&self) -> u64 {
+        const DEFAULT: u64 = 100_000;
+        const HEADER: usize = 32;
+        let frame = (HEADER + self.body).next_multiple_of(32) as u64;
+        self.warmup_option
+            .unwrap_or_else(|| DEFAULT.max(3 * u64::from(self.term_length) / frame.max(1)))
+    }
+}
+
+/// Where the log buffer and the counters file go: `/dev/shm` on Linux, the memory-backed
+/// file system a driver's log buffers live in, so that no write-back ever write-protects
+/// a page under the publisher; the system's temporary directory elsewhere.
+fn bench_dir() -> PathBuf {
+    let shm = PathBuf::from("/dev/shm");
+    if cfg!(target_os = "linux") && shm.is_dir() {
+        shm
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+/// `--pin P,S,C`: three distinct CPU numbers.
+fn parse_pin(text: &str) -> Result<[usize; 3], String> {
+    let cpus: Vec<usize> = text
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<usize>()
+                .map_err(|e| format!("--pin: {part:?}: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    let [publisher, subscriber, conductor] = cpus[..] else {
+        return Err(format!(
+            "--pin takes three CPUs, publisher,subscriber,conductor; got {}",
+            cpus.len()
+        ));
+    };
+    if publisher == subscriber || publisher == conductor || subscriber == conductor {
+        return Err(
+            "--pin: the three CPUs must differ; two spinning threads on one CPU starve each other"
+                .to_string(),
+        );
+    }
+    Ok([publisher, subscriber, conductor])
+}
+
+/// Binds the calling thread to one CPU when `--pin` named one, and does nothing
+/// otherwise. A thread the host refuses to bind is an error, not a noisier number: the
+/// bench host's CPUs are isolated for this (`bench/host/check.sh`), and a number taken
+/// off them is not comparable with the baseline.
+fn pin_to(cpu: Option<usize>) -> Result<(), String> {
+    match cpu {
+        None => Ok(()),
+        Some(id) if core_affinity::set_for_current(core_affinity::CoreId { id }) => Ok(()),
+        Some(id) => Err(format!(
+            "--pin: could not bind the thread to CPU {id}; is it online? (bench/host/check.sh)"
+        )),
+    }
 }
 
 /// One benchmark's result: the percentiles the gate reads, and the rate.
@@ -165,11 +262,12 @@ fn span_ns(from: Instant, to: Instant) -> u64 {
 /// other sample.
 fn bench_timer(options: &Options) -> Summary {
     let mut hist = histogram();
+    let warmup = options.warmup();
     let start = Instant::now();
-    for i in 0..options.warmup + options.messages {
+    for i in 0..warmup + options.messages {
         let t0 = Instant::now();
         let t1 = Instant::now();
-        if i >= options.warmup {
+        if i >= warmup {
             hist.saturating_record(span_ns(t0, t1));
         }
     }
@@ -187,7 +285,7 @@ struct LogRun {
 /// A publisher, a subscriber and a conductor over a real log buffer and counters file
 /// under the system's temporary directory.
 fn bench_log(options: &Options, log_type: LogType) -> Result<LogRun, String> {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = bench_dir().join(format!(
         "cavalry-bench-{}-{:?}",
         std::process::id(),
         log_type
@@ -238,7 +336,8 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     log.set_connected(true).map_err(|e| e.to_string())?;
     limit.store_release(i64::from(window));
 
-    let total = options.warmup + options.messages;
+    let warmup = options.warmup();
+    let total = warmup + options.messages;
     let epoch = Instant::now();
     let done = Arc::new(AtomicBool::new(false));
 
@@ -246,10 +345,11 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     let subscriber = {
         let dir = dir.to_path_buf();
         let position = subscriber_position.clone();
-        let warmup = options.warmup;
+        let cpu = options.pin.map(|pin| pin[1]);
         thread::Builder::new()
             .name("subscriber".into())
             .spawn(move || -> Result<Histogram<u64>, String> {
+                pin_to(cpu)?;
                 let log =
                     LogBuffers::open(&dir, CORRELATION_ID, false).map_err(|e| e.to_string())?;
                 let mut reader = log.reader(0).map_err(|e| e.to_string())?;
@@ -283,9 +383,11 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         let subscriber_position = subscriber_position.clone();
         let publisher_position = publisher_position.clone();
         let window = i64::from(window);
+        let cpu = options.pin.map(|pin| pin[2]);
         thread::Builder::new()
             .name("conductor".into())
             .spawn(move || -> Result<(), String> {
+                pin_to(cpu)?;
                 let mut clean_position: i64 = 0;
                 let mut limit_now = window;
                 let trip_gain = window / 8;
@@ -317,7 +419,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     let mut region: Option<Region<'static, System>> = None;
     let mut start = Instant::now();
     for i in 0..total {
-        if i == options.warmup {
+        if i == warmup {
             region = Some(Region::new(GLOBAL));
             start = Instant::now();
         }
@@ -337,7 +439,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                 Err(other) => return Err(other.to_string()),
             }
         }
-        if i >= options.warmup {
+        if i >= warmup {
             hist.saturating_record(span_ns(t0, Instant::now()));
         }
     }
@@ -368,18 +470,21 @@ struct Words {
 /// position; another loads the word `spacing` bytes away and times each load, as a
 /// publisher loads its limit, until the stores are done. 0 shares the cache line, 64
 /// shares the 128-byte pair the prefetcher moves, 128 shares nothing (ADR 0011). Returns
-/// the load and the store summaries.
-fn bench_slot(options: &Options, spacing: usize) -> (Summary, Summary) {
+/// the load and the store summaries. The loads run on this thread, the publisher's CPU
+/// under `--pin`; the stores run on the subscriber's.
+fn bench_slot(options: &Options, spacing: usize) -> Result<(Summary, Summary), String> {
     let words = Arc::new(Words {
         words: std::array::from_fn(|_| AtomicI64::new(0)),
     });
     let done = Arc::new(AtomicBool::new(false));
-    let total = options.warmup + options.messages;
+    let warmup = options.warmup();
+    let total = warmup + options.messages;
     let writer = {
         let words = Arc::clone(&words);
         let done = Arc::clone(&done);
-        let warmup = options.warmup;
-        thread::spawn(move || {
+        let cpu = options.pin.map(|pin| pin[1]);
+        thread::spawn(move || -> Result<Summary, String> {
+            pin_to(cpu)?;
             let mut hist = histogram();
             let mut start = Instant::now();
             for i in 0..total {
@@ -395,7 +500,7 @@ fn bench_slot(options: &Options, spacing: usize) -> (Summary, Summary) {
             }
             let elapsed = start.elapsed();
             done.store(true, Ordering::Release);
-            summarize(&hist, elapsed)
+            Ok(summarize(&hist, elapsed))
         })
     };
     let index = spacing / 8;
@@ -404,21 +509,23 @@ fn bench_slot(options: &Options, spacing: usize) -> (Summary, Summary) {
     let mut i: u64 = 0;
     let mut start = Instant::now();
     while !done.load(Ordering::Acquire) {
-        if i == options.warmup {
+        if i == warmup {
             start = Instant::now();
         }
         let t0 = Instant::now();
         sink = sink.wrapping_add(words.words[index].load(Ordering::Acquire));
         let t1 = Instant::now();
-        if i >= options.warmup {
+        if i >= warmup {
             hist.saturating_record(span_ns(t0, t1));
         }
         i += 1;
     }
     let elapsed = start.elapsed();
-    let stores = writer.join().expect("the writer thread");
+    let stores = writer
+        .join()
+        .map_err(|_| "the writer thread panicked".to_string())??;
     std::hint::black_box(sink);
-    (summarize(&hist, elapsed), stores)
+    Ok((summarize(&hist, elapsed), stores))
 }
 
 fn git_sha() -> String {
@@ -434,12 +541,58 @@ fn git_sha() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn json_summary(out: &mut String, name: &str, s: &Summary) {
+fn json_summary(out: &mut String, name: &str, s: &Summary, runs: &[u64]) {
+    let every = runs
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     let _ = write!(
         out,
-        "    \"{name}\": {{\"count\": {}, \"p50_ns\": {}, \"p99_ns\": {}, \"p99_99_ns\": {}, \"max_ns\": {}, \"rate_per_s\": {:.0}}}",
+        "    \"{name}\": {{\"count\": {}, \"p50_ns\": {}, \"p99_ns\": {}, \"p99_99_ns\": {}, \"max_ns\": {}, \"rate_per_s\": {:.0}, \"p99_99_ns_runs\": [{every}]}}",
         s.count, s.p50_ns, s.p99_ns, s.p99_99_ns, s.max_ns, s.rate_per_s
     );
+}
+
+/// What one pass over every benchmark produced.
+struct Pass {
+    benchmarks: BTreeMap<String, Summary>,
+    retries: BTreeMap<String, u64>,
+    allocations: usize,
+}
+
+/// Every benchmark once: the timer, both log types, the three slot spacings.
+fn run_pass(options: &Options) -> Result<Pass, String> {
+    let mut pass = Pass {
+        benchmarks: BTreeMap::new(),
+        retries: BTreeMap::new(),
+        allocations: 0,
+    };
+    pass.benchmarks.insert("timer".into(), bench_timer(options));
+    for (log_type, name) in [
+        (LogType::Exclusive, "exclusive"),
+        (LogType::Concurrent, "concurrent"),
+    ] {
+        let run = bench_log(options, log_type)
+            .map_err(|message| format!("the {name} log benchmark failed: {message}"))?;
+        pass.benchmarks.insert(
+            format!("claim_commit_{}_{name}", options.body),
+            run.claim_commit,
+        );
+        pass.benchmarks
+            .insert(format!("one_way_{}_{name}", options.body), run.one_way);
+        pass.retries.insert(name.into(), run.retries);
+        pass.allocations += run.allocations;
+    }
+    for spacing in [0usize, 64, 128] {
+        let (loads, stores) = bench_slot(options, spacing)
+            .map_err(|message| format!("the slot_padding_{spacing} benchmark failed: {message}"))?;
+        pass.benchmarks
+            .insert(format!("slot_padding_{spacing}_load"), loads);
+        pass.benchmarks
+            .insert(format!("slot_padding_{spacing}_store"), stores);
+    }
+    Ok(pass)
 }
 
 fn main() -> ExitCode {
@@ -457,69 +610,90 @@ fn main() -> ExitCode {
             "cavalry-bench: {cpus} cores available; the log benchmarks run three spinning threads and will be noisy"
         );
     }
+    // The publisher is this thread, and so are the timer and the slot-padding loads.
+    if let Err(message) = pin_to(options.pin.map(|pin| pin[0])) {
+        eprintln!("cavalry-bench: {message}");
+        return ExitCode::FAILURE;
+    }
+    let pinned = options.pin.map_or_else(
+        || "unpinned".to_string(),
+        |pin| format!("pinned to CPUs {},{},{}", pin[0], pin[1], pin[2]),
+    );
     let sha = git_sha();
     let date_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     println!(
-        "cavalry-bench: profile {}, git {sha}, {} {}, {cpus} cores, {} messages after {} warm-up, body {} bytes, term {} bytes",
+        "cavalry-bench: profile {}, git {sha}, {} {}, {cpus} cores, {pinned}, {} messages after {} warm-up, body {} bytes, term {} bytes, files under {}, {} run(s) per benchmark",
         options.profile,
         std::env::consts::OS,
         std::env::consts::ARCH,
         options.messages,
-        options.warmup,
+        options.warmup(),
         options.body,
-        options.term_length
+        options.term_length,
+        bench_dir().display(),
+        options.repeat
     );
 
-    let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
+    // Every pass, then each benchmark's median run by p99.99: on one pass, a 0.01 percent
+    // tail of a few hundred nanoseconds lands anywhere in a band 50 percent wide, while
+    // the median of 21 passes holds within 3 percent, and the result keeps every run's
+    // p99.99 so that the band is on record (ADR 0016). For an even count the upper of
+    // the two middle runs is reported, never a mean of them.
+    let mut passes: BTreeMap<String, Vec<Summary>> = BTreeMap::new();
     let mut retries: BTreeMap<String, u64> = BTreeMap::new();
     let mut allocations: usize = 0;
-
-    benchmarks.insert("timer".into(), bench_timer(&options));
-    for (log_type, name) in [
-        (LogType::Exclusive, "exclusive"),
-        (LogType::Concurrent, "concurrent"),
-    ] {
-        match bench_log(&options, log_type) {
-            Ok(run) => {
-                benchmarks.insert(
-                    format!("claim_commit_{}_{name}", options.body),
-                    run.claim_commit,
-                );
-                benchmarks.insert(format!("one_way_{}_{name}", options.body), run.one_way);
-                retries.insert(name.into(), run.retries);
-                allocations += run.allocations;
-            }
+    for _ in 0..options.repeat {
+        let pass = match run_pass(&options) {
+            Ok(pass) => pass,
             Err(message) => {
-                eprintln!("cavalry-bench: the {name} log benchmark failed: {message}");
+                eprintln!("cavalry-bench: {message}");
                 return ExitCode::FAILURE;
             }
+        };
+        for (name, summary) in pass.benchmarks {
+            passes.entry(name).or_default().push(summary);
         }
+        for (name, count) in pass.retries {
+            let worst = retries.entry(name).or_insert(0);
+            *worst = (*worst).max(count);
+        }
+        allocations += pass.allocations;
     }
-    for spacing in [0usize, 64, 128] {
-        let (loads, stores) = bench_slot(&options, spacing);
-        benchmarks.insert(format!("slot_padding_{spacing}_load"), loads);
-        benchmarks.insert(format!("slot_padding_{spacing}_store"), stores);
+    let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
+    let mut runs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for (name, summaries) in passes {
+        runs.insert(
+            name.clone(),
+            summaries.iter().map(|s| s.p99_99_ns).collect(),
+        );
+        let mut sorted = summaries;
+        sorted.sort_by_key(|s| s.p99_99_ns);
+        let median = sorted.swap_remove(sorted.len() / 2);
+        benchmarks.insert(name, median);
     }
 
-    let messages_measured = 2 * options.messages;
+    let messages_measured = 2 * options.messages * u64::from(options.repeat);
     let allocations_per_message = allocations as f64 / messages_measured as f64;
 
     println!();
     println!(
-        "  {:<28} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14}",
+        "  {:<28} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14}  p99.99 ns of every run",
         "benchmark", "count", "p50 ns", "p99 ns", "p99.99 ns", "max ns", "per second"
     );
     for (name, s) in &benchmarks {
+        let every = runs.get(name).map_or(String::new(), |r| {
+            r.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
+        });
         println!(
-            "  {:<28} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14.0}",
+            "  {:<28} {:>10} {:>10} {:>10} {:>10} {:>12} {:>14.0}  {every}",
             name, s.count, s.p50_ns, s.p99_ns, s.p99_99_ns, s.max_ns, s.rate_per_s
         );
     }
     println!();
     println!(
-        "  publisher retries (back pressure or rotation): exclusive {}, concurrent {}",
+        "  publisher retries (back pressure or rotation), the most of any run: exclusive {}, concurrent {}",
         retries.get("exclusive").copied().unwrap_or(0),
         retries.get("concurrent").copied().unwrap_or(0)
     );
@@ -536,8 +710,17 @@ fn main() -> ExitCode {
     let _ = writeln!(out, "  \"os\": \"{}\",", std::env::consts::OS);
     let _ = writeln!(out, "  \"arch\": \"{}\",", std::env::consts::ARCH);
     let _ = writeln!(out, "  \"cpus\": {cpus},");
+    let _ = writeln!(
+        out,
+        "  \"pinned\": {},",
+        options.pin.map_or_else(
+            || "null".to_string(),
+            |pin| format!("[{}, {}, {}]", pin[0], pin[1], pin[2])
+        )
+    );
     let _ = writeln!(out, "  \"messages\": {},", options.messages);
-    let _ = writeln!(out, "  \"warmup\": {},", options.warmup);
+    let _ = writeln!(out, "  \"repeat\": {},", options.repeat);
+    let _ = writeln!(out, "  \"warmup\": {},", options.warmup());
     let _ = writeln!(out, "  \"body\": {},", options.body);
     let _ = writeln!(out, "  \"term_length\": {},", options.term_length);
     let _ = writeln!(
@@ -555,7 +738,12 @@ fn main() -> ExitCode {
         .iter()
         .map(|(name, s)| {
             let mut line = String::new();
-            json_summary(&mut line, name, s);
+            json_summary(
+                &mut line,
+                name,
+                s,
+                runs.get(name).map_or(&[][..], Vec::as_slice),
+            );
             line
         })
         .collect();

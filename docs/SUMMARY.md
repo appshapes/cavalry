@@ -13,6 +13,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Ask the agent to make a change](how-to/ask-the-agent.md)
 - [Implement a feature, from card to commit](how-to/implement-a-feature.md)
 - [Run the bench and compare it with the baseline](how-to/run-the-bench.md)
+- [Set up a bench host for the latency gate](how-to/set-up-a-bench-host.md)
 
 # Reference
 
@@ -39,3 +40,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0012. Lay out the counters file as Aeron's counter records behind a Cavalry header](decisions/0012-lay-out-the-counters-file.md)
 - [0013. Lay out the log buffer as Aeron's three terms and a metadata page](decisions/0013-lay-out-the-log-buffer.md)
 - [0015. Measure the data plane in process, with a baseline per runner](decisions/0015-measure-in-process-with-per-runner-baselines.md)
+- [0016. Run the latency gate on a dedicated host](decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)

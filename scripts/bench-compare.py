@@ -5,7 +5,14 @@ Reads the newest result `just bench` wrote under bench/results/, finds the basel
 its profile in bench/baseline.json, and fails when any benchmark's p99.99 is more than
 5 percent above the baseline's. Max is printed beside it but does not fail the gate: one
 descheduling on a shared runner moves max, and the 5 percent rule on p99.99 is what
-CLAUDE.md's gate table promises.
+CLAUDE.md's gate table promises. A result made with `--repeat N` carries each
+benchmark's median run by p99.99 as its p99.99 and lists every run's; the list is
+printed as its lowest and highest, so the run-to-run band is beside the number the gate
+reads. When the baseline has such a list, the gate compares the result's median with the
+slowest run of the baseline: on the bench host one row's p99.99 moves by a fifth between
+two processes of the same binary while the others hold within 2 percent, and a rule that
+reads the baseline's band is the 5 percent rule on the rows the host can measure and
+says so on the row it cannot, instead of failing an unchanged commit (ADR 0016).
 
     bench-compare.py              compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>     compare that result file instead
@@ -64,18 +71,21 @@ def compare(result: dict, baseline: dict) -> int:
     rows = []
     for name, now in sorted(result["benchmarks"].items()):
         then = (base or {}).get("benchmarks", {}).get(name)
-        line = [name] + [fmt(now.get(k)) for k in SHOWN]
+        runs = now.get("p99_99_ns_runs") or []
+        spread = f"{fmt(min(runs))} to {fmt(max(runs))}" if len(runs) > 1 else "-"
+        line = [name] + [fmt(now.get(k)) for k in SHOWN] + [spread]
         if then and then.get(GATED):
-            ratio = now[GATED] / then[GATED] - 1
+            slowest = max(then.get("p99_99_ns_runs") or [then[GATED]])
+            ratio = now[GATED] / slowest - 1
             verdict = f"{ratio:+.1%}"
             if ratio > TOLERANCE:
                 verdict += " REGRESSION"
                 failures += 1
-            line += [fmt(then[GATED]), verdict]
+            line += [fmt(slowest), verdict]
         else:
             line += ["-", "no baseline"]
         rows.append(line)
-    header = ["benchmark", "p50", "p99", "p99.99", "max", "baseline p99.99", "p99.99 change"]
+    header = ["benchmark", "p50", "p99", "p99.99", "max", "p99.99 runs", "baseline slowest", "p99.99 change"]
     widths = [max(len(r[i]) for r in rows + [header]) for i in range(len(header))]
     for r in [header] + rows:
         print("  " + "  ".join(c.rjust(w) if i else c.ljust(w) for i, (c, w) in enumerate(zip(r, widths))))
@@ -83,8 +93,9 @@ def compare(result: dict, baseline: dict) -> int:
         print(f"bench-compare: no baseline for profile {profile!r} in {BASELINE.relative_to(ROOT)}; "
               "nothing compared. Set one from this machine's run with --update (ADR 0015).")
     if failures:
-        print(f"bench-compare: {failures} finding(s); a p99.99 more than {TOLERANCE:.0%} above the baseline "
-              "fails (CLAUDE.md, gate 2). Measure again on an idle machine before you believe either number.")
+        print(f"bench-compare: {failures} finding(s); a p99.99 more than {TOLERANCE:.0%} above the baseline's "
+              "slowest run fails (CLAUDE.md, gate 2). Measure again on an idle machine before you believe "
+              "either number.")
         return 1
     print("bench-compare: ok")
     return 0
@@ -96,8 +107,10 @@ def update(result: dict, baseline: dict) -> int:
         "git": result.get("git"),
         "date": result.get("date"),
         "messages": result.get("messages"),
+        "repeat": result.get("repeat"),
         "benchmarks": {
-            name: {k: now[k] for k in SHOWN if k in now} for name, now in sorted(result["benchmarks"].items())
+            name: {k: now[k] for k in SHOWN + ("p99_99_ns_runs",) if k in now}
+            for name, now in sorted(result["benchmarks"].items())
         },
     }
     baseline.setdefault("profiles", {})[profile] = entry

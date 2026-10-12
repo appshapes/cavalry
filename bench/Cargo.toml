@@ -21,6 +21,9 @@ hdrhistogram = "7"
 # The counting allocator behind the zero-allocations-per-message assertion (CLAUDE.md,
 # gate 2). It carries the `unsafe` a global allocator needs, so this crate carries none.
 stats_alloc = "0.1"
+# `--pin`: each measured thread on a CPU of its own on the bench host (ADR 0016). It
+# carries the `unsafe` the affinity call needs, so this crate carries none.
+core_affinity = "0.8"
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]

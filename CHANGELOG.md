@@ -152,3 +152,12 @@ user-visible change, added in the same commit as the change. The format follows
   the runners' baselines, checked and unchecked, so `just bench-compare` now fails a
   regression in CI. Both specs say that whoever branches on a position, the driver or
   the publisher, loads it with an acquire load.
+- The latency gate runs on a dedicated bench host, a self-hosted runner with the label
+  `bench-linux`, tuned by `bench/host/setup-ubuntu.sh` and checked by
+  `bench/host/check.sh` on every run; the shared CI runners still run `just bench` and
+  keep the table, but their numbers are not compared. `just bench --pin P,S,C` binds
+  the publisher, the subscriber and the conductor to those CPUs on Linux,
+  `just bench --repeat N` runs every benchmark N times and reports the median run by
+  p99.99 with every run's on record, the warm-up is now one rotation through all
+  three terms so that no measured message first-touches a page, and the files go under
+  `/dev/shm` on Linux. `docs/how-to/set-up-a-bench-host.md` is the page (ADR 0016).

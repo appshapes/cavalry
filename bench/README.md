@@ -9,7 +9,12 @@ nothing depends on it.
 - Drives `cavalry-shm` directly, with no driver process yet: a publisher thread claims and
   commits into a real log buffer, a subscriber thread reads it through its own read-only
   mapping, and a conductor thread does the driver's duties, the publisher limit and the
-  cleaning, through a real counters file, all under the system's temporary directory.
+  cleaning, through a real counters file, all under `/dev/shm` on Linux and the system's
+  temporary directory elsewhere. The warm-up before recording is one rotation through
+  all three terms, so no measured message first-touches a page. `--pin P,S,C` binds the
+  three threads to those CPUs on Linux, and `--repeat N` runs everything N times and
+  reports each benchmark's median run by p99.99, every run's on record; the bench host
+  runs it with both (ADR 0016).
 - Times every message with `Instant` and records it in an HdrHistogram with fixed bounds,
   so recording never allocates, and reports p50, p99, p99.99 and max, never a mean. A
   `timer` row reports the harness's own overhead.
@@ -22,7 +27,8 @@ nothing depends on it.
 - Runs the measured loops under a counting allocator and fails the run when they
   allocate: the zero-allocations-per-message assertion of the gate.
 - Writes `bench/results/<profile>-<unix time>.json`; `scripts/bench-compare.py` fails a
-  p99.99 regression over 5 percent against `bench/baseline.json` for the profile.
+  p99.99 regression over 5 percent against `bench/baseline.json` for the profile. Only
+  the bench host's profiles have a baseline: a shared runner's run is a report.
 
 ## What it must never do
 
@@ -53,6 +59,9 @@ second compares the newest result with the baseline for the profile and ends wit
   reading the table, recording a baseline, what to do on a regression.
 - [ADR 0015](../docs/decisions/0015-measure-in-process-with-per-runner-baselines.md):
   why the harness is in process, why `Instant` and HdrHistogram, why one baseline per
-  runner.
+  runner; [ADR 0016](../docs/decisions/0016-run-the-latency-gate-on-a-dedicated-host.md):
+  why the gate fails only on the dedicated bench host, and
+  [`docs/how-to/set-up-a-bench-host.md`](../docs/how-to/set-up-a-bench-host.md), how
+  that host is built from `bench/host/`.
 - [`scripts/bench-compare.py`](../scripts/bench-compare.py), the gate's second half, and
   [`bench/baseline.json`](baseline.json), its memory.
