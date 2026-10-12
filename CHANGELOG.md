@@ -228,3 +228,8 @@ user-visible change, added in the same commit as the change. The format follows
   closed or stopped, the command ring's and the counters file's fill, every static
   counter whose `doctor` text applies, and on Linux the host's huge pages, governor,
   isolated CPUs and `/dev/shm`; every finding names the docs anchor that explains it.
+- The `cavalry` binary runs: `cavalry run` starts a driver on the default directory
+  and stops it on Ctrl-C or SIGTERM, leaving the directory for doctor; `cavalry doctor`
+  prints the report and exits 0 when no check failed; `just doctor` runs it; no command
+  prints the usage and exits 2. `cargo add cavalry` gives `cavalry::Driver` and, behind
+  the `cli` feature, `cavalry::doctor`. The how-to is `docs/how-to/run-the-driver.md`.
