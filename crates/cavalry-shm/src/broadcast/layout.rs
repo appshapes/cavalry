@@ -15,7 +15,7 @@ pub const TRAILER_LENGTH: usize = 512;
 /// The first eight bytes of the trailer, `CVLYBCST`, written last by the creator.
 pub const MAGIC: [u8; 8] = *b"CVLYBCST";
 /// The version of `spec/broadcast-buffer.md` this crate reads and writes.
-pub const VERSION: i32 = ring::VERSION;
+pub const VERSION: i32 = 0;
 /// The smallest capacity a buffer may have.
 pub const MIN_CAPACITY: u32 = ring::MIN_CAPACITY;
 /// The largest capacity a buffer may have.
@@ -104,14 +104,14 @@ impl HeaderFields {
 
 /// The 128 bytes of a header for these fields, magic included.
 pub fn encode_header(fields: &HeaderFields) -> [u8; HEADER_LENGTH] {
-    ring::encode_header(MAGIC, &fields.0)
+    ring::encode_header(MAGIC, VERSION, &fields.0)
 }
 
 /// Reads a header from the front of `bytes` for a file of `file_length` bytes and runs
 /// the spec's checks in order: too short, not ready, magic, version, capacity, length.
 /// The `changed` check needs two reads and lives in the file layer.
 pub fn parse_header(bytes: &[u8], file_length: u64) -> Result<HeaderFields, BroadcastError> {
-    ring::parse_header(bytes, file_length, MAGIC, TRAILER_LENGTH)
+    ring::parse_header(bytes, file_length, MAGIC, VERSION, TRAILER_LENGTH)
         .map(HeaderFields)
         .map_err(reject)
 }

@@ -1,6 +1,7 @@
-//! The bytes and the arithmetic of `spec/command-ring.md`, version 0, on plain values:
+//! The bytes and the arithmetic of `spec/command-ring.md`, version 1, on plain values:
 //! the constants, the header encoding and its checks, the record header, and the claim,
-//! unblock and read arithmetic, each as a function a caller feeds the values it loaded.
+//! commit, unblock and read arithmetic, each as a function a caller feeds the values it
+//! loaded.
 //! No `unsafe` and no mapping here, so Miri runs every test that uses this module and
 //! the spec's vectors run against it; `cells` and `file` put the same functions over a
 //! mapping.
@@ -14,8 +15,9 @@ pub const HEADER_LENGTH: usize = ring::HEADER_LENGTH;
 pub const TRAILER_LENGTH: usize = 768;
 /// The first eight bytes of the trailer, `CVLYCMDR`, written last by the creator.
 pub const MAGIC: [u8; 8] = *b"CVLYCMDR";
-/// The version of `spec/command-ring.md` this crate reads and writes.
-pub const VERSION: i32 = ring::VERSION;
+/// The version of `spec/command-ring.md` this crate reads and writes: 1, since commit
+/// and abort became a compare-and-swap (ADR 0018).
+pub const VERSION: i32 = 1;
 /// The smallest capacity a ring may have.
 pub const MIN_CAPACITY: u32 = ring::MIN_CAPACITY;
 /// The largest capacity a ring may have.
@@ -109,14 +111,73 @@ impl HeaderFields {
 
 /// The 128 bytes of a header for these fields, magic included.
 pub fn encode_header(fields: &HeaderFields) -> [u8; HEADER_LENGTH] {
-    ring::encode_header(MAGIC, &fields.0)
+    ring::encode_header(MAGIC, VERSION, &fields.0)
+}
+
+/// What a producer does to its record's word (`spec/command-ring.md`, "Claim, commit
+/// and abort", steps 7 to 9): claim it, load it before writing the message, commit, or
+/// abort.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClaimAction {
+    /// Step 7: the swap from 0 to the claim word.
+    Claim,
+    /// Step 8: the acquire load before the message is written.
+    Write,
+    /// Step 9: the swap to the positive length and the type.
+    Commit,
+    /// Step 9: the swap to the positive length and type −1.
+    Abort,
+}
+
+/// What a [`ClaimAction`] produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClaimOutcome {
+    /// The word was 0: this word is swapped in, the claim word.
+    Claimed(RecordHeader),
+    /// The claim is intact: the message may be written.
+    Writable,
+    /// The claim is intact: this word is swapped in, the committed record's header.
+    Committed(RecordHeader),
+    /// The claim is intact: this word is swapped in, a padding record's header.
+    Aborted(RecordHeader),
+    /// The word is not what the action needs, 0 for a claim and the claim word after:
+    /// the driver unblocked the claim, and nothing is written. The producer reports
+    /// `unblocked`.
+    Unblocked,
+}
+
+/// Steps 7 to 9 on plain values: `claim` is the claim word the producer stores or
+/// stored, `found` the word at the record when it acts. The cells do the same with an
+/// acquire load or a compare-and-swap, where the comparison is the atomic's.
+pub fn plan_claim_action(
+    claim: RecordHeader,
+    found: RecordHeader,
+    action: ClaimAction,
+) -> ClaimOutcome {
+    if action == ClaimAction::Claim {
+        return if found == RecordHeader::new(0, 0) {
+            ClaimOutcome::Claimed(claim)
+        } else {
+            ClaimOutcome::Unblocked
+        };
+    }
+    if found != claim {
+        return ClaimOutcome::Unblocked;
+    }
+    let length = -claim.length();
+    match action {
+        ClaimAction::Claim => ClaimOutcome::Claimed(claim),
+        ClaimAction::Write => ClaimOutcome::Writable,
+        ClaimAction::Commit => ClaimOutcome::Committed(RecordHeader::new(length, claim.type_id())),
+        ClaimAction::Abort => ClaimOutcome::Aborted(RecordHeader::new(length, PADDING_TYPE)),
+    }
 }
 
 /// Reads a header from the front of `bytes` for a file of `file_length` bytes and runs
 /// the spec's checks in order: too short, not ready, magic, version, capacity, length.
 /// The `changed` check needs two reads and lives in the file layer.
 pub fn parse_header(bytes: &[u8], file_length: u64) -> Result<HeaderFields, CommandRingError> {
-    ring::parse_header(bytes, file_length, MAGIC, TRAILER_LENGTH)
+    ring::parse_header(bytes, file_length, MAGIC, VERSION, TRAILER_LENGTH)
         .map(HeaderFields)
         .map_err(reject)
 }

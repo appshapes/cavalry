@@ -4,7 +4,7 @@
 //! mapping's trailer to [`TrailerCells`] and its ring to words, so every struct is
 //! `#[repr(C)]` at the spec's offsets and holds nothing but atomics and reserved bytes.
 //! Under `cfg(loom)` the atomics are loom's and the tests at the bottom check the claim,
-//! read and unblock protocols; `just loom` runs them.
+//! commit, read and unblock protocols; `just loom` runs them.
 
 // Under loom, `file` is not compiled (loom's atomics have another size), so the parts of
 // the cells only `file` calls are unused there.
@@ -12,8 +12,8 @@
 
 use super::CommandRingError;
 use super::layout::{
-    self, ClaimResult, DRIVER_CLOSED, HeaderFields, MAGIC, PADDING_TYPE, PaddingRecord,
-    RECORD_ALIGNMENT, ReadPlan, RecordHeader, TRAILER_LENGTH,
+    self, ClaimAction, ClaimOutcome, ClaimResult, DRIVER_CLOSED, HeaderFields, MAGIC, PADDING_TYPE,
+    PaddingRecord, RECORD_ALIGNMENT, ReadPlan, RecordHeader, TRAILER_LENGTH,
 };
 use crate::ring::{PositionCells, RingHeaderCells, Words, record_word};
 use crate::sync::Ordering;
@@ -49,14 +49,14 @@ impl TrailerCells {
     /// The creator's protocol: the heartbeat and the slots were stored before this; the
     /// header's fields, then the magic with a release store.
     pub(crate) fn publish(&self, fields: &HeaderFields) {
-        self.header.publish(MAGIC, fields.ring());
+        self.header.publish(MAGIC, layout::VERSION, fields.ring());
     }
 
     /// A reader's protocol: the magic with an acquire load, then the spec's checks for
     /// a file of `file_length` bytes, in order.
     pub(crate) fn read(&self, file_length: u64) -> Result<HeaderFields, CommandRingError> {
         self.header
-            .read(MAGIC, file_length, TRAILER_LENGTH)
+            .read(MAGIC, layout::VERSION, file_length, TRAILER_LENGTH)
             .map(HeaderFields::from_ring)
             .map_err(layout::reject)
     }
@@ -105,17 +105,27 @@ pub(crate) fn claim(
             continue;
         }
         if let Some(padding) = plan.padding {
-            write_padding(words, padding);
+            // Step 6: a failed swap means the driver padded this gap meanwhile, over
+            // the same bytes, and there is nothing left to write.
+            let _ = pad_from(words, padding, 0);
         }
         return match plan.result {
             ClaimResult::Full => Err(CommandRingError::Full {
                 needed: plan.aligned_length,
             }),
             ClaimResult::Claimed { index } => {
+                // Step 7: the claim word, swapped in from 0. A failed swap means the
+                // driver padded a gap over this index before the claim word landed.
                 let negative = -(plan.record_length as i32);
                 words
                     .word(index)
-                    .store(record_word(negative, type_id), Ordering::Release);
+                    .compare_exchange(
+                        0,
+                        record_word(negative, type_id),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .map_err(|_| CommandRingError::Unblocked { index })?;
                 Ok(Claimed {
                     index,
                     record_length: plan.record_length,
@@ -126,32 +136,77 @@ pub(crate) fn claim(
     }
 }
 
-/// A padding record's length and type −1 in one release store.
-fn write_padding(words: &impl Words, padding: PaddingRecord) {
-    words.word(padding.index).store(
-        record_word(padding.length as i32, PADDING_TYPE),
-        Ordering::Release,
-    );
+/// A padding record's length and type −1, swapped in from the word `expected` that its
+/// writer loaded; `false` when another party changed the word first, and nothing is
+/// written.
+fn pad_from(words: &impl Words, padding: PaddingRecord, expected: u64) -> bool {
+    words
+        .word(padding.index)
+        .compare_exchange(
+            expected,
+            record_word(padding.length as i32, PADDING_TYPE),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
 }
 
-/// Commit: the positive length and the type in one release store, which publishes the
-/// message written before it.
-pub(crate) fn commit(words: &impl Words, claimed: &Claimed) {
-    words.word(claimed.index).store(
-        record_word(claimed.record_length as i32, claimed.type_id),
-        Ordering::Release,
-    );
+/// The claim word: the negative length and the type the producer stored when it claimed.
+fn claim_word(claimed: &Claimed) -> RecordHeader {
+    RecordHeader::new(-(claimed.record_length as i32), claimed.type_id)
 }
 
-/// Abort: the positive length and type −1 in one release store; the consumer skips it.
-pub(crate) fn abort(words: &impl Words, claimed: &Claimed) {
-    write_padding(
-        words,
-        PaddingRecord {
+/// Step 8 of a claim (`spec/command-ring.md`, "Claim, commit and abort"): the acquire
+/// load before the message is written. A word that is not the claim word is
+/// [`CommandRingError::Unblocked`]: the driver padded the claim, and nothing is written.
+pub(crate) fn check_claim(words: &impl Words, claimed: &Claimed) -> Result<(), CommandRingError> {
+    let found = RecordHeader::from_word(words.word(claimed.index).load(Ordering::Acquire));
+    match layout::plan_claim_action(claim_word(claimed), found, ClaimAction::Write) {
+        ClaimOutcome::Writable => Ok(()),
+        _ => Err(CommandRingError::Unblocked {
             index: claimed.index,
-            length: claimed.record_length,
-        },
-    );
+        }),
+    }
+}
+
+/// Step 9: the compare-and-swap from the claim word to the record's header for `action`,
+/// release on success, which publishes the message written before it, acquire on
+/// failure. A failed swap is [`CommandRingError::Unblocked`], and nothing is stored.
+fn swap(
+    words: &impl Words,
+    claimed: &Claimed,
+    action: ClaimAction,
+) -> Result<(), CommandRingError> {
+    let claim = claim_word(claimed);
+    let after = match layout::plan_claim_action(claim, claim, action) {
+        ClaimOutcome::Committed(header) | ClaimOutcome::Aborted(header) => header,
+        ClaimOutcome::Claimed(_) | ClaimOutcome::Writable | ClaimOutcome::Unblocked => {
+            unreachable!("a swap commits or aborts")
+        }
+    };
+    words
+        .word(claimed.index)
+        .compare_exchange(
+            claim.word(),
+            after.word(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map(|_| ())
+        .map_err(|_| CommandRingError::Unblocked {
+            index: claimed.index,
+        })
+}
+
+/// Commit: the positive length and the type, swapped in from the claim word.
+pub(crate) fn commit(words: &impl Words, claimed: &Claimed) -> Result<(), CommandRingError> {
+    swap(words, claimed, ClaimAction::Commit)
+}
+
+/// Abort: the positive length and type −1, swapped in from the claim word; the consumer
+/// skips the record.
+pub(crate) fn abort(words: &impl Words, claimed: &Claimed) -> Result<(), CommandRingError> {
+    swap(words, claimed, ClaimAction::Abort)
 }
 
 /// The ring's words with acquire loads, as the read arithmetic wants them.
@@ -189,20 +244,28 @@ pub(crate) fn read(
 }
 
 /// The driver's unblock (`spec/command-ring.md`, "Unblocking"): the padding record it
-/// wrote, or `None` when nothing was blocked.
+/// wrote, or `None` when nothing was blocked, or when the producer committed, aborted
+/// or claimed there between the driver's load and its swap, in which case nothing is
+/// written and the next read or unblock finds the new word (ADR 0018).
 pub(crate) fn unblock(
     words: &impl Words,
     trailer: &TrailerCells,
 ) -> Result<Option<PaddingRecord>, CommandRingError> {
     let head = trailer.head.load_acquire();
     let tail = trailer.tail.load_acquire();
+    let consumer_index = (head as u64 & u64::from(words.capacity() - 1)) as u32;
+    let mut observed = 0u64;
     let plan = layout::plan_unblock(words.capacity(), head, tail, |index| {
-        words.word(index).load(Ordering::Acquire)
+        let word = words.word(index).load(Ordering::Acquire);
+        if index == consumer_index {
+            observed = word;
+        }
+        word
     })?;
-    if let Some(padding) = plan {
-        write_padding(words, padding);
+    match plan {
+        Some(padding) if pad_from(words, padding, observed) => Ok(Some(padding)),
+        _ => Ok(None),
     }
-    Ok(plan)
 }
 
 /// Step 1 of a claim: the consumer heartbeat against the producer's clock `now` and the
@@ -262,7 +325,7 @@ mod tests {
         });
         assert_eq!(plan.stop, layout::ReadStop::Claimed);
         words.word(8).store(0xABCD, Ordering::Relaxed);
-        commit(&words, &claimed);
+        commit(&words, &claimed).unwrap();
         let mut seen = None;
         let plan = read(&words, &trailer, 16, |index, header| {
             seen = Some((index, header))
@@ -278,9 +341,9 @@ mod tests {
     fn the_full_ring_wraps_with_padding_and_an_unblock_frees_a_dead_claim() {
         let words = WordVec::zeroed(64);
         let trailer = TrailerCells::zeroed();
-        commit(&words, &claim(&words, &trailer, 2, 0).unwrap()); // 8 bytes at 0
+        commit(&words, &claim(&words, &trailer, 2, 0).unwrap()).unwrap(); // 8 bytes at 0
         for _ in 0..3 {
-            commit(&words, &claim(&words, &trailer, 1, 8).unwrap()); // 16 each, to 56
+            commit(&words, &claim(&words, &trailer, 1, 8).unwrap()).unwrap(); // 16 each, to 56
         }
         assert_eq!(trailer.tail.load_acquire(), 56);
         // With 8 free bytes in all, a 16-byte record is refused outright and nothing moves.
@@ -370,7 +433,7 @@ mod loom_tests {
                     words
                         .word(claimed.index + 8)
                         .store(0xABCD, Ordering::Relaxed);
-                    commit(&*words, &claimed);
+                    commit(&*words, &claimed).unwrap();
                 })
             };
             loop {
@@ -441,7 +504,7 @@ mod loom_tests {
                         words
                             .word(claimed.index + 8)
                             .store(n * 0x1111, Ordering::Relaxed);
-                        commit(&*words, &claimed);
+                        commit(&*words, &claimed).unwrap();
                     }
                 })
             };
@@ -487,7 +550,7 @@ mod loom_tests {
                 let trailer = Arc::clone(&trailer);
                 thread::spawn(move || {
                     let claimed = claim(&*words, &*trailer, 2, 8).unwrap();
-                    commit(&*words, &claimed);
+                    commit(&*words, &claimed).unwrap();
                 })
             };
             dead.join().unwrap();
@@ -509,6 +572,86 @@ mod loom_tests {
                 "the dead claim delivers nothing, the live one once"
             );
             assert_eq!(trailer.head.load_acquire(), 32);
+        });
+    }
+
+    /// A producer claims, checks its claim, writes its message and commits, while the
+    /// driver unblocks and reads, in every interleaving (ADR 0018): the record is
+    /// delivered exactly when the producer's commit succeeded, a producer whose index
+    /// or claim was padded reports `unblocked` at the claim, at the check or at the swap
+    /// and stores nothing more, and the ring ends empty with the slot cleared, never
+    /// with a positive header behind the head and never with a committed record under
+    /// a padding. Before the unblock swapped, the model found the second: a padding
+    /// store landing on a record committed an instant earlier.
+    #[test]
+    fn a_late_commit_after_an_unblock_is_refused() {
+        loom::model(|| {
+            let words = Arc::new(WordVec::zeroed(64));
+            let trailer = Arc::new(TrailerCells::zeroed());
+            let producer = {
+                let words = Arc::clone(&words);
+                let trailer = Arc::clone(&trailer);
+                thread::spawn(move || {
+                    let outcome = claim(&*words, &*trailer, 1, 8).and_then(|claimed| {
+                        assert_eq!(claimed.index, 0);
+                        check_claim(&*words, &claimed)?;
+                        words
+                            .word(claimed.index + 8)
+                            .store(0xABCD, Ordering::Relaxed);
+                        commit(&*words, &claimed)
+                    });
+                    match outcome {
+                        Ok(()) => true,
+                        Err(CommandRingError::Unblocked { index }) => {
+                            assert_eq!(index, 0);
+                            false
+                        }
+                        Err(other) => panic!("{other}"),
+                    }
+                })
+            };
+            let mut delivered = Vec::new();
+            let mut trace = Vec::new();
+            loop {
+                let unblocked = unblock(&*words, &*trailer).unwrap();
+                let plan = read(&*words, &*trailer, 16, |index, header| {
+                    delivered.push((index, header, words.word(index + 8).load(Ordering::Relaxed)));
+                });
+                // The ring is empty before the producer claims and after the consumer
+                // has read or skipped its record; only the second ends the loop.
+                let (head, tail) = (trailer.head.load_acquire(), trailer.tail.load_acquire());
+                trace.push(format!(
+                    "unblock {unblocked:?}; read {:?}; head {head} tail {tail} word0 {:?} word8 {:#x}",
+                    plan,
+                    RecordHeader::from_word(words.word(0).load(Ordering::Acquire)),
+                    words.word(8).load(Ordering::Acquire)
+                ));
+                if tail > 0 && head == tail {
+                    break;
+                }
+                thread::yield_now();
+            }
+            let committed = producer.join().unwrap();
+            if committed {
+                assert_eq!(
+                    delivered,
+                    vec![(0, RecordHeader::new(16, 1), 0xABCD)],
+                    "committed but not delivered; trace: {trace:#?}"
+                );
+            } else {
+                assert_eq!(
+                    delivered,
+                    vec![],
+                    "an unblocked claim delivers nothing; trace: {trace:#?}"
+                );
+            }
+            assert_eq!(trailer.head.load_acquire(), 16);
+            assert_eq!(trailer.tail.load_acquire(), 16);
+            assert_eq!(
+                words.word(0).load(Ordering::Acquire),
+                0,
+                "the slot is cleared, with no late header behind the head"
+            );
         });
     }
 }

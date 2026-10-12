@@ -7,8 +7,9 @@
 //! it with the rest.
 
 use cavalry_shm::command_ring::layout::{
-    ClaimResult, HEADER_LENGTH, HeaderFields, PADDING_TYPE, PaddingRecord, ReadStop, RecordHeader,
-    RecordState, encode_header, parse_header, plan_claim, plan_read, plan_unblock,
+    ClaimAction, ClaimOutcome, ClaimResult, HEADER_LENGTH, HeaderFields, PADDING_TYPE,
+    PaddingRecord, ReadStop, RecordHeader, RecordState, encode_header, parse_header, plan_claim,
+    plan_claim_action, plan_read, plan_unblock,
 };
 use serde_json::Value;
 
@@ -259,6 +260,32 @@ fn unblock_vector(name: &str, vector: &Value) {
     }
 }
 
+fn commit_vector(name: &str, vector: &Value) {
+    let inputs = &vector["inputs"];
+    let header = |value: &Value| RecordHeader::new(i32_of(value, "length"), i32_of(value, "type"));
+    let action = match text(inputs, "operation") {
+        "claim" => ClaimAction::Claim,
+        "write" => ClaimAction::Write,
+        "commit" => ClaimAction::Commit,
+        "abort" => ClaimAction::Abort,
+        other => panic!("{name}: unknown operation {other}"),
+    };
+    let outcome = plan_claim_action(header(&inputs["claim"]), header(&inputs["found"]), action);
+    let expected = &vector["fields"];
+    let (result, written) = match outcome {
+        ClaimOutcome::Claimed(word) => ("claimed", Some(word)),
+        ClaimOutcome::Writable => ("writable", None),
+        ClaimOutcome::Committed(word) => ("committed", Some(word)),
+        ClaimOutcome::Aborted(word) => ("aborted", Some(word)),
+        ClaimOutcome::Unblocked => ("unblocked", None),
+    };
+    assert_eq!(result, text(expected, "result"), "{name}: result");
+    let expected_written = expected["written"]
+        .as_object()
+        .map(|_| header(&expected["written"]));
+    assert_eq!(written, expected_written, "{name}: written");
+}
+
 fn read_vector(name: &str, vector: &Value) {
     let inputs = &vector["inputs"];
     let capacity = u32_of(inputs, "capacity");
@@ -329,7 +356,7 @@ fn read_vector(name: &str, vector: &Value) {
 #[test]
 fn every_vector_in_spec_vectors_command_ring_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("command-ring.json parses");
-    assert_eq!(doc["version"], 0, "the vectors are for version 0");
+    assert_eq!(doc["version"], 1, "the vectors are for version 1");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
         vectors.len() >= 56,
@@ -343,6 +370,7 @@ fn every_vector_in_spec_vectors_command_ring_json() {
             "claim" => claim_vector(name, vector),
             "unblock" => unblock_vector(name, vector),
             "read" => read_vector(name, vector),
+            "commit" => commit_vector(name, vector),
             other => panic!("{name}: unknown region {other}"),
         }
     }

@@ -1,4 +1,4 @@
-# Command ring, version 0
+# Command ring, version 1
 
 The command ring is the shared-memory file through which every client on a host sends
 the driver its commands: add a publication, add a subscription, remove one, keep alive.
@@ -38,7 +38,7 @@ difference as `changed` (ADR 0010).
 | Offset | Size | Field | Type | Writer | Readers | Bound |
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 8 | magic | bytes | the creator, last, with a release store | everyone, first, with an acquire load | the bytes `43 56 4C 59 43 4D 44 52` (`CVLYCMDR`) |
-| 8 | 4 | version | i32 | the creator | everyone | 0 |
+| 8 | 4 | version | i32 | the creator | everyone | 1 |
 | 12 | 4 | capacity | i32 | the creator | everyone | a power of two from 4096 to 1073741824; the file length is capacity + 768 |
 | 16 | 8 | creator pid | i64 | the creator | `doctor` | greater than 0 |
 | 24 | 8 | start timestamp | i64 | the creator | `doctor` | nanoseconds since the Unix epoch, 0 or more |
@@ -75,14 +75,18 @@ The longest message is capacity ÷ 8 bytes.
 
 | Offset | Size | Field | Type | Writer | Readers | Bound |
 | --- | --- | --- | --- | --- | --- | --- |
-| 0 | 4 | length | i32 | the producer that claimed the record, with release stores: negative when it claims, positive when it commits; the consumer, when it unblocks, and with plain stores when it clears | the consumer, with acquire loads | 0: unclaimed. Otherwise its magnitude is 8 + the message length: 8 or more, and its aligned length at most capacity − index; when the type is not −1, at most 8 + capacity ÷ 8 |
+| 0 | 4 | length | i32 | the producer that claimed the record: negative with a compare-and-swap from 0 when it claims, positive with a compare-and-swap from that word when it commits or aborts; the consumer, with a compare-and-swap from the word it loaded when it unblocks, and with plain stores when it clears | the consumer, with acquire loads | 0: unclaimed. Otherwise its magnitude is 8 + the message length: 8 or more, and its aligned length at most capacity − index; when the type is not −1, at most 8 + capacity ÷ 8 |
 | 4 | 4 | type | i32 | as the length, in the same 8-byte store | the consumer | −1, a padding record, which delivers nothing; or 1 or more, the message type id |
 | 8 | length − 8 | message | bytes | the producer, before it commits | the consumer | opaque to this page |
 
-Length and type are written together, in one 8-byte store, so that a reader that sees a
+Length and type are written together, in one 8-byte word, so that a reader that sees a
 length sees the type that goes with it. A negative length is a claim in progress: a
 reader stops at it, and the driver knows it when it unblocks. A positive length is a
-committed record.
+committed record. Every change to the word that another party may be racing is a
+compare-and-swap from the value its writer last loaded, so that of a commit and an
+unblock exactly one takes effect and the other learns it; only the clearing of records
+the consumer has read is a plain store, since no producer may claim there before the
+head is released (ADR 0018).
 
 ## Claim, commit and abort
 
@@ -110,17 +114,35 @@ A producer writes a record in place:
 5. It compare-and-swaps the tail position from the value it loaded to tail + aligned
    length + the padding's length, or to tail + the padding's length when the result is
    `full`; on failure it goes back to step 2.
-6. If there is a padding record, it writes it: the padding's length and type −1 in one
-   release store at the tail's index.
+6. If there is a padding record, it writes it: a compare-and-swap of the word at the
+   tail's index from 0 to the padding's length and type −1. A failed swap means the
+   driver padded that gap meanwhile ("Unblocking", step 3), which covers the same bytes,
+   and the producer goes on.
 7. If the result is `full`, it is done. Otherwise the record is claimed at its index: it
-   writes the negative record length and the type in one release store, then the message.
-   Commit: it stores the positive record length and the type in one release store. Abort:
-   it stores the positive record length and type −1 in one release store, and the consumer
-   skips the record.
+   compare-and-swaps the word there from 0 to the claim word, the negative record length
+   and the type, with release ordering on success and acquire on failure. A failed swap
+   is `unblocked`: the driver padded a gap over the index before the claim word landed,
+   the tail has moved past the record, and the producer reports `unblocked` to its
+   caller, whose command was not delivered and may be claimed again.
+8. Before it writes the message, it loads the record's 8-byte word with an acquire load.
+   A word that is not its claim word is `unblocked`: the driver padded the claim after
+   the unblock timeout ("Unblocking"), and the consumer may have read and zeroed it or
+   another producer claimed the index since. The producer writes nothing, and reports
+   `unblocked` to its caller, whose command was not delivered and may be claimed again.
+   Otherwise it writes the message.
+9. Commit: it compare-and-swaps the record's word from the claim word to the positive
+   record length and the type, with release ordering on success and acquire ordering on
+   failure. Abort: the same swap to the positive record length and type −1, a padding
+   record the consumer skips. A failed swap is `unblocked`, as in step 8: nothing more is
+   stored, and the caller's command was not delivered. A stall between the load of step
+   8 and the message's stores that outlasts the unblock timeout can still put bytes into
+   a record another producer has claimed at that index since; the unblock timeout is the
+   bound, since a producer stalled that long has been timed out as a client, and the
+   driver validates every command it decodes (ADR 0018).
 
-A producer that copies a message in (write) runs the same steps with the message written
-between the stores of step 7. A message longer than capacity ÷ 8 is `message`, and a type
-below 1 is `type`; the producer's API refuses both before step 1.
+A producer that copies a message in (write) runs the same steps, with the message
+written in step 8. A message longer than capacity ÷ 8 is `message`, and a type below 1
+is `type`; the producer's API refuses both before step 1.
 
 ## Reading
 
@@ -160,16 +182,20 @@ the tail is beyond it, the driver unblocks:
 2. It loads the length and type at the head's index, the consumer index, with an acquire
    load. A positive length is a committed record the next read will take: nothing is
    blocked. A negative length is the stale claim: after the checks of "Record", whose
-   failure is `record` and adds one to `command_ring.rejected_record`, the driver stores
-   its magnitude as the length and −1 as the type in one release store, a padding record
-   the next read skips.
+   failure is `record` and adds one to `command_ring.rejected_record`, the driver
+   compare-and-swaps the word from the one it loaded to its magnitude as the length and
+   −1 as the type, a padding record the next read skips. A failed swap means the
+   producer committed or aborted meanwhile, and the driver writes nothing: the next read
+   takes or skips the record.
 3. A length of 0 means the claimant died before its first store. The driver scans forward
    in 8-byte steps from the consumer index to a limit: the tail's index when it is above
    the consumer index, else the end of the ring. It stops at the first index whose length
    word is not 0; then it scans back to the consumer index to confirm every word between
-   is still 0, since a claim may have landed meanwhile, and if so stores the gap's
-   length, that index − consumer index, and type −1 in one release store at the consumer
-   index. If it reaches the limit with every word 0, what it does depends on the limit:
+   is still 0, since a claim may have landed meanwhile, and if so compare-and-swaps the
+   word at the consumer index from 0 to the gap's length, that index − consumer index,
+   and type −1; a failed swap means a claim landed there after the scan, and the driver
+   writes nothing. If it reaches the limit with every word 0, what it does depends on
+   the limit:
    at the tail's index it writes nothing, since the next claim will bound the gap, as in
    the design this page copies; at the end of the ring it scans back the same way and
    covers the gap to the end, because no later claim can bound it and the ring would
@@ -177,6 +203,15 @@ the tail is beyond it, the driver unblocks:
    the driver loaded the tail belongs to a live client, and its command is lost under the
    padding; only the record at the consumer index is known to be older than the unblock
    timeout, and the client's own response timeout reports the loss.
+
+A producer whose claim was padded finds the word is not its claim word before it writes
+its message, or its claim's, commit's or abort's compare-and-swap fails, and reports
+`unblocked` (steps 7 to 9 of "Claim, commit and abort"); it stores nothing more, so a
+late commit never puts a positive header behind the head, which in version 0 delivered
+a command nobody sent on the next lap and left the head past the tail, and a padding
+written by the driver never covers a record a producer committed in the same instant,
+which in version 0 lost that command while its producer was told it was delivered
+(ADR 0018).
 
 Each record an unblock writes adds one to `command_ring.unblocked`. The unblock timeout
 is the driver's to specify; it is the client liveness timeout, 10 s in Aeron, so that a
@@ -224,7 +259,7 @@ fails, by the name in the first column.
 | `too-short` | The file is shorter than 768 bytes, or fewer than 128 header bytes were given. |
 | `not-ready` | Magic is eight zero bytes: the creator has not finished. Wait and read again. |
 | `magic` | Magic is any other value than `CVLYCMDR`. |
-| `version` | Version is not 0. |
+| `version` | Version is not 1. |
 | `capacity` | Capacity is not a power of two from 4096 to 1073741824. |
 | `length` | The file length is not capacity + 768. |
 | `changed` | The header read through the final mapping differs from the first read. |
@@ -236,8 +271,11 @@ record's length or type is outside the bounds of "Record"; `full` when a claim f
 fewer free bytes than it needs, with nothing written from step 3 and only the padding to
 the end of the ring written from step 4; `message` when a producer is given a message longer than
 capacity ÷ 8, and `type` when it is given a type below 1, both refused before anything
-is written; `driver-closed` when the consumer heartbeat is −1, and `driver-timeout` when
-it is older than the driver timeout.
+is written; `unblocked` when a producer's claim swap finds the index padded, or it finds
+its claim word gone before it writes its message, or its commit's or abort's
+compare-and-swap fails, with nothing more written;
+`driver-closed` when the consumer heartbeat is −1, and `driver-timeout` when it is older
+than the driver timeout.
 
 ## Vectors
 
@@ -260,6 +298,12 @@ reference encoder. Each vector has a `region`:
 - `read`: an arithmetic vector: the capacity, the head, the message limit and the ring's
   bytes as hex, and the `fields` a read produces: why it stopped, the messages delivered
   in order with their types, the bytes read, the head after, and the bytes it zeroed.
+- `commit`: an arithmetic vector: the claim word a producer stores or stored, as its
+  length and type, the word found at the record when the producer acts, and the
+  operation, `claim` for the swap of step 7 from 0, `write` for the load of step 8,
+  `commit` or `abort` for the swap of step 9; and the `fields`: the result, `claimed`,
+  `writable`, `committed`, `aborted` or `unblocked`, and the word written, as length and
+  type, or none.
 
 A conforming implementation decodes every valid vector to its fields, encodes those
 fields to the same bytes, computes every arithmetic vector's fields from its inputs, and

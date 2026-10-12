@@ -18,8 +18,6 @@ use crate::sync::{AtomicI64, AtomicU64, Ordering, UnsafeCell};
 pub(crate) const HEADER_LENGTH: usize = 128;
 /// The length of one trailer slot: the 128 bytes a core moves at once (ADR 0011).
 pub(crate) const SLOT_LENGTH: usize = 128;
-/// The version both layouts are at.
-pub(crate) const VERSION: i32 = 0;
 /// The smallest ring: one page, and a longest message of 512 bytes.
 pub(crate) const MIN_CAPACITY: u32 = 4096;
 /// The largest ring, 1 GiB: a capacity that fits an i32 with room for a trailer.
@@ -88,10 +86,10 @@ pub(crate) const fn align_record(length: u32) -> u32 {
     (length + RECORD_ALIGNMENT - 1) & !(RECORD_ALIGNMENT - 1)
 }
 
-/// The header's bytes after the magic.
-pub(crate) fn encode_header_rest(header: &RingHeader) -> [u8; HEADER_LENGTH - 8] {
+/// The header's bytes after the magic, for a layout at `version`.
+pub(crate) fn encode_header_rest(version: i32, header: &RingHeader) -> [u8; HEADER_LENGTH - 8] {
     let raw = RawHeaderRest {
-        version: I32::new(VERSION),
+        version: I32::new(version),
         capacity: I32::new(header.capacity as i32),
         creator_pid: I64::new(header.creator_pid),
         start_timestamp: I64::new(header.start_timestamp),
@@ -100,11 +98,16 @@ pub(crate) fn encode_header_rest(header: &RingHeader) -> [u8; HEADER_LENGTH - 8]
     zerocopy::transmute!(raw)
 }
 
-/// The 128 bytes of a header for these fields, `magic` included.
-pub(crate) fn encode_header(magic: [u8; 8], header: &RingHeader) -> [u8; HEADER_LENGTH] {
+/// The 128 bytes of a header for these fields, `magic` included, for a layout at
+/// `version`.
+pub(crate) fn encode_header(
+    magic: [u8; 8],
+    version: i32,
+    header: &RingHeader,
+) -> [u8; HEADER_LENGTH] {
     let mut out = [0u8; HEADER_LENGTH];
     out[..8].copy_from_slice(&magic);
-    out[8..].copy_from_slice(&encode_header_rest(header));
+    out[8..].copy_from_slice(&encode_header_rest(version, header));
     out
 }
 
@@ -119,18 +122,20 @@ pub(crate) fn check_magic(found: [u8; 8], expected: [u8; 8]) -> Result<(), Heade
     Ok(())
 }
 
-/// The version, capacity and length checks on the bytes after the magic, for a file of
-/// `file_length` bytes whose trailer is `trailer_length` bytes.
+/// The version, capacity and length checks on the bytes after the magic, for a layout
+/// at `expected_version` and a file of `file_length` bytes whose trailer is
+/// `trailer_length` bytes.
 pub(crate) fn parse_header_rest(
     rest: &[u8; HEADER_LENGTH - 8],
     file_length: u64,
+    expected_version: i32,
     trailer_length: usize,
 ) -> Result<RingHeader, HeaderReject> {
     let Ok(raw) = RawHeaderRest::ref_from_bytes(rest) else {
         return Err(HeaderReject::TooShort(rest.len() as u64));
     };
     let version = raw.version.get();
-    if version != VERSION {
+    if version != expected_version {
         return Err(HeaderReject::Version(version));
     }
     let capacity = check_capacity(i64::from(raw.capacity.get()))?;
@@ -155,6 +160,7 @@ pub(crate) fn parse_header(
     bytes: &[u8],
     file_length: u64,
     magic: [u8; 8],
+    version: i32,
     trailer_length: usize,
 ) -> Result<RingHeader, HeaderReject> {
     if file_length < trailer_length as u64 {
@@ -168,7 +174,7 @@ pub(crate) fn parse_header(
     check_magic(found, magic)?;
     let mut rest = [0u8; HEADER_LENGTH - 8];
     rest.copy_from_slice(&bytes[8..HEADER_LENGTH]);
-    parse_header_rest(&rest, file_length, trailer_length)
+    parse_header_rest(&rest, file_length, version, trailer_length)
 }
 
 // ---- the record word ---------------------------------------------------------------
@@ -229,8 +235,8 @@ impl RingHeaderCells {
 
     /// The creator's protocol: the fields after the magic, then `magic` with a release
     /// store. Everything else in the trailer was written before this call.
-    pub(crate) fn publish(&self, magic: [u8; 8], header: &RingHeader) {
-        let rest = encode_header_rest(header);
+    pub(crate) fn publish(&self, magic: [u8; 8], version: i32, header: &RingHeader) {
+        let rest = encode_header_rest(version, header);
         // SAFETY: the creator is the only writer of a header and publishes once, on a
         // file it created; no reader reads `rest` before the release store below, which
         // `read` acquires first.
@@ -244,6 +250,7 @@ impl RingHeaderCells {
     pub(crate) fn read(
         &self,
         magic: [u8; 8],
+        version: i32,
         file_length: u64,
         trailer_length: usize,
     ) -> Result<RingHeader, HeaderReject> {
@@ -253,7 +260,7 @@ impl RingHeaderCells {
         // after writing `rest`, and the header never changes after that (both pages,
         // "Header"), so the bytes are complete and nobody writes them.
         let rest = self.rest.with(|p| unsafe { p.read() });
-        parse_header_rest(&rest, file_length, trailer_length)
+        parse_header_rest(&rest, file_length, version, trailer_length)
     }
 }
 
@@ -372,17 +379,22 @@ mod tests {
             start_timestamp: 2,
         };
         assert_eq!(
-            cells.read(*b"CVLYCMDR", 4096 + 768, 768),
+            cells.read(*b"CVLYCMDR", 0, 4096 + 768, 768),
             Err(HeaderReject::NotReady)
         );
-        cells.publish(*b"CVLYCMDR", &header);
-        assert_eq!(cells.read(*b"CVLYCMDR", 4096 + 768, 768), Ok(header));
+        cells.publish(*b"CVLYCMDR", 0, &header);
+        assert_eq!(cells.read(*b"CVLYCMDR", 0, 4096 + 768, 768), Ok(header));
         assert_eq!(
-            cells.read(*b"CVLYBCST", 4096 + 768, 768),
+            cells.read(*b"CVLYCMDR", 1, 4096 + 768, 768),
+            Err(HeaderReject::Version(0)),
+            "a layout at another version refuses the header"
+        );
+        assert_eq!(
+            cells.read(*b"CVLYBCST", 0, 4096 + 768, 768),
             Err(HeaderReject::Magic(*b"CVLYCMDR"))
         );
         assert!(matches!(
-            cells.read(*b"CVLYCMDR", 4096 + 767, 768),
+            cells.read(*b"CVLYCMDR", 0, 4096 + 767, 768),
             Err(HeaderReject::Length { .. })
         ));
     }

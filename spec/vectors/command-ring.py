@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/command-ring.json: the test vectors for spec/command-ring.md, version 0.
+"""Write spec/vectors/command-ring.json: the test vectors for spec/command-ring.md, version 1.
 The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/command-ring.py
 
-Five regions (spec/command-ring.md, "Vectors"): `header` vectors carry the 128-byte header
+Six regions (spec/command-ring.md, "Vectors"): `header` vectors carry the 128-byte header
 at the start of the trailer and the file length the reader sees; `record` vectors one
-record's bytes with the ring index and capacity it sits at; `claim`, `unblock` and `read`
-vectors are arithmetic, with inputs and no bytes, except that a `read` vector starts from
-a ring image. See spec/README.md, "Conventions".
+record's bytes with the ring index and capacity it sits at; `claim`, `unblock`, `read` and
+`commit` vectors are arithmetic, with inputs and no bytes, except that a `read` vector
+starts from a ring image. See spec/README.md, "Conventions".
 """
 
 import json
@@ -35,7 +35,7 @@ def max_message_length(capacity):
 
 # ---- header -----------------------------------------------------------------------
 
-def header(capacity=MIN_CAPACITY, version=0, creator_pid=4242, start_timestamp=1_760_000_000_000_000_000,
+def header(capacity=MIN_CAPACITY, version=1, creator_pid=4242, start_timestamp=1_760_000_000_000_000_000,
            magic=MAGIC):
     return {"magic": magic.hex(), "version": version, "capacity": capacity,
             "creator_pid": creator_pid, "start_timestamp": start_timestamp}
@@ -214,6 +214,36 @@ def unblock(name, capacity, head, tail, lengths):
     return vector
 
 
+# ---- commit -----------------------------------------------------------------------
+
+def commit(name, claim_length, claim_type, found_length, found_type, operation="commit"):
+    """One producer action on its record as spec/command-ring.md, "Claim, commit and
+    abort", steps 7 to 9, computes it: `claim` is the compare-and-swap from 0 to the claim
+    word, `write` the acquire load before the message is written, `commit` and `abort` the
+    compare-and-swap from the claim word. The claim word is the negative length and the
+    type the producer stores or stored; `found` is the word at the record when it acts."""
+    inputs = {"claim": {"length": claim_length, "type": claim_type},
+              "found": {"length": found_length, "type": found_type}, "operation": operation}
+    vector = {"name": name, "region": "commit", "inputs": inputs}
+    assert claim_length < 0 and claim_type >= 1 and operation in ("claim", "write", "commit", "abort")
+    if operation == "claim":
+        if (found_length, found_type) == (0, 0):
+            vector["fields"] = {"result": "claimed", "written": {"length": claim_length, "type": claim_type}}
+        else:
+            vector["fields"] = {"result": "unblocked", "written": None}
+        return vector
+    if (found_length, found_type) != (claim_length, claim_type):
+        vector["fields"] = {"result": "unblocked", "written": None}
+        return vector
+    if operation == "write":
+        vector["fields"] = {"result": "writable", "written": None}
+    elif operation == "commit":
+        vector["fields"] = {"result": "committed", "written": {"length": -claim_length, "type": claim_type}}
+    else:
+        vector["fields"] = {"result": "aborted", "written": {"length": -claim_length, "type": PADDING}}
+    return vector
+
+
 # ---- read -------------------------------------------------------------------------
 
 def ring_image(capacity, records):
@@ -270,14 +300,15 @@ VECTORS = [
     invalid_header("not-ready", "not-ready", encode_header(header(magic=b"\0" * 8)), file_length(C)),
     invalid_header("magic-counters-file", "magic", encode_header(header(magic=b"CVLYCNTR")), file_length(C)),
     invalid_header("magic-broadcast-buffer", "magic", encode_header(header(magic=b"CVLYBCST")), file_length(C)),
-    invalid_header("version-1", "version", encode_header(header(version=1)), file_length(C)),
+    invalid_header("version-0", "version", encode_header(header(version=0)), file_length(C)),
+    invalid_header("version-2", "version", encode_header(header(version=2)), file_length(C)),
     invalid_header("capacity-not-power-of-two", "capacity", encode_header(header(capacity=4097)), file_length(4097)),
     invalid_header("capacity-below-minimum", "capacity", encode_header(header(capacity=2048)), file_length(2048)),
     invalid_header("capacity-above-maximum", "capacity", encode_header(header(capacity=-(1 << 31))), file_length(C)),
     invalid_header("capacity-negative", "capacity", encode_header(header(capacity=-4096)), file_length(C)),
     invalid_header("length-short", "length", encode_header(plain), file_length(C) - 1),
     invalid_header("length-long", "length", encode_header(plain), file_length(C) + 8),
-    invalid_header("version-before-capacity", "version", encode_header(header(version=1, capacity=4097)),
+    invalid_header("version-before-capacity", "version", encode_header(header(version=0, capacity=4097)),
                    file_length(4097)),
     # record
     record("record-committed", 24, 1, b"add publication!"),
@@ -326,12 +357,27 @@ VECTORS = [
          [(0, 24, 1, b"add publication!"), (24, 13, 7, b"hello")], limit=1),
     read("read-to-the-end-of-the-ring", C, C - 16, [(C - 16, 16, 2, b"12345678"), (0, 24, 1, b"add publication!")]),
     read("read-rejects-a-record-after-delivering", C, 0, [(0, 24, 1, b"add publication!"), (24, 24, 0, b"bad type here!!!")]),
+    # commit
+    commit("commit-claim-intact", -24, 1, -24, 1),
+    commit("commit-aborts-claim-intact", -24, 1, -24, 1, operation="abort"),
+    commit("commit-write-claim-intact", -24, 1, -24, 1, operation="write"),
+    commit("commit-after-unblock-is-unblocked", -24, 1, 24, PADDING),
+    commit("commit-after-unblock-and-clear-is-unblocked", -24, 1, 0, 0),
+    commit("commit-after-another-claim-is-unblocked", -24, 1, -16, 5),
+    commit("commit-after-another-commit-is-unblocked", -24, 1, 16, 5),
+    commit("commit-abort-after-unblock-is-unblocked", -24, 1, 24, PADDING, operation="abort"),
+    commit("commit-write-after-unblock-is-unblocked", -24, 1, 24, PADDING, operation="write"),
+    commit("commit-write-after-clear-is-unblocked", -24, 1, 0, 0, operation="write"),
+    commit("commit-same-length-other-type-is-unblocked", -24, 1, -24, 2),
+    commit("commit-claim-of-a-clear-word", -24, 1, 0, 0, operation="claim"),
+    commit("commit-claim-of-a-padded-gap-is-unblocked", -24, 1, 48, PADDING, operation="claim"),
+    commit("commit-claim-of-a-claimed-word-is-unblocked", -24, 1, -16, 5, operation="claim"),
 ]
 
 
 def main():
     out = Path(__file__).with_suffix(".json")
-    doc = {"spec": "spec/command-ring.md", "version": 0,
+    doc = {"spec": "spec/command-ring.md", "version": 1,
            "generated_by": "spec/vectors/command-ring.py; do not edit by hand", "vectors": VECTORS}
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"{out}: {len(VECTORS)} vectors")

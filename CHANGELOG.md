@@ -192,3 +192,10 @@ user-visible change, added in the same commit as the change. The format follows
 - `just tidy` retires branches whose work is on master, locally and on origin: every
   branch whose pull request merged, or the one named, with its worktree when the
   worktree is clean. `CLAUDE.md`'s working rules name it as the step after a merge.
+- The command ring is version 1: every contended change to a record's word is a
+  compare-and-swap from the value its writer last loaded, the claim from 0, the commit
+  and the abort from the claim word, the driver's padding from the word it unblocked,
+  so a producer whose claim the driver unblocked gets `unblocked` instead of leaving a
+  command nobody sent behind the head, and a padding never covers a record committed in
+  the same instant; the claim's message write checks the claim first. `Claim::commit`,
+  `Claim::abort` and `Claim::body` return a result (ADR 0018, GitHub issue 8).

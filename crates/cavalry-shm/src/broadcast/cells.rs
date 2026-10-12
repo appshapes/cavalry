@@ -45,14 +45,14 @@ impl TrailerCells {
 
     /// The creator's protocol: the header's fields, then the magic with a release store.
     pub(crate) fn publish(&self, fields: &HeaderFields) {
-        self.header.publish(MAGIC, fields.ring());
+        self.header.publish(MAGIC, layout::VERSION, fields.ring());
     }
 
     /// A reader's protocol: the magic with an acquire load, then the spec's checks for
     /// a file of `file_length` bytes, in order.
     pub(crate) fn read(&self, file_length: u64) -> Result<HeaderFields, BroadcastError> {
         self.header
-            .read(MAGIC, file_length, TRAILER_LENGTH)
+            .read(MAGIC, layout::VERSION, file_length, TRAILER_LENGTH)
             .map(HeaderFields::from_ring)
             .map_err(layout::reject)
     }

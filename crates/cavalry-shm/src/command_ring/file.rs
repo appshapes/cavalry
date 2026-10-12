@@ -400,7 +400,9 @@ impl Producer {
     /// anything is read; a closed or stopped driver is [`CommandRingError::DriverClosed`]
     /// or [`CommandRingError::DriverTimeout`]; a ring with too few free bytes is
     /// [`CommandRingError::Full`]; a corrupt tail is [`CommandRingError::Tail`]. Nothing
-    /// is written on any of them.
+    /// is written on any of them. A record whose index the driver padded before the
+    /// claim word landed is [`CommandRingError::Unblocked`]: the tail has moved past
+    /// it, and the caller claims again (ADR 0018).
     pub fn try_claim(
         &mut self,
         type_id: i32,
@@ -429,9 +431,8 @@ impl Producer {
         now_nanos: i64,
     ) -> Result<(), CommandRingError> {
         let mut claim = self.try_claim(type_id, message.len(), now_nanos)?;
-        claim.body().copy_from_slice(message);
-        claim.commit();
-        Ok(())
+        claim.body()?.copy_from_slice(message);
+        claim.commit()
     }
 }
 
@@ -443,10 +444,13 @@ impl fmt::Debug for Producer {
     }
 }
 
-/// A claimed record: the message to write, then [`Claim::commit`] or [`Claim::abort`].
-/// Dropping a claim without either aborts it, so a panic between claim and commit
-/// leaves a padding record, not a stale claim; a client that dies still leaves one,
-/// which the driver's unblock resolves.
+/// A claimed record: the message to write through [`Claim::body`], then
+/// [`Claim::commit`] or [`Claim::abort`]. Dropping a claim without either aborts it, so
+/// a panic between claim and commit leaves a padding record, not a stale claim; a
+/// client that dies still leaves one, which the driver's unblock resolves. Each of the
+/// three is [`CommandRingError::Unblocked`] when the driver has unblocked the claim
+/// meanwhile: the command was not delivered, nothing more is written, and the caller
+/// may claim again (ADR 0018).
 pub struct Claim<'a> {
     mapped: &'a Mapped,
     claimed: Claimed,
@@ -455,9 +459,12 @@ pub struct Claim<'a> {
 }
 
 impl Claim<'_> {
-    /// The message, in place in the ring: write the command here.
-    pub fn body(&mut self) -> &mut [u8] {
-        self.body
+    /// The message, in place in the ring: write the command here. The claim is checked
+    /// first with an acquire load, and a claim the driver has unblocked is
+    /// [`CommandRingError::Unblocked`] with nothing written.
+    pub fn body(&mut self) -> Result<&mut [u8], CommandRingError> {
+        cells::check_claim(self.mapped, &self.claimed)?;
+        Ok(self.body)
     }
 
     /// The record's index in the ring.
@@ -465,23 +472,27 @@ impl Claim<'_> {
         self.claimed.index
     }
 
-    /// Publishes the record with one release store of its positive length and type.
-    pub fn commit(mut self) {
-        cells::commit(self.mapped, &self.claimed);
+    /// Publishes the record: a compare-and-swap from the claim word to the positive
+    /// length and type, which fails as [`CommandRingError::Unblocked`] when the driver
+    /// padded the claim first.
+    pub fn commit(mut self) -> Result<(), CommandRingError> {
         self.done = true;
+        cells::commit(self.mapped, &self.claimed)
     }
 
-    /// Turns the record into padding the consumer skips, with one release store.
-    pub fn abort(mut self) {
-        cells::abort(self.mapped, &self.claimed);
+    /// Turns the record into padding the consumer skips: the same swap to the positive
+    /// length and type −1, with the same failure.
+    pub fn abort(mut self) -> Result<(), CommandRingError> {
         self.done = true;
+        cells::abort(self.mapped, &self.claimed)
     }
 }
 
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
         if !self.done {
-            cells::abort(self.mapped, &self.claimed);
+            // A drop has nobody to report to; an unblocked claim is already padding.
+            let _ = cells::abort(self.mapped, &self.claimed);
         }
     }
 }

@@ -1,13 +1,14 @@
-//! The command ring: `spec/command-ring.md`, version 0 (ADR 0014).
+//! The command ring: `spec/command-ring.md`, version 1 (ADR 0014, ADR 0018).
 //!
 //! Every client on a host sends the driver its commands through one ring: many
 //! producers, the clients, and one consumer, the driver's conductor. The driver creates
 //! it with [`CommandRing::create`]; a client opens it with [`CommandRing::open`] and
 //! writes through a [`Producer`], whose [`Producer::try_claim`] reserves a record with a
-//! compare-and-swap on the tail and whose [`Claim::commit`] publishes it with one release
-//! store; the driver reads through a [`Consumer`], which clears what it read and
-//! unblocks a claim a dead client left behind. It is control plane: a record per
-//! command, never per message.
+//! compare-and-swap on the tail and whose [`Claim::commit`] publishes it with a
+//! compare-and-swap from the claim word, so that a claim the driver unblocked meanwhile
+//! is reported as `unblocked` rather than delivered late; the driver reads through a
+//! [`Consumer`], which clears what it read and unblocks a claim a dead client left
+//! behind. It is control plane: a record per command, never per message.
 //!
 //! The module is in the layers of [`crate::counters`]: [`layout`] is the spec's bytes and
 //! arithmetic on plain values, with no `unsafe`, so Miri and the vectors run against it;
@@ -36,13 +37,14 @@
 //!     let mut consumer = ring.consumer(Duration::from_secs(10))?;
 //!
 //!     // A client opens it writable, takes a correlation id, and claims a record for a
-//!     // command of type 1; it writes the command in place and commits with one store.
+//!     // command of type 1; it writes the command in place and commits with one swap.
+//!     // Each step is `unblocked` if the driver padded the claim meanwhile.
 //!     let client = CommandRing::open(&dir, true)?;
 //!     let mut producer = client.producer(Duration::from_secs(10))?;
 //!     let correlation_id = producer.next_correlation_id();
 //!     let mut claim = producer.try_claim(1, 8, now())?;
-//!     claim.body().copy_from_slice(&correlation_id.to_le_bytes());
-//!     claim.commit();
+//!     claim.body()?.copy_from_slice(&correlation_id.to_le_bytes());
+//!     claim.commit()?;
 //!
 //!     // The driver reads the command in place, then clears it and releases the head.
 //!     let read = consumer.read(16, |type_id, message| {
@@ -154,6 +156,14 @@ pub enum CommandRingError {
         /// The type asked for.
         found: i32,
     },
+    /// The claim's swap found its index padded, the claim word was gone before the
+    /// message was written, or the commit's or abort's compare-and-swap failed: the
+    /// driver unblocked the claim after the unblock timeout. The command was not
+    /// delivered and nothing more was written (ADR 0018).
+    Unblocked {
+        /// The claim's index in the ring.
+        index: u32,
+    },
     /// The consumer heartbeat is −1: the driver closed.
     DriverClosed,
     /// The consumer heartbeat is older than the driver timeout: the driver has stopped.
@@ -177,7 +187,7 @@ const DOC_FILE: &str = "docs/reference/command-ring.md#file";
 impl CommandRingError {
     /// The reason's name in `spec/command-ring.md`: `too-short`, `not-ready`, `magic`,
     /// `version`, `capacity`, `length`, `changed`, `tail`, `record`, `full`, `message`,
-    /// `type`, `driver-closed`, `driver-timeout` or `io`.
+    /// `type`, `unblocked`, `driver-closed`, `driver-timeout` or `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
             CommandRingError::TooShort { .. } => "too-short",
@@ -192,6 +202,7 @@ impl CommandRingError {
             CommandRingError::Full { .. } => "full",
             CommandRingError::Message { .. } => "message",
             CommandRingError::Type { .. } => "type",
+            CommandRingError::Unblocked { .. } => "unblocked",
             CommandRingError::DriverClosed => "driver-closed",
             CommandRingError::DriverTimeout { .. } => "driver-timeout",
             CommandRingError::Io(_) => "io",
@@ -280,6 +291,13 @@ impl fmt::Display for CommandRingError {
                 f,
                 "command refused ({reason}): message type {found} is below 1; −1 is padding and 0 \
                  is unclaimed, a command's type is 1 or more; see {DOC_RECORD}"
+            ),
+            CommandRingError::Unblocked { index } => write!(
+                f,
+                "command not delivered ({reason}): the driver unblocked the claim at index {index} \
+                 before it was committed; claim the command again, and if this repeats the client \
+                 is being stalled past the driver's unblock timeout, by throttling or a pause; see \
+                 {DOC_CLAIM}"
             ),
             CommandRingError::DriverClosed => write!(
                 f,

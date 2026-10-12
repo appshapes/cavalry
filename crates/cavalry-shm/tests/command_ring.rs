@@ -155,7 +155,7 @@ fn the_full_ring_before_anything_else() {
     // Free again: the claim that was refused now lands at index 0.
     let claim = producer.try_claim(5, 16, now()).unwrap();
     assert_eq!(claim.index(), 0);
-    claim.commit();
+    claim.commit().unwrap();
     let read = consumer
         .read(16, |type_id, _| assert_eq!(type_id, 5))
         .unwrap();
@@ -231,10 +231,10 @@ fn a_claim_commits_aborts_or_is_aborted_on_drop_and_the_consumer_sees_it() {
     let mut producer = ring.producer(TIMEOUT).unwrap();
 
     let mut claim = producer.try_claim(7, 5, now()).unwrap();
-    assert_eq!(claim.body().len(), 5);
-    claim.body().copy_from_slice(b"hello");
-    claim.commit();
-    producer.try_claim(8, 3, now()).unwrap().abort();
+    assert_eq!(claim.body().unwrap().len(), 5);
+    claim.body().unwrap().copy_from_slice(b"hello");
+    claim.commit().unwrap();
+    producer.try_claim(8, 3, now()).unwrap().abort().unwrap();
     drop(producer.try_claim(9, 3, now()).unwrap());
     producer.write(10, b"bye", now()).unwrap();
     assert_eq!(ring.producer_position(), 16 + 16 + 16 + 16);
@@ -409,9 +409,9 @@ fn a_live_claim_is_never_unblocked_before_the_timeout() {
             UnblockOutcome::NoAction,
             "{step} ns after the head stood still"
         );
-        claim.body().copy_from_slice(&step.to_le_bytes());
+        claim.body().unwrap().copy_from_slice(&step.to_le_bytes());
     }
-    claim.commit();
+    claim.commit().unwrap();
     let mut seen = Vec::new();
     consumer
         .read(16, |type_id, message| {
@@ -605,8 +605,12 @@ fn a_reader_rejects_a_bad_file_by_name() {
     assert!(error.to_string().contains("43564c5942435354"), "{error}");
     fs::remove_file(dir.file()).unwrap();
 
-    ring_with_header(&dir, |h| h[8] = 1);
-    assert_eq!(open(&dir).reason(), "version");
+    ring_with_header(&dir, |h| h[8] = 0);
+    assert_eq!(
+        open(&dir).reason(),
+        "version",
+        "version 0 is refused since ADR 0018"
+    );
     fs::remove_file(dir.file()).unwrap();
 
     ring_with_header(&dir, |h| h[12..16].copy_from_slice(&4097i32.to_le_bytes()));
@@ -647,6 +651,93 @@ fn a_reader_rejects_a_bad_file_by_name() {
     assert_eq!(open(&dir).reason(), "not-ready");
 }
 
+/// A client claims, stalls past the unblock timeout, and acts after the driver has
+/// padded, read and cleared its claim (ADR 0018, GitHub issue 8): the message write and
+/// the commit are refused as `unblocked`, nothing lands behind the head, the next lap
+/// delivers only what was committed, and the ring stays sound for every client.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_late_commit_after_an_unblock_is_refused_and_the_ring_stays_sound() {
+    let dir = Dir::new("late-commit");
+    let ring = CommandRing::create(dir.path(), C).unwrap();
+    let mut consumer = ring.consumer(TIMEOUT).unwrap();
+    let client = CommandRing::open(dir.path(), true).unwrap();
+    let mut stalled = client.producer(TIMEOUT).unwrap();
+    let mut other = CommandRing::open(dir.path(), true)
+        .unwrap()
+        .producer(TIMEOUT)
+        .unwrap();
+    let start = now();
+    let timeout = TIMEOUT.as_nanos() as i64;
+
+    // The stalled client claims at index 0 and does nothing; the driver's clock runs out.
+    let mut claim = stalled.try_claim(2, 8, now()).unwrap();
+    assert_eq!(claim.index(), 0);
+    consumer.unblock(start).unwrap();
+    assert_eq!(
+        consumer.unblock(start + timeout).unwrap(),
+        UnblockOutcome::Unblocked {
+            index: 0,
+            length: 16
+        }
+    );
+    let read = consumer
+        .read(16, |_, _| panic!("padding delivers nothing"))
+        .unwrap();
+    assert_eq!((read.messages, read.bytes), (0, 16));
+    assert_eq!(ring.consumer_position(), 16);
+
+    // The client wakes: its message write and its commit are refused, and the slot stays
+    // clear. A second claim it makes with the same handle works, so the client recovers.
+    assert!(matches!(
+        claim.body(),
+        Err(CommandRingError::Unblocked { index: 0 })
+    ));
+    assert!(matches!(
+        claim.commit(),
+        Err(CommandRingError::Unblocked { index: 0 })
+    ));
+    let bytes = fs::read(dir.file()).unwrap();
+    assert!(
+        bytes[..16].iter().all(|b| *b == 0),
+        "nothing landed behind the head"
+    );
+
+    // Another client fills the rest of the lap and the stalled one commits late on the
+    // next lap's slot: the commit of a claim whose index another record now holds fails
+    // too, and the record there is delivered intact.
+    for _ in 0..255 {
+        other.write(3, b"12345678", now()).unwrap();
+    }
+    let mut seen = Vec::new();
+    let read = consumer
+        .read(usize::MAX, |type_id, _| seen.push(type_id))
+        .unwrap();
+    assert_eq!((read.messages, read.bytes), (255, 255 * 16));
+    assert_eq!(ring.consumer_position(), C as i64);
+    let mut lapped = other.try_claim(4, 8, now()).unwrap();
+    assert_eq!(lapped.index(), 0, "the next lap begins at index 0");
+    lapped.body().unwrap().copy_from_slice(b"intact!!");
+    let mut stale = stalled.try_claim(5, 8, now()).unwrap();
+    assert_eq!(stale.index(), 16);
+    stale.body().unwrap().copy_from_slice(b"second!!");
+    stale.commit().unwrap();
+    lapped.commit().unwrap();
+    let mut delivered = Vec::new();
+    let read = consumer
+        .read(usize::MAX, |type_id, message| {
+            delivered.push((type_id, message.to_vec()))
+        })
+        .unwrap();
+    assert_eq!(read.messages, 2);
+    assert_eq!(
+        delivered,
+        vec![(4, b"intact!!".to_vec()), (5, b"second!!".to_vec())]
+    );
+    assert_eq!(ring.size(), 0);
+    assert_eq!(ring.producer_position(), ring.consumer_position());
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn every_error_names_the_page_that_explains_it() {
@@ -656,7 +747,7 @@ fn every_error_names_the_page_that_explains_it() {
         CommandRingError::Magic {
             found: *b"CVLYCNTR",
         },
-        CommandRingError::Version { found: 1 },
+        CommandRingError::Version { found: 0 },
         CommandRingError::Capacity { found: 100 },
         CommandRingError::Length {
             found: 1,
@@ -675,6 +766,7 @@ fn every_error_names_the_page_that_explains_it() {
             limit: 512,
         },
         CommandRingError::Type { found: 0 },
+        CommandRingError::Unblocked { index: 16 },
         CommandRingError::DriverClosed,
         CommandRingError::DriverTimeout { age: 2, timeout: 1 },
         CommandRingError::Io(std::io::Error::other("no")),
