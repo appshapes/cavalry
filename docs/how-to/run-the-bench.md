@@ -81,7 +81,11 @@ the gate fails only on the dedicated bench host is
    measured, by more than 5 percent. On the bench host that is the 5 percent rule on
    every row but one: `claim_commit_32_exclusive` lands anywhere between 270 and 430 ns
    at p99.99 from one process to the next, for a reason not found yet, and on that row
-   the rule is only as sharp as that band (ADR 0016).
+   the rule is only as sharp as that band (ADR 0016). Only the rows a message passes
+   through, `claim_commit_*` and `one_way_*`, can fail; the `timer` and
+   `slot_padding_*` rows run no Cavalry code and sit where one 10 ns step of the clock
+   is 15 to 33 percent, so their change is printed and marked `reported`
+   ([ADR 0017](../decisions/0017-gate-the-message-rows-and-report-the-host-probes.md)).
    Max is shown but does not fail the gate. A profile with no baseline is reported and
    passes: a laptop has none unless you record one, and the shared CI runners have
    none on purpose, because their own noise moved p99.99 by 40 to 100 percent between
@@ -107,6 +111,8 @@ the gate fails only on the dedicated bench host is
 - `allocations per message` is not 0: a measured loop allocated. The gate has done its
   job; find the allocation with the counting allocator's report in the output and
   remove it. Nothing on the per-message path may allocate (`.claude/rules/data-plane.md`).
+- `reported` beside a `timer` or `slot_padding` row that moved: expected; those rows
+  flip between two adjacent clock steps from run to run and never fail the gate.
 - `REGRESSION` on a p99.99: measure again on an idle machine before you believe either
   number; if it holds, the change under a data-plane crate is slower at the tail and
   does not merge until it is not, or the baseline is raised in a commit whose message

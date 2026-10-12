@@ -44,3 +44,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0014. Lay out the command ring and the broadcast buffer as Agrona's ring buffers behind a Cavalry header](decisions/0014-lay-out-the-command-ring-and-broadcast-buffer.md)
 - [0015. Measure the data plane in process, with a baseline per runner](decisions/0015-measure-in-process-with-per-runner-baselines.md)
 - [0016. Run the latency gate on a dedicated host](decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)
+- [0017. Gate the rows a message passes through, and report the host probes](decisions/0017-gate-the-message-rows-and-report-the-host-probes.md)
