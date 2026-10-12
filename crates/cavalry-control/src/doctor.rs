@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED};
-use cavalry_shm::counters::{CountersReader, Scope};
+use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
 /// The driver timeout of `spec/client-protocol.md`: a heartbeat older than this is a
 /// stopped driver.
@@ -40,6 +40,9 @@ const DOC_DIRECTORY: &str = "docs/reference/client-protocol.md#the-driver-direct
 const DOC_RING_FULL: &str = "docs/reference/command-ring.md#when-the-ring-is-full";
 const DOC_COUNTERS_FULL: &str = "docs/reference/counters-file.md#when-the-file-is-full";
 const DOC_COUNTERS: &str = "docs/reference/counters.md";
+const DOC_COUNTERS_REJECTS: &str = "docs/reference/counters-file.md#what-a-reader-rejects";
+/// The host findings point at the bench host's page until a page on tuning a host for
+/// Cavalry exists: it is the one page that says how each setting is changed.
 const DOC_HOST: &str = "docs/how-to/set-up-a-bench-host.md";
 
 /// How serious a finding is.
@@ -108,7 +111,7 @@ impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "cavalry doctor: {}, {} checks",
+            "cavalry doctor: {}, checks run: {}",
             self.dir.display(),
             self.checks
         )?;
@@ -289,40 +292,75 @@ fn counters_checks(dir: &Path, running: bool, findings: &mut Vec<Finding>) -> us
     };
     let mut checks = 1;
     let capacity = i64::from(reader.capacity());
-    let allocated = reader.read(COUNTERS_ALLOCATED.record()).unwrap_or(0);
-    let failed = reader
-        .read(COUNTERS_ALLOCATION_FAILED.record())
-        .unwrap_or(0);
-    if failed > 0 {
-        findings.push(Finding {
-            check: "counters-file",
-            level: Level::Fail,
-            message: format!(
-                "{failed} counter allocations were refused: the counters file is full at \
-                 {allocated} of {capacity}; publications and subscriptions were refused with \
-                 them; close what is not used, or restart the driver with a larger file"
-            ),
-            doc: DOC_COUNTERS_FULL,
-        });
-    } else if allocated as f64 >= capacity as f64 * COUNTERS_FILL_WARNING {
-        findings.push(Finding {
-            check: "counters-file",
-            level: Level::Warn,
-            message: format!(
-                "the counters file is {allocated} of {capacity} allocated: the next publications \
-                 or subscriptions will be refused when it is full; close what is not used"
-            ),
-            doc: DOC_COUNTERS_FULL,
-        });
+    // A counter that cannot be read is a finding, never a silent zero: the file is the
+    // one instrument, so a reader that rejects it reports it (spec/counters-file.md).
+    let read = |name: &'static str, id: CounterId, findings: &mut Vec<Finding>| match reader
+        .read(id.record())
+    {
+        Ok(value) => Some(value),
+        Err(CountersError::Unallocated { .. } | CountersError::Id { .. }) => {
+            findings.push(Finding {
+                check: name,
+                level: Level::Note,
+                message: format!(
+                    "counter {name} is not in this driver's file: the driver is older than \
+                         doctor; upgrade it when convenient"
+                ),
+                doc: DOC_COUNTERS,
+            });
+            None
+        }
+        Err(error) => {
+            findings.push(Finding {
+                check: name,
+                level: Level::Fail,
+                message: format!(
+                    "counter {name} cannot be read: {error}; the counters file is corrupt or \
+                         not a driver's; restart the driver, which remakes it"
+                ),
+                doc: DOC_COUNTERS_REJECTS,
+            });
+            None
+        }
+    };
+    let allocated = read("counters.allocated", COUNTERS_ALLOCATED, findings);
+    let failed = read(
+        "counters.allocation_failed",
+        COUNTERS_ALLOCATION_FAILED,
+        findings,
+    );
+    if let (Some(allocated), Some(failed)) = (allocated, failed) {
+        if failed > 0 {
+            findings.push(Finding {
+                check: "counters-file",
+                level: Level::Fail,
+                message: format!(
+                    "{failed} counter allocations were refused: the counters file is full at \
+                     {allocated} of {capacity}; publications and subscriptions were refused \
+                     with them; close what is not used; the capacity is fixed in this version"
+                ),
+                doc: DOC_COUNTERS_FULL,
+            });
+        } else if allocated as f64 >= capacity as f64 * COUNTERS_FILL_WARNING {
+            findings.push(Finding {
+                check: "counters-file",
+                level: Level::Warn,
+                message: format!(
+                    "the counters file is {allocated} of {capacity} allocated: the next \
+                     publications or subscriptions will be refused when it is full; close what \
+                     is not used; the capacity is fixed in this version"
+                ),
+                doc: DOC_COUNTERS_FULL,
+            });
+        }
     }
     for def in COUNTERS
         .iter()
         .filter(|def| def.scope == Scope::Static && !def.doctor.is_empty())
     {
         checks += 1;
-        let value = match reader.read(def.id.record()) {
-            Ok(value) => value,
-            Err(_) => continue,
+        let Some(value) = read(def.name, def.id, findings) else {
+            continue;
         };
         if value > 0 && def.id != COUNTERS_ALLOCATION_FAILED {
             findings.push(Finding {
@@ -357,13 +395,15 @@ fn host_checks(findings: &mut Vec<Finding>) -> usize {
             .map_or(thp.clone(), |word| {
                 word.trim_matches(['[', ']']).to_string()
             });
-        if setting != "never" {
+        // `madvise` is harmless: the driver never asks for huge pages, so only `always`
+        // puts the kernel's compaction under its mappings.
+        if setting == "always" {
             findings.push(Finding {
                 check: "host-huge-pages",
                 level: Level::Warn,
                 message: format!(
                     "transparent huge pages are `{setting}`: the kernel may compact memory under \
-                     the driver's mappings and stall a publisher; set them to never"
+                     the driver's mappings and stall a publisher; set them to madvise or never"
                 ),
                 doc: DOC_HOST,
             });
@@ -526,6 +566,179 @@ mod tests {
         assert!(
             report.to_string().contains("WARN client.timed_out"),
             "{report}"
+        );
+    }
+
+    #[test]
+    fn a_counter_the_driver_does_not_have_is_a_note_and_a_corrupt_file_fails() {
+        let dir = TestDir::new("older");
+        // A driver older than doctor: its file has no record for the last static counter.
+        let last = COUNTERS
+            .iter()
+            .filter(|def| def.scope == Scope::Static)
+            .map(|def| def.id.record())
+            .max()
+            .expect("a static counter");
+        let _counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        {
+            use std::os::unix::fs::FileExt;
+            let header = CountersReader::open(&dir.0).expect("opens").header();
+            let offset = header.record_offset(last).expect("a record");
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.0.join("counters"))
+                .expect("writable");
+            // State 0: unused, as an older driver's file would have it.
+            file.write_at(&0i32.to_le_bytes(), offset as u64)
+                .expect("written");
+        }
+        let report = examine(&dir.0);
+        let name = COUNTERS
+            .iter()
+            .find(|def| def.id.record() == last)
+            .expect("the def")
+            .name;
+        let found = finding(&report, name);
+        assert_eq!(found.level, Level::Note, "{}", found.message);
+        assert!(
+            found.message.contains("older than doctor"),
+            "{}",
+            found.message
+        );
+        assert!(report.ok(), "{report}");
+
+        // A corrupt file: the magic is wrong, and every read fails loudly.
+        {
+            use std::os::unix::fs::FileExt;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.0.join("counters"))
+                .expect("writable");
+            file.write_at(b"NOTCVLY!", 0).expect("written");
+        }
+        let report = examine(&dir.0);
+        let found = finding(&report, "counters-file");
+        assert_eq!(found.level, Level::Fail);
+        assert!(
+            found.message.contains("cannot be read"),
+            "{}",
+            found.message
+        );
+    }
+
+    #[test]
+    fn the_command_ring_fill_warns_at_half() {
+        let dir = TestDir::new("fill");
+        let _counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let opened = CommandRing::open(&dir.0, true).expect("opens");
+        let mut producer = opened.producer(Duration::from_secs(10)).expect("producer");
+        // Records of 512 bytes, 520 aligned: three are below half of 4096, four above.
+        for _ in 0..3 {
+            producer
+                .write(1, &[0u8; 512], now_nanos())
+                .expect("written");
+        }
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "command-ring-fill"),
+            "{report}"
+        );
+        producer
+            .write(1, &[0u8; 512], now_nanos())
+            .expect("written");
+        let report = examine(&dir.0);
+        let found = finding(&report, "command-ring-fill");
+        assert_eq!(found.level, Level::Warn);
+        assert!(found.message.contains("2080 of 4096"), "{}", found.message);
+    }
+
+    #[test]
+    fn the_counters_file_warns_at_nine_tenths() {
+        let dir = TestDir::new("nine-tenths");
+        let mut counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let statics = COUNTERS
+            .iter()
+            .filter(|def| def.scope == Scope::Static)
+            .count();
+        // Up to 57 of 64 allocated is under nine tenths; 58 is over.
+        for _ in statics..57 {
+            counters
+                .allocate(CLIENT_TIMED_OUT, &[], "filler")
+                .expect("room");
+        }
+        let report = examine(&dir.0);
+        assert!(
+            !report.findings.iter().any(|f| f.check == "counters-file"),
+            "{report}"
+        );
+        counters
+            .allocate(CLIENT_TIMED_OUT, &[], "filler")
+            .expect("room");
+        let report = examine(&dir.0);
+        let found = finding(&report, "counters-file");
+        assert_eq!(found.level, Level::Warn);
+        assert!(found.message.contains("58 of 64"), "{}", found.message);
+        assert!(report.ok());
+    }
+
+    #[test]
+    fn failures_come_first_in_the_report() {
+        let dir = TestDir::new("order");
+        let counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        counters
+            .counter(CLIENT_TIMED_OUT.record())
+            .expect("static")
+            .increment();
+        consumer.store_heartbeat(now_nanos() - 11_000_000_000);
+        let report = examine(&dir.0);
+        let levels: Vec<Level> = report.findings.iter().map(|f| f.level).collect();
+        assert!(
+            levels.contains(&Level::Fail) && levels.contains(&Level::Warn),
+            "{report}"
+        );
+        let rank = |level: &Level| match level {
+            Level::Fail => 0,
+            Level::Warn => 1,
+            Level::Note => 2,
+        };
+        assert!(
+            levels
+                .windows(2)
+                .all(|pair| rank(&pair[0]) <= rank(&pair[1])),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_ring_not_yet_ready_warns_and_a_wrong_one_fails() {
+        let dir = TestDir::new("ring-state");
+        let _counters = CountersFile::create(&dir.0, 64).expect("counters");
+        // A zero-filled ring of a plausible length: a creator at work.
+        std::fs::write(dir.0.join("command-ring"), vec![0u8; 4096 + 768]).expect("written");
+        let report = examine(&dir.0);
+        let found = finding(&report, "driver-heartbeat");
+        assert_eq!(found.level, Level::Warn);
+        assert!(found.message.contains("not ready"), "{}", found.message);
+        // A ring too short to be one: not a driver's.
+        std::fs::write(dir.0.join("command-ring"), vec![0u8; 100]).expect("written");
+        let report = examine(&dir.0);
+        let found = finding(&report, "driver-heartbeat");
+        assert_eq!(found.level, Level::Fail);
+        assert!(
+            found.message.contains("cannot be read"),
+            "{}",
+            found.message
         );
     }
 

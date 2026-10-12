@@ -61,13 +61,17 @@ fn main() {
 }
 ```
 
-Running it prints the report, one line per finding:
+Running it prints the report, one line per finding. On macOS:
 
 ```text
-cavalry doctor: /tmp/cavalry-control-readme-4242, 1 checks
+cavalry doctor: /tmp/cavalry-control-readme-4242, checks run: 1
   FAIL driver-directory       no driver directory at /tmp/cavalry-control-readme-4242; start a driver with `cavalry run`, or point doctor at the directory the driver uses; see docs/reference/client-protocol.md#the-driver-directory
   1 failed, 0 warnings
 ```
+
+On Linux the four host checks run too, so the header reads `checks run: 5`, and a
+laptop whose governor is not `performance` adds a `WARN host-governor` line; a host with
+isolated CPUs adds a `note host-isolated-cpus` line recommending busy-spin there.
 
 ## What to read next
 
