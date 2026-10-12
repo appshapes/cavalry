@@ -16,6 +16,10 @@ Wire types, zero-copy frames and version negotiation. Data plane.
 - Is the one place bytes are shuffled by hand. Every other crate uses its types. A
   reader that holds only a frame's header, as the log buffer's does, passes the bytes
   left in its term to `parse_within`, and the same four checks run against them.
+- Encodes and decodes the client protocol, `spec/client-protocol.md`: the commands a
+  client sends the driver through the command ring and the events the driver answers
+  with through the broadcast buffer, in `client_protocol`, with the spec's decoding
+  checks in the spec's order and strings borrowed from the message, never copied.
 
 In Aeron, this is the transport protocol specification and its frame layouts
 ([glossary](../../docs/glossary.md)).
@@ -89,3 +93,8 @@ frame rejected (version): version 1, this reader knows 0; the writer runs anothe
 - [`spec/vectors/frame.json`](../../spec/vectors/frame.json), which
   `tests/conformance.rs` runs on every `just test`; `tests/no_panic.rs` and `fuzz/`,
   which feed the parser bytes it must never panic on.
+- [`spec/client-protocol.md`](../../spec/client-protocol.md), the commands and events
+  `client_protocol` reads and writes, and [ADR 0019](../../docs/decisions/0019-adopt-aeron-control-protocol-as-the-client-protocol.md),
+  why they are Aeron's; [`spec/vectors/client-protocol.json`](../../spec/vectors/client-protocol.json),
+  which `tests/client_protocol_conformance.rs` runs, and
+  `tests/client_protocol_no_panic.rs`.

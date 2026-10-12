@@ -39,12 +39,13 @@ bench-compare:
     python3 scripts/bench-compare.py
 
 # Wire-spec conformance: every implementation against every vector in spec/vectors/
-# (spec/README.md). Today the implementations are cavalry-proto's (the frame header)
-# and cavalry-shm's (the counters file, the log buffer, the command ring and the
+# (spec/README.md). Today the implementations are cavalry-proto's (the frame header
+# and the client protocol) and cavalry-shm's (the counters file, the log buffer, the command ring and the
 # broadcast buffer); every vector test also runs in `just test`. A client in clients/
 # joins here with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
+    cargo test -p cavalry-proto --test client_protocol_conformance
     cargo test -p cavalry-shm --test conformance
     cargo test -p cavalry-shm --test log_buffer_conformance
     cargo test -p cavalry-shm --test command_ring_conformance
