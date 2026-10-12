@@ -38,6 +38,7 @@ const COUNTERS_FILL_WARNING: f64 = 0.9;
 
 const DOC_DIRECTORY: &str = "docs/reference/client-protocol.md#the-driver-directory";
 const DOC_RING_FULL: &str = "docs/reference/command-ring.md#when-the-ring-is-full";
+const DOC_RING_REJECTS: &str = "docs/reference/command-ring.md#what-a-reader-rejects";
 const DOC_COUNTERS_FULL: &str = "docs/reference/counters-file.md#when-the-file-is-full";
 const DOC_COUNTERS: &str = "docs/reference/counters.md";
 const DOC_COUNTERS_REJECTS: &str = "docs/reference/counters-file.md#what-a-reader-rejects";
@@ -260,7 +261,7 @@ pub fn examine(dir: &Path) -> Report {
                      driver's, or a driver died while creating it; `cavalry run` remakes it",
                     dir.display()
                 ),
-                doc: DOC_DIRECTORY,
+                doc: DOC_RING_REJECTS,
             });
             false
         }
@@ -276,16 +277,29 @@ pub fn examine(dir: &Path) -> Report {
 fn counters_checks(dir: &Path, running: bool, findings: &mut Vec<Finding>) -> usize {
     let reader = match CountersReader::open(dir) {
         Ok(reader) => reader,
+        Err(CountersError::NotReady) => {
+            findings.push(Finding {
+                check: "counters-file",
+                level: Level::Warn,
+                message: format!(
+                    "the counters file at {} is not ready: a driver is creating it now, or died \
+                     while creating it; run doctor again in a second",
+                    dir.display()
+                ),
+                doc: DOC_COUNTERS_REJECTS,
+            });
+            return 1;
+        }
         Err(error) => {
             findings.push(Finding {
                 check: "counters-file",
                 level: if running { Level::Fail } else { Level::Warn },
                 message: format!(
-                    "the counters file at {} cannot be read: {error}; without it nothing below \
-                     can be explained",
+                    "the counters file at {} cannot be read: {error}; the file is corrupt, from \
+                     another version, or not a driver's; restart the driver, which remakes it",
                     dir.display()
                 ),
-                doc: DOC_COUNTERS_FULL,
+                doc: DOC_COUNTERS_REJECTS,
             });
             return 1;
         }
@@ -354,15 +368,18 @@ fn counters_checks(dir: &Path, running: bool, findings: &mut Vec<Finding>) -> us
             });
         }
     }
-    for def in COUNTERS
-        .iter()
-        .filter(|def| def.scope == Scope::Static && !def.doctor.is_empty())
-    {
+    // The two counters read above are reported there, never a second time here.
+    for def in COUNTERS.iter().filter(|def| {
+        def.scope == Scope::Static
+            && !def.doctor.is_empty()
+            && def.id != COUNTERS_ALLOCATED
+            && def.id != COUNTERS_ALLOCATION_FAILED
+    }) {
         checks += 1;
         let Some(value) = read(def.name, def.id, findings) else {
             continue;
         };
-        if value > 0 && def.id != COUNTERS_ALLOCATION_FAILED {
+        if value > 0 {
             findings.push(Finding {
                 check: def.name,
                 level: Level::Warn,
@@ -621,8 +638,9 @@ mod tests {
         let report = examine(&dir.0);
         let found = finding(&report, "counters-file");
         assert_eq!(found.level, Level::Fail);
+        assert_eq!(found.doc, DOC_COUNTERS_REJECTS);
         assert!(
-            found.message.contains("cannot be read"),
+            found.message.contains("cannot be read") && found.message.contains("restart"),
             "{}",
             found.message
         );
@@ -735,6 +753,7 @@ mod tests {
         let report = examine(&dir.0);
         let found = finding(&report, "driver-heartbeat");
         assert_eq!(found.level, Level::Fail);
+        assert_eq!(found.doc, DOC_RING_REJECTS);
         assert!(
             found.message.contains("cannot be read"),
             "{}",
