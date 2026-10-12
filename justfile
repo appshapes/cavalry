@@ -40,11 +40,15 @@ bench-compare:
 
 # Wire-spec conformance: every implementation against every vector in spec/vectors/
 # (spec/README.md). Today the implementations are cavalry-proto's (the frame header)
-# and cavalry-shm's (the counters file); both vector tests also run in `just test`. A
-# client in clients/ joins here with its own runner.
+# and cavalry-shm's (the counters file, the log buffer, the command ring and the
+# broadcast buffer); every vector test also runs in `just test`. A client in clients/
+# joins here with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-shm --test conformance
+    cargo test -p cavalry-shm --test log_buffer_conformance
+    cargo test -p cavalry-shm --test command_ring_conformance
+    cargo test -p cavalry-shm --test broadcast_buffer_conformance
 
 # Deterministic replay test: replay a recorded log twice and diff the state.
 replay-check:
@@ -123,9 +127,10 @@ doctor:
 miri:
     cargo +nightly miri test -p cavalry-shm --lib --tests
 
-# loom on the publish protocols of the counters file (crates/cavalry-shm/src/counters/
-# cells.rs): `cfg(loom)` swaps the atomics for loom's, which explores every interleaving
-# of the writer and a reader. Run it after any change to a protocol in cavalry-shm.
+# loom on the publish protocols of every shared layout in cavalry-shm (the counters file,
+# the log buffer, the command ring and the broadcast buffer, each in its cells.rs):
+# `cfg(loom)` swaps the atomics for loom's, which explores every interleaving of the
+# parties. Run it after any change to a protocol in cavalry-shm.
 loom:
     RUSTFLAGS="--cfg loom" cargo test -p cavalry-shm --lib --release
 
