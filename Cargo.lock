@@ -56,6 +56,9 @@ version = "0.1.0"
 [[package]]
 name = "cavalry-control"
 version = "0.1.0"
+dependencies = [
+ "cavalry-shm",
+]
 
 [[package]]
 name = "cavalry-driver"

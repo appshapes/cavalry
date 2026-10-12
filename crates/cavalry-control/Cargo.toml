@@ -10,6 +10,11 @@ repository.workspace = true
 # until the first release (ADR 0003).
 publish = false
 
+[dependencies]
+# `doctor` reads the driver's directory through the shared layouts' read-only openers:
+# the counters file, the command ring and the broadcast buffer (ADRs 0012 to 0014).
+cavalry-shm = { path = "../cavalry-shm" }
+
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]
 workspace = true

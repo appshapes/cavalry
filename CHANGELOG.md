@@ -223,3 +223,8 @@ user-visible change, added in the same commit as the change. The format follows
   producer's position, keeps each publication's positions, limit, cleaning, unblocking
   and closing per `spec/log-buffer.md`, times clients out, and counts every refusal;
   `Driver::close` leaves −1 in the heartbeat for `doctor`.
+- `cavalry-control` explains a driver: `doctor::examine` opens a driver directory's
+  counters file and command ring read-only and reports whether the driver is running,
+  closed or stopped, the command ring's and the counters file's fill, every static
+  counter whose `doctor` text applies, and on Linux the host's huge pages, governor,
+  isolated CPUs and `/dev/shm`; every finding names the docs anchor that explains it.
