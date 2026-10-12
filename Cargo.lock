@@ -60,6 +60,10 @@ version = "0.1.0"
 [[package]]
 name = "cavalry-driver"
 version = "0.1.0"
+dependencies = [
+ "cavalry-proto",
+ "cavalry-shm",
+]
 
 [[package]]
 name = "cavalry-ffi"
