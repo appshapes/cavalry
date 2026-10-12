@@ -26,21 +26,34 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    each core's two SMT threads numbered 2n and 2n+1; the isolated set is `8-15` and
    the housekeeping set `0-7`, which are the scripts' defaults.
 
-2. Register the runner. In the organization's settings, under Actions, Runners, create
-   a runner group for this repository alone, then add a new Linux x64 runner to it and
-   follow the steps GitHub prints, which download the runner into a directory of the
-   administrative user and run `./config.sh` with a one-hour registration token. Give
-   the runner the custom label `bench-linux`, which is the label the bench job names.
-   Then install it as a service so it starts at boot:
+2. Register the runner under a user of its own. A job on this host runs whatever a
+   branch or a dependency bump compiles, build scripts included, as the runner's user,
+   so that user has no password, no sudo and no SSH key:
 
    ```sh
    # ignore: run on the bench host, not in this repository
-   cd ~/actions-runner
-   sudo ./svc.sh install "$USER"
+   sudo useradd --create-home --shell /bin/bash runner
+   sudo passwd -l runner
+   ```
+
+   In the organization's settings, under Actions, Runners, create a runner group for
+   this repository alone, then add a new Linux x64 runner to it and follow the steps
+   GitHub prints as the `runner` user (`sudo -u runner -H bash`), which download the
+   runner into `/home/runner/actions-runner` and run `./config.sh` with a one-hour
+   registration token. Give the runner the custom label `bench-linux`, which is the
+   label the bench job names. Then install it as a service so it starts at boot:
+
+   ```sh
+   # ignore: run on the bench host, not in this repository
+   cd /home/runner/actions-runner
+   sudo ./svc.sh install runner
    sudo ./svc.sh start
    ```
 
-   The runner appears as Idle on the organization's runner page.
+   The runner appears as Idle on the organization's runner page. To move a runner
+   that was registered under another user, stop it, `sudo ./svc.sh uninstall`, move
+   the directory, `chown -R runner:runner` it, fix the home directory in its `.path`
+   file, and install the service again; the registration survives the move.
 
 3. Tune the host. Copy `bench/host/` from this repository to the host and run the
    setup as root, naming the sets from step 1:
@@ -74,7 +87,9 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 5. Give the runner a toolchain. The bench job installs a stable toolchain and `just` on
    every run through the same actions as the other jobs, and installs `rustup` when the
    runner has none. A C linker is the one thing the actions do not bring; the setup
-   script installs `build-essential` for it.
+   script installs `build-essential` for it. Installing `rustup` for the `runner` user
+   once and putting `/home/runner/.cargo/bin` first in the runner's `.path` file saves
+   the install on every job.
 
 6. Point the job at the host. The `bench (linux)` job in `.github/workflows/ci.yml`
    runs on `[self-hosted, bench-linux]` and pins to the CPUs from step 4; change the
@@ -96,6 +111,15 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 - The organization's runner page shows the runner Idle after a reboot of the host.
 - A push to `master` runs `bench (linux)` on it, and the run's log opens with the
   state `check.sh` printed, then the harness's line `pinned to CPUs 8,10,12`.
+
+## Access to the host
+
+The administrative user reaches the host by SSH key only, with `PasswordAuthentication
+no` in a drop-in under `/etc/ssh/sshd_config.d/`, and has passwordless sudo through a
+one-line drop-in under `/etc/sudoers.d/`, so that an agent session can maintain the
+host without holding a password. That is safe only because the runner's user is
+separate: a passwordless administrator who also runs the jobs would hand root to every
+build script.
 
 ## Updating the host
 
