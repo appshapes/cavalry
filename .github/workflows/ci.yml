@@ -38,9 +38,13 @@ jobs:
   gates:
     name: gates (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
-    # A bound for a hung runner, not a measurement: the gates took 8 s to 37 s per job
-    # on the empty workspace (runs 38048302932, 38048579016 and 38048705479). Re-measure
-    # when the first crate has code, and keep this at twice the slowest observed job.
+    # A bound for a hung runner, not a measurement. With the three cavalry-shm gates
+    # and a cold cache the jobs took 1 min 53 s (macOS) and 2 min 40 s (Linux) on run
+    # 38298993157, and 35 s warm before them (run 38286062189). `just miri` is the
+    # long step, 57 s and 80 s: Miri's sysroot build, 12 s and 20 s, is not in the
+    # cache, and the rest is the interpreted tests. Twice the slowest cold job is under
+    # six minutes, so this stays at 15. Re-measure when `just miri` nears five minutes,
+    # when it moves to a job of its own.
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -48,23 +52,12 @@ jobs:
         include:
           - name: linux
             runner: blacksmith-4vcpu-ubuntu-2404
-            miri_sysroot: ~/.cache/miri
           - name: macos
             runner: blacksmith-6vcpu-macos-latest
-            miri_sysroot: ~/Library/Caches/org.rust-lang.miri
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0       # `just lint-docs` diffs the change against its base (ADR 0006)
-      # Nightly first, for `just miri`; stable second, so that stable is the default the
-      # action sets and `cargo +nightly` reaches the other. The nightly is the current
-      # one, as it is on a developer's machine: the justfile says `+nightly`, Dependabot
-      # cannot move a dated pin, and a nightly that breaks Miri fails as a build error,
-      # not as a verdict on cavalry-shm.
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
-        with:
-          toolchain: nightly
-          components: miri
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
@@ -76,10 +69,17 @@ jobs:
         with:
           tool: mdbook@0.5.4
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Nightly for `just miri`, after the cache step: the cache key hashes every
+      # installed toolchain, and a nightly in it would move the key every day and leave
+      # the stable build cold. The nightly is the current one, as it is on a developer's
+      # machine: the justfile says `+nightly`, and a nightly that breaks Miri fails as a
+      # build error, not as a verdict on cavalry-shm. The action makes what it installs
+      # the default, so stable is restored as the default right after.
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
-          # Miri builds a sysroot of its own on first use. The cache keeps it beside the
-          # target directory; when the nightly has moved, Miri rebuilds it by itself.
-          cache-directories: ${{ matrix.miri_sysroot }}
+          toolchain: nightly
+          components: miri
+      - run: rustup default stable
       - run: just lint
       - run: just test
       # The three cavalry-shm gates (CLAUDE.md, gate 1): the vector suites, the loom
