@@ -199,3 +199,7 @@ user-visible change, added in the same commit as the change. The format follows
   command nobody sent behind the head, and a padding never covers a record committed in
   the same instant; the claim's message write checks the claim first. `Claim::commit`,
   `Claim::abort` and `Claim::body` return a result (ADR 0018, GitHub issue 8).
+- CI's two `gates` jobs run `just conformance`, `just loom` and `just miri` after
+  `just test`, on Linux and macOS, with the nightly toolchain and Miri installed by the
+  pinned toolchain action; a pull request now proves the three cavalry-shm gates
+  instead of claiming them (GitHub issue 9).

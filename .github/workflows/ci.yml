@@ -10,6 +10,9 @@
 # The gates jobs run on Blacksmith runners (ADR 0004), the two labels Brigade's CI uses.
 # Blacksmith serves the GitHub Actions cache API from its own backend, so the Rust
 # cache action below works unchanged; the restore lines in a run's log are the proof.
+# The three cavalry-shm gates of CLAUDE.md's gate 1, `just conformance`, `just loom`
+# and `just miri`, run in the gates jobs too (GitHub issue 9), so the reviewer's rule
+# of ADR 0005, CI green on the head under review, covers them.
 # The latency gate runs on the dedicated bench host, a self-hosted runner, because a
 # shared runner cannot tell a regression from its own noise (ADR 0016).
 #
@@ -45,12 +48,23 @@ jobs:
         include:
           - name: linux
             runner: blacksmith-4vcpu-ubuntu-2404
+            miri_sysroot: ~/.cache/miri
           - name: macos
             runner: blacksmith-6vcpu-macos-latest
+            miri_sysroot: ~/Library/Caches/org.rust-lang.miri
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0       # `just lint-docs` diffs the change against its base (ADR 0006)
+      # Nightly first, for `just miri`; stable second, so that stable is the default the
+      # action sets and `cargo +nightly` reaches the other. The nightly is the current
+      # one, as it is on a developer's machine: the justfile says `+nightly`, Dependabot
+      # cannot move a dated pin, and a nightly that breaks Miri fails as a build error,
+      # not as a verdict on cavalry-shm.
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: nightly
+          components: miri
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
@@ -62,8 +76,18 @@ jobs:
         with:
           tool: mdbook@0.5.4
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Miri builds a sysroot of its own on first use. The cache keeps it beside the
+          # target directory; when the nightly has moved, Miri rebuilds it by itself.
+          cache-directories: ${{ matrix.miri_sysroot }}
       - run: just lint
       - run: just test
+      # The three cavalry-shm gates (CLAUDE.md, gate 1): the vector suites, the loom
+      # models and Miri, on both operating systems. The bench host runs none of them.
+      # When `just miri` passes about five minutes, it moves to a job of its own on Linux.
+      - run: just conformance
+      - run: just loom
+      - run: just miri
       - run: just docs
       - run: just lint-docs
       # The harness on a shared runner is a report, not a gate (ADR 0016): the table is
