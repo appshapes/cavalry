@@ -23,22 +23,33 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 | `counters` | `spec/counters-file.md` | when the driver starts, first |
 | `command-ring` | `spec/command-ring.md` | when the driver starts, second |
 | `broadcast-buffer` | `spec/broadcast-buffer.md` | when the driver starts, last |
-| `publications/<correlation id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by its registration id |
+| `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id |
 
 A driver that starts and finds the directory loads the command ring's consumer heartbeat
 with an acquire load: a heartbeat fresher than the driver timeout is `driver-active`, and
 the driver refuses to start, naming the directory and the creator pid; a heartbeat of −1
 or older than the driver timeout is a dead driver, and the starting driver removes the
-directory and creates it anew. A driver that stops stores −1 in the consumer heartbeat and
-leaves the directory in place, so that `doctor` can read the counters of a driver that
-has gone; the next driver removes it.
+directory and creates it anew. A directory whose `command-ring` is missing, or fails a
+check of its page other than `not-ready`, is a dead driver's too: one that stopped while
+creating it. A `command-ring` that is `not-ready` is a driver creating it now: the
+starter waits up to the driver timeout for the magic, then treats the file as a dead
+driver's. The driver creates the directory and each file with create-new semantics, so
+that of two drivers starting at the same moment the second finds the first's directory
+and waits or refuses as above; it never removes a file whose creator is alive. A driver
+that stops stores −1 in the consumer heartbeat and leaves the directory in place, so
+that `doctor` can read the counters of a driver that has gone; the next driver removes it.
 
 A client attaches by opening the command ring writable and loading the consumer
 heartbeat, which is `driver-closed` or `driver-timeout` as the ring page says; then the
 broadcast buffer read-only, joining at the latest record; then the counters file
 read-only. It takes its client id from the ring's correlation id counter, so that no
 two clients of one driver share an id. The driver learns of a client from the first
-command that names its client id and forgets it on client close or timeout.
+command that names its client id and forgets it on client close or timeout; it keeps no
+record of the clients it has forgotten, so a command that arrives from a timed-out
+client is a new client's first command, as it is in Aeron, and it is the client that
+acts on `client timeout`: a client that receives one with its own id closes, since its
+publications and subscriptions are gone. A first command that finds the client registry
+full is answered with error code 10 and registers nothing.
 
 ## Encoding
 
@@ -49,7 +60,7 @@ is an i32 length, from 0 to 4096, the string's bytes in UTF-8, and zero bytes to
 multiple of 4, so that the field after it is 4-byte aligned. The message's length is
 exactly the length of its fields: a record whose message is shorter is `too-short`, one
 whose message is longer is `length`, and a string whose length is below 0, above 4096 or
-runs past the message is `string`.
+whose bytes or padding run past the message is `string`.
 
 ## Commands
 
@@ -83,22 +94,25 @@ Then, by command:
 What the driver does with each, after the checks of "What the driver rejects":
 
 - **add publication.** If a concurrent publication with the same stream id and channel is
-  live on this driver, the command joins it: the registration id is the command's
-  correlation id, and the session id, the log and the counters are the shared ones.
-  Otherwise the driver picks a session id, creates the log in `publications/` as
-  `spec/log-buffer.md` says, type 0, with the sizes of "Sizes", allocates its
-  `publication.position` and `publication.limit` counters (`counters.toml`), and
-  registers the publication under the command's correlation id. It answers with
-  `publication ready`, then sends `available image` to every subscription whose stream
-  id and channel match, as under add subscription. A registry at capacity, or a counters
-  file with no free record, is error code 10; a log that cannot be created is error
+  live on this driver, the command joins it: the client's registration is the command's
+  correlation id, and the publication, its registration id, session id, log and counters
+  are the shared ones, so `publication ready` carries a registration id that differs
+  from its correlation id. Otherwise the driver picks a session id, creates the log in
+  `publications/` as `spec/log-buffer.md` says, type 0, with the sizes of "Sizes",
+  allocates its `publication.position` and `publication.limit` counters
+  (`counters.toml`), and registers the publication under the command's correlation id,
+  which is then its registration id and names its log. It answers with `publication
+  ready`, then sends `available image` to every subscription whose stream id and
+  channel match, as under add subscription. A registry at capacity, or a counters file
+  with no free record, is error code 10; a log that cannot be created or sized is error
   code 12.
 - **add exclusive publication.** As add publication, with a new session and a log of
   type 1 every time, never shared; the answer is `exclusive publication ready`.
-- **remove publication.** The driver stores the end of stream position and lingers as
-  `spec/log-buffer.md`, "Closing" says, once the last registration sharing the log is
-  removed, and answers `operation success`. A registration id the driver does not know,
-  or that belongs to another client, is error code 3.
+- **remove publication.** The command names the client's registration, the correlation
+  id of its add command. The driver removes it and answers `operation success`; once the
+  last registration sharing the publication is removed, it stores the end of stream
+  position and lingers as `spec/log-buffer.md`, "Closing" says. A registration the
+  driver does not know, or that belongs to another client, is error code 3.
 - **add subscription.** The driver registers the subscription under the command's
   correlation id and answers `subscription ready`. Then, for every live publication whose
   stream id and channel match, now and whenever one is added later, it allocates a
@@ -116,8 +130,14 @@ What the driver does with each, after the checks of "What the driver rejects":
 
 Session ids are the driver's to choose: it starts at a random i32 and adds 1 per new
 publication, skipping any id a live publication of the same stream id holds, as Aeron's
-driver does. Stream ids are the client's: any i32. A registration id is the correlation id
-of the command that registered the publication or subscription.
+driver does. Stream ids are the client's: any i32. A client's registration of a
+publication or subscription is the correlation id of the command that added it, and
+`remove publication` and `remove subscription` name it. A publication's registration id
+is the first such registration, the one that created its log: it names the log file, it
+is what `publication ready` and `exclusive publication ready` carry as registration id,
+and it is the correlation id of the publication's images in `available image` and
+`unavailable image`. For an exclusive publication, or a concurrent one with one
+registration, the two are the same number.
 
 ## Events
 
@@ -141,15 +161,15 @@ decode may be the one it needed.
 | error | 0 | 8 | offending correlation id | i64 | 0 or more: the correlation id of the command it answers |
 | error | 8 | 4 | error code | i32 | one of "Error codes" |
 | error | 12 | 4 + n + pad | error message | string | what the operator does next, ending with the page and section that explains it |
-| available image | 0 | 8 | correlation id | i64 | 0 or more: the publication's registration id, which names the image |
+| available image | 0 | 8 | correlation id | i64 | 0 or more: the publication's registration id, the one that created its log, which names the image |
 | available image | 8 | 4 | session id | i32 | any |
 | available image | 12 | 4 | stream id | i32 | any |
 | available image | 16 | 8 | subscriber registration id | i64 | 0 or more: the subscription this image belongs to |
 | available image | 24 | 4 | subscriber position counter id | i32 | 0 to the counters file's capacity − 1: the `subscription.position` counter the client owns for this image |
-| available image | 28 | 4 + n + pad | log file name | string | the log's path relative to the driver's directory, `publications/<correlation id>.logbuffer`, 1 to 4096 bytes |
+| available image | 28 | 4 + n + pad | log file name | string | the log's path relative to the driver's directory, `publications/<registration id>.logbuffer`, 1 to 4096 bytes |
 | available image | after log file name | 4 + n + pad | source identity | string | the publisher's channel, `cavalry:ipc` in this version |
 | publication ready, exclusive publication ready | 0 | 8 | correlation id | i64 | 0 or more: the add command's |
-| publication ready, exclusive publication ready | 8 | 8 | registration id | i64 | 0 or more: equal to the correlation id in this version |
+| publication ready, exclusive publication ready | 8 | 8 | registration id | i64 | 0 or more: the publication's registration id; equal to the correlation id unless the command joined a live concurrent publication |
 | publication ready, exclusive publication ready | 16 | 4 | session id | i32 | any |
 | publication ready, exclusive publication ready | 20 | 4 | stream id | i32 | any |
 | publication ready, exclusive publication ready | 24 | 4 | publication limit counter id | i32 | 0 to the counters file's capacity − 1: the `publication.limit` counter the publisher loads |
@@ -178,8 +198,8 @@ client id is its own and ignores the rest.
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
 | 3 | unknown publication | remove publication names a registration id the driver does not know, or another client's |
 | 6 | unknown command type | the record's type is not a command of this version |
-| 7 | malformed command | the message failed a check of "What the driver rejects" after its first 16 bytes were read |
-| 10 | resource temporarily unavailable | a registry is at capacity or the counters file has no free record |
+| 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read |
+| 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
 | 11 | generic error | anything else; the message says what |
 | 12 | storage space | the log file could not be created or sized |
 
@@ -210,25 +230,47 @@ The driver creates its files with these sizes in this version:
 
 | File | Size |
 | --- | --- |
-| counters file | capacity 4096 counters |
+| counters file | capacity 8192 counters |
 | command ring | capacity 1048576 bytes, so the longest command is 131072 bytes |
 | broadcast buffer | capacity 1048576 bytes |
 | log buffer of a `cavalry:ipc` publication | term length 67108864 bytes, MTU length 1408, publication window term length ÷ 2 |
 
+Its registries have these capacities, and a command that would exceed one is answered
+with error code 10 and registers nothing:
+
+| Registry | Capacity | Counts |
+| --- | --- | --- |
+| clients | 256 | every client id the driver has not forgotten |
+| publications | 1024 | every registration of a publication, shared or not |
+| subscriptions | 1024 | every registration of a subscription |
+| images | 2048 | every pair of a subscription and a publication that match |
+
+The counters file is sized so that the registries fill before it does: the static
+counters of `counters.toml`, two per publication and one per image come to fewer than
+8192.
+
 ## What the driver rejects
 
-The driver runs these checks in this order on every command the ring delivers, and the
-first that fails is the result; each adds one to `client_protocol.rejected_command`.
+The driver decodes every command the ring delivers with these checks, in this order, and
+the first that fails is the result; each adds one to `client_protocol.rejected_command`,
+and each answer adds one to `client_protocol.errors`.
 
 | Reason | Check | Answer |
 | --- | --- | --- |
 | `too-short` | the message is shorter than 16 bytes | none: no correlation id to answer |
 | `type` | the type is not a command of this version | `error`, code 6 |
 | `too-short` | the message is shorter than the command's fields | `error`, code 7 |
-| `string` | a string's length is below 0, above 4096 or runs past the message | `error`, code 7 |
+| `string` | a string's length is below 0, above 4096, or its bytes or padding run past the message | `error`, code 7 |
 | `length` | the message is longer than the command's fields | `error`, code 7 |
-| `channel` | the channel is not `cavalry:ipc` | `error`, code 1 |
-| `client` | the command names a client id the driver has timed out | `error`, code 11, and the client attaches again |
+
+The vectors cover these: they are checks on bytes. A command that decodes is then
+checked by the driver against its state, which no vector holds; the checks and their
+codes are the ones "Commands" and "Error codes" name: a channel that is not
+`cavalry:ipc` is `channel`, code 1, and adds one to `client_protocol.rejected_command`;
+an unknown or another client's registration is code 2 or 3; a registry or the counters
+file at capacity is code 10 and adds one to `driver.registry_full`; a log that could not
+be created or sized is code 12 and adds one to `driver.log_create_failed`. Every `error`
+event sent adds one to `client_protocol.errors`.
 
 A record the ring itself rejects (`spec/command-ring.md`, "Reading") never reaches these
 checks and gets no answer: the client's response timeout reports it. A client runs the
@@ -237,14 +279,17 @@ reports the first that fails and closes, as the broadcast buffer page says of `r
 
 ## Counters
 
-Two static counters in `counters.toml` (`spec/counters-file.md`), written by the driver:
-`client.timed_out` and `client_protocol.rejected_command`.
+Five static counters in `counters.toml` (`spec/counters-file.md`), written by the driver:
+`client.timed_out`, `client_protocol.rejected_command`, `client_protocol.errors`,
+`driver.registry_full` and `driver.log_create_failed`.
 
 ## Vectors
 
 `spec/vectors/client-protocol.json`, written by `spec/vectors/client-protocol.py`, the
 reference encoder. Each vector has a `region`, `command` or `event`, the record's `type`
 id, the message `bytes`, and either the `fields` a conforming implementation decodes,
-which it encodes back to the same bytes, or the `error` it reports, by the name in "What
-the driver rejects". A conforming implementation decodes every valid vector to its fields,
-encodes those fields to the same bytes, and reports the named reason for every invalid one.
+which it encodes back to the same bytes, or the `error` it reports, by the name of a
+decoding check in "What the driver rejects". A conforming implementation decodes every
+valid vector to its fields, encodes those fields to the same bytes, and reports the named
+reason for every invalid one. A vector whose channel is not `cavalry:ipc` is valid: the
+`channel` check is the driver's, after decoding, and the driver's tests cover it.

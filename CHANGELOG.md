@@ -206,5 +206,7 @@ user-visible change, added in the same commit as the change. The format follows
 - The client protocol is specified: `spec/client-protocol.md` version 0 is Aeron's
   control protocol as command ring and broadcast buffer records, with the driver
   directory, the seven commands and eight events of IPC publish/subscribe, their
-  bounds and rejections, the timeouts and the file sizes, and 35 vectors; two counters,
-  `client.timed_out` and `client_protocol.rejected_command` (ADR 0019).
+  bounds and rejections, the timeouts, the file sizes and the registries' capacities,
+  and 36 vectors; five counters, `client.timed_out`, `client_protocol.rejected_command`,
+  `client_protocol.errors`, `driver.registry_full` and `driver.log_create_failed`
+  (ADR 0019).
