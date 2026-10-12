@@ -123,7 +123,7 @@ id = 13
 name = "client_protocol.rejected_command"
 kind = "counter"
 scope = "static"
-doc = "Commands the driver decoded and refused: an unknown type, a message of the wrong length, a bad string, a channel that is not cavalry:ipc, or a client the driver had timed out (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable."
+doc = "Commands the driver refused at decoding or for their channel: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, or a channel that is not cavalry:ipc (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable."
 doctor = "A client sent a command the protocol does not allow: a binding that does not conform to spec/client-protocol.md or was upgraded apart from the driver. The error event names the command; stop that client and check its version against the driver's."
 
 [[counter]]

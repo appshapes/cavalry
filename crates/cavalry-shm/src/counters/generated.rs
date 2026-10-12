@@ -44,7 +44,7 @@ pub const COMMAND_RING_REJECTED_RECORD: CounterId = CounterId(11);
 /// `client.timed_out`, a static counter: Clients the driver timed out because no command of theirs arrived within the client liveness timeout; their publications and subscriptions were removed and a client timeout event sent (spec/client-protocol.md, Liveness and timeouts).
 pub const CLIENT_TIMED_OUT: CounterId = CounterId(12);
 
-/// `client_protocol.rejected_command`, a static counter: Commands the driver decoded and refused: an unknown type, a message of the wrong length, a bad string, a channel that is not cavalry:ipc, or a client the driver had timed out (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.
+/// `client_protocol.rejected_command`, a static counter: Commands the driver refused at decoding or for their channel: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, or a channel that is not cavalry:ipc (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.
 pub const CLIENT_PROTOCOL_REJECTED_COMMAND: CounterId = CounterId(13);
 
 /// `client_protocol.errors`, a static counter: Error events the driver sent, whatever the code: every command this version refused after the ring delivered it (spec/client-protocol.md, Error codes); the causes with a counter of their own are client_protocol.rejected_command, driver.registry_full and driver.log_create_failed.
@@ -167,7 +167,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "client_protocol.rejected_command",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Commands the driver decoded and refused: an unknown type, a message of the wrong length, a bad string, a channel that is not cavalry:ipc, or a client the driver had timed out (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.",
+        doc: "Commands the driver refused at decoding or for their channel: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, or a channel that is not cavalry:ipc (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.",
         doctor: "A client sent a command the protocol does not allow: a binding that does not conform to spec/client-protocol.md or was upgraded apart from the driver. The error event names the command; stop that client and check its version against the driver's.",
     },
     CounterDef {
