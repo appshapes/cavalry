@@ -41,6 +41,12 @@ pub const COMMAND_RING_REJECTED_TAIL: CounterId = CounterId(10);
 /// `command_ring.rejected_record`, a static counter: Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring (spec/command-ring.md, Reading).
 pub const COMMAND_RING_REJECTED_RECORD: CounterId = CounterId(11);
 
+/// `client.timed_out`, a static counter: Clients the driver timed out because no command of theirs arrived within the client liveness timeout; their publications and subscriptions were removed and a client timeout event sent (spec/client-protocol.md, Liveness and timeouts).
+pub const CLIENT_TIMED_OUT: CounterId = CounterId(12);
+
+/// `client_protocol.rejected_command`, a static counter: Commands the driver decoded and refused: an unknown type, a message of the wrong length, a bad string, a channel that is not cavalry:ipc, or a client the driver had timed out (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.
+pub const CLIENT_PROTOCOL_REJECTED_COMMAND: CounterId = CounterId(13);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -138,5 +144,21 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring (spec/command-ring.md, Reading).",
         doctor: "A client wrote a corrupt command: a buggy binding or a hostile process, which the ring cannot name. Every client's commands now time out. Restart the driver, which recreates the ring; if the counter climbs again, stop clients one at a time until it stops, and look for a binding that was upgraded or does not conform to spec/command-ring.md.",
+    },
+    CounterDef {
+        id: CLIENT_TIMED_OUT,
+        name: "client.timed_out",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Clients the driver timed out because no command of theirs arrived within the client liveness timeout; their publications and subscriptions were removed and a client timeout event sent (spec/client-protocol.md, Liveness and timeouts).",
+        doctor: "A client stopped sending keepalives: it is stuck, paused under a debugger, or its conductor thread died. Its own driver timeout closes it. Find the process by the client id in the client timeout event and look at what stopped its conductor.",
+    },
+    CounterDef {
+        id: CLIENT_PROTOCOL_REJECTED_COMMAND,
+        name: "client_protocol.rejected_command",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Commands the driver decoded and refused: an unknown type, a message of the wrong length, a bad string, a channel that is not cavalry:ipc, or a client the driver had timed out (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.",
+        doctor: "A client sent a command the protocol does not allow: a binding that does not conform to spec/client-protocol.md or was upgraded apart from the driver. The error event names the command; stop that client and check its version against the driver's.",
     },
 ];

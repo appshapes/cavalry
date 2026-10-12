@@ -23,6 +23,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Log buffer](reference/log-buffer.md)
 - [Command ring](reference/command-ring.md)
 - [Broadcast buffer](reference/broadcast-buffer.md)
+- [Client protocol](reference/client-protocol.md)
 - [Glossary](glossary.md)
 
 # Decisions
@@ -46,3 +47,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0016. Run the latency gate on a dedicated host](decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)
 - [0017. Gate the rows a message passes through, and report the host probes](decisions/0017-gate-the-message-rows-and-report-the-host-probes.md)
 - [0018. Commit with a compare-and-swap in the command ring](decisions/0018-commit-with-a-compare-and-swap-in-the-command-ring.md)
+- [0019. Adopt Aeron's control protocol as the client protocol](decisions/0019-adopt-aeron-control-protocol-as-the-client-protocol.md)
