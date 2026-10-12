@@ -762,6 +762,33 @@ mod tests {
     }
 
     #[test]
+    fn a_counters_file_not_yet_ready_warns() {
+        let dir = TestDir::new("counters-not-ready");
+        let _counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        // A zero magic in a file of the right length: a creator at work.
+        {
+            use std::os::unix::fs::FileExt;
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.0.join("counters"))
+                .expect("writable");
+            file.write_at(&[0u8; 8], 0).expect("written");
+        }
+        let report = examine(&dir.0);
+        let found = finding(&report, "counters-file");
+        assert_eq!(found.level, Level::Warn);
+        assert_eq!(found.doc, DOC_COUNTERS_REJECTS);
+        assert!(
+            found.message.contains("not ready") && found.message.contains("run doctor again"),
+            "{}",
+            found.message
+        );
+        assert!(report.ok(), "a file being created does not fail: {report}");
+    }
+
+    #[test]
     fn a_full_counters_file_fails() {
         let dir = TestDir::new("full");
         let mut counters = CountersFile::create(&dir.0, 64).expect("counters");
