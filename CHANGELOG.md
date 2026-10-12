@@ -172,3 +172,15 @@ user-visible change, added in the same commit as the change. The format follows
   ring through which the driver sends every client its events, lossy by design and so
   control plane only; a receiver that falls a ring behind is told `lapped`. Its vectors
   come from `spec/vectors/broadcast-buffer.py`, and the book includes the page (ADR 0014).
+- `cavalry-shm` builds the command ring and the broadcast buffer. `CommandRing::create`
+  and `open` run the checks of `spec/command-ring.md` in order; a `Producer` takes
+  correlation ids and claims a record in place with one compare-and-swap, or writes one by
+  copy, and a `Claim` commits with one release store or aborts, on drop too; the driver's
+  `Consumer` reads in place, clears what it read, unblocks a claim a dead client left,
+  stores the heartbeat and closes, and stops the ring by name at a corrupt record or tail.
+  `BroadcastBuffer::create` and `open` do the same for `spec/broadcast-buffer.md`; the
+  driver's `Transmitter` never waits for a receiver, and a `Receiver` copies each event
+  out, validates the copy against the tail intent, and reports `lapped` rather than a torn
+  record. The 56 and 54 vectors run on every `just test`, six loom models check the claim,
+  read, unblock, transmit and receive protocols, and the layout layers run under Miri
+  (ADR 0014).

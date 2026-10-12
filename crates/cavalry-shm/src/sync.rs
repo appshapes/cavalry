@@ -37,3 +37,9 @@ impl<T> UnsafeCell<T> {
         f(self.0.get())
     }
 }
+
+#[cfg(loom)]
+pub(crate) use loom::sync::atomic::fence;
+
+#[cfg(not(loom))]
+pub(crate) use core::sync::atomic::fence;

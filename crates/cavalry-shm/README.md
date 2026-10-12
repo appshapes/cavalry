@@ -12,11 +12,18 @@ the two crates where `unsafe` is permitted.
   committed frames where its position says, and the driver's duties, the limit, cleaning,
   unblocking and end of stream, are methods on the log
   ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
-- Provides the lock-free SPSC and MPSC queues every data-plane thread uses to talk to
-  another, with 64-byte alignment on shared state so that two threads never share a
-  cache line by accident, and a 128-byte slot of its own for every field one party
-  writes and another reads in its hot loop, such as a counter's value
-  ([ADR 0012](../../docs/decisions/0012-lay-out-the-counters-file.md)).
+- Carries the control plane's two queues between the processes on a host: the command
+  ring, through which every client sends the driver its commands, with a `Producer` per
+  client thread and the driver's `Consumer`, which clears what it read and unblocks a
+  claim a dead client left; and the broadcast buffer, through which the driver sends
+  every client its events, with the driver's `Transmitter`, which never waits, and a
+  `Receiver` per client, which is told `lapped` when it fell a ring behind
+  ([`spec/command-ring.md`](../../spec/command-ring.md),
+  [`spec/broadcast-buffer.md`](../../spec/broadcast-buffer.md)). Both are lock-free,
+  with 64-byte alignment on shared state and a 128-byte slot of its own for every field
+  one party writes and another reads in its hot loop, such as a counter's value
+  ([ADR 0011](../../docs/decisions/0011-pad-peer-shared-fields-to-128-bytes.md)). The
+  SPSC and MPSC queues between the driver's own threads come with the driver.
 - Owns the counters file, the shared-memory file where the driver publishes every
   counter. It is the primary instrument: cheaper than a log line, and it survives a
   crash. `CountersFile` creates it and allocates counters, a `Counter` moves a value
@@ -113,6 +120,19 @@ The counters file has its own example, the doctest of the `counters` module.
   [`spec/vectors/log-buffer.json`](../../spec/vectors/log-buffer.json) runs in
   `tests/log_buffer_conformance.rs` on every `just test`; `tests/log_buffer.rs` is the
   file on disk, the full term first.
+- [`spec/command-ring.md`](../../spec/command-ring.md) and
+  [`spec/broadcast-buffer.md`](../../spec/broadcast-buffer.md): the two control-plane
+  queues, who writes and who reads every field, the claim, read, unblock, transmit and
+  receive protocols, what a full ring and a lapped receiver do, and the checks a reader
+  runs, in order; the book shows them as
+  [`docs/reference/command-ring.md`](../../docs/reference/command-ring.md) and
+  [`docs/reference/broadcast-buffer.md`](../../docs/reference/broadcast-buffer.md).
+  [ADR 0014](../../docs/decisions/0014-lay-out-the-command-ring-and-broadcast-buffer.md)
+  is why both are Agrona's rings behind a Cavalry header and what Cavalry added. Their
+  vectors run in `tests/command_ring_conformance.rs` and
+  `tests/broadcast_buffer_conformance.rs` on every `just test`; `tests/command_ring.rs`
+  and `tests/broadcast_buffer.rs` are the files on disk, the full ring and the lapped
+  receiver first; each module's docs carry its example as a doctest.
 - [`spec/counters-file.md`](../../spec/counters-file.md): the layout, who writes and
   who reads every field, the creation and allocation protocols, and the checks a reader
   runs, in order. The book shows the same page as
