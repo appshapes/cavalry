@@ -10,12 +10,21 @@ repository.workspace = true
 # until the first release (ADR 0003).
 publish = false
 
+[dependencies]
+# The embeddable driver, re-exported: `cargo add cavalry` gives it (ADR 0002).
+cavalry-driver = { path = "../cavalry-driver" }
+# `cavalry doctor`, control plane, behind `cli`.
+cavalry-control = { path = "../cavalry-control", optional = true }
+# `cavalry run` stops on SIGINT, SIGTERM and SIGHUP: the handler std does not have.
+# Behind `cli`, on the control plane, never on the data plane.
+ctrlc = { version = "3.5.2", features = ["termination"], optional = true }
+
 # Control-plane and CLI dependencies sit behind `cli`, default on, so that
 # `cargo install cavalry` needs no flag and `cargo add cavalry --no-default-features`
-# is the lean library build (ADR 0002). Empty until those dependencies exist.
+# is the lean library build (ADR 0002).
 [features]
 default = ["cli"]
-cli = []
+cli = ["dep:cavalry-control", "dep:ctrlc"]
 
 [[bin]]
 name = "cavalry"

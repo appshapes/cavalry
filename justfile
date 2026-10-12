@@ -117,9 +117,10 @@ docs-links:
     command -v lychee >/dev/null || { echo "docs-links: lychee is not installed. brew install lychee, or cargo install --locked lychee" >&2; exit 1; }
     lychee --no-progress docs README.md crates/*/README.md
 
-# Run cavalry doctor against the local driver.
+# Run cavalry doctor against the local driver: the one on the default directory
+# (docs/how-to/run-the-driver.md). Exits 1 when a check failed.
 doctor:
-    @echo "not built yet: cavalry doctor." && exit 1
+    cargo run --quiet -p cavalry -- doctor
 
 # Miri on the unsafe crate: the layout, cell and conformance tests, which run on plain
 # memory. Miri has no file-backed mapping, so the file tests carry

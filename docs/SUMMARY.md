@@ -13,6 +13,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Ask the agent to make a change](how-to/ask-the-agent.md)
 - [Implement a feature, from card to commit](how-to/implement-a-feature.md)
 - [Run the bench and compare it with the baseline](how-to/run-the-bench.md)
+- [Run a driver and read doctor](how-to/run-the-driver.md)
 - [Set up a bench host for the latency gate](how-to/set-up-a-bench-host.md)
 
 # Reference

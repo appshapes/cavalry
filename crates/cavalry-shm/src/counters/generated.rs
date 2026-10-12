@@ -72,7 +72,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Counter allocations refused because every record was in use: the counters file is full, and whatever needed the counter was refused with it.",
-        doctor: "Restart the driver with a larger counters file capacity; until then new publications and subscriptions are refused.",
+        doctor: "The counters file is full and new publications and subscriptions are refused until a counter is freed: close what is not used; the capacity is fixed in this version.",
     },
     CounterDef {
         id: PUBLICATION_POSITION,
