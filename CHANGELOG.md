@@ -215,3 +215,8 @@ user-visible change, added in the same commit as the change. The format follows
   message with the spec's checks in order and write one in place; every vector of
   `spec/vectors/client-protocol.json` runs on every `just test` and under
   `just conformance`, and random bytes under every type id never panic.
+- `cavalry-control` explains a driver: `doctor::examine` opens a driver directory's
+  counters file and command ring read-only and reports whether the driver is running,
+  closed or stopped, the command ring's and the counters file's fill, every static
+  counter whose `doctor` text applies, and on Linux the host's huge pages, governor,
+  isolated CPUs and `/dev/shm`; every finding names the docs anchor that explains it.
