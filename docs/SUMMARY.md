@@ -41,3 +41,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0013. Lay out the log buffer as Aeron's three terms and a metadata page](decisions/0013-lay-out-the-log-buffer.md)
 - [0015. Measure the data plane in process, with a baseline per runner](decisions/0015-measure-in-process-with-per-runner-baselines.md)
 - [0016. Run the latency gate on a dedicated host](decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)
+- [0017. Gate the rows a message passes through, and report the host probes](decisions/0017-gate-the-message-rows-and-report-the-host-probes.md)

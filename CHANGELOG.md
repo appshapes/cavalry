@@ -161,3 +161,6 @@ user-visible change, added in the same commit as the change. The format follows
   p99.99 with every run's on record, the warm-up is now one rotation through all
   three terms so that no measured message first-touches a page, and the files go under
   `/dev/shm` on Linux. `docs/how-to/set-up-a-bench-host.md` is the page (ADR 0016).
+- `just bench-compare` fails the gate on the `claim_commit` and `one_way` rows only;
+  the `timer` and `slot_padding` rows, which run no Cavalry code and sit within one
+  10 ns clock step of their baseline, are printed as `reported` (ADR 0017).

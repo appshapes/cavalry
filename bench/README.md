@@ -27,8 +27,10 @@ nothing depends on it.
 - Runs the measured loops under a counting allocator and fails the run when they
   allocate: the zero-allocations-per-message assertion of the gate.
 - Writes `bench/results/<profile>-<unix time>.json`; `scripts/bench-compare.py` fails a
-  p99.99 regression over 5 percent against `bench/baseline.json` for the profile. Only
-  the bench host's profiles have a baseline: a shared runner's run is a report.
+  p99.99 regression over 5 percent against `bench/baseline.json` for the profile, on
+  the `claim_commit` and `one_way` rows; the `timer` and `slot_padding` rows are host
+  probes and are reported, never failed (ADR 0017). Only the bench host's profiles have
+  a baseline: a shared runner's run is a report.
 
 ## What it must never do
 

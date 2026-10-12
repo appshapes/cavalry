@@ -12,7 +12,11 @@ reads. When the baseline has such a list, the gate compares the result's median 
 slowest run of the baseline: on the bench host one row's p99.99 moves by a fifth between
 two processes of the same binary while the others hold within 2 percent, and a rule that
 reads the baseline's band is the 5 percent rule on the rows the host can measure and
-says so on the row it cannot, instead of failing an unchanged commit (ADR 0016).
+says so on the row it cannot, instead of failing an unchanged commit (ADR 0016). Only
+the rows a message passes through, claim_commit_* and one_way_*, can fail the gate; the
+timer and slot_padding_* rows hold no Cavalry code, they probe the host and the clock at
+30 to 60 ns, where one 10 ns step of the clock is 15 to 33 percent, and they are printed
+with their change marked "reported" (ADR 0017).
 
     bench-compare.py              compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>     compare that result file instead
@@ -39,6 +43,8 @@ BASELINE = ROOT / "bench" / "baseline.json"
 TOLERANCE = 0.05
 GATED = "p99_99_ns"
 SHOWN = ("p50_ns", "p99_ns", "p99_99_ns", "max_ns")
+# The rows a message passes through; every other row is a probe of the host (ADR 0017).
+GATED_ROWS = ("claim_commit_", "one_way_")
 
 
 def newest_result() -> Path:
@@ -78,7 +84,9 @@ def compare(result: dict, baseline: dict) -> int:
             slowest = max(then.get("p99_99_ns_runs") or [then[GATED]])
             ratio = now[GATED] / slowest - 1
             verdict = f"{ratio:+.1%}"
-            if ratio > TOLERANCE:
+            if not name.startswith(GATED_ROWS):
+                verdict += " reported"
+            elif ratio > TOLERANCE:
                 verdict += " REGRESSION"
                 failures += 1
             line += [fmt(slowest), verdict]
@@ -93,9 +101,9 @@ def compare(result: dict, baseline: dict) -> int:
         print(f"bench-compare: no baseline for profile {profile!r} in {BASELINE.relative_to(ROOT)}; "
               "nothing compared. Set one from this machine's run with --update (ADR 0015).")
     if failures:
-        print(f"bench-compare: {failures} finding(s); a p99.99 more than {TOLERANCE:.0%} above the baseline's "
-              "slowest run fails (CLAUDE.md, gate 2). Measure again on an idle machine before you believe "
-              "either number.")
+        print(f"bench-compare: {failures} finding(s); a message row's p99.99 more than {TOLERANCE:.0%} above "
+              "the baseline's slowest run fails (CLAUDE.md, gate 2). Measure again on an idle machine before "
+              "you believe either number.")
         return 1
     print("bench-compare: ok")
     return 0
