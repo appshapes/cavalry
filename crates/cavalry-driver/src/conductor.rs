@@ -649,8 +649,12 @@ impl Conductor {
             .producer_position()
             .unwrap_or(publication.consumer_position);
         position.store_release(join_position);
+        let first_image = !self
+            .images
+            .iter()
+            .any(|image| image.publication_id == publication_id);
         let publication = &mut self.publications[publication_index];
-        if publication.consumer_position < join_position {
+        if first_image && publication.consumer_position < join_position {
             publication.consumer_position = join_position;
         }
         let _ = publication.log.set_connected(true);
@@ -874,8 +878,11 @@ impl Conductor {
     fn keep_publication(&mut self, index: usize, now: i64) -> bool {
         let max_position = self.publications[index].log.positions().max_position();
         let publication_id = self.publications[index].registration_id;
-        // The subscribers' positions, each checked against its bound (ADR 0010).
+        // The subscribers' positions, each checked against its bound (ADR 0010): one
+        // outside it evicts its client, told with client timeout, the event the page
+        // gives for registrations gone.
         let mut min_subscriber: Option<i64> = None;
+        let mut max_subscriber: Option<i64> = None;
         let mut rejected: Vec<i64> = Vec::new();
         for image in self
             .images
@@ -888,15 +895,18 @@ impl Conductor {
                 continue;
             }
             min_subscriber = Some(min_subscriber.map_or(position, |min: i64| min.min(position)));
+            max_subscriber = Some(max_subscriber.map_or(position, |max: i64| max.max(position)));
         }
         for subscription_id in rejected {
             self.statics.log_buffer_rejected_position.increment();
-            if let Some(subscription_index) = self
+            let client = self
                 .subscriptions
                 .iter()
-                .position(|subscription| subscription.registration_id == subscription_id)
-            {
-                self.drop_subscription(subscription_index, now);
+                .find(|subscription| subscription.registration_id == subscription_id)
+                .map(|subscription| subscription.client_id);
+            if let Some(client_id) = client {
+                self.remove_client(client_id, now);
+                self.send(&Event::ClientTimeout { client_id });
             }
         }
         let publication = &mut self.publications[index];
@@ -920,18 +930,22 @@ impl Conductor {
             publication.position.store_release(producer);
             moved = true;
         }
-        if let Some(min) = min_subscriber
-            && min > publication.consumer_position
+        if let Some(max) = max_subscriber
+            && max > publication.consumer_position
         {
-            publication.consumer_position = min;
+            publication.consumer_position = max;
             moved = true;
         }
-        let consumer = publication.consumer_position;
-        // Cleaning behind the consumer, one term at a time.
-        if publication.clean_position < consumer {
-            if let Ok(cleaned) = publication.log.clean(publication.clean_position, consumer) {
-                publication.clean_position = cleaned;
-            }
+        // The slowest subscriber bounds everything below; with none, the largest
+        // position any subscriber reached, so that the publisher is told not connected.
+        let consumer = min_subscriber.unwrap_or(publication.consumer_position);
+        // Cleaning behind the slowest subscriber, one term at a time; a clean that does
+        // not advance is not work.
+        if publication.clean_position < consumer
+            && let Ok(cleaned) = publication.log.clean(publication.clean_position, consumer)
+            && cleaned > publication.clean_position
+        {
+            publication.clean_position = cleaned;
             moved = true;
         }
         // The limit: consumer + window once cleaned, raised in steps of window ÷ 8; the

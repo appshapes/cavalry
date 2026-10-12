@@ -543,3 +543,240 @@ fn a_silent_client_is_timed_out_and_told() {
     }
     driver.close().expect("closes");
 }
+
+/// Writes a raw value into a counter's slot through the file, as a misbehaving client
+/// would: the driver's mapping sees it.
+fn poison_counter(dir: &Path, counter_id: i32, value: i64) {
+    use std::os::unix::fs::FileExt;
+    let header = CountersReader::open(dir).expect("opens").header();
+    let offset = header
+        .slot_offset(u32::try_from(counter_id).expect("a counter id"))
+        .expect("a slot");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join("counters"))
+        .expect("the counters file opens for writing");
+    file.write_at(&value.to_le_bytes(), offset as u64)
+        .expect("the slot is written");
+}
+
+fn wait_image(client: &mut Client, subscription_id: i64) -> (i64, i32) {
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::AvailableImage {
+            correlation_id,
+            subscriber_registration_id,
+            subscriber_position_counter_id,
+            ..
+        } if subscriber_registration_id == subscription_id => {
+            Some((correlation_id, subscriber_position_counter_id))
+        }
+        _ => None,
+    })
+}
+
+fn wait_counter(dir: &Path, id: cavalry_shm::counters::CounterId, at_least: i64) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let value = counter(dir, id);
+        if value >= at_least {
+            return value;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} did not reach {at_least}: {value}",
+            id.record()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn a_second_subscriber_never_cleans_under_a_slower_one() {
+    let dir = TestDir::new("two-subscribers");
+    let driver = Driver::start(dir.path()).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (_, publication_id, _, limit_id, _) = client.add_publication(31, false);
+    let subscription_a = client.add_subscription(31);
+    let (_, position_a) = wait_image(&mut client, subscription_a);
+    let reader = CountersReader::open(dir.path()).expect("opens");
+    assert_eq!(reader.read_acquire(position_a as u32).expect("a"), 0);
+
+    // The publisher writes one message that A has not read.
+    let window = i64::from(spec::IPC_PUBLICATION_WINDOW);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reader.read_acquire(limit_id as u32).expect("limit") < window {
+        assert!(Instant::now() < deadline, "the limit did not rise");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let log = LogBuffers::open(dir.path(), publication_id, true).expect("the log opens");
+    let mut appender = log.appender().expect("an appender");
+    let after = appender
+        .offer(b"for A", window, 0)
+        .expect("the message is offered");
+    assert!(after > 0);
+
+    // B joins at the producer's position; A's unread message stays, and the limit stays
+    // A's position + window.
+    let subscription_b = client.add_subscription(31);
+    let (_, position_b) = wait_image(&mut client, subscription_b);
+    assert_eq!(
+        reader.read_acquire(position_b as u32).expect("b"),
+        after,
+        "B joined at the producer"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        reader.read_acquire(limit_id as u32).expect("limit"),
+        window,
+        "the limit follows A"
+    );
+    let readable = LogBuffers::open(dir.path(), publication_id, false).expect("opens read-only");
+    let mut term_reader = readable.reader(0).expect("a reader at A's position");
+    let mut messages = Vec::new();
+    term_reader
+        .poll(16, |body, _| messages.push(body.to_vec()))
+        .expect("A polls");
+    assert_eq!(
+        messages,
+        vec![b"for A".to_vec()],
+        "A still reads its message"
+    );
+    driver.close().expect("closes");
+}
+
+#[test]
+fn a_subscriber_position_outside_its_bound_evicts_the_client() {
+    let dir = TestDir::new("evict");
+    let driver = Driver::start(dir.path()).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (_, _, _, _, log_file_name) = client.add_publication(33, false);
+    let subscription_id = client.add_subscription(33);
+    let (_, position_id) = wait_image(&mut client, subscription_id);
+
+    // A misaligned position: not a multiple of 32.
+    poison_counter(dir.path(), position_id, 8);
+    let client_id = client.id;
+    let told = client.wait(Duration::from_secs(5), |event| match *event {
+        Event::ClientTimeout { client_id: id } if id == client_id => Some(id),
+        _ => None,
+    });
+    assert_eq!(told, client_id);
+    assert_eq!(
+        wait_counter(
+            dir.path(),
+            cavalry_shm::counters::generated::LOG_BUFFER_REJECTED_POSITION,
+            1
+        ),
+        1
+    );
+    assert_eq!(
+        counter(dir.path(), CLIENT_TIMED_OUT),
+        0,
+        "an eviction is not a timeout"
+    );
+
+    // The client's registrations are gone: removing them is unknown, and its publication
+    // closed, so a new subscription of the stream gets no image from it.
+    let remove = client.correlation_id();
+    client.send(&Command::RemoveSubscription {
+        client_id: client.id,
+        correlation_id: remove,
+        registration_id: subscription_id,
+    });
+    assert_eq!(client.wait_error(remove).0, 2);
+    let deadline = Instant::now() + spec::PUBLICATION_LINGER + Duration::from_secs(5);
+    while dir.path().join(&log_file_name).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the evicted client's log was not removed"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    driver.close().expect("closes");
+}
+
+#[test]
+fn the_client_registry_is_bounded_and_says_so() {
+    let dir = TestDir::new("clients");
+    let driver = Driver::start(dir.path()).expect("starts");
+    let mut client = Client::attach(dir.path());
+    // The attached client is one, once it has sent a command; crafted client ids fill
+    // the rest.
+    client.add_subscription(1);
+    for n in 1..spec::MAX_CLIENTS {
+        let correlation_id = client.correlation_id();
+        client.send(&Command::AddSubscription {
+            client_id: 1_000_000 + n as i64,
+            correlation_id,
+            stream_id: 1,
+            channel: IPC_CHANNEL,
+        });
+        client.wait(Duration::from_secs(5), |event| match *event {
+            Event::SubscriptionReady { correlation_id: id } if id == correlation_id => Some(()),
+            _ => None,
+        });
+    }
+    let one_too_many = client.correlation_id();
+    client.send(&Command::AddSubscription {
+        client_id: 2_000_000,
+        correlation_id: one_too_many,
+        stream_id: 1,
+        channel: IPC_CHANNEL,
+    });
+    let (code, message) = client.wait_error(one_too_many);
+    assert_eq!(code, 10, "{message}");
+    assert!(message.contains("client registry"), "{message}");
+    assert_eq!(wait_counter(dir.path(), DRIVER_REGISTRY_FULL, 1), 1);
+    // Not registered: its keepalive would have created it; a known client still works.
+    let known = client.add_subscription(2);
+    assert!(known > 0);
+    driver.close().expect("closes");
+}
+
+#[test]
+fn the_subscription_registry_is_bounded_and_says_so() {
+    let dir = TestDir::new("subscriptions");
+    let driver = Driver::start(dir.path()).expect("starts");
+    let mut client = Client::attach(dir.path());
+    for _ in 0..spec::MAX_SUBSCRIPTIONS {
+        client.add_subscription(3);
+    }
+    let one_too_many = client.correlation_id();
+    client.send(&Command::AddSubscription {
+        client_id: client.id,
+        correlation_id: one_too_many,
+        stream_id: 3,
+        channel: IPC_CHANNEL,
+    });
+    let (code, message) = client.wait_error(one_too_many);
+    assert_eq!(code, 10, "{message}");
+    assert!(message.contains("subscriptions registry"), "{message}");
+    assert_eq!(wait_counter(dir.path(), DRIVER_REGISTRY_FULL, 1), 1);
+    driver.close().expect("closes");
+}
+
+#[test]
+fn the_image_registry_is_bounded_and_says_so() {
+    let dir = TestDir::new("images");
+    let driver = Driver::start(dir.path()).expect("starts");
+    let mut client = Client::attach(dir.path());
+    // 64 exclusive publications times 32 subscriptions: 2048 images, the capacity.
+    let publications = 64;
+    let subscriptions = spec::MAX_IMAGES / publications;
+    for _ in 0..publications {
+        client.add_publication(77, true);
+    }
+    for _ in 0..subscriptions {
+        let subscription_id = client.add_subscription(77);
+        for _ in 0..publications {
+            wait_image(&mut client, subscription_id);
+        }
+    }
+    // The next subscription is registered, but its first image does not fit.
+    let one_more = client.add_subscription(77);
+    let (code, message) = client.wait_error(one_more);
+    assert_eq!(code, 10, "{message}");
+    assert!(message.contains("images registry"), "{message}");
+    assert!(wait_counter(dir.path(), DRIVER_REGISTRY_FULL, 1) >= 1);
+    driver.close().expect("closes");
+}
