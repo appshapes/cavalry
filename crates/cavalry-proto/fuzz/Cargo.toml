@@ -20,4 +20,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "client_protocol"
+path = "fuzz_targets/client_protocol.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

@@ -210,3 +210,8 @@ user-visible change, added in the same commit as the change. The format follows
   and 36 vectors; five counters, `client.timed_out`, `client_protocol.rejected_command`,
   `client_protocol.errors`, `driver.registry_full` and `driver.log_create_failed`
   (ADR 0019).
+- `cavalry-proto` reads and writes the client protocol: `client_protocol::Command`
+  and `client_protocol::Event` decode a command ring or broadcast buffer record's
+  message with the spec's checks in order and write one in place; every vector of
+  `spec/vectors/client-protocol.json` runs on every `just test` and under
+  `just conformance`, and random bytes under every type id never panic.
