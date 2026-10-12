@@ -1,0 +1,74 @@
+//! The values `spec/client-protocol.md` fixes for this version: the timeouts of
+//! "Liveness and timeouts", the file sizes and the registries' capacities of "Sizes".
+//! None is configurable in this version (ADR 0019).
+
+use std::time::Duration;
+
+/// How often the conductor stores its clock in the consumer heartbeat.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// A consumer heartbeat older than this is `driver-timeout` to a client.
+pub const DRIVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a client sends `client keepalive` when it has sent nothing else.
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A client whose last command is older than this is timed out.
+pub const CLIENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// An add or remove command unanswered for this long is reported to the caller as lost.
+pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the command ring's head may stand still with the tail beyond it before the
+/// claim at the head is treated as a dead client's: the client liveness timeout.
+pub const COMMAND_RING_UNBLOCK_TIMEOUT: Duration = CLIENT_LIVENESS_TIMEOUT;
+
+/// How long a publication's consumer position may stand still with the producer beyond
+/// it before the claim there is treated as a dead publisher's.
+pub const PUBLICATION_UNBLOCK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long a closed publication's log stays for its subscribers to drain.
+pub const PUBLICATION_LINGER: Duration = Duration::from_secs(5);
+
+/// How long a freed counter's record stays reclaimed before it is allocated again.
+pub const COUNTER_REUSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The counters file's capacity, in counters.
+pub const COUNTERS_CAPACITY: u32 = 8192;
+
+/// The command ring's capacity, in bytes.
+pub const COMMAND_RING_CAPACITY: u32 = 1024 * 1024;
+
+/// The broadcast buffer's capacity, in bytes.
+pub const BROADCAST_CAPACITY: u32 = 1024 * 1024;
+
+/// The term length of a `cavalry:ipc` publication's log, in bytes.
+pub const IPC_TERM_LENGTH: u32 = 64 * 1024 * 1024;
+
+/// The MTU length of a `cavalry:ipc` publication's log, in bytes.
+pub const IPC_MTU_LENGTH: u32 = 1408;
+
+/// The publication window of a `cavalry:ipc` publication: term length ÷ 2.
+pub const IPC_PUBLICATION_WINDOW: u32 = IPC_TERM_LENGTH / 2;
+
+/// How many clients the driver tracks: every client id it has not forgotten.
+pub const MAX_CLIENTS: usize = 256;
+
+/// How many publication registrations the driver holds, shared or not.
+pub const MAX_PUBLICATIONS: usize = 1024;
+
+/// How many subscription registrations the driver holds.
+pub const MAX_SUBSCRIPTIONS: usize = 1024;
+
+/// How many images the driver holds: pairs of a subscription and a publication that match.
+pub const MAX_IMAGES: usize = 2048;
+
+/// A duration as the nanoseconds the driver's clock counts in.
+pub(crate) const fn nanos(duration: Duration) -> i64 {
+    let nanos = duration.as_nanos();
+    if nanos > i64::MAX as u128 {
+        i64::MAX
+    } else {
+        nanos as i64
+    }
+}

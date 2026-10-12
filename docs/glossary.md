@@ -75,3 +75,4 @@ pages elsewhere mention Aeron at most once.
 | driver timeout | How long, 10 s, a client lets the consumer heartbeat go stale before it treats the driver as gone and closes. | driver timeout | `docs/reference/client-protocol.md` |
 | publication linger | How long, 5 s, a closed publication's log stays for subscribers to drain before the driver removes it. | publication linger timeout | `docs/reference/client-protocol.md` |
 | error code | The number in an error event that says why the driver refused a command, Aeron's codes. | error code | `docs/reference/client-protocol.md` |
+| conductor | The driver's one control thread: on every duty cycle it stores its heartbeat, reads and answers commands, unblocks the ring, times out clients and keeps every publication's positions. | conductor (`DriverConductor`) | `docs/reference/client-protocol.md` |

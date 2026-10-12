@@ -215,3 +215,11 @@ user-visible change, added in the same commit as the change. The format follows
   message with the spec's checks in order and write one in place; every vector of
   `spec/vectors/client-protocol.json` runs on every `just test` and under
   `just conformance`, and random bytes under every type id never panic.
+- `cavalry-driver` runs: `Driver::start` keeps a directory as `spec/client-protocol.md`
+  says, refusing one whose driver is alive and remaking one whose driver is gone, creates
+  the counters file, the command ring and the broadcast buffer, and runs the conductor on
+  its own thread with a busy-spin, yield or backoff idle strategy. The conductor answers
+  every command of the protocol, shares concurrent publications, joins images at the
+  producer's position, keeps each publication's positions, limit, cleaning, unblocking
+  and closing per `spec/log-buffer.md`, times clients out, and counts every refusal;
+  `Driver::close` leaves −1 in the heartbeat for `doctor`.
