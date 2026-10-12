@@ -141,6 +141,7 @@ loom:
 # `rustup toolchain install nightly` and `cargo install cargo-fuzz`.
 fuzz:
     cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz frame_header -- -max_total_time=60
+    cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz client_protocol -- -max_total_time=60
 
 # Retire branches whose work is on master, locally and on origin: every branch whose
 # pull request merged, or the one named. GitHub deletes a merged pull request's branch

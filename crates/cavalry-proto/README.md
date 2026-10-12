@@ -96,5 +96,6 @@ frame rejected (version): version 1, this reader knows 0; the writer runs anothe
 - [`spec/client-protocol.md`](../../spec/client-protocol.md), the commands and events
   `client_protocol` reads and writes, and [ADR 0019](../../docs/decisions/0019-adopt-aeron-control-protocol-as-the-client-protocol.md),
   why they are Aeron's; [`spec/vectors/client-protocol.json`](../../spec/vectors/client-protocol.json),
-  which `tests/client_protocol_conformance.rs` runs, and
-  `tests/client_protocol_no_panic.rs`.
+  which `tests/client_protocol_conformance.rs` runs; `tests/client_protocol_no_panic.rs`
+  and `fuzz/fuzz_targets/client_protocol.rs`, which feed the decoder bytes it must
+  never panic on, on every commit and under `just fuzz`.
