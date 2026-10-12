@@ -43,7 +43,7 @@ pages elsewhere mention Aeron at most once.
 | publication window | How far a publisher may run ahead of the slowest subscriber; at most half a term. | term window length | `docs/reference/log-buffer.md` |
 | publisher limit | The position a publisher may write up to: the slowest subscriber's position plus the publication window, a counter the driver maintains. | publisher limit (`pub-lmt`) | `docs/reference/log-buffer.md` |
 | end of stream position | The metadata field the driver sets to the final position when a publication closes; a subscriber at or past it has seen everything. | end of stream position | `docs/reference/log-buffer.md` |
-| unblock | The driver turning a claim that was never committed into a padding frame or padding record after a timeout, so the stream or the ring moves on. | unblock | `docs/reference/log-buffer.md` |
+| unblock | The driver turning a claim that was never committed into a padding frame or padding record after a timeout, so the stream or the ring moves on. | unblock | `docs/reference/log-buffer.md`, `docs/reference/command-ring.md` |
 | admin action | The claim result that says a rotation happened and the caller retries. | `ADMIN_ACTION` | `docs/reference/log-buffer.md` |
 | command ring | The shared-memory file through which every client sends the driver its commands: many producers, one consumer, records read in order and cleared. | to-driver command buffer (`ManyToOneRingBuffer`) | `docs/reference/command-ring.md` |
 | broadcast buffer | The shared-memory file through which the driver sends every client its events: one transmitter, any number of receivers, and a receiver that falls a ring behind is lapped. | to-clients buffer (`BroadcastTransmitter`) | `docs/reference/broadcast-buffer.md` |
