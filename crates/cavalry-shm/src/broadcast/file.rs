@@ -7,6 +7,7 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
@@ -37,6 +38,11 @@ struct Mapped {
     length: usize,
     fields: HeaderFields,
     writable: bool,
+    /// Whether this process created the buffer: only the creator, the driver, transmits.
+    created: bool,
+    /// Whether a [`Transmitter`] on this mapping is alive: the trailer has one writer,
+    /// and two would interleave records and corrupt the buffer for every receiver.
+    transmitter_taken: AtomicBool,
 }
 
 // SAFETY: `base` points into `_map`, which lives as long as `self`, and the only
@@ -47,7 +53,7 @@ unsafe impl Send for Mapped {}
 unsafe impl Sync for Mapped {}
 
 impl Mapped {
-    fn new(mut map: Map, fields: HeaderFields) -> Result<Self, BroadcastError> {
+    fn new(mut map: Map, fields: HeaderFields, created: bool) -> Result<Self, BroadcastError> {
         // The writer's pointer comes from `&mut [u8]`, so it keeps permission to write;
         // the map is never dereferenced again, so nothing invalidates it.
         let (base, length, writable) = match &mut map {
@@ -67,6 +73,8 @@ impl Mapped {
             length,
             fields,
             writable,
+            created,
+            transmitter_taken: AtomicBool::new(false),
         })
     }
 
@@ -139,17 +147,17 @@ impl BroadcastBuffer {
         // assumes (ADR 0010 bounds the values a peer writes, not whether the file
         // exists); a truncation is a fault, never silent misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
-        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields)?);
+        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields, true)?);
         mapped.trailer().publish(&fields);
         Ok(Self { mapped })
     }
 
-    /// Opens `dir/broadcast-buffer`, writable for the driver and read-only for a client
-    /// or `doctor`, and runs the spec's checks in the spec's order
+    /// Opens `dir/broadcast-buffer`, read-only for a client or `doctor`, and runs the spec's checks in the spec's order
     /// (`spec/broadcast-buffer.md`, "What a reader rejects"): the file's size
     /// (`too-short`), the header read once from the file at its last 512 bytes
     /// (`not-ready` to `length`), then the header again through the final mapping, which
-    /// must equal the first read (`changed`).
+    /// must equal the first read (`changed`). A buffer opened `writable` still has no
+    /// transmitter: only the one [`BroadcastBuffer::create`] returned transmits.
     pub fn open(dir: &Path, writable: bool) -> Result<Self, BroadcastError> {
         let mut file = OpenOptions::new()
             .read(true)
@@ -176,7 +184,7 @@ impl BroadcastBuffer {
             // SAFETY: as above.
             Map::Reader(unsafe { MmapOptions::new().len(file_length as usize).map(&file)? })
         };
-        let mapped = Mapped::new(map, first)?;
+        let mapped = Mapped::new(map, first, false)?;
         let second = mapped.trailer().read(file_length)?;
         if second != first {
             return Err(BroadcastError::Changed);
@@ -201,10 +209,28 @@ impl BroadcastBuffer {
         self.mapped.fields.max_message_length() as usize
     }
 
-    /// The driver's transmitter on this buffer, which must be writable. One per buffer:
-    /// the trailer has one writer.
+    /// The driver's transmitter on this buffer. One per buffer: the trailer has one
+    /// writer. So only the buffer this process created with [`BroadcastBuffer::create`]
+    /// has a transmitter, and only one at a time: on a buffer from
+    /// [`BroadcastBuffer::open`], or while another transmitter on this buffer is alive,
+    /// the error is [`BroadcastError::Io`] and says which.
     pub fn transmitter(&self) -> Result<Transmitter, BroadcastError> {
         self.mapped.require_writable()?;
+        if !self.mapped.created {
+            return Err(BroadcastError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "only the driver that created the broadcast buffer transmits on it; take the \
+                 transmitter from the BroadcastBuffer that create returned, and use an opened \
+                 buffer for receivers",
+            )));
+        }
+        if self.mapped.transmitter_taken.swap(true, Ordering::AcqRel) {
+            return Err(BroadcastError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "the broadcast buffer already has a transmitter and a buffer has one; use that \
+                 transmitter, or drop it before taking another",
+            )));
+        }
         Ok(Transmitter {
             mapped: Arc::clone(&self.mapped),
         })
@@ -237,8 +263,9 @@ impl fmt::Debug for BroadcastBuffer {
 }
 
 /// The driver's handle on the buffer (`spec/broadcast-buffer.md`, "Transmitting"): it
-/// writes records and never waits for a receiver. One per buffer. The handle is `Send`
-/// and keeps the mapping alive.
+/// writes records and never waits for a receiver. One per buffer, from the buffer the
+/// driver created ([`BroadcastBuffer::transmitter`]); dropping it lets that buffer hand
+/// out another. The handle is `Send` and keeps the mapping alive.
 pub struct Transmitter {
     mapped: Arc<Mapped>,
 }
@@ -261,6 +288,14 @@ impl Transmitter {
     /// The tail position, the tail intent and the latest record.
     pub fn positions(&self) -> Positions {
         self.mapped.trailer().positions()
+    }
+}
+
+impl Drop for Transmitter {
+    fn drop(&mut self) {
+        self.mapped
+            .transmitter_taken
+            .store(false, Ordering::Release);
     }
 }
 

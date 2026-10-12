@@ -176,10 +176,12 @@ user-visible change, added in the same commit as the change. The format follows
   and `open` run the checks of `spec/command-ring.md` in order; a `Producer` takes
   correlation ids and claims a record in place with one compare-and-swap, or writes one by
   copy, and a `Claim` commits with one release store or aborts, on drop too; the driver's
-  `Consumer` reads in place, clears what it read, unblocks a claim a dead client left,
-  stores the heartbeat and closes, and stops the ring by name at a corrupt record or tail.
+  `Consumer`, one per ring and only from the ring `create` returned, reads in place,
+  clears what it read, unblocks a claim a dead client left once the head has stood still
+  for the unblock timeout it was given, stores the heartbeat and closes, and stops the ring by name at a corrupt record or tail.
   `BroadcastBuffer::create` and `open` do the same for `spec/broadcast-buffer.md`; the
-  driver's `Transmitter` never waits for a receiver, and a `Receiver` copies each event
+  driver's `Transmitter`, one per buffer and only from the buffer `create` returned, never
+  waits for a receiver, and a `Receiver` copies each event
   out, validates the copy against the tail intent, and reports `lapped` rather than a torn
   record. The 56 and 54 vectors run on every `just test`, six loom models check the claim,
   read, unblock, transmit and receive protocols, and the layout layers run under Miri

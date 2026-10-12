@@ -7,6 +7,7 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
@@ -42,6 +43,11 @@ struct Mapped {
     length: usize,
     fields: HeaderFields,
     writable: bool,
+    /// Whether this process created the ring: only the creator, the driver, consumes.
+    created: bool,
+    /// Whether a [`Consumer`] on this mapping is alive: the head has one writer, and the
+    /// bytes a read hands out are the reading consumer's alone (`body`).
+    consumer_taken: AtomicBool,
 }
 
 // SAFETY: `base` points into `_map`, which lives as long as `self`, and the only
@@ -52,7 +58,7 @@ unsafe impl Send for Mapped {}
 unsafe impl Sync for Mapped {}
 
 impl Mapped {
-    fn new(mut map: Map, fields: HeaderFields) -> Result<Self, CommandRingError> {
+    fn new(mut map: Map, fields: HeaderFields, created: bool) -> Result<Self, CommandRingError> {
         // The writer's pointer comes from `&mut [u8]`, so it keeps permission to write;
         // the map is never dereferenced again, so nothing invalidates it.
         let (base, length, writable) = match &mut map {
@@ -72,6 +78,8 @@ impl Mapped {
             length,
             fields,
             writable,
+            created,
+            consumer_taken: AtomicBool::new(false),
         })
     }
 
@@ -97,7 +105,10 @@ impl Mapped {
         // inside the mapping; the producer released the positive length after writing
         // the message and the caller acquired it, so the bytes are complete; nothing
         // writes a committed record until the consumer clears it, which it does after
-        // this slice is dropped (`cells::read`). A process that writes here regardless
+        // this slice is dropped (`cells::read`); and that consumer is the only one on the
+        // ring (`CommandRing::consumer` hands out one, from the creator's mapping only,
+        // and `consumer_taken` holds it until that consumer drops), so no other reader
+        // clears these bytes while the slice lives. A process that writes here regardless
         // breaks the spec; ADR 0010 accepts the driver's directory as the trust boundary.
         unsafe { core::slice::from_raw_parts(self.base.add(start), length) }
     }
@@ -114,8 +125,16 @@ impl Mapped {
         // tail's compare-and-swap, so no other producer writes these bytes; the consumer
         // reads a message only after acquiring a positive length, which commit releases
         // after the writes through this slice; the slice lives as long as the `Claim`,
-        // which commits or aborts when it ends. The driver's unblock rewrites an
-        // abandoned claim's word, not its message, and only after the unblock timeout.
+        // which commits or aborts when it ends. The one thing that lets a consumer read
+        // and clear these bytes without a commit is an unblock, and `Consumer::unblock`
+        // runs one only after the head has stood still at one position for the unblock
+        // timeout with the tail beyond it, a clock the consumer keeps itself (its
+        // `stalled` field). What remains is the spec's assumption ("Unblocking", last
+        // paragraph): a producer that holds a claim, or sits between its compare-and-swap
+        // and its claim's store, for longer than the unblock timeout is a dead client,
+        // already timed out as a client, since the unblock timeout is the client liveness
+        // timeout. A live producer stalled that long while this slice lives breaks it, as
+        // it breaks the design this ring copies.
         // The mapping is writable (asserted above).
         unsafe { core::slice::from_raw_parts_mut(self.base.cast_mut().add(start), length) }
     }
@@ -149,6 +168,10 @@ impl Words for Mapped {
     }
 }
 
+/// How many times [`CommandRing::size`] loads the head, the tail and the head again
+/// before it settles for the last pair.
+pub const SIZE_ATTEMPTS: usize = 16;
+
 /// One command ring: the mapping the driver created or a client opened. `Send` and
 /// `Sync`: a [`Producer`] or a [`Consumer`] made from it keeps the mapping alive on its
 /// own.
@@ -178,7 +201,7 @@ impl CommandRing {
         // assumes (ADR 0010 bounds the values a peer writes, not whether the file
         // exists); a truncation is a fault, never silent misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
-        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields)?);
+        let mapped = Arc::new(Mapped::new(Map::Writer(map), fields, true)?);
         let trailer = mapped.trailer();
         trailer.heartbeat.store_release(fields.start_timestamp());
         trailer.publish(&fields);
@@ -217,7 +240,7 @@ impl CommandRing {
             // SAFETY: as above.
             Map::Reader(unsafe { MmapOptions::new().len(file_length as usize).map(&file)? })
         };
-        let mapped = Mapped::new(map, first)?;
+        let mapped = Mapped::new(map, first, false)?;
         let second = mapped.trailer().read(file_length)?;
         if second != first {
             return Err(CommandRingError::Changed);
@@ -252,13 +275,35 @@ impl CommandRing {
         })
     }
 
-    /// The driver's consumer on this ring, which must be writable. One per ring: the
-    /// head position has one writer.
-    pub fn consumer(&self) -> Result<Consumer, CommandRingError> {
+    /// The driver's consumer on this ring. One per ring: the head position has one
+    /// writer, and a record is read and cleared by one reader. So only the ring this
+    /// process created with [`CommandRing::create`] has a consumer, and only one at a
+    /// time: on a ring from [`CommandRing::open`], or while another consumer on this ring
+    /// is alive, the error is [`CommandRingError::Io`] and says which. `unblock_timeout`
+    /// is how long the head must stand still with the tail beyond it before
+    /// [`Consumer::unblock`] treats the claim at the head as a dead client's: the client
+    /// liveness timeout, 10 s in Aeron (`spec/command-ring.md`, "Unblocking").
+    pub fn consumer(&self, unblock_timeout: Duration) -> Result<Consumer, CommandRingError> {
         self.mapped.require_writable()?;
+        if !self.mapped.created {
+            return Err(CommandRingError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "only the driver that created the command ring consumes it; take the consumer \
+                 from the CommandRing that create returned, and use an opened ring for producers",
+            )));
+        }
+        if self.mapped.consumer_taken.swap(true, Ordering::AcqRel) {
+            return Err(CommandRingError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "the command ring already has a consumer and a ring has one; use that consumer, \
+                 or drop it before taking another",
+            )));
+        }
         Ok(Consumer {
             mapped: Arc::clone(&self.mapped),
             rejected: None,
+            unblock_timeout: i64::try_from(unblock_timeout.as_nanos()).unwrap_or(i64::MAX),
+            stalled: None,
         })
     }
 
@@ -278,20 +323,23 @@ impl CommandRing {
         self.mapped.trailer().heartbeat.load_acquire()
     }
 
-    /// How many bytes the ring holds, tail − head, read until the head is stable and
-    /// clamped to 0 and the capacity: what `doctor` reports as the fill.
+    /// How many bytes the ring holds, tail − head, clamped to 0 and the capacity: what
+    /// `doctor` reports as the fill. It loads the head, the tail and the head again until
+    /// the head is stable, at most [`SIZE_ATTEMPTS`] times; against a head that moves on
+    /// every attempt it reports the last pair, clamped.
     pub fn size(&self) -> u32 {
         let trailer = self.mapped.trailer();
         let mut after = trailer.head.load_acquire();
-        loop {
+        let mut tail = after;
+        for _ in 0..SIZE_ATTEMPTS {
             let before = after;
-            let tail = trailer.tail.load_acquire();
+            tail = trailer.tail.load_acquire();
             after = trailer.head.load_acquire();
             if after == before {
-                let size = (tail - after).clamp(0, i64::from(self.capacity()));
-                return size as u32;
+                break;
             }
         }
+        (tail - after).clamp(0, i64::from(self.capacity())) as u32
     }
 }
 
@@ -508,11 +556,17 @@ impl Rejection {
 
 /// The driver's handle on the ring (`spec/command-ring.md`, "Reading", "Unblocking",
 /// "Heartbeat and correlation ids"): reads records in order and clears them, unblocks a
-/// claim a dead client left, and stores the heartbeat. One per ring. The handle is
-/// `Send` and keeps the mapping alive.
+/// claim a dead client left, and stores the heartbeat. One per ring, from the ring the
+/// driver created ([`CommandRing::consumer`]); dropping it lets that ring hand out
+/// another. The handle is `Send` and keeps the mapping alive.
 pub struct Consumer {
     mapped: Arc<Mapped>,
     rejected: Option<Rejection>,
+    /// The unblock timeout, in nanoseconds.
+    unblock_timeout: i64,
+    /// The head an unblock found with the tail beyond it, and the clock when it first
+    /// found the head there: the head has stood still since.
+    stalled: Option<(i64, i64)>,
 }
 
 impl Consumer {
@@ -552,20 +606,44 @@ impl Consumer {
         })
     }
 
-    /// The driver's unblock, run when the head has not moved for the unblock timeout
-    /// while the tail is beyond it: a stale claim or a gap of zeros becomes a padding
-    /// record. A tail outside its bound is [`CommandRingError::Tail`] and a stale claim
-    /// outside the record bounds is [`CommandRingError::Record`]; both leave the ring
-    /// corrupt, and every later read and unblock returns the same error without
-    /// reading the ring.
-    pub fn unblock(&mut self) -> Result<UnblockOutcome, CommandRingError> {
+    /// The driver's unblock, called on its duty cycle with its clock `now_nanos`. It acts
+    /// only once the head has not moved for the unblock timeout while the tail is beyond
+    /// it (`spec/command-ring.md`, "Unblocking"): the consumer keeps that clock itself,
+    /// from the first call that finds the head where it is with the tail elsewhere, and
+    /// until it runs out the outcome is [`UnblockOutcome::NoAction`] and nothing in the
+    /// ring is read. Then a stale claim or a gap of zeros becomes a padding record. A
+    /// tail outside its bound is [`CommandRingError::Tail`] and a stale claim outside the
+    /// record bounds is [`CommandRingError::Record`]; both leave the ring corrupt, and
+    /// every later read and unblock returns the same error without reading the ring.
+    pub fn unblock(&mut self, now_nanos: i64) -> Result<UnblockOutcome, CommandRingError> {
         self.corrupt()?;
         let mapped = &*self.mapped;
-        match cells::unblock(mapped, mapped.trailer()) {
-            Ok(Some(padding)) => Ok(UnblockOutcome::Unblocked {
-                index: padding.index,
-                length: padding.length,
-            }),
+        let trailer = mapped.trailer();
+        let head = trailer.head.load_own();
+        if trailer.tail.load_acquire() == head {
+            self.stalled = None;
+            return Ok(UnblockOutcome::NoAction);
+        }
+        match self.stalled {
+            Some((stalled_head, since)) if stalled_head == head => {
+                if now_nanos.saturating_sub(since) < self.unblock_timeout {
+                    return Ok(UnblockOutcome::NoAction);
+                }
+            }
+            _ => {
+                self.stalled = Some((head, now_nanos));
+                return Ok(UnblockOutcome::NoAction);
+            }
+        }
+        match cells::unblock(mapped, trailer) {
+            Ok(Some(padding)) => {
+                // The padding is now the head's record; the next stall starts its own clock.
+                self.stalled = None;
+                Ok(UnblockOutcome::Unblocked {
+                    index: padding.index,
+                    length: padding.length,
+                })
+            }
             Ok(None) => Ok(UnblockOutcome::NoAction),
             Err(CommandRingError::Record {
                 index,
@@ -611,6 +689,12 @@ impl Consumer {
     /// The head position: the consumer's own.
     pub fn consumer_position(&self) -> i64 {
         self.mapped.trailer().head.load_own()
+    }
+}
+
+impl Drop for Consumer {
+    fn drop(&mut self) {
+        self.mapped.consumer_taken.store(false, Ordering::Release);
     }
 }
 

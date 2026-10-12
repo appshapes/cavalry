@@ -14,9 +14,10 @@ the two crates where `unsafe` is permitted.
   ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
 - Carries the control plane's two queues between the processes on a host: the command
   ring, through which every client sends the driver its commands, with a `Producer` per
-  client thread and the driver's `Consumer`, which clears what it read and unblocks a
-  claim a dead client left; and the broadcast buffer, through which the driver sends
-  every client its events, with the driver's `Transmitter`, which never waits, and a
+  client thread and the driver's one `Consumer`, which only the ring's creator hands
+  out, clears what it read and unblocks a claim a dead client left once the head has
+  stood still for the unblock timeout; and the broadcast buffer, through which the driver sends
+  every client its events, with the driver's one `Transmitter`, which never waits, and a
   `Receiver` per client, which is told `lapped` when it fell a ring behind
   ([`spec/command-ring.md`](../../spec/command-ring.md),
   [`spec/broadcast-buffer.md`](../../spec/broadcast-buffer.md)). Both are lock-free,

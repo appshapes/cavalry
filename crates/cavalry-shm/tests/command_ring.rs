@@ -79,7 +79,7 @@ fn patch(dir: &Dir, offset: u64, bytes: &[u8]) {
 fn the_full_ring_before_anything_else() {
     let dir = Dir::new("full");
     let ring = CommandRing::create(dir.path(), C).unwrap();
-    let mut consumer = ring.consumer().unwrap();
+    let mut consumer = ring.consumer(TIMEOUT).unwrap();
     let client = CommandRing::open(dir.path(), true).unwrap();
     let mut producer = client.producer(TIMEOUT).unwrap();
 
@@ -207,7 +207,7 @@ fn create_then_open_round_trips_and_the_bytes_are_the_specs() {
     let refused = doctor.producer(TIMEOUT).unwrap_err();
     assert_eq!(refused.reason(), "io");
     assert!(refused.to_string().contains("read-only"), "{refused}");
-    assert_eq!(doctor.consumer().unwrap_err().reason(), "io");
+    assert_eq!(doctor.consumer(TIMEOUT).unwrap_err().reason(), "io");
 
     let again = CommandRing::create(dir.path(), C).unwrap_err();
     assert_eq!(
@@ -227,7 +227,7 @@ fn create_then_open_round_trips_and_the_bytes_are_the_specs() {
 fn a_claim_commits_aborts_or_is_aborted_on_drop_and_the_consumer_sees_it() {
     let dir = Dir::new("claim");
     let ring = CommandRing::create(dir.path(), C).unwrap();
-    let mut consumer = ring.consumer().unwrap();
+    let mut consumer = ring.consumer(TIMEOUT).unwrap();
     let mut producer = ring.producer(TIMEOUT).unwrap();
 
     let mut claim = producer.try_claim(7, 5, now()).unwrap();
@@ -278,7 +278,7 @@ fn correlation_ids_count_up_across_producers() {
 fn the_heartbeat_tells_a_closed_driver_from_a_stopped_one() {
     let dir = Dir::new("heartbeat");
     let ring = CommandRing::create(dir.path(), C).unwrap();
-    let consumer = ring.consumer().unwrap();
+    let consumer = ring.consumer(TIMEOUT).unwrap();
     let mut producer = ring.producer(Duration::from_secs(1)).unwrap();
     let start = ring.header().start_timestamp();
 
@@ -314,18 +314,25 @@ fn the_heartbeat_tells_a_closed_driver_from_a_stopped_one() {
 fn the_driver_unblocks_a_claim_a_dead_client_left() {
     let dir = Dir::new("unblock");
     let ring = CommandRing::create(dir.path(), C).unwrap();
-    let mut consumer = ring.consumer().unwrap();
+    let mut consumer = ring.consumer(TIMEOUT).unwrap();
     let client = CommandRing::open(dir.path(), true).unwrap();
     let mut producer = client.producer(TIMEOUT).unwrap();
+    let start = now();
+    let timeout = TIMEOUT.as_nanos() as i64;
 
     assert_eq!(
-        consumer.unblock().unwrap(),
+        consumer.unblock(start).unwrap(),
         UnblockOutcome::NoAction,
         "an empty ring"
     );
     producer.write(1, b"first", now()).unwrap();
     assert_eq!(
-        consumer.unblock().unwrap(),
+        consumer.unblock(start).unwrap(),
+        UnblockOutcome::NoAction,
+        "the head starts its clock"
+    );
+    assert_eq!(
+        consumer.unblock(start + timeout).unwrap(),
         UnblockOutcome::NoAction,
         "a committed record waits"
     );
@@ -344,8 +351,25 @@ fn the_driver_unblocks_a_claim_a_dead_client_left() {
         .unwrap();
     assert_eq!((read.messages, read.stop), (0, ReadStop::Claimed));
 
+    // The head moved, so the clock starts again here; an unblock before the head has
+    // stood still for the timeout leaves the claim alone, since its client may be alive.
+    let moved = start + timeout;
     assert_eq!(
-        consumer.unblock().unwrap(),
+        consumer.unblock(moved).unwrap(),
+        UnblockOutcome::NoAction,
+        "the head moved: its clock starts"
+    );
+    assert_eq!(
+        consumer.unblock(moved + timeout - 1).unwrap(),
+        UnblockOutcome::NoAction,
+        "one nanosecond short of the timeout"
+    );
+    let read = consumer
+        .read(16, |_, _| panic!("the claim is still not committed"))
+        .unwrap();
+    assert_eq!((read.messages, read.stop), (0, ReadStop::Claimed));
+    assert_eq!(
+        consumer.unblock(moved + timeout).unwrap(),
         UnblockOutcome::Unblocked {
             index: 16,
             length: 24
@@ -359,8 +383,82 @@ fn the_driver_unblocks_a_claim_a_dead_client_left() {
         "the padding is skipped and the next record delivered"
     );
     assert_eq!(read.bytes, 24 + 16);
-    assert_eq!(consumer.unblock().unwrap(), UnblockOutcome::NoAction);
+    assert_eq!(
+        consumer.unblock(moved + 2 * timeout).unwrap(),
+        UnblockOutcome::NoAction
+    );
     assert_eq!(ring.size(), 0);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_live_claim_is_never_unblocked_before_the_timeout() {
+    let dir = Dir::new("unblock-live");
+    let ring = CommandRing::create(dir.path(), C).unwrap();
+    let mut consumer = ring.consumer(TIMEOUT).unwrap();
+    let mut producer = ring.producer(TIMEOUT).unwrap();
+    let start = now();
+    let timeout = TIMEOUT.as_nanos() as i64;
+
+    // A client holds a claim and writes it while the driver unblocks on every duty
+    // cycle; until the timeout nothing pads the claim or clears its bytes.
+    let mut claim = producer.try_claim(4, 8, now()).unwrap();
+    for step in [0, 1, timeout / 2, timeout - 1] {
+        assert_eq!(
+            consumer.unblock(start + step).unwrap(),
+            UnblockOutcome::NoAction,
+            "{step} ns after the head stood still"
+        );
+        claim.body().copy_from_slice(&step.to_le_bytes());
+    }
+    claim.commit();
+    let mut seen = Vec::new();
+    consumer
+        .read(16, |type_id, message| {
+            seen.push((type_id, message.to_vec()))
+        })
+        .unwrap();
+    assert_eq!(seen, vec![(4, (timeout - 1).to_le_bytes().to_vec())]);
+    assert_eq!(
+        consumer.unblock(start + 2 * timeout).unwrap(),
+        UnblockOutcome::NoAction,
+        "an empty ring"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_ring_has_one_consumer_and_only_its_creator_hands_it_out() {
+    let dir = Dir::new("one-consumer");
+    let ring = CommandRing::create(dir.path(), C).unwrap();
+    let consumer = ring.consumer(TIMEOUT).unwrap();
+
+    let second = ring.consumer(TIMEOUT).unwrap_err();
+    assert_eq!(second.reason(), "io");
+    assert!(
+        second.to_string().contains("already has a consumer"),
+        "{second}"
+    );
+
+    let opened = CommandRing::open(dir.path(), true).unwrap();
+    let refused = opened.consumer(TIMEOUT).unwrap_err();
+    assert_eq!(refused.reason(), "io");
+    assert!(
+        refused.to_string().contains("only the driver that created"),
+        "{refused}"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("docs/reference/command-ring.md#"),
+        "{refused}"
+    );
+    assert!(opened.producer(TIMEOUT).is_ok(), "an opened ring produces");
+
+    // Dropping the consumer lets the creator hand out another; still one at a time.
+    drop(consumer);
+    let _again = ring.consumer(TIMEOUT).unwrap();
+    assert_eq!(ring.consumer(TIMEOUT).unwrap_err().reason(), "io");
 }
 
 #[test]
@@ -368,7 +466,7 @@ fn the_driver_unblocks_a_claim_a_dead_client_left() {
 fn a_corrupt_record_stops_the_ring_by_name() {
     let dir = Dir::new("corrupt");
     let ring = CommandRing::create(dir.path(), C).unwrap();
-    let mut consumer = ring.consumer().unwrap();
+    let mut consumer = ring.consumer(TIMEOUT).unwrap();
     let mut producer = ring.producer(TIMEOUT).unwrap();
     producer.write(1, b"good", now()).unwrap();
     producer.write(2, b"bad!", now()).unwrap();
@@ -411,18 +509,23 @@ fn a_corrupt_record_stops_the_ring_by_name() {
             .reason(),
         "record"
     );
-    assert_eq!(consumer.unblock().unwrap_err().reason(), "record");
+    assert_eq!(consumer.unblock(now()).unwrap_err().reason(), "record");
 
     // A corrupt tail is the same for the unblocker.
     let dir = Dir::new("corrupt-tail");
     let ring = CommandRing::create(dir.path(), C).unwrap();
-    let mut consumer = ring.consumer().unwrap();
+    let mut consumer = ring.consumer(TIMEOUT).unwrap();
     patch(
         &dir,
         u64::from(C) + TAIL_POSITION_OFFSET as u64,
         &12i64.to_le_bytes(),
     );
-    let error = consumer.unblock().unwrap_err();
+    // The unblock runs its checks once the head has stood still for the timeout.
+    let start = now();
+    assert_eq!(consumer.unblock(start).unwrap(), UnblockOutcome::NoAction);
+    let error = consumer
+        .unblock(start + TIMEOUT.as_nanos() as i64)
+        .unwrap_err();
     assert_eq!(error.reason(), "tail");
     assert!(
         matches!(error, CommandRingError::Tail { tail: 12, head: 0 }),

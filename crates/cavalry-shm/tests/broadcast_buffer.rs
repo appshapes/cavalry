@@ -160,6 +160,32 @@ fn create_then_open_round_trips_and_the_bytes_are_the_specs() {
     assert_eq!(refused.reason(), "io");
     assert!(refused.to_string().contains("read-only"), "{refused}");
 
+    // One transmitter per buffer: not a second one while the first lives, and none from a
+    // buffer that was opened, even writable; dropping the first lets the creator hand out
+    // another.
+    let second = buffer.transmitter().unwrap_err();
+    assert_eq!(second.reason(), "io");
+    assert!(
+        second.to_string().contains("already has a transmitter"),
+        "{second}"
+    );
+    let opened = BroadcastBuffer::open(dir.path(), true).unwrap();
+    let refused = opened.transmitter().unwrap_err();
+    assert_eq!(refused.reason(), "io");
+    assert!(
+        refused.to_string().contains("only the driver that created"),
+        "{refused}"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("docs/reference/broadcast-buffer.md#"),
+        "{refused}"
+    );
+    drop(transmitter);
+    let mut transmitter = buffer.transmitter().unwrap();
+    transmitter.transmit(1, b"y").unwrap();
+
     let again = BroadcastBuffer::create(dir.path(), C).unwrap_err();
     assert_eq!(
         again.reason(),

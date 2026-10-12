@@ -33,7 +33,7 @@
 //!
 //!     // The driver creates the ring once, 4 KiB here, and reads it on its duty cycle.
 //!     let ring = CommandRing::create(&dir, 4096)?;
-//!     let mut consumer = ring.consumer()?;
+//!     let mut consumer = ring.consumer(Duration::from_secs(10))?;
 //!
 //!     // A client opens it writable, takes a correlation id, and claims a record for a
 //!     // command of type 1; it writes the command in place and commits with one store.
@@ -72,7 +72,9 @@ mod file;
 pub mod layout;
 
 #[cfg(not(loom))]
-pub use file::{Claim, CommandRing, Consumer, Producer, Read, Rejection, UnblockOutcome};
+pub use file::{
+    Claim, CommandRing, Consumer, Producer, Read, Rejection, SIZE_ATTEMPTS, UnblockOutcome,
+};
 pub use layout::{HeaderFields, RecordHeader, RecordState};
 
 /// Why the ring, a record or a request was refused. The first seven variants are the
