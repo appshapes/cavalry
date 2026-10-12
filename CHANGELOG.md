@@ -189,3 +189,6 @@ user-visible change, added in the same commit as the change. The format follows
   record. The 56 and 54 vectors run on every `just test`, six loom models check the claim,
   read, unblock, transmit and receive protocols, and the layout layers run under Miri
   (ADR 0014).
+- `just tidy` retires branches whose work is on master, locally and on origin: every
+  branch whose pull request merged, or the one named, with its worktree when the
+  worktree is clean. `CLAUDE.md`'s working rules name it as the step after a merge.

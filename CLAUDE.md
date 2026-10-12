@@ -46,6 +46,7 @@ just lint           # clippy with workspace lints, fmt, lint-counters, config li
 just docs           # rustdoc + mdBook, warnings denied, code blocks run, links checked
 just lint-docs      # fail if code changed without its docs (what CI runs)
 just doctor         # run cavalry doctor against the local driver
+just tidy           # retire branches whose work is on master, locally and on origin; `just tidy <branch>` for a named one
 ```
 
 Run `just bench` before and after any change under a data-plane crate and put both histograms in the commit message. A performance claim without a histogram is not a claim.
@@ -118,6 +119,7 @@ conformance/          protocol conformance suite and upgrade tests
 
 - Read `spec/` before `crates/`. Read the crate's `README.md` before its code.
 - Trunk-based by default: developers commit directly to `master`. Bots and agent workflows use branches and pull requests. `master` is green after every commit, so run `just lint` and `just test` before each one; `/commit` does. The commit message is the review record: what changed, which invariant, and the evidence.
+- After a pull request merges, run `just tidy`: it retires the branch locally and on origin and removes its worktree, and `just tidy <branch>` retires a working branch that never needed a pull request. GitHub deletes a merged pull request's branch on origin by itself; everything else lingers until this runs.
 - One crate per commit where possible. Keep data-plane and control-plane changes in separate commits.
 - Concurrent branches collide in the files everyone appends to: `CHANGELOG.md`, `docs/SUMMARY.md`, `docs/glossary.md`, `spec/README.md`, `counters.toml` and a crate's `lib.rs`. Collaborators tell each other which of these they are appending to before they do, append at the end of the section so both sides can be kept, and resolve a conflict in them by keeping both sides with `master`'s lines first, in the branch that merges second.
 - Before claiming a change is faster, run `just bench-compare`. Before claiming it is correct, run `just conformance` and `just replay-check`.

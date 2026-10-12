@@ -40,7 +40,8 @@ first one. Why the loop is built this way is in ADR 0004
 `git log --oneline -1 origin/master` after `git fetch` shows one commit whose subject
 is your issue title and whose body is the pull request body. The issue is closed with
 a link to the pull request. Without `auto-merge`, the pull request is open and
-approved, waiting for you to merge it.
+approved, waiting for you to merge it. After the merge, `just tidy` retires the
+branch locally; GitHub has already deleted it on origin.
 
 ## Other ways in
 

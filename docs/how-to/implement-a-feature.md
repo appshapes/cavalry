@@ -72,7 +72,9 @@ feature that followed this page, commit by commit.
    - The agent: open an issue with the card's title and body and label it `claude`;
      [Ask the agent to make a change](ask-the-agent.md) says what happens next.
    - When the feature's last commit is on `master`, comment the commit hashes on the
-     card and archive it.
+     card and archive it, and run `just tidy`: it retires every branch whose pull
+     request merged, locally and on origin, with its worktree; `just tidy <branch>`
+     retires a working branch that never needed a pull request.
 
 ## How to verify it worked
 
