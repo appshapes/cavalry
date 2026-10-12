@@ -33,7 +33,11 @@ below and say so in the commit message.
 ## Memory and layout
 
 - Anything shared between threads or processes is `#[repr(C)]` and padded or aligned
-  to 64 bytes. Put a comment on each field group that shares a cache line.
+  to 64 bytes, and a field one party writes and another reads in its hot loop, a tail
+  counter, a position, a limit, a counter's value, has a 128-byte slot of its own,
+  `#[repr(C, align(128))]`, because the prefetcher moves pairs of lines (ADR 0011;
+  `just lint` refuses an atomic in an `align(64)` wrapper). Put a comment on each field
+  group that shares a cache line.
 - Atomics use `Acquire` for loads that gate reads of other memory, `Release` for
   stores that publish it, `Relaxed` only for counters nobody branches on. `SeqCst`
   needs a comment explaining why the weaker orderings are insufficient.

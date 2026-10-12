@@ -19,7 +19,8 @@ zerocopy = { version = "0.8.62", default-features = false, features = ["derive"]
 # Reads spec/vectors/*.json in tests/conformance.rs. Dev only, never on the data plane.
 serde_json = "1"
 
-# Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
+# Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe") and the check-cfg for
+# `cavalry_unchecked`, which only `just bench-unchecked` sets (ADR 0010).
 [lints]
 workspace = true
 

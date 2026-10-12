@@ -1,0 +1,3 @@
+# The bench harness: Cargo.toml says data_plane = false, so the lock ban in the root
+# clippy.toml does not apply here. Clippy uses the nearest clippy.toml and does not
+# merge, so this file replaces the root one for this crate. It stays empty on purpose.

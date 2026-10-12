@@ -13,6 +13,50 @@
 //! protocols. `file` maps the file and casts offsets to cells; it holds every `unsafe`
 //! block that touches a mapping. [`generated`] is written from `counters.toml` by
 //! `scripts/gen-counters.py`.
+//!
+//! # Example
+//!
+//! The driver creates the file and allocates a counter; a reader opens the file and reads
+//! the counter back; the file fills up and says so.
+//!
+//! ```
+//! use cavalry_shm::counters::generated::{COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED};
+//! use cavalry_shm::counters::{CounterId, CountersError, CountersFile, CountersReader, Scope};
+//!
+//! fn main() -> Result<(), CountersError> {
+//!     let dir = std::env::temp_dir().join(format!("cavalry-shm-counters-{}", std::process::id()));
+//!     std::fs::create_dir_all(&dir)?;
+//!
+//!     // The driver creates the file once, with room for 64 counters. Every static counter
+//!     // in counters.toml is allocated with it, in the record whose index is its id.
+//!     let mut driver = CountersFile::create(&dir, 64)?;
+//!     let statics = COUNTERS.iter().filter(|def| def.scope == Scope::Static).count() as i64;
+//!
+//!     // An instance counter: one per publication, image or whatever it counts. The type id
+//!     // is the counters.toml id of the entry a later feature adds; the key and the label
+//!     // say which instance. Moving it is one relaxed add, the data plane's only operation.
+//!     let gaps = driver.allocate(CounterId(7), &1001i32.to_le_bytes(), "image.gaps 1001")?;
+//!     gaps.increment();
+//!
+//!     // Everyone else opens the file read-only. A reader checks the header before it trusts
+//!     // anything, and a record's state before its value.
+//!     let reader = CountersReader::open(&dir)?;
+//!     assert_eq!(reader.read(COUNTERS_ALLOCATED.record())?, statics + 1);
+//!     assert_eq!(reader.read(gaps.id())?, 1);
+//!
+//!     // The capacity is fixed at creation. When every record is in use, an allocation fails
+//!     // with `full`, counters.allocation_failed moves, and whatever needed it is refused.
+//!     for n in (statics + 1)..64 {
+//!         driver.allocate(CounterId(7), &[], &format!("image.gaps {n}"))?;
+//!     }
+//!     let full = driver.allocate(CounterId(7), &[], "image.gaps 64").unwrap_err();
+//!     assert_eq!(full.reason(), "full");
+//!     assert_eq!(reader.read(COUNTERS_ALLOCATION_FAILED.record())?, 1);
+//!
+//!     std::fs::remove_dir_all(&dir)?;
+//!     Ok(())
+//! }
+//! ```
 
 use core::fmt;
 

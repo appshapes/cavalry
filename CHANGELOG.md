@@ -119,6 +119,48 @@ user-visible change, added in the same commit as the change. The format follows
   a client, with release stores; `spec/counters-file.md` now says so, and the one-writer
   rule of ADR 0012 is amended by ADR 0013. `publication.unblocked` and three
   `log_buffer.rejected_*` counters count the driver's unblocks and refusals.
+- `DataFrameHeader::parse_within` runs the frame checks for a reader that holds the
+  header's bytes and knows how many bytes the frame may occupy, which is how the log
+  buffer's reader checks a frame in a term (ADR 0013).
+- `cavalry-shm` builds the log buffer. `LogBuffers::create` lays out the file of
+  `spec/log-buffer.md` and `open` runs the spec's checks in order; a `TermAppender`
+  claims a frame in place with one fetch-and-add and commits it with one release store,
+  offers a message by copy with fragmentation, pads and rotates at the end of a term and
+  refuses a claim by name at the limit; a `TermReader` reads committed frames where its
+  position says after the checks of `spec/frame.md`; the driver's duties, the producer
+  position, cleaning, unblocking, the connected flag and the end of stream position, are
+  methods on the log. A position counter is stored with release and loaded with acquire
+  through `Counter::store_release` and `CountersReader::read_acquire`. The 51 spec
+  vectors run on every `just test`, `just loom` checks the claim protocol and the tail,
+  and the README example is the log buffer (ADR 0013).
+- `just bench` is real: `cavalry-bench` under `bench/` drives a publisher, a
+  subscriber and a conductor thread over a real log buffer and counters file and
+  reports HdrHistogram p50, p99, p99.99 and max of claim and commit, of publish to
+  delivery and of a slot-padding microbench, with zero allocations per message asserted;
+  `just bench-compare` fails a p99.99 regression over 5 percent against
+  `bench/baseline.json` for the runner's profile, and CI runs both and keeps the result
+  as an artifact. `docs/how-to/run-the-bench.md` is the page (ADR 0015).
+- `just bench-unchecked` runs the harness with the data-plane checks built out, under
+  the profile `<profile>-unchecked`, so that what ADR 0010's checks cost is measured on
+  every CI run; the slot-padding microbench now times the store side as well as the
+  load side (ADR 0011).
+- ADRs 0010 and 0011 are Accepted on the bench's evidence from both CI runners: the
+  per-frame and per-claim checks cost nothing measurable at p99.99, and a field 64 bytes
+  from a hot store pays for the prefetcher's pair while 128 bytes does not. The data-plane
+  rules and the explanation page now say 128 bytes for a peer-shared hot field, and
+  `just lint` refuses an atomic in an `align(64)` wrapper. `bench/baseline.json` holds
+  the runners' baselines, checked and unchecked, so `just bench-compare` now fails a
+  regression in CI. Both specs say that whoever branches on a position, the driver or
+  the publisher, loads it with an acquire load.
+- The latency gate runs on a dedicated bench host, a self-hosted runner with the label
+  `bench-linux`, tuned by `bench/host/setup-ubuntu.sh` and checked by
+  `bench/host/check.sh` on every run; the shared CI runners still run `just bench` and
+  keep the table, but their numbers are not compared. `just bench --pin P,S,C` binds
+  the publisher, the subscriber and the conductor to those CPUs on Linux,
+  `just bench --repeat N` runs every benchmark N times and reports the median run by
+  p99.99 with every run's on record, the warm-up is now one rotation through all
+  three terms so that no measured message first-touches a page, and the files go under
+  `/dev/shm` on Linux. `docs/how-to/set-up-a-bench-host.md` is the page (ADR 0016).
 - `spec/command-ring.md` specifies the command ring at version 0: the many-to-one ring
   through which every client sends the driver its commands, with Cavalry's magic-last
   header, a 128-byte slot per trailer field, the claim, commit, abort, read, unblock and

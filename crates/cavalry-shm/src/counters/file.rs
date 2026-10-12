@@ -323,6 +323,20 @@ impl Counter {
     pub fn get(&self) -> i64 {
         self.mapped.slot_at(self.offset).get()
     }
+
+    /// Stores a position with a release store, so that everything this thread read
+    /// before, the frames it consumed, happens before a driver's acquire load of the
+    /// position (`spec/log-buffer.md`, "Reading"; ADR 0013). For a counter that is a
+    /// position; other counters use [`Counter::set`].
+    pub fn store_release(&self, position: i64) {
+        self.mapped.slot_at(self.offset).set_release(position);
+    }
+
+    /// Loads a position with an acquire load: what the driver does before it branches
+    /// on a subscriber's position to clean a term (`spec/log-buffer.md`, "The driver").
+    pub fn load_acquire(&self) -> i64 {
+        self.mapped.slot_at(self.offset).get_acquire()
+    }
 }
 
 impl fmt::Debug for Counter {
@@ -403,6 +417,16 @@ impl CountersReader {
             return Err(CountersError::Unallocated { id });
         }
         Ok(self.mapped.slot(id)?.get())
+    }
+
+    /// [`CountersReader::read`] with an acquire load of the value: for a position, whose
+    /// owner stored it with release after reading what it consumed
+    /// (`spec/log-buffer.md`, "The driver"; ADR 0013).
+    pub fn read_acquire(&self, id: u32) -> Result<i64, CountersError> {
+        if self.mapped.record(id)?.state()? != State::Allocated {
+            return Err(CountersError::Unallocated { id });
+        }
+        Ok(self.mapped.slot(id)?.get_acquire())
     }
 }
 

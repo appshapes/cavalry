@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Tune an Ubuntu host for the latency gate (ADR 0016). docs/how-to/set-up-a-bench-host.md
+# is the page; bench/host/check.sh verifies the result after the reboot this needs.
+#
+# Run as root, once, on a host that does nothing else. Every step writes a fixed file or
+# value, so running it again changes nothing. Undo: delete the files it names and run
+# `update-grub`, then reboot.
+#
+# The isolated CPUs carry the harness's three spinning threads and nothing else; the
+# housekeeping CPUs carry the runner, the build, interrupts and every other process.
+# The defaults are for an 8-core part with two core complexes of 4 cores and SMT, with
+# siblings numbered 2n and 2n+1, such as the Ryzen 7 2700X: the second complex is
+# isolated. Read `lscpu -e` and the L3 column before accepting them for another part.
+set -euo pipefail
+
+ISOLATED="${ISOLATED:-8-15}"
+HOUSEKEEPING="${HOUSEKEEPING:-0-7}"
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "setup-ubuntu.sh: run as root: sudo ISOLATED=$ISOLATED HOUSEKEEPING=$HOUSEKEEPING $0" >&2
+    exit 1
+fi
+
+# 1. Kernel command line, as a GRUB drop-in so the distribution's file is untouched.
+#    nosmt           one thread per core: a sibling shares the core's pipelines and caches
+#    isolcpus        the scheduler never places anything there (domain) and managed
+#                    interrupts stay away (managed_irq); the harness pins into the set
+#    nohz_full       no scheduler tick on a core running one task: the 1 kHz tick is a
+#                    microsecond stall every millisecond, 1,000 samples per second
+#    rcu_nocbs       RCU callbacks run elsewhere
+#    irqaffinity     every interrupt defaults to the housekeeping CPUs
+#    processor.max_cstate=1  no deep sleep states: a wake from C2 or deeper costs tens of
+#                    microseconds, and the spinning threads never sleep anyway
+#    tsc=reliable    keep the TSC as the clocksource; the clocksource watchdog otherwise
+#                    runs a timer on every CPU and can demote it to a slow clock
+#    nowatchdog      no lockup-detector timer on every CPU
+#    skew_tick=1     the remaining ticks on the housekeeping CPUs do not fire together
+#    transparent_hugepage=never  no compaction stalls; the log buffers are page-aligned
+#                    files, not anonymous memory
+cat > /etc/default/grub.d/90-cavalry-bench.cfg <<CFG
+# Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016). Delete, run update-grub and
+# reboot to undo.
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT nosmt isolcpus=domain,managed_irq,${ISOLATED} nohz_full=${ISOLATED} rcu_nocbs=${ISOLATED} irqaffinity=${HOUSEKEEPING} processor.max_cstate=1 tsc=reliable nowatchdog skew_tick=1 transparent_hugepage=never"
+CFG
+update-grub
+echo "setup-ubuntu.sh: kernel command line written; it applies at the next boot"
+
+# 2. A fixed clock: the performance governor and no boost, every boot, before the runner.
+#    Boost moves the clock with temperature and with how many cores are busy; a fixed
+#    clock is slower and repeatable, and repeatable is what a 5 percent rule needs.
+cat > /usr/local/sbin/cavalry-bench-host-tune <<'TUNE'
+#!/usr/bin/env bash
+# Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016); cavalry-bench-host.service runs it.
+set -euo pipefail
+for governor in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    echo performance > "$governor"
+done
+if [ -w /sys/devices/system/cpu/cpufreq/boost ]; then
+    echo 0 > /sys/devices/system/cpu/cpufreq/boost
+fi
+TUNE
+chmod 755 /usr/local/sbin/cavalry-bench-host-tune
+cat > /etc/systemd/system/cavalry-bench-host.service <<UNIT
+# Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016).
+[Unit]
+Description=Cavalry bench host: performance governor, no boost
+DefaultDependencies=no
+After=sysinit.target
+Before=basic.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cavalry-bench-host-tune
+
+[Install]
+WantedBy=basic.target
+UNIT
+
+# 3. The GitHub Actions runner, when one is installed, starts after the tuning and stays
+#    on the housekeeping CPUs, as does everything it starts; the harness moves its own
+#    threads onto the isolated CPUs with --pin.
+for unit in /etc/systemd/system/actions.runner.*.service; do
+    [ -e "$unit" ] || continue
+    mkdir -p "$unit.d"
+    cat > "$unit.d/cavalry-bench.conf" <<DROPIN
+# Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016).
+[Unit]
+After=cavalry-bench-host.service
+Wants=cavalry-bench-host.service
+
+[Service]
+CPUAffinity=${HOUSEKEEPING}
+DROPIN
+    echo "setup-ubuntu.sh: runner $(basename "$unit") pinned to CPUs ${HOUSEKEEPING}"
+done
+systemctl daemon-reload
+systemctl enable --now cavalry-bench-host.service >/dev/null
+echo "setup-ubuntu.sh: governor $(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | paste -sd, -), boost $(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo none)"
+
+# 4. No swap: a page-out is a stall of milliseconds, and the host has the memory.
+swapoff -a || true
+sed -i -E '/^[^#].*[[:space:]]swap[[:space:]]/ s/^/# cavalry-bench: /' /etc/fstab
+echo "setup-ubuntu.sh: swap off ($(swapon --show --noheadings | wc -l) devices active)"
+
+# 5. No unattended changes to the platform: a kernel or a libc that moves under the
+#    baseline is a regression nobody committed. Updates are applied by hand, and the
+#    baseline is re-recorded afterwards (docs/how-to/set-up-a-bench-host.md).
+cat > /etc/apt/apt.conf.d/99cavalry-bench <<APT
+// Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016): a bench host changes by hand only.
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+APT
+systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+echo "setup-ubuntu.sh: unattended upgrades off"
+
+# 6. What a Rust build needs that a server install lacks: a C linker.
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q >/dev/null
+apt-get install -y -q build-essential >/dev/null
+echo "setup-ubuntu.sh: $(cc --version | head -1)"
+
+echo "setup-ubuntu.sh: done; reboot, then run bench/host/check.sh with the CPUs the harness will pin"

@@ -222,7 +222,8 @@ written by the driver, and `subscription.position`, written by the subscriber th
 it. The key of each is the publication's correlation id (i64), session id (i32) and
 stream id (i32), little-endian, 16 bytes; the label is the counter's name, a space, and
 the three values in decimal separated by spaces. A position is stored with a release
-store and loaded by the driver with an acquire load, the one exception to the counters
+store and loaded with an acquire load by whoever branches on it, the driver on a
+subscriber's position and the publisher on its limit, the one exception to the counters
 file's relaxed rule (ADR 0013). `publication.unblocked` and the three
 `log_buffer.rejected_*` counters are static.
 

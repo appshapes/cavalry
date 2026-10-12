@@ -5,7 +5,7 @@ It enforces the parts of CLAUDE.md that rustc and clippy cannot see on their own
 Every crate's Cargo.toml declares `[package.metadata.cavalry] data_plane = true|false`.
 "Data plane" is the CLAUDE.md definition: code a message passes through between
 `try_claim` on the publisher and the fragment handler on the subscriber. This script
-reads `cargo metadata` and runs seven checks:
+reads `cargo metadata` and runs eight checks:
 
   1. flags       every crate declares data_plane; a data-plane crate also declares
                  allowed-dependencies.
@@ -28,6 +28,10 @@ reads `cargo metadata` and runs seven checks:
                  This check keeps the overrides and the flags in agreement.
   7. re-exports  crates/cavalry/src/lib.rs holds only `pub use` items, attributes and
                  docs: the crate never grows logic of its own (ADR 0002).
+  8. slots       under a data-plane crate's src/, no `#[repr(..., align(64))]` struct
+                 holds an atomic: a field one party writes and another reads in its
+                 hot loop gets a 128-byte slot, `align(128)` (ADR 0011;
+                 .claude/rules/data-plane.md, "Memory and layout").
 
 Python 3.9 standard library only, so it runs on a laptop and on both CI runners
 without anything to install.
@@ -290,6 +294,22 @@ def main():
                 "code in the crate it belongs to and re-export it",
             )
 
+    # 8. slots
+    align64 = re.compile(r"#\[repr\([^\]]*\balign\(64\)[^\]]*\)\]\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+(\w+)[^{;]*\{([^}]*)\}", re.S)
+    for name in sorted(n for n, dp in flags.items() if dp):
+        src_dir = manifest(name).parent / "src"
+        for path in sorted(src_dir.rglob("*.rs")):
+            clean = strip_rust(path.read_text(encoding="utf-8"))
+            for m in align64.finditer(clean):
+                if re.search(r":\s*(?:\w+::)*Atomic\w+", m.group(2)):
+                    find(
+                        rel(path),
+                        line_of(clean, m.start()),
+                        f"`{m.group(1)}` is aligned to 64 bytes and holds an atomic, a field "
+                        "another party reads or writes in its hot loop; give it a 128-byte "
+                        "slot, `#[repr(C, align(128))]` (ADR 0011; .claude/rules/data-plane.md)",
+                    )
+
     if findings:
         print("\n".join(findings))
         print(
@@ -299,7 +319,7 @@ def main():
         )
         return 1
     data_plane_count = sum(1 for dp in flags.values() if dp)
-    print(f"lint-workspace: {len(packages)} crates, {data_plane_count} data plane, 7 checks, ok")
+    print(f"lint-workspace: {len(packages)} crates, {data_plane_count} data plane, 8 checks, ok")
     return 0
 
 

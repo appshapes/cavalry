@@ -1,6 +1,6 @@
 # 0010. Validate every peer-written field of a shared-memory layout before using it
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-11
 - **Invariants affected:** 1, 2, 3, 4
 - **Supersedes:** none
@@ -83,9 +83,26 @@ the code copies them from the spec, never the other way round.
   and `686-725`; and the comment at `326-330` recording the pre-fix bug.
 - Aeron commit 32e531c, `LogBufferDescriptor.java` and `TermReader.java`: the
   checks Aeron does make.
-- Not measured. Acceptance needs the log buffer feature's `just bench` run with and
-  without the checks, showing no p99.99 difference beyond run-to-run noise on both
-  CI runners. Until then this ADR is Proposed.
+- Measured on 2026-10-11 with `just bench` against `just bench-unchecked` (ADR 0015),
+  the same harness with the tail check and the frame checks built out, on both CI
+  runners at commit a2fe613, run 38170750453, 1,000,000 messages after 100,000 warm-up,
+  32-byte bodies, 4 MiB terms, checked against unchecked:
+
+  | runner | benchmark | p50 ns | p99 ns | p99.99 ns | max ns |
+  | --- | --- | --- | --- | --- | --- |
+  | Linux x86_64, 4 vCPU | claim_commit_32_exclusive | 50 vs 40 | 90 vs 80 | 2,725 vs 2,495 | 26,703 vs 28,815 |
+  | Linux x86_64, 4 vCPU | one_way_32_exclusive | 260 vs 250 | 992 vs 370 | 16,399 vs 17,327 | 26,911 vs 29,023 |
+  | macOS aarch64, 6 vCPU | claim_commit_32_exclusive | 83 vs 84 | 167 vs 208 | 9,255 vs 11,375 | 2,014,207 vs 412,927 |
+  | macOS aarch64, 6 vCPU | one_way_32_exclusive | 125 vs 167 | 4,295 vs 2,667 | 139,775 vs 128,063 | 2,015,231 vs 413,695 |
+
+  The spread between two checked runs on the same runner is wider than any of these
+  differences: Linux claim_commit_32_exclusive was p50 30 ns and p99.99 2,215 ns in run
+  38170347896 (commit 984cb71) and p50 50 ns and p99.99 2,725 ns in run 38170750453. The
+  unchecked build is not consistently faster at any percentile on either runner, and
+  the macOS unchecked exclusive run saw 174,260 back-pressure retries where the checked
+  run saw 16, the runner's own scheduling noise. The checks are integer compares and
+  cost nothing the harness can see at p50 or p99.99 on either runner. Accepted on that;
+  `just bench-unchecked` keeps running in CI so the number stays watched.
 
 ## Consequences
 

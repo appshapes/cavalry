@@ -1,10 +1,10 @@
 # 0011. Pad peer-shared hot fields to 128 bytes
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-11
 - **Invariants affected:** 2
-- **Supersedes:** none; when accepted, it amends the 64-byte figure in
-  `.claude/rules/data-plane.md` and in `docs/explanation/why-cavalry.md`
+- **Supersedes:** none; amends the 64-byte figure in `.claude/rules/data-plane.md` and
+  in `docs/explanation/why-cavalry.md`
 
 ## Context
 
@@ -63,9 +63,36 @@ that no `align(64)` wrapper holds a field the spec lists as peer-shared.
   a time".
 - ZigBolt commit b7eeb6b, `src/channel/ipc.zig:30-40` and
   `src/platform/config.zig:4-6`.
-- Not measured. Acceptance needs the log buffer feature's `just bench` run with
-  64-byte and 128-byte slots on both CI runners, reported at p99.99 and max. Until
-  then this ADR is Proposed.
+- Measured on 2026-10-11 with the slot-padding rows of `just bench` (ADR 0015): one
+  thread stores to a word while another loads a word 0, 64 or 128 bytes away, both
+  timed per operation, the pattern a subscriber's position and a publisher's limit
+  make. The counters file's slot size is fixed by `spec/counters-file.md`, so the
+  pattern is reproduced on plain memory rather than by rebuilding the file at 64 bytes.
+  Three runs on each CI runner, 1,000,000 operations each: commit 984cb71 (run
+  38170347896, loads only) and commit a2fe613 (run 38170750453, checked and unchecked
+  builds, loads and stores):
+
+  | runner | spacing | load p50 ns | load p99.99 ns (three runs) | store p50 ns | store p99.99 ns (two runs) |
+  | --- | --- | --- | --- | --- | --- |
+  | Linux x86_64, 4 vCPU | 0 | 30, 30, 100 | 50, 60, 872 | 20 | 30, 91 |
+  | Linux x86_64, 4 vCPU | 64 | 20 | 30, 21, 60 | 20 | 40, 60 |
+  | Linux x86_64, 4 vCPU | 128 | 20 | 21, 21, 21 | 20 | 30, 21 |
+  | macOS aarch64, 6 vCPU | 0 | 42, 41, 41 | 167, 166, 167 | 42 | 167, 208 |
+  | macOS aarch64, 6 vCPU | 64 | 41, 42, 41 | 208, 333, 292 | 42 | 9,711, 9,087 |
+  | macOS aarch64, 6 vCPU | 128 | 0, 0, 0 | 84, 209, 291 | 0, 41 | 167, 625 |
+
+  The `timer` floor is 20 to 21 ns on Linux and one 41.67 ns tick on macOS, where
+  `Instant` cannot resolve a single load, so a macOS p50 of 0 means below one tick and
+  of 41 means one tick. On macOS a word 64 bytes from a hot store costs the same as
+  sharing its cache line at p50, one full tick on every load, and its stores reach 9 µs
+  at p99.99 against 167 ns at 128 bytes: Apple silicon treats the 128-byte pair as a
+  unit. On Linux the 64-byte spacing sits at the timer floor at p50 and is above it at
+  p99.99 in two runs of three (30 and 60 ns against 21), level in the third; its stores
+  are above the 128-byte spacing's in both runs. 128 bytes is at the floor on both
+  runners in every run. Accepted on that; the Revisit clause's "no difference on either
+  runner" did not happen. The amended rule is in `.claude/rules/data-plane.md` and
+  `docs/explanation/why-cavalry.md`, and `just lint` refuses an atomic in an
+  `align(64)` wrapper under a data-plane crate.
 
 ## Consequences
 

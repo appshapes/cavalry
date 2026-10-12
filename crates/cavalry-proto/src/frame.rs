@@ -267,6 +267,17 @@ impl DataFrameHeader {
     /// the whole frame: [`DataFrameHeader::frame_length`] bytes. Alignment padding after
     /// the frame need not be present.
     pub fn parse(bytes: &[u8]) -> Result<Self, FrameError> {
+        Self::parse_within(bytes, bytes.len())
+    }
+
+    /// [`DataFrameHeader::parse`] for a caller that holds the header's bytes and knows
+    /// how many bytes the frame may occupy: `available` is the number of bytes from the
+    /// frame's start to the end of its term or packet, and the `length` check runs
+    /// against it instead of `bytes.len()`. A log buffer reader loads a header through
+    /// its own cells and passes the bytes left in the term (`spec/log-buffer.md`,
+    /// "Reading"). `bytes` still needs [`HEADER_LENGTH`] bytes, or the error is
+    /// [`FrameError::TooShort`].
+    pub fn parse_within(bytes: &[u8], available: usize) -> Result<Self, FrameError> {
         let Ok((raw, _)) = Raw::ref_from_prefix(bytes) else {
             return Err(FrameError::TooShort { given: bytes.len() });
         };
@@ -275,11 +286,11 @@ impl DataFrameHeader {
         }
         let frame_type = FrameType::try_from(raw.frame_type.get())?;
         let frame_length = raw.frame_length.get();
-        let fits = usize::try_from(frame_length).is_ok_and(|length| length <= bytes.len());
+        let fits = usize::try_from(frame_length).is_ok_and(|length| length <= available);
         if frame_length < MIN_FRAME_LENGTH || !fits {
             return Err(FrameError::Length {
                 found: i64::from(frame_length),
-                limit: bytes.len(),
+                limit: available,
             });
         }
         Ok(Self {
@@ -292,6 +303,27 @@ impl DataFrameHeader {
             term_id: raw.term_id.get(),
             reserved_value: raw.reserved_value.get(),
         })
+    }
+
+    /// The header's fields read without the four checks, for one purpose: measuring what
+    /// the checks cost (ADR 0010). It exists only in a build made with
+    /// `--cfg cavalry_unchecked`, which `just bench-unchecked` sets and nothing else does;
+    /// a shipped build has no such function, and a version or type this crate does not
+    /// know comes back as the fields' raw values with the type clamped to data.
+    #[cfg(cavalry_unchecked)]
+    pub fn decode_unchecked(bytes: &[u8; HEADER_LENGTH]) -> Self {
+        let raw =
+            Raw::ref_from_bytes(bytes).unwrap_or_else(|_| unreachable!("the array is a header"));
+        Self {
+            frame_length: raw.frame_length.get(),
+            flags: Flags(raw.flags),
+            frame_type: FrameType::try_from(raw.frame_type.get()).unwrap_or(FrameType::Data),
+            term_offset: raw.term_offset.get(),
+            session_id: raw.session_id.get(),
+            stream_id: raw.stream_id.get(),
+            term_id: raw.term_id.get(),
+            reserved_value: raw.reserved_value.get(),
+        }
     }
 
     /// Writes the header into the first [`HEADER_LENGTH`] bytes of `bytes`, in place.
@@ -430,6 +462,33 @@ mod tests {
                 found: i64::MAX,
                 limit: i32::MAX as usize
             })
+        );
+    }
+
+    #[test]
+    fn parse_within_bounds_the_length_by_the_bytes_available() {
+        let header = DataFrameHeader::new(FrameType::Data, Flags::UNFRAGMENTED, 64).unwrap();
+        let bytes = header.to_bytes();
+        assert_eq!(
+            DataFrameHeader::parse(&bytes).map(|_| ()),
+            Err(FrameError::Length {
+                found: 64,
+                limit: 32
+            }),
+            "the slice alone is too short for the frame"
+        );
+        assert_eq!(DataFrameHeader::parse_within(&bytes, 64), Ok(header));
+        assert_eq!(DataFrameHeader::parse_within(&bytes, 4096), Ok(header));
+        assert_eq!(
+            DataFrameHeader::parse_within(&bytes, 63).map(|_| ()),
+            Err(FrameError::Length {
+                found: 64,
+                limit: 63
+            })
+        );
+        assert_eq!(
+            DataFrameHeader::parse_within(&bytes[..31], 64).map(|_| ()),
+            Err(FrameError::TooShort { given: 31 })
         );
     }
 
