@@ -119,6 +119,7 @@ conformance/          protocol conformance suite and upgrade tests
 - Read `spec/` before `crates/`. Read the crate's `README.md` before its code.
 - Trunk-based by default: developers commit directly to `master`. Bots and agent workflows use branches and pull requests. `master` is green after every commit, so run `just lint` and `just test` before each one; `/commit` does. The commit message is the review record: what changed, which invariant, and the evidence.
 - One crate per commit where possible. Keep data-plane and control-plane changes in separate commits.
+- Concurrent branches collide in the files everyone appends to: `CHANGELOG.md`, `docs/SUMMARY.md`, `docs/glossary.md`, `spec/README.md`, `counters.toml` and a crate's `lib.rs`. Collaborators tell each other which of these they are appending to before they do, append at the end of the section so both sides can be kept, and resolve a conflict in them by keeping both sides with `master`'s lines first, in the branch that merges second.
 - Before claiming a change is faster, run `just bench-compare`. Before claiming it is correct, run `just conformance` and `just replay-check`.
 - Do not add a dependency to a data-plane crate without a justification in the commit message. Data-plane crates have a dependency allowlist in `Cargo.toml` metadata; `just lint` checks it.
 - Ask before: changing the wire format, adding `unsafe` outside the two permitted crates, adding a configuration key, adding a dependency to a data-plane crate, or weakening a gate. Everything else, do and show the evidence.
