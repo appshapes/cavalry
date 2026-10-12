@@ -67,7 +67,8 @@ fn main() -> Result<(), DriverError> {
 }
 ```
 
-Running it prints the second report, failures first:
+Running it prints the second report, failures first; on Linux the host checks may add
+warnings after the failure:
 
 ```text
 cavalry doctor: /tmp/cavalry-readme-4242, checks run: 13

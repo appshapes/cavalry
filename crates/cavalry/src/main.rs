@@ -47,9 +47,23 @@ fn main() -> ExitCode {
     }
 }
 
-/// Starts a driver and waits for a signal; the driver closes on the way out, leaving
-/// −1 in the heartbeat so that doctor and the clients know.
+/// Installs the signal handler, then starts a driver and waits for a signal; the driver
+/// closes on the way out, leaving −1 in the heartbeat so that doctor and the clients
+/// know. The handler goes first, so that no signal between the start and the handler
+/// kills the process with a fresh heartbeat behind it, and a handler that cannot be
+/// installed refuses to start at all, with the directory untouched.
 fn run() -> ExitCode {
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    if let Err(error) = ctrlc::set_handler(move || {
+        let _ = stop.send(());
+    }) {
+        eprintln!(
+            "cavalry run: cannot install the signal handler, so the driver did not start: \
+             {error}; run cavalry from a process that lets it handle SIGINT and SIGTERM, \
+             or embed cavalry::Driver and stop it yourself"
+        );
+        return ExitCode::FAILURE;
+    }
     let dir = Driver::default_dir();
     let driver = match Driver::start(&dir) {
         Ok(driver) => driver,
@@ -63,16 +77,11 @@ fn run() -> ExitCode {
         dir.display(),
         std::process::id()
     );
-    let (stop, stopped) = std::sync::mpsc::channel::<()>();
-    if let Err(error) = ctrlc::set_handler(move || {
-        let _ = stop.send(());
-    }) {
-        eprintln!(
-            "cavalry run: cannot install the signal handler: {error}; stop the driver by killing it, and the next `cavalry run` remakes its directory"
-        );
+    match stopped.recv() {
+        Ok(()) => eprintln!("cavalry run: stopping"),
+        // The handler's sender is gone without a signal: a bug, never silent.
+        Err(_) => eprintln!("cavalry run: the signal handler went away; stopping"),
     }
-    let _ = stopped.recv();
-    eprintln!("cavalry run: stopping");
     match driver.close() {
         Ok(()) => {
             eprintln!(
