@@ -41,6 +41,21 @@ pub const COMMAND_RING_REJECTED_TAIL: CounterId = CounterId(10);
 /// `command_ring.rejected_record`, a static counter: Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring (spec/command-ring.md, Reading).
 pub const COMMAND_RING_REJECTED_RECORD: CounterId = CounterId(11);
 
+/// `client.timed_out`, a static counter: Clients the driver timed out because no command of theirs arrived within the client liveness timeout; their publications and subscriptions were removed and a client timeout event sent (spec/client-protocol.md, Liveness and timeouts).
+pub const CLIENT_TIMED_OUT: CounterId = CounterId(12);
+
+/// `client_protocol.rejected_command`, a static counter: Commands the driver refused at decoding or for their channel: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, or a channel that is not cavalry:ipc (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.
+pub const CLIENT_PROTOCOL_REJECTED_COMMAND: CounterId = CounterId(13);
+
+/// `client_protocol.errors`, a static counter: Error events the driver sent, whatever the code: every command this version refused after the ring delivered it (spec/client-protocol.md, Error codes); the causes with a counter of their own are client_protocol.rejected_command, driver.registry_full and driver.log_create_failed.
+pub const CLIENT_PROTOCOL_ERRORS: CounterId = CounterId(14);
+
+/// `driver.registry_full`, a static counter: Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions or images, or the counters file, was at capacity (spec/client-protocol.md, Sizes).
+pub const DRIVER_REGISTRY_FULL: CounterId = CounterId(15);
+
+/// `driver.log_create_failed`, a static counter: Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands).
+pub const DRIVER_LOG_CREATE_FAILED: CounterId = CounterId(16);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -138,5 +153,45 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Records the driver found outside the command ring's bounds, a length or type no client writes by the protocol (ADR 0010): the driver reads nothing more from the ring (spec/command-ring.md, Reading).",
         doctor: "A client wrote a corrupt command: a buggy binding or a hostile process, which the ring cannot name. Every client's commands now time out. Restart the driver, which recreates the ring; if the counter climbs again, stop clients one at a time until it stops, and look for a binding that was upgraded or does not conform to spec/command-ring.md.",
+    },
+    CounterDef {
+        id: CLIENT_TIMED_OUT,
+        name: "client.timed_out",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Clients the driver timed out because no command of theirs arrived within the client liveness timeout; their publications and subscriptions were removed and a client timeout event sent (spec/client-protocol.md, Liveness and timeouts).",
+        doctor: "A client stopped sending keepalives: it is stuck, paused under a debugger, or its conductor thread died. Its own driver timeout closes it. Find the process by the client id in the client timeout event and look at what stopped its conductor.",
+    },
+    CounterDef {
+        id: CLIENT_PROTOCOL_REJECTED_COMMAND,
+        name: "client_protocol.rejected_command",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Commands the driver refused at decoding or for their channel: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, or a channel that is not cavalry:ipc (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.",
+        doctor: "A client sent a command the protocol does not allow: a binding that does not conform to spec/client-protocol.md or was upgraded apart from the driver. The error event names the command; stop that client and check its version against the driver's.",
+    },
+    CounterDef {
+        id: CLIENT_PROTOCOL_ERRORS,
+        name: "client_protocol.errors",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Error events the driver sent, whatever the code: every command this version refused after the ring delivered it (spec/client-protocol.md, Error codes); the causes with a counter of their own are client_protocol.rejected_command, driver.registry_full and driver.log_create_failed.",
+        doctor: "Compare with client_protocol.rejected_command, driver.registry_full and driver.log_create_failed; an error none of them explains is code 2, 3 or 11, a client naming a registration the driver does not know, or a bug the error event's message names.",
+    },
+    CounterDef {
+        id: DRIVER_REGISTRY_FULL,
+        name: "driver.registry_full",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions or images, or the counters file, was at capacity (spec/client-protocol.md, Sizes).",
+        doctor: "A fixed capacity of the driver is reached: clients, publications or subscriptions are not being closed, or this host needs more than one driver's worth. Close what is not used; the error event's message names the registry; the capacities are the driver's in this version.",
+    },
+    CounterDef {
+        id: DRIVER_LOG_CREATE_FAILED,
+        name: "driver.log_create_failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands).",
+        doctor: "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers. Close publications that are not used, or move the driver directory to a filesystem with room.",
     },
 ];

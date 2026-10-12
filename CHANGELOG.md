@@ -203,3 +203,10 @@ user-visible change, added in the same commit as the change. The format follows
   `just test`, on Linux and macOS, with the nightly toolchain and Miri installed by the
   pinned toolchain action; a pull request now proves the three cavalry-shm gates
   instead of claiming them (GitHub issue 9).
+- The client protocol is specified: `spec/client-protocol.md` version 0 is Aeron's
+  control protocol as command ring and broadcast buffer records, with the driver
+  directory, the seven commands and eight events of IPC publish/subscribe, their
+  bounds and rejections, the timeouts, the file sizes and the registries' capacities,
+  and 36 vectors; five counters, `client.timed_out`, `client_protocol.rejected_command`,
+  `client_protocol.errors`, `driver.registry_full` and `driver.log_create_failed`
+  (ADR 0019).
