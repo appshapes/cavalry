@@ -233,3 +233,7 @@ user-visible change, added in the same commit as the change. The format follows
   prints the report and exits 0 when no check failed; `just doctor` runs it; no command
   prints the usage and exits 2. `cargo add cavalry` gives `cavalry::Driver` and, behind
   the `cli` feature, `cavalry::doctor`. The how-to is `docs/how-to/run-the-driver.md`.
+- The driver records the conductor's idle strategy in a new static counter,
+  `conductor.idle_strategy` (0 backoff, 1 yield, 2 busy-spin), and `IdleStrategy` has
+  a name, `backoff`, `yield` or `busy-spin`, and parses one, so that `doctor` can say
+  which strategy a running driver uses from the counters file alone.

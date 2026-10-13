@@ -18,6 +18,56 @@ pub enum IdleStrategy {
     Backoff,
 }
 
+impl IdleStrategy {
+    /// Every strategy, in counter-value order: backoff, yield, busy-spin.
+    pub const ALL: [IdleStrategy; 3] = [
+        IdleStrategy::Backoff,
+        IdleStrategy::Yield,
+        IdleStrategy::BusySpin,
+    ];
+
+    /// The strategy's name, `backoff`, `yield` or `busy-spin`: the words `CLAUDE.md` and
+    /// the glossary use, what a configuration value spells and a `doctor` finding says.
+    pub const fn name(self) -> &'static str {
+        match self {
+            IdleStrategy::BusySpin => "busy-spin",
+            IdleStrategy::Yield => "yield",
+            IdleStrategy::Backoff => "backoff",
+        }
+    }
+
+    /// The strategy `name` names, or `None` for a name this version does not know. The
+    /// inverse of [`IdleStrategy::name`], exact: `spin` and `Busy-Spin` are refused, and
+    /// the caller lists [`IdleStrategy::ALL`] by name in its message.
+    pub fn parse(name: &str) -> Option<Self> {
+        IdleStrategy::ALL
+            .into_iter()
+            .find(|strategy| strategy.name() == name)
+    }
+
+    /// The value the driver stores in the `conductor.idle_strategy` counter when it
+    /// starts, 0 backoff, 1 yield, 2 busy-spin (`counters.toml`), so that `doctor` reads
+    /// the strategy a running driver uses from the counters file alone (invariant 4).
+    pub const fn counter_value(self) -> i64 {
+        match self {
+            IdleStrategy::Backoff => 0,
+            IdleStrategy::Yield => 1,
+            IdleStrategy::BusySpin => 2,
+        }
+    }
+
+    /// The strategy a `conductor.idle_strategy` value names, or `None` for a value this
+    /// version does not know: a newer driver's, or a corrupt file.
+    pub const fn from_counter_value(value: i64) -> Option<Self> {
+        match value {
+            0 => Some(IdleStrategy::Backoff),
+            1 => Some(IdleStrategy::Yield),
+            2 => Some(IdleStrategy::BusySpin),
+            _ => None,
+        }
+    }
+}
+
 /// Aeron's backoff figures: spins, then yields, then parks from a microsecond to a
 /// millisecond, doubling.
 const MAX_SPINS: u32 = 10;
@@ -69,5 +119,40 @@ impl Idler {
         self.spins = 0;
         self.yields = 0;
         self.park = MIN_PARK;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_strategy_round_trips_through_its_name_and_its_counter_value() {
+        for (index, strategy) in IdleStrategy::ALL.into_iter().enumerate() {
+            assert_eq!(IdleStrategy::parse(strategy.name()), Some(strategy));
+            assert_eq!(strategy.counter_value(), index as i64);
+            assert_eq!(
+                IdleStrategy::from_counter_value(index as i64),
+                Some(strategy)
+            );
+        }
+        assert_eq!(IdleStrategy::default(), IdleStrategy::Backoff);
+        assert_eq!(IdleStrategy::Backoff.counter_value(), 0, "the default is 0");
+    }
+
+    #[test]
+    fn an_unknown_name_or_value_is_none() {
+        for name in [
+            "spin",
+            "Busy-Spin",
+            "BUSY-SPIN",
+            "busy_spin",
+            "",
+            " backoff",
+        ] {
+            assert_eq!(IdleStrategy::parse(name), None, "{name:?}");
+        }
+        assert_eq!(IdleStrategy::from_counter_value(3), None);
+        assert_eq!(IdleStrategy::from_counter_value(-1), None);
     }
 }

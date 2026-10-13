@@ -149,3 +149,11 @@ kind = "counter"
 scope = "static"
 doc = "Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands)."
 doctor = "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers. Close publications that are not used, or move the driver directory to a filesystem with room."
+
+[[counter]]
+id = 17
+name = "conductor.idle_strategy"
+kind = "gauge"
+scope = "static"
+doc = "The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin."
+doctor = ""

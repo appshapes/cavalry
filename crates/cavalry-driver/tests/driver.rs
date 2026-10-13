@@ -13,7 +13,7 @@ use cavalry_shm::command_ring::{CommandRing, Producer};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLIENT_PROTOCOL_ERRORS, CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT,
-    DRIVER_REGISTRY_FULL,
+    CONDUCTOR_IDLE_STRATEGY, DRIVER_REGISTRY_FULL,
 };
 use cavalry_shm::log::LogBuffers;
 
@@ -239,6 +239,31 @@ fn a_live_directory_is_refused_and_a_dead_one_is_remade() {
         Driver::start_with(dir.path(), IdleStrategy::Yield).expect("starts on a half directory");
     assert!(dir.path().join("command-ring").is_file());
     third.close().expect("closes");
+}
+
+#[test]
+fn the_idle_strategy_is_recorded_in_its_counter() {
+    let dir = TestDir::new("idle");
+    let strategy = |dir: &Path| {
+        CountersReader::open(dir)
+            .expect("opens")
+            .read(CONDUCTOR_IDLE_STRATEGY.record())
+            .expect("reads")
+    };
+    let driver = Driver::start(dir.path()).expect("starts");
+    assert_eq!(strategy(dir.path()), IdleStrategy::Backoff.counter_value());
+    assert_eq!(strategy(dir.path()), 0, "the default reads 0");
+    driver.close().expect("closes");
+    for idle in IdleStrategy::ALL {
+        let driver = Driver::start_with(dir.path(), idle).expect("starts");
+        let value = strategy(dir.path());
+        assert_eq!(
+            IdleStrategy::from_counter_value(value),
+            Some(idle),
+            "{idle:?}"
+        );
+        driver.close().expect("closes");
+    }
 }
 
 #[test]

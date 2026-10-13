@@ -56,6 +56,9 @@ pub const DRIVER_REGISTRY_FULL: CounterId = CounterId(15);
 /// `driver.log_create_failed`, a static counter: Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands).
 pub const DRIVER_LOG_CREATE_FAILED: CounterId = CounterId(16);
 
+/// `conductor.idle_strategy`, a static gauge: The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin.
+pub const CONDUCTOR_IDLE_STRATEGY: CounterId = CounterId(17);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -193,5 +196,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands).",
         doctor: "Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers. Close publications that are not used, or move the driver directory to a filesystem with room.",
+    },
+    CounterDef {
+        id: CONDUCTOR_IDLE_STRATEGY,
+        name: "conductor.idle_strategy",
+        kind: Kind::Gauge,
+        scope: Scope::Static,
+        doc: "The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin.",
+        doctor: "",
     },
 ];
