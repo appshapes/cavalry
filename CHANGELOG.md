@@ -353,4 +353,6 @@ user-visible change, added in the same commit as the change. The format follows
   The catalog writer writes the header's magic last and writes again a header torn while
   it was created, a descriptor reports its first fault in one order (state, `invalid`,
   `checksum`, then the fields), and `CatalogWriter::rewrite` refuses a slot it does not
-  hold, an empty or invalid one, or another recording's descriptor.
+  hold, an empty or invalid one, or another recording's descriptor. A descriptor's stop
+  position is −1 exactly when its stop timestamp is −1, and a reader rejects a mix of the
+  two as `position`.
