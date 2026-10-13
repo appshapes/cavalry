@@ -250,6 +250,9 @@ user-visible change, added in the same commit as the change. The format follows
   one process with one producer and one consumer, for the client's conductor to hand
   images to the user's thread; `offer` returns the item when the queue is full, and the
   protocol has a `loom` model and runs under Miri.
+- `cavalry-shm`'s `CountersReader::value` gives a reader a handle on one counter's
+  value, resolved once, so a publisher reads its limit with one acquire load per claim
+  and no check in its hot loop.
 - `cavalry-client` attaches: `Cavalry::connect()` finds the driver through `CAVALRY_DIR`
   or the default directory, `connect_to(dir)` names one, and the client conductor thread
   keeps the client alive with a keepalive every 500 ms, closes it when the driver closes
@@ -265,6 +268,23 @@ user-visible change, added in the same commit as the change. The format follows
   subscriber stores its `subscription.position` through the owner's `Counter` handle
   without being able to allocate or free a record; `spsc` halves report
   `peer_dropped()`, so a conductor sweeps a registration whose subscription is gone.
+- `cavalry-client` publishes: `add_publication` and `add_exclusive_publication` wait for
+  the driver's answer up to the response timeout and return a `Publication`, whose
+  `try_claim` writes a frame in place and `offer` copies a message in, each against the
+  limit the driver maintains with one acquire load; the refusals are `Offer`, Aeron's
+  codes as a result (`not-connected`, `back-pressured`, `admin-action`,
+  `max-position-exceeded`, `closed`, `too-long`); `close` sends `remove publication`.
+  After the client closes, `is_closed` is true and a refusal is `closed`. A command the
+  driver refuses is `ClientError::Refused` with the error code and message (ADR 0021).
+- `cavalry-client` subscribes: `add_subscription` returns a `Subscription` whose `poll`
+  hands each fragment to a handler as a view into the log, across one `Image` per
+  connected publication in turn, storing each image's `subscription.position` with a
+  release store after its share; images join and go as the driver announces them,
+  opened and unmapped by the conductor, never by the poll; a frame that fails a check
+  retires its image and is reported as a `Fault`, and a poll after the client closes is
+  `Fault::Closed`. A subscription the client's conductor cannot hold is
+  `ClientError::SubscriptionsFull` and is removed again. The README example is now the
+  ten-minute path's program: publish and subscribe in one process (ADR 0021).
 - The driver's conductor copies each command into scratch sized once at start, so its
   command read allocates nothing, keepalives included; a record longer than any command
   of this version is not copied past that bound, and is refused by the spec's checks in
