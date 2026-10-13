@@ -311,3 +311,8 @@ user-visible change, added in the same commit as the change. The format follows
   of stream position and the join position. On the bench host the conductor's loads
   were the exclusive row's p99.99 band and a third of the publisher's p50; the driver,
   the harness and the baseline follow in their own commits.
+- The driver's conductor loads a publication's producer position at most once per
+  millisecond, as ADR 0022 and `spec/log-buffer.md` say, and a move of it is no longer
+  work for the idle strategy, so a backoff conductor parks while only the publisher
+  moves; closing and a subscription's join still load it afresh. `publication.position`
+  says it is at most a millisecond behind the publisher.

@@ -1,6 +1,7 @@
 //! The values `spec/client-protocol.md` fixes for this version: the timeouts of
-//! "Liveness and timeouts", the file sizes and the registries' capacities of "Sizes".
-//! None is configurable in this version (ADR 0019).
+//! "Liveness and timeouts", the file sizes and the registries' capacities of "Sizes";
+//! and the cadence `spec/log-buffer.md`, "The driver", fixes for the producer position.
+//! None is configurable in this version (ADR 0019, ADR 0022).
 
 use std::time::Duration;
 
@@ -26,6 +27,13 @@ pub const COMMAND_RING_UNBLOCK_TIMEOUT: Duration = CLIENT_LIVENESS_TIMEOUT;
 /// How long a publication's consumer position may stand still with the producer beyond
 /// it before the claim there is treated as a dead publisher's.
 pub const PUBLICATION_UNBLOCK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The least time between two loads of one publication's producer position by the
+/// conductor: the publisher stores to that line on every commit, and a load on every
+/// duty cycle kept the line moving between two caches, which the publisher paid at p50
+/// and p99.99 (`spec/log-buffer.md`, "The driver", Positions; ADR 0022). The backoff
+/// strategy's longest park, so a parked conductor loads once per cycle.
+pub const PRODUCER_POSITION_INTERVAL: Duration = Duration::from_millis(1);
 
 /// How long a closed publication's log stays for its subscribers to drain.
 pub const PUBLICATION_LINGER: Duration = Duration::from_secs(5);
