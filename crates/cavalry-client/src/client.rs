@@ -16,8 +16,8 @@ use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
 use crate::conductor::{
-    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, NO_PENDING, REGISTRATION_QUEUE, RESPONSE_QUEUE,
-    RESPONSE_TIMEOUT, Shared, nanos, now_nanos,
+    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_SUBSCRIPTIONS, NO_PENDING, REGISTRATION_QUEUE,
+    RESPONSE_QUEUE, RESPONSE_TIMEOUT, Shared, nanos, now_nanos,
 };
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
@@ -161,7 +161,9 @@ impl Cavalry {
     /// Adds a subscription on `channel` and `stream_id`: one image per publication on
     /// them, joining at the publisher's position, now and as publications come and go
     /// (`spec/client-protocol.md`, "Commands"). Waits for the driver's answer up to the
-    /// response timeout. The channel must be `cavalry:ipc` in this version.
+    /// response timeout. The channel must be `cavalry:ipc` in this version. A client
+    /// that already holds the driver's bound of subscriptions is
+    /// [`ClientError::SubscriptionsFull`], and the new one is removed again.
     pub fn add_subscription(
         &mut self,
         channel: &str,
@@ -204,15 +206,34 @@ impl Cavalry {
         // On a refusal the queue halves drop with `incoming` and `retired`, and the
         // conductor sweeps the registration on its next cycle.
         match self.request(&command, correlation_id, "add subscription")? {
-            Response::SubscriptionReady { .. } => Ok(Subscription::new(
-                correlation_id,
-                stream_id,
-                channel.to_string(),
-                self.client_id,
-                self.ring.producer(DRIVER_TIMEOUT)?,
-                incoming,
-                retired,
-            )),
+            Response::SubscriptionReady { .. } => {
+                // The conductor admits or refuses every queued registration before it
+                // hands over an answer, and a refused one is dropped there: its halves
+                // here see their peer gone (`Registry::admit`).
+                let refused = incoming.peer_dropped();
+                let subscription = Subscription::new(
+                    correlation_id,
+                    stream_id,
+                    channel.to_string(),
+                    self.client_id,
+                    Arc::clone(&self.shared),
+                    self.ring.producer(DRIVER_TIMEOUT)?,
+                    incoming,
+                    retired,
+                );
+                if !refused {
+                    return Ok(subscription);
+                }
+                // Dropping it sends `remove subscription`, so the driver forgets it too.
+                drop(subscription);
+                // A conductor that stopped drops every registration: that is the close.
+                Err(match self.shared.closed() {
+                    Some(reason) => ClientError::Closed(reason),
+                    None => ClientError::SubscriptionsFull {
+                        limit: MAX_SUBSCRIPTIONS,
+                    },
+                })
+            }
             other => Err(ClientError::Driver {
                 what: format!("{other:?} in answer to add subscription"),
             }),
@@ -303,6 +324,7 @@ impl Cavalry {
                 Publication::new(
                     log,
                     limit,
+                    Arc::clone(&self.shared),
                     self.ring.producer(DRIVER_TIMEOUT)?,
                     self.client_id,
                     registration_id,

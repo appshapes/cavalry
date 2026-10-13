@@ -13,6 +13,7 @@ use cavalry_shm::log::LogError;
 const DOC_DIRECTORY: &str = "docs/reference/client-protocol.md#the-driver-directory";
 const DOC_LIVENESS: &str = "docs/reference/client-protocol.md#liveness-and-timeouts";
 const DOC_ERRORS: &str = "docs/reference/client-protocol.md#error-codes";
+const DOC_SIZES: &str = "docs/reference/client-protocol.md#sizes";
 const DOC_BROADCAST: &str = "docs/reference/broadcast-buffer.md#receiving";
 
 /// Why the client is closed: by the user, or by what the conductor found.
@@ -107,6 +108,13 @@ pub enum ClientError {
         /// The driver's message.
         message: String,
     },
+    /// The driver accepted `add subscription`, but this client's conductor already
+    /// holds as many subscriptions as the driver allows, so it could not hand the new
+    /// one its images. The subscription is removed again, and nothing is read from it.
+    SubscriptionsFull {
+        /// The bound: the driver's own on subscriptions.
+        limit: usize,
+    },
     /// An add or remove command went unanswered for the response timeout.
     ResponseTimeout {
         /// The command, by name.
@@ -122,7 +130,8 @@ pub enum ClientError {
     Protocol(ProtocolError),
     /// A log buffer failed a check, or could not be opened.
     Log(LogError),
-    /// The driver answered with something this version does not understand.
+    /// The driver answered with something this version does not understand, or with an
+    /// answer that does not match the command: another log, stream or kind.
     Driver {
         /// What it said.
         what: String,
@@ -140,14 +149,15 @@ pub enum ClientError {
 
 impl ClientError {
     /// The reason's name: `not-found`, `driver-gone`, `closed`, `refused`,
-    /// `response-timeout`, `command-ring`, `broadcast`, `counters`, `protocol`, `log`,
-    /// `driver` or `io`.
+    /// `subscriptions-full`, `response-timeout`, `command-ring`, `broadcast`, `counters`,
+    /// `protocol`, `log`, `driver` or `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClientError::NotFound { .. } => "not-found",
             ClientError::DriverGone { .. } => "driver-gone",
             ClientError::Closed(_) => "closed",
             ClientError::Refused { .. } => "refused",
+            ClientError::SubscriptionsFull { .. } => "subscriptions-full",
             ClientError::ResponseTimeout { .. } => "response-timeout",
             ClientError::CommandRing(_) => "command-ring",
             ClientError::Broadcast(_) => "broadcast",
@@ -215,6 +225,12 @@ impl fmt::Display for ClientError {
                 "command refused ({reason}, error code {raw_code}{}): {message}; see {DOC_ERRORS}",
                 code.map_or(String::new(), |code| format!(", {code:?}"))
             ),
+            ClientError::SubscriptionsFull { limit } => write!(
+                f,
+                "command refused ({reason}): this client holds {limit} subscriptions, the \
+                 driver's bound; the new one was removed again; close subscriptions this \
+                 process no longer polls, or spread them across processes; see {DOC_SIZES}"
+            ),
             ClientError::ResponseTimeout { command } => write!(
                 f,
                 "command lost ({reason}): no answer to {command} within 10 s; the driver is \
@@ -231,8 +247,10 @@ impl fmt::Display for ClientError {
             ClientError::Driver { what } => write!(
                 f,
                 "client refused ({reason}): the driver answered with {what}, which this version \
-                 does not understand; the driver is newer than the client; upgrade the client; \
-                 see {DOC_ERRORS}"
+                 does not understand or did not ask for; a driver newer than the client says \
+                 what it cannot read, so upgrade the client to the driver's version; if they \
+                 are the same version, the answer does not match its command, which is a bug: \
+                 run `cavalry doctor` and report it; see {DOC_ERRORS}"
             ),
             ClientError::Io { what, path, source } => write!(
                 f,

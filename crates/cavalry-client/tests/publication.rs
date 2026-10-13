@@ -285,34 +285,43 @@ fn a_refused_command_carries_the_drivers_code_and_message() {
 }
 
 #[test]
-fn a_closed_publication_refuses_and_a_closed_client_adds_nothing() {
+fn a_closed_publications_log_goes_and_a_closed_clients_publication_refuses() {
     let dir = TestDir::new("closed");
     let driver = Driver::start(dir.path()).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
-    let publication = client
+    let closing = client
         .add_publication("cavalry:ipc", 1005)
         .expect("a publication");
     let log = dir.path().join(format!(
         "publications/{}.logbuffer",
-        publication.registration_id()
+        closing.registration_id()
     ));
     assert!(log.is_file());
-    assert!(!publication.is_closed());
-    let closed = {
-        // Closing consumes the handle; the refusal after is on a second handle to the
-        // same registration, which the driver treats as one publication per client.
-        publication.close().expect("closes");
-        true
-    };
-    assert!(closed);
+    closing.close().expect("closes");
     // The driver removes the log after its linger, since no subscriber holds it.
     assert!(
         wait_until(Duration::from_secs(8), || !log.is_file()),
         "the log lingered past 5 s"
     );
 
+    // A publication still held when its client closes: open, it is not connected; once
+    // the driver has gone and the client has seen it, every refusal is `closed`.
+    let mut held = client
+        .add_exclusive_publication("cavalry:ipc", 1006)
+        .expect("a publication");
+    assert!(!held.is_closed());
+    assert_eq!(held.offer(b"before"), Err(Offer::NotConnected));
     driver.close().expect("the driver closes");
     assert!(wait_until(Duration::from_secs(3), || client.is_closed()));
+    assert!(held.is_closed());
+    assert!(!held.is_connected());
+    assert_eq!(held.offer(b"after"), Err(Offer::Closed));
+    let claim = held.try_claim(8).map(|_| ());
+    assert_eq!(claim, Err(Offer::Closed));
+    let refusal = Offer::Closed.to_string();
+    assert!(refusal.contains("client is closed"), "{refusal}");
+    assert!(format!("{held:?}").contains("closed: true"));
+
     let error = client
         .add_publication("cavalry:ipc", 1005)
         .expect_err("the client is closed");
