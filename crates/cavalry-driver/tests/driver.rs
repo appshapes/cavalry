@@ -13,7 +13,7 @@ use cavalry_shm::command_ring::{CommandRing, Producer};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLIENT_PROTOCOL_ERRORS, CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT,
-    CONDUCTOR_IDLE_STRATEGY, DRIVER_REGISTRY_FULL,
+    CONDUCTOR_IDLE_STRATEGY, DRIVER_REGISTRY_FULL, PUBLICATION_POSITION,
 };
 use cavalry_shm::log::LogBuffers;
 
@@ -699,6 +699,71 @@ fn a_second_subscriber_never_cleans_under_a_slower_one() {
         vec![b"for A".to_vec()],
         "A still reads its message"
     );
+    driver.close().expect("closes");
+}
+
+/// The record id of one publication's `publication.position` gauge: the driver allocates
+/// it with the key `spec/counters-file.md` gives, so a reader finds it by type and key.
+fn find_position_gauge(dir: &Path, correlation_id: i64, session_id: i32, stream_id: i32) -> u32 {
+    let reader = CountersReader::open(dir).expect("the counters file opens");
+    let mut key = [0u8; 16];
+    key[..8].copy_from_slice(&correlation_id.to_le_bytes());
+    key[8..12].copy_from_slice(&session_id.to_le_bytes());
+    key[12..].copy_from_slice(&stream_id.to_le_bytes());
+    (0..reader.capacity())
+        .find(|&id| {
+            reader.record(id).ok().flatten().is_some_and(|record| {
+                record.type_id() == PUBLICATION_POSITION.0 && record.key()[..16] == key[..]
+            })
+        })
+        .expect("the publication.position gauge is allocated")
+}
+
+#[test]
+fn the_publication_position_gauge_follows_the_publisher() {
+    let dir = TestDir::new("position-gauge");
+    let driver = Driver::start(dir.path()).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (correlation_id, publication_id, session_id, limit_id, _) =
+        client.add_publication(51, false);
+    let gauge = find_position_gauge(dir.path(), correlation_id, session_id, 51);
+    let reader = CountersReader::open(dir.path()).expect("opens");
+    assert_eq!(
+        reader.read_acquire(gauge).expect("gauge"),
+        0,
+        "nothing published"
+    );
+
+    // A subscriber, so that the limit rises and the publisher may write.
+    let subscription = client.add_subscription(51);
+    let _ = wait_image(&mut client, subscription);
+    let window = i64::from(spec::IPC_PUBLICATION_WINDOW);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reader.read_acquire(limit_id as u32).expect("limit") < window {
+        assert!(Instant::now() < deadline, "the limit did not rise");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let log = LogBuffers::open(dir.path(), publication_id, true).expect("the log opens");
+    let mut appender = log.appender().expect("an appender");
+    let after = appender
+        .offer(b"moved", window, 0)
+        .expect("the message is offered");
+
+    // The driver loads the producer position at most once per millisecond and stores
+    // the gauge from that load (ADR 0022), so the gauge reaches the position well inside
+    // the deadline; the test asserts the value, not the millisecond.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let value = reader.read_acquire(gauge).expect("gauge");
+        if value == after {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "publication.position stayed at {value}, not {after}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     driver.close().expect("closes");
 }
 

@@ -15,7 +15,9 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   recommends busy-spin on isolated cores. On every duty cycle the conductor stores its
   heartbeat, reads and answers commands, unblocks the ring, times out clients, and keeps
   every publication's positions, cleaning, unblocking and closing as
-  `spec/log-buffer.md`, "The driver" says. The strategy it runs is stored once in the
+  `spec/log-buffer.md`, "The driver" says, loading a publication's producer position
+  at most once per millisecond so that the publisher's cache line is not read on every
+  cycle (ADR 0022). The strategy it runs is stored once in the
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
 - Will run dedicated threads for the sender and the receiver, pinned when the operating
   system allows, when the UDP slice arrives: a receiver that detects a gap sends a NAK,

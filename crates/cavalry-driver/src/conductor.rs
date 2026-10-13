@@ -4,7 +4,10 @@
 //! as `spec/log-buffer.md`, "The driver" says; what each command means is
 //! `spec/client-protocol.md` (ADR 0019). Nothing here is on the message path: a
 //! message goes from a publisher's claim to a subscriber's handler through the log
-//! buffer alone, and the conductor only moves the limit that bounds the publisher.
+//! buffer alone, and the conductor only moves the limit that bounds the publisher. It
+//! loads a publication's producer position at most once per millisecond, so that the
+//! publisher's cache line is not read on every cycle, and a move of that position is
+//! not work for the idle strategy (ADR 0022).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,6 +131,10 @@ struct Publication {
     clean_position: i64,
     /// The limit last stored.
     last_limit: i64,
+    /// The producer position as last loaded, and when, by the conductor's clock: loaded
+    /// at most once per [`spec::PRODUCER_POSITION_INTERVAL`] (ADR 0022).
+    producer: i64,
+    producer_loaded_at: i64,
     /// The consumer position that has not moved, and since when.
     stalled: Option<(i64, i64)>,
     /// The end of stream position and when it was stored.
@@ -597,6 +604,8 @@ impl Conductor {
             consumer_position: join_position,
             clean_position: join_position,
             last_limit: join_position,
+            producer: join_position,
+            producer_loaded_at: now,
             stalled: None,
             closing: None,
             log_file_name,
@@ -891,7 +900,8 @@ impl Conductor {
 
     /// The driver's duties on every publication (`spec/log-buffer.md`, "The driver"):
     /// positions, cleaning, the limit, unblocking, and closing once the linger has passed
-    /// or every subscriber has reached the end of stream.
+    /// or every subscriber has reached the end of stream. The producer position is loaded
+    /// at most once per millisecond per publication, and its move is not work (ADR 0022).
     fn keep_publications(&mut self, now: i64) -> usize {
         let mut work = 0;
         let mut index = 0;
@@ -944,25 +954,39 @@ impl Conductor {
             }
         }
         let publication = &mut self.publications[index];
-        let producer = match publication.log.producer_position() {
-            Ok(position) => position,
-            Err(_) => {
-                self.statics.log_buffer_rejected_tail.increment();
-                if publication.closing.is_none() {
-                    let end = publication.consumer_position;
-                    let _ = publication.log.set_end_of_stream_position(end);
-                    publication.closing = Some((end, now));
-                    let registrations = publication.registrations.len();
-                    publication.registrations.clear();
-                    self.registration_count = self.registration_count.saturating_sub(registrations);
+        // The producer position at most once per millisecond (ADR 0022): the publisher
+        // stores to that line on every commit, and a load on every cycle kept the line
+        // moving between the two caches, which the publisher paid at p50 and p99.99.
+        // Closing loads it afresh (`drop_registration`), so the end of stream is exact.
+        let due = now.saturating_sub(publication.producer_loaded_at)
+            >= spec::nanos(spec::PRODUCER_POSITION_INTERVAL);
+        if due {
+            match publication.log.producer_position() {
+                Ok(position) => {
+                    publication.producer = position;
+                    publication.producer_loaded_at = now;
                 }
-                return true;
+                Err(_) => {
+                    self.statics.log_buffer_rejected_tail.increment();
+                    if publication.closing.is_none() {
+                        let end = publication.consumer_position;
+                        let _ = publication.log.set_end_of_stream_position(end);
+                        publication.closing = Some((end, now));
+                        let registrations = publication.registrations.len();
+                        publication.registrations.clear();
+                        self.registration_count =
+                            self.registration_count.saturating_sub(registrations);
+                    }
+                    return true;
+                }
             }
-        };
+        }
+        let producer = publication.producer;
         let mut moved = false;
         if publication.position.get() != producer {
+            // Not work: a publisher that publishes while nothing else moves lets the
+            // conductor idle, and the gauge is at most a millisecond behind (ADR 0022).
             publication.position.store_release(producer);
-            moved = true;
         }
         if let Some(max) = max_subscriber
             && max > publication.consumer_position
