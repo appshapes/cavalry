@@ -609,3 +609,46 @@ fn every_error_names_the_page_that_explains_it() {
     let header = HeaderFields::new(64, 1, 0).unwrap();
     assert_eq!(header.file_length(), 128 + 64 * 384);
 }
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_value_handle_reads_what_the_owner_stores_and_outlives_its_reader() {
+    let dir = Dir::new("value-handle");
+    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let limit = file
+        .allocate(INSTANCE, &[1, 2, 3, 4], "publication.limit 1")
+        .unwrap();
+    let reader = CountersReader::open(dir.path()).unwrap();
+    let value = reader.value(limit.id()).unwrap();
+    assert_eq!(value.id(), limit.id());
+    assert_eq!(value.get(), 0);
+    limit.store_release(4096);
+    assert_eq!(
+        value.load_acquire(),
+        4096,
+        "a release store is seen by an acquire load"
+    );
+    limit.add(-96);
+    assert_eq!(value.get(), 4000);
+    assert!(format!("{value:?}").contains("CounterValue"));
+
+    // The handle keeps the mapping alive without the reader.
+    drop(reader);
+    limit.set(7);
+    assert_eq!(value.load_acquire(), 7);
+
+    // A record that holds no counter, and an id past the capacity, are refused at the
+    // one check, not in the hot loop.
+    let reader = CountersReader::open(dir.path()).unwrap();
+    let free = free_records(64);
+    let unallocated = free
+        .iter()
+        .copied()
+        .find(|record| *record != limit.id())
+        .unwrap();
+    assert_eq!(
+        reader.value(unallocated).unwrap_err().reason(),
+        "unallocated"
+    );
+    assert_eq!(reader.value(64).unwrap_err().reason(), "id");
+}

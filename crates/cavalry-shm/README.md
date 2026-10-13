@@ -35,7 +35,9 @@ the two crates where `unsafe` is permitted.
   counter. It is the primary instrument: cheaper than a log line, and it survives a
   crash. `CountersFile` creates it and allocates counters, a `Counter` moves a value
   with one relaxed add, and `CountersReader` reads it after the checks of
-  [`spec/counters-file.md`](../../spec/counters-file.md).
+  [`spec/counters-file.md`](../../spec/counters-file.md); its `value` handle resolves
+  one counter's slot once, so a publisher's hot loop reads its limit with one acquire
+  load and no check.
 - Keeps every shared layout `#[repr(C)]` with a version in its header. Atomics use
   `Acquire` for loads that gate reads of other memory and `Release` for stores that
   publish it.
