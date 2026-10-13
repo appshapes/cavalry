@@ -45,78 +45,60 @@ The durable log is a directory, the driver's `log.dir`, holding three kinds of f
 each versioned and specified in `spec/durable-log.md` version 0 with vectors:
 
 1. **The catalog, `catalog`.** A 128-byte header: magic `CVLYCTLG`, version 0, the
-   descriptor length (1024), the maximum number of descriptors N as an i32 (the
-   catalog's bound; the version 0 writer always writes 8192, a fixed value and not a
-   configuration key, and every reader takes N from the field), the data checksum kind
-   (0 in version 0, meaning none; a reader rejects any other value), the creation
-   timestamp, reserved to 128. No header field changes after creation. Then fixed slots
-   of 1024 bytes, slot s at 128 + s × 1024. The catalog has one writer, the driver that
-   owns `log.dir` (card 93 decides how the driver refuses a second one), and readers in
-   other processes map it as they map the counters file.
+   descriptor length (1024), the data checksum kind (0 in version 0, meaning none; a
+   reader rejects any other value), the creation timestamp, reserved to 128. No header
+   field changes after creation. Then fixed slots of 1024 bytes, slot i at 128 + i ×
+   1024, and recording i's descriptor is slot i: an id is a slot, ids are given in
+   order, and a slot is never reused, as Aeron's `nextRecordingId` never goes back. The
+   catalog's bound is the format's, 1048576 slots (1 GiB of slots), not a header field:
+   at the bound `start recording` is refused with `catalog full`, whose message tells
+   the operator to start a new `log.dir`, and `cavalry doctor` warns from 90 percent of
+   it. A deleted recording loses its files and keeps its slot, so an old id never names
+   a new recording and a leftover file never collides with a new one's name. The
+   catalog has one writer, the driver that owns `log.dir`, which holds an advisory lock
+   on the file while it runs so that a second driver refuses to start; readers in other
+   processes read it with positional reads, never a mapping.
 
-   **Recording ids.** A recording id is an i64, unique for the life of `log.dir` and
-   never reused: id = generation × N + s, so that the id's slot is id mod N. A lookup
-   reads slot id mod N and reports `unknown recording` unless the descriptor there is
-   not empty and holds that id. A new recording takes the lowest deleted slot whose
-   files are removed, with generation one more than its last id's, or else a new slot
-   at the end of the file with generation 0; the file grows by one slot at a time.
-   With N slots valid or invalid, `start recording` is refused with `catalog full`,
-   whose message tells the operator to purge a recording (card 95). N bounds the
-   recordings kept at once, not the recordings ever made.
-
-   **A descriptor** is two parts with a CRC32 each (the zlib polynomial).
-   - The *body*, bytes 32 to 1024, written once and never changed: the body's CRC32
-     over bytes 40 to 1024, four reserved bytes, then the recording id, the start timestamp (nanoseconds
-     since the Unix epoch), the start position, the initial term id, the segment file
-     length, the term length, the MTU length, the session id, the stream id, the
-     channel as a length and up to 256 bytes, the source identity as a length and up to
-     128 bytes, and reserved bytes to 1024.
-   - The *mutable part*, bytes 0 to 32: a sequence (i64), the stop timestamp and the
-     stop position (each −1 while the recording is live), the state (0 empty, 1 valid,
-     2 invalid, 3 deleted), and the mutable part's CRC32 over bytes 0 to 28, so the
-     CRC covers the state.
-
-   **Publishing a change.** The writer changes the mutable part as a sequence lock:
-   it stores the sequence plus one (odd) with a release store, writes the fields and
-   the CRC32, then stores the sequence plus two (even) with a release store. A reader
-   loads the sequence with an acquire load, reads the part, and loads the sequence
-   again; when the sequence was odd or changed, it retries, with backoff, for at most
-   one second, then reports `busy` for that descriptor, which means a stalled writer
-   and not corruption. A CRC32 that does not match under an even, unchanged sequence
-   is corruption: the reader reports `checksum` and skips the descriptor. A reader
-   therefore never mistakes a torn or racing update for corruption.
+   **A descriptor** holds its state (0 empty, 1 valid, 2 invalid, 3 deleted), a CRC32
+   (the zlib polynomial) over bytes 8 to 1024 of the slot, the recording id, the start
+   and stop timestamps (nanoseconds since the Unix epoch; stop is −1 while live), the
+   start and stop positions (stop is −1 while live), the initial term id, the segment
+   file length, the term length, the MTU length, the session id, the stream id, the
+   channel as a length and up to 256 bytes, the source identity as a length and up to
+   128 bytes, and reserved bytes to 1024. The state is the slot's commit word and lies
+   outside the CRC32 on purpose: it is written last, in one four-byte store.
 
    **Creating a slot.** The writer grows the file by one zeroed slot, writes the body
-   and its CRC32, then publishes the mutable part with state valid and sequence 2. A
-   slot whose sequence is 0 is empty whatever its body holds, so a crash during
-   creation leaves an empty slot that the next recording takes. The recorder creates
-   the recording's files only after the descriptor is valid.
+   with the stop fields at −1 and then the CRC32, and writes the state, 1, last. A slot
+   whose state is 0 is empty whatever its body holds, so a crash during creation leaves
+   an empty slot, which the next recording takes. The recorder creates the recording's
+   files only after the slot is valid.
 
-   **Deleting.** Card 95's purge publishes state deleted, then removes the recording's
-   segment files and time index. The driver removes the files of every deleted
-   descriptor at start-up before it reuses the slot. A new id never names an old
-   file, so a leftover file cannot collide with a new recording's.
+   **Changing a slot.** While a recording lives only its stop fields and its state
+   change: a stop writes the stop position and the stop timestamp, then the CRC32; a
+   delete (card 95) writes the state, 3, then removes the files. A reader that finds a
+   state of 1, 2 or 3 with a CRC32 that does not match the body retries for up to 100
+   milliseconds, since the driver may be between the two writes of a stop, and then
+   reports `checksum` for that slot and reads nothing from it: the slot is a torn update
+   or damage, and only the driver repairs it. Nothing a reader does mistakes a racing
+   stop for damage, and nothing it does hides damage.
 
-   **Recovery at start-up.** Before it records, the driver checks every slot that is
-   not empty:
-   - A body whose CRC32 does not match: state invalid, `checksum` reported.
-   - A mutable part with an odd sequence or a CRC32 that does not match is a change
-     torn by a crash. The driver rebuilds it from the files: state valid when the
-     segment holding the start position exists and the frame at the start position
-     checks, else invalid; the stop fields as for a live recording below. A torn
-     deletion is undone and runs again, so the state never contradicts the files.
-   - A valid descriptor whose stop position is −1 was live at a crash. As Aeron does,
-     the driver scans the segments frame by frame from the last time index entry's
-     position, to the end of the last segment file at most, and stops at the first
-     frame whose header does not check (below) or whose length is 0. The stop
-     position is the end of the last frame that checks. The stop timestamp is the
-     last time index entry's timestamp.
-
-   After a process crash every byte the recorder wrote is in the page cache, and the
-   scan finds them. After an operating-system crash or a power loss, bytes past the
-   last sync are not guaranteed (card 93 decides the sync cadence), and version 0
-   cannot tell a frame whose header survived but whose body did not from a whole one.
-   The data checksum kind is the place for the fix.
+   **Recovery.** When the driver starts, and again at `stop recording` for the slot it
+   closes, it repairs every slot that is not empty: a valid slot whose CRC32 does not
+   match, or whose stop position is −1, was torn or live at a crash, and the driver
+   rebuilds its stop fields as Aeron recovers a stop position: it scans the segments
+   frame by frame from the position of the last time index entry, to the end of the
+   last segment file at most, and stops at the first frame whose header does not check
+   (below) or whose length is 0; the stop position is the end of the last frame that
+   checks, the stop timestamp is the last index entry's, and it rewrites the body and
+   the CRC32. A slot it cannot repair, because the segment holding the start position
+   is missing or the frame there does not check, gets state 2, and `cavalry doctor`
+   names it. A torn delete, state 3 with files still present, runs again. After a
+   process crash every byte the recorder wrote is in the page cache and the scan finds
+   it; after an operating-system crash or a power loss, bytes past the last sync are
+   not guaranteed (card 93 decides the sync cadence), and version 0 cannot tell a frame
+   whose header survived but whose body did not from a whole one. The data checksum
+   kind is the place for that fix.
 2. **The segment files, `<recording id>-<segment base position>.rec`.** Aeron's: the
    log buffer's raw term bytes from the segment base position, frame headers and
    padding included, each file extended to the segment file length when opened. The
@@ -172,15 +154,20 @@ truncated, and no recording starts.
   slot gives a recording id that names its slot, a header that never changes, a bound
   stated in one field, and vectors a page can show in full. The price is the string
   bounds above and the refusal beyond them.
-- **The slot index as the recording id, slots reused.** Lost: an id would name a
-  different recording after a purge, so a client holding an old id would replay another
-  stream, and old files would collide with new ones by name.
-- **The slot index as the recording id, slots never reused.** Lost: N would become a
-  lifetime cap, and the log would refuse every recording after its 8192nd, forever.
-- **One CRC32 over the whole descriptor.** Lost: a descriptor change is several stores,
-  so a crash or a racing reader between them would look like corruption, and one torn
-  update would drop a whole recording from replay. The sequence lock and the two parts
-  separate a change in progress from damage.
+- **Slots reused under a generation number: id = generation × N + slot, a sequence
+  lock on a mutable part of the descriptor with a CRC32 of its own, and readers that
+  map the catalog and retry on an odd sequence.** Lost: it brings shared-memory
+  ordering into a disk file every reader must map, and a `busy` failure for a stalled
+  writer; it fixes N for the life of the directory; and Aeron's ids are monotonic and
+  never reused. The bound it buys, recordings kept at once rather than ever made, is
+  card 95's to buy by purging files, not slots. Its recovery rules are kept above.
+- **The slot index as the recording id, slots reused without a generation.** Lost: an
+  id would name a different recording after a purge, so a client holding an old id
+  would replay another stream, and old files would collide with new ones by name.
+- **A CRC32 that covers the state.** Lost: the state is the commit word, written last
+  and alone, so that a crash during creation leaves an empty slot and a reader never
+  sees a half-written body under a valid state; a CRC32 over the state would need a
+  second write after the commit word, which is the torn update the design avoids.
 - **Segments aligned to multiples of the segment file length.** Lost: a recording that
   starts in the second term of a segment would carry a zeroed leading term, 64 MiB of
   disk with nothing in it. Aeron's alignment to the start term costs nothing.
@@ -218,8 +205,9 @@ resolves to a position in one index lookup.
 
 Harder: three files per recording to keep consistent, with the catalog's stop fields
 and the index's last entry both written by the recorder, and a recovery pass at every
-start-up that rebuilds them after a crash; a bound of 8192 recordings kept at once,
-which card 95's purge frees, while ids stay unique. The catalog is bounded by N. The
+start-up that rebuilds them after a crash; a lifetime bound of 1048576 recordings per
+directory, after which the operator starts a new one. The catalog is bounded by the
+format. The
 segment files and the time index are not bounded by this format: each grows with the
 length of its recording, the index by at most 16 KiB per second, until card 95's
 retention truncates or purges it. A channel or source identity past its field is
@@ -229,8 +217,8 @@ its frame headers alone.
 Revisit: when a checksum beside the frames is needed, as version 1 with its own ADR,
 and first if a power loss ever yields a recovered frame whose body is wrong; when the
 UDP slice records a channel longer than 256 bytes or a source identity longer than 128;
-when 8192 recordings kept at once is not enough, by writing a larger N, which the i32
-field allows up to 2^31 − 1 without a format change.
+when a directory reaches 1048576 recordings in its life, which only a new version with
+a wider bound or with reuse can change.
 
 ## References
 
