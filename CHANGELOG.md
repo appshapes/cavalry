@@ -283,3 +283,8 @@ user-visible change, added in the same commit as the change. The format follows
   opened and unmapped by the conductor, never by the poll; a frame that fails a check
   retires its image and is reported as a `Fault`. The README example is now the
   ten-minute path's program: publish and subscribe in one process (ADR 0021).
+- The ten-minute path exists: `cargo add cavalry` gives `cavalry::Cavalry`,
+  `Publication` and `Subscription`, the README's five commands build the binary and the
+  example, start a driver, publish 1,000 messages and read them back, read doctor and
+  stop the driver, and `just quickstart` runs them end to end in CI on Linux and macOS;
+  `docs/tutorials/publish-and-subscribe.md` is the tutorial (ADR 0007's acceptance test).

@@ -3,6 +3,10 @@
 The four kinds of page, in the order `.claude/rules/docs.md` defines them. Every page
 under `docs/` is listed here; `just lint-docs` fails on one that is not.
 
+# Tutorials
+
+- [Publish and subscribe in ten minutes](tutorials/publish-and-subscribe.md)
+
 # Explanation
 
 - [Why Cavalry, and why not Aeron](explanation/why-cavalry.md)

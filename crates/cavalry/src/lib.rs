@@ -1,6 +1,10 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+pub use cavalry_client::{
+    BufferClaim, Cavalry, ClientError, Closed, DataFrameHeader, Fault, Image, MAX_IMAGES, Offer,
+    Publication, Subscription,
+};
 pub use cavalry_driver::{Driver, DriverError, IdleStrategy, spec};
 
 #[cfg(feature = "cli")]

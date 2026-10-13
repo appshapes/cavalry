@@ -55,9 +55,12 @@ conformance:
 replay-check:
     @echo "not built yet: replay-check (CLAUDE.md gate 1)." && exit 1
 
-# The README's ten-minute path, timed, end to end.
+# The README's ten-minute path, timed, end to end (CLAUDE.md, gate 5): build the binary
+# and the example, start a driver on a directory of its own, run the example against it
+# through CAVALRY_DIR, read doctor, stop the driver, and fail on any step that does not
+# do what the README says it does. What CI runs on Linux and macOS.
 quickstart:
-    @echo "not built yet: quickstart (CLAUDE.md gate 5). The README path does not exist yet." && exit 1
+    bash scripts/quickstart.sh
 
 # clippy with workspace lints, fmt, the workspace lint, the counters lint and the
 # configuration lint below.
