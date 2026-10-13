@@ -696,6 +696,16 @@ fn a_writer_stores_the_value_of_the_counter_the_driver_allocated_for_it() {
     );
     assert_eq!(writer.counter(64).unwrap_err().reason(), "id");
     assert_eq!(
+        writer.read(unallocated).unwrap_err().reason(),
+        "unallocated"
+    );
+    assert_eq!(writer.read(64).unwrap_err().reason(), "id");
+    assert_eq!(
+        writer.value(unallocated).unwrap_err().reason(),
+        "unallocated"
+    );
+    assert_eq!(writer.value(64).unwrap_err().reason(), "id");
+    assert_eq!(
         CountersWriter::open(Dir::new("writer-none").path())
             .unwrap_err()
             .reason(),
