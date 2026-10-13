@@ -350,3 +350,7 @@ user-visible change, added in the same commit as the change. The format follows
   progress, the conformance test under `just conformance`, a no-panic test over generated
   input, and its first README example. A state-2 slot reads as `invalid`, a missing
   middle segment is damage, and recovery's actions get counters in the recorder's feature.
+  The catalog writer writes the header's magic last and writes again a header torn while
+  it was created, a descriptor reports its first fault in one order (state, `invalid`,
+  `checksum`, then the fields), and `CatalogWriter::rewrite` refuses a slot it does not
+  hold, an empty or invalid one, or another recording's descriptor.

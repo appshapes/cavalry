@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::layout::{
     CATALOG_FILE_NAME, CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, HEADER_LENGTH, LayoutError,
-    MAX_SLOTS, Recording, State,
+    MAX_SLOTS, Recording, State, crc32,
 };
 
 const DOC: &str = "docs/reference/durable-log.md#catalog-header";
@@ -25,11 +25,16 @@ const RETRY_STEP: Duration = Duration::from_millis(1);
 pub enum CatalogError {
     /// The bytes failed a check of the page.
     Layout(LayoutError),
-    /// Every slot is used: start a new log directory.
+    /// Every slot is used: move or archive the log directory.
     Full,
-    /// No such slot.
+    /// No such slot, or a slot that holds no recording.
     Unknown {
         /// The id asked for.
+        recording_id: i64,
+    },
+    /// The descriptor given to [`CatalogWriter::rewrite`] is not the one its slot holds.
+    Mismatch {
+        /// The slot.
         recording_id: i64,
     },
     /// The operating system refused a step.
@@ -44,12 +49,13 @@ pub enum CatalogError {
 }
 
 impl CatalogError {
-    /// The reason's name: a layout check's, or `full`, `unknown`, `io`.
+    /// The reason's name: a layout check's, or `full`, `unknown`, `mismatch`, `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
             CatalogError::Layout(error) => error.reason(),
             CatalogError::Full => "full",
             CatalogError::Unknown { .. } => "unknown",
+            CatalogError::Mismatch { .. } => "mismatch",
             CatalogError::Io { .. } => "io",
         }
     }
@@ -61,13 +67,20 @@ impl std::fmt::Display for CatalogError {
             CatalogError::Layout(error) => write!(f, "{error}"),
             CatalogError::Full => write!(
                 f,
-                "catalog full: every one of its {MAX_SLOTS} slots is used; start a new log \
-                 directory with CAVALRY_LOG_DIR and record there; see {DOC}"
+                "catalog full: every one of its {MAX_SLOTS} slots is used; move or archive the \
+                 log directory, and a new catalog is created in its place when the directory \
+                 is next opened; see {DOC}"
             ),
             CatalogError::Unknown { recording_id } => write!(
                 f,
                 "unknown recording {recording_id}: no slot holds it; `cavalry doctor` lists the \
                  recordings; see {DOC}"
+            ),
+            CatalogError::Mismatch { recording_id } => write!(
+                f,
+                "catalog refused (mismatch): the descriptor given for slot {recording_id} is not \
+                 the one the slot holds, so its stop fields were not written; read the slot \
+                 with `get` and stop that descriptor; see {DOC}"
             ),
             CatalogError::Io { what, path, source } => write!(
                 f,
@@ -129,28 +142,68 @@ fn read_header(file: &File, path: &Path) -> Result<CatalogHeader, CatalogError> 
     Ok(CatalogHeader::parse(&bytes, length)?)
 }
 
-fn read_slot(file: &File, path: &Path, slot: u64) -> Result<Option<Descriptor>, CatalogError> {
+fn read_slot_bytes(
+    file: &File,
+    path: &Path,
+    slot: u64,
+) -> Result<[u8; DESCRIPTOR_LENGTH], CatalogError> {
     let mut bytes = [0u8; DESCRIPTOR_LENGTH];
     file.read_exact_at(&mut bytes, CatalogHeader::slot_offset(slot))
         .map_err(io("read a slot of", path))?;
+    Ok(bytes)
+}
+
+/// Reads a slot as a reader does: a stop checksum that does not match is retried for
+/// [`RETRY`], since the driver may be between the two writes of a stop.
+fn read_slot(file: &File, path: &Path, slot: u64) -> Result<Option<Descriptor>, CatalogError> {
     let mut waited = Duration::ZERO;
     loop {
+        let bytes = read_slot_bytes(file, path, slot)?;
         match Descriptor::parse(&bytes, slot as i64) {
             Err(LayoutError::StopChecksum) if waited < RETRY => {
                 std::thread::sleep(RETRY_STEP);
                 waited += RETRY_STEP;
-                file.read_exact_at(&mut bytes, CatalogHeader::slot_offset(slot))
-                    .map_err(io("read a slot of", path))?;
             }
             other => return Ok(other?),
         }
     }
 }
 
+/// Whether the catalog's header was torn while the driver created it: the file is
+/// shorter than the header, or its magic is zero and it holds no whole slot, which the
+/// creation order allows since the header is synced before a slot is added
+/// (`spec/durable-log.md`, "The driver").
+fn header_is_torn(file: &File, path: &Path, length: u64) -> Result<bool, CatalogError> {
+    if length < HEADER_LENGTH as u64 {
+        return Ok(true);
+    }
+    let mut magic = [0u8; 8];
+    file.read_exact_at(&mut magic, 0)
+        .map_err(io("read the header of", path))?;
+    Ok(magic == [0u8; 8] && CatalogHeader::slots(length) == 0)
+}
+
+/// Writes the header in the page's order: every field and a sync, then the magic and a
+/// sync, so that a reader sees `not-ready` and never a part-written header.
+fn write_header(file: &File, path: &Path, now: i64) -> Result<(), CatalogError> {
+    let encoded = CatalogHeader::new(now)?.encode();
+    file.set_len(0)
+        .map_err(io("truncate the header of", path))?;
+    file.write_all_at(&encoded[8..], 8)
+        .map_err(io("write the header of", path))?;
+    file.sync_all().map_err(io("sync", path))?;
+    file.write_all_at(&encoded[..8], 0)
+        .map_err(io("write the magic of", path))?;
+    file.sync_all().map_err(io("sync", path))?;
+    Ok(())
+}
+
 impl CatalogWriter {
-    /// Creates the catalog in `dir`, or opens the one there. The driver that owns the
-    /// directory is its one writer; how it keeps a second driver out is the driver's
-    /// (card 93), not this type's.
+    /// Creates the catalog in `dir`, or opens the one there. A catalog whose header was
+    /// torn while it was created is written again, and an empty last slot, a creation
+    /// torn by a crash, is not counted, so the next [`add`](Self::add) takes it. The
+    /// driver that owns the directory is its one writer; how it keeps a second driver
+    /// out is the driver's (card 93), not this type's.
     pub fn open(dir: &Path, now: i64) -> Result<Self, CatalogError> {
         let path = dir.join(CATALOG_FILE_NAME);
         let file = OpenOptions::new()
@@ -161,29 +214,38 @@ impl CatalogWriter {
             .open(&path)
             .map_err(io("open", &path))?;
         let length = file_length(&file, &path)?;
-        if length == 0 {
-            let header = CatalogHeader::new(now)?;
-            file.write_all_at(&header.encode(), 0)
-                .map_err(io("write the header of", &path))?;
-            file.sync_all().map_err(io("sync", &path))?;
+        if header_is_torn(&file, &path, length)? {
+            write_header(&file, &path, now)?;
         } else {
             read_header(&file, &path)?;
         }
-        let slots = CatalogHeader::slots(file_length(&file, &path)?);
+        let mut slots = CatalogHeader::slots(file_length(&file, &path)?);
+        if slots > 0 && read_slot_bytes(&file, &path, slots - 1)?[..4] == [0u8; 4] {
+            slots -= 1;
+        }
         Ok(CatalogWriter { file, path, slots })
     }
 
-    /// How many slots the catalog holds, used or empty.
+    /// How many slots the catalog holds; an empty last slot left by a torn creation is
+    /// not counted.
     pub const fn slots(&self) -> u64 {
         self.slots
     }
 
-    /// The descriptor in slot `recording_id`, `None` when the slot is empty.
+    /// The descriptor in slot `recording_id`, `None` when the slot is empty. The writer
+    /// is the only writer, so it is never in the middle of its own stop and does not
+    /// retry a stop checksum.
     pub fn get(&self, recording_id: i64) -> Result<Option<Descriptor>, CatalogError> {
-        if recording_id < 0 || recording_id as u64 >= self.slots {
-            return Err(CatalogError::Unknown { recording_id });
+        let slot = self.slot(recording_id)?;
+        let bytes = read_slot_bytes(&self.file, &self.path, slot)?;
+        Ok(Descriptor::parse(&bytes, recording_id)?)
+    }
+
+    fn slot(&self, recording_id: i64) -> Result<u64, CatalogError> {
+        match u64::try_from(recording_id) {
+            Ok(slot) if slot < self.slots => Ok(slot),
+            _ => Err(CatalogError::Unknown { recording_id }),
         }
-        read_slot(&self.file, &self.path, recording_id as u64)
     }
 
     /// Adds a recording in the next slot: the file grows by one zeroed slot, the body
@@ -228,7 +290,7 @@ impl CatalogWriter {
             .get(recording_id)?
             .ok_or(CatalogError::Unknown { recording_id })?
             .stopped(stop_position, stop_timestamp)?;
-        self.rewrite(recording_id as u64, &descriptor)
+        self.rewrite(self.slot(recording_id)?, &descriptor)
     }
 
     /// Writes the state of recording `recording_id`.
@@ -237,7 +299,7 @@ impl CatalogWriter {
             .get(recording_id)?
             .ok_or(CatalogError::Unknown { recording_id })?
             .with_state(state);
-        let offset = CatalogHeader::slot_offset(recording_id as u64);
+        let offset = CatalogHeader::slot_offset(self.slot(recording_id)?);
         self.file
             .write_all_at(&descriptor.encode()[..4], offset)
             .map_err(io("write a state of", &self.path))?;
@@ -246,10 +308,42 @@ impl CatalogWriter {
     }
 
     /// Writes a slot's stop fields and then their checksum; the creation fields and the
-    /// state are not touched, so recovery never re-signs a creation field.
+    /// state are not touched, so recovery never re-signs a creation field. The slot's
+    /// stop checksum may fail, since rebuilding a torn stop is what this is for, but the
+    /// rest must hold: a slot past the last is `unknown`, an empty one is `unknown`, a
+    /// state-2 one is `invalid`, a creation checksum that fails is `checksum`, a
+    /// descriptor whose id is not `slot` is `recording-id`, and one whose creation
+    /// fields are not the slot's is `mismatch`. Nothing is written when any fails.
     pub fn rewrite(&mut self, slot: u64, descriptor: &Descriptor) -> Result<(), CatalogError> {
+        let recording_id = i64::try_from(slot).unwrap_or(i64::MAX);
+        if slot >= self.slots {
+            return Err(CatalogError::Unknown { recording_id });
+        }
+        let found = read_slot_bytes(&self.file, &self.path, slot)?;
+        let state = i32::from_le_bytes([found[0], found[1], found[2], found[3]]);
+        match State::from_i32(state) {
+            Some(State::Valid | State::Deleted) => {}
+            Some(State::Empty) => return Err(CatalogError::Unknown { recording_id }),
+            Some(State::Invalid) => return Err(LayoutError::Invalid.into()),
+            None => return Err(LayoutError::State { found: state }.into()),
+        }
+        let creation_checksum = u32::from_le_bytes([found[24], found[25], found[26], found[27]]);
+        if creation_checksum != crc32(&found[28..]) {
+            return Err(LayoutError::CreationChecksum.into());
+        }
+        if descriptor.recording_id() != recording_id {
+            return Err(LayoutError::RecordingId {
+                found: descriptor.recording_id(),
+            }
+            .into());
+        }
         let offset = CatalogHeader::slot_offset(slot);
         let encoded = descriptor.encode();
+        // Bytes 32 to 472 are the creation fields; the reserved bytes around them are
+        // never read, so another writer's values there are not a mismatch.
+        if encoded[32..472] != found[32..472] {
+            return Err(CatalogError::Mismatch { recording_id });
+        }
         self.file
             .write_all_at(&encoded[8..24], offset + 8)
             .map_err(io("write the stop fields of", &self.path))?;

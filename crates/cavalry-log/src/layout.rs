@@ -169,8 +169,9 @@ impl fmt::Display for LayoutError {
         match self {
             LayoutError::TooShort { length } => write!(
                 f,
-                "durable log rejected ({reason}): {length} bytes, fewer than a header; the file \
-                 is truncated or not a catalog or index; see {DOC}"
+                "durable log rejected ({reason}): {length} bytes, fewer than a header; a catalog \
+                 or index torn while the driver created it is written again when the driver \
+                 opens the log directory, so start the driver; see {DOC}"
             ),
             LayoutError::NotReady => write!(
                 f,
@@ -501,16 +502,29 @@ impl Descriptor {
         changed
     }
 
+    /// Every field check, in the page's order: the numeric fields, then the strings.
     fn check(&self, slot: i64) -> Result<(), LayoutError> {
-        if self.recording_id != slot || self.recording_id < 0 {
-            return Err(LayoutError::RecordingId {
-                found: self.recording_id,
-            });
+        self.check_fields(slot)?;
+        if self.channel.len() > CHANNEL_LENGTH
+            || self.source_identity.len() > SOURCE_IDENTITY_LENGTH
+        {
+            return Err(LayoutError::String);
         }
+        Ok(())
+    }
+
+    /// The checks after the checksums and before `string`, in the page's order:
+    /// `timestamp`, `recording-id`, `position`, `term-length`, `segment-length`, `mtu`.
+    fn check_fields(&self, slot: i64) -> Result<(), LayoutError> {
         if self.start_timestamp < 0
             || (self.stop_timestamp != -1 && self.stop_timestamp < self.start_timestamp)
         {
             return Err(LayoutError::Timestamp);
+        }
+        if self.recording_id != slot || self.recording_id < 0 {
+            return Err(LayoutError::RecordingId {
+                found: self.recording_id,
+            });
         }
         if self.start_position < 0 || self.start_position % FRAME_ALIGNMENT != 0 {
             return Err(LayoutError::Position {
@@ -545,11 +559,6 @@ impl Descriptor {
             return Err(LayoutError::Mtu {
                 found: self.mtu_length,
             });
-        }
-        if self.channel.len() > CHANNEL_LENGTH
-            || self.source_identity.len() > SOURCE_IDENTITY_LENGTH
-        {
-            return Err(LayoutError::String);
         }
         Ok(())
     }
@@ -596,8 +605,10 @@ impl Descriptor {
         out
     }
 
-    /// Parses slot `slot`'s bytes, running the page's checks in order. An empty slot
-    /// parses to `None`.
+    /// Parses slot `slot`'s bytes, running the page's checks in order: `state`,
+    /// `invalid`, `checksum` (creation, then stop), `timestamp`, `recording-id`,
+    /// `position`, `term-length`, `segment-length`, `mtu`, `string`. An empty slot
+    /// parses to `None`, and nothing after its state is read.
     pub fn parse(bytes: &[u8], slot: i64) -> Result<Option<Self>, LayoutError> {
         if bytes.len() < DESCRIPTOR_LENGTH {
             return Err(LayoutError::TooShort {
@@ -619,22 +630,7 @@ impl Descriptor {
         if u32_at(bytes, 4) != crc32(&bytes[8..24]) {
             return Err(LayoutError::StopChecksum);
         }
-        let channel_length = i32_at(bytes, 80);
-        let source_length = i32_at(bytes, 340);
-        if channel_length < 0
-            || channel_length as usize > CHANNEL_LENGTH
-            || source_length < 0
-            || source_length as usize > SOURCE_IDENTITY_LENGTH
-        {
-            return Err(LayoutError::String);
-        }
-        let channel = std::str::from_utf8(&bytes[84..84 + channel_length as usize])
-            .map_err(|_| LayoutError::String)?
-            .to_string();
-        let source_identity = std::str::from_utf8(&bytes[344..344 + source_length as usize])
-            .map_err(|_| LayoutError::String)?
-            .to_string();
-        let descriptor = Descriptor {
+        let mut descriptor = Descriptor {
             state,
             stop_timestamp: i64_at(bytes, 8),
             stop_position: i64_at(bytes, 16),
@@ -647,10 +643,25 @@ impl Descriptor {
             mtu_length: i32_at(bytes, 68),
             session_id: i32_at(bytes, 72),
             stream_id: i32_at(bytes, 76),
-            channel,
-            source_identity,
+            channel: String::new(),
+            source_identity: String::new(),
         };
-        descriptor.check(slot)?;
+        descriptor.check_fields(slot)?;
+        let channel_length = i32_at(bytes, 80);
+        let source_length = i32_at(bytes, 340);
+        if channel_length < 0
+            || channel_length as usize > CHANNEL_LENGTH
+            || source_length < 0
+            || source_length as usize > SOURCE_IDENTITY_LENGTH
+        {
+            return Err(LayoutError::String);
+        }
+        descriptor.channel = std::str::from_utf8(&bytes[84..84 + channel_length as usize])
+            .map_err(|_| LayoutError::String)?
+            .to_string();
+        descriptor.source_identity = std::str::from_utf8(&bytes[344..344 + source_length as usize])
+            .map_err(|_| LayoutError::String)?
+            .to_string();
         Ok(Some(descriptor))
     }
 }
