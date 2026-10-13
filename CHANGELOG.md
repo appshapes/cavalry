@@ -304,3 +304,15 @@ user-visible change, added in the same commit as the change. The format follows
   host. Its text now says what landed: `poll` returns a count or a `Fault`, the handler
   receives the data frame header, a full image queue closes the client with `overrun`
   and is not counted until clients have counters, and the image queue holds 64 events.
+- ADR 0022: the driver loads a publication's producer position at most once per
+  millisecond, by `spec/log-buffer.md`, so the publisher's cache line is no longer read
+  on every duty cycle; `publication.position` is at most a millisecond behind the
+  publisher, and closing and a subscription joining still load it afresh, for the end
+  of stream position and the join position. On the bench host the conductor's loads
+  were the exclusive row's p99.99 band and a third of the publisher's p50; the driver,
+  the harness and the baseline follow in their own commits.
+- The driver's conductor loads a publication's producer position at most once per
+  millisecond, as ADR 0022 and `spec/log-buffer.md` say, and a move of it is no longer
+  work for the idle strategy, so a backoff conductor parks while only the publisher
+  moves; closing and a subscription's join still load it afresh. `publication.position`
+  says it is at most a millisecond behind the publisher.

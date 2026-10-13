@@ -178,10 +178,15 @@ The driver creates the log, and on its duty cycle:
 
 - **Positions.** It stores the producer position in `publication.position`, and the
   publisher limit, the minimum subscriber position + the publication window length, in
-  `publication.limit`, each with a release store. It raises the limit only when the new
-  value is at least window ÷ 8 beyond the last, so that the publisher's cache line is
-  not written on every cycle, and only after cleaning. With no subscriber the limit is
-  the consumer position, the largest position any subscriber reached, so the publisher
+  `publication.limit`, each with a release store. For this store and for unblocking it
+  loads the producer position at most once per millisecond per publication, by its
+  own clock, so that the publisher's cache line is not read on every cycle;
+  `publication.position` is at most a millisecond behind the publisher. Closing and a
+  subscription's join load it afresh: a join below the clean position would read
+  cleaned bytes (ADR 0022). It raises the limit only when the new value is at least
+  window ÷ 8 beyond the last, so that the publisher's cache line is not written on
+  every cycle, and only after cleaning. With no subscriber the limit is the consumer
+  position, the largest position any subscriber reached, so the publisher
   is told `not connected`. It sets is connected to 1 while a subscriber has a position
   and to 0 otherwise.
 - **Cleaning.** Before it raises the limit to L, it zeroes every byte from the clean
@@ -202,9 +207,10 @@ The driver creates the log, and on its duty cycle:
   frame covers the rest of the term and the driver rotates. If the consumer position is
   the first byte of the term after the active one, the driver only rotates. Each unblock
   adds one to `publication.unblocked`.
-- **Closing.** When the publication is closed it stores the producer position in the
-  end of stream position with a release store, and removes the file once every
-  subscriber has reached that position or the publication's linger has passed.
+- **Closing.** When the publication is closed it loads the producer position afresh
+  and stores it in the end of stream position with a release store, and removes the
+  file once every subscriber has reached that position or the publication's linger has
+  passed.
 - **Checks.** Before it uses a value a client wrote, a subscriber position or a tail, it
   checks the bound the tables name; a value outside it adds one to
   `log_buffer.rejected_position` or `log_buffer.rejected_tail`, and the client is

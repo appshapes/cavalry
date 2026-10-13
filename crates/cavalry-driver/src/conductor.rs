@@ -4,7 +4,10 @@
 //! as `spec/log-buffer.md`, "The driver" says; what each command means is
 //! `spec/client-protocol.md` (ADR 0019). Nothing here is on the message path: a
 //! message goes from a publisher's claim to a subscriber's handler through the log
-//! buffer alone, and the conductor only moves the limit that bounds the publisher.
+//! buffer alone, and the conductor only moves the limit that bounds the publisher. It
+//! loads a publication's producer position at most once per millisecond, so that the
+//! publisher's cache line is not read on every cycle, and a move of that position is
+//! not work for the idle strategy (ADR 0022).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,6 +131,10 @@ struct Publication {
     clean_position: i64,
     /// The limit last stored.
     last_limit: i64,
+    /// The producer position as last loaded, and when, by the conductor's clock: loaded
+    /// at most once per [`spec::PRODUCER_POSITION_INTERVAL`] (ADR 0022).
+    producer: i64,
+    producer_loaded_at: i64,
     /// The consumer position that has not moved, and since when.
     stalled: Option<(i64, i64)>,
     /// The end of stream position and when it was stored.
@@ -597,6 +604,8 @@ impl Conductor {
             consumer_position: join_position,
             clean_position: join_position,
             last_limit: join_position,
+            producer: join_position,
+            producer_loaded_at: now,
             stalled: None,
             closing: None,
             log_file_name,
@@ -891,7 +900,8 @@ impl Conductor {
 
     /// The driver's duties on every publication (`spec/log-buffer.md`, "The driver"):
     /// positions, cleaning, the limit, unblocking, and closing once the linger has passed
-    /// or every subscriber has reached the end of stream.
+    /// or every subscriber has reached the end of stream. The producer position is loaded
+    /// at most once per millisecond per publication, and its move is not work (ADR 0022).
     fn keep_publications(&mut self, now: i64) -> usize {
         let mut work = 0;
         let mut index = 0;
@@ -944,25 +954,39 @@ impl Conductor {
             }
         }
         let publication = &mut self.publications[index];
-        let producer = match publication.log.producer_position() {
-            Ok(position) => position,
-            Err(_) => {
-                self.statics.log_buffer_rejected_tail.increment();
-                if publication.closing.is_none() {
-                    let end = publication.consumer_position;
-                    let _ = publication.log.set_end_of_stream_position(end);
-                    publication.closing = Some((end, now));
-                    let registrations = publication.registrations.len();
-                    publication.registrations.clear();
-                    self.registration_count = self.registration_count.saturating_sub(registrations);
+        // The producer position at most once per millisecond (ADR 0022): the publisher
+        // stores to that line on every commit, and a load on every cycle kept the line
+        // moving between the two caches, which the publisher paid at p50 and p99.99.
+        // Closing loads it afresh (`drop_registration`), so the end of stream is exact.
+        let due = now.saturating_sub(publication.producer_loaded_at)
+            >= spec::nanos(spec::PRODUCER_POSITION_INTERVAL);
+        if due {
+            match publication.log.producer_position() {
+                Ok(position) => {
+                    publication.producer = position;
+                    publication.producer_loaded_at = now;
                 }
-                return true;
+                Err(_) => {
+                    self.statics.log_buffer_rejected_tail.increment();
+                    if publication.closing.is_none() {
+                        let end = publication.consumer_position;
+                        let _ = publication.log.set_end_of_stream_position(end);
+                        publication.closing = Some((end, now));
+                        let registrations = publication.registrations.len();
+                        publication.registrations.clear();
+                        self.registration_count =
+                            self.registration_count.saturating_sub(registrations);
+                    }
+                    return true;
+                }
             }
-        };
+        }
+        let producer = publication.producer;
         let mut moved = false;
         if publication.position.get() != producer {
+            // Not work: a publisher that publishes while nothing else moves lets the
+            // conductor idle, and the gauge is at most a millisecond behind (ADR 0022).
             publication.position.store_release(producer);
-            moved = true;
         }
         if let Some(max) = max_subscriber
             && max > publication.consumer_position
@@ -1190,4 +1214,93 @@ fn counter_id(counter: &Counter) -> i32 {
 /// Removes a publication's log file; a file already gone is not an error.
 fn remove_log(dir: &Path, registration_id: i64) {
     let _ = std::fs::remove_file(dir.join(log_layout::file_name(registration_id)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A temporary driver directory, removed on drop so a failed assert does not leave it.
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(test: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("cavalry-driver-{}-{test}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            TestDir(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// ADR 0022: the conductor loads a publication's producer position at most once per
+    /// [`spec::PRODUCER_POSITION_INTERVAL`] by the clock it is given, and a move of that
+    /// position is not work, so a publisher alone lets the conductor idle.
+    #[test]
+    fn the_producer_position_is_loaded_once_per_interval_and_its_move_is_not_work() {
+        let dir = TestDir::new("producer-cadence");
+        prepare_dir(dir.path()).expect("the directory is prepared");
+        let mut conductor =
+            Conductor::create(dir.path(), IdleStrategy::Backoff).expect("the conductor is created");
+        let t0 = now_nanos();
+        let interval = spec::nanos(spec::PRODUCER_POSITION_INTERVAL);
+
+        // A subscriber, then a publication, loaded at t0; the first cycle raises the
+        // limit, and after it nothing moves.
+        conductor.add_subscription(1, 1, 7, IPC_CHANNEL);
+        conductor.add_publication(1, 2, 7, IPC_CHANNEL, false, t0);
+        assert_eq!(conductor.publications.len(), 1, "the publication is added");
+        assert_eq!(conductor.images.len(), 1, "the subscriber has an image");
+        conductor.duty_cycle(t0);
+        assert_eq!(conductor.duty_cycle(t0), 0, "nothing moves once settled");
+        let joined = conductor.publications[0].position.get();
+
+        // One frame committed through an appender, as a publisher would.
+        let committed = {
+            let publication = &conductor.publications[0];
+            let mut appender = publication.log.appender().expect("an appender");
+            appender
+                .offer(b"one message", publication.limit.get(), 0)
+                .expect("the message is offered")
+        };
+        assert!(committed > joined, "the producer moved");
+
+        // Half the interval after the last load: no load, the gauge stays, and the
+        // publication is no work.
+        assert_eq!(
+            conductor.duty_cycle(t0 + interval / 2),
+            0,
+            "no work before the interval"
+        );
+        assert_eq!(
+            conductor.publications[0].position.get(),
+            joined,
+            "the producer position is not loaded before the interval has passed"
+        );
+
+        // The interval after the last load: one load, the gauge follows, and its move is
+        // still no work.
+        assert_eq!(
+            conductor.duty_cycle(t0 + interval),
+            0,
+            "a moved gauge is not work"
+        );
+        assert_eq!(
+            conductor.publications[0].position.get(),
+            committed,
+            "the gauge follows the publisher once the interval has passed"
+        );
+
+        // The conductor unmaps its files before the guard removes the directory.
+        drop(conductor);
+    }
 }
