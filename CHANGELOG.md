@@ -344,3 +344,18 @@ user-visible change, added in the same commit as the change. The format follows
   Aeron aligns them; and a time index of one entry per
   millisecond for `cavalry replay --from <instant>`. The spec page and its vectors land
   with the acceptance, which is a person's, since the format cannot be undone.
+- ADR 0024 is Accepted and `spec/durable-log.md` version 0 is the durable log's on-disk
+  format, with its vectors; `cavalry-log` gains the layout types, a catalog writer that
+  creates and stops recordings in the page's order and a reader that retries a stop in
+  progress, the conformance test under `just conformance`, a no-panic test over generated
+  input, and its first README example. A state-2 slot reads as `invalid`, a missing
+  middle segment is damage, and recovery's actions get counters in the recorder's feature.
+  The catalog writer writes the header's magic last and writes again a header torn while
+  it was created, a descriptor reports its first fault in one order (state, `invalid`,
+  `checksum`, then the fields), and `CatalogWriter::rewrite` refuses a slot it does not
+  hold, an empty or invalid one, or another recording's descriptor. A descriptor's stop
+  position is −1 exactly when its stop timestamp is −1, and a reader rejects a mix of the
+  two as `position`. The writer's only state writes are a delete of a stopped recording
+  and an invalidation of a damaged one, and a stop is written once; any other transition
+  is refused as `transition` with nothing written, and opening the catalog truncates the
+  bytes a crash left past its last whole slot.

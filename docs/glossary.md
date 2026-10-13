@@ -81,3 +81,8 @@ pages elsewhere mention Aeron at most once.
 | client conductor | The thread a client starts when it attaches: it sends the keepalive, reads every event, completes the client's add and remove operations, and closes the client when the driver is gone or has timed it out. | client conductor (`ClientConductor`) | `docs/reference/client-protocol.md` |
 | offer | The copying publish API: a message is copied into the log as one frame, or as fragments committed in order, against the publication limit; the result is the position after it, or the same refusals as a claim. | `offer` | `docs/reference/log-buffer.md` |
 | fragment handler | The closure a subscription hands each fragment to on a poll: the body as a view into the log, and the frame's header. | `FragmentHandler` | `docs/reference/log-buffer.md` |
+| recording | One stream captured to the durable log from a start position, identified by its recording id. | recording | `docs/reference/durable-log.md` |
+| recording id | The index of a recording's slot in the catalog, never reused. | recording id | `docs/reference/durable-log.md` |
+| catalog | The durable log's index of recordings: a header and one 1024-byte slot per recording. | catalog | `docs/reference/durable-log.md` |
+| segment file | One file of a recording holding the log buffer's raw term bytes from a segment base position. | recording segment | `docs/reference/durable-log.md` |
+| time index | A recording's list of (timestamp, position) entries, at most one per millisecond, that resolves an instant to a position. | none | `docs/reference/durable-log.md` |

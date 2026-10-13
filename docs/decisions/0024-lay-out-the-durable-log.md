@@ -1,6 +1,6 @@
 # 0024. Lay out the durable log as a fixed-slot catalog, Aeron's segment files and a time index
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-13
 - **Invariants affected:** 1, 3, 6
 - **Supersedes:** none
@@ -87,7 +87,8 @@ have no header (item 2); the catalog's version governs them.
    **Changing a slot.** While a recording lives only its stop fields and its state
    change: a stop writes the stop position and the stop timestamp, then the stop CRC32;
    a delete (card 95) writes the state, 3, then removes the files. A reader that finds
-   a state of 1, 2 or 3 checks both CRC32s. A creation CRC32 that does not match is
+   a state of 2 reports `invalid` and reads nothing else from the slot; one that finds
+   a state of 1 or 3 checks both CRC32s. A creation CRC32 that does not match is
    damage, since nothing writes those bytes after the state: the reader reports
    `checksum` at once. A stop CRC32 that does not match may be a stop the driver is
    writing, so the reader retries for up to 100 milliseconds and then reports
@@ -140,9 +141,15 @@ have no header (item 2); the catalog's version governs them.
         position, which the first entry guarantees exists. It writes the stop fields
         and then the stop CRC32.
 
-     Only damage gets state 2, and `cavalry doctor` names it: segment files exist but
-     the one holding the start position is missing, or the frame at the start position
-     has a non-zero length and does not check.
+     Segment files wholly past the stop position, such as a next segment pre-extended
+     before a power loss, are removed. Only damage gets state 2, and `cavalry doctor`
+     names it: segment files exist but the one holding the start position is missing,
+     a segment between the start position and the last segment file is missing, so
+     that the scan would cut off data that is on disk, or the frame at the start
+     position has a non-zero length and does not check. Every action recovery takes,
+     a truncation, a dropped slot, a rewritten index, a rebuilt stop, a slot set to
+     state 2, is a state transition with a counter of its own, which card 93 adds
+     with the recorder (invariant 4).
    - A torn delete, state 3 with files still present, runs again.
 
    After a process crash every byte the recorder wrote is in the page cache and the
@@ -264,7 +271,9 @@ truncated, and no recording starts.
 
 ## Evidence
 
-A layout decision: what informed it is above. What will accept it: the vectors written
+A layout decision: what informed it is above. Accepted on Rjae's decision of
+2026-10-13, with the vectors, the conformance test, the no-panic test and the catalog
+reader and writer in the acceptance commit. What was to accept it: the vectors written
 by `spec/vectors/durable-log.py` and read by `cavalry-log`'s tests, among them: an
 empty last slot (state 0) with a non-zero body, which recovery removes; an empty slot
 before the last, which recovery sets to state 2; a catalog with a trailing partial

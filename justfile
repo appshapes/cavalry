@@ -50,6 +50,7 @@ conformance:
     cargo test -p cavalry-shm --test log_buffer_conformance
     cargo test -p cavalry-shm --test command_ring_conformance
     cargo test -p cavalry-shm --test broadcast_buffer_conformance
+    cargo test -p cavalry-log --test conformance
 
 # Deterministic replay test: replay a recorded log twice and diff the state.
 replay-check:

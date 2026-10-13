@@ -19,3 +19,7 @@ workspace = true
 [package.metadata.cavalry]
 data_plane = true
 allowed-dependencies = []
+
+[dev-dependencies]
+# Reads spec/vectors/durable-log.json in tests/conformance.rs. Dev only, never on the data plane.
+serde_json = "1"

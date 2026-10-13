@@ -29,6 +29,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Command ring](reference/command-ring.md)
 - [Broadcast buffer](reference/broadcast-buffer.md)
 - [Client protocol](reference/client-protocol.md)
+- [Durable log](reference/durable-log.md)
 - [Configuration](reference/config.md)
 - [Glossary](glossary.md)
 
