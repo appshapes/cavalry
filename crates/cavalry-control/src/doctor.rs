@@ -589,10 +589,11 @@ mod tests {
     #[test]
     fn a_counter_the_driver_does_not_have_is_a_note_and_a_corrupt_file_fails() {
         let dir = TestDir::new("older");
-        // A driver older than doctor: its file has no record for the last static counter.
+        // A driver older than doctor: its file has no record for the last static counter
+        // that doctor reports, the last with a doctor text.
         let last = COUNTERS
             .iter()
-            .filter(|def| def.scope == Scope::Static)
+            .filter(|def| def.scope == Scope::Static && !def.doctor.is_empty())
             .map(|def| def.id.record())
             .max()
             .expect("a static counter");

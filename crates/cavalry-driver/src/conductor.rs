@@ -19,9 +19,9 @@ use cavalry_shm::command_ring::{
 use cavalry_shm::counters::generated::{
     CLIENT_PROTOCOL_ERRORS, CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT,
     COMMAND_RING_REJECTED_RECORD, COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED,
-    DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_POSITION,
-    LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT, PUBLICATION_POSITION, PUBLICATION_UNBLOCKED,
-    SUBSCRIPTION_POSITION,
+    CONDUCTOR_IDLE_STRATEGY, DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL,
+    LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT,
+    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
@@ -216,10 +216,14 @@ pub(crate) struct Conductor {
 
 impl Conductor {
     /// Creates the counters file, the command ring and the broadcast buffer in `dir`,
-    /// in that order, with the sizes of [`spec`].
+    /// in that order, with the sizes of [`spec`], and records `idle` in the
+    /// `conductor.idle_strategy` counter for `doctor`.
     pub(crate) fn create(dir: &Path, idle: IdleStrategy) -> Result<Self, DriverError> {
         let counters = CountersFile::create(dir, spec::COUNTERS_CAPACITY)?;
         let statics = Statics::new(&counters)?;
+        counters
+            .counter(CONDUCTOR_IDLE_STRATEGY.record())?
+            .set(idle.counter_value());
         let ring = CommandRing::create(dir, spec::COMMAND_RING_CAPACITY)?;
         let consumer = ring.consumer(spec::COMMAND_RING_UNBLOCK_TIMEOUT)?;
         let broadcast = BroadcastBuffer::create(dir, spec::BROADCAST_CAPACITY)?;
