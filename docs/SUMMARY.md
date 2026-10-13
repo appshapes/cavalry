@@ -57,3 +57,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0020. Configure by environment variable, and register every key in config.toml](decisions/0020-configure-by-environment-variable.md)
 - [0021. Shape the client API after Aeron's, with a conductor thread and no lock](decisions/0021-shape-the-client-api-after-aerons.md)
 - [0022. Load a publication's producer position at most once per millisecond](decisions/0022-load-the-producer-position-once-per-millisecond.md)
+- [0023. Build the durable log and replay second, in four features](decisions/0023-build-the-durable-log-second.md)
