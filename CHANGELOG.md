@@ -261,3 +261,7 @@ user-visible change, added in the same commit as the change. The format follows
 - `cavalry-shm`'s `CountersReader::value` gives a reader a handle on one counter's
   value, resolved once, so a publisher reads its limit with one acquire load per claim
   and no check in its hot loop.
+- `cavalry-shm`'s `CountersWriter` opens the counters file writable for a client, so a
+  subscriber stores its `subscription.position` through the owner's `Counter` handle
+  without being able to allocate or free a record; `spsc` halves report
+  `peer_dropped()`, so a conductor sweeps a registration whose subscription is gone.

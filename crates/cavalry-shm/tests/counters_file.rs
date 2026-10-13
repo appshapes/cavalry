@@ -13,7 +13,9 @@ use cavalry_shm::counters::layout::{
     FILE_NAME, HEADER_LENGTH, HeaderFields, MAX_LABEL_LENGTH, RECORD_LENGTH, RecordFields,
     SLOT_LENGTH, State, encode_header, encode_record,
 };
-use cavalry_shm::counters::{CounterId, CountersError, CountersFile, CountersReader, Scope};
+use cavalry_shm::counters::{
+    CounterId, CountersError, CountersFile, CountersReader, CountersWriter, Scope,
+};
 
 /// A fresh directory for one test, removed when the test ends.
 struct Dir(PathBuf);
@@ -651,4 +653,52 @@ fn a_value_handle_reads_what_the_owner_stores_and_outlives_its_reader() {
         "unallocated"
     );
     assert_eq!(reader.value(64).unwrap_err().reason(), "id");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_writer_stores_the_value_of_the_counter_the_driver_allocated_for_it() {
+    let dir = Dir::new("writer");
+    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let position = file
+        .allocate(INSTANCE, &[1, 2, 3, 4], "subscription.position 1")
+        .unwrap();
+    position.store_release(64);
+
+    let writer = CountersWriter::open(dir.path()).unwrap();
+    assert_eq!(writer.capacity(), 64);
+    assert_eq!(writer.header(), file.header());
+    assert!(format!("{writer:?}").contains("CountersWriter"));
+    let owned = writer.counter(position.id()).unwrap();
+    assert_eq!(owned.id(), position.id());
+    assert_eq!(owned.load_acquire(), 64, "what the driver set at the join");
+    owned.store_release(4096);
+    assert_eq!(
+        position.load_acquire(),
+        4096,
+        "the driver's handle sees the store"
+    );
+    let reader = CountersReader::open(dir.path()).unwrap();
+    assert_eq!(reader.read_acquire(position.id()).unwrap(), 4096);
+    assert_eq!(writer.read(position.id()).unwrap(), 4096);
+    assert_eq!(writer.value(position.id()).unwrap().load_acquire(), 4096);
+
+    // The same refusals as a reader, at the one check.
+    let free = free_records(64);
+    let unallocated = free
+        .iter()
+        .copied()
+        .find(|record| *record != position.id())
+        .unwrap();
+    assert_eq!(
+        writer.counter(unallocated).unwrap_err().reason(),
+        "unallocated"
+    );
+    assert_eq!(writer.counter(64).unwrap_err().reason(), "id");
+    assert_eq!(
+        CountersWriter::open(Dir::new("writer-none").path())
+            .unwrap_err()
+            .reason(),
+        "io"
+    );
 }

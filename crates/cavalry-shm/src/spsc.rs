@@ -171,6 +171,13 @@ impl<T> Producer<T> {
         self.shared.capacity()
     }
 
+    /// Whether the other half has been dropped: the shared state has one owner left,
+    /// this one. A conductor sweeps a registration whose subscription is gone this way,
+    /// with no message between the threads (ADR 0021).
+    pub fn peer_dropped(&self) -> bool {
+        Arc::strong_count(&self.shared) == 1
+    }
+
     /// How many items are queued, a snapshot from a fresh load of the consumer's `head`:
     /// exact for the items this half put in, and possibly more than the queue holds by
     /// the time the caller reads it, since the consumer may take more.
@@ -211,6 +218,13 @@ impl<T> Consumer<T> {
     /// How many items the queue holds.
     pub fn capacity(&self) -> usize {
         self.shared.capacity()
+    }
+
+    /// Whether the other half has been dropped: the shared state has one owner left,
+    /// this one. A conductor sweeps a registration whose subscription is gone this way,
+    /// with no message between the threads (ADR 0021).
+    pub fn peer_dropped(&self) -> bool {
+        Arc::strong_count(&self.shared) == 1
     }
 
     /// How many items are queued, a snapshot from a fresh load of the producer's `tail`:
@@ -345,6 +359,18 @@ mod tests {
         }
         consumer_thread.join().expect("the consumer finished");
         assert!(producer.is_empty());
+    }
+
+    #[test]
+    fn a_half_knows_when_its_peer_is_gone() {
+        let (producer, consumer) = queue::<u8>(2);
+        assert!(!producer.peer_dropped());
+        assert!(!consumer.peer_dropped());
+        drop(consumer);
+        assert!(producer.peer_dropped());
+        let (producer, consumer) = queue::<u8>(2);
+        drop(producer);
+        assert!(consumer.peer_dropped());
     }
 
     #[test]
