@@ -191,6 +191,9 @@ def main():
     vectors.append(invalid("descriptor-stop-position-live-timestamp-set", "descriptor", "position", encode_descriptor(descriptor(stop_timestamp=1_760_000_001_000_000_000)), slot=0))
     vectors.append(invalid("catalog-order-version-before-descriptor-length", "catalog-header", "version", encode_catalog_header(catalog_header(version=1, descriptor_length=512)), file_length=HEADER_LENGTH))
     vectors.append(invalid("catalog-order-magic-before-version", "catalog-header", "magic", encode_catalog_header(catalog_header(magic=b"CVLYCNTR", version=1)), file_length=HEADER_LENGTH))
+    vectors.append(invalid("descriptor-order-state-before-checksum", "descriptor", "state", struct.pack("<i", 4) + encode_descriptor(descriptor(), body_checksum=1)[4:], slot=0))
+    vectors.append(invalid("catalog-order-checksum-kind-before-timestamp", "catalog-header", "checksum-kind", encode_catalog_header(catalog_header(checksum_kind=1, created=-1)), file_length=HEADER_LENGTH))
+    vectors.append(invalid("catalog-order-timestamp-before-length", "catalog-header", "timestamp", encode_catalog_header(catalog_header(created=-1)), file_length=HEADER_LENGTH + (MAX_SLOTS + 1) * DESCRIPTOR_LENGTH))
     # Time index: valid header, rejections, then entries.
     ih = index_header(recording_id=1)
     vectors.append(valid("index-header", "index-header", encode_index_header(ih), ih, file_length=HEADER_LENGTH + 3 * ENTRY_LENGTH, entries=3))
@@ -198,6 +201,8 @@ def main():
     vectors.append(invalid("index-too-short", "index-header", "too-short", encode_index_header(ih)[:100], file_length=100))
     vectors.append(invalid("index-magic", "index-header", "magic", encode_index_header(index_header(magic=CATALOG_MAGIC)), file_length=HEADER_LENGTH))
     vectors.append(invalid("index-not-ready-torn-header", "index-header", "not-ready", encode_index_header(index_header(magic=bytes(8))), file_length=HEADER_LENGTH))
+    vectors.append(invalid("index-order-not-ready-before-version", "index-header", "not-ready", encode_index_header(index_header(magic=bytes(8), version=1)), file_length=HEADER_LENGTH))
+    vectors.append(invalid("index-order-version-before-recording-id", "index-header", "version", encode_index_header(index_header(version=1, recording_id=-1)), file_length=HEADER_LENGTH))
     vectors.append(invalid("index-version", "index-header", "version", encode_index_header(index_header(version=1)), file_length=HEADER_LENGTH))
     vectors.append(invalid("index-recording-id", "index-header", "recording-id", encode_index_header(index_header(recording_id=-1)), file_length=HEADER_LENGTH))
     first = entry(1_760_000_000_000_000_000, 0)
