@@ -192,7 +192,7 @@ const MAX_COMMAND_LENGTH: usize = 8 + 8 + 4 + 4 + MAX_STRING_LENGTH;
 
 /// A command the ring delivered, copied out so that the ring's read can finish before
 /// the command is handled. The buffer is sized once, at create, to
-/// [`MAX_COMMAND_LENGTH`]: no duty cycle allocates (CLAUDE.md, invariant 2; the
+/// [`MAX_COMMAND_LENGTH`]: the command read allocates nothing (CLAUDE.md, invariant 2; the
 /// harness's zero-allocation assertion covers the client path, keepalives included).
 struct Pending {
     type_id: i32,
