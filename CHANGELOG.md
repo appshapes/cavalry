@@ -250,3 +250,10 @@ user-visible change, added in the same commit as the change. The format follows
   one process with one producer and one consumer, for the client's conductor to hand
   images to the user's thread; `offer` returns the item when the queue is full, and the
   protocol has a `loom` model and runs under Miri.
+- `cavalry-client` attaches: `Cavalry::connect()` finds the driver through `CAVALRY_DIR`
+  or the default directory, `connect_to(dir)` names one, and the client conductor thread
+  keeps the client alive with a keepalive every 500 ms, closes it when the driver closes
+  or its heartbeat goes stale, when the driver times the client out, or when the
+  broadcast buffer laps it, and `closed()` says which; `close()` tells the driver. A
+  directory with no driver, or a driver that is gone, is refused with what to do
+  (ADR 0021).
