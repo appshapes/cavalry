@@ -282,6 +282,10 @@ user-visible change, added in the same commit as the change. The format follows
   `Fault::Closed`. A subscription the client's conductor cannot hold is
   `ClientError::SubscriptionsFull` and is removed again. The README example is now the
   ten-minute path's program: publish and subscribe in one process (ADR 0021).
+- The driver's conductor copies each command into scratch sized once at start, so its
+  command read allocates nothing, keepalives included; a record longer than any command
+  of this version is not copied past that bound, and is refused by the spec's checks in
+  their order on the copy: `type` with code 6, `string` or `length` with code 7.
 - The ten-minute path exists: `cargo add cavalry` gives `cavalry::Cavalry`,
   `Publication` and `Subscription`, the README's five commands build the binary and the
   example, start a driver, publish 1,000 messages and read them back, read doctor and

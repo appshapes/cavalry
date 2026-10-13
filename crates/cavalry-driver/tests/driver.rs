@@ -427,21 +427,54 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     client.send_raw(CommandType::ClientKeepalive as i32, &message);
     assert_eq!(client.wait_error(too_long).0, 7);
 
+    // Longer than any command of this version, a 5,000-byte record with a readable
+    // correlation id, is checked in the spec's order on the conductor's copy of its
+    // first bytes, without the conductor copying past its scratch. A legal head and
+    // fields with bytes past them: `length`, code 7, naming the record's own length.
+    let client_id = client.id;
+    let over_long = move |correlation_id: i64| {
+        let mut message = vec![0u8; 5000];
+        message[..8].copy_from_slice(&client_id.to_le_bytes());
+        message[8..16].copy_from_slice(&correlation_id.to_le_bytes());
+        message
+    };
+    let length = client.correlation_id();
+    client.send_raw(CommandType::AddPublication as i32, &over_long(length));
+    let (code, text) = client.wait_error(length);
+    assert_eq!(code, 7);
+    assert!(text.contains("(length): 5000 bytes"), "{text}");
+
+    // A reserved type id is `type`, code 6, however long the record.
+    let reserved = client.correlation_id();
+    client.send_raw(7, &over_long(reserved));
+    let (code, text) = client.wait_error(reserved);
+    assert_eq!(code, 6);
+    assert!(text.contains("(type)"), "{text}");
+
+    // A channel length above the bound is `string`, code 7, however long the record.
+    let string = client.correlation_id();
+    let mut message = over_long(string);
+    message[20..24].copy_from_slice(&4097i32.to_le_bytes());
+    client.send_raw(CommandType::AddPublication as i32, &message);
+    let (code, text) = client.wait_error(string);
+    assert_eq!(code, 7);
+    assert!(text.contains("(string): a string of length 4097"), "{text}");
+
     // Too short to carry a correlation id: no answer, only the counter.
     client.send_raw(
         CommandType::ClientKeepalive as i32,
         &client.id.to_le_bytes(),
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND) < 4 {
+    while counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND) < 7 {
         assert!(
             Instant::now() < deadline,
-            "rejected_command did not reach 4"
+            "rejected_command did not reach 7"
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 4);
-    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 3);
+    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 7);
+    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 6);
     driver.close().expect("closes");
 }
 
