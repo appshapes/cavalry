@@ -39,3 +39,4 @@ Protocol).
 | `command-ring.md`, the command ring | 1 | ADR 0014, ADR 0018 |
 | `broadcast-buffer.md`, the broadcast buffer | 0 | ADR 0014 |
 | `client-protocol.md`, the client protocol | 0 | ADR 0019 |
+| `durable-log.md`, the durable log | 0 | ADR 0024 |

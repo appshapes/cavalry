@@ -344,3 +344,9 @@ user-visible change, added in the same commit as the change. The format follows
   Aeron aligns them; and a time index of one entry per
   millisecond for `cavalry replay --from <instant>`. The spec page and its vectors land
   with the acceptance, which is a person's, since the format cannot be undone.
+- ADR 0024 is Accepted and `spec/durable-log.md` version 0 is the durable log's on-disk
+  format, with its vectors; `cavalry-log` gains the layout types, a catalog writer that
+  creates and stops recordings in the page's order and a reader that retries a stop in
+  progress, the conformance test under `just conformance`, a no-panic test over generated
+  input, and its first README example. A state-2 slot reads as `invalid`, a missing
+  middle segment is damage, and recovery's actions get counters in the recorder's feature.
