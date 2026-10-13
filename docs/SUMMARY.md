@@ -51,3 +51,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0018. Commit with a compare-and-swap in the command ring](decisions/0018-commit-with-a-compare-and-swap-in-the-command-ring.md)
 - [0019. Adopt Aeron's control protocol as the client protocol](decisions/0019-adopt-aeron-control-protocol-as-the-client-protocol.md)
 - [0020. Configure by environment variable, and register every key in config.toml](decisions/0020-configure-by-environment-variable.md)
+- [0021. Shape the client API after Aeron's, with a conductor thread and no lock](decisions/0021-shape-the-client-api-after-aerons.md)

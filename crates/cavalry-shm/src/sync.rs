@@ -7,10 +7,10 @@
 #[cfg(loom)]
 pub(crate) use loom::cell::UnsafeCell;
 #[cfg(loom)]
-pub(crate) use loom::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
+pub(crate) use loom::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(not(loom))]
-pub(crate) use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
+pub(crate) use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 /// Plain bytes that one party writes before a release store and another reads after
 /// an acquire load. The callers of `with` and `with_mut` carry the `// SAFETY:`
@@ -22,9 +22,9 @@ pub(crate) struct UnsafeCell<T>(core::cell::UnsafeCell<T>);
 
 #[cfg(not(loom))]
 impl<T> UnsafeCell<T> {
-    /// A cell holding `value`. Production cells are never constructed: they are views
-    /// over a mapping (`counters::file`). Tests build them on plain memory.
-    #[cfg(test)]
+    /// A cell holding `value`. The shared layouts never construct one, they are views
+    /// over a mapping (`counters::file`); the in-process queue (`spsc`) and the tests
+    /// build them on plain memory.
     pub(crate) const fn new(value: T) -> Self {
         Self(core::cell::UnsafeCell::new(value))
     }

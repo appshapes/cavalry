@@ -5,6 +5,7 @@ pub mod broadcast;
 pub mod command_ring;
 pub mod counters;
 pub mod log;
+pub mod spsc;
 pub(crate) mod sync;
 // What the two ring layouts share: the header, the record word, the trailer slots.
 pub(crate) mod ring;

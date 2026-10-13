@@ -23,8 +23,14 @@ the two crates where `unsafe` is permitted.
   [`spec/broadcast-buffer.md`](../../spec/broadcast-buffer.md)). Both are lock-free,
   with 64-byte alignment on shared state and a 128-byte slot of its own for every field
   one party writes and another reads in its hot loop, such as a counter's value
-  ([ADR 0011](../../docs/decisions/0011-pad-peer-shared-fields-to-128-bytes.md)). The
-  SPSC and MPSC queues between the driver's own threads come with the driver.
+  ([ADR 0011](../../docs/decisions/0011-pad-peer-shared-fields-to-128-bytes.md)).
+- Carries items between two threads of one process: `spsc::queue(capacity)` is a
+  bounded queue with one `Producer` and one `Consumer`, no lock and no allocation after
+  construction, whose `offer` returns the item when the queue is full and whose `poll`
+  returns `None` when it is empty. The client's conductor hands the user's thread its
+  images through one, and gets the mappings back through another
+  ([ADR 0021](../../docs/decisions/0021-shape-the-client-api-after-aerons.md)). The
+  MPSC queue between the driver's own threads comes with the sender and receiver.
 - Owns the counters file, the shared-memory file where the driver publishes every
   counter. It is the primary instrument: cheaper than a log line, and it survives a
   crash. `CountersFile` creates it and allocates counters, a `Counter` moves a value

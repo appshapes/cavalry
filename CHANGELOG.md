@@ -246,3 +246,7 @@ user-visible change, added in the same commit as the change. The format follows
   filesystem in memory and when the conductor busy-spins with no isolated CPU, and notes
   isolated CPUs a backoff conductor is not using. A value a key does not take stops the
   command before anything starts, with what to do (ADR 0020).
+- `cavalry-shm` gains `spsc::queue`, a bounded lock-free queue between two threads of
+  one process with one producer and one consumer, for the client's conductor to hand
+  images to the user's thread; `offer` returns the item when the queue is full, and the
+  protocol has a `loom` model and runs under Miri.
