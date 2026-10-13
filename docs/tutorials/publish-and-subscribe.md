@@ -11,8 +11,9 @@ what this page says happens is what the repository checks.
 ## Before you start
 
 - A Rust toolchain and a checkout of this repository. There is no release yet, so the
-  binary and the program are built from the checkout; the commands below use `cargo run`
-  where a release would use `cavalry`.
+  binary and the program are built from the checkout; the commands below run the binaries
+  that `cargo build --release` puts under `target/release/`, where a release would put
+  `cavalry` on the PATH.
 - On Linux, `/dev/shm` mounted, which it is on every common distribution.
 
 ## 1. Build
