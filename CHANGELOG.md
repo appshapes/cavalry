@@ -331,3 +331,8 @@ user-visible change, added in the same commit as the change. The format follows
   result's median with the baseline's slowest run, now as sharp on that row as on the
   others, which closes ADR 0016's Revisit; the how-to says why the median rule ADR 0022
   named is not taken.
+- ADR 0023: the second slice is the durable log and replay on one host, in four
+  features (cards 92 to 95): the on-disk format specified first and accepted by a person,
+  recording in the driver, replay with `cavalry replay` and `just replay-check`, then
+  retention and the ten-minute path. UDP is the third slice, once a dedicated second
+  bench host exists (card 91).
