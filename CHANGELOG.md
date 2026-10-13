@@ -324,3 +324,10 @@ user-visible change, added in the same commit as the change. The format follows
   measured; reading the clock on every spin of the conductor instead cost the raw rows
   about 100 ns at p99.99 on that host. The host's baseline is re-recorded from
   this change's run in a commit of its own, a person's decision.
+- The bench host's baseline is re-recorded from the harness at ADR 0022's cadence, both
+  profiles: at p99.99 `claim_commit_32_exclusive` 380 to 220 ns with its band of 21 runs
+  at 210 to 250 instead of 270 to 430 between processes, `one_way_32_exclusive` 660 to
+  600, and the client rows 460 to 280 and 670 to 600. The gate still compares a
+  result's median with the baseline's slowest run, now as sharp on that row as on the
+  others, which closes ADR 0016's Revisit; the how-to says why the median rule ADR 0022
+  named is not taken.

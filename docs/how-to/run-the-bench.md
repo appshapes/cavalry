@@ -80,14 +80,18 @@ the gate fails only on the dedicated bench host is
    more than 5 percent above the baseline is a regression and the recipe exits 1; when
    the baseline was recorded with `--repeat`, the baseline's slowest run is the number
    compared, so a commit fails when its median tail is slower than anything the baseline
-   measured, by more than 5 percent. On the bench host that was the 5 percent rule on
-   every row but one: `claim_commit_32_exclusive` landed anywhere between 270 and 430 ns
-   at p99.99 from one process to the next, which was the harness's own conductor
-   loading the publisher's tail on every spin; with that load at the driver's cadence
+   measured, by more than 5 percent. On the bench host that is the rule on every row.
+   Until ADR 0022 one row escaped it: `claim_commit_32_exclusive` landed anywhere
+   between 270 and 430 ns at p99.99 from one process to the next, which was the
+   harness's own conductor loading the publisher's tail on every spin; with that load at
+   the driver's cadence
    ([ADR 0022](../decisions/0022-load-the-producer-position-once-per-millisecond.md))
-   the row's runs sit between 210 and 250 ns, and it is compared against the old
-   baseline's slowest run until a person re-records the baseline, which closes
-   ADR 0016's Revisit. Only the rows a message passes
+   the row's 21 runs sit between 210 and 250 ns inside one process and its median holds
+   within 2.5 percent across processes, and the baseline is recorded from that harness.
+   The rule stays with the slowest run rather than the median because at these numbers
+   every row's 21 runs spread 10 to 20 percent inside one process, which a 5 percent
+   rule on medians would fail on an unchanged commit; the slowest run leaves about 20
+   percent between a row's median and its failing number. Only the rows a message passes
    through, `claim_commit_*` and `one_way_*`, can fail; the `timer` and
    `slot_padding_*` rows run no Cavalry code and sit where one 10 ns step of the clock
    is 15 to 33 percent, so their change is printed and marked `reported`
