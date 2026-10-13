@@ -355,4 +355,7 @@ user-visible change, added in the same commit as the change. The format follows
   `checksum`, then the fields), and `CatalogWriter::rewrite` refuses a slot it does not
   hold, an empty or invalid one, or another recording's descriptor. A descriptor's stop
   position is −1 exactly when its stop timestamp is −1, and a reader rejects a mix of the
-  two as `position`.
+  two as `position`. The writer's only state writes are a delete of a stopped recording
+  and an invalidation of a damaged one, and a stop is written once; any other transition
+  is refused as `transition` with nothing written, and opening the catalog truncates the
+  bytes a crash left past its last whole slot.

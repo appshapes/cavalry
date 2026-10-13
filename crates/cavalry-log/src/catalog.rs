@@ -33,6 +33,18 @@ pub enum CatalogError {
         recording_id: i64,
     },
     /// The descriptor given to [`CatalogWriter::rewrite`] is not the one its slot holds.
+    /// A write the page does not define: a stop on a recording that is not live, a
+    /// delete of one that is live or already deleted, an invalidation of one already
+    /// invalid. Nothing is written.
+    Transition {
+        /// The recording.
+        recording_id: i64,
+        /// The state it is in.
+        from: State,
+        /// What the write needed.
+        needed: &'static str,
+    },
+    /// A descriptor's creation fields are not the slot's: another recording's descriptor.
     Mismatch {
         /// The slot.
         recording_id: i64,
@@ -56,6 +68,7 @@ impl CatalogError {
             CatalogError::Full => "full",
             CatalogError::Unknown { .. } => "unknown",
             CatalogError::Mismatch { .. } => "mismatch",
+            CatalogError::Transition { .. } => "transition",
             CatalogError::Io { .. } => "io",
         }
     }
@@ -75,6 +88,17 @@ impl std::fmt::Display for CatalogError {
                 f,
                 "unknown recording {recording_id}: no slot holds it; `cavalry doctor` lists the \
                  recordings; see {DOC}"
+            ),
+            CatalogError::Transition {
+                recording_id,
+                from,
+                needed,
+            } => write!(
+                f,
+                "catalog refused (transition): recording {recording_id} is {from:?}, and this write \
+                 needs {needed}; a stop is written once when a live recording stops, a delete \
+                 once when a stopped one is purged, and recovery alone marks damage; nothing was \
+                 written; see {DOC}"
             ),
             CatalogError::Mismatch { recording_id } => write!(
                 f,
@@ -219,7 +243,14 @@ impl CatalogWriter {
         } else {
             read_header(&file, &path)?;
         }
-        let mut slots = CatalogHeader::slots(file_length(&file, &path)?);
+        let length = file_length(&file, &path)?;
+        let mut slots = CatalogHeader::slots(length);
+        let whole = CatalogHeader::slot_offset(slots);
+        if length > whole {
+            // Bytes past the last whole slot, which a crash while the file grew leaves:
+            // the page says the driver truncates them at start-up.
+            file.set_len(whole).map_err(io("truncate", &path))?;
+        }
         if slots > 0 && read_slot_bytes(&file, &path, slots - 1)?[..4] == [0u8; 4] {
             slots -= 1;
         }
@@ -279,7 +310,9 @@ impl CatalogWriter {
         Ok(id)
     }
 
-    /// Writes the stop fields of recording `recording_id`, then the checksum.
+    /// Writes the stop fields of a live recording, then the checksum: the one stop the
+    /// page writes. A recording that is stopped or deleted is `transition`, and nothing
+    /// is written; recovery rebuilds a torn stop with [`rewrite`](Self::rewrite).
     pub fn stop(
         &mut self,
         recording_id: i64,
@@ -288,20 +321,59 @@ impl CatalogWriter {
     ) -> Result<(), CatalogError> {
         let descriptor = self
             .get(recording_id)?
-            .ok_or(CatalogError::Unknown { recording_id })?
-            .stopped(stop_position, stop_timestamp)?;
+            .ok_or(CatalogError::Unknown { recording_id })?;
+        if descriptor.state() != State::Valid || !descriptor.is_live() {
+            return Err(CatalogError::Transition {
+                recording_id,
+                from: descriptor.state(),
+                needed: "a live recording",
+            });
+        }
+        let descriptor = descriptor.stopped(stop_position, stop_timestamp)?;
         self.rewrite(self.slot(recording_id)?, &descriptor)
     }
 
-    /// Writes the state of recording `recording_id`.
-    pub fn set_state(&mut self, recording_id: i64, state: State) -> Result<(), CatalogError> {
+    /// Writes state 3 on a stopped recording: the delete the page defines, after which
+    /// the caller removes the recording's files. A live, deleted or invalid recording
+    /// is `transition`, and nothing is written.
+    pub fn delete(&mut self, recording_id: i64) -> Result<(), CatalogError> {
+        let slot = self.slot(recording_id)?;
         let descriptor = self
             .get(recording_id)?
-            .ok_or(CatalogError::Unknown { recording_id })?
-            .with_state(state);
-        let offset = CatalogHeader::slot_offset(self.slot(recording_id)?);
+            .ok_or(CatalogError::Unknown { recording_id })?;
+        if descriptor.state() != State::Valid || descriptor.is_live() {
+            return Err(CatalogError::Transition {
+                recording_id,
+                from: descriptor.state(),
+                needed: "a stopped recording",
+            });
+        }
+        self.write_state(slot, State::Deleted)
+    }
+
+    /// Writes state 2 on a slot recovery found damaged: valid or deleted, whatever its
+    /// checksums say, since damage is why. An empty slot is `unknown`, an invalid one
+    /// is `transition`, and nothing is written.
+    pub fn invalidate(&mut self, recording_id: i64) -> Result<(), CatalogError> {
+        let slot = self.slot(recording_id)?;
+        let found = read_slot_bytes(&self.file, &self.path, slot)?;
+        let state = i32::from_le_bytes([found[0], found[1], found[2], found[3]]);
+        match State::from_i32(state) {
+            Some(State::Valid | State::Deleted) => self.write_state(slot, State::Invalid),
+            Some(State::Empty) => Err(CatalogError::Unknown { recording_id }),
+            Some(State::Invalid) => Err(CatalogError::Transition {
+                recording_id,
+                from: State::Invalid,
+                needed: "a valid or deleted recording",
+            }),
+            None => Err(LayoutError::State { found: state }.into()),
+        }
+    }
+
+    fn write_state(&mut self, slot: u64, state: State) -> Result<(), CatalogError> {
+        let offset = CatalogHeader::slot_offset(slot);
         self.file
-            .write_all_at(&descriptor.encode()[..4], offset)
+            .write_all_at(&(state as i32).to_le_bytes(), offset)
             .map_err(io("write a state of", &self.path))?;
         self.file.sync_all().map_err(io("sync", &self.path))?;
         Ok(())

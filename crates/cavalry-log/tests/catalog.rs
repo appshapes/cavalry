@@ -125,7 +125,8 @@ fn an_id_out_of_range_or_negative_is_unknown() {
             "unknown",
             "{missing}"
         );
-        assert_eq!(reason(writer.set_state(missing, State::Deleted)), "unknown");
+        assert_eq!(reason(writer.delete(missing)), "unknown", "{missing}");
+        assert_eq!(reason(writer.invalidate(missing)), "unknown", "{missing}");
     }
 }
 
@@ -153,7 +154,7 @@ fn a_delete_keeps_both_checksums_valid() {
     let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
     let id = writer.add(&recording(1)).expect("added");
     writer.stop(id, 4096, NOW + 1).expect("stopped");
-    writer.set_state(id, State::Deleted).expect("deleted");
+    writer.delete(id).expect("deleted");
     let reader = CatalogReader::open(dir.path()).expect("the catalog opens");
     let deleted = reader
         .get(id)
@@ -286,7 +287,7 @@ fn rewrite_checks_the_slot_before_it_writes() {
         .expect("a recording")
         .stopped(4096, NOW + 1)
         .expect("a valid stop");
-    writer.set_state(second, State::Invalid).expect("set");
+    writer.invalidate(second).expect("invalidated");
     assert_eq!(reason(writer.rewrite(1, &stopped_second)), "invalid");
     // A creation checksum that fails is never re-signed.
     let mut slot = [0u8; DESCRIPTOR_LENGTH];
@@ -303,4 +304,94 @@ fn rewrite_checks_the_slot_before_it_writes() {
         .expect("the stop is rebuilt");
     let reader = CatalogReader::open(dir.path()).expect("the catalog opens");
     assert_eq!(reader.get(first).expect("read"), Some(stopped_first));
+}
+
+/// The bytes of slot `slot`, for asserting that a refused write wrote nothing.
+fn slot_bytes(dir: &TestDir, slot: u64) -> Vec<u8> {
+    let offset = CatalogHeader::slot_offset(slot) as usize;
+    std::fs::read(dir.catalog()).expect("read")[offset..offset + DESCRIPTOR_LENGTH].to_vec()
+}
+
+#[test]
+fn a_stop_is_written_once_and_refused_after() {
+    let dir = TestDir::new("stop-once");
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
+    let id = writer.add(&recording(1)).expect("added");
+    writer.stop(id, 8192, NOW + 1).expect("stopped");
+    let before = slot_bytes(&dir, 0);
+    assert_eq!(reason(writer.stop(id, 4096, NOW + 2)), "transition");
+    assert_eq!(slot_bytes(&dir, 0), before, "a refused stop writes nothing");
+    writer.delete(id).expect("deleted");
+    let before = slot_bytes(&dir, 0);
+    assert_eq!(reason(writer.stop(id, 4096, NOW + 3)), "transition");
+    assert_eq!(
+        slot_bytes(&dir, 0),
+        before,
+        "a stop after a delete writes nothing"
+    );
+}
+
+#[test]
+fn a_delete_needs_a_stopped_recording_and_happens_once() {
+    let dir = TestDir::new("delete-once");
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
+    let id = writer.add(&recording(1)).expect("added");
+    let before = slot_bytes(&dir, 0);
+    assert_eq!(reason(writer.delete(id)), "transition", "a live recording");
+    assert_eq!(slot_bytes(&dir, 0), before);
+    writer.stop(id, 4096, NOW + 1).expect("stopped");
+    writer.delete(id).expect("deleted");
+    let before = slot_bytes(&dir, 0);
+    assert_eq!(reason(writer.delete(id)), "transition", "already deleted");
+    assert_eq!(slot_bytes(&dir, 0), before);
+    writer
+        .invalidate(id)
+        .expect("a deleted recording can still be marked damaged");
+}
+
+#[test]
+fn an_invalidation_marks_damage_once_and_never_an_empty_slot() {
+    let dir = TestDir::new("invalidate");
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
+    let id = writer.add(&recording(1)).expect("added");
+    // Damage the creation fields: get reports checksum, and invalidate still marks it.
+    dir.write_at(&[0xFF], CatalogHeader::slot_offset(0) + 100);
+    assert_eq!(reason(writer.get(id)), "checksum");
+    writer
+        .invalidate(id)
+        .expect("damage is marked whatever the checksums say");
+    assert_eq!(reason(writer.get(id)), "invalid");
+    let before = slot_bytes(&dir, 0);
+    assert_eq!(
+        reason(writer.invalidate(id)),
+        "transition",
+        "already invalid"
+    );
+    assert_eq!(slot_bytes(&dir, 0), before);
+    assert_eq!(
+        reason(writer.invalidate(id + 1)),
+        "unknown",
+        "past the last slot"
+    );
+}
+
+#[test]
+fn open_truncates_bytes_past_the_last_whole_slot() {
+    let dir = TestDir::new("truncate");
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
+    writer.add(&recording(1)).expect("added");
+    drop(writer);
+    let whole = std::fs::metadata(dir.catalog()).expect("stat").len();
+    dir.write_at(&[7u8; 100], whole);
+    assert_eq!(
+        std::fs::metadata(dir.catalog()).expect("stat").len(),
+        whole + 100
+    );
+    let writer = CatalogWriter::open(dir.path(), NOW).expect("opens");
+    assert_eq!(writer.slots(), 1);
+    assert_eq!(
+        std::fs::metadata(dir.catalog()).expect("stat").len(),
+        whole,
+        "truncated to whole slots"
+    );
 }
