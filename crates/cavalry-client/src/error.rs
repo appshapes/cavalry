@@ -8,6 +8,7 @@ use cavalry_proto::client_protocol::{ErrorCode, ProtocolError};
 use cavalry_shm::broadcast::BroadcastError;
 use cavalry_shm::command_ring::CommandRingError;
 use cavalry_shm::counters::CountersError;
+use cavalry_shm::log::LogError;
 
 const DOC_DIRECTORY: &str = "docs/reference/client-protocol.md#the-driver-directory";
 const DOC_LIVENESS: &str = "docs/reference/client-protocol.md#liveness-and-timeouts";
@@ -112,6 +113,13 @@ pub enum ClientError {
     Counters(CountersError),
     /// A command could not be encoded: a channel or a name too long.
     Protocol(ProtocolError),
+    /// A log buffer failed a check, or could not be opened.
+    Log(LogError),
+    /// The driver answered with something this version does not understand.
+    Driver {
+        /// What it said.
+        what: String,
+    },
     /// The operating system refused a step.
     Io {
         /// The step that failed.
@@ -125,7 +133,8 @@ pub enum ClientError {
 
 impl ClientError {
     /// The reason's name: `not-found`, `driver-gone`, `closed`, `refused`,
-    /// `response-timeout`, `command-ring`, `broadcast`, `counters`, `protocol` or `io`.
+    /// `response-timeout`, `command-ring`, `broadcast`, `counters`, `protocol`, `log`,
+    /// `driver` or `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClientError::NotFound { .. } => "not-found",
@@ -137,6 +146,8 @@ impl ClientError {
             ClientError::Broadcast(_) => "broadcast",
             ClientError::Counters(_) => "counters",
             ClientError::Protocol(_) => "protocol",
+            ClientError::Log(_) => "log",
+            ClientError::Driver { .. } => "driver",
             ClientError::Io { .. } => "io",
         }
     }
@@ -205,6 +216,13 @@ impl fmt::Display for ClientError {
             }
             ClientError::Counters(error) => write!(f, "client refused ({reason}): {error}"),
             ClientError::Protocol(error) => write!(f, "command refused ({reason}): {error}"),
+            ClientError::Log(error) => write!(f, "client refused ({reason}): {error}"),
+            ClientError::Driver { what } => write!(
+                f,
+                "client refused ({reason}): the driver answered with {what}, which this version \
+                 does not understand; the driver is newer than the client; upgrade the client; \
+                 see {DOC_ERRORS}"
+            ),
             ClientError::Io { what, path, source } => write!(
                 f,
                 "client refused ({reason}): cannot {what} at {}: {source}; see {DOC_DIRECTORY}",
@@ -221,6 +239,7 @@ impl std::error::Error for ClientError {
             ClientError::Broadcast(error) => Some(error),
             ClientError::Counters(error) => Some(error),
             ClientError::Protocol(error) => Some(error),
+            ClientError::Log(error) => Some(error),
             ClientError::Io { source, .. } => Some(source),
             _ => None,
         }
@@ -248,5 +267,11 @@ impl From<CountersError> for ClientError {
 impl From<ProtocolError> for ClientError {
     fn from(error: ProtocolError) -> Self {
         ClientError::Protocol(error)
+    }
+}
+
+impl From<LogError> for ClientError {
+    fn from(error: LogError) -> Self {
+        ClientError::Log(error)
     }
 }

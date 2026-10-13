@@ -261,3 +261,11 @@ user-visible change, added in the same commit as the change. The format follows
   or broadcast buffer fails a check of its page (`corrupt`), and `closed()` says which; `close()` tells the driver. A
   directory with no driver, or a driver that is gone, is refused with what to do
   (ADR 0021).
+- `cavalry-client` publishes: `add_publication` and `add_exclusive_publication` wait for
+  the driver's answer up to the response timeout and return a `Publication`, whose
+  `try_claim` writes a frame in place and `offer` copies a message in, each against the
+  limit the driver maintains with one acquire load; the refusals are `Offer`, Aeron's
+  codes as a result (`not-connected`, `back-pressured`, `admin-action`,
+  `max-position-exceeded`, `closed`, `too-long`); `close` sends `remove publication`. A
+  command the driver refuses is `ClientError::Refused` with the error code and message
+  (ADR 0021).

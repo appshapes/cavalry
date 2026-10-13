@@ -17,8 +17,10 @@ use cavalry_proto::client_protocol::{Command, Event};
 use cavalry_shm::broadcast::{BroadcastError, Receiver};
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
+use cavalry_shm::spsc;
 
 use crate::error::Closed;
+use crate::response::Response;
 
 /// How often a client sends `client keepalive` when it has sent nothing else
 /// (`spec/client-protocol.md`, "Liveness and timeouts").
@@ -26,6 +28,16 @@ pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// A consumer heartbeat older than this is `driver-timeout`.
 pub(crate) const DRIVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// An add or remove command unanswered for this long is lost.
+pub(crate) const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// No command is waiting for an answer: correlation ids are 0 and up.
+pub(crate) const NO_PENDING: i64 = -1;
+
+/// How many answers the response queue holds: one command is in flight per client, and
+/// the rest is room for an answer that arrives after its caller gave up.
+pub(crate) const RESPONSE_QUEUE: usize = 4;
 
 /// The scratch buffer every command is encoded into: the longest command is a channel
 /// of 4096 bytes and its header, and the ring's own limit is far above.
@@ -38,6 +50,8 @@ pub(crate) struct Shared {
     /// The driver's clock, nanoseconds since the Unix epoch, when a command was last
     /// sent by either thread.
     last_sent: AtomicI64,
+    /// The correlation id of the command the user's thread waits on, or [`NO_PENDING`].
+    pending: AtomicI64,
 }
 
 impl Shared {
@@ -45,7 +59,18 @@ impl Shared {
         Self {
             state: AtomicI32::new(0),
             last_sent: AtomicI64::new(now),
+            pending: AtomicI64::new(NO_PENDING),
         }
+    }
+
+    /// The user's thread names the command it waits on before it sends it, and clears
+    /// it after the answer or the timeout.
+    pub(crate) fn set_pending(&self, correlation_id: i64) {
+        self.pending.store(correlation_id, Ordering::Release);
+    }
+
+    fn pending(&self) -> i64 {
+        self.pending.load(Ordering::Acquire)
     }
 
     /// Why the client is closed, or `None` while it is open.
@@ -131,6 +156,7 @@ pub(crate) struct Conductor {
     producer: Producer,
     receiver: Receiver,
     shared: Arc<Shared>,
+    responses: spsc::Producer<Response>,
     client_id: i64,
     scratch: Vec<u8>,
 }
@@ -141,6 +167,7 @@ impl Conductor {
         producer: Producer,
         receiver: Receiver,
         shared: Arc<Shared>,
+        responses: spsc::Producer<Response>,
         client_id: i64,
     ) -> Self {
         Self {
@@ -148,6 +175,7 @@ impl Conductor {
             producer,
             receiver,
             shared,
+            responses,
             client_id,
             scratch: vec![0u8; COMMAND_SCRATCH],
         }
@@ -226,21 +254,27 @@ impl Conductor {
         }
     }
 
-    /// Up to a batch of events; each closes the client when [`event`] says so, and a
-    /// lap or a corrupt buffer closes it too.
+    /// Up to a batch of events; each closes the client when [`event`] says so, answers
+    /// the command the user's thread waits on through the response queue when it is
+    /// that command's event, and is dropped otherwise; a lap or a corrupt buffer closes
+    /// the client too.
     fn events(&mut self) -> Result<usize, Closed> {
         let mut received = 0;
         let client_id = self.client_id;
         while received < 16 {
-            let mut closed = None;
+            let pending = self.shared.pending();
+            let mut outcome = Ok(None);
             let got = self.receiver.receive(|type_id, message| {
-                closed = event(client_id, type_id, message);
+                outcome = event(client_id, pending, type_id, message);
             });
             match got {
                 Ok(true) => {
                     received += 1;
-                    if let Some(reason) = closed {
-                        return Err(reason);
+                    if let Some(response) = outcome? {
+                        // Full means the caller gave up on several answers in a row and the
+                        // queue holds them; the caller clears the queue before its next
+                        // command, so a dropped stale answer is nothing lost.
+                        let _ = self.responses.offer(response);
                     }
                 }
                 Ok(false) => break,
@@ -252,25 +286,83 @@ impl Conductor {
     }
 }
 
-/// What one event means to client `client_id`: `client timeout` with its id closes it
-/// with [`Closed::ClientTimeout`]; an event that fails a decoding check, `too-short`,
-/// `type`, `string` or `length`, closes it with [`Closed::Corrupt`], since an event it
-/// cannot decode may be the one it needed (`spec/client-protocol.md`, "What the driver
-/// rejects"); every other event leaves it open.
-fn event(client_id: i64, type_id: i32, message: &[u8]) -> Option<Closed> {
-    match Event::parse(type_id, message) {
-        Ok(Event::ClientTimeout { client_id: id }) if id == client_id => {
-            Some(Closed::ClientTimeout)
-        }
-        Ok(_) => None,
-        Err(_) => Some(Closed::Corrupt),
+/// What one event means to client `client_id` while it waits on the command with
+/// correlation id `pending` ([`NO_PENDING`] for none): `client timeout` with the client's
+/// id closes it with [`Closed::ClientTimeout`]; an event that fails a decoding check,
+/// `too-short`, `type`, `string` or `length`, closes it with [`Closed::Corrupt`], since
+/// an event it cannot decode may be the one it needed (`spec/client-protocol.md`, "What
+/// the driver rejects"); `publication ready`, `exclusive publication ready`, `operation
+/// success` and `error` with the pending correlation id are the answer; every other
+/// event leaves the client open and is nothing to it.
+fn event(
+    client_id: i64,
+    pending: i64,
+    type_id: i32,
+    message: &[u8],
+) -> Result<Option<Response>, Closed> {
+    let event = Event::parse(type_id, message).map_err(|_| Closed::Corrupt)?;
+    if let Event::ClientTimeout { client_id: id } = event
+        && id == client_id
+    {
+        return Err(Closed::ClientTimeout);
     }
+    if pending == NO_PENDING {
+        return Ok(None);
+    }
+    Ok(match event {
+        Event::PublicationReady {
+            correlation_id,
+            registration_id,
+            session_id,
+            stream_id,
+            publication_limit_counter_id,
+            log_file_name,
+        } if correlation_id == pending => Some(Response::PublicationReady {
+            correlation_id,
+            registration_id,
+            session_id,
+            stream_id,
+            limit_counter_id: publication_limit_counter_id,
+            log_file_name: String::from_utf8_lossy(log_file_name).into_owned(),
+            exclusive: false,
+        }),
+        Event::ExclusivePublicationReady {
+            correlation_id,
+            registration_id,
+            session_id,
+            stream_id,
+            publication_limit_counter_id,
+            log_file_name,
+        } if correlation_id == pending => Some(Response::PublicationReady {
+            correlation_id,
+            registration_id,
+            session_id,
+            stream_id,
+            limit_counter_id: publication_limit_counter_id,
+            log_file_name: String::from_utf8_lossy(log_file_name).into_owned(),
+            exclusive: true,
+        }),
+        Event::OperationSuccess { correlation_id } if correlation_id == pending => {
+            Some(Response::Success { correlation_id })
+        }
+        Event::Error {
+            offending_correlation_id,
+            error_code,
+            error_message,
+        } if offending_correlation_id == pending => Some(Response::Error {
+            correlation_id: offending_correlation_id,
+            code: error_code,
+            message: String::from_utf8_lossy(error_message).into_owned(),
+        }),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::event;
+    use super::{NO_PENDING, event};
     use crate::error::Closed;
+    use crate::response::Response;
 
     // Vectors from `spec/vectors/client-protocol.json`, by name.
 
@@ -295,27 +387,53 @@ mod tests {
     #[test]
     fn client_timeout_for_this_client_closes_it() {
         let (type_id, message) = CLIENT_TIMEOUT;
-        assert_eq!(event(5, type_id, message), Some(Closed::ClientTimeout));
+        assert_eq!(
+            event(5, NO_PENDING, type_id, message),
+            Err(Closed::ClientTimeout)
+        );
+        assert_eq!(event(5, 3, type_id, message), Err(Closed::ClientTimeout));
     }
 
     #[test]
     fn client_timeout_for_another_client_leaves_it_open() {
         let (type_id, message) = CLIENT_TIMEOUT;
-        assert_eq!(event(6, type_id, message), None);
+        assert_eq!(event(6, NO_PENDING, type_id, message), Ok(None));
     }
 
     #[test]
-    fn a_decoded_event_leaves_it_open() {
+    fn a_decoded_event_nobody_waits_for_leaves_it_open() {
         let (type_id, message) = OPERATION_SUCCESS;
-        assert_eq!(event(5, type_id, message), None);
+        assert_eq!(event(5, NO_PENDING, type_id, message), Ok(None));
+        assert_eq!(event(5, 4, type_id, message), Ok(None), "another command's");
+    }
+
+    #[test]
+    fn the_pending_commands_event_is_its_answer() {
+        let (type_id, message) = OPERATION_SUCCESS;
+        assert_eq!(
+            event(5, 3, type_id, message),
+            Ok(Some(Response::Success { correlation_id: 3 }))
+        );
+        // `error`: type 3841, offending correlation id 4, code 1, message "abc".
+        let error: &[u8] = &[
+            4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0x61, 0x62, 0x63, 0,
+        ];
+        assert_eq!(
+            event(5, 4, 3841, error),
+            Ok(Some(Response::Error {
+                correlation_id: 4,
+                code: 1,
+                message: "abc".to_string()
+            }))
+        );
     }
 
     #[test]
     fn an_event_that_fails_a_decoding_check_closes_it() {
         for (error, type_id, message) in MALFORMED {
             assert_eq!(
-                event(5, type_id, message),
-                Some(Closed::Corrupt),
+                event(5, NO_PENDING, type_id, message),
+                Err(Closed::Corrupt),
                 "the `{error}` vector"
             );
         }

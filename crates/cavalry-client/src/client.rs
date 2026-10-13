@@ -5,14 +5,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use cavalry_proto::client_protocol::Command;
+use std::time::{Duration, Instant};
+
+use cavalry_proto::client_protocol::{Command, ErrorCode};
 use cavalry_shm::broadcast::BroadcastBuffer;
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, Producer};
 use cavalry_shm::counters::CountersReader;
+use cavalry_shm::log::LogBuffers;
+use cavalry_shm::spsc;
 
-use crate::conductor::{COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, Shared, nanos, now_nanos};
+use crate::conductor::{
+    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, NO_PENDING, RESPONSE_QUEUE, RESPONSE_TIMEOUT,
+    Shared, nanos, now_nanos,
+};
 use crate::error::{ClientError, Closed};
+use crate::publication::Publication;
+use crate::response::Response;
 
 /// The environment variable that names the driver directory (`config.toml`, `dir`;
 /// ADR 0020). Clients read the same key the driver does.
@@ -28,7 +37,9 @@ pub struct Cavalry {
     client_id: i64,
     shared: Arc<Shared>,
     producer: Producer,
+    ring: CommandRing,
     counters: CountersReader,
+    responses: spsc::Consumer<Response>,
     conductor: Option<JoinHandle<()>>,
     scratch: Vec<u8>,
 }
@@ -105,11 +116,14 @@ impl Cavalry {
         )?;
 
         let shared = Arc::new(Shared::new(now_nanos()));
+        let (response_producer, responses) = spsc::queue::<Response>(RESPONSE_QUEUE);
+        let conductor_ring = CommandRing::open(&dir, true)?;
         let conductor = Conductor::new(
-            ring,
+            conductor_ring,
             conductor_producer,
             receiver,
             Arc::clone(&shared),
+            response_producer,
             client_id,
         );
         let handle = std::thread::Builder::new()
@@ -125,10 +139,177 @@ impl Cavalry {
             client_id,
             shared,
             producer,
+            ring,
             counters,
+            responses,
             conductor: Some(handle),
             scratch,
         })
+    }
+
+    /// Adds a publication on `channel` and `stream_id`, shared with every other
+    /// publication of this driver on the same channel and stream: they write one log
+    /// under one session (`spec/client-protocol.md`, "Commands"). Waits for the driver's
+    /// answer up to the response timeout. The channel must be `cavalry:ipc` in this
+    /// version; another is [`ClientError::Refused`] with error code 1.
+    pub fn add_publication(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+    ) -> Result<Publication, ClientError> {
+        self.publication(channel, stream_id, false)
+    }
+
+    /// Adds an exclusive publication on `channel` and `stream_id`: a session of its own,
+    /// written by this handle alone, which is what lets it claim without a
+    /// compare-and-swap.
+    pub fn add_exclusive_publication(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+    ) -> Result<Publication, ClientError> {
+        self.publication(channel, stream_id, true)
+    }
+
+    fn publication(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+        exclusive: bool,
+    ) -> Result<Publication, ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let command = if exclusive {
+            Command::AddExclusivePublication {
+                client_id: self.client_id,
+                correlation_id,
+                stream_id,
+                channel: channel.as_bytes(),
+            }
+        } else {
+            Command::AddPublication {
+                client_id: self.client_id,
+                correlation_id,
+                stream_id,
+                channel: channel.as_bytes(),
+            }
+        };
+        let name = if exclusive {
+            "add exclusive publication"
+        } else {
+            "add publication"
+        };
+        match self.request(&command, correlation_id, name)? {
+            Response::PublicationReady {
+                registration_id,
+                session_id,
+                stream_id: ready_stream,
+                limit_counter_id,
+                log_file_name,
+                exclusive: ready_exclusive,
+                ..
+            } => {
+                let expected = format!("publications/{registration_id}.logbuffer");
+                if log_file_name != expected
+                    || ready_stream != stream_id
+                    || ready_exclusive != exclusive
+                {
+                    return Err(ClientError::Driver {
+                        what: format!(
+                            "publication ready for registration {registration_id}, stream \
+                             {ready_stream}, exclusive {ready_exclusive}, log {log_file_name}"
+                        ),
+                    });
+                }
+                let log = LogBuffers::open(&self.dir, registration_id, true)?;
+                let limit = self
+                    .counters
+                    .value(
+                        u32::try_from(limit_counter_id).map_err(|_| ClientError::Driver {
+                            what: format!("limit counter id {limit_counter_id}"),
+                        })?,
+                    )?;
+                Publication::new(
+                    log,
+                    limit,
+                    self.ring.producer(DRIVER_TIMEOUT)?,
+                    self.client_id,
+                    registration_id,
+                    session_id,
+                    stream_id,
+                    channel.to_string(),
+                    exclusive,
+                )
+            }
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to {name}"),
+            }),
+        }
+    }
+
+    /// Sends `command` and waits for its answer: the event with its correlation id, up
+    /// to the response timeout. An `error` event is [`ClientError::Refused`]; a client
+    /// closed meanwhile is [`ClientError::Closed`]; no answer is
+    /// [`ClientError::ResponseTimeout`], and the command may have been unblocked or
+    /// rejected before it was decoded (`spec/client-protocol.md`, "Liveness and
+    /// timeouts"). Answers to earlier commands the caller gave up on are dropped.
+    fn request(
+        &mut self,
+        command: &Command<'_>,
+        correlation_id: i64,
+        name: &'static str,
+    ) -> Result<Response, ClientError> {
+        if let Some(reason) = self.shared.closed() {
+            return Err(ClientError::Closed(reason));
+        }
+        while self.responses.poll().is_some() {}
+        self.shared.set_pending(correlation_id);
+        let sent = self.send(command);
+        if let Err(error) = sent {
+            self.shared.set_pending(NO_PENDING);
+            return Err(error);
+        }
+        let deadline = Instant::now() + RESPONSE_TIMEOUT;
+        let mut spins: u32 = 0;
+        let outcome = loop {
+            match self.responses.poll() {
+                Some(response) if response.correlation_id() == correlation_id => {
+                    break Ok(response);
+                }
+                Some(_) => continue,
+                None => {}
+            }
+            if let Some(reason) = self.shared.closed() {
+                break Err(ClientError::Closed(reason));
+            }
+            if Instant::now() >= deadline {
+                break Err(ClientError::ResponseTimeout { command: name });
+            }
+            if spins < 100 {
+                spins += 1;
+                std::hint::spin_loop();
+            } else {
+                std::thread::sleep(Duration::from_micros(50));
+            }
+        };
+        self.shared.set_pending(NO_PENDING);
+        match outcome? {
+            Response::Error { code, message, .. } => Err(ClientError::Refused {
+                code: ErrorCode::from_code(code),
+                raw_code: code,
+                message,
+            }),
+            response => Ok(response),
+        }
+    }
+
+    /// Encodes and writes `command` on the ring, and notes the time for the keepalive.
+    fn send(&mut self, command: &Command<'_>) -> Result<(), ClientError> {
+        let length = command.write(&mut self.scratch)?;
+        let now = now_nanos();
+        self.producer
+            .write(command.command_type() as i32, &self.scratch[..length], now)?;
+        self.shared.sent(now);
+        Ok(())
     }
 
     /// The driver directory this client is attached to.
