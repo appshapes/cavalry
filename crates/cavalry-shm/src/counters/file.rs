@@ -102,11 +102,13 @@ impl Mapped {
         Ok(self.slot_at(offset))
     }
 
-    /// The slot at `offset`, a value `fields.slot_offset` returned for this mapping.
+    /// The slot at `offset`, a value `fields.slot_offset` returned for this mapping
+    /// (`slot`, `Counter::new`, or `CountersReader::value`, which `CounterValue` keeps).
     fn slot_at(&self, offset: usize) -> &SlotCells {
         debug_assert!(offset + SLOT_LENGTH <= self.length && offset % SLOT_LENGTH == 0);
-        // SAFETY: `offset` came from `slot_offset` on this mapping's fields (`slot`, and
-        // `Counter::new`, which keeps one), so the slot ends at or before `file_length()`,
+        // SAFETY: `offset` came from `slot_offset` on this mapping's fields (`slot`;
+        // `Counter::new`, which keeps one; and `CountersReader::value`, which
+        // `CounterValue` keeps), so the slot ends at or before `file_length()`,
         // which the mapping covers (`new`); the offset is 128 + capacity × 256 + id × 128
         // from a page-aligned base, a multiple of the 128 bytes `SlotCells` is aligned
         // to; the cell is atomics and bytes; the reference lives no longer than `self`.
