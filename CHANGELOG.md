@@ -297,3 +297,10 @@ user-visible change, added in the same commit as the change. The format follows
   example, start a driver, publish 1,000 messages and read them back, read doctor and
   stop the driver, and `just quickstart` runs them end to end in CI on Linux and macOS;
   `docs/tutorials/publish-and-subscribe.md` is the tutorial (ADR 0007's acceptance test).
+- ADR 0021, the client API shaped after Aeron's with a conductor thread and no lock, is
+  Accepted on `master`'s evidence: the README doctest, fourteen end-to-end tests against
+  a real driver, zero allocations per message on the client rows, `just quickstart` green
+  on both runners, and the public API within 10 to 40 ns of the raw log on the bench
+  host. Its text now says what landed: `poll` returns a count or a `Fault`, the handler
+  receives the data frame header, a full image queue closes the client with `overrun`
+  and is not counted until clients have counters, and the image queue holds 64 events.
