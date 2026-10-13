@@ -427,21 +427,32 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     client.send_raw(CommandType::ClientKeepalive as i32, &message);
     assert_eq!(client.wait_error(too_long).0, 7);
 
+    // Longer than any command of this version (a 5,000-byte record with a readable
+    // correlation id): `length`, code 7, without the conductor copying past its scratch.
+    let over_long = client.correlation_id();
+    let mut message = vec![0u8; 5000];
+    message[..8].copy_from_slice(&client.id.to_le_bytes());
+    message[8..16].copy_from_slice(&over_long.to_le_bytes());
+    client.send_raw(CommandType::AddPublication as i32, &message);
+    let (code, text) = client.wait_error(over_long);
+    assert_eq!(code, 7);
+    assert!(text.contains("5000 bytes"), "{text}");
+
     // Too short to carry a correlation id: no answer, only the counter.
     client.send_raw(
         CommandType::ClientKeepalive as i32,
         &client.id.to_le_bytes(),
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND) < 4 {
+    while counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND) < 5 {
         assert!(
             Instant::now() < deadline,
-            "rejected_command did not reach 4"
+            "rejected_command did not reach 5"
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 4);
-    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 3);
+    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 5);
+    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 4);
     driver.close().expect("closes");
 }
 

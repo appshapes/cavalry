@@ -265,3 +265,6 @@ user-visible change, added in the same commit as the change. The format follows
   subscriber stores its `subscription.position` through the owner's `Counter` handle
   without being able to allocate or free a record; `spsc` halves report
   `peer_dropped()`, so a conductor sweeps a registration whose subscription is gone.
+- The driver's conductor copies each command into scratch sized once at start, so no
+  duty cycle allocates, keepalives included; a record longer than any command of this
+  version is refused as `length` with error code 7 without being copied past that bound.
