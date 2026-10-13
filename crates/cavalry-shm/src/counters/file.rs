@@ -25,7 +25,8 @@ const _: () = assert!(
         <= usize::MAX as u64
 );
 
-/// The writable mapping of the creator or the read-only mapping of a reader.
+/// A writable mapping, the creator's or a client's ([`CountersWriter`]), or the read-only
+/// mapping of a reader.
 enum Map {
     Writer(MmapMut),
     Reader(Mmap),
@@ -102,13 +103,43 @@ impl Mapped {
         Ok(self.slot_at(offset))
     }
 
+    /// `Ok` when record `id` holds a counter: [`CountersError::Id`] when `id` is not below
+    /// the capacity, and [`CountersError::Unallocated`] when the record holds none. The
+    /// check every reading and owning handle runs first.
+    fn allocated(&self, id: u32) -> Result<(), CountersError> {
+        if self.record(id)?.state()? != State::Allocated {
+            return Err(CountersError::Unallocated { id });
+        }
+        Ok(())
+    }
+
+    /// The value of counter `id`, one plain load after [`Mapped::allocated`]: what
+    /// [`CountersReader::read`] and [`CountersWriter::read`] return.
+    fn read(&self, id: u32) -> Result<i64, CountersError> {
+        self.allocated(id)?;
+        Ok(self.slot(id)?.get())
+    }
+
+    /// A [`CounterValue`] on counter `id`, after [`Mapped::allocated`]: what
+    /// [`CountersReader::value`] and [`CountersWriter::value`] return, and the one place
+    /// a `CounterValue` is built.
+    fn value(self: &Arc<Self>, id: u32) -> Result<CounterValue, CountersError> {
+        self.allocated(id)?;
+        let offset = self.fields.slot_offset(id)?;
+        Ok(CounterValue {
+            mapped: Arc::clone(self),
+            offset,
+            id,
+        })
+    }
+
     /// The slot at `offset`, a value `fields.slot_offset` returned for this mapping
-    /// (`slot`, `Counter::new`, or `CountersReader::value`, which `CounterValue` keeps).
+    /// (`slot`, `Counter::new`, or `Mapped::value`, which `CounterValue` keeps).
     fn slot_at(&self, offset: usize) -> &SlotCells {
         debug_assert!(offset + SLOT_LENGTH <= self.length && offset % SLOT_LENGTH == 0);
         // SAFETY: `offset` came from `slot_offset` on this mapping's fields (`slot`;
-        // `Counter::new`, which keeps one; and `CountersReader::value`, which
-        // `CounterValue` keeps), so the slot ends at or before `file_length()`,
+        // `Counter::new`, which keeps one; and `Mapped::value`, the one builder of a
+        // `CounterValue`, which keeps one), so the slot ends at or before `file_length()`,
         // which the mapping covers (`new`); the offset is 128 + capacity × 256 + id × 128
         // from a page-aligned base, a multiple of the 128 bytes `SlotCells` is aligned
         // to; the cell is atomics and bytes; the reference lives no longer than `self`.
@@ -267,9 +298,7 @@ impl CountersFile {
     /// static counter's record is its id. [`CountersError::Id`] when `id` is not below
     /// the capacity, and [`CountersError::Unallocated`] when the record holds no counter.
     pub fn counter(&self, id: u32) -> Result<Counter, CountersError> {
-        if self.mapped.record(id)?.state()? != State::Allocated {
-            return Err(CountersError::Unallocated { id });
-        }
+        self.mapped.allocated(id)?;
         Counter::new(Arc::clone(&self.mapped), id)
     }
 }
@@ -382,31 +411,19 @@ impl CountersWriter {
     /// below the capacity, and [`CountersError::Unallocated`] when the record holds no
     /// counter.
     pub fn counter(&self, id: u32) -> Result<Counter, CountersError> {
-        if self.mapped.record(id)?.state()? != State::Allocated {
-            return Err(CountersError::Unallocated { id });
-        }
+        self.mapped.allocated(id)?;
         Counter::new(Arc::clone(&self.mapped), id)
     }
 
-    /// A reader's handle on counter `id`'s value, as [`CountersReader::value`].
+    /// A reader's handle on counter `id`'s value, as [`CountersReader::value`], with its
+    /// refusals.
     pub fn value(&self, id: u32) -> Result<CounterValue, CountersError> {
-        if self.mapped.record(id)?.state()? != State::Allocated {
-            return Err(CountersError::Unallocated { id });
-        }
-        let offset = self.mapped.fields.slot_offset(id)?;
-        Ok(CounterValue {
-            mapped: Arc::clone(&self.mapped),
-            offset,
-            id,
-        })
+        self.mapped.value(id)
     }
 
-    /// The value of counter `id`, as [`CountersReader::read`].
+    /// The value of counter `id`, as [`CountersReader::read`], with its refusals.
     pub fn read(&self, id: u32) -> Result<i64, CountersError> {
-        if self.mapped.record(id)?.state()? != State::Allocated {
-            return Err(CountersError::Unallocated { id });
-        }
-        Ok(self.mapped.slot(id)?.get())
+        self.mapped.read(id)
     }
 }
 
@@ -418,7 +435,8 @@ impl fmt::Debug for CountersWriter {
     }
 }
 
-/// A reader's handle on one counter's value, from [`CountersReader::value`]: the
+/// A reader's handle on one counter's value, from [`CountersReader::value`] or
+/// [`CountersWriter::value`]: the
 /// read-only side of [`Counter`]. One load per call, nothing checked, nothing allocated;
 /// `Clone`, `Send` and `Sync`, and it keeps the mapping alive on its own.
 #[derive(Clone)]
@@ -542,19 +560,14 @@ impl CountersReader {
     /// [`CountersError::Id`] when `id` is not below the capacity, and
     /// [`CountersError::Unallocated`] when the record holds no counter.
     pub fn read(&self, id: u32) -> Result<i64, CountersError> {
-        if self.mapped.record(id)?.state()? != State::Allocated {
-            return Err(CountersError::Unallocated { id });
-        }
-        Ok(self.mapped.slot(id)?.get())
+        self.mapped.read(id)
     }
 
     /// [`CountersReader::read`] with an acquire load of the value: for a position, whose
     /// owner stored it with release after reading what it consumed
     /// (`spec/log-buffer.md`, "The driver"; ADR 0013).
     pub fn read_acquire(&self, id: u32) -> Result<i64, CountersError> {
-        if self.mapped.record(id)?.state()? != State::Allocated {
-            return Err(CountersError::Unallocated { id });
-        }
+        self.mapped.allocated(id)?;
         Ok(self.mapped.slot(id)?.get_acquire())
     }
 
@@ -566,15 +579,7 @@ impl CountersReader {
     /// record may be freed and reused under the handle, as any counter may; the owner of
     /// the instance the counter belongs to is told so by the driver first (ADR 0019).
     pub fn value(&self, id: u32) -> Result<CounterValue, CountersError> {
-        if self.mapped.record(id)?.state()? != State::Allocated {
-            return Err(CountersError::Unallocated { id });
-        }
-        let offset = self.mapped.fields.slot_offset(id)?;
-        Ok(CounterValue {
-            mapped: Arc::clone(&self.mapped),
-            offset,
-            id,
-        })
+        self.mapped.value(id)
     }
 }
 
