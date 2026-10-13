@@ -11,6 +11,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The client API, re-exported: `cargo add cavalry` gives `Cavalry`, `Publication` and
+# `Subscription` (ADR 0002; ADR 0021).
+cavalry-client = { path = "../cavalry-client" }
 # The embeddable driver, re-exported: `cargo add cavalry` gives it (ADR 0002).
 cavalry-driver = { path = "../cavalry-driver" }
 # `cavalry doctor`, control plane, behind `cli`.

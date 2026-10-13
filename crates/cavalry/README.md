@@ -5,11 +5,12 @@ binary's `main`.
 
 ## What this does
 
-- `cargo add cavalry` gives the client API, re-exported from `cavalry-client`, and an
-  embeddable driver, `cavalry::Driver`, re-exported from `cavalry-driver`, so a program
-  can run with no separate daemon. Embedding is how the ten-minute path works on a
-  laptop; one shared driver per host is the production shape. Today the driver is here
-  and the client API arrives with its feature.
+- `cargo add cavalry` gives the client API, `cavalry::Cavalry`, `Publication` and
+  `Subscription`, re-exported from `cavalry-client`, and an embeddable driver,
+  `cavalry::Driver`, re-exported from `cavalry-driver`, so a program can run with no
+  separate daemon. One shared driver per host, `cavalry run`, is the production shape
+  and the ten-minute path's; `examples/quickstart.rs` is that path's program, and
+  `just quickstart` runs it end to end.
 - `cargo install cavalry` gives the `cavalry` binary: `run` starts a driver and stops
   it on Ctrl-C or SIGTERM, leaving the directory for `doctor`; `doctor` explains the
   driver from its counters and exits 0 when no check failed; `replay` and `console`
