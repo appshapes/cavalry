@@ -289,8 +289,8 @@ user-visible change, added in the same commit as the change. The format follows
 - `just bench` gains the client rows, `claim_commit_32_client` and `one_way_32_client`:
   publish to delivery through `cavalry-client` and a real driver in the harness's
   process, with the zero-allocation assertion over that path too, so the gate holds the
-  path a user takes to the budget. The rows report "no baseline" and pass until the
-  bench host's baseline records them. A client subscriber that fails or stops reading
+  path a user takes to the budget. The client rows are in the bench host's baseline,
+  so a p99.99 regression over 5% on the client path fails CI. A client subscriber that fails or stops reading
   fails the run with its reason instead of leaving the publisher retrying.
 - The ten-minute path exists: `cargo add cavalry` gives `cavalry::Cavalry`,
   `Publication` and `Subscription`, the README's five commands build the binary and the
