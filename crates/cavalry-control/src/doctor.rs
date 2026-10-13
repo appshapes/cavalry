@@ -22,9 +22,15 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cavalry_driver::IdleStrategy;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
-use cavalry_shm::counters::generated::{COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED};
+use cavalry_shm::counters::generated::{
+    CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
+    COUNTERS_ALLOCATION_FAILED,
+};
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
+
+use crate::config::generated::{CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_KEY, DIR as DIR_KEY};
 
 /// The driver timeout of `spec/client-protocol.md`: a heartbeat older than this is a
 /// stopped driver.
@@ -45,6 +51,10 @@ const DOC_COUNTERS_REJECTS: &str = "docs/reference/counters-file.md#what-a-reade
 /// The host findings point at the bench host's page until a page on tuning a host for
 /// Cavalry exists: it is the one page that says how each setting is changed.
 const DOC_HOST: &str = "docs/how-to/set-up-a-bench-host.md";
+
+/// The Linux filesystem types that live in memory: a log buffer on one of these never
+/// waits on write-back. `/dev/shm` is a tmpfs on every common distribution.
+const MEMORY_FILESYSTEMS: [&str; 3] = ["tmpfs", "ramfs", "hugetlbfs"];
 
 /// How serious a finding is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -173,6 +183,7 @@ pub fn examine(dir: &Path) -> Report {
         let host = host_checks(&mut findings);
         return finish(dir, findings, checks + host);
     }
+    checks += backing_check(dir, &mut findings);
 
     checks += 1;
     let running = match CommandRing::open(dir, false) {
@@ -388,7 +399,182 @@ fn counters_checks(dir: &Path, running: bool, findings: &mut Vec<Finding>) -> us
             });
         }
     }
+    // The conductor's idle strategy, from the counter the driver stored it in: the check
+    // of the `conductor.idle.strategy` key (config.toml). What a stopped driver ran with
+    // is nothing to act on, so it is read only while the driver runs.
+    if running {
+        checks += 1;
+        if let Some(value) = read("conductor.idle_strategy", IDLE_STRATEGY_COUNTER, findings) {
+            idle_strategy_check(value, findings);
+        }
+    }
     checks
+}
+
+/// The check of the `conductor.idle.strategy` key: busy-spin on a host with no isolated
+/// CPU takes a core from the clients for a thread with little to do; backoff on a host
+/// with isolated CPUs leaves the limit a publisher waits on to a sleep of up to 1 ms.
+fn idle_strategy_check(value: i64, findings: &mut Vec<Finding>) {
+    let isolated = isolated_cpus();
+    match IdleStrategy::from_counter_value(value) {
+        None => findings.push(Finding {
+            check: "conductor-idle-strategy",
+            level: Level::Warn,
+            message: format!(
+                "conductor.idle_strategy is {value}, which this doctor does not know: the driver \
+                 is newer than doctor, or the counters file is corrupt; upgrade doctor to the \
+                 driver's version"
+            ),
+            doc: IDLE_STRATEGY_KEY.anchor,
+        }),
+        Some(IdleStrategy::BusySpin) if isolated.is_none() => findings.push(Finding {
+            check: "conductor-idle-strategy",
+            level: Level::Warn,
+            message: format!(
+                "the conductor busy-spins and no CPU is isolated: it takes a whole core from the \
+                 clients and the rest of the host for a thread with little to do; set {}=backoff, \
+                 or isolate a core, pin the driver there and keep busy-spin",
+                IDLE_STRATEGY_KEY.env
+            ),
+            doc: IDLE_STRATEGY_KEY.anchor,
+        }),
+        Some(strategy @ (IdleStrategy::Backoff | IdleStrategy::Yield)) => {
+            if let Some(cpus) = isolated {
+                findings.push(Finding {
+                    check: "conductor-idle-strategy",
+                    level: Level::Note,
+                    message: format!(
+                        "CPUs {cpus} are isolated and the conductor runs {}: pin the driver there \
+                         and set {}=busy-spin, so that the limit a publisher waits on moves without \
+                         a sleep of up to 1 ms",
+                        strategy.name(),
+                        IDLE_STRATEGY_KEY.env
+                    ),
+                    doc: IDLE_STRATEGY_KEY.anchor,
+                });
+            }
+        }
+        Some(IdleStrategy::BusySpin) => {}
+    }
+}
+
+/// The isolated CPUs of a Linux host, as `/sys/devices/system/cpu/isolated` lists them,
+/// or `None` when there are none or the host is not Linux.
+fn isolated_cpus() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    std::fs::read_to_string("/sys/devices/system/cpu/isolated")
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+/// What a driver directory is on.
+#[derive(Debug, PartialEq, Eq)]
+enum Backing {
+    /// A filesystem in memory: one of [`MEMORY_FILESYSTEMS`].
+    Memory,
+    /// A filesystem that writes back to a device, with its type and mount point.
+    Disk { fstype: String, mount: String },
+    /// The host does not say: not Linux, or `/proc/self/mountinfo` cannot be read.
+    Unknown,
+}
+
+/// The check of the `dir` key: a log buffer on a disk-backed filesystem goes through the
+/// page cache, and write-back can stall the publisher writing it.
+fn backing_check(dir: &Path, findings: &mut Vec<Finding>) -> usize {
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    match backing(&canonical) {
+        Backing::Memory => {}
+        Backing::Disk { fstype, mount } => findings.push(Finding {
+            check: "driver-directory-backing",
+            level: Level::Warn,
+            message: format!(
+                "the driver directory {} is on {fstype} at {mount}, not a filesystem in memory: \
+                 a publisher's writes to a log buffer go through the page cache, and write-back \
+                 can stall it; set {}=<a directory on a tmpfs, /dev/shm on most Linux hosts> for \
+                 the driver and its clients, or mount a tmpfs there",
+                dir.display(),
+                DIR_KEY.env
+            ),
+            doc: DIR_KEY.anchor,
+        }),
+        Backing::Unknown => findings.push(Finding {
+            check: "driver-directory-backing",
+            level: Level::Note,
+            message: format!(
+                "whether {} is in memory cannot be read on this host: on macOS the directory \
+                 is on disk, the best the default can do there; on Linux the default is a tmpfs, \
+                 /dev/shm",
+                dir.display()
+            ),
+            doc: DIR_KEY.anchor,
+        }),
+    }
+    1
+}
+
+/// What `path` is on, from `/proc/self/mountinfo` on Linux.
+fn backing(path: &Path) -> Backing {
+    if !cfg!(target_os = "linux") {
+        return Backing::Unknown;
+    }
+    match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(mountinfo) => backing_from_mountinfo(path, &mountinfo),
+        Err(_) => Backing::Unknown,
+    }
+}
+
+/// The mount of the longest mount point that is `path` or a parent of it, as
+/// `proc(5)` lays `mountinfo` out: mount point fifth, then the options, optional fields
+/// to a `-`, then the filesystem type. A mount point's space, tab, newline and backslash
+/// are octal escapes.
+fn backing_from_mountinfo(path: &Path, mountinfo: &str) -> Backing {
+    let path = path.to_string_lossy();
+    let mut best: Option<(String, String)> = None;
+    for line in mountinfo.lines() {
+        let mut fields = line.split(' ');
+        let Some(mount) = fields.nth(4).map(unescape_mount) else {
+            continue;
+        };
+        let Some(fstype) = fields.skip_while(|field| *field != "-").nth(1) else {
+            continue;
+        };
+        let under = mount == "/"
+            || *path == *mount
+            || path
+                .strip_prefix(mount.as_str())
+                .is_some_and(|rest| rest.starts_with('/'));
+        if under && best.as_ref().is_none_or(|(m, _)| mount.len() > m.len()) {
+            best = Some((mount, fstype.to_string()));
+        }
+    }
+    match best {
+        Some((_, fstype)) if MEMORY_FILESYSTEMS.contains(&fstype.as_str()) => Backing::Memory,
+        Some((mount, fstype)) => Backing::Disk { fstype, mount },
+        None => Backing::Unknown,
+    }
+}
+
+/// `\040` and the other octal escapes of a mount point, decoded.
+fn unescape_mount(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && let Ok(code) = u8::from_str_radix(&field[i + 1..i + 4], 8)
+        {
+            out.push(code);
+            i += 4;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The host, on Linux: transparent huge pages, the governor, isolated CPUs and
@@ -443,9 +629,7 @@ fn host_checks(findings: &mut Vec<Finding>) -> usize {
     }
 
     checks += 1;
-    if let Some(isolated) = read("/sys/devices/system/cpu/isolated")
-        && !isolated.is_empty()
-    {
+    if let Some(isolated) = isolated_cpus() {
         findings.push(Finding {
             check: "host-isolated-cpus",
             level: Level::Note,
@@ -787,6 +971,186 @@ mod tests {
             found.message
         );
         assert!(report.ok(), "a file being created does not fail: {report}");
+    }
+
+    const MOUNTINFO: &str = "\
+22 28 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
+28 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw,errors=remount-ro
+30 22 0:25 / /dev/shm rw,nosuid,nodev shared:4 - tmpfs tmpfs rw,inode64
+31 28 0:30 / /mnt/with\\040space rw,relatime shared:9 - tmpfs tmpfs rw,size=1024k
+32 28 0:31 / /mnt/huge rw,relatime shared:10 - hugetlbfs nodev rw,pagesize=2M
+33 28 8:1 / /data rw,relatime shared:11 - xfs /dev/sda1 rw,attr2
+";
+
+    #[test]
+    fn the_filesystem_under_a_directory_is_read_from_mountinfo() {
+        let under = |path: &str| backing_from_mountinfo(Path::new(path), MOUNTINFO);
+        assert_eq!(under("/dev/shm/cavalry-rjae"), Backing::Memory);
+        assert_eq!(under("/dev/shm"), Backing::Memory);
+        assert_eq!(under("/mnt/with space/cavalry"), Backing::Memory);
+        assert_eq!(under("/mnt/huge/d"), Backing::Memory);
+        assert_eq!(
+            under("/tmp/cavalry-rjae"),
+            Backing::Disk {
+                fstype: "ext4".to_string(),
+                mount: "/".to_string()
+            }
+        );
+        // A mount point is a path component, not a prefix of one.
+        assert_eq!(
+            under("/dev/shmfoo/cavalry"),
+            Backing::Disk {
+                fstype: "ext4".to_string(),
+                mount: "/".to_string()
+            }
+        );
+        assert_eq!(
+            under("/data/cavalry"),
+            Backing::Disk {
+                fstype: "xfs".to_string(),
+                mount: "/data".to_string()
+            }
+        );
+        assert_eq!(
+            backing_from_mountinfo(Path::new("/x"), ""),
+            Backing::Unknown
+        );
+        assert_eq!(
+            backing_from_mountinfo(Path::new("/x"), "garbage\n"),
+            Backing::Unknown
+        );
+        assert_eq!(unescape_mount("/a\\040b\\011c\\134d"), "/a b\tc\\d");
+        assert_eq!(unescape_mount("/a\\04"), "/a\\04");
+    }
+
+    #[test]
+    fn a_directory_on_disk_warns_and_names_the_variable() {
+        let dir = TestDir::new("backing");
+        let report = examine(&dir.0);
+        let found = finding(&report, "driver-directory-backing");
+        assert_eq!(found.doc, "docs/reference/config.md#dir");
+        let canonical = dir.0.canonicalize().expect("exists");
+        match backing(&canonical) {
+            Backing::Memory => panic!("a directory in memory has no finding: {report}"),
+            Backing::Disk { fstype, mount } => {
+                assert_eq!(found.level, Level::Warn);
+                assert!(found.message.contains("CAVALRY_DIR="), "{}", found.message);
+                assert!(
+                    found.message.contains(&format!("on {fstype} at {mount}")),
+                    "{}",
+                    found.message
+                );
+            }
+            Backing::Unknown => {
+                assert_eq!(found.level, Level::Note);
+                assert!(
+                    found.message.contains("cannot be read"),
+                    "{}",
+                    found.message
+                );
+            }
+        }
+        // The check runs only on a directory that exists, after driver-directory.
+        let missing =
+            std::env::temp_dir().join(format!("cavalry-doctor-nodir-{}", std::process::id()));
+        let report = examine(&missing);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "driver-directory-backing"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_directory_in_memory_has_no_backing_finding() {
+        // Linux hosts with /dev/shm: the default directory's filesystem is in memory.
+        if !Path::new("/dev/shm").is_dir() || backing(Path::new("/dev/shm")) != Backing::Memory {
+            return;
+        }
+        let path = PathBuf::from(format!(
+            "/dev/shm/cavalry-doctor-{}-memory",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("the test directory");
+        let dir = TestDir(path);
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "driver-directory-backing"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn the_idle_strategy_is_judged_against_the_isolated_cpus() {
+        let dir = TestDir::new("idle");
+        let counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let strategy = counters
+            .counter(IDLE_STRATEGY_COUNTER.record())
+            .expect("static");
+        let idle = |report: &Report| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.check == "conductor-idle-strategy")
+                .cloned()
+        };
+        let isolated = isolated_cpus();
+
+        strategy.set(IdleStrategy::BusySpin.counter_value());
+        let report = examine(&dir.0);
+        match (&isolated, idle(&report)) {
+            (None, Some(found)) => {
+                assert_eq!(found.level, Level::Warn);
+                assert!(
+                    found
+                        .message
+                        .contains("CAVALRY_CONDUCTOR_IDLE_STRATEGY=backoff"),
+                    "{}",
+                    found.message
+                );
+                assert_eq!(found.doc, "docs/reference/config.md#conductoridlestrategy");
+                assert!(report.ok(), "a warning does not fail: {report}");
+            }
+            (Some(_), None) => {}
+            (isolated, found) => panic!("isolated {isolated:?}, finding {found:?}: {report}"),
+        }
+
+        strategy.set(IdleStrategy::Backoff.counter_value());
+        let report = examine(&dir.0);
+        match (&isolated, idle(&report)) {
+            (None, None) => {}
+            (Some(cpus), Some(found)) => {
+                assert_eq!(found.level, Level::Note);
+                assert!(found.message.contains(cpus), "{}", found.message);
+                assert!(
+                    found
+                        .message
+                        .contains("CAVALRY_CONDUCTOR_IDLE_STRATEGY=busy-spin"),
+                    "{}",
+                    found.message
+                );
+            }
+            (isolated, found) => panic!("isolated {isolated:?}, finding {found:?}: {report}"),
+        }
+
+        strategy.set(7);
+        let report = examine(&dir.0);
+        let found = idle(&report).expect("a value doctor does not know is a finding");
+        assert_eq!(found.level, Level::Warn);
+        assert!(found.message.contains("does not know"), "{}", found.message);
+
+        // A stopped driver's strategy is nothing to act on: the check does not run.
+        consumer.close();
+        let report = examine(&dir.0);
+        assert!(idle(&report).is_none(), "{report}");
     }
 
     #[test]

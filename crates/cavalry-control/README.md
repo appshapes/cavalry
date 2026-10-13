@@ -9,13 +9,18 @@ is allowed here.
   primary instrument; this crate turns them into something a dashboard can read, at zero
   cost to the data plane.
 - Serves the admin API and discovery.
-- Loads configuration. Every key lives in `config.toml` with a non-empty
-  `why_not_default`, a `doctor` check that fires when it is set wrong, and a line in the
-  generated reference.
+- Loads configuration: `config::Config` is every key of `config.toml` resolved, the
+  defaults with each key whose environment variable is set applied, and a value a key
+  does not take refused before anything starts. Every key lives in `config.toml` with a
+  non-empty `why_not_default`, a `doctor` check that fires when it is set wrong, and a
+  section of the generated reference; `config::generated` is the key table written from
+  it (ADR 0020).
 - Explains a driver from its directory: `doctor` opens the counters file and the command
   ring read-only, as their pages say a reader does, and every finding names the docs
-  anchor that explains it (`CLAUDE.md`, invariant 4). The `cavalry doctor` command is
-  this module behind a `main`.
+  anchor that explains it (`CLAUDE.md`, invariant 4). The checks of the two
+  configuration keys are here: the filesystem under the driver directory, and the idle
+  strategy the running conductor recorded in its counter against the host's isolated
+  CPUs. The `cavalry doctor` command is this module behind a `main`.
 - May use `async` and an executor: nothing a message passes through lives here.
 
 In Aeron, this is AeronStat and hand-written tooling: the open project has no admin API
@@ -71,12 +76,20 @@ cavalry doctor: /tmp/cavalry-control-readme-4242, checks run: 1
 
 On Linux the four host checks run too, so the header reads `checks run: 5`, and a
 laptop whose governor is not `performance` adds a `WARN host-governor` line; a host with
-isolated CPUs adds a `note host-isolated-cpus` line recommending busy-spin there.
+isolated CPUs adds a `note host-isolated-cpus` line recommending busy-spin there. A
+directory that exists adds `driver-directory-backing`, a warning on Linux when it is not
+on a filesystem in memory, and a running driver adds `conductor-idle-strategy`.
 
 ## What to read next
 
-Not yet: the pages this crate will point at, its section of `spec/` and its reference
-page, do not exist. Until they do, read [`CLAUDE.md`](../../CLAUDE.md) for the
-invariants and the gates, and
-[ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md) for how the workspace is
-laid out.
+- [Configuration](../../docs/reference/config.md), every key, how one is set and the
+  check that fires when it is set wrong, generated from `config.toml`; and
+  [ADR 0020](../../docs/decisions/0020-configure-by-environment-variable.md), why keys
+  are read from the environment and what a secret will look like.
+- [Counters](../../docs/reference/counters.md), what each counter `doctor` reads means
+  and what to do, generated from `counters.toml`; and
+  [Run a driver and read doctor](../../docs/how-to/run-the-driver.md), the report as an
+  operator sees it.
+- [`CLAUDE.md`](../../CLAUDE.md), invariants 4 and 5, which this crate enforces, and
+  [ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md), how the workspace is
+  laid out. The admin API, discovery and the OpenTelemetry export have no page yet.

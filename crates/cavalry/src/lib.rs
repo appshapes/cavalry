@@ -4,4 +4,4 @@
 pub use cavalry_driver::{Driver, DriverError, IdleStrategy, spec};
 
 #[cfg(feature = "cli")]
-pub use cavalry_control::doctor;
+pub use cavalry_control::{config, doctor};

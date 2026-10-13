@@ -25,6 +25,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Command ring](reference/command-ring.md)
 - [Broadcast buffer](reference/broadcast-buffer.md)
 - [Client protocol](reference/client-protocol.md)
+- [Configuration](reference/config.md)
 - [Glossary](glossary.md)
 
 # Decisions
@@ -49,3 +50,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0017. Gate the rows a message passes through, and report the host probes](decisions/0017-gate-the-message-rows-and-report-the-host-probes.md)
 - [0018. Commit with a compare-and-swap in the command ring](decisions/0018-commit-with-a-compare-and-swap-in-the-command-ring.md)
 - [0019. Adopt Aeron's control protocol as the client protocol](decisions/0019-adopt-aeron-control-protocol-as-the-client-protocol.md)
+- [0020. Configure by environment variable, and register every key in config.toml](decisions/0020-configure-by-environment-variable.md)
