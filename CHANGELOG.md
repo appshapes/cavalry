@@ -268,17 +268,6 @@ user-visible change, added in the same commit as the change. The format follows
   subscriber stores its `subscription.position` through the owner's `Counter` handle
   without being able to allocate or free a record; `spsc` halves report
   `peer_dropped()`, so a conductor sweeps a registration whose subscription is gone.
-- The driver's conductor copies each command into scratch sized once at start, so its
-  command read allocates nothing, keepalives included; a record longer than any command
-  of this version is not copied past that bound, and is refused by the spec's checks in
-  their order on the copy: `type` with code 6, `string` or `length` with code 7.
-- The driver's conductor copies each command into scratch sized once at start, so no
-  duty cycle allocates, keepalives included; a record longer than any command of this
-  version is refused as `length` with error code 7 without being copied past that bound.
-- `just bench` gains the client rows, `claim_commit_32_client` and `one_way_32_client`:
-  publish to delivery through `cavalry-client` and a real driver in the harness's
-  process, with the zero-allocation assertion over that path too, so the gate holds the
-  path a user takes to the budget; the rows join the baseline on the bench host.
 - `cavalry-client` publishes: `add_publication` and `add_exclusive_publication` wait for
   the driver's answer up to the response timeout and return a `Publication`, whose
   `try_claim` writes a frame in place and `offer` copies a message in, each against the
@@ -296,10 +285,10 @@ user-visible change, added in the same commit as the change. The format follows
   `Fault::Closed`. A subscription the client's conductor cannot hold is
   `ClientError::SubscriptionsFull` and is removed again. The README example is now the
   ten-minute path's program: publish and subscribe in one process (ADR 0021).
-- The driver's conductor copies each command into scratch sized once at start, so its
-  command read allocates nothing, keepalives included; a record longer than any command
-  of this version is not copied past that bound, and is refused by the spec's checks in
-  their order on the copy: `type` with code 6, `string` or `length` with code 7.
+- `just bench` gains the client rows, `claim_commit_32_client` and `one_way_32_client`:
+  publish to delivery through `cavalry-client` and a real driver in the harness's
+  process, with the zero-allocation assertion over that path too, so the gate holds the
+  path a user takes to the budget; the rows join the baseline on the bench host.
 - The ten-minute path exists: `cargo add cavalry` gives `cavalry::Cavalry`,
   `Publication` and `Subscription`, the README's five commands build the binary and the
   example, start a driver, publish 1,000 messages and read them back, read doctor and
