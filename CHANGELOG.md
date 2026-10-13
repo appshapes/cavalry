@@ -316,3 +316,7 @@ user-visible change, added in the same commit as the change. The format follows
   work for the idle strategy, so a backoff conductor parks while only the publisher
   moves; closing and a subscription's join still load it afresh. `publication.position`
   says it is at most a millisecond behind the publisher.
+- `just bench`'s conductor thread loads the publisher's producer position at most once
+  per millisecond, the driver's cadence from ADR 0022, so the raw rows measure the log
+  buffer and not the harness's loads of the publisher's cache line; the bench host's
+  baseline is re-recorded from this change's run in the commit that follows.
