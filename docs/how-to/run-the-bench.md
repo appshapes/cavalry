@@ -128,8 +128,9 @@ the gate fails only on the dedicated bench host is
 - `REGRESSION` after a change to `bench/` only, with no data-plane crate changed: the
   tail moved with the harness, not with the log. What a spinning harness thread does on
   every spin reaches the other two threads: a clock read on every spin of the conductor
-  cost every row about 100 ns at p99.99 on the bench host, in each of eight processes
-  (ADR 0022's harness commit). Before believing one run, run the same binary in several
+  cost the raw rows about 100 ns at p99.99 on the bench host, in each of the processes
+  measured, while the `_client` rows, whose driver reads its clock once per duty cycle,
+  did not move. Before believing one run, run the same binary in several
   processes on the host and compare their medians, since one process lands in one mode
   ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A person
   decides whether to re-record the baseline from that run, as step 4 says, in a commit

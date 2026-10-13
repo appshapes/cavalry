@@ -321,6 +321,6 @@ user-visible change, added in the same commit as the change. The format follows
   from the clock, so the raw rows measure the log buffer and not the harness's loads of
   the publisher's cache line. On the bench host the raw `claim_commit` rows fall by
   about half at p99.99 and the raw `one_way` rows by about a tenth, in every process
-  measured; a clock read on every spin of the conductor, the first form of this change,
-  cost every row about 100 ns at p99.99 instead. The host's baseline is re-recorded from
+  measured; reading the clock on every spin of the conductor instead cost the raw rows
+  about 100 ns at p99.99 on that host. The host's baseline is re-recorded from
   this change's run in a commit of its own, a person's decision.
