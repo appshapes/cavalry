@@ -308,7 +308,6 @@ user-visible change, added in the same commit as the change. The format follows
   millisecond, by `spec/log-buffer.md`, so the publisher's cache line is no longer read
   on every duty cycle; `publication.position` is at most a millisecond behind the
   publisher, and closing and a subscription joining still load it afresh, for the end
-  of stream position and the join position. On the
-  bench host the conductor's loads were the exclusive row's p99.99 band and a third of
-  the publisher's p50; the driver, the harness and the baseline follow in their own
-  commits.
+  of stream position and the join position. On the bench host the conductor's loads
+  were the exclusive row's p99.99 band and a third of the publisher's p50; the driver,
+  the harness and the baseline follow in their own commits.
