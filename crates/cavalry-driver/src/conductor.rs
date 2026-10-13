@@ -1220,18 +1220,37 @@ fn remove_log(dir: &Path, registration_id: i64) {
 mod tests {
     use super::*;
 
+    /// A temporary driver directory, removed on drop so a failed assert does not leave it.
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(test: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("cavalry-driver-{}-{test}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            TestDir(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// ADR 0022: the conductor loads a publication's producer position at most once per
     /// [`spec::PRODUCER_POSITION_INTERVAL`] by the clock it is given, and a move of that
     /// position is not work, so a publisher alone lets the conductor idle.
     #[test]
     fn the_producer_position_is_loaded_once_per_interval_and_its_move_is_not_work() {
-        let dir = std::env::temp_dir().join(format!(
-            "cavalry-driver-{}-producer-cadence",
-            std::process::id()
-        ));
-        prepare_dir(&dir).expect("the directory is prepared");
+        let dir = TestDir::new("producer-cadence");
+        prepare_dir(dir.path()).expect("the directory is prepared");
         let mut conductor =
-            Conductor::create(&dir, IdleStrategy::Backoff).expect("the conductor is created");
+            Conductor::create(dir.path(), IdleStrategy::Backoff).expect("the conductor is created");
         let t0 = now_nanos();
         let interval = spec::nanos(spec::PRODUCER_POSITION_INTERVAL);
 
@@ -1281,7 +1300,7 @@ mod tests {
             "the gauge follows the publisher once the interval has passed"
         );
 
+        // The conductor unmaps its files before the guard removes the directory.
         drop(conductor);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
