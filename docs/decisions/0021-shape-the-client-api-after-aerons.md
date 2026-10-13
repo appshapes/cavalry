@@ -34,7 +34,10 @@ path, never on the message path, and the GC frees retired image arrays.
 The client API is Aeron's, with Aeron's names, in Rust, and its two threads share
 nothing that needs a lock. `Cavalry::connect()` attaches to the driver at `CAVALRY_DIR`
 or the default directory (ADR 0020), `Cavalry::connect_to(dir)` to a named one: it opens
-the command ring writable, the broadcast buffer and the counters file read-only, takes
+the command ring writable, the broadcast buffer read-only, and the counters file writable,
+so that the subscriber can store its own `subscription.position` (ADR 0013;
+`spec/counters-file.md`, "Value slot": a value is written by its owner) through
+`cavalry_shm::counters::CountersWriter`, which never allocates or frees a record; takes
 its client id from the ring's correlation id counter, and starts the client conductor
 thread, which every 500 ms sends `client keepalive`, on every cycle reads the broadcast
 buffer and the consumer heartbeat, completes pending operations, applies image events,
@@ -64,7 +67,11 @@ Both queues are `cavalry_shm::spsc`, an in-process SPSC queue in the crate where
 maximum images; when the queue is full the conductor keeps the event in its own bounded pending
 list and counts `client.image_events_pending`, and past that list the client closes with
 `client-overrun`, counted, since a client that cannot keep its images is lying about
-what it will deliver (invariant 1 over 3). Nothing on the poll or publish path allocates,
+what it will deliver (invariant 1 over 3). A dropped `Subscription` drops its halves of
+both queues, and the conductor learns of it with no message between the threads: on each
+cycle it asks its own halves `peer_dropped()`, which is true once the other half is gone,
+and sweeps that registration, unmapping its images and sending `remove subscription`.
+Nothing on the poll or publish path allocates,
 locks, opens, unmaps, panics or logs: the one clock the conductor reads is its own.
 
 ## Alternatives considered
