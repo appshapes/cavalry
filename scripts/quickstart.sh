@@ -40,12 +40,15 @@ done
 "$cavalry" doctor | grep -q 'is running' || { echo "quickstart: the driver did not report running" >&2; exit 1; }
 
 step "3. the program: publish 1,000 messages and read them back"
-target/release/examples/quickstart | tee /dev/stderr | grep -q 'received once, in order' || {
+program=$(target/release/examples/quickstart)
+printf '%s\n' "$program"
+grep -q 'received once, in order' <<<"$program" || {
     echo "quickstart: the program did not report every message once, in order" >&2; exit 1; }
 
 step "4. cavalry doctor"
-"$cavalry" doctor
-"$cavalry" doctor | grep -q '0 failed' || { echo "quickstart: doctor reported a failure" >&2; exit 1; }
+report=$("$cavalry" doctor)
+printf '%s\n' "$report"
+grep -q '0 failed' <<<"$report" || { echo "quickstart: doctor reported a failure" >&2; exit 1; }
 
 step "5. stop the driver with SIGTERM"
 kill -TERM "$driver_pid"
