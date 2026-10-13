@@ -80,10 +80,14 @@ the gate fails only on the dedicated bench host is
    more than 5 percent above the baseline is a regression and the recipe exits 1; when
    the baseline was recorded with `--repeat`, the baseline's slowest run is the number
    compared, so a commit fails when its median tail is slower than anything the baseline
-   measured, by more than 5 percent. On the bench host that is the 5 percent rule on
-   every row but one: `claim_commit_32_exclusive` lands anywhere between 270 and 430 ns
-   at p99.99 from one process to the next, for a reason not found yet, and on that row
-   the rule is only as sharp as that band (ADR 0016). Only the rows a message passes
+   measured, by more than 5 percent. On the bench host that was the 5 percent rule on
+   every row but one: `claim_commit_32_exclusive` landed anywhere between 270 and 430 ns
+   at p99.99 from one process to the next, which was the harness's own conductor
+   loading the publisher's tail on every spin; with that load at the driver's cadence
+   ([ADR 0022](../decisions/0022-load-the-producer-position-once-per-millisecond.md))
+   the row's runs sit between 210 and 250 ns, and it is compared against the old
+   baseline's slowest run until a person re-records the baseline, which closes
+   ADR 0016's Revisit. Only the rows a message passes
    through, `claim_commit_*` and `one_way_*`, can fail; the `timer` and
    `slot_padding_*` rows run no Cavalry code and sit where one 10 ns step of the clock
    is 15 to 33 percent, so their change is printed and marked `reported`
