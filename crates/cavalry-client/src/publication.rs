@@ -3,13 +3,14 @@
 //! `ExclusivePublication`, with `tryClaim` and `offer` (`docs/glossary.md`).
 
 use std::fmt;
+use std::sync::Arc;
 
 use cavalry_proto::client_protocol::Command;
 use cavalry_shm::command_ring::Producer;
 use cavalry_shm::counters::CounterValue;
 use cavalry_shm::log::{BufferClaim, ClaimError, LogBuffers, TermAppender};
 
-use crate::conductor::now_nanos;
+use crate::conductor::{Shared, now_nanos};
 use crate::error::ClientError;
 
 /// Why a claim or an offer did not write: Aeron's result codes, as a type the caller
@@ -28,7 +29,11 @@ pub enum Offer {
     AdminAction,
     /// The stream reached the largest position its term length allows.
     MaxPositionExceeded,
-    /// The publication was closed.
+    /// The client this publication belongs to is closed, by [`crate::Cavalry::close`]
+    /// or by what its conductor found, and [`crate::Cavalry::closed`] says which. The
+    /// driver removes the client's publications, so the limit will not move again: the
+    /// first claim or offer the limit refuses after the close says so, as Aeron's
+    /// `CLOSED` does.
     Closed,
     /// The message is longer than this log allows.
     TooLong {
@@ -73,7 +78,8 @@ impl fmt::Display for Offer {
         match self {
             Offer::Closed => write!(
                 f,
-                "offer refused ({reason}): the publication is closed; add a new one; see {DOC}"
+                "offer refused ({reason}): the client is closed, and Cavalry::closed says why; \
+                 connect a new client and add the publication again; see {DOC}"
             ),
             Offer::TooLong { found, limit } => write!(
                 f,
@@ -104,6 +110,20 @@ impl fmt::Display for Offer {
 
 impl std::error::Error for Offer {}
 
+/// What a refusal of the appender is to the caller. A refusal that waits on the
+/// subscribers, `not-connected` or `back-pressured`, is `closed` once the client is,
+/// since the limit will not move again. The client's state is read on the refusal path
+/// alone, so a claim the limit allows stays one acquire load (invariant 2); a claim
+/// within the last limit still writes after the close, as in Aeron between two checks.
+fn refusal(shared: &Shared, error: ClaimError) -> Offer {
+    match error {
+        ClaimError::NotConnected | ClaimError::BackPressured if shared.closed().is_some() => {
+            Offer::Closed
+        }
+        error => Offer::from(error),
+    }
+}
+
 /// A client's handle for writing one stream on one channel: claim a frame and commit
 /// it, or offer a message, each against the limit the driver maintains. One
 /// publication is used from one thread at a time. Closing sends `remove publication`;
@@ -112,6 +132,7 @@ pub struct Publication {
     log: LogBuffers,
     appender: TermAppender,
     limit: CounterValue,
+    shared: Arc<Shared>,
     producer: Producer,
     client_id: i64,
     registration_id: i64,
@@ -119,7 +140,8 @@ pub struct Publication {
     stream_id: i32,
     channel: String,
     exclusive: bool,
-    closed: bool,
+    /// Whether `remove publication` was sent, so that `close` and `Drop` send it once.
+    removed: bool,
     scratch: Vec<u8>,
 }
 
@@ -128,6 +150,7 @@ impl Publication {
     pub(crate) fn new(
         log: LogBuffers,
         limit: CounterValue,
+        shared: Arc<Shared>,
         producer: Producer,
         client_id: i64,
         registration_id: i64,
@@ -141,6 +164,7 @@ impl Publication {
             log,
             appender,
             limit,
+            shared,
             producer,
             client_id,
             registration_id,
@@ -148,7 +172,7 @@ impl Publication {
             stream_id,
             channel,
             exclusive,
-            closed: false,
+            removed: false,
             scratch: vec![0u8; 64],
         })
     }
@@ -157,25 +181,26 @@ impl Publication {
     /// [`BufferClaim::body`], then [`BufferClaim::commit`], or [`BufferClaim::abort`].
     /// Nothing is allocated; the limit is one acquire load. The refusals are
     /// [`Offer`]'s; `length` over [`Publication::max_payload_length`] is
-    /// [`Offer::TooLong`] before anything is reserved.
+    /// [`Offer::TooLong`] before anything is reserved, and a refusal after the client
+    /// closed is [`Offer::Closed`].
     pub fn try_claim(&mut self, length: usize) -> Result<BufferClaim<'_>, Offer> {
-        if self.closed {
-            return Err(Offer::Closed);
-        }
         let limit = self.limit.load_acquire();
-        self.appender.try_claim(length, limit).map_err(Offer::from)
+        let shared = &self.shared;
+        self.appender
+            .try_claim(length, limit)
+            .map_err(|error| refusal(shared, error))
     }
 
     /// Copies `message` in, as one frame or as fragments of
     /// [`Publication::max_payload_length`] bytes committed in order, and returns the
     /// position after it. A message over [`Publication::max_message_length`] is
-    /// [`Offer::TooLong`] before anything is reserved.
+    /// [`Offer::TooLong`] before anything is reserved, and a refusal after the client
+    /// closed is [`Offer::Closed`].
     pub fn offer(&mut self, message: &[u8]) -> Result<i64, Offer> {
-        if self.closed {
-            return Err(Offer::Closed);
-        }
         let limit = self.limit.load_acquire();
-        self.appender.offer(message, limit, 0).map_err(Offer::from)
+        self.appender
+            .offer(message, limit, 0)
+            .map_err(|error| refusal(&self.shared, error))
     }
 
     /// The producer position: where the next frame goes.
@@ -189,9 +214,10 @@ impl Publication {
         self.limit.load_acquire()
     }
 
-    /// Whether a subscriber has a position on this stream, as the driver last set it.
+    /// Whether a subscriber has a position on this stream, as the driver last set it,
+    /// and the client is open.
     pub fn is_connected(&self) -> bool {
-        !self.closed && self.log.is_connected()
+        !self.is_closed() && self.log.is_connected()
     }
 
     /// The longest body one claim carries.
@@ -230,25 +256,26 @@ impl Publication {
         self.exclusive
     }
 
-    /// Whether [`Publication::close`] was called.
+    /// Whether the client this publication belongs to is closed, so that every refusal
+    /// from here is [`Offer::Closed`]. [`Publication::close`] consumes the handle, so a
+    /// publication the caller still holds is closed only with its client.
     pub fn is_closed(&self) -> bool {
-        self.closed
+        self.shared.closed().is_some()
     }
 
     /// Sends `remove publication`: the driver closes the log when every registration
     /// of it is gone, lets subscribers drain it for the linger, and removes it. A
-    /// driver that is gone cannot be told, and that is not an error here. Every call
-    /// after is [`Offer::Closed`].
+    /// driver that is gone cannot be told, and that is not an error here.
     pub fn close(mut self) -> Result<(), ClientError> {
         self.remove();
         Ok(())
     }
 
     fn remove(&mut self) {
-        if self.closed {
+        if self.removed {
             return;
         }
-        self.closed = true;
+        self.removed = true;
         let command = Command::RemovePublication {
             client_id: self.client_id,
             correlation_id: self.producer.next_correlation_id(),
@@ -278,7 +305,7 @@ impl fmt::Debug for Publication {
             .field("stream_id", &self.stream_id)
             .field("channel", &self.channel)
             .field("exclusive", &self.exclusive)
-            .field("closed", &self.closed)
+            .field("closed", &self.is_closed())
             .finish()
     }
 }
