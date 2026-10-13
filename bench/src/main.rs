@@ -401,6 +401,12 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                 let mut clean_position: i64 = 0;
                 let mut limit_now = window;
                 let trip_gain = window / 8;
+                // The producer position at most once per millisecond, as the driver
+                // loads it (ADR 0022): the publisher stores to that line on every
+                // commit, and a load on every spin kept the line moving between the two
+                // caches, which was the publisher's p50 and its p99.99 band on the bench
+                // host. The clock is the conductor's own, read once per spin.
+                let mut loaded_at: Option<Instant> = None;
                 while !done.load(Ordering::Acquire) {
                     let consumed = subscriber_position.load_acquire();
                     if consumed + window >= limit_now + trip_gain {
@@ -412,8 +418,14 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                         limit_now = consumed + window;
                         limit.store_release(limit_now);
                     }
-                    publisher_position
-                        .store_release(log.producer_position().map_err(|e| e.to_string())?);
+                    let now = Instant::now();
+                    if loaded_at.is_none_or(|at| {
+                        now.duration_since(at) >= cavalry_driver::spec::PRODUCER_POSITION_INTERVAL
+                    }) {
+                        publisher_position
+                            .store_release(log.producer_position().map_err(|e| e.to_string())?);
+                        loaded_at = Some(now);
+                    }
                     std::hint::spin_loop();
                 }
                 Ok(())
