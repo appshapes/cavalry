@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cavalry_proto::client_protocol::{Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH};
+use cavalry_proto::client_protocol::{
+    Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, ProtocolError,
+};
 use cavalry_proto::frame::FRAME_ALIGNMENT;
 use cavalry_shm::broadcast::{BroadcastBuffer, Transmitter};
 use cavalry_shm::command_ring::{
@@ -184,8 +186,8 @@ impl Statics {
 
 /// The longest command of this version: client id, correlation id, stream id, and a
 /// channel of [`MAX_STRING_LENGTH`] bytes with its length (`spec/client-protocol.md`,
-/// "Commands"). A record longer than this is no command, and is refused without being
-/// copied past this.
+/// "Commands"). A record longer than this is no command, and is refused, by the spec's
+/// checks run on its first this many bytes, without being copied past this.
 const MAX_COMMAND_LENGTH: usize = 8 + 8 + 4 + 4 + MAX_STRING_LENGTH;
 
 /// A command the ring delivered, copied out so that the ring's read can finish before
@@ -340,26 +342,14 @@ impl Conductor {
         let count = self.pending_count;
         for command in &commands[..count] {
             if command.length > MAX_COMMAND_LENGTH {
-                self.refuse_over_long(&command.message, command.length);
+                let error = over_long(command.type_id, &command.message, command.length);
+                self.refuse(error, &command.message);
             } else {
                 self.handle(command.type_id, &command.message[..command.length], now);
             }
         }
         self.pending = commands;
         count
-    }
-
-    /// A record longer than any command of this version: `length`, as the page's decoding
-    /// checks name it, answered when the correlation id was readable (the first 16 bytes
-    /// are in the copy) and counted.
-    fn refuse_over_long(&mut self, head: &[u8], length: usize) {
-        self.statics.rejected_command.increment();
-        let correlation_id = correlation_id_of(head);
-        let text = format!(
-            "command refused (length): a record of {length} bytes, longer than any command of \
-             this version ({MAX_COMMAND_LENGTH}); see {ERRORS_DOC}"
-        );
-        self.send_error(correlation_id, ErrorCode::MalformedCommand, &text);
     }
 
     /// The ring's unblock: a stale claim or a gap becomes padding after the timeout.
@@ -395,12 +385,7 @@ impl Conductor {
         let command = match Command::parse(type_id, message) {
             Ok(command) => command,
             Err(error) => {
-                self.statics.rejected_command.increment();
-                if let Some(code) = error.error_code() {
-                    let correlation_id = correlation_id_of(message);
-                    let text = format!("{error}");
-                    self.send_error(correlation_id, code, &text);
-                }
+                self.refuse(error, message);
                 return;
             }
         };
@@ -1106,6 +1091,17 @@ impl Conductor {
         );
     }
 
+    /// Counts a refused command and answers it with the code the spec names, when the
+    /// message carried a correlation id to answer.
+    fn refuse(&mut self, error: ProtocolError, message: &[u8]) {
+        self.statics.rejected_command.increment();
+        if let Some(code) = error.error_code() {
+            let correlation_id = correlation_id_of(message);
+            let text = format!("{error}");
+            self.send_error(correlation_id, code, &text);
+        }
+    }
+
     /// Sends an `error` event and counts it.
     fn send_error(&mut self, correlation_id: i64, code: ErrorCode, message: &str) {
         let bytes = message.as_bytes();
@@ -1136,6 +1132,35 @@ impl Conductor {
         {
             self.statics.errors.increment();
         }
+    }
+}
+
+/// Why a record of `length` bytes, longer than [`MAX_COMMAND_LENGTH`], is refused, decided
+/// from its first [`MAX_COMMAND_LENGTH`] bytes in the spec's order
+/// (`spec/client-protocol.md`, "What the driver rejects"). The prefix holds the head and
+/// every fixed field and string of a legal command, so `too-short`, `type` and `string`
+/// come out as they would from the whole record; what is left is `length`, reported with
+/// the record's own length.
+fn over_long(type_id: i32, prefix: &[u8], length: usize) -> ProtocolError {
+    let prefix = &prefix[..prefix.len().min(MAX_COMMAND_LENGTH)];
+    match Command::parse(type_id, prefix) {
+        Ok(_) => ProtocolError::Length {
+            given: length,
+            expected: prefix.len(),
+        },
+        Err(ProtocolError::Length { expected, .. }) => ProtocolError::Length {
+            given: length,
+            expected,
+        },
+        // The bytes left after the string's length field, in the whole record.
+        Err(ProtocolError::String {
+            length: string,
+            available,
+        }) => ProtocolError::String {
+            length: string,
+            available: available.saturating_add(length.saturating_sub(prefix.len())),
+        },
+        Err(error) => error,
     }
 }
 
