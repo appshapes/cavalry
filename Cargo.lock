@@ -72,6 +72,11 @@ dependencies = [
 [[package]]
 name = "cavalry-client"
 version = "0.1.0"
+dependencies = [
+ "cavalry-driver",
+ "cavalry-proto",
+ "cavalry-shm",
+]
 
 [[package]]
 name = "cavalry-control"
