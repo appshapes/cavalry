@@ -258,3 +258,6 @@ user-visible change, added in the same commit as the change. The format follows
   or broadcast buffer fails a check of its page (`corrupt`), and `closed()` says which; `close()` tells the driver. A
   directory with no driver, or a driver that is gone, is refused with what to do
   (ADR 0021).
+- `cavalry-shm`'s `CountersReader::value` gives a reader a handle on one counter's
+  value, resolved once, so a publisher reads its limit with one acquire load per claim
+  and no check in its hot loop.
