@@ -182,11 +182,31 @@ impl Statics {
     }
 }
 
+/// The longest command of this version: client id, correlation id, stream id, and a
+/// channel of [`MAX_STRING_LENGTH`] bytes with its length (`spec/client-protocol.md`,
+/// "Commands"). A record longer than this is no command, and is refused without being
+/// copied past this.
+const MAX_COMMAND_LENGTH: usize = 8 + 8 + 4 + 4 + MAX_STRING_LENGTH;
+
 /// A command the ring delivered, copied out so that the ring's read can finish before
-/// the command is handled.
+/// the command is handled. The buffer is sized once, at create, to
+/// [`MAX_COMMAND_LENGTH`]: no duty cycle allocates (CLAUDE.md, invariant 2; the
+/// harness's zero-allocation assertion covers the client path, keepalives included).
 struct Pending {
     type_id: i32,
+    /// The record's message length, which may exceed the buffer: an over-long record.
+    length: usize,
     message: Vec<u8>,
+}
+
+impl Pending {
+    fn new() -> Self {
+        Self {
+            type_id: 0,
+            length: 0,
+            message: vec![0u8; MAX_COMMAND_LENGTH],
+        }
+    }
 }
 
 /// The conductor's state: the files, the registries and the counters.
@@ -206,6 +226,8 @@ pub(crate) struct Conductor {
     last_heartbeat: i64,
     ring_corrupt: bool,
     pending: Vec<Pending>,
+    /// How many of `pending` the last read filled.
+    pending_count: usize,
     scratch: Vec<u8>,
     idler: Idler,
     // The ring and the buffer outlive their consumer and transmitter; kept so that the
@@ -248,7 +270,8 @@ impl Conductor {
             ),
             last_heartbeat: now,
             ring_corrupt: false,
-            pending: Vec::with_capacity(COMMANDS_PER_CYCLE),
+            pending: (0..COMMANDS_PER_CYCLE).map(|_| Pending::new()).collect(),
+            pending_count: 0,
             scratch: vec![0u8; scratch_length],
             idler: Idler::new(idle),
             _ring: ring,
@@ -289,13 +312,18 @@ impl Conductor {
             return 0;
         }
         let pending = &mut self.pending;
-        pending.clear();
+        let mut count = 0;
         let read = self.consumer.read(COMMANDS_PER_CYCLE, |type_id, message| {
-            pending.push(Pending {
-                type_id,
-                message: message.to_vec(),
-            });
+            // The consumer delivers at most COMMANDS_PER_CYCLE records, one per slot.
+            if let Some(slot) = pending.get_mut(count) {
+                let copied = message.len().min(MAX_COMMAND_LENGTH);
+                slot.type_id = type_id;
+                slot.length = message.len();
+                slot.message[..copied].copy_from_slice(&message[..copied]);
+                count += 1;
+            }
         });
+        self.pending_count = count;
         match read {
             Ok(_) => {}
             Err(CommandRingError::Record { .. }) => {
@@ -309,12 +337,29 @@ impl Conductor {
             Err(_) => self.ring_corrupt = true,
         }
         let commands = std::mem::take(&mut self.pending);
-        let count = commands.len();
-        for command in &commands {
-            self.handle(command.type_id, &command.message, now);
+        let count = self.pending_count;
+        for command in &commands[..count] {
+            if command.length > MAX_COMMAND_LENGTH {
+                self.refuse_over_long(&command.message, command.length);
+            } else {
+                self.handle(command.type_id, &command.message[..command.length], now);
+            }
         }
         self.pending = commands;
         count
+    }
+
+    /// A record longer than any command of this version: `length`, as the page's decoding
+    /// checks name it, answered when the correlation id was readable (the first 16 bytes
+    /// are in the copy) and counted.
+    fn refuse_over_long(&mut self, head: &[u8], length: usize) {
+        self.statics.rejected_command.increment();
+        let correlation_id = correlation_id_of(head);
+        let text = format!(
+            "command refused (length): a record of {length} bytes, longer than any command of \
+             this version ({MAX_COMMAND_LENGTH}); see {ERRORS_DOC}"
+        );
+        self.send_error(correlation_id, ErrorCode::MalformedCommand, &text);
     }
 
     /// The ring's unblock: a stale claim or a gap becomes padding after the timeout.
