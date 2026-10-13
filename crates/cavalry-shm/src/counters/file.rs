@@ -3,7 +3,7 @@
 //! this module; `cells` and `layout` never see a file.
 
 use core::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -102,11 +102,13 @@ impl Mapped {
         Ok(self.slot_at(offset))
     }
 
-    /// The slot at `offset`, a value `fields.slot_offset` returned for this mapping.
+    /// The slot at `offset`, a value `fields.slot_offset` returned for this mapping
+    /// (`slot`, `Counter::new`, or `CountersReader::value`, which `CounterValue` keeps).
     fn slot_at(&self, offset: usize) -> &SlotCells {
         debug_assert!(offset + SLOT_LENGTH <= self.length && offset % SLOT_LENGTH == 0);
-        // SAFETY: `offset` came from `slot_offset` on this mapping's fields (`slot`, and
-        // `Counter::new`, which keeps one), so the slot ends at or before `file_length()`,
+        // SAFETY: `offset` came from `slot_offset` on this mapping's fields (`slot`;
+        // `Counter::new`, which keeps one; and `CountersReader::value`, which
+        // `CounterValue` keeps), so the slot ends at or before `file_length()`,
         // which the mapping covers (`new`); the offset is 128 + capacity × 256 + id × 128
         // from a page-aligned base, a multiple of the 128 bytes `SlotCells` is aligned
         // to; the cell is atomics and bytes; the reference lives no longer than `self`.
@@ -345,6 +347,77 @@ impl fmt::Debug for Counter {
     }
 }
 
+/// A client's writable view of a counters file: the one mapping through which it stores
+/// the values of the counters the driver allocated for it, its `subscription.position`
+/// (`spec/counters-file.md`, "Value slot": a value is written by its owner; ADR 0013),
+/// and reads any counter. It never allocates or frees a record: the header and the
+/// metadata records are the driver's alone, and [`CountersFile`] is the driver's type.
+/// Writing a counter that is not this client's is a protocol violation the driver's
+/// bounds checks catch (ADR 0010); nothing here can stop it, as nothing in Aeron can.
+pub struct CountersWriter {
+    mapped: Arc<Mapped>,
+}
+
+impl CountersWriter {
+    /// Opens `dir/counters` writable and runs the checks of [`CountersReader::open`].
+    pub fn open(dir: &Path) -> Result<Self, CountersError> {
+        Ok(Self {
+            mapped: open_mapped(dir, true)?,
+        })
+    }
+
+    /// The header's fields: capacity, creator pid and start timestamp.
+    pub fn header(&self) -> HeaderFields {
+        self.mapped.fields
+    }
+
+    /// How many counters the file holds; ids run from 0 to one below it.
+    pub fn capacity(&self) -> u32 {
+        self.mapped.fields.capacity()
+    }
+
+    /// The owner's handle on counter `id`, for the counter the driver allocated for this
+    /// client and named in its event: its `subscription.position`, stored with
+    /// [`Counter::store_release`] after each poll. [`CountersError::Id`] when `id` is not
+    /// below the capacity, and [`CountersError::Unallocated`] when the record holds no
+    /// counter.
+    pub fn counter(&self, id: u32) -> Result<Counter, CountersError> {
+        if self.mapped.record(id)?.state()? != State::Allocated {
+            return Err(CountersError::Unallocated { id });
+        }
+        Counter::new(Arc::clone(&self.mapped), id)
+    }
+
+    /// A reader's handle on counter `id`'s value, as [`CountersReader::value`].
+    pub fn value(&self, id: u32) -> Result<CounterValue, CountersError> {
+        if self.mapped.record(id)?.state()? != State::Allocated {
+            return Err(CountersError::Unallocated { id });
+        }
+        let offset = self.mapped.fields.slot_offset(id)?;
+        Ok(CounterValue {
+            mapped: Arc::clone(&self.mapped),
+            offset,
+            id,
+        })
+    }
+
+    /// The value of counter `id`, as [`CountersReader::read`].
+    pub fn read(&self, id: u32) -> Result<i64, CountersError> {
+        if self.mapped.record(id)?.state()? != State::Allocated {
+            return Err(CountersError::Unallocated { id });
+        }
+        Ok(self.mapped.slot(id)?.get())
+    }
+}
+
+impl fmt::Debug for CountersWriter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CountersWriter")
+            .field("capacity", &self.capacity())
+            .finish()
+    }
+}
+
 /// A reader's handle on one counter's value, from [`CountersReader::value`]: the
 /// read-only side of [`Counter`]. One load per call, nothing checked, nothing allocated;
 /// `Clone`, `Send` and `Sync`, and it keeps the mapping alive on its own.
@@ -381,6 +454,52 @@ impl fmt::Debug for CounterValue {
     }
 }
 
+/// Opens `dir/counters`, read-only or writable, with the spec's checks in the spec's
+/// order (`spec/counters-file.md`, "What a reader rejects"): the file's size from `fstat`
+/// before any mapping (`too-short`), the header through a first mapping of 128 bytes
+/// (`not-ready`, `magic`, `version`, `capacity`, `length`), then the header again through
+/// the final mapping, which must equal the first read (`changed`). What
+/// [`CountersReader::open`] and [`CountersWriter::open`] share.
+fn open_mapped(dir: &Path, writable: bool) -> Result<Arc<Mapped>, CountersError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(writable)
+        .open(dir.join(FILE_NAME))?;
+    let file_length = file.metadata()?.len();
+    if file_length < HEADER_LENGTH as u64 {
+        return Err(CountersError::TooShort { given: file_length });
+    }
+    // SAFETY: as at `CountersFile::create`: memmap2 marks the mapping `unsafe` because
+    // another process could truncate the file underneath it, and the driver's directory
+    // is the trust boundary; a truncation faults, never lies.
+    let probe = unsafe { MmapOptions::new().len(HEADER_LENGTH).map(&file)? };
+    let first = {
+        // SAFETY: the probe maps `HEADER_LENGTH` bytes at a page-aligned base, which the
+        // file's size covers (checked above); `HeaderCells` is atomics and bytes; the
+        // reference lives no longer than `probe`.
+        let header = unsafe { &*probe.as_ptr().cast::<HeaderCells>() };
+        header.read(file_length)?
+    };
+    drop(probe);
+    let length = first.file_length() as usize;
+    let map = if writable {
+        // SAFETY: as above; writable, so that the owner of a counter the driver
+        // allocated for it can store the value, which the spec gives the owner alone
+        // ("Value slot"; ADR 0013). ADR 0010 bounds what a peer writes; the driver's
+        // directory is the trust boundary, as for every mapping here.
+        Map::Writer(unsafe { MmapOptions::new().len(length).map_mut(&file)? })
+    } else {
+        // SAFETY: as above.
+        Map::Reader(unsafe { MmapOptions::new().len(length).map(&file)? })
+    };
+    let mapped = Mapped::new(map, first)?;
+    let second = mapped.header_cells().read(file_length)?;
+    if second != first {
+        return Err(CountersError::Changed);
+    }
+    Ok(Arc::new(mapped))
+}
+
 /// A read-only view of a counters file: what clients, `cavalry doctor` and the control
 /// plane hold. It never writes the file; its mapping is read-only.
 pub struct CountersReader {
@@ -396,36 +515,8 @@ impl CountersReader {
     /// The error's [`CountersError::reason`] names the check that failed. A reader
     /// that gets [`CountersError::NotReady`] waits and opens again.
     pub fn open(dir: &Path) -> Result<Self, CountersError> {
-        let file = File::open(dir.join(FILE_NAME))?;
-        let file_length = file.metadata()?.len();
-        if file_length < HEADER_LENGTH as u64 {
-            return Err(CountersError::TooShort { given: file_length });
-        }
-        // SAFETY: as at `CountersFile::create`: memmap2 marks the mapping `unsafe`
-        // because another process could truncate the file underneath it, and the
-        // driver's directory is the trust boundary; a truncation faults, never lies.
-        let probe = unsafe { MmapOptions::new().len(HEADER_LENGTH).map(&file)? };
-        let first = {
-            // SAFETY: the probe maps `HEADER_LENGTH` bytes at a page-aligned base, which
-            // the file's size covers (checked above); `HeaderCells` is atomics and bytes;
-            // the reference lives no longer than `probe`.
-            let header = unsafe { &*probe.as_ptr().cast::<HeaderCells>() };
-            header.read(file_length)?
-        };
-        drop(probe);
-        // SAFETY: as above.
-        let map = unsafe {
-            MmapOptions::new()
-                .len(first.file_length() as usize)
-                .map(&file)?
-        };
-        let mapped = Mapped::new(Map::Reader(map), first)?;
-        let second = mapped.header_cells().read(file_length)?;
-        if second != first {
-            return Err(CountersError::Changed);
-        }
         Ok(Self {
-            mapped: Arc::new(mapped),
+            mapped: open_mapped(dir, false)?,
         })
     }
 

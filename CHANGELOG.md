@@ -261,6 +261,13 @@ user-visible change, added in the same commit as the change. The format follows
   or broadcast buffer fails a check of its page (`corrupt`), and `closed()` says which; `close()` tells the driver. A
   directory with no driver, or a driver that is gone, is refused with what to do
   (ADR 0021).
+- `cavalry-shm`'s `CountersReader::value` gives a reader a handle on one counter's
+  value, resolved once, so a publisher reads its limit with one acquire load per claim
+  and no check in its hot loop.
+- `cavalry-shm`'s `CountersWriter` opens the counters file writable for a client, so a
+  subscriber stores its `subscription.position` through the owner's `Counter` handle
+  without being able to allocate or free a record; `spsc` halves report
+  `peer_dropped()`, so a conductor sweeps a registration whose subscription is gone.
 - `cavalry-client` publishes: `add_publication` and `add_exclusive_publication` wait for
   the driver's answer up to the response timeout and return a `Publication`, whose
   `try_claim` writes a frame in place and `offer` copies a message in, each against the
