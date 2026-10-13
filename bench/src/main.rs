@@ -164,11 +164,17 @@ impl Options {
     /// 5,000,000-message run are the whole p99.99; a driver pre-touches its log at
     /// creation, so the gate measures what comes after.
     fn warmup(&self) -> u64 {
+        self.warmup_for(self.term_length)
+    }
+
+    /// The same warm-up for a log of three `term_length` terms that `--term-length` does
+    /// not size, the driver's for the client rows.
+    fn warmup_for(&self, term_length: u32) -> u64 {
         const DEFAULT: u64 = 100_000;
         const HEADER: usize = 32;
         let frame = (HEADER + self.body).next_multiple_of(32) as u64;
         self.warmup_option
-            .unwrap_or_else(|| DEFAULT.max(3 * u64::from(self.term_length) / frame.max(1)))
+            .unwrap_or_else(|| DEFAULT.max(3 * u64::from(term_length) / frame.max(1)))
     }
 }
 
@@ -500,10 +506,7 @@ fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String
         }
     }
 
-    let frame = ((options.body + 32).div_ceil(32) * 32) as u64;
-    let warmup = options
-        .warmup_option
-        .unwrap_or(3 * u64::from(spec::IPC_TERM_LENGTH) / frame);
+    let warmup = options.warmup_for(spec::IPC_TERM_LENGTH);
     let total = warmup + options.messages;
     let epoch = Instant::now();
 
@@ -540,6 +543,12 @@ fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String
 
     let mut hist = histogram();
     let mut retries: u64 = 0;
+    // The retries of the message being claimed. A subscriber that has returned, or one
+    // that has stopped reading, leaves the publisher back-pressured for ever; the retry is
+    // bounded so the run fails with the reason instead of hanging (invariant 3).
+    let mut stalled: u64 = 0;
+    const STALL_CHECK: u64 = 4096;
+    const STALL_LIMIT: Duration = Duration::from_secs(10);
     let mut region: Option<Region<'static, System>> = None;
     let mut start = Instant::now();
     for i in 0..total {
@@ -558,20 +567,34 @@ fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String
                 }
                 Err(Offer::BackPressured | Offer::AdminAction | Offer::NotConnected) => {
                     retries += 1;
+                    stalled += 1;
+                    if subscriber.is_finished() {
+                        return Err(subscriber_failure(subscriber.join()));
+                    }
+                    if stalled % STALL_CHECK == 0 && t0.elapsed() > STALL_LIMIT {
+                        return Err(format!(
+                            "the publisher was back-pressured for over {} s at message {i} of \
+                             {total}, so the subscriber stopped reading; see \
+                             docs/how-to/run-the-bench.md",
+                            STALL_LIMIT.as_secs()
+                        ));
+                    }
                     std::hint::spin_loop();
                 }
                 Err(other) => return Err(other.to_string()),
             }
         }
+        stalled = 0;
         if i >= warmup {
             hist.saturating_record(span_ns(t0, Instant::now()));
         }
     }
     let elapsed = start.elapsed();
     let allocations = region.as_ref().map_or(0, |r| r.change().allocations);
-    let one_way = subscriber
-        .join()
-        .map_err(|_| "the client subscriber thread panicked".to_string())??;
+    let one_way = match subscriber.join() {
+        Ok(Ok(hist)) => hist,
+        failed => return Err(subscriber_failure(failed)),
+    };
     publication.close().map_err(|e| e.to_string())?;
     client.close().map_err(|e| e.to_string())?;
     driver.close().map_err(|e| e.to_string())?;
@@ -581,6 +604,16 @@ fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String
         retries,
         allocations,
     })
+}
+
+/// Why the client subscriber thread ended before the publisher was done: its own error,
+/// or its panic.
+fn subscriber_failure(joined: thread::Result<Result<Histogram<u64>, String>>) -> String {
+    match joined {
+        Ok(Err(message)) => format!("the client subscriber failed: {message}"),
+        Ok(Ok(_)) => "the client subscriber returned before the publisher was done".to_string(),
+        Err(_) => "the client subscriber thread panicked".to_string(),
+    }
 }
 
 /// Thirty-two words, 256 bytes, so two of them can sit 0, 64 or 128 bytes apart.

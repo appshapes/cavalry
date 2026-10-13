@@ -126,6 +126,13 @@ the gate fails only on the dedicated bench host is
   host it means the baseline was not recorded yet; record one as step 4 says.
 - `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the
   process's allowed set; `cat /sys/devices/system/cpu/online` says which CPUs exist.
+- `the client benchmark failed: the client subscriber failed: ...`: the subscriber of the
+  client rows got an error from `Subscription::poll`, and the rest of the line is that
+  error, which says what to do. The publisher stops as soon as its subscriber has
+  returned, instead of retrying a full log for ever.
+- `the client benchmark failed: the publisher was back-pressured for over 10 s`: the
+  client rows' subscriber is alive but has not read for 10 seconds. Look for a stopped
+  or starved subscriber CPU under `--pin`, then run the harness again.
 - The harness refuses to start: it needs to create files under `/dev/shm` or the
   system's temporary directory and at least two cores; the error names what it could
   not do.
