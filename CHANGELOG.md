@@ -253,7 +253,8 @@ user-visible change, added in the same commit as the change. The format follows
 - `cavalry-client` attaches: `Cavalry::connect()` finds the driver through `CAVALRY_DIR`
   or the default directory, `connect_to(dir)` names one, and the client conductor thread
   keeps the client alive with a keepalive every 500 ms, closes it when the driver closes
-  or its heartbeat goes stale, when the driver times the client out, or when the
-  broadcast buffer laps it, and `closed()` says which; `close()` tells the driver. A
+  or its heartbeat goes stale, when the driver times the client out, when the
+  broadcast buffer laps it, and when an event fails a decoding check or the command ring
+  or broadcast buffer fails a check of its page (`corrupt`), and `closed()` says which; `close()` tells the driver. A
   directory with no driver, or a driver that is gone, is refused with what to do
   (ADR 0021).

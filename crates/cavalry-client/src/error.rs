@@ -14,7 +14,7 @@ const DOC_LIVENESS: &str = "docs/reference/client-protocol.md#liveness-and-timeo
 const DOC_ERRORS: &str = "docs/reference/client-protocol.md#error-codes";
 const DOC_BROADCAST: &str = "docs/reference/broadcast-buffer.md#receiving";
 
-/// Why the client is closed, when it did not close itself: what the conductor found.
+/// Why the client is closed: by the user, or by what the conductor found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Closed {
     /// [`crate::Cavalry::close`] was called.
@@ -29,7 +29,9 @@ pub enum Closed {
     /// The broadcast buffer lapped this client: events were overwritten unread, so what
     /// the driver did is unknown, and a client that cannot know does not guess.
     Lapped,
-    /// The ring or the buffer failed a check of its page: corrupt, or not the driver's.
+    /// The ring or the buffer failed a check of its page, or an event failed a decoding
+    /// check (`too-short`, `type`, `string` or `length`): corrupt, not the driver's, or
+    /// from a driver of another version.
     Corrupt,
 }
 
@@ -176,8 +178,10 @@ impl fmt::Display for ClientError {
                          it read them, so the state of its publications and subscriptions is \
                          unknown; connect a new client, and poll it more often or run fewer clients",
                     Closed::Corrupt =>
-                        "a file of the driver directory failed a check of its page: run `cavalry \
-                         doctor`, then restart the driver, which remakes its files",
+                        "a file of the driver directory failed a check of its page, or an event \
+                         from the driver failed a decoding check: run `cavalry doctor`, check that \
+                         the driver and the client are the same version, then restart the driver, \
+                         which remakes its files",
                 }
             ),
             ClientError::Refused {
