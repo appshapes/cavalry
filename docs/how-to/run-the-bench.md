@@ -99,7 +99,10 @@ the gate fails only on the dedicated bench host is
    histograms in the message. The bench host's baseline is set from its own CI run:
    download the `bench-results-bench-linux` artifact of a green run and pass each of
    its two files, the `bench-linux` and the `bench-linux-unchecked` result, to
-   `--update`.
+   `--update`. A new row joins a baseline that already exists by adding its entry from
+   that run's result and leaving the other rows as they were recorded, in a commit that
+   names the row and the run; `--update` rewrites the whole profile, which is for a host
+   whose numbers moved, never for one new row.
 
 ## How to verify it worked
 
