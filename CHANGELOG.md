@@ -268,6 +268,10 @@ user-visible change, added in the same commit as the change. The format follows
   subscriber stores its `subscription.position` through the owner's `Counter` handle
   without being able to allocate or free a record; `spsc` halves report
   `peer_dropped()`, so a conductor sweeps a registration whose subscription is gone.
+- The driver's conductor copies each command into scratch sized once at start, so its
+  command read allocates nothing, keepalives included; a record longer than any command
+  of this version is not copied past that bound, and is refused by the spec's checks in
+  their order on the copy: `type` with code 6, `string` or `length` with code 7.
 - The driver's conductor copies each command into scratch sized once at start, so no
   duty cycle allocates, keepalives included; a record longer than any command of this
   version is refused as `length` with error code 7 without being copied past that bound.
