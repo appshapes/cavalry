@@ -13,8 +13,8 @@ code, because a recorded log outlives the binary that wrote it and `CLAUDE.md` s
 decision that cannot be undone is written up and stopped at, not chosen. What the format
 must carry comes from the crate's README and ADR 0023: a stream recorded to disk by the
 driver as an ordered, replayable log; replay from a position; `cavalry replay` from an
-instant; the same state from the same log, byte for byte; a version in every file
-header; a bound on everything.
+instant; the same state from the same log, byte for byte; a version that governs every
+file, carried in the file's header where it has one; a bound on everything.
 
 Aeron Archive, read from its source on 2026-10-13: a recording's data is the log
 buffer's raw term bytes, frame headers and padding included, written in blocks into
@@ -41,8 +41,10 @@ writes. The log buffer's positions (`spec/log-buffer.md`, "Positions") are multi
 
 ## Decision
 
-The durable log is a directory, the driver's `log.dir`, holding three kinds of file,
-each versioned and specified in `spec/durable-log.md` version 0 with vectors:
+The durable log is a directory, the driver's `log.dir`, holding three kinds of file, all
+specified in `spec/durable-log.md` version 0 with vectors. The catalog and the time
+index each start with a header that carries a magic and a version. The segment files
+have no header (item 2); the catalog's version governs them.
 
 1. **The catalog, `catalog`.** A 128-byte header: magic `CVLYCTLG`, version 0, the
    descriptor length (1024), the data checksum kind (0 in version 0, meaning none; a
@@ -98,9 +100,8 @@ each versioned and specified in `spec/durable-log.md` version 0 with vectors:
    slots, 128 + n × 1024 bytes, which drops a slot part-grown at a crash, and then
    drops a last slot whose state is 0; the next recording id is then n. A reader ignores
    bytes past the last whole slot. An empty slot before the last cannot come from one
-   writer, so it is damage: recovery sets it to
-   state 2, `cavalry doctor` names it, and no recording takes it. Then, for every slot
-   that is not empty:
+   writer, so it is damage: recovery sets it to state 2, `cavalry doctor` names it,
+   and no recording takes it. Then, for every slot that is not empty:
    - A creation CRC32 that does not match is damage that the files cannot repair: the
      segment files can confirm the session id, the stream id, the initial term id and
      the start position, but not the start timestamp, the term length, the MTU length,
@@ -109,21 +110,46 @@ each versioned and specified in `spec/durable-log.md` version 0 with vectors:
    - A valid slot whose creation CRC32 checks but whose stop CRC32 does not, or whose
      stop position is −1, was torn during a stop or live at a crash. The stop fields
      are wholly derived from the files, so the driver rebuilds them as Aeron recovers a
-     stop position: it scans the segments frame by frame from the position of the last
-     time index entry, to the end of the last segment file at most, and stops at the
-     first frame whose header does not check (below) or whose length is 0. The stop
-     position is the end of the last frame that checks, the stop timestamp is the last
-     index entry's, and it writes the stop fields and then the stop CRC32. If the
-     segment holding the start position is missing or the frame there does not check,
-     the slot gets state 2 instead, and `cavalry doctor` names it.
+     stop position, in this order:
+     1. *The time index first.* An index file that is missing, too short for its
+        header, or whose magic, version or recording id does not check was torn while
+        the recorder created it, which the creation order above allows. Recovery
+        writes it again: the header, magic last, and one entry, the start timestamp
+        and the start position. An index with a header and no whole entry gets that
+        entry appended. Then it truncates the index to whole entries and drops a last
+        entry that breaks the order (item 3).
+     2. *An empty recording.* If no segment file of the recording exists, or the
+        segment holding the start position exists and the frame length there is 0,
+        the recorder crashed before the first frame. The stop position is the start
+        position, the stop timestamp is the start timestamp, and the slot stays
+        valid: it is an empty recording, as Aeron stops a recording with no data at
+        its start position.
+     3. *The scan's start.* Recovery walks the index back from its last entry to the
+        first entry at whose position a frame checks (below), and starts there; when
+        none does, it starts at the start position. After a power loss the index can
+        hold an entry past what its segment kept, since the two files are synced
+        apart; walking back skips such an entry, so the stop position is always at a
+        frame boundary the recorder wrote. An entry at the end of the data, where the
+        frame length is 0, is skipped the same way, and the earlier entry's scan
+        reaches the same end.
+     4. *The scan.* From that position it reads frame by frame, to the end of the last
+        segment file at most, and stops at the first frame that does not check or
+        whose length is 0. The stop position is the end of the last frame that
+        checks. It drops index entries whose position is past the stop position. The
+        stop timestamp is the timestamp of the last entry left, at or before the stop
+        position, which the first entry guarantees exists. It writes the stop fields
+        and then the stop CRC32.
+
+     Only damage gets state 2, and `cavalry doctor` names it: segment files exist but
+     the one holding the start position is missing, or the frame at the start position
+     has a non-zero length and does not check.
    - A torn delete, state 3 with files still present, runs again.
 
-   After a
-   process crash every byte the recorder wrote is in the page cache and the scan finds
-   it; after an operating-system crash or a power loss, bytes past the last sync are
-   not guaranteed (card 93 decides the sync cadence), and version 0 cannot tell a frame
-   whose header survived but whose body did not from a whole one. The data checksum
-   kind is the place for that fix.
+   After a process crash every byte the recorder wrote is in the page cache and the
+   scan finds it; after an operating-system crash or a power loss, bytes past the last
+   sync are not guaranteed (card 93 decides the sync cadence), and version 0 cannot
+   tell a frame whose header survived but whose body did not from a whole one. The
+   data checksum kind is the place for that fix.
 2. **The segment files, `<recording id>-<segment base position>.rec`.** Aeron's: the
    log buffer's raw term bytes from the segment base position, frame headers and
    padding included, each file extended to the segment file length when opened. The
@@ -138,7 +164,11 @@ each versioned and specified in `spec/durable-log.md` version 0 with vectors:
    the start position are zero. A recorded position is the stream's position, so the
    frame at a position *checks* when its header's term offset, term id, session id
    and stream id are the position's and the descriptor's; a reader rejects anything
-   else with `frame`.
+   else with `frame`, and a position past the end of its segment file does not check.
+   A segment file has no header, no magic and no version field: like Aeron's, it is
+   term bytes from byte 0, so that a recorded position maps to a file offset with no
+   adjustment. Its version is the catalog's version, and the per-frame check is its
+   only check; a reader does not run `too-short`, `magic` or `version` on it.
 3. **The time index, `<recording id>.idx`.** A 128-byte header: magic `CVLYTIDX`,
    version 0, the recording id, reserved; then entries of 16 bytes, a timestamp and a
    position at a frame boundary the recorder has written. The recorder appends an
@@ -154,11 +184,12 @@ each versioned and specified in `spec/durable-log.md` version 0 with vectors:
    is card 94's decision and does not touch the format. The granularity of "between
    two instants" is the recorder's cadence, a millisecond.
 
-Every file's header is written in full with the magic last; every reader checks, in this
-order, `too-short`, `magic`, `version`, then the field bounds the page tables, and
-reports the first failure by name, so that every implementation reports the same reason
-for the same bytes. Version 0 carries no per-frame checksum: the data checksum kind is
-reserved for a version that adds one beside the frames, never inside them.
+The two files that have a header, the catalog and the time index, write it in full with
+the magic last; a reader of either checks, in this order, `too-short`, `magic`,
+`version`, then the field bounds the page tables, and reports the first failure by
+name, so that every implementation reports the same reason for the same bytes. Version
+0 carries no per-frame checksum: the data checksum kind is reserved for a version that
+adds one beside the frames, never inside them.
 
 `spec/durable-log.md` states the byte offsets of every field above. It decides nothing
 this ADR leaves open, except the names of the failures it tables.
@@ -203,6 +234,15 @@ truncated, and no recording starts.
   and alone, so that a crash during creation leaves an empty slot and a reader never
   sees a half-written body under a valid state; a CRC32 over the state would need a
   second write after the commit word, which is the torn update the design avoids.
+- **A valid slot with no files, or no frame at its start, set to state 2.** Lost: the
+  creation order makes that state legitimate after a crash, so `cavalry doctor` would
+  send the operator after damage that does not exist, and a recording that started
+  cleanly could never be listed as valid. It is an empty recording, as in Aeron.
+- **The stop position taken from the last time index entry, or the scan always
+  started there.** Lost: the index and the segments are synced apart, so after a power
+  loss the last entry can point past the data the segment kept, and the stop position
+  would not be at a frame the recorder wrote. Walking back to an entry whose frame
+  checks costs one header read per skipped entry.
 - **Segments aligned to multiples of the segment file length.** Lost: a recording that
   starts in the second term of a segment would carry a zeroed leading term, 64 MiB of
   disk with nothing in it. Aeron's alignment to the start term costs nothing.
@@ -232,10 +272,14 @@ slot, truncated to whole slots; a valid slot whose stop CRC32 fails, read before
 after the 100 ms retry, and the stop fields it recovers to; a valid slot whose creation
 CRC32 fails, reported `checksum` at once and set to state 2, its creation fields
 untouched; a slot live at a crash (stop −1) and the stop position it recovers to; a
-slot that cannot be repaired (the start frame missing), set to state 2; a deleted slot
-(state 3) whose files remain; a time index whose last entry is part-written, and one
-whose last entry is out of order. Also a no-panic test over generated input for the
-catalog and index parsers, and Rjae's acceptance, since the
+valid slot with stop −1 and no files, which stays valid with its stop at its start; a
+valid slot with stop −1 whose first segment holds only zeros, recovered the same way;
+a slot that cannot be repaired (segment files present, the one holding the start
+position missing), set to state 2; a deleted slot (state 3) whose files remain; a time
+index with a torn header, written again with one entry; a time index whose last entry
+is part-written, one whose last entry is out of order, and one whose last entry points
+past what its segment holds, which the scan walks back from. Also a no-panic test over
+generated input for the catalog and index parsers, and Rjae's acceptance, since the
 format cannot be undone. What the implementation proves goes in the commit messages of
 cards 92 to 94.
 
@@ -249,9 +293,9 @@ Harder: three files per recording to keep consistent, with the catalog's stop fi
 and the index's last entry both written by the recorder, and a recovery pass at every
 start-up that rebuilds them after a crash; a lifetime bound of 1048576 recordings per
 directory, after which the operator starts a new one. The catalog is bounded by the
-format. The segment files and the time index are not bounded by this format: each grows with the
-length of its recording, the index by at most 16 KiB per second, until card 95's
-retention truncates or purges it. A channel or source identity past its field is
+format. The segment files and the time index are not bounded by this format: each
+grows with the length of its recording, the index by at most 16 KiB per second, until
+card 95's retention truncates or purges it. A channel or source identity past its field is
 refused, not recorded. After a power loss, the tail past the last sync is trusted on
 its frame headers alone.
 
