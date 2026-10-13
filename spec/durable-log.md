@@ -59,7 +59,7 @@ Slot i is at 128 + i × 1024 and describes recording i.
 | 0 | 4 | state | i32 | 0, empty, the slot's other bytes are not read; 1, valid; 2, invalid, a recording the driver could not repair and `cavalry doctor` names; 3, deleted |
 | 4 | 4 | stop checksum | u32 | the zlib CRC32 of bytes 8 to 24 |
 | 8 | 8 | stop timestamp | i64 | −1 while the recording is live; otherwise at least the start timestamp |
-| 16 | 8 | stop position | i64 | −1 while the recording is live; otherwise at least the start position, a multiple of 32 |
+| 16 | 8 | stop position | i64 | −1 while the recording is live; otherwise at least the start position, a multiple of 32; −1 exactly when the stop timestamp is −1 |
 | 24 | 4 | creation checksum | u32 | the zlib CRC32 of bytes 28 to 1024 |
 | 28 | 4 | reserved | i32 | written as 0, never read |
 | 32 | 8 | recording id | i64 | i |
@@ -150,13 +150,17 @@ retention removes them.
 ## The driver
 
 The driver is the directory's only writer; how it keeps a second driver out is its own
-rule, not this page's. It creates a slot in this order: the file grows by one zeroed
-slot, the creation fields are written and then the creation checksum, the stop fields
-are written at −1 and then the stop checksum, and the state, 1, last; a slot whose state
-is 0 is empty whatever its other bytes hold, so a crash during creation leaves an empty
-last slot. The recording's id is reported, and its files created, only after the state is
-1. With one writer only the last slot can be empty, and the next recording id is the
-number of whole slots after recovery.
+rule, not this page's. It creates the catalog's header in the page's order, every field
+and a sync, then the magic and a sync; a catalog shorter than its header, or whose magic
+is zero while it holds no whole slot, was torn while the driver created it, and the
+driver writes the header again; a zero magic over whole slots is damage, and the driver
+refuses to start with `not-ready`. It creates a slot in this order: the file grows by
+one zeroed slot, the creation fields are written and then the creation checksum, the
+stop fields are written at −1 and then the stop checksum, and the state, 1, last; a slot
+whose state is 0 is empty whatever its other bytes hold, so a crash during creation
+leaves an empty last slot. The recording's id is reported, and its files created, only
+after the state is 1. With one writer only the last slot can be empty, and the next
+recording id is the number of whole slots after recovery.
 
 When the driver starts, and again at every `stop recording` for the slot it closes, it
 repairs the catalog. At start-up it first truncates the file to whole slots, then drops
@@ -205,30 +209,60 @@ identity is longer than 128 is refused with a named error before any slot is wri
 
 ## What a reader rejects
 
-A reader checks each file in this order and reports the first failure by name, so that
-every implementation reports the same reason for the same bytes.
+A reader checks each file in the order its table gives and reports the first failure by
+name, so that every implementation reports the same reason for the same bytes.
+
+The catalog header, with the file's length:
 
 | Check | Reported when |
 | --- | --- |
-| `too-short` | The catalog or the index is shorter than 128 bytes. |
+| `too-short` | The file is shorter than 128 bytes. |
 | `not-ready` | The magic is eight zero bytes: the creator has not finished. |
-| `magic` | The magic is any other value than the file's. |
+| `magic` | The magic is any other value than `CVLYCTLG`. |
 | `version` | The version is not 0. |
-| `descriptor-length` | The catalog's descriptor length is not 1024. |
-| `checksum-kind` | The catalog's data checksum kind is not 0. |
-| `timestamp` | A timestamp is below 0, or a stop timestamp that is not −1 is below its start timestamp. |
-| `length` | The catalog holds more than 1048576 whole slots. |
-| `state` | A descriptor's state is not 0 to 3. |
-| `invalid` | A descriptor's state is 2: the driver found the recording damaged, and `cavalry doctor` names it. |
-| `checksum` | A descriptor's creation checksum is not the zlib CRC32 of bytes 28 to 1024 of its slot, or its stop checksum is not that of bytes 8 to 24. |
-| `recording-id` | A descriptor's recording id is not its slot's index, or an index header's recording id is below 0. |
-| `position` | A position is below 0 or not a multiple of 32, or a stop position that is not −1 is below its start position. |
+| `descriptor-length` | The descriptor length is not 1024. |
+| `checksum-kind` | The data checksum kind is not 0. |
+| `timestamp` | The creation timestamp is below 0. |
+| `length` | The file holds more than 1048576 whole slots. |
+
+A descriptor, with its slot's index:
+
+| Check | Reported when |
+| --- | --- |
+| `too-short` | Fewer than 1024 bytes were given. |
+| `state` | The state is not 0 to 3. A state of 0 is an empty slot, not a failure: nothing else is read. |
+| `invalid` | The state is 2: the driver found the recording damaged, and `cavalry doctor` names it. Nothing else is read. |
+| `checksum` | The creation checksum is not the zlib CRC32 of bytes 28 to 1024, or the stop checksum is not that of bytes 8 to 24. A stop checksum is retried for 100 milliseconds first. |
+| `timestamp` | The start timestamp is below 0, or a stop timestamp that is not −1 is below the start timestamp. |
+| `recording-id` | The recording id is not the slot's index. |
+| `position` | The start position is below 0 or not a multiple of 32; a stop position that is not −1 is below the start position or not a multiple of 32; or one stop field is −1 and the other is not. |
 | `term-length` | The term length is not a power of two from 65536 to 1073741824. |
 | `segment-length` | The segment file length is not a power of two, is below the term length, or is above 1073741824. |
 | `mtu` | The MTU length is not a multiple of 32 from 64 to 65504. |
-| `string` | The channel length is above 256, the source identity length is above 128, or the bytes are not UTF-8. |
-| `order` | An index entry's timestamp or position is below the entry before it. |
-| `frame` | The frame header at a position does not carry the position's term id and term offset and the descriptor's session id and stream id. |
+| `string` | The channel length is below 0 or above 256, the source identity length is below 0 or above 128, or either's bytes are not UTF-8. |
+
+The time index header, with the file's length:
+
+| Check | Reported when |
+| --- | --- |
+| `too-short` | The file is shorter than 128 bytes. |
+| `not-ready` | The magic is eight zero bytes. |
+| `magic` | The magic is any other value than `CVLYTIDX`. |
+| `version` | The version is not 0. |
+| `recording-id` | The recording id is below 0. |
+
+A time index entry, with the entry before it when there is one:
+
+| Check | Reported when |
+| --- | --- |
+| `too-short` | Fewer than 16 bytes were given. |
+| `timestamp` | The timestamp is below 0. |
+| `position` | The position is below 0 or not a multiple of 32. |
+| `order` | The timestamp or the position is below the entry before it. |
+
+A segment file has no header and one check, `frame`: the frame header at a position
+does not carry the position's term id and term offset and the descriptor's session id
+and stream id, or the position is past the end of its segment file.
 
 ## Vectors
 

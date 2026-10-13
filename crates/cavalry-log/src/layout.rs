@@ -539,6 +539,11 @@ impl Descriptor {
                 found: self.stop_position,
             });
         }
+        if (self.stop_timestamp == -1) != (self.stop_position == -1) {
+            return Err(LayoutError::Position {
+                found: self.stop_position,
+            });
+        }
         if !is_power_of_two(self.term_length)
             || self.term_length < MIN_TERM_LENGTH
             || self.term_length > MAX_TERM_LENGTH

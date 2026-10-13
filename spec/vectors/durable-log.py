@@ -174,6 +174,23 @@ def main():
     stop = descriptor_stop(d)
     long_channel = struct.pack("<iI", VALID, zlib.crc32(stop) & 0xFFFFFFFF) + stop + struct.pack("<I", zlib.crc32(creation) & 0xFFFFFFFF) + creation
     vectors.append(invalid("descriptor-channel-length", "descriptor", "string", long_channel, slot=0))
+    # Two faults each: the first in the page's order is the one reported.
+    vectors.append(invalid("descriptor-order-checksum-before-id", "descriptor", "checksum", encode_descriptor(descriptor(recording_id=5), body_checksum=1), slot=0))
+    vectors.append(invalid("descriptor-order-timestamp-before-id", "descriptor", "timestamp", encode_descriptor(descriptor(recording_id=5, start_timestamp=-1)), slot=0))
+    vectors.append(invalid("descriptor-order-id-before-position", "descriptor", "recording-id", encode_descriptor(descriptor(recording_id=5, start_position=16)), slot=0))
+    vectors.append(invalid("descriptor-order-position-before-mtu", "descriptor", "position", encode_descriptor(descriptor(start_position=16, mtu_length=1400)), slot=0))
+    bad_mtu = descriptor(mtu_length=1400)
+    body = descriptor_body(bad_mtu)
+    body = body[:48] + struct.pack("<i", CHANNEL_LENGTH + 1) + body[52:]
+    creation = struct.pack("<i", 0) + body
+    stop = descriptor_stop(bad_mtu)
+    mtu_and_long_channel = struct.pack("<iI", VALID, zlib.crc32(stop) & 0xFFFFFFFF) + stop + struct.pack("<I", zlib.crc32(creation) & 0xFFFFFFFF) + creation
+    vectors.append(invalid("descriptor-order-mtu-before-string", "descriptor", "mtu", mtu_and_long_channel, slot=0))
+    vectors.append(invalid("descriptor-order-invalid-before-checksum", "descriptor", "invalid", struct.pack("<i", INVALID) + encode_descriptor(descriptor(), body_checksum=1)[4:], slot=0))
+    vectors.append(invalid("descriptor-stop-timestamp-live-position-set", "descriptor", "position", encode_descriptor(descriptor(stop_position=4096)), slot=0))
+    vectors.append(invalid("descriptor-stop-position-live-timestamp-set", "descriptor", "position", encode_descriptor(descriptor(stop_timestamp=1_760_000_001_000_000_000)), slot=0))
+    vectors.append(invalid("catalog-order-version-before-descriptor-length", "catalog-header", "version", encode_catalog_header(catalog_header(version=1, descriptor_length=512)), file_length=HEADER_LENGTH))
+    vectors.append(invalid("catalog-order-magic-before-version", "catalog-header", "magic", encode_catalog_header(catalog_header(magic=b"CVLYCNTR", version=1)), file_length=HEADER_LENGTH))
     # Time index: valid header, rejections, then entries.
     ih = index_header(recording_id=1)
     vectors.append(valid("index-header", "index-header", encode_index_header(ih), ih, file_length=HEADER_LENGTH + 3 * ENTRY_LENGTH, entries=3))
@@ -191,6 +208,8 @@ def main():
     vectors.append(invalid("index-entry-position-backwards", "index-entry", "order", encode_entry(entry(second["timestamp"], 0)), previous=second))
     vectors.append(invalid("index-entry-position-unaligned", "index-entry", "position", encode_entry(entry(second["timestamp"], 4100)), previous=first))
     vectors.append(invalid("index-entry-negative", "index-entry", "position", encode_entry(entry(second["timestamp"], -32)), previous=first))
+    vectors.append(invalid("index-entry-order-timestamp-before-position", "index-entry", "timestamp", encode_entry(entry(-1, 4100)), previous=first))
+    vectors.append(invalid("index-entry-order-position-before-order", "index-entry", "position", encode_entry(entry(first["timestamp"] - 1, 4100)), previous=first))
     # Positions: the arithmetic from a position to its bytes.
     d = descriptor()
     vectors.append(position_vector("position-start", d, 0))
