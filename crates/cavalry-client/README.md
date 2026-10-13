@@ -32,16 +32,46 @@ In Aeron, this is the client, with `tryClaim` and `commit`
 
 ## Example
 
-Not yet. This crate has no public item to show, and a crate README's example is also
-its doctest, so an example written now would invent an API.
-[ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md) records why the example
-rule is deferred for scaffold crates. The example arrives in the same commit as the
-first public item.
+Attach to the driver running on this host, see the client id the driver knows this
+process by, and close. `cavalry run` in another terminal is the usual driver; the
+doctest embeds one. Publications and subscriptions arrive with the next commits of card
+87, and this example grows into the ten-minute path.
+
+```rust
+use cavalry_client::Cavalry;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A driver of our own for the doctest; `cavalry run` is the usual shape.
+    let dir = std::env::temp_dir().join(format!("cavalry-client-readme-{}", std::process::id()));
+    let driver = cavalry_driver::Driver::start(&dir)?;
+
+    // `Cavalry::connect()` reads CAVALRY_DIR or the default directory; this names one.
+    let client = Cavalry::connect_to(&dir)?;
+    println!("client {} attached to {}", client.client_id(), client.dir().display());
+    assert!(!client.is_closed());
+
+    // While the client lives, its conductor thread keeps it alive with the driver.
+    client.close()?;
+    driver.close()?;
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
+```
+
+Running it prints one line, such as `client 3 attached to /tmp/cavalry-client-readme-4242`.
+A directory with no driver is refused with what to do:
+
+```text
+client refused (not-found): no driver at /tmp/nowhere; start one with `cavalry run`, or set CAVALRY_DIR to the directory of the driver to use; see docs/reference/client-protocol.md#the-driver-directory
+```
 
 ## What to read next
 
-Not yet: the pages this crate will point at, its section of `spec/` and its reference
-page, do not exist. Until they do, read [`CLAUDE.md`](../../CLAUDE.md) for the
-invariants and the gates, and
-[ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md) for how the workspace is
-laid out.
+- [`spec/client-protocol.md`](../../spec/client-protocol.md): how a client attaches, the
+  commands it sends, the events it reads, and the timeouts its conductor keeps; and
+  [ADR 0021](../../docs/decisions/0021-shape-the-client-api-after-aerons.md), the shape
+  of this API and why its two threads share no lock.
+- [`spec/log-buffer.md`](../../spec/log-buffer.md), "Claim, commit and abort" and
+  "Reading": what a publication and a subscription do with a log.
+- [Configuration](../../docs/reference/config.md): `CAVALRY_DIR`, the one key a client
+  reads; and [`cavalry-driver`](../cavalry-driver/README.md), the driver it attaches to.
