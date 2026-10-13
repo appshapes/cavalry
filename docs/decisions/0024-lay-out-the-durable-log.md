@@ -59,41 +59,66 @@ each versioned and specified in `spec/durable-log.md` version 0 with vectors:
    on the file while it runs so that a second driver refuses to start; readers in other
    processes read it with positional reads, never a mapping.
 
-   **A descriptor** holds its state (0 empty, 1 valid, 2 invalid, 3 deleted), a CRC32
-   (the zlib polynomial) over bytes 8 to 1024 of the slot, the recording id, the start
-   and stop timestamps (nanoseconds since the Unix epoch; stop is −1 while live), the
-   start and stop positions (stop is −1 while live), the initial term id, the segment
-   file length, the term length, the MTU length, the session id, the stream id, the
-   channel as a length and up to 256 bytes, the source identity as a length and up to
-   128 bytes, and reserved bytes to 1024. The state is the slot's commit word and lies
-   outside the CRC32 on purpose: it is written last, in one four-byte store.
+   **A descriptor** holds its state (0 empty, 1 valid, 2 invalid, 3 deleted), two
+   CRC32s (the zlib polynomial), the recording id, the start and stop timestamps
+   (nanoseconds since the Unix epoch; stop is −1 while live), the start and stop
+   positions (stop is −1 while live), the initial term id, the segment file length, the
+   term length, the MTU length, the session id, the stream id, the channel as a length
+   and up to 256 bytes, the source identity as a length and up to 128 bytes, and
+   reserved bytes to 1024. The fields fall in two groups, each under its own CRC32:
+   the *stop fields*, the stop timestamp and the stop position, are under the *stop
+   CRC32*; every other byte of the slot except the state and the two CRC32s, reserved
+   bytes included, is a *creation field*, written once when the slot is created and
+   never again, and is under the *creation CRC32*. The state is the slot's commit word
+   and lies outside both CRC32s on purpose: it is written last, in one four-byte store.
 
-   **Creating a slot.** The writer grows the file by one zeroed slot, writes the body
-   with the stop fields at −1 and then the CRC32, and writes the state, 1, last. A slot
-   whose state is 0 is empty whatever its body holds, so a crash during creation leaves
-   an empty slot, which the next recording takes. The recorder creates the recording's
-   files only after the slot is valid.
+   **Creating a slot.** The writer is the only writer, so it creates one slot at a time
+   and only the last slot can be empty. The next recording id is the number of whole
+   slots after recovery (below). The writer grows the file by one zeroed slot, writes
+   the creation fields and the creation CRC32, then the stop fields at −1 and the stop
+   CRC32, and writes the state, 1, last. A slot whose state is 0 is empty whatever its
+   body holds, so a crash during creation leaves an empty last slot, which recovery
+   removes and the next recording takes again. The recorder reports the id to the
+   client, and creates the recording's files, only after the state is 1, so an id is
+   never seen before its slot is valid.
 
    **Changing a slot.** While a recording lives only its stop fields and its state
-   change: a stop writes the stop position and the stop timestamp, then the CRC32; a
-   delete (card 95) writes the state, 3, then removes the files. A reader that finds a
-   state of 1, 2 or 3 with a CRC32 that does not match the body retries for up to 100
-   milliseconds, since the driver may be between the two writes of a stop, and then
-   reports `checksum` for that slot and reads nothing from it: the slot is a torn update
-   or damage, and only the driver repairs it. Nothing a reader does mistakes a racing
-   stop for damage, and nothing it does hides damage.
+   change: a stop writes the stop position and the stop timestamp, then the stop CRC32;
+   a delete (card 95) writes the state, 3, then removes the files. A reader that finds
+   a state of 1, 2 or 3 checks both CRC32s. A creation CRC32 that does not match is
+   damage, since nothing writes those bytes after the state: the reader reports
+   `checksum` at once. A stop CRC32 that does not match may be a stop the driver is
+   writing, so the reader retries for up to 100 milliseconds and then reports
+   `checksum`. Either way it reads nothing from that slot, and only the driver repairs
+   it. Nothing a reader does mistakes a racing stop for damage, and nothing it does
+   hides damage.
 
    **Recovery.** When the driver starts, and again at `stop recording` for the slot it
-   closes, it repairs every slot that is not empty: a valid slot whose CRC32 does not
-   match, or whose stop position is −1, was torn or live at a crash, and the driver
-   rebuilds its stop fields as Aeron recovers a stop position: it scans the segments
-   frame by frame from the position of the last time index entry, to the end of the
-   last segment file at most, and stops at the first frame whose header does not check
-   (below) or whose length is 0; the stop position is the end of the last frame that
-   checks, the stop timestamp is the last index entry's, and it rewrites the body and
-   the CRC32. A slot it cannot repair, because the segment holding the start position
-   is missing or the frame there does not check, gets state 2, and `cavalry doctor`
-   names it. A torn delete, state 3 with files still present, runs again. After a
+   closes, it repairs the catalog. At start-up it first truncates the file to whole
+   slots, 128 + n × 1024 bytes, which drops a slot part-grown at a crash, and then
+   drops a last slot whose state is 0; the next recording id is then n. A reader ignores
+   bytes past the last whole slot. An empty slot before the last cannot come from one
+   writer, so it is damage: recovery sets it to
+   state 2, `cavalry doctor` names it, and no recording takes it. Then, for every slot
+   that is not empty:
+   - A creation CRC32 that does not match is damage that the files cannot repair: the
+     segment files can confirm the session id, the stream id, the initial term id and
+     the start position, but not the start timestamp, the term length, the MTU length,
+     the segment file length or the channel. The slot gets state 2 and `cavalry doctor`
+     names it. Recovery never writes a creation field or the creation CRC32.
+   - A valid slot whose creation CRC32 checks but whose stop CRC32 does not, or whose
+     stop position is −1, was torn during a stop or live at a crash. The stop fields
+     are wholly derived from the files, so the driver rebuilds them as Aeron recovers a
+     stop position: it scans the segments frame by frame from the position of the last
+     time index entry, to the end of the last segment file at most, and stops at the
+     first frame whose header does not check (below) or whose length is 0. The stop
+     position is the end of the last frame that checks, the stop timestamp is the last
+     index entry's, and it writes the stop fields and then the stop CRC32. If the
+     segment holding the start position is missing or the frame there does not check,
+     the slot gets state 2 instead, and `cavalry doctor` names it.
+   - A torn delete, state 3 with files still present, runs again.
+
+   After a
    process crash every byte the recorder wrote is in the page cache and the scan finds
    it; after an operating-system crash or a power loss, bytes past the last sync are
    not guaranteed (card 93 decides the sync cadence), and version 0 cannot tell a frame
@@ -164,6 +189,16 @@ truncated, and no recording starts.
 - **The slot index as the recording id, slots reused without a generation.** Lost: an
   id would name a different recording after a purge, so a client holding an old id
   would replay another stream, and old files would collide with new ones by name.
+- **One CRC32 over the whole body, re-signed by recovery after it rebuilds the stop
+  fields.** Lost: a mismatch cannot tell a torn stop from damage anywhere else in the
+  body, so recovery would sign a flipped bit in the term length, the segment file
+  length or the start timestamp as valid, and replay would then compute wrong segment
+  names, wrong positions or a wrong `--from` position from it.
+- **One CRC32 over the whole body, with recovery re-signing it only after validating
+  the body against the segment files.** Lost: the files confirm the session id, the
+  stream id, the initial term id and the start position, but not the start timestamp,
+  the term length, the MTU length, the segment file length or the channel, so the
+  validation would leave most of the body unchecked. Two CRC32s cost four bytes.
 - **A CRC32 that covers the state.** Lost: the state is the commit word, written last
   and alone, so that a crash during creation leaves an empty slot and a reader never
   sees a half-written body under a valid state; a CRC32 over the state would need a
@@ -190,10 +225,17 @@ truncated, and no recording starts.
 ## Evidence
 
 A layout decision: what informed it is above. What will accept it: the vectors written
-by `spec/vectors/durable-log.py` and read by `cavalry-log`'s tests, among them a
-descriptor with an odd sequence, one with a torn mutable part, one live at a crash and
-a reused slot with its next generation's id, a no-panic test over
-generated input for the catalog and index parsers, and Rjae's acceptance, since the
+by `spec/vectors/durable-log.py` and read by `cavalry-log`'s tests, among them: an
+empty last slot (state 0) with a non-zero body, which recovery removes; an empty slot
+before the last, which recovery sets to state 2; a catalog with a trailing partial
+slot, truncated to whole slots; a valid slot whose stop CRC32 fails, read before and
+after the 100 ms retry, and the stop fields it recovers to; a valid slot whose creation
+CRC32 fails, reported `checksum` at once and set to state 2, its creation fields
+untouched; a slot live at a crash (stop −1) and the stop position it recovers to; a
+slot that cannot be repaired (the start frame missing), set to state 2; a deleted slot
+(state 3) whose files remain; a time index whose last entry is part-written, and one
+whose last entry is out of order. Also a no-panic test over generated input for the
+catalog and index parsers, and Rjae's acceptance, since the
 format cannot be undone. What the implementation proves goes in the commit messages of
 cards 92 to 94.
 
@@ -207,8 +249,7 @@ Harder: three files per recording to keep consistent, with the catalog's stop fi
 and the index's last entry both written by the recorder, and a recovery pass at every
 start-up that rebuilds them after a crash; a lifetime bound of 1048576 recordings per
 directory, after which the operator starts a new one. The catalog is bounded by the
-format. The
-segment files and the time index are not bounded by this format: each grows with the
+format. The segment files and the time index are not bounded by this format: each grows with the
 length of its recording, the index by at most 16 KiB per second, until card 95's
 retention truncates or purges it. A channel or source identity past its field is
 refused, not recorded. After a power loss, the tail past the last sync is trusted on
