@@ -64,9 +64,20 @@ cache line is not written on every cycle". It does not bound the load.
 The driver loads a publication's producer position at most once per millisecond per
 publication, by its own clock, which it reads once per duty cycle; it stores
 `publication.position` when the loaded value moved, and unblocking compares the
-consumer position with the position so loaded. Closing loads the producer position
-afresh, because the end-of-stream position is the last byte the publisher committed and
-a stale one would drop up to a millisecond of committed frames (invariant 1). A move of
+consumer position with the position so loaded. The loaded value is never above the
+real producer position, so unblocking's test that the producer position is beyond the
+consumer position can only pass late, by up to 1 ms against the unblock timeout, and
+never wrongly. The `rejected_tail` check runs on the same load, so a corrupt tail is
+caught, and its client evicted, up to 1 ms later than before. Closing loads the producer
+position afresh, because the end-of-stream position is the last byte the publisher
+committed and a stale one would drop up to a millisecond of committed frames (invariant
+1). Joining loads it afresh too, when a subscription joins the publication at the
+producer position (`spec/client-protocol.md`, "add subscription"): a stale value can be
+below the clean position, because another subscriber has read to the real producer
+position and cleaning has zeroed the log up to there. The new subscriber would read a
+frame length of 0 in the cleaned range, never advance, hold the limit down as the
+slowest subscriber, and back-pressure the publisher for good, while unblocking never
+fires because the other subscriber keeps moving the consumer position (invariant 1). A move of
 the producer position is not work for the conductor's idle strategy; the subscriber
 positions, cleaning and the limit are loaded, done and raised on every cycle as the spec
 already says, because a publisher waits on the limit and a subscriber's stores are
@@ -123,7 +134,8 @@ needs a conductor of its own, which ADR 0015 chose for the raw rows.
 
 ## References
 
-- `spec/log-buffer.md`, "The driver", Positions and Closing; ADR 0013, the layout and
+- `spec/log-buffer.md`, "The driver", Positions and Closing; `spec/client-protocol.md`,
+  "add subscription", the join position; ADR 0013, the layout and
   the positions; ADR 0015, the harness; ADR 0016, the host, its Revisit and its Evidence
   with the p50 question; ADR 0017, which rows the gate reads
 - `crates/cavalry-driver/src/conductor.rs`, `keep_publication`; `bench/src/main.rs`,
