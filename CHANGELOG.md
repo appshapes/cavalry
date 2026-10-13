@@ -286,6 +286,12 @@ user-visible change, added in the same commit as the change. The format follows
   command read allocates nothing, keepalives included; a record longer than any command
   of this version is not copied past that bound, and is refused by the spec's checks in
   their order on the copy: `type` with code 6, `string` or `length` with code 7.
+- `just bench` gains the client rows, `claim_commit_32_client` and `one_way_32_client`:
+  publish to delivery through `cavalry-client` and a real driver in the harness's
+  process, with the zero-allocation assertion over that path too, so the gate holds the
+  path a user takes to the budget. The client rows are in the bench host's baseline,
+  so a p99.99 regression over 5% on the client path fails CI. A client subscriber that fails or stops reading
+  fails the run with its reason instead of leaving the publisher retrying.
 - The ten-minute path exists: `cargo add cavalry` gives `cavalry::Cavalry`,
   `Publication` and `Subscription`, the README's five commands build the binary and the
   example, start a driver, publish 1,000 messages and read them back, read doctor and

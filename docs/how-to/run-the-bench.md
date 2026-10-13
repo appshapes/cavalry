@@ -54,6 +54,8 @@ the gate fails only on the dedicated bench host is
    | `timer` | Two `Instant::now()` calls back to back: the harness's own overhead, present in every other row. |
    | `claim_commit_<body>` | The publisher's `try_claim`, writing the body, and `commit`, for a body of that many bytes. |
    | `one_way_<body>` | From the publisher's timestamp before its claim to the subscriber's handler receiving the frame, across two threads. |
+   | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor reads the publisher's tail on its duty cycle, as a user's does. |
+   | `one_way_<body>_client` | From the publisher's timestamp to `Subscription::poll`'s handler, through a real driver and the client's conductor hand-off; the path a user's message takes (ADR 0021). |
    | `slot_padding_<spacing>_load` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
    | `slot_padding_<spacing>_store` | The other side of the same pair: one store while the other thread loads. |
 
@@ -97,7 +99,10 @@ the gate fails only on the dedicated bench host is
    histograms in the message. The bench host's baseline is set from its own CI run:
    download the `bench-results-bench-linux` artifact of a green run and pass each of
    its two files, the `bench-linux` and the `bench-linux-unchecked` result, to
-   `--update`.
+   `--update`. A new row joins a baseline that already exists by adding its entry from
+   that run's result and leaving the other rows as they were recorded, in a commit that
+   names the row and the run; `--update` rewrites the whole profile, which is for a host
+   whose numbers moved, never for one new row.
 
 ## How to verify it worked
 
@@ -124,6 +129,13 @@ the gate fails only on the dedicated bench host is
   host it means the baseline was not recorded yet; record one as step 4 says.
 - `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the
   process's allowed set; `cat /sys/devices/system/cpu/online` says which CPUs exist.
+- `the client benchmark failed: the client subscriber failed: ...`: the subscriber of the
+  client rows got an error from `Subscription::poll`, and the rest of the line is that
+  error, which says what to do. The publisher stops as soon as its subscriber has
+  returned, instead of retrying a full log for ever.
+- `the client benchmark failed: the publisher was back-pressured for over 10 s`: the
+  client rows' subscriber is alive but has not read for 10 seconds. Look for a stopped
+  or starved subscriber CPU under `--pin`, then run the harness again.
 - The harness refuses to start: it needs to create files under `/dev/shm` or the
   system's temporary directory and at least two cores; the error names what it could
   not do.

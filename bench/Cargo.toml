@@ -15,6 +15,10 @@ path = "src/main.rs"
 
 [dependencies]
 cavalry-shm = { path = "../crates/cavalry-shm" }
+# The client row: publish to delivery through the public API and a real driver in this
+# process, so the gate holds the path a user takes to the budget (ADR 0021).
+cavalry-client = { path = "../crates/cavalry-client" }
+cavalry-driver = { path = "../crates/cavalry-driver" }
 # The histograms every number comes from: p50, p99, p99.99 and max, never a mean
 # (CLAUDE.md, invariant 2; ADR 0015). Fixed bounds, so recording never allocates.
 hdrhistogram = "7"

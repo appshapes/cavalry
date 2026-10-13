@@ -1,10 +1,12 @@
 //! `cavalry-bench`: the latency and throughput harness `just bench` runs (CLAUDE.md,
-//! gate 2; ADR 0015). It drives `cavalry-shm` directly, with no driver process yet: a
-//! publisher thread claims and commits into a real log buffer, a subscriber thread reads
-//! it, and a conductor thread does the driver's duties, the limit and the cleaning,
-//! through a real counters file. Every sample is one message, timed with `Instant`, and
-//! every number reported is a percentile or a max of an HdrHistogram, never a mean. The
-//! measured loops run under a counting allocator and the run fails when they allocate.
+//! gate 2; ADR 0015). The log rows drive `cavalry-shm` directly: a publisher thread
+//! claims and commits into a real log buffer, a subscriber thread reads it, and a
+//! conductor thread does the driver's duties, the limit and the cleaning, through a real
+//! counters file. The client rows take the path a user takes: `cavalry-client` against a
+//! real `cavalry-driver` in this process, publication to subscription (ADR 0021). Every
+//! sample is one message, timed with `Instant`, and every number reported is a percentile
+//! or a max of an HdrHistogram, never a mean. The measured loops run under a counting
+//! allocator and the run fails when they allocate.
 //!
 //! `cavalry-bench --help` lists the options; `docs/how-to/run-the-bench.md` is the page.
 
@@ -18,6 +20,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use cavalry_client::{Cavalry, Offer};
+use cavalry_driver::{Driver, IdleStrategy, spec};
 use cavalry_shm::counters::CountersFile;
 use cavalry_shm::counters::generated::{
     PUBLICATION_LIMIT, PUBLICATION_POSITION, SUBSCRIPTION_POSITION,
@@ -160,11 +164,17 @@ impl Options {
     /// 5,000,000-message run are the whole p99.99; a driver pre-touches its log at
     /// creation, so the gate measures what comes after.
     fn warmup(&self) -> u64 {
+        self.warmup_for(self.term_length)
+    }
+
+    /// The same warm-up for a log of three `term_length` terms that `--term-length` does
+    /// not size, the driver's for the client rows.
+    fn warmup_for(&self, term_length: u32) -> u64 {
         const DEFAULT: u64 = 100_000;
         const HEADER: usize = 32;
         let frame = (HEADER + self.body).next_multiple_of(32) as u64;
         self.warmup_option
-            .unwrap_or_else(|| DEFAULT.max(3 * u64::from(self.term_length) / frame.max(1)))
+            .unwrap_or_else(|| DEFAULT.max(3 * u64::from(term_length) / frame.max(1)))
     }
 }
 
@@ -460,6 +470,152 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     })
 }
 
+/// The client rows: a real driver and a real client in this process, a publication and a
+/// subscription on one stream, the publisher on this thread and the subscriber on its
+/// own, each message claimed, written in place and committed, then delivered to the
+/// subscription's handler (ADR 0021). The driver's and the client's conductor threads
+/// inherit the conductor CPU under `--pin`, since a thread inherits the affinity of the
+/// thread that spawns it. The log is the driver's, 64 MiB terms (`spec/client-protocol.md`,
+/// "Sizes"), so the warm-up is one rotation of that log, not of `--term-length`'s, for the
+/// same reason as the log rows': no measured message first-touches a page.
+fn bench_client(options: &Options) -> Result<LogRun, String> {
+    let dir = bench_dir().join(format!("cavalry-bench-{}-client", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let result = run_client(options, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
+    pin_to(options.pin.map(|pin| pin[2]))?;
+    let driver = Driver::start_with(dir, IdleStrategy::Backoff).map_err(|e| e.to_string())?;
+    let mut client = Cavalry::connect_to(dir).map_err(|e| e.to_string())?;
+    let mut subscription = client
+        .add_subscription("cavalry:ipc", STREAM_ID)
+        .map_err(|e| e.to_string())?;
+    let mut publication = client
+        .add_publication("cavalry:ipc", STREAM_ID)
+        .map_err(|e| e.to_string())?;
+    pin_to(options.pin.map(|pin| pin[0]))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !subscription.is_connected() {
+        subscription.poll(|_, _| {}, 1).map_err(|e| e.to_string())?;
+        if Instant::now() > deadline {
+            return Err("the subscription never connected".to_string());
+        }
+    }
+
+    let warmup = options.warmup_for(spec::IPC_TERM_LENGTH);
+    let total = warmup + options.messages;
+    let epoch = Instant::now();
+
+    let subscriber = {
+        let cpu = options.pin.map(|pin| pin[1]);
+        thread::Builder::new()
+            .name("client-subscriber".into())
+            .spawn(move || -> Result<Histogram<u64>, String> {
+                pin_to(cpu)?;
+                let mut hist = histogram();
+                let mut received: u64 = 0;
+                while received < total {
+                    let delivered = subscription
+                        .poll(
+                            |body, _| {
+                                let stamp =
+                                    u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
+                                if received >= warmup {
+                                    hist.saturating_record(nanos(epoch).saturating_sub(stamp));
+                                }
+                                received += 1;
+                            },
+                            1024,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    if delivered == 0 {
+                        std::hint::spin_loop();
+                    }
+                }
+                Ok(hist)
+            })
+            .map_err(|e| e.to_string())?
+    };
+
+    let mut hist = histogram();
+    let mut retries: u64 = 0;
+    // The retries of the message being claimed. A subscriber that has returned, or one
+    // that has stopped reading, leaves the publisher back-pressured for ever; the retry is
+    // bounded so the run fails with the reason instead of hanging (invariant 3).
+    let mut stalled: u64 = 0;
+    const STALL_CHECK: u64 = 4096;
+    const STALL_LIMIT: Duration = Duration::from_secs(10);
+    let mut region: Option<Region<'static, System>> = None;
+    let mut start = Instant::now();
+    for i in 0..total {
+        if i == warmup {
+            region = Some(Region::new(GLOBAL));
+            start = Instant::now();
+        }
+        let stamp = nanos(epoch);
+        let t0 = Instant::now();
+        loop {
+            match publication.try_claim(options.body) {
+                Ok(mut claim) => {
+                    claim.body()[..8].copy_from_slice(&stamp.to_le_bytes());
+                    claim.commit();
+                    break;
+                }
+                Err(Offer::BackPressured | Offer::AdminAction | Offer::NotConnected) => {
+                    retries += 1;
+                    stalled += 1;
+                    if subscriber.is_finished() {
+                        return Err(subscriber_failure(subscriber.join()));
+                    }
+                    if stalled % STALL_CHECK == 0 && t0.elapsed() > STALL_LIMIT {
+                        return Err(format!(
+                            "the publisher was back-pressured for over {} s at message {i} of \
+                             {total}, so the subscriber stopped reading; see \
+                             docs/how-to/run-the-bench.md",
+                            STALL_LIMIT.as_secs()
+                        ));
+                    }
+                    std::hint::spin_loop();
+                }
+                Err(other) => return Err(other.to_string()),
+            }
+        }
+        stalled = 0;
+        if i >= warmup {
+            hist.saturating_record(span_ns(t0, Instant::now()));
+        }
+    }
+    let elapsed = start.elapsed();
+    let allocations = region.as_ref().map_or(0, |r| r.change().allocations);
+    let one_way = match subscriber.join() {
+        Ok(Ok(hist)) => hist,
+        failed => return Err(subscriber_failure(failed)),
+    };
+    publication.close().map_err(|e| e.to_string())?;
+    client.close().map_err(|e| e.to_string())?;
+    driver.close().map_err(|e| e.to_string())?;
+    Ok(LogRun {
+        claim_commit: summarize(&hist, elapsed),
+        one_way: summarize(&one_way, elapsed),
+        retries,
+        allocations,
+    })
+}
+
+/// Why the client subscriber thread ended before the publisher was done: its own error,
+/// or its panic.
+fn subscriber_failure(joined: thread::Result<Result<Histogram<u64>, String>>) -> String {
+    match joined {
+        Ok(Err(message)) => format!("the client subscriber failed: {message}"),
+        Ok(Ok(_)) => "the client subscriber returned before the publisher was done".to_string(),
+        Err(_) => "the client subscriber thread panicked".to_string(),
+    }
+}
+
 /// Thirty-two words, 256 bytes, so two of them can sit 0, 64 or 128 bytes apart.
 #[repr(C, align(256))]
 struct Words {
@@ -561,7 +717,8 @@ struct Pass {
     allocations: usize,
 }
 
-/// Every benchmark once: the timer, both log types, the three slot spacings.
+/// Every benchmark once: the timer, both log types, the client path, the three slot
+/// spacings.
 fn run_pass(options: &Options) -> Result<Pass, String> {
     let mut pass = Pass {
         benchmarks: BTreeMap::new(),
@@ -584,6 +741,16 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
         pass.retries.insert(name.into(), run.retries);
         pass.allocations += run.allocations;
     }
+    let client = bench_client(options)
+        .map_err(|message| format!("the client benchmark failed: {message}"))?;
+    pass.benchmarks.insert(
+        format!("claim_commit_{}_client", options.body),
+        client.claim_commit,
+    );
+    pass.benchmarks
+        .insert(format!("one_way_{}_client", options.body), client.one_way);
+    pass.retries.insert("client".into(), client.retries);
+    pass.allocations += client.allocations;
     for spacing in [0usize, 64, 128] {
         let (loads, stores) = bench_slot(options, spacing)
             .map_err(|message| format!("the slot_padding_{spacing} benchmark failed: {message}"))?;
@@ -674,7 +841,7 @@ fn main() -> ExitCode {
         benchmarks.insert(name, median);
     }
 
-    let messages_measured = 2 * options.messages * u64::from(options.repeat);
+    let messages_measured = 3 * options.messages * u64::from(options.repeat);
     let allocations_per_message = allocations as f64 / messages_measured as f64;
 
     println!();
@@ -693,9 +860,10 @@ fn main() -> ExitCode {
     }
     println!();
     println!(
-        "  publisher retries (back pressure or rotation), the most of any run: exclusive {}, concurrent {}",
+        "  publisher retries (back pressure or rotation), the most of any run: exclusive {}, concurrent {}, client {}",
         retries.get("exclusive").copied().unwrap_or(0),
-        retries.get("concurrent").copied().unwrap_or(0)
+        retries.get("concurrent").copied().unwrap_or(0),
+        retries.get("client").copied().unwrap_or(0)
     );
     println!(
         "  allocations per message: {allocations_per_message} ({allocations} in {messages_measured} messages)"
@@ -725,9 +893,10 @@ fn main() -> ExitCode {
     let _ = writeln!(out, "  \"term_length\": {},", options.term_length);
     let _ = writeln!(
         out,
-        "  \"publisher_retries\": {{\"exclusive\": {}, \"concurrent\": {}}},",
+        "  \"publisher_retries\": {{\"exclusive\": {}, \"concurrent\": {}, \"client\": {}}},",
         retries.get("exclusive").copied().unwrap_or(0),
-        retries.get("concurrent").copied().unwrap_or(0)
+        retries.get("concurrent").copied().unwrap_or(0),
+        retries.get("client").copied().unwrap_or(0)
     );
     let _ = writeln!(
         out,
