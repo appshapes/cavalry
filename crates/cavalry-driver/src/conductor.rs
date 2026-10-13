@@ -1215,3 +1215,73 @@ fn counter_id(counter: &Counter) -> i32 {
 fn remove_log(dir: &Path, registration_id: i64) {
     let _ = std::fs::remove_file(dir.join(log_layout::file_name(registration_id)));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR 0022: the conductor loads a publication's producer position at most once per
+    /// [`spec::PRODUCER_POSITION_INTERVAL`] by the clock it is given, and a move of that
+    /// position is not work, so a publisher alone lets the conductor idle.
+    #[test]
+    fn the_producer_position_is_loaded_once_per_interval_and_its_move_is_not_work() {
+        let dir = std::env::temp_dir().join(format!(
+            "cavalry-driver-{}-producer-cadence",
+            std::process::id()
+        ));
+        prepare_dir(&dir).expect("the directory is prepared");
+        let mut conductor =
+            Conductor::create(&dir, IdleStrategy::Backoff).expect("the conductor is created");
+        let t0 = now_nanos();
+        let interval = spec::nanos(spec::PRODUCER_POSITION_INTERVAL);
+
+        // A subscriber, then a publication, loaded at t0; the first cycle raises the
+        // limit, and after it nothing moves.
+        conductor.add_subscription(1, 1, 7, IPC_CHANNEL);
+        conductor.add_publication(1, 2, 7, IPC_CHANNEL, false, t0);
+        assert_eq!(conductor.publications.len(), 1, "the publication is added");
+        assert_eq!(conductor.images.len(), 1, "the subscriber has an image");
+        conductor.duty_cycle(t0);
+        assert_eq!(conductor.duty_cycle(t0), 0, "nothing moves once settled");
+        let joined = conductor.publications[0].position.get();
+
+        // One frame committed through an appender, as a publisher would.
+        let committed = {
+            let publication = &conductor.publications[0];
+            let mut appender = publication.log.appender().expect("an appender");
+            appender
+                .offer(b"one message", publication.limit.get(), 0)
+                .expect("the message is offered")
+        };
+        assert!(committed > joined, "the producer moved");
+
+        // Half the interval after the last load: no load, the gauge stays, and the
+        // publication is no work.
+        assert_eq!(
+            conductor.duty_cycle(t0 + interval / 2),
+            0,
+            "no work before the interval"
+        );
+        assert_eq!(
+            conductor.publications[0].position.get(),
+            joined,
+            "the producer position is not loaded before the interval has passed"
+        );
+
+        // The interval after the last load: one load, the gauge follows, and its move is
+        // still no work.
+        assert_eq!(
+            conductor.duty_cycle(t0 + interval),
+            0,
+            "a moved gauge is not work"
+        );
+        assert_eq!(
+            conductor.publications[0].position.get(),
+            committed,
+            "the gauge follows the publisher once the interval has passed"
+        );
+
+        drop(conductor);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
