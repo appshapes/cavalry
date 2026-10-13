@@ -336,8 +336,10 @@ user-visible change, added in the same commit as the change. The format follows
   recording in the driver, replay with `cavalry replay` and `just replay-check`, then
   retention and the ten-minute path. UDP is the third slice, once a dedicated second
   bench host exists (card 91).
-- ADR 0024, Proposed: the durable log's on-disk format, a fixed-slot catalog whose slot
-  index is the recording id, Aeron's segment files of raw term bytes, and a time index
+- ADR 0024, Proposed: the durable log's on-disk format, a fixed-slot catalog of 8192
+  slots with recording ids never reused and descriptor changes published under a
+  sequence lock and recovered after a crash, Aeron's segment files of raw term bytes
+  aligned as Aeron aligns them, and a time index
   of one entry per millisecond for `cavalry replay --from <instant>`; the spec page and
   its vectors land with the acceptance, which is a person's, since the format cannot be
   undone.
