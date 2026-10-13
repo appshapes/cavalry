@@ -273,13 +273,15 @@ user-visible change, added in the same commit as the change. The format follows
   `try_claim` writes a frame in place and `offer` copies a message in, each against the
   limit the driver maintains with one acquire load; the refusals are `Offer`, Aeron's
   codes as a result (`not-connected`, `back-pressured`, `admin-action`,
-  `max-position-exceeded`, `closed`, `too-long`); `close` sends `remove publication`. A
-  command the driver refuses is `ClientError::Refused` with the error code and message
-  (ADR 0021).
+  `max-position-exceeded`, `closed`, `too-long`); `close` sends `remove publication`.
+  After the client closes, `is_closed` is true and a refusal is `closed`. A command the
+  driver refuses is `ClientError::Refused` with the error code and message (ADR 0021).
 - `cavalry-client` subscribes: `add_subscription` returns a `Subscription` whose `poll`
   hands each fragment to a handler as a view into the log, across one `Image` per
   connected publication in turn, storing each image's `subscription.position` with a
   release store after its share; images join and go as the driver announces them,
   opened and unmapped by the conductor, never by the poll; a frame that fails a check
-  retires its image and is reported as a `Fault`. The README example is now the
+  retires its image and is reported as a `Fault`, and a poll after the client closes is
+  `Fault::Closed`. A subscription the client's conductor cannot hold is
+  `ClientError::SubscriptionsFull` and is removed again. The README example is now the
   ten-minute path's program: publish and subscribe in one process (ADR 0021).

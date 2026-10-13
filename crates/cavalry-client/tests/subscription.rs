@@ -280,32 +280,34 @@ fn images_come_and_go_with_publications() {
     assert_eq!(subscription.images()[0].session_id(), shared.session_id());
     assert!(!subscription.images()[0].is_end_of_stream());
 
-    // Closing the subscription stops the polls.
-    let registration_id = subscription.registration_id();
     subscription.close().expect("closes");
-    let _ = registration_id;
     shared.close().expect("closes");
     client.close().expect("closes");
     driver.close().expect("the driver closes");
 }
 
 #[test]
-fn a_closed_subscription_refuses_to_poll() {
+fn a_refused_channel_is_refused_and_a_closed_clients_subscription_refuses_to_poll() {
     let dir = TestDir::new("closed");
     let driver = Driver::start(dir.path()).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
-    let subscription = client
-        .add_subscription("cavalry:ipc", 2004)
-        .expect("a subscription");
-    assert!(!subscription.is_closed());
-    // Fault::Closed is what a poll after close would say; close consumes the handle, so
-    // the check is on the type's contract.
-    assert_eq!(Fault::Closed.reason(), "closed");
-    subscription.close().expect("closes");
     let error = client
         .add_subscription("cavalry:udp?endpoint=localhost:1", 2004)
         .expect_err("not this version's channel");
     assert_eq!(error.reason(), "refused");
-    client.close().expect("closes");
+
+    // A subscription still held when its client closes: open, it polls; once the driver
+    // has gone and the client has seen it, every poll is `closed`.
+    let mut subscription = client
+        .add_subscription("cavalry:ipc", 2004)
+        .expect("a subscription");
+    assert!(!subscription.is_closed());
+    assert_eq!(subscription.poll(|_, _| {}, 10), Ok(0));
     driver.close().expect("the driver closes");
+    assert!(wait_until(Duration::from_secs(3), || client.is_closed()));
+    assert!(subscription.is_closed());
+    assert_eq!(subscription.poll(|_, _| {}, 10), Err(Fault::Closed));
+    let refusal = Fault::Closed.to_string();
+    assert!(refusal.contains("client is closed"), "{refusal}");
+    assert!(format!("{subscription:?}").contains("closed: true"));
 }

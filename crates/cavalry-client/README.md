@@ -15,6 +15,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   per connected publisher.
 - Returns back-pressure as a result code when the receiver window or the log buffer is
   full. The caller decides what to do; the driver never buffers more.
+- Says when its client is gone. Once the client is closed, by `close` or because the
+  driver went, a publication's next refusal is `Offer::Closed` and every poll of a
+  subscription is `Fault::Closed`. A subscription the client cannot hold is refused with
+  `subscriptions-full`; it is never left open without its images.
 
 In Aeron, this is the client, with `tryClaim` and `commit`
 ([glossary](../../docs/glossary.md)).

@@ -44,8 +44,9 @@ pub(crate) const NO_PENDING: i64 = -1;
 pub(crate) const RESPONSE_QUEUE: usize = 4;
 
 /// How many subscriptions one client registers with its conductor: the driver's own
-/// bound on subscriptions, so the driver refuses first, with error code 10, and the
-/// registry here never fills silently (`spec/client-protocol.md`, "Sizes").
+/// bound on subscriptions, so the driver refuses first, with error code 10
+/// (`spec/client-protocol.md`, "Sizes"). A registration the registry cannot admit even
+/// after a sweep is refused, never dropped silently: see [`Registry::admit`].
 pub(crate) const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// How many registrations may wait for the conductor between two of its cycles.
@@ -63,6 +64,8 @@ pub(crate) struct Shared {
     /// sent by either thread.
     last_sent: AtomicI64,
     /// The correlation id of the command the user's thread waits on, or [`NO_PENDING`].
+    /// Stored before the command is written and loaded after its answer is read, so the
+    /// ring and the broadcast buffer order the two: see [`Conductor::events`].
     pending: AtomicI64,
 }
 
@@ -172,8 +175,7 @@ pub(crate) struct Conductor {
     shared: Arc<Shared>,
     responses: spsc::Producer<Response>,
     registrations: spsc::Consumer<Registration>,
-    /// The subscriptions this client holds, by registration id, with the queues to each.
-    subscriptions: Vec<Registration>,
+    registry: Registry,
     client_id: i64,
     scratch: Vec<u8>,
 }
@@ -200,7 +202,7 @@ impl Conductor {
             shared,
             responses,
             registrations,
-            subscriptions: Vec::with_capacity(MAX_SUBSCRIPTIONS),
+            registry: Registry::with_capacity(MAX_SUBSCRIPTIONS),
             client_id,
             scratch: vec![0u8; COMMAND_SCRATCH],
         }
@@ -236,30 +238,20 @@ impl Conductor {
         Ok(self.keepalive(now)? + self.registrations() + self.events()?)
     }
 
-    /// Registers the subscriptions the user's thread added, drops the mappings its
-    /// subscriptions retired, and forgets a registration whose subscription is gone,
-    /// which its queue's dropped half says. The registry's bound is the driver's own, so
-    /// it never fills: the driver refused first.
+    /// Drops the mappings the subscriptions retired and forgets a registration whose
+    /// subscription is gone, then admits the subscriptions the user's thread added: the
+    /// sweep first, so that a subscription dropped before another was added leaves its
+    /// place to it.
     fn registrations(&mut self) -> usize {
+        self.registry.sweep() + self.admit()
+    }
+
+    /// Admits every registration queued, each through [`Registry::admit`].
+    fn admit(&mut self) -> usize {
         let mut work = 0;
         while let Some(registration) = self.registrations.poll() {
-            if self.subscriptions.len() < MAX_SUBSCRIPTIONS {
-                self.subscriptions.push(registration);
-            }
+            self.registry.admit(registration);
             work += 1;
-        }
-        let mut index = 0;
-        while index < self.subscriptions.len() {
-            while let Some(retired) = self.subscriptions[index].retired.poll() {
-                drop(retired);
-                work += 1;
-            }
-            if self.subscriptions[index].images.peer_dropped() {
-                self.subscriptions.swap_remove(index);
-                work += 1;
-            } else {
-                index += 1;
-            }
         }
         work
     }
@@ -312,19 +304,37 @@ impl Conductor {
     /// the command the user's thread waits on through the response queue when it is
     /// that command's event, and is dropped otherwise; a lap or a corrupt buffer closes
     /// the client too.
+    ///
+    /// The pending correlation id is loaded inside the handler, after the event is read,
+    /// never before the receive. The user's thread stores it (release) before it writes
+    /// the command; the driver reads the command from the ring, then writes its answer to
+    /// the broadcast buffer, which this receive reads (acquire). So a load after the read
+    /// sees the id of every command whose answer it is reading; a load before the
+    /// receive could see [`NO_PENDING`] and drop the answer: a false `response-timeout`,
+    /// with a registration left on the driver.
+    ///
+    /// The same chain orders the registration queue: `add subscription` queues its
+    /// registration before it writes the command, so admitting the queue before an
+    /// answer or an image is handled finds every registration the driver could have
+    /// answered, and an image that follows its answer in one batch finds its
+    /// subscription.
     fn events(&mut self) -> Result<usize, Closed> {
         let mut received = 0;
         let client_id = self.client_id;
         while received < 16 {
-            let pending = self.shared.pending();
+            let shared = &self.shared;
             let mut outcome = Ok(Outcome::Nothing);
             let got = self.receiver.receive(|type_id, message| {
-                outcome = event(client_id, pending, type_id, message);
+                outcome = event(client_id, shared.pending(), type_id, message);
             });
             match got {
                 Ok(true) => {
                     received += 1;
-                    match outcome? {
+                    let outcome = outcome?;
+                    if outcome != Outcome::Nothing {
+                        self.admit();
+                    }
+                    match outcome {
                         Outcome::Nothing => {}
                         Outcome::Answer(response) => {
                             // Full means the caller gave up on several answers in a row and
@@ -377,11 +387,7 @@ impl Conductor {
         log_id: i64,
         source_identity: String,
     ) -> Result<(), Closed> {
-        let Some(index) = self
-            .subscriptions
-            .iter()
-            .position(|registration| registration.registration_id == subscriber_registration_id)
-        else {
+        let Some(registration) = self.registry.get(subscriber_registration_id) else {
             return Ok(());
         };
         let log = LogBuffers::open(&self.dir, log_id, false).map_err(|_| Closed::Corrupt)?;
@@ -389,7 +395,7 @@ impl Conductor {
             .ok()
             .and_then(|id| self.counters.counter(id).ok())
             .ok_or(Closed::Corrupt)?;
-        self.subscriptions[index]
+        registration
             .images
             .offer(ImageEvent::Available {
                 correlation_id,
@@ -408,17 +414,79 @@ impl Conductor {
         correlation_id: i64,
         subscriber_registration_id: i64,
     ) -> Result<(), Closed> {
-        let Some(index) = self
-            .subscriptions
-            .iter()
-            .position(|registration| registration.registration_id == subscriber_registration_id)
-        else {
+        let Some(registration) = self.registry.get(subscriber_registration_id) else {
             return Ok(());
         };
-        self.subscriptions[index]
+        registration
             .images
             .offer(ImageEvent::Unavailable { correlation_id })
             .map_err(|_| Closed::Overrun)
+    }
+}
+
+/// The subscriptions one client holds, by registration id, with the queues to each:
+/// bounded, and never full in silence.
+pub(crate) struct Registry {
+    subscriptions: Vec<Registration>,
+    capacity: usize,
+}
+
+impl Registry {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            subscriptions: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Admits `registration`, sweeping first when the registry is full. Still full, the
+    /// registration is dropped here and the call returns `false`: its subscription's
+    /// halves of the two queues see their peer dropped, and `add subscription`, which
+    /// looks after the answer, removes the subscription and returns
+    /// [`crate::ClientError::SubscriptionsFull`]. A subscription is refused, never left
+    /// without its images.
+    pub(crate) fn admit(&mut self, registration: Registration) -> bool {
+        if self.subscriptions.len() >= self.capacity {
+            self.sweep();
+        }
+        if self.subscriptions.len() >= self.capacity {
+            drop(registration);
+            return false;
+        }
+        self.subscriptions.push(registration);
+        true
+    }
+
+    /// Drops the mappings the subscriptions retired, and forgets a registration whose
+    /// subscription is gone, which its queue's dropped half says. Returns the work done.
+    pub(crate) fn sweep(&mut self) -> usize {
+        let mut work = 0;
+        let mut index = 0;
+        while index < self.subscriptions.len() {
+            while let Some(retired) = self.subscriptions[index].retired.poll() {
+                drop(retired);
+                work += 1;
+            }
+            if self.subscriptions[index].images.peer_dropped() {
+                self.subscriptions.swap_remove(index);
+                work += 1;
+            } else {
+                index += 1;
+            }
+        }
+        work
+    }
+
+    /// The registration of the subscription with `registration_id`.
+    pub(crate) fn get(&mut self, registration_id: i64) -> Option<&mut Registration> {
+        self.subscriptions
+            .iter_mut()
+            .find(|registration| registration.registration_id == registration_id)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.subscriptions.len()
     }
 }
 
@@ -561,9 +629,79 @@ fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<O
 
 #[cfg(test)]
 mod tests {
-    use super::{NO_PENDING, Outcome, event, log_id};
+    use cavalry_shm::spsc;
+
+    use super::{MAX_SUBSCRIPTIONS, NO_PENDING, Outcome, Registry, event, log_id};
     use crate::error::Closed;
     use crate::response::Response;
+    use crate::subscription::{ImageEvent, Registration, Retired};
+
+    /// A registration and the subscription's halves of its two queues.
+    fn registration(
+        registration_id: i64,
+    ) -> (
+        Registration,
+        spsc::Consumer<ImageEvent>,
+        spsc::Producer<Retired>,
+    ) {
+        let (images, incoming) = spsc::queue::<ImageEvent>(2);
+        let (retired, retired_consumer) = spsc::queue::<Retired>(2);
+        (
+            Registration {
+                registration_id,
+                images,
+                retired: retired_consumer,
+            },
+            incoming,
+            retired,
+        )
+    }
+
+    #[test]
+    fn a_full_registry_sweeps_then_refuses_and_its_subscription_sees_the_refusal() {
+        let mut registry = Registry::with_capacity(MAX_SUBSCRIPTIONS);
+        let mut held = Vec::with_capacity(MAX_SUBSCRIPTIONS);
+        for id in 0..MAX_SUBSCRIPTIONS as i64 {
+            let (registration, incoming, retired) = registration(id);
+            assert!(registry.admit(registration));
+            held.push((incoming, retired));
+        }
+        assert_eq!(registry.len(), MAX_SUBSCRIPTIONS);
+
+        // Full, with every subscription alive: the next is refused, and its
+        // subscription's halves see their peer dropped, which `add subscription` reports.
+        let over = MAX_SUBSCRIPTIONS as i64;
+        let (refused, incoming, retired) = registration(over);
+        assert!(!registry.admit(refused));
+        assert!(incoming.peer_dropped());
+        assert!(retired.peer_dropped());
+        assert!(registry.get(over).is_none());
+        assert_eq!(registry.len(), MAX_SUBSCRIPTIONS);
+
+        // A subscription dropped, then another added before any cycle swept: the
+        // admission sweeps first, and the new one takes the place.
+        drop(held.swap_remove(0));
+        let (admitted, incoming, _retired) = registration(over + 1);
+        assert!(registry.admit(admitted));
+        assert!(!incoming.peer_dropped());
+        assert!(registry.get(0).is_none());
+        assert!(registry.get(over + 1).is_some());
+        assert_eq!(registry.len(), MAX_SUBSCRIPTIONS);
+    }
+
+    #[test]
+    fn a_sweep_forgets_a_registration_whose_subscription_is_gone() {
+        let mut registry = Registry::with_capacity(4);
+        let (first, first_incoming, first_retired) = registration(1);
+        let (second, _second_incoming, _second_retired) = registration(2);
+        assert!(registry.admit(first));
+        assert!(registry.admit(second));
+        drop((first_incoming, first_retired));
+        assert_eq!(registry.sweep(), 1);
+        assert!(registry.get(1).is_none());
+        assert!(registry.get(2).is_some());
+        assert_eq!(registry.sweep(), 0);
+    }
 
     // Vectors from `spec/vectors/client-protocol.json`, by name.
 

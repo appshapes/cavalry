@@ -8,6 +8,7 @@
 //! goes, so that the poll never opens or unmaps a file.
 
 use std::fmt;
+use std::sync::Arc;
 
 use cavalry_proto::client_protocol::Command;
 use cavalry_proto::frame::DataFrameHeader;
@@ -16,7 +17,7 @@ use cavalry_shm::counters::Counter;
 use cavalry_shm::log::{LogBuffers, LogError, TermReader};
 use cavalry_shm::spsc;
 
-use crate::conductor::now_nanos;
+use crate::conductor::{Shared, now_nanos};
 use crate::error::ClientError;
 
 /// How many image events may wait for a subscription between two polls.
@@ -61,8 +62,10 @@ pub(crate) struct Registration {
 }
 
 /// Why a poll could not go on. A fault names the image it retired; the subscription
-/// keeps its other images and the next poll continues with them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// keeps its other images and the next poll continues with them. A poll that faults
+/// returns the fault and not the count: the fragments it handed over before the fault
+/// were delivered, and the handler is the place that counts them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
     /// A frame of the image failed a check of `spec/frame.md`, or the join position was
     /// outside the log: nothing from it on is delivered, and the image is retired. A
@@ -73,7 +76,7 @@ pub enum Fault {
         /// The reader's position when the check failed.
         position: i64,
         /// The check that failed, as the log page names it.
-        reason: String,
+        reason: &'static str,
     },
     /// The subscription holds [`MAX_IMAGES`] images and the driver announced another; it
     /// is retired unread, and its publisher sees a subscriber that never moves.
@@ -81,7 +84,10 @@ pub enum Fault {
         /// The image's session id.
         session_id: i32,
     },
-    /// The subscription was closed.
+    /// The client this subscription belongs to is closed, by [`crate::Cavalry::close`]
+    /// or by what its conductor found, and [`crate::Cavalry::closed`] says which: no
+    /// image comes or goes from here, so nothing more is read, as Aeron's closed
+    /// subscription reads nothing.
     Closed,
 }
 
@@ -120,7 +126,8 @@ impl fmt::Display for Fault {
             ),
             Fault::Closed => write!(
                 f,
-                "poll refused ({reason}): the subscription is closed; add a new one; see {DOC}"
+                "poll refused ({reason}): the client is closed, and Cavalry::closed says why; \
+                 connect a new client and add the subscription again; see {DOC}"
             ),
         }
     }
@@ -190,21 +197,25 @@ pub struct Subscription {
     stream_id: i32,
     channel: String,
     client_id: i64,
+    shared: Arc<Shared>,
     producer: Producer,
     images: Vec<Image>,
     incoming: spsc::Consumer<ImageEvent>,
     retired: spsc::Producer<Retired>,
     next: usize,
-    closed: bool,
+    /// Whether `remove subscription` was sent, so that `close` and `Drop` send it once.
+    removed: bool,
     scratch: Vec<u8>,
 }
 
 impl Subscription {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         registration_id: i64,
         stream_id: i32,
         channel: String,
         client_id: i64,
+        shared: Arc<Shared>,
         producer: Producer,
         incoming: spsc::Consumer<ImageEvent>,
         retired: spsc::Producer<Retired>,
@@ -214,12 +225,13 @@ impl Subscription {
             stream_id,
             channel,
             client_id,
+            shared,
             producer,
             images: Vec::with_capacity(MAX_IMAGES),
             incoming,
             retired,
             next: 0,
-            closed: false,
+            removed: false,
             scratch: vec![0u8; 64],
         }
     }
@@ -230,12 +242,14 @@ impl Subscription {
     /// Images the driver announced since the last poll join first; the images are
     /// polled in turn, starting one further along each call. Returns how many fragments
     /// were delivered, or the [`Fault`] that stopped the poll, with what was delivered
-    /// before it already handed over. Nothing here allocates, locks, opens or unmaps.
+    /// before it already handed over and not counted in the result. A client that is
+    /// closed is [`Fault::Closed`], one acquire load per poll. Nothing here allocates,
+    /// locks, opens or unmaps, on the fault path either.
     pub fn poll<F>(&mut self, mut handler: F, fragment_limit: usize) -> Result<usize, Fault>
     where
         F: FnMut(&[u8], &DataFrameHeader),
     {
-        if self.closed {
+        if self.shared.closed().is_some() {
             return Err(Fault::Closed);
         }
         self.apply_events()?;
@@ -269,7 +283,7 @@ impl Subscription {
             let fault = Fault::Image {
                 session_id: image.session_id,
                 position: image.position(),
-                reason: error.reason().to_string(),
+                reason: error.reason(),
             };
             self.retire(image);
             return Err(fault);
@@ -300,7 +314,7 @@ impl Subscription {
                             return Err(Fault::Image {
                                 session_id,
                                 position: join,
-                                reason: error.reason().to_string(),
+                                reason: error.reason(),
                             });
                         }
                     };
@@ -379,9 +393,11 @@ impl Subscription {
         &self.channel
     }
 
-    /// Whether [`Subscription::close`] was called.
+    /// Whether the client this subscription belongs to is closed, so that every poll
+    /// from here is [`Fault::Closed`]. [`Subscription::close`] consumes the handle, so a
+    /// subscription the caller still holds is closed only with its client.
     pub fn is_closed(&self) -> bool {
-        self.closed
+        self.shared.closed().is_some()
     }
 
     /// Sends `remove subscription`, so the driver withdraws this subscription's images
@@ -393,10 +409,10 @@ impl Subscription {
     }
 
     fn remove(&mut self) {
-        if self.closed {
+        if self.removed {
             return;
         }
-        self.closed = true;
+        self.removed = true;
         let command = Command::RemoveSubscription {
             client_id: self.client_id,
             correlation_id: self.producer.next_correlation_id(),
@@ -426,7 +442,7 @@ impl fmt::Debug for Subscription {
             .field("stream_id", &self.stream_id)
             .field("channel", &self.channel)
             .field("images", &self.images.len())
-            .field("closed", &self.closed)
+            .field("closed", &self.is_closed())
             .finish()
     }
 }
