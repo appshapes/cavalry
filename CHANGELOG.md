@@ -318,5 +318,7 @@ user-visible change, added in the same commit as the change. The format follows
   says it is at most a millisecond behind the publisher.
 - `just bench`'s conductor thread loads the publisher's producer position at most once
   per millisecond, the driver's cadence from ADR 0022, so the raw rows measure the log
-  buffer and not the harness's loads of the publisher's cache line; the bench host's
-  baseline is re-recorded from this change's run in the commit that follows.
+  buffer and not the harness's loads of the publisher's cache line. The raw
+  `claim_commit` rows fall by a quarter at p99.99 on the bench host; the raw `one_way`
+  rows' p50 falls and their p99.99 rises, so the host's baseline needs re-recording from
+  this change's run before it merges, a person's decision.

@@ -125,6 +125,14 @@ the gate fails only on the dedicated bench host is
   every row of the same commit repeated within 1 percent at p99.99 over three runs, so
   a regression there is not noise; check the host first with `bench/host/check.sh`,
   which the job also runs.
+- `REGRESSION` after a change to `bench/` only, with no data-plane crate changed: the
+  tail moved with the harness, not with the log. A tail of 0.01 percent moves with the
+  binary's layout, and a harness whose publisher runs faster queues more messages behind
+  the subscriber's slowest polls, so `one_way_*` can rise at p99.99 while its p50 and
+  `claim_commit_*` fall
+  ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A person
+  decides whether to re-record the baseline from that run, as step 4 says, in a commit
+  whose message names the harness change and carries both histograms.
 - `no baseline for profile`: expected on a laptop and on a shared runner. On the bench
   host it means the baseline was not recorded yet; record one as step 4 says.
 - `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the
