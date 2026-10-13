@@ -54,7 +54,7 @@ the gate fails only on the dedicated bench host is
    | `timer` | Two `Instant::now()` calls back to back: the harness's own overhead, present in every other row. |
    | `claim_commit_<body>` | The publisher's `try_claim`, writing the body, and `commit`, for a body of that many bytes. |
    | `one_way_<body>` | From the publisher's timestamp before its claim to the subscriber's handler receiving the frame, across two threads. |
-   | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor reads the publisher's tail on its duty cycle, as a user's does. |
+   | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor loads the publisher's tail at most once per millisecond on its duty cycle (ADR 0022), as a user's does. |
    | `one_way_<body>_client` | From the publisher's timestamp to `Subscription::poll`'s handler, through a real driver and the client's conductor hand-off; the path a user's message takes (ADR 0021). |
    | `slot_padding_<spacing>_load` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
    | `slot_padding_<spacing>_store` | The other side of the same pair: one store while the other thread loads. |
@@ -80,10 +80,14 @@ the gate fails only on the dedicated bench host is
    more than 5 percent above the baseline is a regression and the recipe exits 1; when
    the baseline was recorded with `--repeat`, the baseline's slowest run is the number
    compared, so a commit fails when its median tail is slower than anything the baseline
-   measured, by more than 5 percent. On the bench host that is the 5 percent rule on
-   every row but one: `claim_commit_32_exclusive` lands anywhere between 270 and 430 ns
-   at p99.99 from one process to the next, for a reason not found yet, and on that row
-   the rule is only as sharp as that band (ADR 0016). Only the rows a message passes
+   measured, by more than 5 percent. On the bench host that was the 5 percent rule on
+   every row but one: `claim_commit_32_exclusive` landed anywhere between 270 and 430 ns
+   at p99.99 from one process to the next, which was the harness's own conductor
+   loading the publisher's tail on every spin; with that load at the driver's cadence
+   ([ADR 0022](../decisions/0022-load-the-producer-position-once-per-millisecond.md))
+   the row's runs sit between 210 and 250 ns, and it is compared against the old
+   baseline's slowest run until a person re-records the baseline, which closes
+   ADR 0016's Revisit. Only the rows a message passes
    through, `claim_commit_*` and `one_way_*`, can fail; the `timer` and
    `slot_padding_*` rows run no Cavalry code and sit where one 10 ns step of the clock
    is 15 to 33 percent, so their change is printed and marked `reported`
@@ -125,6 +129,16 @@ the gate fails only on the dedicated bench host is
   every row of the same commit repeated within 1 percent at p99.99 over three runs, so
   a regression there is not noise; check the host first with `bench/host/check.sh`,
   which the job also runs.
+- `REGRESSION` after a change to `bench/` only, with no data-plane crate changed: the
+  tail moved with the harness, not with the log. What a spinning harness thread does on
+  every spin reaches the other two threads: a clock read on every spin of the conductor
+  cost the raw rows about 100 ns at p99.99 on the bench host, in each of the processes
+  measured, while the `_client` rows, whose driver reads its clock once per duty cycle,
+  did not move. Before believing one run, run the same binary in several
+  processes on the host and compare their medians, since one process lands in one mode
+  ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A person
+  decides whether to re-record the baseline from that run, as step 4 says, in a commit
+  whose message names the harness change and carries both histograms.
 - `no baseline for profile`: expected on a laptop and on a shared runner. On the bench
   host it means the baseline was not recorded yet; record one as step 4 says.
 - `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the

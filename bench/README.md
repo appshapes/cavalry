@@ -9,7 +9,9 @@ nothing depends on it.
 - Drives `cavalry-shm` directly, with no driver process yet: a publisher thread claims and
   commits into a real log buffer, a subscriber thread reads it through its own read-only
   mapping, and a conductor thread does the driver's duties, the publisher limit and the
-  cleaning, through a real counters file, all under `/dev/shm` on Linux and the system's
+  cleaning, loading the producer position about once per millisecond as the driver does
+  (ADR 0022; counted in spins, since a clock read per spin costs the other threads),
+  through a real counters file, all under `/dev/shm` on Linux and the system's
   temporary directory elsewhere. The warm-up before recording is one rotation through
   all three terms, so no measured message first-touches a page. `--pin P,S,C` binds the
   three threads to those CPUs on Linux, and `--repeat N` runs everything N times and
