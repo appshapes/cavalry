@@ -32,7 +32,6 @@ pub enum CatalogError {
         /// The id asked for.
         recording_id: i64,
     },
-    /// The descriptor given to [`CatalogWriter::rewrite`] is not the one its slot holds.
     /// A write the page does not define: a stop on a recording that is not live, a
     /// delete of one that is live or already deleted, an invalidation of one already
     /// invalid. Nothing is written.
@@ -44,7 +43,8 @@ pub enum CatalogError {
         /// What the write needed.
         needed: &'static str,
     },
-    /// A descriptor's creation fields are not the slot's: another recording's descriptor.
+    /// The descriptor given to [`CatalogWriter::rewrite`] is not the one its slot holds:
+    /// its creation fields are another recording's.
     Mismatch {
         /// The slot.
         recording_id: i64,
