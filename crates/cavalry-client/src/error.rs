@@ -34,11 +34,15 @@ pub enum Closed {
     /// check (`too-short`, `type`, `string` or `length`): corrupt, not the driver's, or
     /// from a driver of another version.
     Corrupt,
+    /// The driver announced or withdrew images faster than a subscription polled: its
+    /// image queue was full, and a client that cannot keep its images is not told what it
+    /// reads (ADR 0021).
+    Overrun,
 }
 
 impl Closed {
     /// The reason's name: `by-user`, `driver-closed`, `driver-timeout`,
-    /// `client-timeout`, `lapped` or `corrupt`.
+    /// `client-timeout`, `lapped`, `corrupt` or `overrun`.
     pub const fn reason(self) -> &'static str {
         match self {
             Closed::ByUser => "by-user",
@@ -47,6 +51,7 @@ impl Closed {
             Closed::ClientTimeout => "client-timeout",
             Closed::Lapped => "lapped",
             Closed::Corrupt => "corrupt",
+            Closed::Overrun => "overrun",
         }
     }
 
@@ -58,6 +63,7 @@ impl Closed {
             Closed::ClientTimeout => 4,
             Closed::Lapped => 5,
             Closed::Corrupt => 6,
+            Closed::Overrun => 7,
         }
     }
 
@@ -69,6 +75,7 @@ impl Closed {
             4 => Some(Closed::ClientTimeout),
             5 => Some(Closed::Lapped),
             6 => Some(Closed::Corrupt),
+            7 => Some(Closed::Overrun),
             _ => None,
         }
     }
@@ -193,6 +200,10 @@ impl fmt::Display for ClientError {
                          from the driver failed a decoding check: run `cavalry doctor`, check that \
                          the driver and the client are the same version, then restart the driver, \
                          which remakes its files",
+                    Closed::Overrun =>
+                        "images were announced faster than a subscription polled, and its queue \
+                         filled; connect a new client, and poll each subscription at least every \
+                         few hundred image changes",
                 }
             ),
             ClientError::Refused {

@@ -16,6 +16,8 @@ pub(crate) enum Response {
         log_file_name: String,
         exclusive: bool,
     },
+    /// `subscription ready`.
+    SubscriptionReady { correlation_id: i64 },
     /// `operation success`.
     Success { correlation_id: i64 },
     /// `error`, with Aeron's code and the driver's message.
@@ -30,6 +32,7 @@ impl Response {
     pub(crate) fn correlation_id(&self) -> i64 {
         match self {
             Response::PublicationReady { correlation_id, .. }
+            | Response::SubscriptionReady { correlation_id }
             | Response::Success { correlation_id }
             | Response::Error { correlation_id, .. } => *correlation_id,
         }

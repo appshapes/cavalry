@@ -32,12 +32,9 @@ In Aeron, this is the client, with `tryClaim` and `commit`
 
 ## Example
 
-Attach to the driver running on this host, add a publication and try to publish. With
-no subscriber yet the claim is refused with `not-connected`, which is the back-pressure
-shape every refusal has: a result the caller decides on, never a message absorbed.
-`cavalry run` in another terminal is the usual driver; the doctest embeds one.
-Subscriptions arrive with the next commit of card 87, and this example grows into the
-ten-minute path.
+One process publishes and subscribes through the driver on this host: this is the
+ten-minute path's program, and the crate's doctest. `cavalry run` in another terminal is
+the usual driver; the doctest embeds one.
 
 ```rust
 use cavalry_client::{Cavalry, Offer};
@@ -49,21 +46,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // `Cavalry::connect()` reads CAVALRY_DIR or the default directory; this names one.
     let mut client = Cavalry::connect_to(&dir)?;
+    let mut subscription = client.add_subscription("cavalry:ipc", 1001)?;
     let mut publication = client.add_publication("cavalry:ipc", 1001)?;
-    println!("publication {} on stream {}", publication.session_id(), publication.stream_id());
 
-    // Claim a frame, write in place, commit: nothing copied, nothing allocated. No
-    // subscriber has joined, so the driver holds the publisher at `not-connected`.
-    match publication.try_claim(5) {
-        Ok(mut claim) => {
-            claim.body().copy_from_slice(b"hello");
-            claim.commit();
+    // Publish by claim and commit: write in place, nothing copied, nothing allocated.
+    // Until the subscription's image joins, the driver answers `not-connected`.
+    loop {
+        match publication.try_claim(5) {
+            Ok(mut claim) => {
+                claim.body().copy_from_slice(b"hello");
+                claim.commit();
+                break;
+            }
+            Err(Offer::NotConnected | Offer::BackPressured | Offer::AdminAction) => {
+                subscription.poll(|_, _| {}, 1)?;
+            }
+            Err(other) => return Err(other.into()),
         }
-        Err(Offer::NotConnected) => println!("no subscriber yet: nothing lost, try later"),
-        Err(other) => return Err(other.into()),
     }
 
+    // Subscribe by polling: each fragment is a view into the log, with its header.
+    let mut received = None;
+    while received.is_none() {
+        subscription.poll(|body, header| received = Some((body.to_vec(), header.session_id())), 10)?;
+    }
+    let (body, session) = received.unwrap();
+    println!("received {:?} from session {session}", std::str::from_utf8(&body)?);
+
     publication.close()?;
+    subscription.close()?;
     client.close()?;
     driver.close()?;
     std::fs::remove_dir_all(&dir).ok();
@@ -71,9 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Running it prints two lines, such as `publication -1716223105 on stream 1001` and
-`no subscriber yet: nothing lost, try later`. A directory with no driver is refused with
-what to do:
+Running it prints one line, such as `received "hello" from session -1716223105`. A
+directory with no driver is refused with what to do:
 
 ```text
 client refused (not-found): no driver at /tmp/nowhere; start one with `cavalry run`, or set CAVALRY_DIR to the directory of the driver to use; see docs/reference/client-protocol.md#the-driver-directory

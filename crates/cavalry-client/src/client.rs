@@ -11,17 +11,20 @@ use cavalry_proto::client_protocol::{Command, ErrorCode};
 use cavalry_shm::broadcast::BroadcastBuffer;
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, Producer};
-use cavalry_shm::counters::CountersReader;
+use cavalry_shm::counters::{CountersReader, CountersWriter};
 use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
 use crate::conductor::{
-    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, NO_PENDING, RESPONSE_QUEUE, RESPONSE_TIMEOUT,
-    Shared, nanos, now_nanos,
+    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, NO_PENDING, REGISTRATION_QUEUE, RESPONSE_QUEUE,
+    RESPONSE_TIMEOUT, Shared, nanos, now_nanos,
 };
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
 use crate::response::Response;
+use crate::subscription::{
+    IMAGE_QUEUE, ImageEvent, RETIRE_QUEUE, Registration, Retired, Subscription,
+};
 
 /// The environment variable that names the driver directory (`config.toml`, `dir`;
 /// ADR 0020). Clients read the same key the driver does.
@@ -40,6 +43,7 @@ pub struct Cavalry {
     ring: CommandRing,
     counters: CountersReader,
     responses: spsc::Consumer<Response>,
+    registrations: spsc::Producer<Registration>,
     conductor: Option<JoinHandle<()>>,
     scratch: Vec<u8>,
 }
@@ -117,13 +121,19 @@ impl Cavalry {
 
         let shared = Arc::new(Shared::new(now_nanos()));
         let (response_producer, responses) = spsc::queue::<Response>(RESPONSE_QUEUE);
+        let (registrations, registration_consumer) =
+            spsc::queue::<Registration>(REGISTRATION_QUEUE);
         let conductor_ring = CommandRing::open(&dir, true)?;
+        let counters_writer = CountersWriter::open(&dir)?;
         let conductor = Conductor::new(
+            dir.clone(),
             conductor_ring,
             conductor_producer,
             receiver,
+            counters_writer,
             Arc::clone(&shared),
             response_producer,
+            registration_consumer,
             client_id,
         );
         let handle = std::thread::Builder::new()
@@ -142,9 +152,71 @@ impl Cavalry {
             ring,
             counters,
             responses,
+            registrations,
             conductor: Some(handle),
             scratch,
         })
+    }
+
+    /// Adds a subscription on `channel` and `stream_id`: one image per publication on
+    /// them, joining at the publisher's position, now and as publications come and go
+    /// (`spec/client-protocol.md`, "Commands"). Waits for the driver's answer up to the
+    /// response timeout. The channel must be `cavalry:ipc` in this version.
+    pub fn add_subscription(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+    ) -> Result<Subscription, ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let (images, incoming) = spsc::queue::<ImageEvent>(IMAGE_QUEUE);
+        let (retired, retired_consumer) = spsc::queue::<Retired>(RETIRE_QUEUE);
+        // Registered before the command goes, so that the first image, which follows the
+        // answer, finds its subscription; the conductor drains this queue every cycle.
+        let mut registration = Registration {
+            registration_id: correlation_id,
+            images,
+            retired: retired_consumer,
+        };
+        let deadline = Instant::now() + RESPONSE_TIMEOUT;
+        loop {
+            match self.registrations.offer(registration) {
+                Ok(()) => break,
+                Err(back) => {
+                    registration = back;
+                    if let Some(reason) = self.shared.closed() {
+                        return Err(ClientError::Closed(reason));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(ClientError::ResponseTimeout {
+                            command: "add subscription",
+                        });
+                    }
+                    std::thread::sleep(Duration::from_micros(50));
+                }
+            }
+        }
+        let command = Command::AddSubscription {
+            client_id: self.client_id,
+            correlation_id,
+            stream_id,
+            channel: channel.as_bytes(),
+        };
+        // On a refusal the queue halves drop with `incoming` and `retired`, and the
+        // conductor sweeps the registration on its next cycle.
+        match self.request(&command, correlation_id, "add subscription")? {
+            Response::SubscriptionReady { .. } => Ok(Subscription::new(
+                correlation_id,
+                stream_id,
+                channel.to_string(),
+                self.client_id,
+                self.ring.producer(DRIVER_TIMEOUT)?,
+                incoming,
+                retired,
+            )),
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to add subscription"),
+            }),
+        }
     }
 
     /// Adds a publication on `channel` and `stream_id`, shared with every other
