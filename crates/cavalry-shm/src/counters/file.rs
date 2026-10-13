@@ -345,10 +345,46 @@ impl fmt::Debug for Counter {
     }
 }
 
+/// A reader's handle on one counter's value, from [`CountersReader::value`]: the
+/// read-only side of [`Counter`]. One load per call, nothing checked, nothing allocated;
+/// `Clone`, `Send` and `Sync`, and it keeps the mapping alive on its own.
+#[derive(Clone)]
+pub struct CounterValue {
+    mapped: Arc<Mapped>,
+    offset: usize,
+    id: u32,
+}
+
+impl CounterValue {
+    /// The counter's id.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// The value, relaxed: a counter nobody branches on.
+    pub fn get(&self) -> i64 {
+        self.mapped.slot_at(self.offset).get()
+    }
+
+    /// The value with an acquire load: a limit or a position, whose owner stored it with
+    /// release after writing what the value publishes (`spec/log-buffer.md`).
+    pub fn load_acquire(&self) -> i64 {
+        self.mapped.slot_at(self.offset).get_acquire()
+    }
+}
+
+impl fmt::Debug for CounterValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CounterValue")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
 /// A read-only view of a counters file: what clients, `cavalry doctor` and the control
 /// plane hold. It never writes the file; its mapping is read-only.
 pub struct CountersReader {
-    mapped: Mapped,
+    mapped: Arc<Mapped>,
 }
 
 impl CountersReader {
@@ -388,7 +424,9 @@ impl CountersReader {
         if second != first {
             return Err(CountersError::Changed);
         }
-        Ok(Self { mapped })
+        Ok(Self {
+            mapped: Arc::new(mapped),
+        })
     }
 
     /// The header's fields: capacity, creator pid and start timestamp.
@@ -427,6 +465,25 @@ impl CountersReader {
             return Err(CountersError::Unallocated { id });
         }
         Ok(self.mapped.slot(id)?.get_acquire())
+    }
+
+    /// A handle on counter `id`'s value for a reader's hot loop: the slot is resolved
+    /// once, here, with the checks of [`CountersReader::read`], and each
+    /// [`CounterValue::load_acquire`] after is one acquire load with no check, no
+    /// allocation and no panic path. A publisher reads its `publication.limit` this way
+    /// on every claim (`spec/log-buffer.md`, "Claim, commit and abort"; ADR 0013). The
+    /// record may be freed and reused under the handle, as any counter may; the owner of
+    /// the instance the counter belongs to is told so by the driver first (ADR 0019).
+    pub fn value(&self, id: u32) -> Result<CounterValue, CountersError> {
+        if self.mapped.record(id)?.state()? != State::Allocated {
+            return Err(CountersError::Unallocated { id });
+        }
+        let offset = self.mapped.fields.slot_offset(id)?;
+        Ok(CounterValue {
+            mapped: Arc::clone(&self.mapped),
+            offset,
+            id,
+        })
     }
 }
 

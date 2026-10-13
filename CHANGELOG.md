@@ -250,3 +250,6 @@ user-visible change, added in the same commit as the change. The format follows
   one process with one producer and one consumer, for the client's conductor to hand
   images to the user's thread; `offer` returns the item when the queue is full, and the
   protocol has a `loom` model and runs under Miri.
+- `cavalry-shm`'s `CountersReader::value` gives a reader a handle on one counter's
+  value, resolved once, so a publisher reads its limit with one acquire load per claim
+  and no check in its hot loop.

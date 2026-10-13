@@ -67,7 +67,7 @@ pub mod generated;
 pub mod layout;
 
 #[cfg(not(loom))]
-pub use file::{Counter, CountersFile, CountersReader};
+pub use file::{Counter, CounterValue, CountersFile, CountersReader};
 
 /// The `id` of an entry in `counters.toml`: the type id of every record allocated for
 /// that entry, 0 or more. A static counter also occupies the record at this index
