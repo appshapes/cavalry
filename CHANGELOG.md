@@ -237,3 +237,12 @@ user-visible change, added in the same commit as the change. The format follows
   `conductor.idle_strategy` (0 backoff, 1 yield, 2 busy-spin), and `IdleStrategy` has
   a name, `backoff`, `yield` or `busy-spin`, and parses one, so that `doctor` can say
   which strategy a running driver uses from the counters file alone.
+- Configuration keys exist, two of them: `dir` (`CAVALRY_DIR`, `--dir` on `cavalry run`
+  and `cavalry doctor`) and `conductor.idle.strategy` (`CAVALRY_CONDUCTOR_IDLE_STRATEGY`,
+  `backoff`, `yield` or `busy-spin`). Every key lives in `config.toml` with its
+  `why_not_default` and its `doctor` check; `docs/reference/config.md` and the key table
+  in `cavalry-control` are generated from it, and `just lint-config`, now in `just lint`,
+  fails a key without them. `doctor` warns when the driver directory is not on a
+  filesystem in memory and when the conductor busy-spins with no isolated CPU, and notes
+  isolated CPUs a backoff conductor is not using. A value a key does not take stops the
+  command before anything starts, with what to do (ADR 0020).

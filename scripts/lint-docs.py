@@ -19,8 +19,9 @@ Checks:
           the first dotted segment of every counter name in counters.toml, underscores
           read as spaces, is a term in docs/glossary.md or the first word of one
           (`counters.allocated` needs "counters file", `log_buffer.rejected_frame` needs
-          "log buffer"), so every counter name has a row (.claude/rules/docs.md,
-          Glossary; CLAUDE.md, invariant 6)
+          "log buffer"), so every counter name has a row; and the `term` of every key in
+          config.toml is a term in docs/glossary.md (.claude/rules/docs.md, Glossary;
+          CLAUDE.md, invariant 6)
   change  over the range: a change to a public item (a line with `pub ` in a crate's
           src/), to spec/, counters.toml or config.toml needs a change under docs/ or to
           a README; a change to spec/ needs an ADR in the same change whose Status is
@@ -49,6 +50,7 @@ SUMMARY = DOCS / "SUMMARY.md"
 DECISIONS = DOCS / "decisions"
 GLOSSARY = DOCS / "glossary.md"
 COUNTERS = ROOT / "counters.toml"
+CONFIG = ROOT / "config.toml"
 
 STATUSES = re.compile(r"^- \*\*Status:\*\* (Proposed|Accepted|Superseded by \d{4}|Rejected)\s*$")
 ADR_NAME = re.compile(r"^(\d{4})-[a-z0-9-]+\.md$")
@@ -200,19 +202,29 @@ def glossary_terms() -> set[str]:
     return terms
 
 
-def check_glossary() -> int:
-    if not COUNTERS.exists():
-        return 0
+def check_glossary() -> tuple[int, int]:
     terms = glossary_terms()
     first_words = {t.split()[0] for t in terms if t}
-    names = re.findall(r'^name\s*=\s*"([^"]+)"', COUNTERS.read_text(encoding="utf-8"), re.M)
+    names: list[str] = []
+    if COUNTERS.exists():
+        names = re.findall(r'^name\s*=\s*"([^"]+)"', COUNTERS.read_text(encoding="utf-8"), re.M)
     for name in names:
         segment = name.split(".", 1)[0].replace("_", " ")
         if segment not in terms and segment not in first_words:
             find(f"glossary: counter `{name}` begins with `{segment}`, which is not a term in "
                  "docs/glossary.md or the first word of one; add a row (.claude/rules/docs.md, "
                  "Glossary)")
-    return len(names)
+    config_terms: list[str] = []
+    if CONFIG.exists():
+        text = CONFIG.read_text(encoding="utf-8")
+        keys = re.findall(r'^name\s*=\s*"([^"]+)"', text, re.M)
+        config_terms = re.findall(r'^term\s*=\s*"([^"]+)"', text, re.M)
+        for key, term in zip(keys, config_terms):
+            if term.lower() not in terms:
+                find(f"glossary: config key `{key}` names the term `{term}`, which is not a row "
+                     "in docs/glossary.md; add the row, or name the one that defines what the "
+                     "key sets (.claude/rules/docs.md, Glossary)")
+    return len(names), len(config_terms)
 
 
 # ---- change -----------------------------------------------------------------------
@@ -329,8 +341,8 @@ def main(argv: list[str]) -> int:
     pages = check_pages()
     links = check_links()
     adrs = check_adrs()
-    counters = check_glossary()
-    summary = f"{pages} pages, {links} links, {adrs} ADRs, {counters} counters"
+    counters, keys = check_glossary()
+    summary = f"{pages} pages, {links} links, {adrs} ADRs, {counters} counters, {keys} config keys"
     if mode == "all":
         label, n = check_change()
         summary += f", {n} files changed in {label}"

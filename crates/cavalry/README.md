@@ -10,17 +10,21 @@ binary's `main`.
   can run with no separate daemon. Embedding is how the ten-minute path works on a
   laptop; one shared driver per host is the production shape. Today the driver is here
   and the client API arrives with its feature.
-- `cargo install cavalry` gives the `cavalry` binary: `run` starts a driver on the
-  default directory and stops it on Ctrl-C or SIGTERM, leaving the directory for
-  `doctor`; `doctor` explains the driver there from its counters and exits 0 when no
-  check failed; `replay` and `console` arrive with their features.
+- `cargo install cavalry` gives the `cavalry` binary: `run` starts a driver and stops
+  it on Ctrl-C or SIGTERM, leaving the directory for `doctor`; `doctor` explains the
+  driver from its counters and exits 0 when no check failed; `replay` and `console`
+  arrive with their features.
 - Control-plane and command-line dependencies sit behind the `cli` feature, on by
   default so that `cargo install cavalry` needs no flag. `cargo add cavalry --no-
   default-features` is the lean library build; it skips the binary and `doctor`.
-- Takes no arguments and no configuration: the directory is
+- Needs no arguments and no configuration: the directory is
   `spec/client-protocol.md`'s default, `/dev/shm/cavalry-<user>` on Linux and
-  `<tmp>/cavalry-<user>` elsewhere. A key, when one is justified, comes with its
-  `why_not_default` and its `doctor` check (invariant 5).
+  `<tmp>/cavalry-<user>` elsewhere, and the conductor backs off when idle. The two keys
+  of `config.toml` change that: `--dir <path>` on `run` and `doctor`, or `CAVALRY_DIR`,
+  and `CAVALRY_CONDUCTOR_IDLE_STRATEGY`, `backoff`, `yield` or `busy-spin`; the flag
+  wins over the variable, and a value a key does not take exits 2 before anything
+  starts, saying what to do. Each key carries its `why_not_default` and its `doctor`
+  check (invariant 5; ADR 0020), and `cavalry::config` is the reader behind both.
 
 In Aeron, this is the client library and the media driver, which are separate artifacts
 there ([glossary](../../docs/glossary.md)).
@@ -71,8 +75,9 @@ Running it prints the second report, failures first; on Linux the host checks ma
 warnings after the failure:
 
 ```text
-cavalry doctor: /tmp/cavalry-readme-4242, checks run: 13
+cavalry doctor: /tmp/cavalry-readme-4242, checks run: 14
   FAIL driver-heartbeat       the driver that made /tmp/cavalry-readme-4242 (pid 4242) closed; its counters below are the last it wrote; start a driver with `cavalry run`; see docs/reference/client-protocol.md#the-driver-directory
+  note driver-directory-backing whether /tmp/cavalry-readme-4242 is in memory cannot be read on this host: on macOS the directory is on disk, the best the default can do there; on Linux the default is a tmpfs, /dev/shm; see docs/reference/config.md#dir
   1 failed, 0 warnings
 ```
 
@@ -81,6 +86,9 @@ cavalry doctor: /tmp/cavalry-readme-4242, checks run: 13
 - [Run a driver and read doctor](../../docs/how-to/run-the-driver.md), the how-to for
   the binary, and [`spec/client-protocol.md`](../../spec/client-protocol.md), the
   directory, the commands and the events it keeps.
+- [Configuration](../../docs/reference/config.md), the two keys and how one is set, and
+  [ADR 0020](../../docs/decisions/0020-configure-by-environment-variable.md), why by
+  environment variable.
 - [`cavalry-driver`](../cavalry-driver/README.md), the driver behind `run`, and
   [`cavalry-control`](../cavalry-control/README.md), the checks behind `doctor`.
 - [ADR 0002](../../docs/decisions/0002-one-crate-named-cavalry.md), why this is the one

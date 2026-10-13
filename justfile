@@ -59,9 +59,9 @@ replay-check:
 quickstart:
     @echo "not built yet: quickstart (CLAUDE.md gate 5). The README path does not exist yet." && exit 1
 
-# clippy with workspace lints, fmt, the workspace lint and the counters lint below.
-# lint-config rejoins this list when it is built; until then it would fail it.
-lint: fmt-check clippy lint-workspace lint-counters
+# clippy with workspace lints, fmt, the workspace lint, the counters lint and the
+# configuration lint below.
+lint: fmt-check clippy lint-workspace lint-counters lint-config
 
 # The CLAUDE.md rules rustc and clippy cannot see: data-plane flags, the dependency
 # allowlist, no async on the data plane, unsafe only in two crates, the lock ban's
@@ -85,9 +85,16 @@ gen-counters:
 lint-counters:
     python3 scripts/gen-counters.py --check
 
-# Fail on a config key without why_not_default, a doctor check and a reference line.
+# config.toml is the single source of every configuration key (ADR 0020). gen-config
+# checks it and writes docs/reference/config.md and the key table in cavalry-control from
+# it; lint-config runs the same checks, fails when either generated file is stale, and
+# fails a key whose doctor check is not in doctor.rs with a test, whose flag the binary
+# does not parse, or whose constant the config module does not read.
+gen-config:
+    python3 scripts/gen-config.py
+
 lint-config:
-    @echo "not built yet: lint-config (CLAUDE.md gate 5)." && exit 1
+    python3 scripts/gen-config.py --check
 
 # rustdoc with warnings denied; the mdBook under target/book with any warning denied;
 # the book's Rust code blocks; and every relative link and anchor in docs/ and the

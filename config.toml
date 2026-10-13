@@ -1,0 +1,45 @@
+# Every configuration key Cavalry has, in one place (CLAUDE.md, invariant 5; ADR 0020).
+# docs/reference/config.md and the key table in cavalry-control are generated from this
+# file; `just lint-config` fails when they are stale, when an entry lacks a field, or
+# when a key's doctor check or flag does not exist in the code. Edit here, never there.
+#
+# A key is set by its flag on the `cavalry` binary when it has one, else by its
+# environment variable, else it is its default. The environment variable is derived:
+# CAVALRY_, then the name upper-cased with dots as underscores (`dir` is CAVALRY_DIR).
+# An empty value is an unset one. Zero configuration is the primary supported
+# configuration: every key here argues why its default cannot always be right.
+#
+# name:             lowercase, dotted, Aeron's name without its `aeron.` prefix where
+#                   the concept matches.
+# type:             "path", or "enum" with `values`, the names it takes, in the order
+#                   that numbers them where a counter records the value.
+# default:          the value when the key is not set; for a path, the rule in words.
+# flag:             the flag on `cavalry run` and `cavalry doctor`, for a key an
+#                   operator types interactively, or "" for a key set once in a unit
+#                   file or a container's environment.
+# term:             the glossary row that defines the thing the key sets.
+# doc:              one sentence for the reference page: what the key sets.
+# why_not_default:  why the default cannot always be right, in one or two sentences.
+# doctor:           the doctor check that fires when the key is set wrong.
+schema = 0
+
+[[key]]
+name = "dir"
+type = "path"
+default = "cavalry-<user> under /dev/shm on Linux when /dev/shm exists, else under the temporary directory"
+flag = "--dir"
+term = "driver directory"
+doc = "The driver directory: where the driver creates its counters file, command ring, broadcast buffer and log buffers, and where clients and doctor find it (spec/client-protocol.md, The driver directory). A relative path is relative to the working directory of the process that reads it."
+why_not_default = "One directory per host and user is right on a laptop and on a cloud VM, and wrong for two drivers on one host, for a container whose /dev/shm is 64 MiB or absent, and for a host whose memory-backed filesystem is mounted elsewhere; the default cannot know which host it is on."
+doctor = "driver-directory-backing"
+
+[[key]]
+name = "conductor.idle.strategy"
+type = "enum"
+values = ["backoff", "yield", "busy-spin"]
+default = "backoff"
+flag = ""
+term = "idle strategy"
+doc = "What the conductor's thread does on a duty cycle that found no work: backoff spins, then yields, then sleeps for longer and longer up to 1 ms; yield gives the CPU up on every idle cycle; busy-spin never leaves the CPU. The running driver records its choice in the conductor.idle_strategy counter."
+why_not_default = "Backoff is right on a laptop and on a cloud VM, where a spinning conductor would take a core from the clients; busy-spin is right on an isolated core, where backoff's sleep of up to 1 ms delays the limit a publisher waits on; the driver cannot tell from inside which core it was given."
+doctor = "conductor-idle-strategy"
