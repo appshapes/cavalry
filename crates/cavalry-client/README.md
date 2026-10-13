@@ -15,6 +15,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   per connected publisher.
 - Returns back-pressure as a result code when the receiver window or the log buffer is
   full. The caller decides what to do; the driver never buffers more.
+- Says when its client is gone. Once the client is closed, by `close` or because the
+  driver went, a publication's next refusal is `Offer::Closed` and every poll of a
+  subscription is `Fault::Closed`. A subscription the client cannot hold is refused with
+  `subscriptions-full`; it is never left open without its images.
 
 In Aeron, this is the client, with `tryClaim` and `commit`
 ([glossary](../../docs/glossary.md)).
@@ -32,13 +36,12 @@ In Aeron, this is the client, with `tryClaim` and `commit`
 
 ## Example
 
-Attach to the driver running on this host, see the client id the driver knows this
-process by, and close. `cavalry run` in another terminal is the usual driver; the
-doctest embeds one. Publications and subscriptions arrive with the next commits of card
-87, and this example grows into the ten-minute path.
+One process publishes and subscribes through the driver on this host: this is the
+ten-minute path's program, and the crate's doctest. `cavalry run` in another terminal is
+the usual driver; the doctest embeds one.
 
 ```rust
-use cavalry_client::Cavalry;
+use cavalry_client::{Cavalry, Offer};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A driver of our own for the doctest; `cavalry run` is the usual shape.
@@ -46,11 +49,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let driver = cavalry_driver::Driver::start(&dir)?;
 
     // `Cavalry::connect()` reads CAVALRY_DIR or the default directory; this names one.
-    let client = Cavalry::connect_to(&dir)?;
-    println!("client {} attached to {}", client.client_id(), client.dir().display());
-    assert!(!client.is_closed());
+    let mut client = Cavalry::connect_to(&dir)?;
+    let mut subscription = client.add_subscription("cavalry:ipc", 1001)?;
+    let mut publication = client.add_publication("cavalry:ipc", 1001)?;
 
-    // While the client lives, its conductor thread keeps it alive with the driver.
+    // Publish by claim and commit: write in place, nothing copied, nothing allocated.
+    // Until the subscription's image joins, the driver answers `not-connected`.
+    loop {
+        match publication.try_claim(5) {
+            Ok(mut claim) => {
+                claim.body().copy_from_slice(b"hello");
+                claim.commit();
+                break;
+            }
+            Err(Offer::NotConnected | Offer::BackPressured | Offer::AdminAction) => {
+                subscription.poll(|_, _| {}, 1)?;
+            }
+            Err(other) => return Err(other.into()),
+        }
+    }
+
+    // Subscribe by polling: each fragment is a view into the log, with its header.
+    let mut received = None;
+    while received.is_none() {
+        subscription.poll(|body, header| received = Some((body.to_vec(), header.session_id())), 10)?;
+    }
+    let (body, session) = received.unwrap();
+    println!("received {:?} from session {session}", std::str::from_utf8(&body)?);
+
+    publication.close()?;
+    subscription.close()?;
     client.close()?;
     driver.close()?;
     std::fs::remove_dir_all(&dir).ok();
@@ -58,8 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Running it prints one line, such as `client 3 attached to /tmp/cavalry-client-readme-4242`.
-A directory with no driver is refused with what to do:
+Running it prints one line, such as `received "hello" from session -1716223105`. A
+directory with no driver is refused with what to do:
 
 ```text
 client refused (not-found): no driver at /tmp/nowhere; start one with `cavalry run`, or set CAVALRY_DIR to the directory of the driver to use; see docs/reference/client-protocol.md#the-driver-directory

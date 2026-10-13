@@ -8,10 +8,12 @@ use cavalry_proto::client_protocol::{ErrorCode, ProtocolError};
 use cavalry_shm::broadcast::BroadcastError;
 use cavalry_shm::command_ring::CommandRingError;
 use cavalry_shm::counters::CountersError;
+use cavalry_shm::log::LogError;
 
 const DOC_DIRECTORY: &str = "docs/reference/client-protocol.md#the-driver-directory";
 const DOC_LIVENESS: &str = "docs/reference/client-protocol.md#liveness-and-timeouts";
 const DOC_ERRORS: &str = "docs/reference/client-protocol.md#error-codes";
+const DOC_SIZES: &str = "docs/reference/client-protocol.md#sizes";
 const DOC_BROADCAST: &str = "docs/reference/broadcast-buffer.md#receiving";
 
 /// Why the client is closed: by the user, or by what the conductor found.
@@ -33,11 +35,15 @@ pub enum Closed {
     /// check (`too-short`, `type`, `string` or `length`): corrupt, not the driver's, or
     /// from a driver of another version.
     Corrupt,
+    /// The driver announced or withdrew images faster than a subscription polled: its
+    /// image queue was full, and a client that cannot keep its images is not told what it
+    /// reads (ADR 0021).
+    Overrun,
 }
 
 impl Closed {
     /// The reason's name: `by-user`, `driver-closed`, `driver-timeout`,
-    /// `client-timeout`, `lapped` or `corrupt`.
+    /// `client-timeout`, `lapped`, `corrupt` or `overrun`.
     pub const fn reason(self) -> &'static str {
         match self {
             Closed::ByUser => "by-user",
@@ -46,6 +52,7 @@ impl Closed {
             Closed::ClientTimeout => "client-timeout",
             Closed::Lapped => "lapped",
             Closed::Corrupt => "corrupt",
+            Closed::Overrun => "overrun",
         }
     }
 
@@ -57,6 +64,7 @@ impl Closed {
             Closed::ClientTimeout => 4,
             Closed::Lapped => 5,
             Closed::Corrupt => 6,
+            Closed::Overrun => 7,
         }
     }
 
@@ -68,6 +76,7 @@ impl Closed {
             4 => Some(Closed::ClientTimeout),
             5 => Some(Closed::Lapped),
             6 => Some(Closed::Corrupt),
+            7 => Some(Closed::Overrun),
             _ => None,
         }
     }
@@ -99,6 +108,13 @@ pub enum ClientError {
         /// The driver's message.
         message: String,
     },
+    /// The driver accepted `add subscription`, but this client's conductor already
+    /// holds as many subscriptions as the driver allows, so it could not hand the new
+    /// one its images. The subscription is removed again, and nothing is read from it.
+    SubscriptionsFull {
+        /// The bound: the driver's own on subscriptions.
+        limit: usize,
+    },
     /// An add or remove command went unanswered for the response timeout.
     ResponseTimeout {
         /// The command, by name.
@@ -112,6 +128,14 @@ pub enum ClientError {
     Counters(CountersError),
     /// A command could not be encoded: a channel or a name too long.
     Protocol(ProtocolError),
+    /// A log buffer failed a check, or could not be opened.
+    Log(LogError),
+    /// The driver answered with something this version does not understand, or with an
+    /// answer that does not match the command: another log, stream or kind.
+    Driver {
+        /// What it said.
+        what: String,
+    },
     /// The operating system refused a step.
     Io {
         /// The step that failed.
@@ -125,18 +149,22 @@ pub enum ClientError {
 
 impl ClientError {
     /// The reason's name: `not-found`, `driver-gone`, `closed`, `refused`,
-    /// `response-timeout`, `command-ring`, `broadcast`, `counters`, `protocol` or `io`.
+    /// `subscriptions-full`, `response-timeout`, `command-ring`, `broadcast`, `counters`,
+    /// `protocol`, `log`, `driver` or `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClientError::NotFound { .. } => "not-found",
             ClientError::DriverGone { .. } => "driver-gone",
             ClientError::Closed(_) => "closed",
             ClientError::Refused { .. } => "refused",
+            ClientError::SubscriptionsFull { .. } => "subscriptions-full",
             ClientError::ResponseTimeout { .. } => "response-timeout",
             ClientError::CommandRing(_) => "command-ring",
             ClientError::Broadcast(_) => "broadcast",
             ClientError::Counters(_) => "counters",
             ClientError::Protocol(_) => "protocol",
+            ClientError::Log(_) => "log",
+            ClientError::Driver { .. } => "driver",
             ClientError::Io { .. } => "io",
         }
     }
@@ -182,6 +210,10 @@ impl fmt::Display for ClientError {
                          from the driver failed a decoding check: run `cavalry doctor`, check that \
                          the driver and the client are the same version, then restart the driver, \
                          which remakes its files",
+                    Closed::Overrun =>
+                        "images were announced faster than a subscription polled, and its queue \
+                         filled; connect a new client, and poll each subscription at least every \
+                         few hundred image changes",
                 }
             ),
             ClientError::Refused {
@@ -192,6 +224,12 @@ impl fmt::Display for ClientError {
                 f,
                 "command refused ({reason}, error code {raw_code}{}): {message}; see {DOC_ERRORS}",
                 code.map_or(String::new(), |code| format!(", {code:?}"))
+            ),
+            ClientError::SubscriptionsFull { limit } => write!(
+                f,
+                "command refused ({reason}): this client holds {limit} subscriptions, the \
+                 driver's bound; the new one was removed again; close subscriptions this \
+                 process no longer polls, or spread them across processes; see {DOC_SIZES}"
             ),
             ClientError::ResponseTimeout { command } => write!(
                 f,
@@ -205,6 +243,15 @@ impl fmt::Display for ClientError {
             }
             ClientError::Counters(error) => write!(f, "client refused ({reason}): {error}"),
             ClientError::Protocol(error) => write!(f, "command refused ({reason}): {error}"),
+            ClientError::Log(error) => write!(f, "client refused ({reason}): {error}"),
+            ClientError::Driver { what } => write!(
+                f,
+                "client refused ({reason}): the driver answered with {what}, which this version \
+                 does not understand or did not ask for; a driver newer than the client says \
+                 what it cannot read, so upgrade the client to the driver's version; if they \
+                 are the same version, the answer does not match its command, which is a bug: \
+                 run `cavalry doctor` and report it; see {DOC_ERRORS}"
+            ),
             ClientError::Io { what, path, source } => write!(
                 f,
                 "client refused ({reason}): cannot {what} at {}: {source}; see {DOC_DIRECTORY}",
@@ -221,6 +268,7 @@ impl std::error::Error for ClientError {
             ClientError::Broadcast(error) => Some(error),
             ClientError::Counters(error) => Some(error),
             ClientError::Protocol(error) => Some(error),
+            ClientError::Log(error) => Some(error),
             ClientError::Io { source, .. } => Some(source),
             _ => None,
         }
@@ -248,5 +296,11 @@ impl From<CountersError> for ClientError {
 impl From<ProtocolError> for ClientError {
     fn from(error: ProtocolError) -> Self {
         ClientError::Protocol(error)
+    }
+}
+
+impl From<LogError> for ClientError {
+    fn from(error: LogError) -> Self {
+        ClientError::Log(error)
     }
 }
