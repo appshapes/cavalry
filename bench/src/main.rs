@@ -34,6 +34,12 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const SCHEMA: u32 = 0;
+/// Spins of the conductor's loop between two loads of the producer position: about a
+/// millisecond on the bench host, the driver's cadence (ADR 0022;
+/// `cavalry_driver::spec::PRODUCER_POSITION_INTERVAL`), counted rather than timed
+/// because a clock read on every spin costs the other two threads at p99.99.
+const PRODUCER_POSITION_SPINS: u32 = 10_000;
+
 const CORRELATION_ID: i64 = 7;
 const SESSION_ID: i32 = 1;
 const STREAM_ID: i32 = 1001;
@@ -401,12 +407,16 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                 let mut clean_position: i64 = 0;
                 let mut limit_now = window;
                 let trip_gain = window / 8;
-                // The producer position at most once per millisecond, as the driver
-                // loads it (ADR 0022): the publisher stores to that line on every
-                // commit, and a load on every spin kept the line moving between the two
-                // caches, which was the publisher's p50 and its p99.99 band on the bench
-                // host. The clock is the conductor's own, read once per spin.
-                let mut loaded_at: Option<Instant> = None;
+                // The producer position about once per millisecond, the driver's cadence
+                // (ADR 0022): the publisher stores to that line on every commit, and a
+                // load on every spin kept the line moving between the two caches, which
+                // was the publisher's p50 and its p99.99 band on the bench host. The
+                // cadence is counted in spins, not read from the clock: a clock read on
+                // every spin of this thread cost the publisher 100 ns and the subscriber
+                // 70 to 130 ns at p99.99 on the bench host, in every one of eight
+                // processes measured on 2026-10-13, for a reason not found; 10,000 spins
+                // of this loop are about a millisecond there.
+                let mut spins: u32 = 0;
                 while !done.load(Ordering::Acquire) {
                     let consumed = subscriber_position.load_acquire();
                     if consumed + window >= limit_now + trip_gain {
@@ -418,13 +428,11 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                         limit_now = consumed + window;
                         limit.store_release(limit_now);
                     }
-                    let now = Instant::now();
-                    if loaded_at.is_none_or(|at| {
-                        now.duration_since(at) >= cavalry_driver::spec::PRODUCER_POSITION_INTERVAL
-                    }) {
+                    spins += 1;
+                    if spins >= PRODUCER_POSITION_SPINS {
                         publisher_position
                             .store_release(log.producer_position().map_err(|e| e.to_string())?);
-                        loaded_at = Some(now);
+                        spins = 0;
                     }
                     std::hint::spin_loop();
                 }

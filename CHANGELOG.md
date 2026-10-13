@@ -316,9 +316,11 @@ user-visible change, added in the same commit as the change. The format follows
   work for the idle strategy, so a backoff conductor parks while only the publisher
   moves; closing and a subscription's join still load it afresh. `publication.position`
   says it is at most a millisecond behind the publisher.
-- `just bench`'s conductor thread loads the publisher's producer position at most once
-  per millisecond, the driver's cadence from ADR 0022, so the raw rows measure the log
-  buffer and not the harness's loads of the publisher's cache line. The raw
-  `claim_commit` rows fall by a quarter at p99.99 on the bench host; the raw `one_way`
-  rows' p50 falls and their p99.99 rises, so the host's baseline needs re-recording from
-  this change's run before it merges, a person's decision.
+- `just bench`'s conductor thread loads the publisher's producer position about once per
+  millisecond, the driver's cadence from ADR 0022, counted in spins rather than read
+  from the clock, so the raw rows measure the log buffer and not the harness's loads of
+  the publisher's cache line. On the bench host the raw `claim_commit` rows fall by
+  about half at p99.99 and the raw `one_way` rows by about a tenth, in every process
+  measured; a clock read on every spin of the conductor, the first form of this change,
+  cost every row about 100 ns at p99.99 instead. The host's baseline is re-recorded from
+  this change's run in a commit of its own, a person's decision.

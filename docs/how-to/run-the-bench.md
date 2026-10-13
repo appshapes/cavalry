@@ -126,10 +126,11 @@ the gate fails only on the dedicated bench host is
   a regression there is not noise; check the host first with `bench/host/check.sh`,
   which the job also runs.
 - `REGRESSION` after a change to `bench/` only, with no data-plane crate changed: the
-  tail moved with the harness, not with the log. A tail of 0.01 percent moves with the
-  binary's layout, and a harness whose publisher runs faster queues more messages behind
-  the subscriber's slowest polls, so `one_way_*` can rise at p99.99 while its p50 and
-  `claim_commit_*` fall
+  tail moved with the harness, not with the log. What a spinning harness thread does on
+  every spin reaches the other two threads: a clock read on every spin of the conductor
+  cost every row about 100 ns at p99.99 on the bench host, in each of eight processes
+  (ADR 0022's harness commit). Before believing one run, run the same binary in several
+  processes on the host and compare their medians, since one process lands in one mode
   ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A person
   decides whether to re-record the baseline from that run, as step 4 says, in a commit
   whose message names the harness change and carries both histograms.
