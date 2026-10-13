@@ -56,12 +56,16 @@ struct Shared<T> {
 
 // SAFETY: a slot is written by the producer before it releases `tail` and read by the
 // consumer after it acquires `tail`, and written again only after the consumer released
-// `head` past it and the producer acquired `head`; the two halves are the only parties,
-// each is `!Sync`, and each thread's accesses are ordered by those two counters. `T` must
-// be `Send` for an item to cross threads.
+// `head` past it and the producer acquired `head`. There is exactly one producer and one
+// consumer per queue: `queue` makes one `Producer` and one `Consumer`, neither is
+// `Clone`, and a slot is reached only from `Producer::offer` and `Consumer::poll`, which
+// take `&mut self`, so a shared `&Producer` or `&Consumer` on another thread (the halves
+// are `Sync` when `T: Send`) can only load the counters and read the half's own fields.
+// `T` must be `Send` for an item to cross threads.
 unsafe impl<T: Send> Send for Shared<T> {}
-// SAFETY: as above; the halves hold an `Arc<Shared<T>>` from two threads at once, and
-// every access to a slot is through the protocol the counters order.
+// SAFETY: as above; the halves hold an `Arc<Shared<T>>` from two threads at once, the
+// `&self` methods only load the atomic counters, and every access to a slot is through
+// `offer` or `poll`, one caller each, in the protocol the counters order.
 unsafe impl<T: Send> Sync for Shared<T> {}
 
 impl<T> Shared<T> {
@@ -151,7 +155,8 @@ impl<T> Producer<T> {
         }
         // SAFETY: `tail - head < capacity`, so the slot at `tail` was taken by the
         // consumer (it released `head` past the slot's last position, which the acquire
-        // load above saw) or never written; only this producer writes slots, and the
+        // load above saw) or never written; only this producer writes slots (one per
+        // queue, not `Clone`, and `&mut self` here), and the
         // consumer will read this one only after the release store of `tail` below.
         self.shared
             .slot(self.tail)
@@ -166,8 +171,9 @@ impl<T> Producer<T> {
         self.shared.capacity()
     }
 
-    /// How many items are queued, as this half last saw it: exact for the items it put
-    /// in, and at most this many until the consumer takes more.
+    /// How many items are queued, a snapshot from a fresh load of the consumer's `head`:
+    /// exact for the items this half put in, and possibly more than the queue holds by
+    /// the time the caller reads it, since the consumer may take more.
     pub fn len(&self) -> usize {
         let head = self.shared.head.0.load(Ordering::Acquire);
         self.tail.wrapping_sub(head)
@@ -190,7 +196,8 @@ impl<T> Consumer<T> {
         }
         // SAFETY: `head < tail`, and the producer wrote the slot at `head` before the
         // release store of `tail` that the acquire load above saw; only this consumer
-        // reads slots, and the producer will write this one again only after the
+        // reads slots (one per queue, not `Clone`, and `&mut self` here), and the
+        // producer will write this one again only after the
         // release store of `head` below.
         let item = self
             .shared
@@ -206,8 +213,9 @@ impl<T> Consumer<T> {
         self.shared.capacity()
     }
 
-    /// How many items are queued, as this half last saw it: at least this many until
-    /// the producer puts in more.
+    /// How many items are queued, a snapshot from a fresh load of the producer's `tail`:
+    /// exact for the items this half has taken, and possibly fewer than the queue holds
+    /// by the time the caller reads it, since the producer may put in more.
     pub fn len(&self) -> usize {
         let tail = self.shared.tail.0.load(Ordering::Acquire);
         tail.wrapping_sub(self.head)
@@ -325,21 +333,18 @@ mod tests {
             }
             assert_eq!(consumer.poll(), None);
         });
-        let mut refused: u64 = 0;
         let mut next = 0;
         while next < total {
             match producer.offer(next) {
                 Ok(()) => next += 1,
                 Err(back) => {
                     assert_eq!(back, next);
-                    refused += 1;
                     std::hint::spin_loop();
                 }
             }
         }
         consumer_thread.join().expect("the consumer finished");
         assert!(producer.is_empty());
-        let _ = refused;
     }
 
     #[test]
@@ -395,7 +400,7 @@ mod loom_tests {
         loom::model(|| {
             let (mut producer, consumer) = queue::<Box<u32>>(1);
             let consumer_thread = thread::spawn(move || drop(consumer));
-            assert!(producer.offer(Box::new(7)).is_ok() || producer.offer(Box::new(7)).is_ok());
+            assert!(producer.offer(Box::new(7)).is_ok());
             drop(producer);
             consumer_thread.join().unwrap();
         });
