@@ -9,9 +9,11 @@ the two crates where `unsafe` is permitted.
   fixed-size terms and a metadata page, and a position is a byte offset into the stream
   that increases across terms. `LogBuffers` creates and opens one, a `TermAppender`
   claims a frame in place and commits it with one release store, a `TermReader` reads
-  committed frames where its position says, and the driver's duties, the limit, cleaning,
-  unblocking and end of stream, are methods on the log
-  ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
+  committed frames where its position says, or scans a `Block` of them with their
+  headers for the recorder to write in one go
+  ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)), and the
+  driver's duties, the limit, cleaning, unblocking and end of stream, are methods on the
+  log ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
 - Carries the control plane's two queues between the processes on a host: the command
   ring, through which every client sends the driver its commands, with a `Producer` per
   client thread and the driver's one `Consumer`, which only the ring's creator hands

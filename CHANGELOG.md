@@ -368,3 +368,8 @@ user-visible change, added in the same commit as the change. The format follows
   behind a `recording.synced_position`; the log directory is the key `log.dir`, with an
   absolute per-user default and an advisory lock on the catalog that moves the Rust floor
   to 1.89; a recording belongs to the driver and outlives the client that started it.
+- `cavalry-shm`: `TermReader::block` scans a block of committed frames with their
+  headers, up to a limit, as Aeron's `TermBlockScanner` does, taking a padding frame as
+  a block of its own with its header alone, so that the recorder writes each block from
+  the log buffer into a segment file with one positional write (ADR 0025); a loom model
+  checks the one read the scan adds, of the frame word's own bytes after its acquire.
