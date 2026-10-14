@@ -9,6 +9,12 @@ The durable log: recording and replay. Data plane.
   advisory lock on the catalog, so two drivers never write one directory, and runs the
   recovery pass of the spec before any recording is added, reporting every action for
   the driver to count (ADR 0025).
+- Writes a recording for the driver: `LogDir::start` takes the catalog slot and creates
+  the time index and the first segment file; `recorder::RecordingWriter` writes each
+  block of committed frames with one positional write, appends an index entry at most
+  once per millisecond, rolls segments at their length, and syncs once per second
+  behind two positions, what is written and what is synced; `LogDir::stop` writes the
+  stop (ADR 0025).
 - Replays a log back into a subscription from a given position, at original or maximum
   speed. `cavalry replay` answers "what did this service see between two instants" in
   one command.
@@ -32,34 +38,40 @@ In Aeron, this is Archive, with its recordings and replay
 
 ## Example
 
-A catalog in a directory of its own: the driver's writer adds a recording, stops it, and
-any process reads it back (`spec/durable-log.md`).
+The driver's path, in one process: open the log directory, record one block of a
+stream, sync it, stop, and read the recording back by position
+(`spec/durable-log.md`). The clock is the caller's, nanoseconds since the Unix epoch.
 
 ```rust
-use cavalry_log::catalog::{CatalogReader, CatalogWriter};
-use cavalry_log::layout::{Recording, State};
+use cavalry_log::catalog::CatalogReader;
+use cavalry_log::dir::{LogDir, Recovery};
+use cavalry_log::layout::{Recording, State, locate};
+use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 
 let dir = std::env::temp_dir().join(format!("cavalry-log-{}", std::process::id()));
-std::fs::create_dir_all(&dir)?;
-let mut writer = CatalogWriter::open(&dir, 1_760_000_000_000_000_000)?;
-let id = writer.add(&Recording {
-    recording_id: 0,
-    start_timestamp: 1_760_000_000_000_000_000,
-    start_position: 0,
-    initial_term_id: 7,
-    term_length: 64 * 1024 * 1024,
-    mtu_length: 1408,
-    session_id: 1,
-    stream_id: 1001,
-    channel: "cavalry:ipc",
-    source_identity: "cavalry:ipc",
-})?;
-writer.stop(id, 4096, 1_760_000_001_000_000_000)?;
+let now = 1_760_000_000_000_000_000;
+let (mut log, recovery) = LogDir::open(&dir, now)?;
+assert_eq!(recovery, Recovery::default(), "a new directory has nothing to repair");
+let mut writer = log.start(&Recording {
+    recording_id: 0, start_timestamp: now, start_position: 0, initial_term_id: 7,
+    term_length: 64 * 1024 * 1024, mtu_length: 1408, session_id: 1, stream_id: 1001,
+    channel: "cavalry:ipc", source_identity: "cavalry:ipc",
+}, now)?;
+// One block as the recorder's scan hands it: a committed frame, header and body.
+let mut block = [0u8; 64];
+let header = DataFrameHeader::new(FrameType::Data, Flags::UNFRAGMENTED, 64)?
+    .with_term_id(7).with_session_id(1).with_stream_id(1001);
+block[..32].copy_from_slice(&header.to_bytes());
+writer.write(&block, block.len(), now)?;
+assert!(writer.sync(now + 1_000_000_000)?, "a second passed: the block is durable");
+assert_eq!(writer.synced_position(), 64);
+let stopped = log.stop(writer, now + 2_000_000_000)?;
+assert_eq!((stopped.state(), stopped.stop_position()), (State::Valid, 64));
+let located = locate(&stopped, 0)?;
+println!("recording {} holds position 0 in {} at offset {}",
+    stopped.recording_id(), located.segment_file, located.offset_in_segment);
 let reader = CatalogReader::open(&dir)?;
-let recording = reader.get(id)?.expect("the slot holds the recording");
-assert_eq!(recording.state(), State::Valid);
-assert_eq!(recording.stop_position(), 4096);
-println!("recording {id} on stream {} stopped at {}", recording.stream_id(), recording.stop_position());
+assert_eq!(reader.get(0)?.expect("the slot holds the recording").stop_position(), 64);
 std::fs::remove_dir_all(&dir)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
