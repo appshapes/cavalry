@@ -134,6 +134,28 @@ impl Mapped {
         unsafe { core::slice::from_raw_parts(self.base.add(start), length) }
     }
 
+    /// The bytes of a block of committed frames: `length` bytes from `term_offset` in
+    /// `partition`, which the caller scanned frame by frame, acquiring each frame's
+    /// positive length through its word, headers included.
+    fn block(&self, partition: usize, term_offset: u32, length: u32) -> &[u8] {
+        let start = partition * self.term_length() as usize + term_offset as usize;
+        debug_assert!(
+            term_offset % FRAME_ALIGNMENT == 0 && term_offset + length <= self.term_length()
+        );
+        // SAFETY: the caller acquired a positive length at `term_offset` and at the start
+        // of every frame up to `term_offset + length`, each stored by its publisher with
+        // release after the header's other 24 bytes and the body were written
+        // (`cells::FrameCells`), so every byte of the range is complete, the eight bytes
+        // of each word included, which the acquire load ordered before this read (the
+        // loom model `a_block_scan_reads_the_word_it_acquired_without_a_race`); nothing
+        // rewrites a committed frame until the driver cleans it, which happens only
+        // below every reader's position, after this reader stored its own with release
+        // (`spec/log-buffer.md`, "The driver"). The range is inside the term, which is
+        // inside the mapping. A process that writes here regardless breaks the spec;
+        // ADR 0010 accepts the driver's directory as the trust boundary.
+        unsafe { core::slice::from_raw_parts(self.base.add(start), length as usize) }
+    }
+
     /// The body of the frame the caller has just claimed at `term_offset` with
     /// `frame_length`, to write into until it commits.
     #[allow(clippy::mut_from_ref)]
@@ -919,6 +941,46 @@ impl fmt::Debug for BufferClaim<'_> {
     }
 }
 
+/// A block of committed frames from one term, headers included, which
+/// [`TermReader::block`] scanned: what a recorder writes into a segment file with one
+/// positional write, so that a recorded position is the stream's position (ADR 0025).
+#[derive(Clone, Copy)]
+pub struct Block<'a> {
+    /// The position of the block's first byte: the reader's position.
+    pub position: i64,
+    /// The bytes to write: every frame of the block with its header, or, for a padding
+    /// frame, its 32-byte header alone, since a padding frame's body is zeros a writer
+    /// skips.
+    pub bytes: &'a [u8],
+    /// The block's length in the stream: `bytes.len()`, or the padding frame's aligned
+    /// length. The next block starts at `position + length`.
+    pub length: usize,
+    /// Whether the block is one padding frame.
+    pub padding: bool,
+}
+
+impl Block<'_> {
+    /// The position after the block, which the reader seeks to once the bytes are used.
+    pub fn end(&self) -> i64 {
+        self.position + self.length as i64
+    }
+
+    /// Whether nothing is committed at the position.
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+}
+
+impl fmt::Debug for Block<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Block")
+            .field("position", &self.position)
+            .field("length", &self.length)
+            .field("padding", &self.padding)
+            .finish()
+    }
+}
+
 /// What one poll did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Poll {
@@ -1020,6 +1082,65 @@ impl TermReader {
         Ok(Poll {
             position: self.position,
             fragments,
+        })
+    }
+
+    /// Scans a block of committed frames from the position, as Aeron's
+    /// `TermBlockScanner` does behind `Image.rawPoll`: it loads each frame's length with
+    /// an acquire load and checks the frame as `spec/frame.md` says, as [`TermReader::poll`]
+    /// does, and takes whole frames in order until the next would carry the block past
+    /// `limit` bytes, the term ends, or a frame is not yet committed. The first committed
+    /// frame is always taken, so a block makes progress under any limit. A padding frame
+    /// at the position is a block of its own, with its header as the bytes and its
+    /// aligned length as the length; a padding frame after the first frame ends the
+    /// block before it. A frame that fails a check is [`LogError::Frame`], and nothing is
+    /// returned. The reader's position does not move: the caller seeks to [`Block::end`]
+    /// once it has used the bytes, so a write that failed leaves the position where it
+    /// was and the next call scans the same block again.
+    pub fn block(&self, limit: usize) -> Result<Block<'_>, LogError> {
+        let positions = self.mapped.positions;
+        let term_length = positions.term_length();
+        let partition = positions.partition_of(self.position);
+        let start = positions.term_offset_of(self.position);
+        let end = (start as usize)
+            .saturating_add(limit)
+            .min(term_length as usize) as u32;
+        let mut offset = start;
+        while offset < term_length && (offset == start || offset < end) {
+            let frame = self.mapped.frame(partition, offset);
+            let word = frame.word();
+            if layout::frame_word_length(word) <= 0 {
+                break;
+            }
+            let bytes = frame.header(word);
+            // The spec's checks, built out only to measure their cost (ADR 0010).
+            #[cfg(not(cavalry_unchecked))]
+            let header = DataFrameHeader::parse_within(&bytes, (term_length - offset) as usize)?;
+            #[cfg(cavalry_unchecked)]
+            let header = DataFrameHeader::decode_unchecked(&bytes);
+            let aligned = aligned_length(header.frame_length() as u32);
+            if header.frame_type() != FrameType::Data {
+                if offset == start {
+                    return Ok(Block {
+                        position: self.position,
+                        bytes: self.mapped.block(partition, start, FRAME_HEADER),
+                        length: aligned as usize,
+                        padding: true,
+                    });
+                }
+                break;
+            }
+            if offset != start && offset + aligned > end {
+                break;
+            }
+            offset += aligned;
+        }
+        let length = offset - start;
+        Ok(Block {
+            position: self.position,
+            bytes: self.mapped.block(partition, start, length),
+            length: length as usize,
+            padding: false,
         })
     }
 }

@@ -359,6 +359,20 @@ user-visible change, added in the same commit as the change. The format follows
   and an invalidation of a damaged one, and a stop is written once; any other transition
   is refused as `transition` with nothing written, and opening the catalog truncates the
   bytes a crash left past its last whole slot.
+- ADR 0025, Proposed: the driver records a stream to the durable log. `start recording`
+  and `stop recording` join the client protocol as version 1 with `recording ready` and
+  `recording stopped`, under type ids from ranges of Cavalry's own that keep Aeron's
+  numbers free for Aeron's features; a recorder thread writes committed frames in blocks
+  straight from the log buffer into segment files, holds a `recording.position` the publisher's limit
+  respects so that a slow disk back-pressures and never loses, and syncs once per second
+  behind a `recording.synced_position`; the log directory is the key `log.dir`, with an
+  absolute per-user default and an advisory lock on the catalog that moves the Rust floor
+  to 1.89; a recording belongs to the driver and outlives the client that started it.
+- `cavalry-shm`: `TermReader::block` scans a block of committed frames with their
+  headers, up to a limit, as Aeron's `TermBlockScanner` does, taking a padding frame as
+  a block of its own with its header alone, so that the recorder writes each block from
+  the log buffer into a segment file with one positional write (ADR 0025); a loom model
+  checks the one read the scan adds, of the frame word's own bytes after its acquire.
 - `cavalry-log`: `dir::LogDir` opens a log directory under an exclusive advisory lock on
   the catalog, through the standard library's `File::try_lock`, so a second driver on
   the same directory is refused with `locked` and a crash never leaves a stale lock, and
