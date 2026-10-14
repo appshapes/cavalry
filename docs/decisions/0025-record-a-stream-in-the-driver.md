@@ -52,18 +52,28 @@ not a decision until it is an ADR.
 
 ## Decision
 
-`spec/client-protocol.md` moves to version 1 with two commands and two events. `start
-recording` (type id 12: client id, correlation id, stream id, channel) asks the driver to
-record the live publication on that stream id and channel from its producer position,
-loaded afresh as a join loads it (ADR 0022); the driver answers `recording ready` (type
-id 3851, `0x0F0B`: correlation id, recording id, the `recording.position` counter id, the
-`recording.synced_position` counter id) once the catalog slot is valid and synced and
+`spec/client-protocol.md` moves to version 1 with two commands and two events, the first
+of Cavalry's own, so their type ids come from ranges of Cavalry's own that Aeron's ids do
+not reach. Aeron's driver numbers its commands up from 1, at `0x12` today, and its events
+up from `0x0F01`, at `0x0F0D` today, one id per feature, and ADR 0019 keeps every id in
+those two runs for the feature Aeron gave it. The page reserves commands 1 to 255
+(`0x01` to `0xFF`) and events 3841 to 4095 (`0x0F01` to `0x0FFF`) for Aeron's ids,
+present and future, and gives Cavalry commands 257 to 511 (`0x0101` to `0x01FF`) and
+events 4097 to 4351 (`0x1001` to `0x10FF`), each taken in order from the bottom of its
+range; an id outside a range a version specifies stays code 6 for the driver and `type`
+for the client, as the page already says. Aeron would need 237 more commands or 242 more
+events to fill the ranges kept for it, and a Cavalry range that fills is a new ADR. `start recording` (type id 257, `0x0101`: client id, correlation id, stream id,
+channel) asks the driver to record the live publication on that stream id and channel
+from its producer position, loaded afresh as a join loads it (ADR 0022); the driver
+answers `recording ready` (type id 4097, `0x1001`: correlation id, recording id, the
+`recording.position` counter id, the `recording.synced_position` counter id) once the
+catalog slot is valid and synced and
 the first segment file and the time index exist. No live publication matches: error
 code 20. One already being recorded: code 22, with its recording id in the message. The
 catalog's slots used up, the recordings registry at capacity or the counters file with
 no free record: code 10. A segment or index file that cannot be created: code 12. The
 new codes sit past Aeron's range, whose 13 and 14 the page keeps reserved. `stop
-recording` (type id 13: client id, correlation id, recording id) stops a recording and is
+recording` (type id 258, `0x0102`: client id, correlation id, recording id) stops a recording and is
 answered with `operation success` once the stop fields are written and synced; a
 recording id the catalog does not hold is code 21, and one already stopped is `operation
 success` with nothing written, since a recording id is never reused. A recording belongs
@@ -72,10 +82,13 @@ client may stop it. The driver stops a recording by itself when its publication 
 at the end of stream position, once the recorder has written up to it; the log of a
 recorded publication is removed only then, and the recorder's lag is bounded by the
 window. Every stop, by command or by close, is announced to every client with
-`recording stopped` (type id 3852, `0x0F0C`: recording id, stop position), and the
+`recording stopped` (type id 4098, `0x1002`: recording id, stop position), and the
 recording's two counters are freed after the counter reuse timeout. A version 0 client
 never sends the new commands; a version 1 client that sends them to a version 0 driver
-gets code 6, as the page already says of a type the driver does not know.
+gets code 6, as the page already says of a type the driver does not know. ADR 0019's
+Revisit names the UDP slice's channel status and destination commands as version 1;
+this ADR takes version 1, so they come in a later version, under Aeron's numbers, which
+this version leaves free.
 
 The recorder is a thread of the driver named `recorder`, with the conductor's idle
 strategy, and the conductor never touches the disk: it hands the recorder each start,
@@ -154,6 +167,20 @@ ten-minute path publishes.
 
 ## Alternatives considered
 
+- **The recording commands and events in the gaps of Aeron's runs, commands 12 and 13
+  and events `0x0F0B` and `0x0F0C`.** Lost: Aeron already uses all four, for add and
+  remove receive destination, static counter and publication error, and ADR 0019 keeps
+  every Aeron id for the feature Aeron gave it, so the UDP slice and a later counter
+  feature could not take their commands under Aeron's numbers. The same rule already
+  puts the new error codes past Aeron's.
+- **The recording commands after Aeron's last ids, command 19 and event `0x0F0E`.**
+  Lost: Aeron adds an id at its next feature, and the next Aeron release would take the
+  number Cavalry had shipped; a range of Cavalry's own, with room between it and
+  Aeron's, never collides.
+- **Aeron Archive's ids, `StartRecordingRequest` and `StopRecordingByIdentityRequest`.**
+  Lost: they are template ids of the archive's own SBE schema, numbered from 1 in a
+  space of their own, and in the client protocol they would land among the ids kept for
+  Aeron's driver commands.
 - **A separate archive process with its own control protocol, as Aeron.** Lost in ADR
   0023; it returns if the recorder's writes move a bench row.
 - **The recorder on the conductor's thread, or the conductor writing the catalog.** Lost:
@@ -243,8 +270,8 @@ bounded queue.
 Harder: the limit and cleaning have a third input; a second data-plane thread to idle;
 a closed publication's log lives until the recorder has written it; the catalog's
 transitions each cost a sync on the recorder's thread; the client protocol is at version
-1; the Rust floor is 1.89, so the four releases from February to August 2025 no longer
-build the workspace. To maintain: the recorder's state machine and its queues, the
+1, with Cavalry's own type id ranges beside Aeron's; the Rust floor is 1.89, so the four
+releases 1.85 to 1.88, from February to June 2025, no longer build the workspace. To maintain: the recorder's state machine and its queues, the
 block scan's `loom` model, the recovery counters, and the doctor checks.
 
 Revisit: when the bench shows the recorder's writes on the raw rows, for the separate
@@ -262,4 +289,6 @@ the two gauges give it.
   `aeron-archive/src/main/java/io/aeron/archive/{RecordingWriter,ArchiveConductor,
   Archive,ArchiveMarkFile}.java`, `aeron-client/src/main/java/io/aeron/logbuffer/
   TermBlockScanner.java`, read 2026-10-13
+- Aeron, `aeron-client/src/main/java/io/aeron/command/ControlProtocolEvents.java`, for the
+  command and event ids Aeron uses, read 2026-10-14
 - AppShapes Trello card 93
