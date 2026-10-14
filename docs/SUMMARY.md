@@ -60,3 +60,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0022. Load a publication's producer position at most once per millisecond](decisions/0022-load-the-producer-position-once-per-millisecond.md)
 - [0023. Build the durable log and replay second, in four features](decisions/0023-build-the-durable-log-second.md)
 - [0024. Lay out the durable log as a fixed-slot catalog, Aeron's segment files and a time index](decisions/0024-lay-out-the-durable-log.md)
+- [0025. Record a stream in the driver, with Aeron Archive's commands in the client protocol](decisions/0025-record-a-stream-in-the-driver.md)
