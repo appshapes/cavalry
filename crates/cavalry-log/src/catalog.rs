@@ -272,6 +272,35 @@ impl CatalogWriter {
         Ok(Descriptor::parse(&bytes, recording_id)?)
     }
 
+    /// The catalog's path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// A slot's bytes as they are, for the recovery pass, which reads a slot whose stop
+    /// or creation checksum may fail.
+    pub(crate) fn slot_bytes(&self, slot: u64) -> Result<[u8; DESCRIPTOR_LENGTH], CatalogError> {
+        if slot >= self.slots {
+            return Err(CatalogError::Unknown {
+                recording_id: i64::try_from(slot).unwrap_or(i64::MAX),
+            });
+        }
+        read_slot_bytes(&self.file, &self.path, slot)
+    }
+
+    /// Recovery's write of state 2 on a slot it found damaged, whatever the slot holds:
+    /// an empty slot before the last, a creation checksum that fails, or a recording
+    /// whose files cannot repair it. [`invalidate`](Self::invalidate) reads the slot
+    /// first and refuses an empty one, which is right for every caller but recovery.
+    pub(crate) fn mark_invalid(&mut self, slot: u64) -> Result<(), CatalogError> {
+        if slot >= self.slots {
+            return Err(CatalogError::Unknown {
+                recording_id: i64::try_from(slot).unwrap_or(i64::MAX),
+            });
+        }
+        self.write_state(slot, State::Invalid)
+    }
+
     fn slot(&self, recording_id: i64) -> Result<u64, CatalogError> {
         match u64::try_from(recording_id) {
             Ok(slot) if slot < self.slots => Ok(slot),

@@ -359,3 +359,13 @@ user-visible change, added in the same commit as the change. The format follows
   and an invalidation of a damaged one, and a stop is written once; any other transition
   is refused as `transition` with nothing written, and opening the catalog truncates the
   bytes a crash left past its last whole slot.
+- `cavalry-log`: `dir::LogDir` opens a log directory under an exclusive advisory lock on
+  the catalog, through the standard library's `File::try_lock`, so a second driver on
+  the same directory is refused with `locked` and a crash never leaves a stale lock, and
+  runs the recovery pass of `spec/durable-log.md` before any recording is added: a torn
+  catalog is truncated and an empty last slot dropped, an empty slot before the last or a
+  creation checksum that fails is set to state 2, a recording live at a crash or with a
+  torn stop gets its stop fields from its files with its time index repaired, segments
+  wholly past the stop are removed, and a deleted recording's files are removed again;
+  every action is reported for the driver to count. The workspace's Rust floor moves
+  from 1.85 to 1.89 for the lock (ADR 0025).

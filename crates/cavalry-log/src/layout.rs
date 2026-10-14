@@ -615,6 +615,25 @@ impl Descriptor {
     /// `position`, `term-length`, `segment-length`, `mtu`, `string`. An empty slot
     /// parses to `None`, and nothing after its state is read.
     pub fn parse(bytes: &[u8], slot: i64) -> Result<Option<Self>, LayoutError> {
+        Self::parse_inner(bytes, slot, false).map(|parsed| parsed.map(|(descriptor, _)| descriptor))
+    }
+
+    /// Parses a descriptor for the recovery pass (`spec/durable-log.md`, "The driver"):
+    /// as [`parse`](Self::parse), except that a stop checksum that does not match is not
+    /// a failure, since rebuilding a torn stop is what recovery does. The descriptor then
+    /// reads as live, its stop fields at −1, and the flag says the stop was torn.
+    pub fn parse_for_recovery(
+        bytes: &[u8],
+        slot: i64,
+    ) -> Result<Option<(Self, bool)>, LayoutError> {
+        Self::parse_inner(bytes, slot, true)
+    }
+
+    fn parse_inner(
+        bytes: &[u8],
+        slot: i64,
+        tolerate_torn_stop: bool,
+    ) -> Result<Option<(Self, bool)>, LayoutError> {
         if bytes.len() < DESCRIPTOR_LENGTH {
             return Err(LayoutError::TooShort {
                 length: bytes.len() as u64,
@@ -632,13 +651,14 @@ impl Descriptor {
         if u32_at(bytes, 24) != crc32(&bytes[28..DESCRIPTOR_LENGTH]) {
             return Err(LayoutError::CreationChecksum);
         }
-        if u32_at(bytes, 4) != crc32(&bytes[8..24]) {
+        let torn_stop = u32_at(bytes, 4) != crc32(&bytes[8..24]);
+        if torn_stop && !tolerate_torn_stop {
             return Err(LayoutError::StopChecksum);
         }
         let mut descriptor = Descriptor {
             state,
-            stop_timestamp: i64_at(bytes, 8),
-            stop_position: i64_at(bytes, 16),
+            stop_timestamp: if torn_stop { -1 } else { i64_at(bytes, 8) },
+            stop_position: if torn_stop { -1 } else { i64_at(bytes, 16) },
             recording_id: i64_at(bytes, 32),
             start_timestamp: i64_at(bytes, 40),
             start_position: i64_at(bytes, 48),
@@ -667,7 +687,7 @@ impl Descriptor {
         descriptor.source_identity = std::str::from_utf8(&bytes[344..344 + source_length as usize])
             .map_err(|_| LayoutError::String)?
             .to_string();
-        Ok(Some(descriptor))
+        Ok(Some((descriptor, torn_stop)))
     }
 }
 

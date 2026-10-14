@@ -157,7 +157,7 @@ impl Words for Mapped {
     }
 
     fn word(&self, index: u32) -> &AtomicU64 {
-        debug_assert!(index % 8 == 0 && index < self.fields.capacity());
+        debug_assert!(index.is_multiple_of(8) && index < self.fields.capacity());
         // SAFETY: `index` is a multiple of 8 below the capacity (the arithmetic of
         // `layout` masks every position by capacity − 1 and bounds every length it
         // adds; asserted above in debug builds), so the word is inside the ring, which

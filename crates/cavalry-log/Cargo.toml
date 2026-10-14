@@ -20,6 +20,12 @@ workspace = true
 data_plane = true
 allowed-dependencies = []
 
+[dependencies]
+# The frame header parser behind a segment file's one check, `frame`: the header at a
+# position carries the position's term id and term offset and the recording's session
+# and stream ids (spec/durable-log.md, "Segment files"; ADR 0024). A workspace member.
+cavalry-proto = { path = "../cavalry-proto" }
+
 [dev-dependencies]
 # Reads spec/vectors/durable-log.json in tests/conformance.rs. Dev only, never on the data plane.
 serde_json = "1"

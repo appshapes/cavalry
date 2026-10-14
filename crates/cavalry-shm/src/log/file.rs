@@ -103,7 +103,8 @@ impl Mapped {
     fn frame(&self, partition: usize, term_offset: u32) -> &FrameCells {
         debug_assert!(partition < PARTITION_COUNT);
         debug_assert!(
-            term_offset % FRAME_ALIGNMENT == 0 && term_offset + FRAME_HEADER <= self.term_length()
+            term_offset.is_multiple_of(FRAME_ALIGNMENT)
+                && term_offset + FRAME_HEADER <= self.term_length()
         );
         let offset = partition * self.term_length() as usize + term_offset as usize;
         // SAFETY: `partition` is below 3 and `term_offset` a multiple of 32 at least 32
