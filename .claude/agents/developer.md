@@ -64,7 +64,20 @@ Never invent a number.
 - No trailers: no `Co-authored-by`, no `Closes #N` (the workflow adds that one). The body is
   the review record and nothing else.
 - **Merges only, never rebase.** No `git rebase` in any form, no force push, no rewriting
-  pushed history. On a merge conflict, stop and hand it back in a pull request comment.
+  pushed history. Before each fix cycle and before every push, merge `master` into the
+  branch with `git pull --no-edit origin master`: a pull request that conflicts with
+  `master` has no merge ref, so GitHub starts no CI run and no fix run on it, and the
+  reviewer blocks on the missing CI. Resolve a conflict yourself: in the files everyone
+  appends to (listed in CLAUDE.md, "Working rules for agents") keep both sides with
+  `master`'s lines first and yours after; anywhere else keep what both changes meant,
+  then run the gates. Say in the commit message which files conflicted and how you
+  resolved them. Decide before you merge, never by undoing a merge afterwards, which
+  would drop the fix commits on top of it: your token cannot push a change under
+  `.github/workflows/` (claude.yml says so), so first run `git fetch origin master` and
+  `git diff --name-only HEAD...origin/master -- .github/workflows/`; if that lists
+  anything, do not merge. Do the fix on the branch as it is, push it, and say in a pull
+  request comment that a person must merge `master` because it changed
+  `.github/workflows/`.
 
 ## Ask before, by stopping and saying so in a comment
 
