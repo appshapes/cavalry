@@ -64,7 +64,14 @@ Never invent a number.
 - No trailers: no `Co-authored-by`, no `Closes #N` (the workflow adds that one). The body is
   the review record and nothing else.
 - **Merges only, never rebase.** No `git rebase` in any form, no force push, no rewriting
-  pushed history. On a merge conflict, stop and hand it back in a pull request comment.
+  pushed history. Before each fix cycle and before every push, merge `master` into the
+  branch with `git pull --no-edit origin master`: a pull request that conflicts with
+  `master` has no merge ref, so GitHub starts no CI run and no fix run on it, and the
+  reviewer blocks on the missing CI. Resolve a conflict yourself, never by aborting the
+  merge: in the files everyone appends to (CLAUDE.md, "Working rules for agents") keep
+  both sides with `master`'s lines first and yours after; anywhere else keep what both
+  changes meant, then run the gates. Say in the commit message which files conflicted
+  and how you resolved them.
 
 ## Ask before, by stopping and saying so in a comment
 

@@ -72,3 +72,11 @@ branch locally; GitHub has already deleted it on origin.
   person.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
   label, or a required check failed. `gh pr checks <number>` shows which.
+- **The pull request conflicts with `master`.** `gh pr view <number>` says
+  `CONFLICTING`. Such a pull request has no merge ref, so GitHub starts no CI run and
+  no fix run on it, whatever its labels, and the reviewer blocks on the missing CI. The
+  fixer merges `master` into the branch before each fix cycle, so this happens only
+  when it could not start. Merge `master` yourself with `git pull --no-edit origin
+  master`, keep both sides with `master`'s lines first in the files everyone appends to
+  (`CLAUDE.md`, "Working rules for agents"), run the gates and push; the next review
+  starts on the push.
