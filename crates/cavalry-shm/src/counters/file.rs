@@ -136,7 +136,7 @@ impl Mapped {
     /// The slot at `offset`, a value `fields.slot_offset` returned for this mapping
     /// (`slot`, `Counter::new`, or `Mapped::value`, which `CounterValue` keeps).
     fn slot_at(&self, offset: usize) -> &SlotCells {
-        debug_assert!(offset + SLOT_LENGTH <= self.length && offset % SLOT_LENGTH == 0);
+        debug_assert!(offset + SLOT_LENGTH <= self.length && offset.is_multiple_of(SLOT_LENGTH));
         // SAFETY: `offset` came from `slot_offset` on this mapping's fields (`slot`;
         // `Counter::new`, which keeps one; and `Mapped::value`, the one builder of a
         // `CounterValue`, which keeps one), so the slot ends at or before `file_length()`,
