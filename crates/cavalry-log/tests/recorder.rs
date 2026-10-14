@@ -359,12 +359,13 @@ fn a_roll_that_fails_is_io_and_is_retried_at_the_next_write() {
     // disk would make its create or extend refuse.
     fs::write(dir.segment(0, SEGMENT), b"").expect("a file in the way");
     let mut now = NOW;
-    let error = loop {
-        let (header, length) = padding_block(&found, writer.position());
+    let (before, error) = loop {
+        let before = writer.position();
+        let (header, length) = padding_block(&found, before);
         now += MS;
         match writer.write(&header, length, now) {
             Ok(()) => assert!(writer.position() < SEGMENT, "rolled past a file in the way"),
-            Err(error) => break error,
+            Err(error) => break (before, error),
         }
     };
     assert_eq!(error.reason(), "io", "{error}");
@@ -373,14 +374,24 @@ fn a_roll_that_fails_is_io_and_is_retried_at_the_next_write() {
         SEGMENT,
         "the block that filled the segment was taken"
     );
+    assert_ne!(
+        writer.position(),
+        before,
+        "the position moved, so the caller hands the next block"
+    );
     let second = data_block(&found, SEGMENT, 0x33);
+    let before = writer.position();
     let error = writer.write(&second, 64, now + MS).unwrap_err();
     assert_eq!(
         error.reason(),
         "io",
         "the roll is retried, never refused as a block"
     );
-    assert_eq!(writer.position(), SEGMENT, "nothing moved");
+    assert_eq!(
+        writer.position(),
+        before,
+        "the position did not move, so the caller hands the same block again"
+    );
     fs::remove_file(dir.segment(0, SEGMENT)).expect("the file is moved out of the way");
     writer
         .write(&second, 64, now + 2 * MS)

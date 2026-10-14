@@ -395,6 +395,8 @@ user-visible change, added in the same commit as the change. The format follows
   catalog's stop fields, so a crash between the two leaves a live slot recovery repairs.
   A block that is empty, unaligned, longer in bytes than in length or that would cross
   its segment is refused with nothing moved (ADR 0025). A roll that fails, a full disk
-  at the next segment, is `io` and is retried at the next write; a start that fails
-  after its slot is written stops the slot at its start, as recovery would. The README
+  at the next segment, is `io` and is retried at the next write; on any error, the block
+  was taken exactly when `position()` moved, so the caller compares it before and after.
+  A start that fails after its slot is written stops the slot at its start, as recovery
+  would. The README
   example is this path, from open to read-back.

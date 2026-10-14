@@ -166,7 +166,9 @@ impl LogDir {
     /// start timestamp, the empty recording recovery would make of it
     /// (`spec/durable-log.md`, "The driver"), and returns the step's error; if that stop
     /// fails too, the slot stays live until the next [`LogDir::open`] repairs it the
-    /// same way.
+    /// same way. A step that fails at the segment file leaves the index file, header and
+    /// start entry, beside the stopped, empty slot; it is harmless, since a recording id
+    /// is never reused, and it is kept so that nothing is removed on an error path.
     pub fn start(
         &mut self,
         recording: &Recording<'_>,
@@ -324,13 +326,15 @@ impl RecordingWriter {
     /// in bytes than in length, or that would cross the segment's end is
     /// [`RecorderError::Block`], and nothing moves.
     ///
-    /// An [`RecorderError::Io`] whose step is `write a block of` means the block was not
-    /// taken and the position did not move. Any other `Io` error, from the index entry or
-    /// the roll into the next segment, came after the block was written: the block is
-    /// taken and [`position`](Self::position) is past it, so the caller does not hand it
-    /// again. A roll that failed, a full disk when the next segment is created, is
-    /// retried at the start of the next `write`, which returns the roll's `Io` error
-    /// again, with nothing moved, until the roll succeeds.
+    /// On an error, the block was taken exactly when [`position`](Self::position) moved:
+    /// the caller compares it before and after the call, hands the block again when it
+    /// did not move, and hands the next one when it did. `write` writes at the position,
+    /// never at a position the caller names, so a block dropped that was not taken would
+    /// shift every block after it. An [`RecorderError::Io`] error can come before the
+    /// block is written or after, from the index entry or the roll into the next
+    /// segment, and its step does not say which. A roll that failed, a full disk when the
+    /// next segment is created, is retried at the start of the next `write`, which
+    /// returns the roll's `Io` error again, with nothing moved, until the roll succeeds.
     pub fn write(&mut self, bytes: &[u8], length: usize, now: i64) -> Result<(), RecorderError> {
         if self.position == self.segment_base + self.segment_length {
             self.roll()?;
