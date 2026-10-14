@@ -67,11 +67,17 @@ Never invent a number.
   pushed history. Before each fix cycle and before every push, merge `master` into the
   branch with `git pull --no-edit origin master`: a pull request that conflicts with
   `master` has no merge ref, so GitHub starts no CI run and no fix run on it, and the
-  reviewer blocks on the missing CI. Resolve a conflict yourself, never by aborting the
-  merge: in the files everyone appends to (CLAUDE.md, "Working rules for agents") keep
-  both sides with `master`'s lines first and yours after; anywhere else keep what both
-  changes meant, then run the gates. Say in the commit message which files conflicted
-  and how you resolved them.
+  reviewer blocks on the missing CI. Resolve a conflict yourself: in the files everyone
+  appends to (listed in CLAUDE.md, "Working rules for agents") keep both sides with
+  `master`'s lines first and yours after; anywhere else keep what both changes meant,
+  then run the gates. Say in the commit message which files conflicted and how you
+  resolved them. One exception, the only merge you may undo: your token cannot push a
+  change under `.github/workflows/` (claude.yml says so), so when the push is rejected
+  for the `workflows` permission, drop the local, unpushed merge commit with
+  `git reset --hard ORIG_HEAD`, or `git merge --abort` while the merge is still in
+  progress, which rewrites nothing that was pushed; push your fix without it; and say in
+  a pull request comment that a person must merge `master` because it changed
+  `.github/workflows/`.
 
 ## Ask before, by stopping and saying so in a comment
 
