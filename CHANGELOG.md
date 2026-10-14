@@ -359,3 +359,8 @@ user-visible change, added in the same commit as the change. The format follows
   and an invalidation of a damaged one, and a stop is written once; any other transition
   is refused as `transition` with nothing written, and opening the catalog truncates the
   bytes a crash left past its last whole slot.
+- `cavalry-shm`: `TermReader::block` scans a block of committed frames with their
+  headers, up to a limit, as Aeron's `TermBlockScanner` does, taking a padding frame as
+  a block of its own with its header alone, so that the recorder writes each block from
+  the log buffer into a segment file with one positional write (ADR 0025); a loom model
+  checks the one read the scan adds, of the frame word's own bytes after its acquire.

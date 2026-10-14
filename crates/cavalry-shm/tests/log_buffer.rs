@@ -654,6 +654,159 @@ fn a_reader_checks_positions_and_frames() {
     assert_eq!(reader.position(), 128, "the two good frames were delivered");
 }
 
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_holds_whole_committed_frames_up_to_the_limit_and_stops_at_a_claim() {
+    let dir = Dir::new("block");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    let mut reader = log.reader(0).unwrap();
+
+    let empty = reader.block(usize::MAX).unwrap();
+    assert!(empty.is_empty() && !empty.padding && empty.bytes.is_empty());
+    assert_eq!((empty.position, empty.end()), (0, 0));
+
+    for n in 0..3u8 {
+        let mut claim = appender.try_claim(5, unlimited()).unwrap();
+        claim.body().copy_from_slice(&[n; 5]);
+        claim.commit(); // frame 37, aligned 64
+    }
+    let mut claim = appender.try_claim(5, unlimited()).unwrap();
+    claim.body().copy_from_slice(b"later");
+
+    let file = fs::read(dir.file(CORRELATION)).unwrap();
+    let block = reader.block(usize::MAX).unwrap();
+    assert_eq!(
+        (block.position, block.length, block.padding),
+        (0, 192, false)
+    );
+    assert_eq!(block.bytes, &file[..192], "three frames, headers included");
+    assert_eq!(block.end(), 192);
+    assert_eq!(reader.position(), 0, "the position moves only on seek");
+    assert_eq!(
+        reader.block(100).unwrap().length,
+        64,
+        "the second frame does not fit"
+    );
+    assert_eq!(reader.block(128).unwrap().length, 128);
+    assert_eq!(
+        reader.block(0).unwrap().length,
+        64,
+        "the first frame is always taken"
+    );
+
+    assert_eq!(claim.commit(), 256);
+    let block = reader.block(usize::MAX).unwrap();
+    assert_eq!(block.length, 256);
+    assert_eq!(&block.bytes[192 + 32..192 + 37], b"later");
+    assert_eq!(
+        format!("{block:?}"),
+        "Block { position: 0, length: 256, padding: false }"
+    );
+    let end = block.end();
+    reader.seek(end).unwrap();
+    assert!(reader.block(usize::MAX).unwrap().is_empty());
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_padding_frame_is_a_block_of_its_own_and_the_next_block_is_in_the_next_term() {
+    let dir = Dir::new("block-padding");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    let mut reader = log.reader(0).unwrap();
+
+    let body_len = 1000; // frame 1032, aligned 1056
+    let per_term = (T / 1056) as usize; // 62 frames, 65472 bytes, 64 left
+    for n in 0..per_term {
+        let mut claim = appender.try_claim(body_len, unlimited()).unwrap();
+        claim.body().fill(n as u8);
+        claim.commit();
+    }
+    assert_eq!(
+        appender.try_claim(body_len, unlimited()).unwrap_err(),
+        ClaimError::AdminAction,
+        "the frame does not fit: padding and rotation"
+    );
+    let mut claim = appender.try_claim(body_len, unlimited()).unwrap();
+    claim.body().fill(0xAB);
+    assert_eq!(claim.commit(), i64::from(T) + 1056);
+
+    let file = fs::read(dir.file(CORRELATION)).unwrap();
+    let data = reader.block(usize::MAX).unwrap();
+    assert_eq!(
+        (data.position, data.length, data.padding),
+        (0, 65472, false)
+    );
+    assert_eq!(
+        data.bytes,
+        &file[..65472],
+        "the block stops before the padding"
+    );
+    reader.seek(data.end()).unwrap();
+
+    let padding = reader.block(usize::MAX).unwrap();
+    assert_eq!(padding.position, 65472);
+    assert!(padding.padding);
+    assert_eq!(padding.bytes.len(), 32, "a padding frame's header alone");
+    assert_eq!(padding.bytes, &file[65472..65472 + 32]);
+    assert_eq!(padding.length, 64, "its aligned length in the stream");
+    assert_eq!(padding.end(), i64::from(T));
+    assert_eq!(
+        &padding.bytes[..4],
+        &64i32.to_le_bytes(),
+        "the padding frame's length"
+    );
+    reader.seek(padding.end()).unwrap();
+
+    let next = reader.block(usize::MAX).unwrap();
+    assert_eq!(
+        (next.position, next.length, next.padding),
+        (i64::from(T), 1056, false)
+    );
+    assert_eq!(
+        next.bytes,
+        &file[T as usize..T as usize + 1056],
+        "the next term's first frame"
+    );
+    assert_eq!(next.bytes[32], 0xAB);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_stops_at_a_bad_frame_and_at_its_limit_without_reading_past_it() {
+    let dir = Dir::new("block-checks");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    for _ in 0..3 {
+        appender.try_claim(8, unlimited()).unwrap().commit();
+    }
+    // The version byte of the third frame is 1: the block from 0 is refused, and the
+    // block from 0 with a limit of two frames never reads the third.
+    let path = dir.file(CORRELATION);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[128 + 4] = 1;
+    fs::write(&path, &bytes).unwrap();
+    let log = LogBuffers::open(dir.path(), CORRELATION, false).unwrap();
+    let reader = log.reader(0).unwrap();
+    let error = reader.block(usize::MAX).unwrap_err();
+    assert!(matches!(error, LogError::Frame(_)), "{error}");
+    assert!(
+        error.to_string().contains("frame rejected (version)"),
+        "{error}"
+    );
+    assert_eq!(reader.position(), 0);
+    assert_eq!(reader.block(128).unwrap().length, 128);
+    let reader = log.reader(128).unwrap();
+    assert!(matches!(
+        reader.block(usize::MAX).unwrap_err(),
+        LogError::Frame(_)
+    ));
+}
+
 /// A valid file whose metadata header is then changed by `patch`, for the header checks.
 fn log_with_header(dir: &Dir, patch: impl FnOnce(&mut [u8])) {
     let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();

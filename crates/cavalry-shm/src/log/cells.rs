@@ -420,6 +420,42 @@ mod loom_tests {
         });
     }
 
+    /// The block scan's one step beyond `header`: after acquiring a positive length it
+    /// reads the word's own eight bytes without synchronisation, as the block's slice
+    /// over the mapping does (`file`, `Mapped::block`, ADR 0025), and loom checks that
+    /// the read never races the publisher's two stores of the word; a scan that read
+    /// them before the acquire would fail here.
+    #[test]
+    fn a_block_scan_reads_the_word_it_acquired_without_a_race() {
+        loom::model(|| {
+            let cells = Arc::new(FrameCells::zeroed());
+            let default = fields().default_frame_header();
+            let committed =
+                layout::committed_header(&layout::claim_header(&default, 64, 40, -5, 0));
+            let publisher = {
+                let cells = Arc::clone(&cells);
+                thread::spawn(move || {
+                    cells.claim(&layout::claim_header(&default, 64, 40, -5, 0));
+                    cells.publish(layout::frame_word(&committed));
+                })
+            };
+            loop {
+                let word = cells.word();
+                if layout::frame_word_length(word) > 0 {
+                    // SAFETY: the acquire load above saw the positive length the publisher
+                    // stored with release, after which nobody writes the word; loom
+                    // checks exactly that claim.
+                    let plain = unsafe { cells.word.unsync_load() };
+                    assert_eq!(plain, word);
+                    assert_eq!(cells.header(word), committed);
+                    break;
+                }
+                thread::yield_now();
+            }
+            publisher.join().unwrap();
+        });
+    }
+
     /// Two concurrent publishers reserve with fetch-and-add and get disjoint offsets.
     #[test]
     fn two_publishers_reserve_disjoint_offsets() {
