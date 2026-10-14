@@ -362,8 +362,8 @@ user-visible change, added in the same commit as the change. The format follows
 - ADR 0025, Proposed: the driver records a stream to the durable log. `start recording`
   and `stop recording` join the client protocol as version 1 with `recording ready` and
   `recording stopped`, under type ids from ranges of Cavalry's own that keep Aeron's
-  numbers free for Aeron's features; a recorder thread writes committed frames in blocks straight from
-  the log buffer into segment files, holds a `recording.position` the publisher's limit
+  numbers free for Aeron's features; a recorder thread writes committed frames in blocks
+  straight from the log buffer into segment files, holds a `recording.position` the publisher's limit
   respects so that a slow disk back-pressures and never loses, and syncs once per second
   behind a `recording.synced_position`; the log directory is the key `log.dir`, with an
   absolute per-user default and an advisory lock on the catalog that moves the Rust floor

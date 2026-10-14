@@ -62,23 +62,24 @@ present and future, and gives Cavalry commands 257 to 511 (`0x0101` to `0x01FF`)
 events 4097 to 4351 (`0x1001` to `0x10FF`), each taken in order from the bottom of its
 range; an id outside a range a version specifies stays code 6 for the driver and `type`
 for the client, as the page already says. Aeron would need 237 more commands or 242 more
-events to fill the ranges kept for it, and a Cavalry range that fills is a new ADR. `start recording` (type id 257, `0x0101`: client id, correlation id, stream id,
-channel) asks the driver to record the live publication on that stream id and channel
-from its producer position, loaded afresh as a join loads it (ADR 0022); the driver
-answers `recording ready` (type id 4097, `0x1001`: correlation id, recording id, the
+events to fill the ranges kept for it, and a Cavalry range that fills is a new ADR.
+`start recording` (type id 257, `0x0101`: client id, correlation id, stream id, channel)
+asks the driver to record the live publication on that stream id and channel from its
+producer position, loaded afresh as a join loads it (ADR 0022); the driver answers
+`recording ready` (type id 4097, `0x1001`: correlation id, recording id, the
 `recording.position` counter id, the `recording.synced_position` counter id) once the
-catalog slot is valid and synced and
-the first segment file and the time index exist. No live publication matches: error
+catalog slot is valid and synced and the first segment file and the time index exist.
+No live publication matches: error
 code 20. One already being recorded: code 22, with its recording id in the message. The
 catalog's slots used up, the recordings registry at capacity or the counters file with
 no free record: code 10. A segment or index file that cannot be created: code 12. The
 new codes sit past Aeron's range, whose 13 and 14 the page keeps reserved. `stop
-recording` (type id 258, `0x0102`: client id, correlation id, recording id) stops a recording and is
-answered with `operation success` once the stop fields are written and synced; a
-recording id the catalog does not hold is code 21, and one already stopped is `operation
-success` with nothing written, since a recording id is never reused. A recording belongs
-to the driver, not to the client that started it: it outlives that client, and any
-client may stop it. The driver stops a recording by itself when its publication closes,
+recording` (type id 258, `0x0102`: client id, correlation id, recording id) stops a
+recording and is answered with `operation success` once the stop fields are written and
+synced; a recording id the catalog does not hold is code 21, and one already stopped is
+`operation success` with nothing written, since a recording id is never reused. A
+recording belongs to the driver, not to the client that started it: it outlives that
+client, and any client may stop it. The driver stops a recording by itself when its publication closes,
 at the end of stream position, once the recorder has written up to it; the log of a
 recorded publication is removed only then, and the recorder's lag is bounded by the
 window. Every stop, by command or by close, is announced to every client with
@@ -271,8 +272,9 @@ Harder: the limit and cleaning have a third input; a second data-plane thread to
 a closed publication's log lives until the recorder has written it; the catalog's
 transitions each cost a sync on the recorder's thread; the client protocol is at version
 1, with Cavalry's own type id ranges beside Aeron's; the Rust floor is 1.89, so the four
-releases 1.85 to 1.88, from February to June 2025, no longer build the workspace. To maintain: the recorder's state machine and its queues, the
-block scan's `loom` model, the recovery counters, and the doctor checks.
+releases 1.85 to 1.88, from February to June 2025, no longer build the workspace. To
+maintain: the recorder's state machine and its queues, the block scan's `loom` model, the
+recovery counters, and the doctor checks.
 
 Revisit: when the bench shows the recorder's writes on the raw rows, for the separate
 process; when a user needs no sync or a sync per write, for the `log.sync` key with its
