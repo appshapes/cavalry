@@ -225,7 +225,8 @@ fn write_header(file: &File, path: &Path, now: i64) -> Result<(), CatalogError> 
 impl CatalogWriter {
     /// Creates the catalog in `dir`, or opens the one there. A catalog whose header was
     /// torn while it was created is written again, and an empty last slot, a creation
-    /// torn by a crash, is not counted, so the next [`add`](Self::add) takes it. The
+    /// torn by a crash, is dropped from the file, so the next [`add`](Self::add) takes
+    /// its id and a later open finds nothing to drop. The
     /// driver that owns the directory is its one writer; how it keeps a second driver
     /// out is the driver's (card 93), not this type's.
     pub fn open(dir: &Path, now: i64) -> Result<Self, CatalogError> {
@@ -252,13 +253,19 @@ impl CatalogWriter {
             file.set_len(whole).map_err(io("truncate", &path))?;
         }
         if slots > 0 && read_slot_bytes(&file, &path, slots - 1)?[..4] == [0u8; 4] {
+            // An empty last slot, a creation torn by a crash: the page says the driver
+            // drops it, so the file loses it and the next recording id is the number of
+            // whole slots left, which a later start finds nothing to drop again.
             slots -= 1;
+            file.set_len(CatalogHeader::slot_offset(slots))
+                .map_err(io("drop the empty last slot of", &path))?;
+            file.sync_all().map_err(io("sync", &path))?;
         }
         Ok(CatalogWriter { file, path, slots })
     }
 
-    /// How many slots the catalog holds; an empty last slot left by a torn creation is
-    /// not counted.
+    /// How many slots the catalog holds: whole slots, after an empty last slot left by a
+    /// torn creation was dropped at open.
     pub const fn slots(&self) -> u64 {
         self.slots
     }

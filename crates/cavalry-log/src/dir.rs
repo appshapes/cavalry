@@ -18,6 +18,12 @@ use crate::layout::{
 
 const DOC: &str = "docs/reference/durable-log.md#the-driver";
 
+/// How many time index entries the repair reads at a time: 16 KiB on the stack,
+/// whatever the index's length, so that the pass holds a fixed amount of memory for a
+/// file of any size (invariant 3). A recording live for a day leaves about 86 million
+/// entries, 1.4 GB, which is read once, forward, and never held.
+const INDEX_CHUNK: usize = 1024;
+
 /// Why the directory could not be opened or repaired.
 #[derive(Debug)]
 pub enum DirError {
@@ -101,14 +107,15 @@ fn io<'a>(what: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> DirEr
 }
 
 /// What the recovery pass did when the directory was opened. Every field is a state
-/// transition the driver counts (`counters.toml`; ADR 0023, card 93).
+/// transition the driver counts (`counters.toml`; ADR 0023, card 93), and each happens
+/// once: a later open of a repaired directory reports nothing.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Recovery {
     /// The catalog held bytes past its last whole slot, left by a crash while it grew,
     /// and was truncated to whole slots.
     pub truncated: bool,
-    /// The catalog's last slot was empty, a creation torn by a crash, and the next
-    /// recording takes it.
+    /// The catalog's last slot was empty, a creation torn by a crash, and was dropped
+    /// from the file, so the next recording takes its id.
     pub dropped_empty_slot: bool,
     /// Recordings live at a crash, or whose stop was torn, whose stop fields were rebuilt
     /// from their files.
@@ -117,7 +124,7 @@ pub struct Recovery {
     /// fails, a state the page does not name, or files that cannot repair the recording.
     pub invalidated: u64,
     /// Time indexes written again with their first entry, given a first entry, or
-    /// truncated to whole entries in order.
+    /// truncated to whole entries in order or to the entries at or before the stop.
     pub index_rewritten: u64,
     /// Files removed: segments wholly past a rebuilt stop, and a deleted recording's
     /// files found still present.
@@ -210,17 +217,15 @@ struct Segment {
 }
 
 /// The recovery pass, after [`CatalogWriter::open`] has written a torn header again,
-/// truncated the file to whole slots and left an empty last slot uncounted.
+/// truncated the file to whole slots and dropped an empty last slot; `before` is the
+/// file's length before that, which says what it did.
 fn recover(dir: &Path, catalog: &mut CatalogWriter, before: u64) -> Result<Recovery, DirError> {
     let mut recovery = Recovery::default();
     let header = HEADER_LENGTH as u64;
     let descriptor = DESCRIPTOR_LENGTH as u64;
     recovery.truncated = before > header && !(before - header).is_multiple_of(descriptor);
-    let after = fs::metadata(catalog.path())
-        .map_err(io("stat", catalog.path()))?
-        .len();
     recovery.dropped_empty_slot =
-        after >= header && (after - header) / descriptor > catalog.slots();
+        before >= header && (before - header) / descriptor > catalog.slots();
     for slot in 0..catalog.slots() {
         let bytes = catalog.slot_bytes(slot)?;
         let state = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -271,7 +276,7 @@ fn rebuild(
 ) -> Result<(), DirError> {
     let id = found.recording_id();
     let start = found.start_position();
-    let mut entries = repair_index(dir, found, recovery)?;
+    let mut index = repair_index(dir, found, recovery)?;
     let segments = list_segments(dir, id)?;
     let mut damage = false;
     let mut stop = None;
@@ -313,8 +318,13 @@ fn rebuild(
     let stop = match stop {
         Some(stop) => stop,
         None => {
+            // The scan's start: the last index entry at whose position a frame checks,
+            // walking back entry by entry from the file, or the start position.
             let mut from = start;
-            for entry in entries.iter().rev() {
+            let mut j = index.count;
+            while j > 0 {
+                j -= 1;
+                let entry = index.read(j)?;
                 if entry.position >= start && frame_checks(&segments, found, entry.position)? {
                     from = entry.position;
                     break;
@@ -323,27 +333,33 @@ fn rebuild(
             scan(&segments, found, from)?
         }
     };
-    let kept = entries
-        .iter()
-        .take_while(|entry| entry.position <= stop)
-        .count();
-    if kept < entries.len() {
-        // Index entries past the stop are dropped: one more rewrite of the index.
-        recovery.index_rewritten += 1;
-        entries.truncate(kept);
-        let index_path = dir.join(index_file_name(id));
-        let index = OpenOptions::new()
-            .write(true)
-            .open(&index_path)
-            .map_err(io("open", &index_path))?;
-        index
-            .set_len(HEADER_LENGTH as u64 + (kept as u64) * ENTRY_LENGTH as u64)
-            .map_err(io("truncate", &index_path))?;
-        index.sync_all().map_err(io("sync", &index_path))?;
+    // The cut: entries past the stop are dropped. Positions never decrease from one
+    // entry to the next, so the first entry past the stop is found by a search over the
+    // file, in a number of reads that grows with the logarithm of the count.
+    let (mut low, mut high) = (0u64, index.count);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if index.read(mid)?.position <= stop {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
     }
-    let stop_timestamp = entries
-        .last()
-        .map_or(found.start_timestamp(), |entry| entry.timestamp);
+    let mut changed = false;
+    if low < index.count {
+        index.truncate(low)?;
+        changed = true;
+    }
+    if index.count == 0 {
+        // The first entry lay past the stop, which one writer never leaves behind: the
+        // start entry takes its place.
+        index.write_first(found)?;
+        changed = true;
+    }
+    if changed {
+        recovery.index_rewritten += 1;
+    }
+    let stop_timestamp = index.read(index.count - 1)?.timestamp;
     catalog.rewrite(slot, &found.stopped(stop, stop_timestamp)?)?;
     recovery.recovered += 1;
     recovery.files_removed += remove_files(dir, id, stop)?;
@@ -433,20 +449,57 @@ fn scan(segments: &[Segment], found: &Descriptor, from: i64) -> Result<i64, DirE
     }
 }
 
+/// A recording's time index, open for the repair: the file and how many whole entries
+/// in order it holds. Entries are read from the file one at a time; none are held.
+struct Index {
+    file: File,
+    path: PathBuf,
+    count: u64,
+}
+
+impl Index {
+    fn read(&self, j: u64) -> Result<IndexEntry, DirError> {
+        let mut bytes = [0u8; ENTRY_LENGTH];
+        self.file
+            .read_exact_at(&mut bytes, HEADER_LENGTH as u64 + j * ENTRY_LENGTH as u64)
+            .map_err(io("read an entry of", &self.path))?;
+        Ok(IndexEntry::parse(&bytes, None)?)
+    }
+
+    fn truncate(&mut self, count: u64) -> Result<(), DirError> {
+        self.file
+            .set_len(HEADER_LENGTH as u64 + count * ENTRY_LENGTH as u64)
+            .map_err(io("truncate", &self.path))?;
+        self.file.sync_all().map_err(io("sync", &self.path))?;
+        self.count = count;
+        Ok(())
+    }
+
+    /// The start entry as the only entry: the start timestamp at the start position.
+    fn write_first(&mut self, found: &Descriptor) -> Result<(), DirError> {
+        let first = IndexEntry {
+            timestamp: found.start_timestamp(),
+            position: found.start_position(),
+        };
+        self.file
+            .write_all_at(&first.encode(), HEADER_LENGTH as u64)
+            .map_err(io("write the first entry of", &self.path))?;
+        self.file.sync_all().map_err(io("sync", &self.path))?;
+        self.count = 1;
+        Ok(())
+    }
+}
+
 /// The index repair: a missing or torn index is written again with the start entry, an
 /// index with no whole entry gets it, and the file is truncated to whole entries in
-/// order. Returns the entries left, at least one.
+/// order, checked forward in fixed chunks with only the entry before kept.
 fn repair_index(
     dir: &Path,
     found: &Descriptor,
     recovery: &mut Recovery,
-) -> Result<Vec<IndexEntry>, DirError> {
+) -> Result<Index, DirError> {
     let id = found.recording_id();
     let path = dir.join(index_file_name(id));
-    let first = IndexEntry {
-        timestamp: found.start_timestamp(),
-        position: found.start_position(),
-    };
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -463,44 +516,64 @@ fn repair_index(
     } else {
         false
     };
+    let mut index = Index {
+        file,
+        path,
+        count: 0,
+    };
     if !header_ok {
-        write_index(&file, &path, id, &first)?;
+        write_index(&index.file, &index.path, id)?;
+        index.write_first(found)?;
         recovery.index_rewritten += 1;
-        return Ok(vec![first]);
+        return Ok(index);
     }
     let whole = (length - HEADER_LENGTH as u64) / ENTRY_LENGTH as u64;
-    let mut entries: Vec<IndexEntry> = Vec::with_capacity(whole as usize);
-    let mut bytes = [0u8; ENTRY_LENGTH];
-    for j in 0..whole {
-        file.read_exact_at(&mut bytes, HEADER_LENGTH as u64 + j * ENTRY_LENGTH as u64)
-            .map_err(io("read an entry of", &path))?;
-        match IndexEntry::parse(&bytes, entries.last()) {
-            Ok(entry) => entries.push(entry),
-            Err(_) => break,
+    let mut buffer = [0u8; INDEX_CHUNK * ENTRY_LENGTH];
+    let mut previous: Option<IndexEntry> = None;
+    let mut count = 0u64;
+    'entries: while count < whole {
+        let n = (whole - count).min(INDEX_CHUNK as u64) as usize;
+        index
+            .file
+            .read_exact_at(
+                &mut buffer[..n * ENTRY_LENGTH],
+                HEADER_LENGTH as u64 + count * ENTRY_LENGTH as u64,
+            )
+            .map_err(io("read the entries of", &index.path))?;
+        for chunk in buffer[..n * ENTRY_LENGTH].as_chunks::<ENTRY_LENGTH>().0 {
+            match IndexEntry::parse(chunk, previous.as_ref()) {
+                Ok(entry) => {
+                    previous = Some(entry);
+                    count += 1;
+                }
+                Err(_) => break 'entries,
+            }
         }
     }
+    index.count = count;
     let mut changed = false;
-    if entries.is_empty() {
-        file.write_all_at(&first.encode(), HEADER_LENGTH as u64)
-            .map_err(io("write the first entry of", &path))?;
-        entries.push(first);
+    if count == 0 {
+        index.write_first(found)?;
         changed = true;
     }
-    let kept = HEADER_LENGTH as u64 + entries.len() as u64 * ENTRY_LENGTH as u64;
+    let kept = HEADER_LENGTH as u64 + index.count * ENTRY_LENGTH as u64;
     if kept != length {
-        file.set_len(kept).map_err(io("truncate", &path))?;
+        index
+            .file
+            .set_len(kept)
+            .map_err(io("truncate", &index.path))?;
+        index.file.sync_all().map_err(io("sync", &index.path))?;
         changed = true;
     }
     if changed {
-        file.sync_all().map_err(io("sync", &path))?;
         recovery.index_rewritten += 1;
     }
-    Ok(entries)
+    Ok(index)
 }
 
-/// Writes an index anew in the page's order: the fields, a sync, the magic, the first
-/// entry, a sync.
-fn write_index(file: &File, path: &Path, id: i64, first: &IndexEntry) -> Result<(), DirError> {
+/// Writes an index header anew in the page's order: the fields, a sync, then the magic;
+/// the first entry follows.
+fn write_index(file: &File, path: &Path, id: i64) -> Result<(), DirError> {
     let header = IndexHeader::new(id)?.encode();
     file.set_len(0).map_err(io("truncate", path))?;
     file.write_all_at(&header[8..], 8)
@@ -508,9 +581,6 @@ fn write_index(file: &File, path: &Path, id: i64, first: &IndexEntry) -> Result<
     file.sync_all().map_err(io("sync", path))?;
     file.write_all_at(&header[..8], 0)
         .map_err(io("write the magic of", path))?;
-    file.write_all_at(&first.encode(), HEADER_LENGTH as u64)
-        .map_err(io("write the first entry of", path))?;
-    file.sync_all().map_err(io("sync", path))?;
     Ok(())
 }
 

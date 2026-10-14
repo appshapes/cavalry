@@ -140,7 +140,8 @@ impl Mapped {
     fn block(&self, partition: usize, term_offset: u32, length: u32) -> &[u8] {
         let start = partition * self.term_length() as usize + term_offset as usize;
         debug_assert!(
-            term_offset % FRAME_ALIGNMENT == 0 && term_offset + length <= self.term_length()
+            term_offset.is_multiple_of(FRAME_ALIGNMENT)
+                && term_offset + length <= self.term_length()
         );
         // SAFETY: the caller acquired a positive length at `term_offset` and at the start
         // of every frame up to `term_offset + length`, each stored by its publisher with

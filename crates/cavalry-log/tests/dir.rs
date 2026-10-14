@@ -222,8 +222,15 @@ fn a_torn_catalog_is_truncated_and_an_empty_last_slot_is_dropped() {
         fs::metadata(dir.path().join("catalog"))
             .expect("stat")
             .len(),
-        CatalogHeader::slot_offset(2),
-        "whole slots only"
+        CatalogHeader::slot_offset(1),
+        "whole slots only, the empty last slot dropped from the file"
+    );
+    drop(log);
+    let (_log, recovery) = LogDir::open(dir.path(), NOW).expect("opens again");
+    assert_eq!(
+        recovery,
+        Recovery::default(),
+        "a drop happens once; a later open finds nothing to drop"
     );
 }
 
@@ -507,4 +514,67 @@ fn every_error_names_the_page_that_explains_it() {
         );
         assert!(!error.reason().is_empty());
     }
+}
+
+#[test]
+fn a_huge_sparse_index_is_cut_in_fixed_chunks_without_being_held() {
+    // An index whose length is far past its whole entries, as a damaged or sparse file
+    // leaves it: the repair reads forward in fixed chunks, stops at the first entry out
+    // of order (the zeros after the real entries) and truncates there; it never holds
+    // the file, so a gigabyte of index costs one chunk of memory.
+    let dir = TestDir::new("huge-index");
+    let (id, found) = dir.add(1001, 0);
+    dir.write_frames(&found, 0, 2);
+    dir.write_index(id, &[(NOW, 0), (NOW + MS, 64)]);
+    OpenOptions::new()
+        .write(true)
+        .open(dir.index(id))
+        .expect("opens")
+        .set_len(HEADER_LENGTH as u64 + (1u64 << 30))
+        .expect("a sparse gigabyte");
+    let (_log, recovery) = LogDir::open(dir.path(), NOW).expect("opens");
+    assert_eq!(
+        recovery,
+        Recovery {
+            recovered: 1,
+            index_rewritten: 1,
+            ..Recovery::default()
+        }
+    );
+    assert_eq!(dir.index_entries(id), vec![(NOW, 0), (NOW + MS, 64)]);
+    let stopped = read(&dir, id).expect("reads").expect("holds");
+    assert_eq!(
+        (stopped.stop_position(), stopped.stop_timestamp()),
+        (128, NOW + MS)
+    );
+}
+
+#[test]
+fn an_index_with_many_entries_past_the_stop_is_cut_by_a_search() {
+    // 100,000 whole entries in order, spanning many read chunks, of which all but three
+    // point past the data: the walk back finds the third, the scan stops at the end of
+    // the frames, and the cut finds the first entry past the stop by a search.
+    let dir = TestDir::new("many-entries");
+    let (id, found) = dir.add(1001, 0);
+    let end = dir.write_frames(&found, 0, 3);
+    let mut entries: Vec<(i64, i64)> = vec![(NOW, 0), (NOW + MS, 64), (NOW + 2 * MS, 128)];
+    for j in 0..100_000i64 {
+        entries.push((NOW + (3 + j) * MS, 256 + 64 * j));
+    }
+    dir.write_index(id, &entries);
+    let (_log, recovery) = LogDir::open(dir.path(), NOW).expect("opens");
+    assert_eq!(
+        recovery,
+        Recovery {
+            recovered: 1,
+            index_rewritten: 1,
+            ..Recovery::default()
+        }
+    );
+    assert_eq!(dir.index_entries(id), entries[..3]);
+    let stopped = read(&dir, id).expect("reads").expect("holds");
+    assert_eq!(
+        (stopped.stop_position(), stopped.stop_timestamp()),
+        (end, NOW + 2 * MS)
+    );
 }
