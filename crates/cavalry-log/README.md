@@ -5,6 +5,10 @@ The durable log: recording and replay. Data plane.
 ## What this does
 
 - Records a stream to disk as an ordered, replayable log, written by the driver.
+- Holds the log directory for the driver: `dir::LogDir` opens it under an exclusive
+  advisory lock on the catalog, so two drivers never write one directory, and runs the
+  recovery pass of the spec before any recording is added, reporting every action for
+  the driver to count (ADR 0025).
 - Replays a log back into a subscription from a given position, at original or maximum
   speed. `cavalry replay` answers "what did this service see between two instants" in
   one command.

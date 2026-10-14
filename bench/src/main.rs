@@ -591,7 +591,7 @@ fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String
                     if subscriber.is_finished() {
                         return Err(subscriber_failure(subscriber.join()));
                     }
-                    if stalled % STALL_CHECK == 0 && t0.elapsed() > STALL_LIMIT {
+                    if stalled.is_multiple_of(STALL_CHECK) && t0.elapsed() > STALL_LIMIT {
                         return Err(format!(
                             "the publisher was back-pressured for over {} s at message {i} of \
                              {total}, so the subscriber stopped reading; see \

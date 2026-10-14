@@ -140,7 +140,7 @@ impl HeaderFields {
             });
         }
         if !(MIN_MTU_LENGTH..=MAX_MTU_LENGTH).contains(&mtu_length)
-            || mtu_length % FRAME_ALIGNMENT as u32 != 0
+            || !mtu_length.is_multiple_of(FRAME_ALIGNMENT as u32)
         {
             return Err(LogError::Mtu {
                 found: i64::from(mtu_length),
