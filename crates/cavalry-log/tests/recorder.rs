@@ -1,7 +1,8 @@
 //! The recorder on real files: a block the writer refuses with nothing moved, blocks
 //! written and rolled across a segment boundary and read back by position, the time
-//! index's cadence, the sync cadence behind the two positions, the stop, and a stopped
-//! recording that a later open finds nothing to repair (`spec/durable-log.md`, "Segment
+//! index's cadence, the sync cadence behind the two positions, the stop, a roll that
+//! fails and is retried, a start that fails after its slot, and a stopped recording that
+//! a later open finds nothing to repair (`spec/durable-log.md`, "Segment
 //! files", "Time index", "The driver"; ADR 0025; CLAUDE.md, invariants 1 and 3). The
 //! full case comes first.
 
@@ -346,6 +347,70 @@ fn a_stop_at_a_segment_boundary_removes_the_empty_next_segment() {
         !dir.segment(0, SEGMENT).exists(),
         "a segment wholly past the stop is removed"
     );
+}
+
+#[test]
+fn a_roll_that_fails_is_io_and_is_retried_at_the_next_write() {
+    let dir = TestDir::new("roll-fails");
+    let (mut log, _) = LogDir::open(dir.path(), NOW).expect("opens");
+    let mut writer = log.start(&recording(1001, 0), NOW).expect("starts");
+    let found = writer.descriptor().clone();
+    // A file in the next segment's place makes the roll's create refuse, as a full
+    // disk would make its create or extend refuse.
+    fs::write(dir.segment(0, SEGMENT), b"").expect("a file in the way");
+    let mut now = NOW;
+    let error = loop {
+        let (header, length) = padding_block(&found, writer.position());
+        now += MS;
+        match writer.write(&header, length, now) {
+            Ok(()) => assert!(writer.position() < SEGMENT, "rolled past a file in the way"),
+            Err(error) => break error,
+        }
+    };
+    assert_eq!(error.reason(), "io", "{error}");
+    assert_eq!(
+        writer.position(),
+        SEGMENT,
+        "the block that filled the segment was taken"
+    );
+    let second = data_block(&found, SEGMENT, 0x33);
+    let error = writer.write(&second, 64, now + MS).unwrap_err();
+    assert_eq!(
+        error.reason(),
+        "io",
+        "the roll is retried, never refused as a block"
+    );
+    assert_eq!(writer.position(), SEGMENT, "nothing moved");
+    fs::remove_file(dir.segment(0, SEGMENT)).expect("the file is moved out of the way");
+    writer
+        .write(&second, 64, now + 2 * MS)
+        .expect("the retried roll lets the block in");
+    assert_eq!(writer.position(), SEGMENT + 64);
+    assert_eq!(read_at(&dir.segment(0, SEGMENT), 0, 64), second);
+    let stopped = log.stop(writer, now + 3 * MS).expect("stops");
+    assert_eq!(stopped.stop_position(), SEGMENT + 64);
+}
+
+#[test]
+fn a_start_that_fails_after_the_slot_is_written_stops_the_slot_as_empty() {
+    let dir = TestDir::new("start-fails");
+    let (mut log, _) = LogDir::open(dir.path(), NOW).expect("opens");
+    // An index file in the recording's place makes the start's create refuse after
+    // the slot is written.
+    fs::write(dir.path().join(index_file_name(0)), b"").expect("a file in the way");
+    let error = log.start(&recording(1001, 128), NOW + MS).unwrap_err();
+    assert_eq!(error.reason(), "io", "{error}");
+    let slot = log.catalog().get(0).expect("reads").expect("holds");
+    assert_eq!(slot.state(), State::Valid);
+    assert!(!slot.is_live(), "no live slot without a writer");
+    assert_eq!(
+        (slot.stop_position(), slot.stop_timestamp()),
+        (128, NOW),
+        "stopped where recovery would stop it, at the start"
+    );
+    drop(log);
+    let (_, recovery) = LogDir::open(dir.path(), NOW + 2 * MS).expect("opens again");
+    assert_eq!(recovery, Recovery::default(), "nothing left to repair");
 }
 
 #[test]

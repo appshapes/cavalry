@@ -14,7 +14,8 @@ The durable log: recording and replay. Data plane.
   block of committed frames with one positional write, appends an index entry at most
   once per millisecond, rolls segments at their length, and syncs once per second
   behind two positions, what is written and what is synced; `LogDir::stop` writes the
-  stop (ADR 0025).
+  stop (ADR 0025). A roll that fails on a full disk is an `io` error and is retried at
+  the next write, never a stuck writer.
 - Replays a log back into a subscription from a given position, at original or maximum
   speed. `cavalry replay` answers "what did this service see between two instants" in
   one command.

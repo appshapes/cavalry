@@ -391,7 +391,10 @@ user-visible change, added in the same commit as the change. The format follows
   that never go back, and rolls into the next segment file at the segment's end, syncing
   the one it closes; `sync` syncs the segment and the index once per second while bytes
   are unsynced and moves `synced_position` up to `position`; `LogDir::stop` writes the
-  stop entry, syncs, writes the catalog's stop fields and removes a segment wholly past
-  the stop. A block that is empty, unaligned, longer in bytes than in length or that
-  would cross its segment is refused with nothing moved (ADR 0025). The README example
-  is this path, from open to read-back.
+  stop entry, syncs, removes a segment wholly past the stop and then writes the
+  catalog's stop fields, so a crash between the two leaves a live slot recovery repairs.
+  A block that is empty, unaligned, longer in bytes than in length or that would cross
+  its segment is refused with nothing moved (ADR 0025). A roll that fails, a full disk
+  at the next segment, is `io` and is retried at the next write; a start that fails
+  after its slot is written stops the slot at its start, as recovery would. The README
+  example is this path, from open to read-back.

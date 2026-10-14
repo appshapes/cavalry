@@ -161,7 +161,12 @@ impl LogDir {
     /// index with its header and the start entry, synced, then the first segment file
     /// at its full length. Every slot used is [`CatalogError::Full`], a channel or
     /// source identity past its field is refused before any slot is written, and the
-    /// recording id is the slot's.
+    /// recording id is the slot's. A step that fails after the slot is written leaves no
+    /// writer to stop it, so `start` stops the slot itself at its start position and
+    /// start timestamp, the empty recording recovery would make of it
+    /// (`spec/durable-log.md`, "The driver"), and returns the step's error; if that stop
+    /// fails too, the slot stays live until the next [`LogDir::open`] repairs it the
+    /// same way.
     pub fn start(
         &mut self,
         recording: &Recording<'_>,
@@ -171,6 +176,16 @@ impl LogDir {
         // refuses here, with nothing on disk.
         Descriptor::new(recording)?;
         let id = self.catalog_mut().add(recording)?;
+        self.start_files(id, now).inspect_err(|_| {
+            // The step's error is the one the caller needs; a failed stop here is
+            // repaired by recovery at the next open.
+            let _ =
+                self.catalog_mut()
+                    .stop(id, recording.start_position, recording.start_timestamp);
+        })
+    }
+
+    fn start_files(&mut self, id: i64, now: i64) -> Result<RecordingWriter, RecorderError> {
         let descriptor = self
             .catalog()
             .get(id)?
@@ -223,10 +238,12 @@ impl LogDir {
     }
 
     /// Stops a recording at `now`: the index gets its stop entry, the segment and the
-    /// index are synced, the catalog's stop fields are written and synced with the stop
-    /// entry's timestamp, which never goes below the last entry's, and a segment file
-    /// wholly past the stop, one the writer had just rolled into, is removed. Returns
-    /// the stopped descriptor.
+    /// index are synced, a segment file wholly past the stop, one the writer had just
+    /// rolled into, is removed and the removal synced, and then the catalog's stop
+    /// fields are written and synced with the stop entry's timestamp, which never goes
+    /// below the last entry's. The removal comes first so that a crash between the two
+    /// leaves a live slot, which recovery scans and repairs, never a stopped slot with
+    /// a segment past its stop that nothing revisits. Returns the stopped descriptor.
     pub fn stop(
         &mut self,
         mut writer: RecordingWriter,
@@ -235,13 +252,16 @@ impl LogDir {
         writer.append_entry(now)?;
         writer.sync_files()?;
         let id = writer.descriptor.recording_id();
+        if writer.segment_base >= writer.position {
+            fs::remove_file(&writer.segment_path).map_err(io("remove", &writer.segment_path))?;
+            File::open(&writer.dir)
+                .and_then(|dir| dir.sync_all())
+                .map_err(io("sync", &writer.dir))?;
+        }
         // The stop timestamp is the stop entry's: never before the last entry's, so a
         // clock that stepped back cannot put the stop before the start.
         self.catalog_mut()
             .stop(id, writer.position, writer.last_index_timestamp)?;
-        if writer.segment_base >= writer.position {
-            fs::remove_file(&writer.segment_path).map_err(io("remove", &writer.segment_path))?;
-        }
         Ok(self
             .catalog()
             .get(id)?
@@ -250,7 +270,8 @@ impl LogDir {
 }
 
 /// Creates a segment file at its full length, synced, so that its length is durable
-/// before a byte is written into it.
+/// before a byte is written into it. A file it created and could not extend or sync is
+/// removed again, so that a retry, after the operator frees space, can create it.
 fn open_segment(path: &Path, length: i64) -> Result<File, RecorderError> {
     let segment = OpenOptions::new()
         .read(true)
@@ -258,8 +279,16 @@ fn open_segment(path: &Path, length: i64) -> Result<File, RecorderError> {
         .create_new(true)
         .open(path)
         .map_err(io("create", path))?;
-    segment.set_len(length as u64).map_err(io("extend", path))?;
-    segment.sync_all().map_err(io("sync", path))?;
+    let extended = segment
+        .set_len(length as u64)
+        .map_err(io("extend", path))
+        .and_then(|()| segment.sync_all().map_err(io("sync", path)));
+    if let Err(error) = extended {
+        // The extend's error is the one the operator needs; a file left behind makes
+        // the retry's create refuse, which names the path.
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
     Ok(segment)
 }
 
@@ -294,7 +323,18 @@ impl RecordingWriter {
     /// syncing the one it closes. A block that is empty, not a multiple of 32, longer
     /// in bytes than in length, or that would cross the segment's end is
     /// [`RecorderError::Block`], and nothing moves.
+    ///
+    /// An [`RecorderError::Io`] whose step is `write a block of` means the block was not
+    /// taken and the position did not move. Any other `Io` error, from the index entry or
+    /// the roll into the next segment, came after the block was written: the block is
+    /// taken and [`position`](Self::position) is past it, so the caller does not hand it
+    /// again. A roll that failed, a full disk when the next segment is created, is
+    /// retried at the start of the next `write`, which returns the roll's `Io` error
+    /// again, with nothing moved, until the roll succeeds.
     pub fn write(&mut self, bytes: &[u8], length: usize, now: i64) -> Result<(), RecorderError> {
+        if self.position == self.segment_base + self.segment_length {
+            self.roll()?;
+        }
         let refuse = |reason| RecorderError::Block {
             position: self.position,
             length,
