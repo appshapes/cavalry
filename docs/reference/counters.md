@@ -23,3 +23,9 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 15 | `driver.registry_full` | counter | static | Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions or images, or the counters file, was at capacity (spec/client-protocol.md, Sizes). | A fixed capacity of the driver is reached: clients, publications or subscriptions are not being closed, or this host needs more than one driver's worth. Close what is not used; the error event's message names the registry; the capacities are the driver's in this version. |
 | 16 | `driver.log_create_failed` | counter | static | Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands). | Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers. Close publications that are not used, or move the driver directory to a filesystem with room. |
 | 17 | `conductor.idle_strategy` | gauge | static | The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin. |  |
+
+## State machines
+
+Every state machine on the data plane registers its states and transitions in `counters.toml` too, and `just lint-counters` fails a transition that names no counter, a counter that is not in the table above, or an enum whose variants are not the machine's states (CLAUDE.md, invariant 4). The enum that holds the states carries the comment `// state machine: <name>` on the line before its definition. Each machine is listed here with the counter every transition adds one to.
+
+None registered yet.

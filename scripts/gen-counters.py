@@ -26,10 +26,23 @@ Checks on counters.toml:
   doc      a non-empty string
   doctor   a string, empty when there is nothing for an operator to do
 
+Checks on the state machines of the data plane, the gate CLAUDE.md names for a state
+transition with no counter (invariant 4; the shape is in counters.toml's header):
+
+  machine     every [[state_machine]] has exactly name and states: a unique lowercase name
+              and a non-empty array of unique lowercase states
+  transition  every [[transition]] has exactly machine, from, to and counter: the machine
+              exists, from and to are its states, the counter is a [[counter]] name, no
+              transition repeats, and every machine has at least one
+  enum        exactly one enum under crates/*/src carries the comment
+              `// state machine: <name>` on the line before its definition (attributes
+              and docs may sit between), and its variants, lower-cased with an underscore
+              between words, are the machine's states
+
 Python 3.9 standard library only, like the other scripts (ADR 0003): `tomllib` when the
 interpreter has it (3.11 and later), else a parser for the flat subset of TOML that
-counters.toml uses: `key = value` with integers and basic strings, `[[counter]]`
-headers, blank lines and comments. The Rust output is written in rustfmt's shape and
+counters.toml uses: `key = value` with integers, basic strings and arrays of them,
+`[[counter]]`, `[[state_machine]]` and `[[transition]]` headers, blank lines and comments. The Rust output is written in rustfmt's shape and
 run through rustfmt when it is installed, so `cargo fmt --check` passes either way.
 """
 
@@ -49,11 +62,19 @@ RUST = ROOT / "crates" / "cavalry-shm" / "src" / "counters" / "generated.rs"
 
 SCHEMA = 0
 KEYS = ("id", "name", "kind", "scope", "doc", "doctor")
+MACHINE_KEYS = ("name", "states")
+TRANSITION_KEYS = ("machine", "from", "to", "counter")
+TABLES = ("counter", "state_machine", "transition")
 KINDS = ("counter", "gauge")
 SCOPES = ("static", "instance")
 MAX_ID = 2**31 - 1
 MAX_LABEL_LENGTH = 124
 NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
+STATE = re.compile(r"^[a-z][a-z0-9_]*$")
+MARKER = re.compile(r"^\s*// state machine: ([a-z][a-z0-9_.]*)\s*$")
+ENUM = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+\w+")
+VARIANT = re.compile(r"^\s*([A-Z]\w*)")
+CRATES = ROOT / "crates"
 
 
 class Fail(Exception):
@@ -74,21 +95,23 @@ def load(text: str) -> dict:
 
 
 def parse_flat(text: str) -> dict:
-    """The subset counters.toml uses: top-level `key = value`, `[[counter]]` tables,
-    integers, basic strings with \\\" \\\\ \\n \\t escapes, comments and blank lines."""
-    doc: dict = {"counter": []}
+    """The subset counters.toml uses: top-level `key = value`, the `[[counter]]`,
+    `[[state_machine]]` and `[[transition]]` tables, integers, basic strings with \\\" \\\\
+    \\n \\t escapes, one-line arrays of them, comments and blank lines."""
+    doc: dict = {}
     table: dict | None = None
     for number, raw in enumerate(text.splitlines(), 1):
         line = strip_comment(raw).strip()
         if not line:
             continue
-        if line == "[[counter]]":
+        header = re.fullmatch(r"\[\[([a-z_]+)\]\]", line)
+        if header:
             table = {}
-            doc["counter"].append(table)
+            doc.setdefault(header.group(1), []).append(table)
             continue
         m = re.match(r"^([A-Za-z0-9_-]+)\s*=\s*(.+)$", line)
         if not m:
-            raise Fail(f"counters.toml:{number}: not `key = value` or `[[counter]]`; this "
+            raise Fail(f"counters.toml:{number}: not `key = value` or a `[[table]]` header; this "
                        "parser reads the flat subset the file uses (scripts/gen-counters.py)")
         key, value = m.group(1), parse_value(m.group(2), number)
         target = doc if table is None else table
@@ -117,6 +140,8 @@ def parse_value(text: str, number: int):
     text = text.strip()
     if re.fullmatch(r"[+-]?\d+", text):
         return int(text)
+    if len(text) >= 2 and text[0] == "[" and text[-1] == "]":
+        return [parse_value(item, number) for item in split_items(text[1:-1])]
     if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
         body = text[1:-1]
         out = []
@@ -138,19 +163,37 @@ def parse_value(text: str, number: int):
     raise Fail(f"counters.toml:{number}: `{text}` is not an integer or a \"string\"")
 
 
+def split_items(text: str) -> list[str]:
+    """An array's items, split on the commas outside strings; a trailing comma is allowed."""
+    items, start, quoted, escaped = [], 0, False, False
+    for i, ch in enumerate(text):
+        if escaped:
+            escaped = False
+        elif ch == "\\" and quoted:
+            escaped = True
+        elif ch == '"':
+            quoted = not quoted
+        elif ch == "," and not quoted:
+            items.append(text[start:i])
+            start = i + 1
+    items.append(text[start:])
+    return [item for item in items if item.strip()]
+
+
 def fail(message: str):
     raise Fail(message)
 
 
 # ---- checking ---------------------------------------------------------------------
 
-def check(doc: dict) -> list[dict]:
+def check(doc: dict) -> tuple[list[dict], list[dict]]:
     if doc.get("schema") != SCHEMA:
         raise Fail(f"counters.toml: schema = {doc.get('schema')!r}; this script knows "
                    f"schema {SCHEMA} (spec/counters-file.md, `counters.toml`)")
     for key in doc:
-        if key not in ("schema", "counter"):
-            raise Fail(f"counters.toml: top-level key `{key}` is not `schema` or `[[counter]]`")
+        if key not in ("schema", *TABLES):
+            raise Fail(f"counters.toml: top-level key `{key}` is not `schema` or one of "
+                       f"{['[[' + t + ']]' for t in TABLES]}")
     counters = doc.get("counter") or []
     if not isinstance(counters, list) or not counters:
         raise Fail("counters.toml: no [[counter]] entries")
@@ -193,11 +236,110 @@ def check(doc: dict) -> list[dict]:
             raise Fail(f"{where}: doc must be one sentence, what a change in the value means")
         if not isinstance(doctor, str):
             raise Fail(f"{where}: doctor must be a string: what an operator does, or \"\"")
-    return counters
+    return counters, check_machines(doc, names)
 
 
 def const_name(name: str) -> str:
     return name.upper().replace(".", "_")
+
+
+def check_machines(doc: dict, counters: set[str]) -> list[dict]:
+    """The [[state_machine]] and [[transition]] tables, checked against each other, the
+    counters and the marked enums; returns each machine with its transitions attached."""
+    machines: dict[str, dict] = {}
+    for n, m in enumerate(doc.get("state_machine") or [], 1):
+        where = f"counters.toml: [[state_machine]] {n} ({m.get('name', 'unnamed')!r})"
+        if sorted(m) != sorted(MACHINE_KEYS):
+            raise Fail(f"{where}: every entry has exactly name and states; got {sorted(m)}")
+        name, states = m["name"], m["states"]
+        if not isinstance(name, str) or not MARKER.match(f"// state machine: {name}"):
+            raise Fail(f"{where}: name must be lowercase, like a counter's prefix; got {name!r}")
+        if name in machines:
+            raise Fail(f"{where}: name {name!r} is used twice")
+        if (not isinstance(states, list) or not states or len(set(states)) != len(states)
+                or any(not isinstance(s, str) or not STATE.match(s) for s in states)):
+            raise Fail(f"{where}: states must be a non-empty array of unique lowercase names; "
+                       f"got {states!r}")
+        machines[name] = {"name": name, "states": states, "transitions": []}
+    seen: set[tuple] = set()
+    for n, t in enumerate(doc.get("transition") or [], 1):
+        where = f"counters.toml: [[transition]] {n}"
+        if sorted(t) != sorted(TRANSITION_KEYS):
+            raise Fail(f"{where}: every entry has exactly machine, from, to and counter; "
+                       f"got {sorted(t)}")
+        machine = machines.get(t["machine"])
+        if machine is None:
+            raise Fail(f"{where}: machine {t['machine']!r} has no [[state_machine]]")
+        for end in ("from", "to"):
+            if t[end] not in machine["states"]:
+                raise Fail(f"{where}: {end} = {t[end]!r} is not a state of {t['machine']!r}, "
+                           f"whose states are {machine['states']}")
+        if t["counter"] not in counters:
+            raise Fail(f"{where}: counter {t['counter']!r} is not a [[counter]] name; a "
+                       "transition with no counter is what this gate refuses (CLAUDE.md, "
+                       "invariant 4): add the counter, then name it here")
+        key = tuple(t[k] for k in TRANSITION_KEYS)
+        if key in seen:
+            raise Fail(f"{where}: repeats an earlier transition")
+        seen.add(key)
+        machine["transitions"].append(t)
+    for machine in machines.values():
+        if not machine["transitions"]:
+            raise Fail(f"counters.toml: state machine {machine['name']!r} has no [[transition]]")
+    check_enums(machines)
+    return list(machines.values())
+
+
+def check_enums(machines: dict[str, dict]) -> None:
+    """Every marked enum under crates/*/src has a table and the table's states; every
+    table has exactly one marked enum."""
+    found: dict[str, str] = {}
+    for path in sorted(CRATES.glob("*/src/**/*.rs")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            m = MARKER.match(line)
+            if not m:
+                continue
+            name, where = m.group(1), f"{path.relative_to(ROOT).as_posix()}:{i + 1}"
+            if name not in machines:
+                raise Fail(f"{where}: `// state machine: {name}` has no [[state_machine]] "
+                           "in counters.toml")
+            if name in found:
+                raise Fail(f"{where}: state machine {name!r} is also marked at {found[name]}; "
+                           "one enum per machine")
+            found[name] = where
+            variants, states = enum_variants(lines, i + 1, where), machines[name]["states"]
+            if sorted(variants) != sorted(states):
+                raise Fail(f"{where}: the enum's variants {sorted(variants)} are not the "
+                           f"states of {name!r}, {sorted(states)}")
+    for name in machines:
+        if name not in found:
+            raise Fail(f"counters.toml: state machine {name!r} has no enum under crates/*/src "
+                       f"marked `// state machine: {name}` on the line before it")
+
+
+def enum_variants(lines: list[str], start: int, where: str) -> list[str]:
+    """The variants of the enum that begins at line `start`, after any attributes and
+    docs, as lowercase names with an underscore between words (`WriteFailed` is
+    `write_failed`)."""
+    variants: list[str] = []
+    depth, started, opened = 0, False, False
+    for line in lines[start:]:
+        if not started:
+            if ENUM.match(line):
+                started = True
+            elif line.strip() and not line.strip().startswith(("#[", "///")):
+                raise Fail(f"{where}: the line after `// state machine:` must begin an enum; "
+                           "attributes and docs may sit between")
+            else:
+                continue
+        if opened and depth == 1 and (m := VARIANT.match(line)):
+            variants.append(re.sub(r"(?<!^)(?=[A-Z])", "_", m.group(1)).lower())
+        depth += line.count("{") - line.count("}")
+        opened = opened or depth > 0
+        if opened and depth == 0:
+            return variants
+    raise Fail(f"{where}: the marked enum never closes")
 
 
 # ---- rendering --------------------------------------------------------------------
@@ -206,7 +348,7 @@ def md_cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ").strip()
 
 
-def render_page(counters: list[dict]) -> str:
+def render_page(counters: list[dict], machines: list[dict]) -> str:
     lines = [
         "<!-- Generated from counters.toml by scripts/gen-counters.py. Do not edit this page: "
         "change counters.toml and run `just gen-counters`. -->",
@@ -228,6 +370,31 @@ def render_page(counters: list[dict]) -> str:
     for c in counters:
         lines.append(f"| {c['id']} | `{c['name']}` | {c['kind']} | {c['scope']} | "
                      f"{md_cell(c['doc'])} | {md_cell(c['doctor'])} |")
+    lines += [
+        "",
+        "## State machines",
+        "",
+        "Every state machine on the data plane registers its states and transitions in "
+        "`counters.toml` too, and `just lint-counters` fails a transition that names no "
+        "counter, a counter that is not in the table above, or an enum whose variants are "
+        "not the machine's states (CLAUDE.md, invariant 4). The enum that holds the states "
+        "carries the comment `// state machine: <name>` on the line before its definition. "
+        "Each machine is listed here with the counter every transition adds one to.",
+    ]
+    if not machines:
+        lines += ["", "None registered yet."]
+    for machine in machines:
+        lines += [
+            "",
+            f"### `{machine['name']}`",
+            "",
+            "States: " + ", ".join(f"`{s}`" for s in machine["states"]) + ".",
+            "",
+            "| From | To | Counter |",
+            "| --- | --- | --- |",
+        ]
+        lines += [f"| `{t['from']}` | `{t['to']}` | `{t['counter']}` |"
+                  for t in machine["transitions"]]
     return "\n".join(lines) + "\n"
 
 
@@ -290,8 +457,8 @@ def main(argv: list[str]) -> int:
     if argv[1:] and not check_only:
         sys.exit("usage: gen-counters.py [--check]")
     try:
-        counters = check(load(SOURCE.read_text(encoding="utf-8")))
-        outputs = {PAGE: render_page(counters), RUST: render_rust(counters)}
+        counters, machines = check(load(SOURCE.read_text(encoding="utf-8")))
+        outputs = {PAGE: render_page(counters, machines), RUST: render_rust(counters)}
     except Fail as e:
         print(f"gen-counters: {e}", file=sys.stderr)
         return 1
@@ -303,7 +470,8 @@ def main(argv: list[str]) -> int:
                   "generates; run `just gen-counters` and commit the result", file=sys.stderr)
         if stale:
             return 1
-        print(f"lint-counters: {len(counters)} counters, 2 generated files current, ok")
+        print(f"lint-counters: {len(counters)} counters, {len(machines)} state machines, "
+              "2 generated files current, ok")
         return 0
     for p in stale:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -311,7 +479,7 @@ def main(argv: list[str]) -> int:
         print(f"gen-counters: wrote {p.relative_to(ROOT).as_posix()}")
     if not stale:
         print("gen-counters: both files already current")
-    print(f"gen-counters: {len(counters)} counters")
+    print(f"gen-counters: {len(counters)} counters, {len(machines)} state machines")
     return 0
 
 

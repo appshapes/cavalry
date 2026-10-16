@@ -12,6 +12,23 @@
 #         with the key's layout stated in doc.
 # doc:    one sentence for the reference page: what a change in the value means.
 # doctor: what an operator does when this counter says something is wrong, or "".
+#
+# A state machine on the data plane registers here too, so that `just lint-counters` can
+# refuse a transition with no counter (CLAUDE.md, invariant 4). The enum that holds its
+# states carries the comment `// state machine: <name>` on the line before its
+# definition (attributes and docs may sit between), and its variants, lower-cased with an
+# underscore between words, are the machine's states.
+#
+# [[state_machine]]
+# name:    lowercase, like a counter's prefix, unique.
+# states:  every state, an array of lowercase names.
+#
+# [[transition]]
+# machine: the state machine's name.
+# from:    the state it leaves.
+# to:      the state it enters.
+# counter: the name of the counter the transition adds one to; a counter may serve
+#          several transitions, and a transition is listed once per counter it moves.
 schema = 0
 
 [[counter]]

@@ -400,3 +400,9 @@ user-visible change, added in the same commit as the change. The format follows
   A start that fails after its slot is written stops the slot at its start, as recovery
   would. The README
   example is this path, from open to read-back.
+- `just lint-counters` checks the state machines of the data plane: a `[[state_machine]]`
+  in `counters.toml` names its states, every `[[transition]]` names the counter it adds
+  one to, and the enum marked `// state machine: <name>` has those states as its
+  variants; the counters reference page lists each machine with its transitions. This
+  is the gate CLAUDE.md names for a transition with no counter, built before the first
+  state machine, the driver's recorder (ADR 0025, card 93).
