@@ -38,8 +38,10 @@ transition with no counter (invariant 4; the shape is in counters.toml's header)
               for a count that only rises, and a gauge that moves back hides how often
               it moved
   moved       a transition's counter's constant (`COUNTERS_FREED`) is named in the code of
-              the crate that holds the machine's enum, outside generated.rs and comments:
-              a registered counter no code names is a transition with no counter
+              some crate under crates/*/src, outside generated.rs and comments: a
+              registered counter no code names is a transition with no counter. The
+              crate may differ from the enum's: a layout crate holds the state, and the
+              driver, which performs the transition, moves the counter
   enum        exactly one enum under crates/*/src carries the comment
               `// state machine: <name>` on the line before its definition (attributes
               and docs may sit between), and its variants, one per line, lower-cased
@@ -361,26 +363,32 @@ def check_enums(machines: dict[str, dict]) -> None:
         if name not in found:
             raise Fail(f"counters.toml: state machine {name!r} has no enum under crates/*/src "
                        f"marked `// state machine: {name}` on the line before it")
+    code = crate_code()
     for name, machine in machines.items():
-        check_moved(machine, crate_of[name], found[name])
+        check_moved(machine, found[name], code)
 
 
-def check_moved(machine: dict, crate: str, where: str) -> None:
-    """Every transition's counter is named by code in the crate that holds the machine's
-    enum, outside generated.rs and outside comments: a counter declared and registered
-    but never moved would let the gate pass a transition nothing counts."""
+def crate_code() -> str:
+    """Every crate's source outside generated.rs, with comments stripped, as one text."""
     code = []
-    for path in sorted((CRATES / crate / "src").glob("**/*.rs")):
+    for path in sorted(CRATES.glob("*/src/**/*.rs")):
         if path == RUST:
             continue
         code += [line.split("//")[0] for line in path.read_text(encoding="utf-8").splitlines()]
-    text = "\n".join(code)
+    return "\n".join(code)
+
+
+def check_moved(machine: dict, where: str, code: str) -> None:
+    """Every transition's counter is named by code in some crate, outside generated.rs
+    and outside comments: a counter declared and registered but never moved would let the
+    gate pass a transition nothing counts. The crate may differ from the enum's: a layout
+    crate holds the state word, and the driver that writes it moves the counter."""
     for t in machine["transitions"]:
         const = const_name(t["counter"])
-        if not re.search(rf"\b{const}\b", text):
+        if not re.search(rf"\b{const}\b", code):
             raise Fail(f"counters.toml: [[transition]] {t['from']} -> {t['to']} of "
                        f"{machine['name']!r} (enum at {where}) names counter "
-                       f"{t['counter']!r}, but no code in crates/{crate}/src outside "
+                       f"{t['counter']!r}, but no code under crates/*/src outside "
                        f"generated.rs names {const}: a counter nothing moves is a transition "
                        "with no counter (CLAUDE.md, invariant 4); move it where the "
                        "transition is written, then register it")

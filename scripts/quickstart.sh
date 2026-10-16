@@ -14,13 +14,16 @@ started=$(date +%s)
 
 if [ -d /dev/shm ]; then base=/dev/shm; else base="${TMPDIR:-/tmp}"; fi
 export CAVALRY_DIR="${base%/}/cavalry-quickstart-$$"
-rm -rf "$CAVALRY_DIR"
+# The driver's log directory follows XDG_DATA_HOME (ADR 0025), so the run's recordings,
+# none yet, land beside its driver directory and never under the user's home.
+export XDG_DATA_HOME="${CAVALRY_DIR}-data"
+rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME"
 cleanup() {
     if [ -n "${driver_pid:-}" ] && kill -0 "$driver_pid" 2>/dev/null; then
         kill -TERM "$driver_pid" 2>/dev/null || true
         wait "$driver_pid" 2>/dev/null || true
     fi
-    rm -rf "$CAVALRY_DIR"
+    rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME"
 }
 trap cleanup EXIT
 

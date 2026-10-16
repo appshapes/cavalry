@@ -1,5 +1,5 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 0
-//! (ADR 0019).
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 1
+//! (ADR 0019; the recording commands and events are ADR 0025).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -41,7 +41,7 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 0;
+pub const VERSION: i32 = 1;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
@@ -74,6 +74,11 @@ pub enum CommandType {
     ClientKeepalive = 6,
     /// Remove everything of the client's and forget it. No answer.
     ClientClose = 11,
+    /// Record the live publication on a stream and channel to the durable log; the first
+    /// of Cavalry's own commands, in its range from `0x0101` (ADR 0025).
+    StartRecording = 0x0101,
+    /// Stop a recording at the position the recorder has written.
+    StopRecording = 0x0102,
 }
 
 impl TryFrom<i32> for CommandType {
@@ -90,6 +95,8 @@ impl TryFrom<i32> for CommandType {
             5 => Ok(CommandType::RemoveSubscription),
             6 => Ok(CommandType::ClientKeepalive),
             11 => Ok(CommandType::ClientClose),
+            0x0101 => Ok(CommandType::StartRecording),
+            0x0102 => Ok(CommandType::StopRecording),
             found => Err(ProtocolError::Type { found }),
         }
     }
@@ -116,6 +123,12 @@ pub enum EventType {
     SubscriptionReady = 0x0F07,
     /// The driver timed a client out and removed everything of its.
     ClientTimeout = 0x0F0A,
+    /// A recording is in the catalog with its files and its two counters; the first of
+    /// Cavalry's own events, in its range from `0x1001` (ADR 0025).
+    RecordingReady = 0x1001,
+    /// A recording stopped, by command, at its publication's end of stream, or on a
+    /// failure; sent to every client.
+    RecordingStopped = 0x1002,
 }
 
 impl TryFrom<i32> for EventType {
@@ -133,13 +146,16 @@ impl TryFrom<i32> for EventType {
             0x0F06 => Ok(EventType::ExclusivePublicationReady),
             0x0F07 => Ok(EventType::SubscriptionReady),
             0x0F0A => Ok(EventType::ClientTimeout),
+            0x1001 => Ok(EventType::RecordingReady),
+            0x1002 => Ok(EventType::RecordingStopped),
             found => Err(ProtocolError::Type { found }),
         }
     }
 }
 
 /// The code of an `error` event: `spec/client-protocol.md`, "Error codes". Aeron's
-/// numbers; the ones this version does not use are reserved and have no variant.
+/// numbers up to 14, the ones this version does not use reserved with no variant, and
+/// Cavalry's own from 20 (ADR 0025).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum ErrorCode {
@@ -159,8 +175,15 @@ pub enum ErrorCode {
     ResourceTemporarilyUnavailable = 10,
     /// Anything else; the message says what.
     GenericError = 11,
-    /// The log file could not be created or sized.
+    /// The log file, or a recording's time index or segment file, could not be created
+    /// or sized.
     StorageSpace = 12,
+    /// Start recording named a stream id and channel no live publication has.
+    NoPublicationToRecord = 20,
+    /// Stop recording named a recording id the catalog does not hold.
+    UnknownRecording = 21,
+    /// Start recording named a stream whose live publications are all being recorded.
+    AlreadyRecording = 22,
 }
 
 impl ErrorCode {
@@ -175,6 +198,9 @@ impl ErrorCode {
             10 => Some(ErrorCode::ResourceTemporarilyUnavailable),
             11 => Some(ErrorCode::GenericError),
             12 => Some(ErrorCode::StorageSpace),
+            20 => Some(ErrorCode::NoPublicationToRecord),
+            21 => Some(ErrorCode::UnknownRecording),
+            22 => Some(ErrorCode::AlreadyRecording),
             _ => None,
         }
     }
@@ -343,6 +369,26 @@ pub enum Command<'a> {
         /// This command's id.
         correlation_id: i64,
     },
+    /// Type 257 (`0x0101`).
+    StartRecording {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; `recording ready` or `error` names it.
+        correlation_id: i64,
+        /// The stream whose live publication is recorded.
+        stream_id: i32,
+        /// The channel, `cavalry:ipc` in this version.
+        channel: &'a [u8],
+    },
+    /// Type 258 (`0x0102`).
+    StopRecording {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; `operation success` or `error` names it.
+        correlation_id: i64,
+        /// The recording id that `recording ready` carried.
+        recording_id: i64,
+    },
 }
 
 impl<'a> Command<'a> {
@@ -356,6 +402,8 @@ impl<'a> Command<'a> {
             Command::RemoveSubscription { .. } => CommandType::RemoveSubscription,
             Command::ClientKeepalive { .. } => CommandType::ClientKeepalive,
             Command::ClientClose { .. } => CommandType::ClientClose,
+            Command::StartRecording { .. } => CommandType::StartRecording,
+            Command::StopRecording { .. } => CommandType::StopRecording,
         }
     }
 
@@ -368,7 +416,9 @@ impl<'a> Command<'a> {
             | Command::AddSubscription { client_id, .. }
             | Command::RemoveSubscription { client_id, .. }
             | Command::ClientKeepalive { client_id, .. }
-            | Command::ClientClose { client_id, .. } => client_id,
+            | Command::ClientClose { client_id, .. }
+            | Command::StartRecording { client_id, .. }
+            | Command::StopRecording { client_id, .. } => client_id,
         }
     }
 
@@ -381,7 +431,9 @@ impl<'a> Command<'a> {
             | Command::AddSubscription { correlation_id, .. }
             | Command::RemoveSubscription { correlation_id, .. }
             | Command::ClientKeepalive { correlation_id, .. }
-            | Command::ClientClose { correlation_id, .. } => correlation_id,
+            | Command::ClientClose { correlation_id, .. }
+            | Command::StartRecording { correlation_id, .. }
+            | Command::StopRecording { correlation_id, .. } => correlation_id,
         }
     }
 
@@ -438,6 +490,17 @@ impl<'a> Command<'a> {
                 client_id,
                 correlation_id,
             },
+            CommandType::StartRecording => Command::StartRecording {
+                client_id,
+                correlation_id,
+                stream_id: cursor.i32()?,
+                channel: cursor.string()?,
+            },
+            CommandType::StopRecording => Command::StopRecording {
+                client_id,
+                correlation_id,
+                recording_id: cursor.i64()?,
+            },
         };
         cursor.finish()?;
         Ok(command)
@@ -480,6 +543,9 @@ impl<'a> Command<'a> {
             }
             | Command::AddSubscription {
                 stream_id, channel, ..
+            }
+            | Command::StartRecording {
+                stream_id, channel, ..
             } => {
                 out.i32(stream_id)?;
                 out.string(channel)
@@ -490,6 +556,7 @@ impl<'a> Command<'a> {
             | Command::RemoveSubscription {
                 registration_id, ..
             } => out.i64(registration_id),
+            Command::StopRecording { recording_id, .. } => out.i64(recording_id),
             Command::ClientKeepalive { .. } | Command::ClientClose { .. } => Ok(()),
         }
     }
@@ -582,6 +649,26 @@ pub enum Event<'a> {
         /// The client the driver timed out.
         client_id: i64,
     },
+    /// Type `0x1001`: a recording started and its counters exist.
+    RecordingReady {
+        /// The start recording command's correlation id.
+        correlation_id: i64,
+        /// The recording's slot in the catalog.
+        recording_id: i64,
+        /// The session of the publication being recorded.
+        session_id: i32,
+        /// The `recording.position` counter: what the operating system holds.
+        recording_position_counter_id: i32,
+        /// The `recording.synced_position` counter: what a sync has made durable.
+        recording_synced_position_counter_id: i32,
+    },
+    /// Type `0x1002`: a recording stopped; sent to every client.
+    RecordingStopped {
+        /// The recording.
+        recording_id: i64,
+        /// The catalog's stop position.
+        stop_position: i64,
+    },
 }
 
 impl<'a> Event<'a> {
@@ -596,6 +683,8 @@ impl<'a> Event<'a> {
             Event::ExclusivePublicationReady { .. } => EventType::ExclusivePublicationReady,
             Event::SubscriptionReady { .. } => EventType::SubscriptionReady,
             Event::ClientTimeout { .. } => EventType::ClientTimeout,
+            Event::RecordingReady { .. } => EventType::RecordingReady,
+            Event::RecordingStopped { .. } => EventType::RecordingStopped,
         }
     }
 
@@ -650,6 +739,17 @@ impl<'a> Event<'a> {
             },
             EventType::ClientTimeout => Event::ClientTimeout {
                 client_id: cursor.i64()?,
+            },
+            EventType::RecordingReady => Event::RecordingReady {
+                correlation_id: cursor.i64()?,
+                recording_id: cursor.i64()?,
+                session_id: cursor.i32()?,
+                recording_position_counter_id: cursor.i32()?,
+                recording_synced_position_counter_id: cursor.i32()?,
+            },
+            EventType::RecordingStopped => Event::RecordingStopped {
+                recording_id: cursor.i64()?,
+                stop_position: cursor.i64()?,
             },
         };
         cursor.finish()?;
@@ -744,6 +844,26 @@ impl<'a> Event<'a> {
                 out.string(channel)
             }
             Event::ClientTimeout { client_id } => out.i64(client_id),
+            Event::RecordingReady {
+                correlation_id,
+                recording_id,
+                session_id,
+                recording_position_counter_id,
+                recording_synced_position_counter_id,
+            } => {
+                out.i64(correlation_id)?;
+                out.i64(recording_id)?;
+                out.i32(session_id)?;
+                out.i32(recording_position_counter_id)?;
+                out.i32(recording_synced_position_counter_id)
+            }
+            Event::RecordingStopped {
+                recording_id,
+                stop_position,
+            } => {
+                out.i64(recording_id)?;
+                out.i64(stop_position)
+            }
         }
     }
 }
@@ -980,6 +1100,13 @@ mod tests {
             Some(ErrorCode::ResourceTemporarilyUnavailable)
         );
         assert_eq!(ErrorCode::from_code(4), None);
+        assert_eq!(
+            ErrorCode::from_code(19),
+            None,
+            "left free for Aeron's later codes"
+        );
+        assert_eq!(ErrorCode::from_code(22), Some(ErrorCode::AlreadyRecording));
+        assert_eq!(ErrorCode::AlreadyRecording.code(), 22);
     }
 
     #[test]

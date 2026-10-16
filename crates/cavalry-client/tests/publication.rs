@@ -106,7 +106,7 @@ fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
 #[test]
 fn a_publisher_is_back_pressured_at_the_window_and_nothing_is_lost() {
     let dir = TestDir::new("window");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let mut publication = client
         .add_publication("cavalry:ipc", 1001)
@@ -170,7 +170,7 @@ fn a_publisher_is_back_pressured_at_the_window_and_nothing_is_lost() {
 #[test]
 fn claim_writes_in_place_and_too_long_is_refused_before_anything_is_reserved() {
     let dir = TestDir::new("claim");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let mut publication = client
         .add_exclusive_publication("cavalry:ipc", 1002)
@@ -223,7 +223,7 @@ fn claim_writes_in_place_and_too_long_is_refused_before_anything_is_reserved() {
 #[test]
 fn shared_publications_share_a_session_and_exclusive_ones_do_not() {
     let dir = TestDir::new("sessions");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let first = client
         .add_publication("cavalry:ipc", 1003)
@@ -256,7 +256,7 @@ fn shared_publications_share_a_session_and_exclusive_ones_do_not() {
 #[test]
 fn a_refused_command_carries_the_drivers_code_and_message() {
     let dir = TestDir::new("refused");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let error = client
         .add_publication("cavalry:udp?endpoint=localhost:40123", 1004)
@@ -287,7 +287,7 @@ fn a_refused_command_carries_the_drivers_code_and_message() {
 #[test]
 fn a_closed_publications_log_goes_and_a_closed_clients_publication_refuses() {
     let dir = TestDir::new("closed");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let closing = client
         .add_publication("cavalry:ipc", 1005)

@@ -33,7 +33,8 @@ target/release/cavalry run
 ```
 
 You will see one line: `cavalry run: driver started on /dev/shm/cavalry-<user> (pid
-<pid>), conductor idle strategy backoff; Ctrl-C or SIGTERM stops it`. On macOS the
+<pid>), recording into ~/.local/share/cavalry/log, conductor idle strategy
+backoff; Ctrl-C or SIGTERM stops it`. On macOS the
 directory is under the temporary directory. Leave it running.
 
 ## 3. Run the program

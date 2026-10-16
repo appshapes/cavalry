@@ -1,6 +1,6 @@
 # 0025. Record a stream in the driver, with Aeron Archive's commands in the client protocol
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-13
 - **Invariants affected:** 1, 2, 3, 4, 5, 6
 - **Supersedes:** none
@@ -56,63 +56,76 @@ not a decision until it is an ADR.
 of Cavalry's own, so their type ids come from ranges of Cavalry's own that Aeron's ids do
 not reach. Aeron's driver numbers its commands up from 1, at `0x12` today, and its events
 up from `0x0F01`, at `0x0F0D` today, one id per feature, and ADR 0019 keeps every id in
-those two runs for the feature Aeron gave it. The page reserves commands 1 to 255
-(`0x01` to `0xFF`) and events 3841 to 4095 (`0x0F01` to `0x0FFF`) for Aeron's ids,
-present and future, and gives Cavalry commands 257 to 511 (`0x0101` to `0x01FF`) and
-events 4097 to 4351 (`0x1001` to `0x10FF`), each taken in order from the bottom of its
-range; an id outside a range a version specifies stays code 6 for the driver and `type`
-for the client, as the page already says. Aeron would need 237 more commands or 242 more
-events to fill the ranges kept for it, and a Cavalry range that fills is a new ADR.
-`start recording` (type id 257, `0x0101`: client id, correlation id, stream id, channel)
-asks the driver to record the live publication on that stream id and channel from its
-producer position, loaded afresh as a join loads it (ADR 0022); the driver answers
-`recording ready` (type id 4097, `0x1001`: correlation id, recording id, the
-`recording.position` counter id, the `recording.synced_position` counter id) once the
-catalog slot is valid and synced and the first segment file and the time index exist.
-No live publication matches: error
-code 20. One already being recorded: code 22, with its recording id in the message. The
-catalog's slots used up, the recordings registry at capacity or the counters file with
-no free record: code 10. A segment or index file that cannot be created: code 12. The
-new codes sit past Aeron's range, whose 13 and 14 the page keeps reserved. `stop
-recording` (type id 258, `0x0102`: client id, correlation id, recording id) stops a
-recording and is answered with `operation success` once the stop fields are written and
-synced; a recording id the catalog does not hold is code 21, and one already stopped is
-`operation success` with nothing written, since a recording id is never reused. A
-recording belongs to the driver, not to the client that started it: it outlives that
-client, and any client may stop it. The driver stops a recording by itself when its publication closes,
-at the end of stream position, once the recorder has written up to it; the log of a
-recorded publication is removed only then, and the recorder's lag is bounded by the
-window. Every stop, by command or by close, is announced to every client with
-`recording stopped` (type id 4098, `0x1002`: recording id, stop position), and the
-recording's two counters are freed after the counter reuse timeout. A version 0 client
-never sends the new commands; a version 1 client that sends them to a version 0 driver
-gets code 6, as the page already says of a type the driver does not know. ADR 0019's
-Revisit names the UDP slice's channel status and destination commands as version 1;
-this ADR takes version 1, so they come in a later version, under Aeron's numbers, which
-this version leaves free.
+those two runs for the feature Aeron gave it. The page reserves commands 1 to 255 (`0x01`
+to `0xFF`) and events 3841 to 4095 (`0x0F01` to `0x0FFF`) for Aeron's ids, present and
+future, and gives Cavalry commands 257 to 511 (`0x0101` to `0x01FF`) and events 4097 to
+4351 (`0x1001` to `0x10FF`), each taken in order from the bottom of its range; an id
+outside a range a version specifies stays code 6 for the driver and `type` for the client,
+as the page already says. Aeron would need 237 more commands or 242 more events to fill
+the ranges kept for it, and a Cavalry range that fills is a new ADR. `start recording`
+(type id 257, `0x0101`: client id, correlation id, stream id, channel) asks the driver to
+record a live publication on that stream id and channel from its producer position, loaded
+afresh as a join loads it (ADR 0022): of the live publications on the stream, a concurrent
+one and any exclusive ones, the one with the lowest registration id that is not yet being
+recorded, so that each command records one more and code 22 comes only when every one is
+recorded. The driver answers `recording ready` (type id 4097, `0x1001`: correlation id,
+recording id, session id, the `recording.position` counter id, the
+`recording.synced_position` counter id) once the catalog slot is valid and synced, the
+first segment file and the time index exist, and the two counters are allocated; the
+session id says which publication the recording holds. The counters are keyed by the
+recording id, which only the recorder's reply gives, so the conductor allocates them on
+that reply and hands the recorder their handles in an attach request; until then the limit
+respects the start position, and `recording ready` goes out only after the counters exist,
+since it carries their ids. No live publication matches: error code 20. Every one already
+being recorded: code 22, with the recording id in the message. The catalog's slots used
+up, the recordings registry at capacity or the counters file with no free record: code 10.
+A segment or index file that cannot be created: code 12, counted in
+`recording.start_failed`. The new codes sit past Aeron's range, whose 13 and 14 the page
+keeps reserved. `stop recording` (type id 258, `0x0102`: client id, correlation id,
+recording id) stops a recording and is answered with `operation success` once the stop
+fields are written and synced; a recording id the catalog does not hold is code 21, and
+one already stopped is `operation success` with nothing written, since a recording id is
+never reused. A recording belongs to the driver, not to the client that started it: it
+outlives that client, and any client may stop it. The driver stops a recording by itself
+when its publication closes, at the end of stream position, once the recorder has written
+up to it; the log of a recorded publication is removed only then, and the recorder's lag
+is bounded by the window. It also stops a recording whose block scan finds a committed
+frame that fails a check of `spec/frame.md`, at that frame, counting
+`log_buffer.rejected_frame` as a subscriber's report is counted, so the recording ends at
+the last frame that checked. Every stop, by command, by close or by failure, is announced
+to every client with `recording stopped` (type id 4098, `0x1002`: recording id, stop
+position), and the recording's two counters are freed after the counter reuse timeout. A
+version 0 client never sends the new commands; a version 1 client that sends them to a
+version 0 driver gets code 6, as the page already says of a type the driver does not know.
+ADR 0019's Revisit names the UDP slice's channel status and destination commands as
+version 1; this ADR takes version 1, so they come in a later version, under Aeron's
+numbers, which this version leaves free.
 
 The recorder is a thread of the driver named `recorder`, with the conductor's idle
-strategy, and the conductor never touches the disk: it hands the recorder each start,
-stop and close through a bounded in-process queue (`cavalry_shm::spsc`, as the client's
+strategy, and the conductor never touches the disk: it hands the recorder each start, stop
+and close through a bounded in-process queue (`cavalry_shm::spsc`, as the client's
 conductor hands images, ADR 0021), the recorder answers through a second queue, and the
-conductor sends the event when the answer arrives, within the client's response
-timeout. On each duty cycle the recorder visits every live recording. It scans a block
-after Aeron's `TermBlockScanner`, a new block scan in `cavalry-shm` with a `loom` model
-and Miri: from the recording's position it loads frame lengths with acquire loads, as a
-subscriber's poll does, and takes whole committed frames, padding included, up to 1 MiB
-or the end of the term, stopping at the first frame whose length is not yet committed.
-A committed frame's bytes never change until cleaning, and cleaning stays below the
-recorder's position, so the block is written from the mapping into the segment file
-with one positional write and no copy in between; a segment rolls at its length as
+conductor sends the event when the answer arrives, within the client's response timeout.
+On each duty cycle the recorder visits every live recording. It scans a block after
+Aeron's `TermBlockScanner`, a new block scan in `cavalry-shm` with a `loom` model and
+Miri: from the recording's position it loads frame lengths with acquire loads, as a
+subscriber's poll does, and takes whole committed frames, padding included, up to 1 MiB or
+the end of the term, stopping at the first frame whose length is not yet committed. A
+committed frame's bytes never change until cleaning, and cleaning stays below the
+recorder's position, so the block is written from the mapping into the segment file with
+one positional write and no copy in between; a segment rolls at its length as
 `spec/durable-log.md` says. After a write it stores `recording.position`, the bytes the
 operating system holds, with a release store, and appends a time index entry when a
 millisecond has passed since the last. It reads its clock once per duty cycle, as the
 conductor does. The publisher's limit for a recorded publication is the window past the
-lesser of the subscribers' positions and `recording.position`, and cleaning uses the
-same lesser position, so a slow disk back-pressures the publisher and no recorded byte
-is cleaned before it is written; the recorder is never lossy. A write that fails counts
-`recording.write_failed` and stops the recording at the position written, which frees
-the publication's log. The live recordings are bounded by a registry of 1024, one per
+lesser of the subscribers' positions and `recording.position`, and cleaning uses the same
+lesser position, so a slow disk back-pressures the publisher and no recorded byte is
+cleaned before it is written; the recorder is never lossy. A live recording connects its
+publication: with no subscriber the limit is `recording.position` plus the window, and is
+connected is 1, since a recording alone is a legitimate consumer, as Aeron's archive,
+which records through a subscription, connects its publishers. A write that fails counts
+`recording.write_failed` and stops the recording at the position written, which frees the
+publication's log. The live recordings are bounded by a registry of 1024, one per
 publication at most, and the counters file holds two counters per recording within its
 8192.
 
@@ -148,14 +161,18 @@ behind the stream and how far the disk is behind the recorder. No sync key exist
 this version; one is a Revisit.
 
 Counters in `counters.toml`, written by the driver: static `recording.started`,
-`recording.stopped`, `recording.write_failed`, `recording.catalog_full`, and for the
-recovery pass ADR 0024 describes `recording.recovered`, `recording.invalidated` and
-`recording.index_rewritten`; instance `recording.position` and
-`recording.synced_position`, key: recording id, label: recording id, session id and
-stream id in decimal. Doctor checks: `recording-stalled`, a `recording.position` that does
-not move while its publication's position does; `recording-write-failed`;
-`recording-invalid`, a catalog slot in state 2; and `log-directory-backing` above. Every
-message names the page and section that explains it.
+`recording.stopped`, `recording.write_failed`, `recording.start_failed`,
+`recording.catalog_full`, and for the recovery pass ADR 0024 describes, one per action the
+page names, `recording.recovered`, `recording.invalidated`, `recording.index_rewritten`,
+`recording.catalog_truncated`, `recording.slot_dropped` and `recording.files_removed`;
+instance `recording.position` and `recording.synced_position`, key: recording id, label:
+recording id, session id and stream id in decimal. The conductor's view of a recording,
+starting, live, stopped or failed, is registered in `counters.toml` as a state machine, so
+that `just lint-counters` holds every transition to a counter. Doctor checks:
+`recording-stalled`, a `recording.position` that does not move while its publication's
+position does; `recording-write-failed`; `recording-invalid`, a catalog slot in state 2;
+and `log-directory-backing` above. Every message names the page and section that explains
+it.
 
 The client API gains `Cavalry::start_recording(channel, stream_id) -> Recording`, with
 `recording_id`, `position` and `synced_position` read from the counters file, and `stop`;
@@ -168,26 +185,26 @@ ten-minute path publishes.
 
 ## Alternatives considered
 
-- **The recording commands and events in the gaps of Aeron's runs, commands 12 and 13
-  and events `0x0F0B` and `0x0F0C`.** Lost: Aeron already uses all four, for add and
-  remove receive destination, static counter and publication error, and ADR 0019 keeps
-  every Aeron id for the feature Aeron gave it, so the UDP slice and a later counter
-  feature could not take their commands under Aeron's numbers. The same rule already
-  puts the new error codes past Aeron's.
-- **The recording commands after Aeron's last ids, command 19 and event `0x0F0E`.**
-  Lost: Aeron adds an id at its next feature, and the next Aeron release would take the
-  number Cavalry had shipped; a range of Cavalry's own, with room between it and
-  Aeron's, never collides.
+- **The recording commands and events in the gaps of Aeron's runs, commands 12 and 13 and
+  events `0x0F0B` and `0x0F0C`.** Lost: Aeron already uses all four, for add and remove
+  receive destination, static counter and publication error, and ADR 0019 keeps every
+  Aeron id for the feature Aeron gave it, so the UDP slice and a later counter feature
+  could not take their commands under Aeron's numbers. The same rule already puts the new
+  error codes past Aeron's.
+- **The recording commands after Aeron's last ids, command 19 and event `0x0F0E`.** Lost:
+  Aeron adds an id at its next feature, and the next Aeron release would take the number
+  Cavalry had shipped; a range of Cavalry's own, with room between it and Aeron's, never
+  collides.
 - **Aeron Archive's ids, `StartRecordingRequest` and `StopRecordingByIdentityRequest`.**
-  Lost: they are template ids of the archive's own SBE schema, numbered from 1 in a
-  space of their own, and in the client protocol they would land among the ids kept for
-  Aeron's driver commands.
+  Lost: they are template ids of the archive's own SBE schema, numbered from 1 in a space
+  of their own, and in the client protocol they would land among the ids kept for Aeron's
+  driver commands.
 - **A separate archive process with its own control protocol, as Aeron.** Lost in ADR
   0023; it returns if the recorder's writes move a bench row.
 - **The recorder on the conductor's thread, or the conductor writing the catalog.** Lost:
   a write or a sync that stalls on the disk would stall every publication's limit and
-  every client's command; the conductor never touches the disk, and the queue between
-  the two threads is the one the client already uses between its threads.
+  every client's command; the conductor never touches the disk, and the queue between the
+  two threads is the one the client already uses between its threads.
 - **The recorder loading the producer position instead of scanning frame lengths.** Lost:
   a subscriber reads the stream by the frame lengths it finds, and the recorder is one
   more reader; the scan stops at the first uncommitted frame on its own, with no second
@@ -198,51 +215,62 @@ ten-minute path publishes.
 - **Back-pressure through a subscription of the recorder's own.** Lost: a subscription
   carries an image and a client; the recorder is the driver, and the limit's rule gains
   one position instead.
+- **Refusing `start recording` as ambiguous when several live publications share the
+  stream, or recording only the concurrent one.** Lost: a stream with a concurrent
+  publication and exclusive ones is ordinary, and each of its sessions is worth recording;
+  the lowest registration id first, one per command, records them all in turn, and the
+  session id in `recording ready` tells the client which it got.
+- **A publication with a recording and no subscriber told `not connected`.** Lost:
+  `cavalry record` alone could then record nothing a publisher writes; a recording is a
+  consumer, as Aeron's archive is through its subscription.
+- **Predicting the recording id from the catalog's slot count, so that the counters exist
+  before the recorder answers.** Lost: a start that fails without taking a slot while
+  another is in flight shifts every predicted id by one; the id comes from the reply, the
+  counters follow it, and the limit holds the start position in between.
 - **Stopping a closed publication's recording after the linger, where the recorder is.**
-  Lost: the recorder's lag is bounded by the window, so finishing costs at most a
-  window's worth of writing, and a recording of a closed publication then holds
-  everything it published; a disk that cannot write a window is visible in
-  `recording-stalled` and ends in `recording.write_failed`.
+  Lost: the recorder's lag is bounded by the window, so finishing costs at most a window's
+  worth of writing, and a recording of a closed publication then holds everything it
+  published; a disk that cannot write a window is visible in `recording-stalled` and ends
+  in `recording.write_failed`.
 - **Aeron's working-directory default for the log directory, `cavalry-log` under the
   working directory.** Lost: a systemd unit's working directory is `/`, and a replay or
   doctor run from another shell would resolve a different directory than the driver did,
   which hides the log from the person looking for it (invariant 6); a rule fixed by the
   user makes every command find the same log with no flag.
-- **A default under the driver directory.** Lost: the driver directory is memory and
-  dies with the host (ADR 0020).
-- **No key, and a fixed `/var/lib/cavalry/log`.** Lost: a laptop user cannot write it,
-  and the ten-minute path breaks.
+- **A default under the driver directory.** Lost: the driver directory is memory and dies
+  with the host (ADR 0020).
+- **No key, and a fixed `/var/lib/cavalry/log`.** Lost: a laptop user cannot write it, and
+  the ten-minute path breaks.
 - **A separate macOS rule under `~/Library/Application Support`.** Lost: one rule reads
   easier, and the key exists for anyone who wants the log elsewhere.
-- **A locking crate, `fs4` or `fd-lock`, in `cavalry-log`.** Lost: a data-plane
-  dependency needs an allowlist entry and a justification for twenty lines the standard
-  library now has.
+- **A locking crate, `fs4` or `fd-lock`, in `cavalry-log`.** Lost: a data-plane dependency
+  needs an allowlist entry and a justification for twenty lines the standard library now
+  has.
 - **Calling `flock` through libc.** Lost: `unsafe` is allowed in `cavalry-shm` and
   `cavalry-ffi` only, and `cavalry-shm` has no libc dependency; it maps memory through
   `memmap2` alone.
 - **Aeron's mark file with a heartbeat timestamp, refusing to start while it is fresh.**
   Lost: correct after a crash once the liveness timeout passes, but it costs a periodic
-  write for the directory's whole life, and a restart after a crash waits out the
-  timeout; a plain pid file is the same idea without the heartbeat and lies until someone
-  deletes it.
+  write for the directory's whole life, and a restart after a crash waits out the timeout;
+  a plain pid file is the same idea without the heartbeat and lies until someone deletes
+  it.
 - **No lock, with documentation saying one driver per directory.** Lost: two drivers
   computing the next recording id as the catalog's slot count would write the same slot
   and the same segment files, which is a corrupt catalog and a lie about delivery
   (invariant 1).
 - **Never sync, Aeron's default.** Lost: it is not faster in steady state, since the
-  kernel writes the same pages back within seconds either way and throttles the
-  recorder's writes itself when the disk is slower than the stream, invisibly; a power
-  cut then loses a tail bounded only by kernel settings the operator has not seen, and
-  no synced position can exist.
-- **Sync every block.** Lost: a disk's sync costs from a tenth of a millisecond on NVMe
-  to tens of milliseconds on a disk or a cloud volume, and the recorder, and through the
+  kernel writes the same pages back within seconds either way and throttles the recorder's
+  writes itself when the disk is slower than the stream, invisibly; a power cut then loses
+  a tail bounded only by kernel settings the operator has not seen, and no synced position
+  can exist.
+- **Sync every block.** Lost: a disk's sync costs from a tenth of a millisecond on NVMe to
+  tens of milliseconds on a disk or a cloud volume, and the recorder, and through the
   limit the publisher, would run at the disk's sync rate; the recording is a side effect
   of the stream and must not set its pace.
 - **A sync key with Aeron's levels from the start.** Lost for this version: no detection
   can set an application's durability need right, so the key would be a knob set by
   documentation; it is a Revisit, with its reason and a doctor check that times a sync
-  against the window at the observed rate, when a user needs no sync or a sync per
-  write.
+  against the window at the observed rate, when a user needs no sync or a sync per write.
 
 ## Evidence
 
@@ -268,19 +296,24 @@ on a disk; two drivers cannot share a log directory by mistake; the recorder, th
 client's conductor and the driver's conductor all cross threads through the same
 bounded queue.
 
-Harder: the limit and cleaning have a third input; a second data-plane thread to idle;
-a closed publication's log lives until the recorder has written it; the catalog's
+Harder: the limit and cleaning have a third input; a second data-plane thread to idle; a
+closed publication's log lives until the recorder has written it; the catalog's
 transitions each cost a sync on the recorder's thread; the client protocol is at version
 1, with Cavalry's own type id ranges beside Aeron's; the Rust floor is 1.89, so the four
-releases 1.85 to 1.88, from February to June 2025, no longer build the workspace. To
-maintain: the recorder's state machine and its queues, the block scan's `loom` model, the
-recovery counters, and the doctor checks.
+releases 1.85 to 1.88, from February to June 2025, no longer build the workspace. A start
+costs five syncs before `recording ready`, so a disk whose sync takes seconds can time the
+client out while the recording exists unnamed to it; `cavalry doctor` lists it. A version
+0 client closes on the first recording event a version 1 driver broadcasts, so an upgrade
+restarts the clients before the driver. To maintain: the recorder's state machine and its
+queues, the block scan's `loom` model, the recovery counters, and the doctor checks.
 
 Revisit: when the bench shows the recorder's writes on the raw rows, for the separate
 process; when a user needs no sync or a sync per write, for the `log.sync` key with its
 doctor check; when UDP records a channel with a source location, as Aeron's
 `SourceLocation`; when card 94's replay needs a recording's extent while it is live, which
-the two gauges give it.
+the two gauges give it; before the first release, for the client's rule on an unknown
+event type in Cavalry's range, which becomes skip-with-counter so that mixed versions run
+through an upgrade (invariant 3).
 
 ## References
 

@@ -46,7 +46,8 @@ use cavalry_client::{Cavalry, Offer};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A driver of our own for the doctest; `cavalry run` is the usual shape.
     let dir = std::env::temp_dir().join(format!("cavalry-client-readme-{}", std::process::id()));
-    let driver = cavalry_driver::Driver::start(&dir)?;
+    let log_dir = dir.with_extension("log");
+    let driver = cavalry_driver::Driver::start(&dir, &log_dir)?;
 
     // `Cavalry::connect()` reads CAVALRY_DIR or the default directory; this names one.
     let mut client = Cavalry::connect_to(&dir)?;
@@ -82,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.close()?;
     driver.close()?;
     std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&log_dir).ok();
     Ok(())
 }
 ```

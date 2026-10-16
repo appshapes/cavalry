@@ -125,7 +125,6 @@ fn an_id_out_of_range_or_negative_is_unknown() {
             "unknown",
             "{missing}"
         );
-        assert_eq!(reason(writer.delete(missing)), "unknown", "{missing}");
         assert_eq!(reason(writer.invalidate(missing)), "unknown", "{missing}");
     }
 }
@@ -149,12 +148,17 @@ fn a_stop_is_read_back_by_the_reader() {
 }
 
 #[test]
-fn a_delete_keeps_both_checksums_valid() {
+fn a_deleted_slot_reads_with_both_checksums() {
     let dir = TestDir::new("delete");
     let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
     let id = writer.add(&recording(1)).expect("added");
     writer.stop(id, 4096, NOW + 1).expect("stopped");
-    writer.delete(id).expect("deleted");
+    drop(writer);
+    // State 3 as card 95's purge will write it: the state word alone, after the stop.
+    dir.write_at(
+        &(State::Deleted as i32).to_le_bytes(),
+        CatalogHeader::slot_offset(0),
+    );
     let reader = CatalogReader::open(dir.path()).expect("the catalog opens");
     let deleted = reader
         .get(id)
@@ -321,7 +325,10 @@ fn a_stop_is_written_once_and_refused_after() {
     let before = slot_bytes(&dir, 0);
     assert_eq!(reason(writer.stop(id, 4096, NOW + 2)), "transition");
     assert_eq!(slot_bytes(&dir, 0), before, "a refused stop writes nothing");
-    writer.delete(id).expect("deleted");
+    dir.write_at(
+        &(State::Deleted as i32).to_le_bytes(),
+        CatalogHeader::slot_offset(0),
+    );
     let before = slot_bytes(&dir, 0);
     assert_eq!(reason(writer.stop(id, 4096, NOW + 3)), "transition");
     assert_eq!(
@@ -329,24 +336,6 @@ fn a_stop_is_written_once_and_refused_after() {
         before,
         "a stop after a delete writes nothing"
     );
-}
-
-#[test]
-fn a_delete_needs_a_stopped_recording_and_happens_once() {
-    let dir = TestDir::new("delete-once");
-    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
-    let id = writer.add(&recording(1)).expect("added");
-    let before = slot_bytes(&dir, 0);
-    assert_eq!(reason(writer.delete(id)), "transition", "a live recording");
-    assert_eq!(slot_bytes(&dir, 0), before);
-    writer.stop(id, 4096, NOW + 1).expect("stopped");
-    writer.delete(id).expect("deleted");
-    let before = slot_bytes(&dir, 0);
-    assert_eq!(reason(writer.delete(id)), "transition", "already deleted");
-    assert_eq!(slot_bytes(&dir, 0), before);
-    writer
-        .invalidate(id)
-        .expect("a deleted recording can still be marked damaged");
 }
 
 #[test]

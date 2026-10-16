@@ -327,7 +327,11 @@ impl CatalogHeader {
     }
 }
 
-/// A descriptor's state: the slot's commit word.
+/// A descriptor's state: the slot's commit word. Its transitions are the driver's and
+/// counted: a slot taken in `recording.started`, a slot set to invalid in
+/// `recording.invalidated` (`counters.toml`, the `catalog_slot` state machine; ADR 0024;
+/// CLAUDE.md, invariant 4). The delete of card 95 brings its own.
+// state machine: catalog_slot
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum State {

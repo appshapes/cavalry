@@ -16,6 +16,9 @@ publish = false
 cavalry-shm = { path = "../cavalry-shm" }
 # The commands the conductor decodes and the events it answers with (ADR 0019).
 cavalry-proto = { path = "../cavalry-proto" }
+# The durable log the recorder thread writes: the log directory under its lock, the
+# recovery pass, and the recording writer (ADR 0025). A workspace member.
+cavalry-log = { path = "../cavalry-log" }
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]

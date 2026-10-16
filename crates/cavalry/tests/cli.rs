@@ -12,9 +12,12 @@ use std::time::{Duration, Instant};
 
 fn cavalry() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cavalry"));
-    // The tests set what they test; the developer's shell does not leak in.
+    // The tests set what they test; the developer's shell does not leak in. A test that
+    // runs a driver sets XDG_DATA_HOME to its own directory, so the default log directory
+    // (`Driver::default_log_dir`) lands there and never under the developer's home.
     command.env_remove("CAVALRY_DIR");
     command.env_remove("CAVALRY_CONDUCTOR_IDLE_STRATEGY");
+    command.env_remove("XDG_DATA_HOME");
     command
 }
 
@@ -112,6 +115,7 @@ fn run_on_a_dir_flag_starts_a_driver_doctor_sees_and_sigterm_closes_it() {
     let dir = TestDir::new("flag");
     let mut run = cavalry()
         .args(["run", "--dir", &dir.arg()])
+        .env("XDG_DATA_HOME", dir.arg())
         .stderr(Stdio::piped())
         .spawn()
         .expect("run starts");
@@ -153,6 +157,7 @@ fn the_environment_sets_the_directory_and_the_idle_strategy_and_the_flag_wins() 
     let mut run = cavalry()
         .arg("run")
         .env("CAVALRY_DIR", from_env.arg())
+        .env("XDG_DATA_HOME", from_env.arg())
         .env("CAVALRY_CONDUCTOR_IDLE_STRATEGY", "yield")
         .stderr(Stdio::piped())
         .spawn()
@@ -170,6 +175,7 @@ fn the_environment_sets_the_directory_and_the_idle_strategy_and_the_flag_wins() 
     let mut run = cavalry()
         .args(["run", "--dir", &from_flag.arg()])
         .env("CAVALRY_DIR", from_env.arg())
+        .env("XDG_DATA_HOME", from_flag.arg())
         .stderr(Stdio::piped())
         .spawn()
         .expect("run starts");

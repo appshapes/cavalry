@@ -1,6 +1,6 @@
 {
  "spec": "spec/client-protocol.md",
- "version": 0,
+ "version": 1,
  "generated_by": "spec/vectors/client-protocol.py",
  "vectors": [
   {
@@ -141,6 +141,56 @@
    }
   },
   {
+   "name": "start-recording",
+   "region": "command",
+   "type": 257,
+   "bytes": "05000000000000000b00000000000000e90300000b000000636176616c72793a69706300",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 11,
+    "stream_id": 1001,
+    "channel": "cavalry:ipc",
+    "name": "start_recording"
+   }
+  },
+  {
+   "name": "start-recording-other-channel",
+   "region": "command",
+   "type": 257,
+   "bytes": "05000000000000000b00000000000000e903000024000000636176616c72793a7564703f656e64706f696e743d6c6f63616c686f73743a3430313233",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 11,
+    "stream_id": 1001,
+    "channel": "cavalry:udp?endpoint=localhost:40123",
+    "name": "start_recording"
+   }
+  },
+  {
+   "name": "stop-recording",
+   "region": "command",
+   "type": 258,
+   "bytes": "05000000000000000c000000000000000000000000000000",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 12,
+    "recording_id": 0,
+    "name": "stop_recording"
+   }
+  },
+  {
+   "name": "stop-recording-extremes",
+   "region": "command",
+   "type": 258,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7f",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "recording_id": 9223372036854775807,
+    "name": "stop_recording"
+   }
+  },
+  {
    "name": "error-invalid-channel",
    "region": "event",
    "type": 3841,
@@ -269,6 +319,78 @@
    }
   },
   {
+   "name": "recording-ready",
+   "region": "event",
+   "type": 4097,
+   "bytes": "0b0000000000000000000000000000002efd69b61000000011000000",
+   "fields": {
+    "correlation_id": 11,
+    "recording_id": 0,
+    "session_id": -1234567890,
+    "recording_position_counter_id": 16,
+    "recording_synced_position_counter_id": 17,
+    "name": "recording_ready"
+   }
+  },
+  {
+   "name": "recording-stopped",
+   "region": "event",
+   "type": 4098,
+   "bytes": "00000000000000000010000000000000",
+   "fields": {
+    "recording_id": 0,
+    "stop_position": 4096,
+    "name": "recording_stopped"
+   }
+  },
+  {
+   "name": "recording-stopped-at-start",
+   "region": "event",
+   "type": 4098,
+   "bytes": "03000000000000000000000000000000",
+   "fields": {
+    "recording_id": 3,
+    "stop_position": 0,
+    "name": "recording_stopped"
+   }
+  },
+  {
+   "name": "error-no-publication-to-record",
+   "region": "event",
+   "type": 3841,
+   "bytes": "0b0000000000000014000000770000006e6f206c697665207075626c69636174696f6e206f6e2073747265616d203130303120616e64206368616e6e656c20636176616c72793a6970633b2061646420746865207075626c69636174696f6e2066697273742028636c69656e742d70726f746f636f6c2e6d642c204572726f7220636f6465732900",
+   "fields": {
+    "offending_correlation_id": 11,
+    "error_code": 20,
+    "error_message": "no live publication on stream 1001 and channel cavalry:ipc; add the publication first (client-protocol.md, Error codes)",
+    "name": "error"
+   }
+  },
+  {
+   "name": "error-unknown-recording",
+   "region": "event",
+   "type": 3841,
+   "bytes": "0c0000000000000015000000430000007265636f7264696e672037206973206e6f7420696e2074686520636174616c6f672028636c69656e742d70726f746f636f6c2e6d642c204572726f7220636f6465732900",
+   "fields": {
+    "offending_correlation_id": 12,
+    "error_code": 21,
+    "error_message": "recording 7 is not in the catalog (client-protocol.md, Error codes)",
+    "name": "error"
+   }
+  },
+  {
+   "name": "error-already-recording",
+   "region": "event",
+   "type": 3841,
+   "bytes": "0b00000000000000160000005c00000073747265616d203130303120697320616c7265616479207265636f7264696e6720303b2073746f70207265636f7264696e6720302066697273742028636c69656e742d70726f746f636f6c2e6d642c204572726f7220636f64657329",
+   "fields": {
+    "offending_correlation_id": 11,
+    "error_code": 22,
+    "error_message": "stream 1001 is already recording 0; stop recording 0 first (client-protocol.md, Error codes)",
+    "name": "error"
+   }
+  },
+  {
    "name": "too-short-before-correlation-id",
    "region": "command",
    "type": 1,
@@ -283,9 +405,30 @@
    "error": "type"
   },
   {
-   "name": "unknown-type-above",
+   "name": "unknown-type-aeron-reserved",
    "region": "command",
    "type": 12,
+   "bytes": "00000000000000000100000000000000",
+   "error": "type"
+  },
+  {
+   "name": "unknown-type-between",
+   "region": "command",
+   "type": 256,
+   "bytes": "00000000000000000100000000000000",
+   "error": "type"
+  },
+  {
+   "name": "unknown-type-cavalry-reserved",
+   "region": "command",
+   "type": 259,
+   "bytes": "00000000000000000100000000000000",
+   "error": "type"
+  },
+  {
+   "name": "unknown-type-above",
+   "region": "command",
+   "type": 512,
    "bytes": "00000000000000000100000000000000",
    "error": "type"
   },
@@ -301,6 +444,20 @@
    "region": "command",
    "type": 2,
    "bytes": "00000000000000000100000000000000",
+   "error": "too-short"
+  },
+  {
+   "name": "start-recording-too-short-no-channel",
+   "region": "command",
+   "type": 257,
+   "bytes": "05000000000000000b00000000000000e9030000",
+   "error": "too-short"
+  },
+  {
+   "name": "stop-recording-too-short-no-recording-id",
+   "region": "command",
+   "type": 258,
+   "bytes": "05000000000000000c00000000000000",
    "error": "too-short"
   },
   {
@@ -332,6 +489,13 @@
    "error": "string"
   },
   {
+   "name": "start-recording-string-runs-past-message",
+   "region": "command",
+   "type": 257,
+   "bytes": "05000000000000000b00000000000000e90300000b000000636176616c72793a6970",
+   "error": "string"
+  },
+  {
    "name": "length-trailing-bytes",
    "region": "command",
    "type": 1,
@@ -343,6 +507,13 @@
    "region": "command",
    "type": 6,
    "bytes": "0500000000000000090000000000000000000000",
+   "error": "length"
+  },
+  {
+   "name": "stop-recording-length-trailing",
+   "region": "command",
+   "type": 258,
+   "bytes": "05000000000000000c00000000000000000000000000000000000000",
    "error": "length"
   },
   {
@@ -358,6 +529,41 @@
    "type": 3848,
    "bytes": "0300000000000000",
    "error": "type"
+  },
+  {
+   "name": "event-unknown-type-between",
+   "region": "event",
+   "type": 4096,
+   "bytes": "0300000000000000",
+   "error": "type"
+  },
+  {
+   "name": "event-unknown-type-cavalry-reserved",
+   "region": "event",
+   "type": 4099,
+   "bytes": "0300000000000000",
+   "error": "type"
+  },
+  {
+   "name": "event-unknown-type-above",
+   "region": "event",
+   "type": 4352,
+   "bytes": "0300000000000000",
+   "error": "type"
+  },
+  {
+   "name": "event-recording-ready-too-short",
+   "region": "event",
+   "type": 4097,
+   "bytes": "0b0000000000000000000000000000002efd69b610000000",
+   "error": "too-short"
+  },
+  {
+   "name": "event-recording-stopped-length-trailing",
+   "region": "event",
+   "type": 4098,
+   "bytes": "0000000000000000001000000000000000000000",
+   "error": "length"
   },
   {
    "name": "event-string-runs-past-message",

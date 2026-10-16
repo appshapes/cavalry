@@ -25,7 +25,8 @@ In Aeron, this is the media driver ([glossary](../glossary.md)).
    ```
 
    You will see one line on stderr: `cavalry run: driver started on
-   /dev/shm/cavalry-<user> (pid <pid>), conductor idle strategy backoff; Ctrl-C or
+   /dev/shm/cavalry-<user> (pid <pid>), recording into
+   ~/.local/share/cavalry/log, conductor idle strategy backoff; Ctrl-C or
    SIGTERM stops it`. The directory now holds `counters`, `command-ring` and
    `broadcast-buffer`, and a `publications/` directory appears with the first
    publication.
