@@ -157,3 +157,19 @@ kind = "gauge"
 scope = "static"
 doc = "The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin."
 doctor = ""
+
+[[counter]]
+id = 18
+name = "counters.allocations"
+kind = "counter"
+scope = "static"
+doc = "Counter allocations made since the driver started, the static counters' own records included: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for, so that counters.allocations minus counters.freed is counters.allocated (spec/counters-file.md, Metadata record)."
+doctor = ""
+
+[[counter]]
+id = 19
+name = "counters.freed"
+kind = "counter"
+scope = "static"
+doc = "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout."
+doctor = ""
