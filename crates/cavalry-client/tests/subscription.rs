@@ -61,7 +61,7 @@ fn publish(publication: &mut cavalry_client::Publication, message: &[u8]) {
 #[test]
 fn every_message_arrives_once_and_in_order() {
     let dir = TestDir::new("order");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let mut subscription = client
         .add_subscription("cavalry:ipc", 2001)
@@ -135,7 +135,7 @@ fn every_message_arrives_once_and_in_order() {
 #[test]
 fn a_late_joiner_sees_nothing_before_its_join_and_a_slow_one_loses_nothing() {
     let dir = TestDir::new("late");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let mut early = client
         .add_subscription("cavalry:ipc", 2002)
@@ -240,7 +240,7 @@ fn a_late_joiner_sees_nothing_before_its_join_and_a_slow_one_loses_nothing() {
 #[test]
 fn images_come_and_go_with_publications() {
     let dir = TestDir::new("images");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let mut subscription = client
         .add_subscription("cavalry:ipc", 2003)
@@ -289,7 +289,7 @@ fn images_come_and_go_with_publications() {
 #[test]
 fn a_refused_channel_is_refused_and_a_closed_clients_subscription_refuses_to_poll() {
     let dir = TestDir::new("closed");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let error = client
         .add_subscription("cavalry:udp?endpoint=localhost:1", 2004)

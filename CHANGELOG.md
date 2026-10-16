@@ -413,3 +413,31 @@ user-visible change, added in the same commit as the change. The format follows
   `counters.freed` for every record freed, so that the `counters.allocated` gauge's moves
   are counted and allocations minus freed is the gauge, as invariant 4 asks of every state
   transition (`spec/counters-file.md`, Metadata record).
+- `spec/client-protocol.md` version 1: `start recording` (type id `0x0101`) and `stop
+  recording` (`0x0102`), the first commands of Cavalry's own, in a type id range beside
+  Aeron's; `recording ready` (`0x1001`) with the recording id, the session id and the two
+  position counter ids, and `recording stopped` (`0x1002`) with the stop position, sent to
+  every client; error codes 20 (no publication to record), 21 (unknown recording) and 22
+  (already recording); a `recordings` registry of 1024; 22 new vectors, among them one
+  reserved id per range the page names. A version 0 client closes on the first recording
+  event, so an upgrade restarts the clients before the driver (ADR 0025, accepted).
+- The driver records a stream: a second thread, the recorder, with the conductor's idle
+  strategy, takes blocks of committed frames from the publication's log buffer and writes
+  them into the log directory with one positional write each, syncing once per second;
+  the conductor never touches the disk and hands the recorder its starts and stops
+  through two bounded queues. `recording.position` bounds the publisher's limit and the
+  cleaning, so a slow disk back-pressures the publisher and never loses a byte; a
+  recording alone connects its publication; a closed publication's log goes only once
+  its recording has stopped; a start the counters file refuses after the recorder took
+  the slot is answered with code 10 and stopped, and the limit holds at the start
+  position until that stop is written; a `start recording` while stops and attaches wait
+  for room in the recorder's queue is answered with code 10. `Driver::start` takes the log directory, opened under a
+  lock and recovered at start, with `Driver::default_log_dir()` as the rule until the
+  `log.dir` key arrives; counters `recording.started`, `recording.stopped`,
+  `recording.write_failed`, `recording.start_failed`, `recording.catalog_full`, the six
+  recovery counters, and the gauges `recording.position` and `recording.synced_position`
+  per recording (ADR 0025).
+- `cavalry-log`: `CatalogWriter::delete` leaves until card 95 brings the purge with its
+  counter and its caller in the driver, so that every catalog transition on `master` is
+  one the driver performs and counts (CLAUDE.md, invariant 4); the catalog's truncation
+  of a torn tail at open is now synced.

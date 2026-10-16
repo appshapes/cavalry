@@ -73,6 +73,21 @@ fn command_fields(command: &Command<'_>) -> Value {
         } => {
             json!({"name": "client_close", "client_id": client_id, "correlation_id": correlation_id})
         }
+        Command::StartRecording {
+            client_id,
+            correlation_id,
+            stream_id,
+            channel,
+        } => {
+            json!({"name": "start_recording", "client_id": client_id, "correlation_id": correlation_id, "stream_id": stream_id, "channel": text(channel)})
+        }
+        Command::StopRecording {
+            client_id,
+            correlation_id,
+            recording_id,
+        } => {
+            json!({"name": "stop_recording", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id})
+        }
     }
 }
 
@@ -134,17 +149,32 @@ fn event_fields(event: &Event<'_>) -> Value {
         Event::ClientTimeout { client_id } => {
             json!({"name": "client_timeout", "client_id": client_id})
         }
+        Event::RecordingReady {
+            correlation_id,
+            recording_id,
+            session_id,
+            recording_position_counter_id,
+            recording_synced_position_counter_id,
+        } => {
+            json!({"name": "recording_ready", "correlation_id": correlation_id, "recording_id": recording_id, "session_id": session_id, "recording_position_counter_id": recording_position_counter_id, "recording_synced_position_counter_id": recording_synced_position_counter_id})
+        }
+        Event::RecordingStopped {
+            recording_id,
+            stop_position,
+        } => {
+            json!({"name": "recording_stopped", "recording_id": recording_id, "stop_position": stop_position})
+        }
     }
 }
 
 #[test]
 fn every_vector_in_spec_vectors_client_protocol_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("client-protocol.json parses");
-    assert_eq!(doc["version"], 0, "the vectors are for version 0");
+    assert_eq!(doc["version"], 1, "the vectors are for version 1");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
-        vectors.len() >= 36,
-        "client-protocol.py writes at least 36 vectors"
+        vectors.len() >= 58,
+        "client-protocol.py writes at least 58 vectors"
     );
 
     for vector in vectors {

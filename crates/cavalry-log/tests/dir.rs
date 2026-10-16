@@ -442,7 +442,11 @@ fn a_deleted_recording_loses_its_files_again_and_a_stopped_one_is_left_alone() {
     {
         let mut writer = CatalogWriter::open(dir.path(), NOW).expect("opens");
         writer.stop(deleted, 64, NOW + MS).expect("stops");
-        writer.delete(deleted).expect("deletes");
+        // State 3 as card 95's purge will write it, with the files still present.
+        dir.write_catalog_at(
+            &(State::Deleted as i32).to_le_bytes(),
+            CatalogHeader::slot_offset(deleted as u64),
+        );
         writer.stop(stopped, 64, NOW + MS).expect("stops");
     }
     let (_log, recovery) = LogDir::open(dir.path(), NOW).expect("opens");

@@ -19,6 +19,9 @@ cavalry-shm = { path = "../crates/cavalry-shm" }
 # process, so the gate holds the path a user takes to the budget (ADR 0021).
 cavalry-client = { path = "../crates/cavalry-client" }
 cavalry-driver = { path = "../crates/cavalry-driver" }
+# The record row: the recorder's block path, one scan and one positional write per block
+# into a segment file, under the counting allocator (ADR 0025).
+cavalry-log = { path = "../crates/cavalry-log" }
 # The histograms every number comes from: p50, p99, p99.99 and max, never a mean
 # (CLAUDE.md, invariant 2; ADR 0015). Fixed bounds, so recording never allocates.
 hdrhistogram = "7"

@@ -4,6 +4,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use cavalry_log::dir::DirError;
 use cavalry_shm::broadcast::BroadcastError;
 use cavalry_shm::command_ring::CommandRingError;
 use cavalry_shm::counters::CountersError;
@@ -44,11 +45,20 @@ pub enum DriverError {
         /// The directory.
         dir: PathBuf,
     },
+    /// The log directory could not be opened: another driver holds it, or the catalog
+    /// or a file in it refused a step of the recovery pass (ADR 0025).
+    LogDir(DirError),
+    /// The recorder thread panicked; its recordings are live in the catalog, and the
+    /// next driver to open the log directory stops them at what was written.
+    Recorder {
+        /// The log directory.
+        log_dir: PathBuf,
+    },
 }
 
 impl DriverError {
     /// The reason's name: `driver-active`, `io`, `counters`, `command-ring`,
-    /// `broadcast`, `log` or `conductor`.
+    /// `broadcast`, `log`, `conductor`, `log-dir` or `recorder`.
     pub const fn reason(&self) -> &'static str {
         match self {
             DriverError::Active { .. } => "driver-active",
@@ -58,6 +68,8 @@ impl DriverError {
             DriverError::Broadcast(_) => "broadcast",
             DriverError::Log(_) => "log",
             DriverError::Conductor { .. } => "conductor",
+            DriverError::LogDir(_) => "log-dir",
+            DriverError::Recorder { .. } => "recorder",
         }
     }
 }
@@ -88,6 +100,15 @@ impl fmt::Display for DriverError {
                  the directory may be half kept, and the next driver to start removes it; see {DOC}",
                 dir.display()
             ),
+            DriverError::LogDir(error) => write!(f, "driver failed (log-dir): {error}"),
+            DriverError::Recorder { log_dir } => write!(
+                f,
+                "driver failed (recorder): the recorder thread of the driver on {} panicked; \
+                 its recordings stay live in the catalog, and the next driver to open the \
+                 directory stops them at what was written; see \
+                 docs/reference/durable-log.md#the-driver",
+                log_dir.display()
+            ),
         }
     }
 }
@@ -100,7 +121,10 @@ impl std::error::Error for DriverError {
             DriverError::CommandRing(error) => Some(error),
             DriverError::Broadcast(error) => Some(error),
             DriverError::Log(error) => Some(error),
-            DriverError::Active { .. } | DriverError::Conductor { .. } => None,
+            DriverError::LogDir(error) => Some(error),
+            DriverError::Active { .. }
+            | DriverError::Conductor { .. }
+            | DriverError::Recorder { .. } => None,
         }
     }
 }
@@ -126,5 +150,11 @@ impl From<BroadcastError> for DriverError {
 impl From<LogError> for DriverError {
     fn from(error: LogError) -> Self {
         DriverError::Log(error)
+    }
+}
+
+impl From<DirError> for DriverError {
+    fn from(error: DirError) -> Self {
+        DriverError::LogDir(error)
     }
 }
