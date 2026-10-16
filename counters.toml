@@ -203,7 +203,7 @@ id = 23
 name = "recording.start_failed"
 kind = "counter"
 scope = "static"
-doc = "Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands)."
+doc = "Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands). The recording's catalog slot may already be taken: a start that fails at its files leaves its slot valid, stopped at the start position, so the catalog's slots used are at most recording.started plus these plus the driver.registry_full refusals of a start."
 doctor = "Free space on the log directory's filesystem, or move the directory with `--log-dir`; a recording needs a 128 MiB segment file when it starts."
 
 [[counter]]
@@ -277,3 +277,124 @@ kind = "gauge"
 scope = "instance"
 doc = "The position of one recording up to which a sync has made its segment files and time index durable, stored with a release store after each sync, at most a second behind recording.position; key and label as recording.position."
 doctor = "A synced position far behind recording.position is a disk whose sync is slow; a power cut loses what lies between the two."
+
+# The state machines (CLAUDE.md, invariant 4): the counters file's metadata record, the
+# recording catalog's descriptor and the driver's view of a recording. A catalog slot
+# goes from empty to valid in every start whose slot the recorder took: one that goes
+# live (recording.started), one whose files then fail (recording.start_failed) and one
+# the counters file then refuses (driver.registry_full), so empty to valid is listed
+# once for each.
+
+[[state_machine]]
+name = "counters_record"
+states = ["unused", "allocated", "reclaimed"]
+
+[[transition]]
+machine = "counters_record"
+from = "unused"
+to = "allocated"
+counter = "counters.allocations"
+
+[[transition]]
+machine = "counters_record"
+from = "reclaimed"
+to = "allocated"
+counter = "counters.allocations"
+
+[[transition]]
+machine = "counters_record"
+from = "allocated"
+to = "reclaimed"
+counter = "counters.freed"
+
+[[state_machine]]
+name = "catalog_slot"
+states = ["empty", "valid", "invalid", "deleted"]
+
+[[transition]]
+machine = "catalog_slot"
+from = "empty"
+to = "valid"
+counter = "recording.started"
+
+[[transition]]
+machine = "catalog_slot"
+from = "empty"
+to = "valid"
+counter = "recording.start_failed"
+
+[[transition]]
+machine = "catalog_slot"
+from = "empty"
+to = "valid"
+counter = "driver.registry_full"
+
+[[transition]]
+machine = "catalog_slot"
+from = "empty"
+to = "invalid"
+counter = "recording.invalidated"
+
+[[transition]]
+machine = "catalog_slot"
+from = "valid"
+to = "invalid"
+counter = "recording.invalidated"
+
+[[transition]]
+machine = "catalog_slot"
+from = "deleted"
+to = "invalid"
+counter = "recording.invalidated"
+
+[[state_machine]]
+name = "recording"
+states = ["starting", "live", "stopped", "failed"]
+
+[[transition]]
+machine = "recording"
+from = "starting"
+to = "live"
+counter = "recording.started"
+
+[[transition]]
+machine = "recording"
+from = "starting"
+to = "failed"
+counter = "recording.start_failed"
+
+[[transition]]
+machine = "recording"
+from = "starting"
+to = "failed"
+counter = "recording.catalog_full"
+
+[[transition]]
+machine = "recording"
+from = "starting"
+to = "failed"
+counter = "driver.registry_full"
+
+[[transition]]
+machine = "recording"
+from = "live"
+to = "stopped"
+counter = "recording.stopped"
+
+[[transition]]
+machine = "recording"
+from = "live"
+to = "stopped"
+counter = "recording.write_failed"
+
+[[transition]]
+machine = "recording"
+from = "live"
+to = "stopped"
+counter = "log_buffer.rejected_frame"
+
+[[transition]]
+machine = "recording"
+from = "failed"
+to = "stopped"
+counter = "recording.stopped"

@@ -204,6 +204,10 @@ pub const fn max_message_length(capacity: u32) -> u32 {
     ring::max_message_length(capacity)
 }
 
+// not a state machine: what `RecordHeader::state` reads in one header. The word's moves
+// are the ring's claim protocol, once per command; the tail and head positions measure
+// them, the driver's moves are `command_ring.unblocked` and `command_ring.rejected_record`,
+// and a producer's abort is a client's, which owns no counter (spec/command-ring.md).
 /// What a record's header says it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecordState {

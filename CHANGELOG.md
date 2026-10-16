@@ -441,6 +441,20 @@ user-visible change, added in the same commit as the change. The format follows
   counter and its caller in the driver, so that every catalog transition on `master` is
   one the driver performs and counts (CLAUDE.md, invariant 4); the catalog's truncation
   of a torn tail at open is now synced.
+- `just lint-counters` checks the state machines of the data plane: a `[[state_machine]]`
+  in `counters.toml` names its states, every `[[transition]]` names the counter of kind
+  `counter` it adds one to, whose generated constant some crate's code names, and the
+  enum marked `// state machine: <name>` has those states as its variants; the counters
+  reference page lists each machine with its transitions. It fails closed: an enum named
+  `*State`, `*Status` or `*Phase` with neither that mark nor `// not a state machine:
+  <why>` fails it. Three machines register with it: the counters file's metadata record
+  (`counters.allocations`, `counters.freed`), the recording catalog's descriptor
+  (a slot taken in `recording.started`, `recording.start_failed` or
+  `driver.registry_full`, a slot set to invalid in `recording.invalidated`) and the
+  driver's view of a recording
+  (`recording.started`, `recording.stopped`, the failure counters); the two ring record
+  states are exempt with their reasons. This is the gate CLAUDE.md names for a transition
+  with no counter (ADR 0024, ADR 0025, card 93).
 - The `log.dir` configuration key: the log directory, `--log-dir` on `run` and `doctor`
   or `CAVALRY_LOG_DIR`, defaulting to `$XDG_DATA_HOME/cavalry/log`, else
   `~/.local/share/cavalry/log`, and `/var/lib/cavalry/log` as root; with neither a home

@@ -74,7 +74,7 @@ pub const RECORDING_STOPPED: CounterId = CounterId(21);
 /// `recording.write_failed`, a static counter: Writes or syncs the recorder could not make to a recording's segment file or time index, each of which stopped the recording at the position written (spec/client-protocol.md, Commands).
 pub const RECORDING_WRITE_FAILED: CounterId = CounterId(22);
 
-/// `recording.start_failed`, a static counter: Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands).
+/// `recording.start_failed`, a static counter: Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands). The recording's catalog slot may already be taken: a start that fails at its files leaves its slot valid, stopped at the start position, so the catalog's slots used are at most recording.started plus these plus the driver.registry_full refusals of a start.
 pub const RECORDING_START_FAILED: CounterId = CounterId(23);
 
 /// `recording.catalog_full`, a static counter: Start recording commands refused with error code 10 because the catalog holds every one of its 1048576 slots (spec/durable-log.md, Catalog header).
@@ -295,7 +295,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "recording.start_failed",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands).",
+        doc: "Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands). The recording's catalog slot may already be taken: a start that fails at its files leaves its slot valid, stopped at the start position, so the catalog's slots used are at most recording.started plus these plus the driver.registry_full refusals of a start.",
         doctor: "Free space on the log directory's filesystem, or move the directory with `--log-dir`; a recording needs a 128 MiB segment file when it starts.",
     },
     CounterDef {

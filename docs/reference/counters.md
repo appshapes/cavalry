@@ -28,7 +28,7 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 20 | `recording.started` | counter | static | Recordings the driver started: a catalog slot taken, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands). |  |
 | 21 | `recording.stopped` | counter | static | Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands). |  |
 | 22 | `recording.write_failed` | counter | static | Writes or syncs the recorder could not make to a recording's segment file or time index, each of which stopped the recording at the position written (spec/client-protocol.md, Commands). | The log directory's filesystem is full, read-only or failing: `cavalry doctor` names it. Free space, or move the log directory with `--log-dir`, then start the recording again; what was written up to the stop position is whole and replayable. |
-| 23 | `recording.start_failed` | counter | static | Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands). | Free space on the log directory's filesystem, or move the directory with `--log-dir`; a recording needs a 128 MiB segment file when it starts. |
+| 23 | `recording.start_failed` | counter | static | Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands). The recording's catalog slot may already be taken: a start that fails at its files leaves its slot valid, stopped at the start position, so the catalog's slots used are at most recording.started plus these plus the driver.registry_full refusals of a start. | Free space on the log directory's filesystem, or move the directory with `--log-dir`; a recording needs a 128 MiB segment file when it starts. |
 | 24 | `recording.catalog_full` | counter | static | Start recording commands refused with error code 10 because the catalog holds every one of its 1048576 slots (spec/durable-log.md, Catalog header). | The log directory has held 1048576 recordings in its life: move or archive it, and start the driver on a new directory, which gets a new catalog. |
 | 25 | `recording.recovered` | counter | static | Recordings found live, or with a torn stop, when the driver opened the log directory, whose stop fields recovery rebuilt from their files (spec/durable-log.md, The driver). | The previous driver did not stop cleanly; the recordings are whole up to the rebuilt stop. If this climbs at every start, find what kills the driver before `close`. |
 | 26 | `recording.invalidated` | counter | static | Catalog slots recovery set to state 2 because their files cannot repair them: an empty slot before the last, a creation checksum that fails, or a segment file missing between the start and the last (spec/durable-log.md, The driver). | A recording in the log directory is damaged beyond repair and `cavalry doctor` names its slot: check the disk, and restore the directory from a backup if the recording matters; the slot is never reused. |
@@ -38,3 +38,45 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 30 | `recording.files_removed` | counter | static | Files recovery removed: segment files wholly past a rebuilt stop, and the files of a deleted recording that were still present (spec/durable-log.md, The driver). |  |
 | 31 | `recording.position` | gauge | instance | The position of one recording up to which the recorder has written its segment files, what the operating system holds, stored with a release store after each block; the publisher's limit respects it (spec/log-buffer.md, The driver); key: recording id (i64), little-endian; label text: the recording id, the session id and the stream id in decimal, space-separated. | A recording.position that does not move while its publication.position does is a recorder behind a slow or failing disk, and the publisher is back-pressured when it reaches the window: check recording.write_failed and the log directory's disk with `cavalry doctor`. |
 | 32 | `recording.synced_position` | gauge | instance | The position of one recording up to which a sync has made its segment files and time index durable, stored with a release store after each sync, at most a second behind recording.position; key and label as recording.position. | A synced position far behind recording.position is a disk whose sync is slow; a power cut loses what lies between the two. |
+
+## State machines
+
+Every state machine on the data plane registers its states and transitions in `counters.toml` too, and `just lint-counters` fails a transition that names no counter, a counter that is not of kind `counter` in the table above, a counter whose constant no code in the enum's crate names, or an enum whose variants are not the machine's states (CLAUDE.md, invariant 4). The enum that holds the states carries the comment `// state machine: <name>` on the line before its definition. The check fails closed: every enum under `crates/*/src` whose name is or ends in `State`, `Status` or `Phase` carries that comment, or `// not a state machine: <why>` with the reason no transition of it needs a counter, and `just lint-counters` names the file and line of one that has neither. Each machine is listed here with the counter every transition adds one to.
+
+### `counters_record`
+
+States: `unused`, `allocated`, `reclaimed`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `unused` | `allocated` | `counters.allocations` |
+| `reclaimed` | `allocated` | `counters.allocations` |
+| `allocated` | `reclaimed` | `counters.freed` |
+
+### `catalog_slot`
+
+States: `empty`, `valid`, `invalid`, `deleted`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `empty` | `valid` | `recording.started` |
+| `empty` | `valid` | `recording.start_failed` |
+| `empty` | `valid` | `driver.registry_full` |
+| `empty` | `invalid` | `recording.invalidated` |
+| `valid` | `invalid` | `recording.invalidated` |
+| `deleted` | `invalid` | `recording.invalidated` |
+
+### `recording`
+
+States: `starting`, `live`, `stopped`, `failed`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `starting` | `live` | `recording.started` |
+| `starting` | `failed` | `recording.start_failed` |
+| `starting` | `failed` | `recording.catalog_full` |
+| `starting` | `failed` | `driver.registry_full` |
+| `live` | `stopped` | `recording.stopped` |
+| `live` | `stopped` | `recording.write_failed` |
+| `live` | `stopped` | `log_buffer.rejected_frame` |
+| `failed` | `stopped` | `recording.stopped` |

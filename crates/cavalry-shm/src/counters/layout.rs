@@ -215,7 +215,10 @@ pub(crate) fn parse_header_rest(
     Ok(fields)
 }
 
-/// A metadata record's state field.
+/// A metadata record's state field. Its transitions are counted: an allocation in
+/// `counters.allocations`, a free in `counters.freed` (`counters.toml`, the
+/// `counters_record` state machine; CLAUDE.md, invariant 4).
+// state machine: counters_record
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum State {
