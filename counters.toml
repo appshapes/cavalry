@@ -33,6 +33,8 @@
 # counter: the name of the counter the transition adds one to, of kind "counter": a
 #          gauge that moves back hides how often it moved; a counter may serve
 #          several transitions, and a transition is listed once per counter it moves.
+#          Code in the crate that holds the enum, outside generated.rs, names the
+#          counter's constant, so a counter is registered only once something moves it.
 schema = 0
 
 [[counter]]
@@ -195,24 +197,9 @@ scope = "static"
 doc = "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout."
 doctor = ""
 
-[[counter]]
-id = 20
-name = "recording.started"
-kind = "counter"
-scope = "static"
-doc = "Recordings the driver started: a catalog slot taken from empty to valid, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands; spec/durable-log.md, The driver)."
-doctor = ""
-
-[[counter]]
-id = 21
-name = "recording.invalidated"
-kind = "counter"
-scope = "static"
-doc = "Catalog slots recovery set to state 2, invalid, because their files cannot repair them: an empty slot before the last, a creation checksum that fails, or a segment file missing between the start and the last (spec/durable-log.md, The driver)."
-doctor = "A recording in the log directory is damaged beyond repair and `cavalry doctor` names its slot: check the disk, and restore the directory from a backup if the recording matters; the slot is never reused."
-
-# The state machines (CLAUDE.md, invariant 4): the counters file's metadata record and
-# the recording catalog's descriptor; the recorder's own registers with its thread.
+# The state machines (CLAUDE.md, invariant 4): the counters file's metadata record. The
+# recording catalog's descriptor registers with the pull request whose code moves its
+# counters; until then its enum fails `just lint-counters`, as an unregistered one must.
 
 [[state_machine]]
 name = "counters_record"
@@ -235,25 +222,3 @@ machine = "counters_record"
 from = "allocated"
 to = "reclaimed"
 counter = "counters.freed"
-
-[[state_machine]]
-name = "catalog_slot"
-states = ["empty", "valid", "invalid", "deleted"]
-
-[[transition]]
-machine = "catalog_slot"
-from = "empty"
-to = "valid"
-counter = "recording.started"
-
-[[transition]]
-machine = "catalog_slot"
-from = "valid"
-to = "invalid"
-counter = "recording.invalidated"
-
-[[transition]]
-machine = "catalog_slot"
-from = "deleted"
-to = "invalid"
-counter = "recording.invalidated"

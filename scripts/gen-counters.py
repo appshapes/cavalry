@@ -37,6 +37,9 @@ transition with no counter (invariant 4; the shape is in counters.toml's header)
   counter     a transition's counter is a [[counter]] of kind "counter": invariant 4 asks
               for a count that only rises, and a gauge that moves back hides how often
               it moved
+  moved       a transition's counter's constant (`COUNTERS_FREED`) is named in the code of
+              the crate that holds the machine's enum, outside generated.rs and comments:
+              a registered counter no code names is a transition with no counter
   enum        exactly one enum under crates/*/src carries the comment
               `// state machine: <name>` on the line before its definition (attributes
               and docs may sit between), and its variants, one per line, lower-cased
@@ -48,8 +51,9 @@ transition with no counter (invariant 4; the shape is in counters.toml's header)
 Python 3.9 standard library only, like the other scripts (ADR 0003): `tomllib` when the
 interpreter has it (3.11 and later), else a parser for the flat subset of TOML that
 counters.toml uses: `key = value` with integers, basic strings and arrays of them,
-`[[counter]]`, `[[state_machine]]` and `[[transition]]` headers, blank lines and comments. The Rust output is written in rustfmt's shape and
-run through rustfmt when it is installed, so `cargo fmt --check` passes either way.
+`[[counter]]`, `[[state_machine]]` and `[[transition]]` headers, blank lines and
+comments. The Rust output is written in rustfmt's shape and run through rustfmt when it
+is installed, so `cargo fmt --check` passes either way.
 """
 
 from __future__ import annotations
@@ -311,9 +315,11 @@ def check_enums(machines: dict[str, dict]) -> None:
     table has exactly one marked enum; every enum whose name says it holds a state is
     marked, as a state machine or as not one."""
     found: dict[str, str] = {}
+    crate_of: dict[str, str] = {}
     unmarked: list[str] = []
     for path in sorted(CRATES.glob("*/src/**/*.rs")):
         file = path.relative_to(ROOT).as_posix()
+        crate = path.relative_to(CRATES).parts[0]
         lines = path.read_text(encoding="utf-8").splitlines()
         marked: set[int] = set()
         for i, line in enumerate(lines):
@@ -336,6 +342,7 @@ def check_enums(machines: dict[str, dict]) -> None:
                 raise Fail(f"{where}: state machine {name!r} is also marked at {found[name]}; "
                            "one enum per machine")
             found[name] = where
+            crate_of[name] = crate
             states = machines[name]["states"]
             if sorted(variants) != sorted(states):
                 raise Fail(f"{where}: the enum's variants {sorted(variants)} are not the "
@@ -354,6 +361,29 @@ def check_enums(machines: dict[str, dict]) -> None:
         if name not in found:
             raise Fail(f"counters.toml: state machine {name!r} has no enum under crates/*/src "
                        f"marked `// state machine: {name}` on the line before it")
+    for name, machine in machines.items():
+        check_moved(machine, crate_of[name], found[name])
+
+
+def check_moved(machine: dict, crate: str, where: str) -> None:
+    """Every transition's counter is named by code in the crate that holds the machine's
+    enum, outside generated.rs and outside comments: a counter declared and registered
+    but never moved would let the gate pass a transition nothing counts."""
+    code = []
+    for path in sorted((CRATES / crate / "src").glob("**/*.rs")):
+        if path == RUST:
+            continue
+        code += [line.split("//")[0] for line in path.read_text(encoding="utf-8").splitlines()]
+    text = "\n".join(code)
+    for t in machine["transitions"]:
+        const = const_name(t["counter"])
+        if not re.search(rf"\b{const}\b", text):
+            raise Fail(f"counters.toml: [[transition]] {t['from']} -> {t['to']} of "
+                       f"{machine['name']!r} (enum at {where}) names counter "
+                       f"{t['counter']!r}, but no code in crates/{crate}/src outside "
+                       f"generated.rs names {const}: a counter nothing moves is a transition "
+                       "with no counter (CLAUDE.md, invariant 4); move it where the "
+                       "transition is written, then register it")
 
 
 def enum_at(lines: list[str], start: int, where: str) -> tuple[int, list[str]]:
@@ -427,8 +457,9 @@ def render_page(counters: list[dict], machines: list[dict]) -> str:
         "",
         "Every state machine on the data plane registers its states and transitions in "
         "`counters.toml` too, and `just lint-counters` fails a transition that names no "
-        "counter, a counter that is not of kind `counter` in the table above, or an enum "
-        "whose variants are not the machine's states (CLAUDE.md, invariant 4). The enum "
+        "counter, a counter that is not of kind `counter` in the table above, a counter "
+        "whose constant no code in the enum's crate names, or an enum whose variants are "
+        "not the machine's states (CLAUDE.md, invariant 4). The enum "
         "that holds the states carries the comment `// state machine: <name>` on the line "
         "before its definition. The check fails closed: every enum under `crates/*/src` "
         "whose name is or ends in `State`, `Status` or `Phase` carries that comment, or "

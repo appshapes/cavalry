@@ -65,12 +65,6 @@ pub const COUNTERS_ALLOCATIONS: CounterId = CounterId(18);
 /// `counters.freed`, a static counter: Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout.
 pub const COUNTERS_FREED: CounterId = CounterId(19);
 
-/// `recording.started`, a static counter: Recordings the driver started: a catalog slot taken from empty to valid, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands; spec/durable-log.md, The driver).
-pub const RECORDING_STARTED: CounterId = CounterId(20);
-
-/// `recording.invalidated`, a static counter: Catalog slots recovery set to state 2, invalid, because their files cannot repair them: an empty slot before the last, a creation checksum that fails, or a segment file missing between the start and the last (spec/durable-log.md, The driver).
-pub const RECORDING_INVALIDATED: CounterId = CounterId(21);
-
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -232,21 +226,5 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout.",
         doctor: "",
-    },
-    CounterDef {
-        id: RECORDING_STARTED,
-        name: "recording.started",
-        kind: Kind::Counter,
-        scope: Scope::Static,
-        doc: "Recordings the driver started: a catalog slot taken from empty to valid, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands; spec/durable-log.md, The driver).",
-        doctor: "",
-    },
-    CounterDef {
-        id: RECORDING_INVALIDATED,
-        name: "recording.invalidated",
-        kind: Kind::Counter,
-        scope: Scope::Static,
-        doc: "Catalog slots recovery set to state 2, invalid, because their files cannot repair them: an empty slot before the last, a creation checksum that fails, or a segment file missing between the start and the last (spec/durable-log.md, The driver).",
-        doctor: "A recording in the log directory is damaged beyond repair and `cavalry doctor` names its slot: check the disk, and restore the directory from a backup if the recording matters; the slot is never reused.",
     },
 ];
