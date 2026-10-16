@@ -400,6 +400,19 @@ user-visible change, added in the same commit as the change. The format follows
   A start that fails after its slot is written stops the slot at its start, as recovery
   would. The README
   example is this path, from open to read-back.
+- A weekly release-notes email (ADR 0026): the `send release notes` workflow runs on
+  Mondays, covers the commits on `master` since the last email, has a writer agent draft
+  what a reader can now do and what was decided, refuses a draft that names a recipe,
+  command, key, counter, ADR, path or link that does not exist in the checkout, has a
+  reviewer agent read it against the sources, and sends only an approved draft, `bcc`, to
+  the list in the secret `RELEASE_NOTES_RECIPIENTS`. A run by hand is a preview to one
+  address; `draft_run` sends what a preview approved. `docs/how-to/send-the-release-notes.md`
+  is the page, and `just test-scripts`, which `just test` now runs first, tests the scripts.
+- Two counters for the counters file's own transitions: `counters.allocations` adds one
+  for every record allocated, the static counters' own records included, and
+  `counters.freed` for every record freed, so that the `counters.allocated` gauge's moves
+  are counted and allocations minus freed is the gauge, as invariant 4 asks of every state
+  transition (`spec/counters-file.md`, Metadata record).
 - `spec/client-protocol.md` version 1: `start recording` (type id `0x0101`) and `stop
   recording` (`0x0102`), the first commands of Cavalry's own, in a type id range beside
   Aeron's; `recording ready` (`0x1001`) with the recording id, the session id and the two
