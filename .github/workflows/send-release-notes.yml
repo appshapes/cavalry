@@ -172,6 +172,11 @@ jobs:
       # window step laid out and from the checkout, and the token in the agent's environment is
       # reachable to anything it runs. The Write and Edit tools are denied; the one file the
       # agent writes is under /tmp/cavalry-email, outside the checkout, through `tee`.
+      # `--add-dir /tmp/cavalry-email` makes that directory a working directory of the
+      # session: without it the CLI refuses `tee` to a path outside the checkout whatever the
+      # Bash allow rule says, and the writer prints its draft into its own log instead (the
+      # first preview, run 38973732554 on 2026-10-16: two writer sessions, no file, the gate
+      # refused). scripts/release-notes-test.py checks every agent step carries it.
       - name: Draft the email
         id: draft1
         if: steps.window.outputs.count > 0 && inputs.draft_run == ''
@@ -180,7 +185,7 @@ jobs:
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50"
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
           show_full_output: false
           prompt: |
             You are the WRITER of Cavalry's release-notes email. Read `.claude/agents/release-notes-email.md`
@@ -242,7 +247,7 @@ jobs:
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50"
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
           show_full_output: false
           prompt: |
             You are the REVIEWER of a DRAFT of Cavalry's release-notes email, at /tmp/cavalry-email/notes.md. Read
@@ -308,7 +313,7 @@ jobs:
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50"
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
           show_full_output: false
           prompt: |
             You are the WRITER of Cavalry's release-notes email, and your draft, /tmp/cavalry-email/notes.md, was
@@ -366,7 +371,7 @@ jobs:
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50"
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
           show_full_output: false
           prompt: |
             You are the REVIEWER of the SECOND draft of Cavalry's release-notes email, at

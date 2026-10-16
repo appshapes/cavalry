@@ -596,6 +596,9 @@ class Workflow(unittest.TestCase):
         self.assertEqual(self.text.count('"Write",'), 4)
         self.assertEqual(self.text.count('"Edit",'), 4)
         self.assertIn("RELEASE_NOTES_DIR: /tmp/cavalry-email", self.text)
+        # The one directory an agent writes to is a working directory of its session; without
+        # it the CLI refuses the write (preview run 38973732554, 2026-10-16).
+        self.assertEqual(self.text.count("--max-turns 50 --add-dir /tmp/cavalry-email\""), 4)
         self.assertIn("/tmp/cavalry-email/sources/changelog.md", self.brief)
         self.assertIn("/tmp/cavalry-email/lint.txt", self.brief)
         self.assertIn("scripts/release-notes-email-sample.md", self.brief)

@@ -43,6 +43,10 @@ changelog, the commits, the cards or the plans, and they will give this email on
   `justfile` (the recipes), `crates/cavalry/src/main.rs` (the `USAGE` constant lists the
   commands the binary has), `config.toml` (the keys) and `counters.toml` (the counters).
 
+In the workflow's job, use absolute paths and one command per Bash call: a `cd` or a chain
+of commands joined with `;` or `&&` is refused as a whole, and each refusal costs a turn.
+`Read` works on the sources; `grep`, `head`, `tail` and `wc` work from Bash.
+
 Every statement in the email is in those sources. Where a later commit in the window changed
 or removed what an earlier one added, the email describes what `master` does today, once:
 the reader is reading the newest.
