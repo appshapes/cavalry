@@ -22,7 +22,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
 - Records a stream to the durable log: `Cavalry::start_recording(channel, stream_id)`
   asks the driver to record the stream's live publication and returns a `Recording`
   whose `position()` and `synced_position()` read the recorder's two counters;
-  `Cavalry::stop_recording(id)` stops it from any client. The recording is the driver's:
+  `Cavalry::stop_recording(id)`, or `Recording::stop(&mut client)`, stops it from any
+  client. The recording is the driver's:
   it outlives the client, and dropping the handle stops nothing (ADR 0025).
 
 In Aeron, this is the client, with `tryClaim` and `commit`
