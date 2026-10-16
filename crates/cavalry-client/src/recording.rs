@@ -6,6 +6,8 @@
 
 use cavalry_shm::counters::CounterValue;
 
+use crate::{Cavalry, ClientError};
+
 /// A recording the driver started for one publication: its id in the catalog, the
 /// session recorded, and its two positions as the driver stores them
 /// (`spec/client-protocol.md`, "Events", `recording ready`).
@@ -74,6 +76,15 @@ impl Recording {
     /// [`position`]: Recording::position
     pub fn synced_position(&self) -> i64 {
         self.synced_position.load_acquire()
+    }
+
+    /// Stops this recording through `client`, which need not be the client that started
+    /// it: [`Cavalry::stop_recording`] with [`recording_id`], and the same answers (ADR
+    /// 0025). The handle stays valid and its two positions stay readable at the stop.
+    ///
+    /// [`recording_id`]: Recording::recording_id
+    pub fn stop(&self, client: &mut Cavalry) -> Result<(), ClientError> {
+        client.stop_recording(self.recording_id)
     }
 }
 

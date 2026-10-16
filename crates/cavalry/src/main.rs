@@ -313,7 +313,7 @@ fn doctor(config: &Config) -> ExitCode {
 }
 
 /// `cavalry record`: a client of the driver for one command. A start prints the
-/// recording id, the session recorded and the two counter ids and exits; the recording
+/// recording id, the session recorded and the two positions and exits; the recording
 /// is the driver's and goes on. A stop prints that it stopped. Exit 1 with the driver's
 /// message when the command is refused (`spec/client-protocol.md`, "Error codes").
 fn record(config: &Config, action: RecordAction) -> ExitCode {

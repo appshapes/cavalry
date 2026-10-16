@@ -65,8 +65,9 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
 
 From a program, the same three steps are `client.start_recording("cavalry:ipc", 1001)?`,
 which returns a `Recording` with `recording_id()`, `position()` and `synced_position()`
-read from the counters file, and `client.stop_recording(id)?`, from any client. Dropping
-the `Recording` stops nothing.
+read from the counters file, and `client.stop_recording(id)?`, from any client, or
+`recording.stop(&mut client)?`, the same command with the handle's id. Dropping the
+`Recording` stops nothing.
 
 ## How to verify it worked
 

@@ -108,6 +108,9 @@ fn a_recording_follows_the_publisher_and_stops_on_request() {
     );
     // Dropping the handle stops nothing: the recording is the driver's.
     drop(recording);
+    let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
+    assert!(catalog.get(0).expect("reads").expect("the slot").is_live());
+    drop(catalog);
     client.stop_recording(0).expect("stops");
     let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
     assert_eq!(
@@ -141,9 +144,25 @@ fn a_recording_follows_the_publisher_and_stops_on_request() {
         after,
         "it starts at the producer position"
     );
+    // The handle's stop is `stop_recording` with its id.
+    again.stop(&mut client).expect("stops through the handle");
+    let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
+    assert_eq!(
+        catalog
+            .get(1)
+            .expect("reads")
+            .expect("the slot")
+            .stop_position(),
+        after
+    );
+    drop(catalog);
+    let live = client
+        .start_recording("cavalry:ipc", 71)
+        .expect("a third recording");
+    assert_eq!(live.recording_id(), 2);
     drop(publication);
     client.close().expect("closes");
     driver.close().expect("closes, stopping the live recording");
     let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
-    assert!(!catalog.get(1).expect("reads").expect("the slot").is_live());
+    assert!(!catalog.get(2).expect("reads").expect("the slot").is_live());
 }

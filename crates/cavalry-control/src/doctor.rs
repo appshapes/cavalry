@@ -388,11 +388,33 @@ fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
             doc: LOG_DIR_KEY.anchor,
         }),
     }
-    // Writable: opening the catalog for writing, without writing, is what the driver's
-    // lock needs; a catalog that is not there yet is a directory no driver has used.
+    // Writable, without writing: the driver creates the catalog and every segment file in
+    // the directory, so the directory's mode bits must let this user add entries; and
+    // opening the catalog for writing is what the driver's lock needs, when there is one.
     checks += 1;
     let catalog = log_dir.join(cavalry_log::layout::CATALOG_FILE_NAME);
-    if catalog.is_file()
+    if let Some(user) = UserIds::current()
+        && let Ok(metadata) = std::fs::metadata(log_dir)
+        && !user.may_add_entries(&metadata)
+    {
+        findings.push(Finding {
+            check: "log-directory-backing",
+            level: Level::Warn,
+            message: format!(
+                "the log directory {} cannot be written by this user (uid {}): its mode is \
+                 {:o}, owner uid {}, group gid {}; the driver cannot create the catalog or a \
+                 segment file there; run the driver as a user that owns the log directory, \
+                 give the directory to it, or set {}=<a directory it can write>, or --log-dir",
+                log_dir.display(),
+                user.uid,
+                std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o7777,
+                std::os::unix::fs::MetadataExt::uid(&metadata),
+                std::os::unix::fs::MetadataExt::gid(&metadata),
+                LOG_DIR_KEY.env
+            ),
+            doc: LOG_DIR_KEY.anchor,
+        });
+    } else if catalog.is_file()
         && let Err(error) = std::fs::OpenOptions::new().append(true).open(&catalog)
     {
         findings.push(Finding {
@@ -426,6 +448,52 @@ fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
         });
     }
     checks
+}
+
+/// This process's effective user and groups, read from `id -u` and `id -G`, which every
+/// Unix has; `None` when either cannot be run or read, which is not a finding.
+struct UserIds {
+    uid: u32,
+    gids: Vec<u32>,
+}
+
+impl UserIds {
+    fn current() -> Option<UserIds> {
+        let id = |flag: &str| -> Option<Vec<u32>> {
+            let output = std::process::Command::new("id").arg(flag).output().ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .map(|field| field.parse().ok())
+                .collect()
+        };
+        let uid = *id("-u")?.first()?;
+        Some(UserIds {
+            uid,
+            gids: id("-G")?,
+        })
+    }
+
+    /// Whether the mode bits of a directory let this user create an entry in it: write
+    /// and search, from the owner's, the group's or the others' bits, the first class
+    /// that applies, as the kernel decides; root may always. An ACL is not read.
+    fn may_add_entries(&self, metadata: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if self.uid == 0 {
+            return true;
+        }
+        let mode = metadata.permissions().mode();
+        let bits = if metadata.uid() == self.uid {
+            mode >> 6
+        } else if self.gids.contains(&metadata.gid()) {
+            mode >> 3
+        } else {
+            mode
+        };
+        bits & 0o3 == 0o3
+    }
 }
 
 /// The free bytes on the filesystem under `path`, read from `df -P -k`, which every
@@ -586,7 +654,7 @@ fn read_static(
                     "counter {name} cannot be read: {error}; the counters file is corrupt or \
                      not a driver's; restart the driver, which remakes it"
                 ),
-                doc: DOC_COUNTERS,
+                doc: DOC_COUNTERS_REJECTS,
             });
             None
         }
@@ -1176,6 +1244,64 @@ mod tests {
         }
     }
 
+    /// A log directory this user cannot add entries to warns before any driver has used
+    /// it, and so does a catalog this user cannot open for writing; root may write both,
+    /// so the test says nothing as root.
+    #[test]
+    fn a_log_directory_or_catalog_this_user_cannot_write_warns() {
+        use std::os::unix::fs::PermissionsExt;
+        let user = UserIds::current().expect("id -u and id -G");
+        if user.uid == 0 {
+            return;
+        }
+        let dir = TestDir::new("log-dir-mode");
+        let log_dir = dir.0.join("log");
+        std::fs::create_dir_all(&log_dir).expect("the log directory");
+        let unwritable = |report: &Report| {
+            report
+                .findings
+                .iter()
+                .find(|f| {
+                    f.check == "log-directory-backing"
+                        && f.level == Level::Warn
+                        && f.message.contains("by this user")
+                })
+                .cloned()
+        };
+        let report = examine_with(&dir.0, Some(&log_dir));
+        assert!(unwritable(&report).is_none(), "{report}");
+
+        // No catalog yet, a directory of mode 0500: the driver could not create one.
+        let set = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod")
+        };
+        set(&log_dir, 0o500);
+        let report = examine_with(&dir.0, Some(&log_dir));
+        set(&log_dir, 0o700);
+        let found = unwritable(&report).unwrap_or_else(|| panic!("no warning: {report}"));
+        assert!(
+            found.message.contains("cannot be written")
+                && found.message.contains("mode is 500")
+                && found.message.contains(LOG_DIR_KEY.env),
+            "{}",
+            found.message
+        );
+        assert_eq!(found.doc, LOG_DIR_KEY.anchor);
+
+        // A catalog of mode 0400 in a directory this user may write.
+        let catalog = log_dir.join(cavalry_log::layout::CATALOG_FILE_NAME);
+        drop(CatalogWriter::open(&log_dir, now_nanos()).expect("the catalog"));
+        set(&catalog, 0o400);
+        let report = examine_with(&dir.0, Some(&log_dir));
+        set(&catalog, 0o600);
+        let found = unwritable(&report).unwrap_or_else(|| panic!("no warning: {report}"));
+        assert!(
+            found.message.contains("cannot be opened for writing"),
+            "{}",
+            found.message
+        );
+    }
+
     /// Every recording is listed with its two positions, and a recorder a full
     /// publication window behind its publisher is `recording-stalled`.
     #[test]
@@ -1383,6 +1509,29 @@ mod tests {
             found.message
         );
         assert!(report.ok(), "{report}");
+
+        // A corrupt record: a state the spec does not define fails that counter's read,
+        // and the finding names the page that says what a reader rejects.
+        {
+            use std::os::unix::fs::FileExt;
+            let header = CountersReader::open(&dir.0).expect("opens").header();
+            let offset = header.record_offset(last).expect("a record");
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.0.join("counters"))
+                .expect("writable");
+            file.write_at(&7i32.to_le_bytes(), offset as u64)
+                .expect("written");
+        }
+        let report = examine(&dir.0);
+        let found = finding(&report, name);
+        assert_eq!(found.level, Level::Fail, "{}", found.message);
+        assert_eq!(found.doc, DOC_COUNTERS_REJECTS);
+        assert!(
+            found.message.contains("cannot be read") && found.message.contains("restart"),
+            "{}",
+            found.message
+        );
 
         // A corrupt file: the magic is wrong, and every read fails loudly.
         {
