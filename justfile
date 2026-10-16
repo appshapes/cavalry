@@ -82,8 +82,10 @@ clippy:
 # counters.toml is the single source of every counter and of every data-plane state
 # machine (ADR 0012). gen-counters checks it and writes docs/reference/counters.md and the
 # constants in cavalry-shm from it; lint-counters runs the same checks and fails when
-# either generated file is stale, when a [[transition]] names no counter, or when the
-# enum marked `// state machine: <name>` does not have the machine's states as variants.
+# either generated file is stale, when a [[transition]] names no counter, when the enum
+# marked `// state machine: <name>` does not have the machine's states as variants, or
+# when an enum named *State, *Status or *Phase has neither that mark nor
+# `// not a state machine: <why>`.
 gen-counters:
     python3 scripts/gen-counters.py
 

@@ -26,6 +26,6 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 
 ## State machines
 
-Every state machine on the data plane registers its states and transitions in `counters.toml` too, and `just lint-counters` fails a transition that names no counter, a counter that is not in the table above, or an enum whose variants are not the machine's states (CLAUDE.md, invariant 4). The enum that holds the states carries the comment `// state machine: <name>` on the line before its definition. Each machine is listed here with the counter every transition adds one to.
+Every state machine on the data plane registers its states and transitions in `counters.toml` too, and `just lint-counters` fails a transition that names no counter, a counter that is not of kind `counter` in the table above, or an enum whose variants are not the machine's states (CLAUDE.md, invariant 4). The enum that holds the states carries the comment `// state machine: <name>` on the line before its definition. The check fails closed: every enum under `crates/*/src` whose name is or ends in `State`, `Status` or `Phase` carries that comment, or `// not a state machine: <why>` with the reason no transition of it needs a counter, and `just lint-counters` names the file and line of one that has neither. Each machine is listed here with the counter every transition adds one to.
 
 None registered yet.

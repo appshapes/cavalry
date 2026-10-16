@@ -403,6 +403,9 @@ user-visible change, added in the same commit as the change. The format follows
 - `just lint-counters` checks the state machines of the data plane: a `[[state_machine]]`
   in `counters.toml` names its states, every `[[transition]]` names the counter it adds
   one to, and the enum marked `// state machine: <name>` has those states as its
-  variants; the counters reference page lists each machine with its transitions. This
-  is the gate CLAUDE.md names for a transition with no counter, built before the first
-  state machine, the driver's recorder (ADR 0025, card 93).
+  variants; the counters reference page lists each machine with its transitions. It
+  fails closed: an enum named `*State`, `*Status` or `*Phase` with neither that mark nor
+  `// not a state machine: <why>` fails it. This is the gate CLAUDE.md names for a
+  transition with no counter, and it fails today on the two state machines already on
+  `master` without counters for every transition: the counters file's metadata record
+  and the recording catalog's descriptor (ADR 0024, card 93).

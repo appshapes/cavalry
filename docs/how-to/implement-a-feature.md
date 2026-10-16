@@ -52,7 +52,9 @@ feature that followed this page, commit by commit.
    3. Add a counter to `counters.toml` for every state transition, and register a state
       machine there as a `[[state_machine]]` with its `[[transition]]` rows, with the
       comment `// state machine: <name>` on its enum, so that `just lint-counters` can
-      refuse a transition with no counter. If `counters.toml`
+      refuse a transition with no counter. An enum named `State`, `*State`, `*Status` or
+      `*Phase` that is not a state machine carries `// not a state machine: <why>`
+      instead; `just lint-counters` fails on one with neither. If `counters.toml`
       does not exist yet, the counters file feature of ADR 0007 is still open, and a
       feature with a state transition waits for it.
    4. Tests: the full case before the happy path; one test per `spec/` vector; a

@@ -34,10 +34,16 @@ transition with no counter (invariant 4; the shape is in counters.toml's header)
   transition  every [[transition]] has exactly machine, from, to and counter: the machine
               exists, from and to are its states, the counter is a [[counter]] name, no
               transition repeats, and every machine has at least one
+  counter     a transition's counter is a [[counter]] of kind "counter": invariant 4 asks
+              for a count that only rises, and a gauge that moves back hides how often
+              it moved
   enum        exactly one enum under crates/*/src carries the comment
               `// state machine: <name>` on the line before its definition (attributes
-              and docs may sit between), and its variants, lower-cased with an underscore
-              between words, are the machine's states
+              and docs may sit between), and its variants, one per line, lower-cased
+              with an underscore between words, are the machine's states
+  fail closed every enum under crates/*/src whose name is or ends in State, Status or
+              Phase carries `// state machine: <name>` or `// not a state machine: <why>`,
+              so an enum nobody registered fails the gate instead of passing it
 
 Python 3.9 standard library only, like the other scripts (ADR 0003): `tomllib` when the
 interpreter has it (3.11 and later), else a parser for the flat subset of TOML that
@@ -72,7 +78,9 @@ MAX_LABEL_LENGTH = 124
 NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 STATE = re.compile(r"^[a-z][a-z0-9_]*$")
 MARKER = re.compile(r"^\s*// state machine: ([a-z][a-z0-9_.]*)\s*$")
-ENUM = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+\w+")
+EXEMPT = re.compile(r"^\s*// not a state machine:(.*)$")
+ENUM = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+(\w+)")
+STATEFUL = re.compile(r"(State|Status|Phase)$")
 VARIANT = re.compile(r"^\s*([A-Z]\w*)")
 CRATES = ROOT / "crates"
 
@@ -236,14 +244,14 @@ def check(doc: dict) -> tuple[list[dict], list[dict]]:
             raise Fail(f"{where}: doc must be one sentence, what a change in the value means")
         if not isinstance(doctor, str):
             raise Fail(f"{where}: doctor must be a string: what an operator does, or \"\"")
-    return counters, check_machines(doc, names)
+    return counters, check_machines(doc, {c["name"]: c["kind"] for c in counters})
 
 
 def const_name(name: str) -> str:
     return name.upper().replace(".", "_")
 
 
-def check_machines(doc: dict, counters: set[str]) -> list[dict]:
+def check_machines(doc: dict, counters: dict[str, str]) -> list[dict]:
     """The [[state_machine]] and [[transition]] tables, checked against each other, the
     counters and the marked enums; returns each machine with its transitions attached."""
     machines: dict[str, dict] = {}
@@ -267,6 +275,10 @@ def check_machines(doc: dict, counters: set[str]) -> list[dict]:
         if sorted(t) != sorted(TRANSITION_KEYS):
             raise Fail(f"{where}: every entry has exactly machine, from, to and counter; "
                        f"got {sorted(t)}")
+        wrong = [k for k in TRANSITION_KEYS if not isinstance(t[k], str)]
+        if wrong:
+            raise Fail(f"{where}: {wrong} must be strings, one name each; got "
+                       f"{[t[k] for k in wrong]!r}")
         machine = machines.get(t["machine"])
         if machine is None:
             raise Fail(f"{where}: machine {t['machine']!r} has no [[state_machine]]")
@@ -278,6 +290,10 @@ def check_machines(doc: dict, counters: set[str]) -> list[dict]:
             raise Fail(f"{where}: counter {t['counter']!r} is not a [[counter]] name; a "
                        "transition with no counter is what this gate refuses (CLAUDE.md, "
                        "invariant 4): add the counter, then name it here")
+        if counters[t["counter"]] != "counter":
+            raise Fail(f"{where}: counter {t['counter']!r} is a {counters[t['counter']]}; a "
+                       "transition adds one to a [[counter]] of kind \"counter\", which only "
+                       "rises, so its count of moves survives a move back (invariant 4)")
         key = tuple(t[k] for k in TRANSITION_KEYS)
         if key in seen:
             raise Fail(f"{where}: repeats an earlier transition")
@@ -292,15 +308,27 @@ def check_machines(doc: dict, counters: set[str]) -> list[dict]:
 
 def check_enums(machines: dict[str, dict]) -> None:
     """Every marked enum under crates/*/src has a table and the table's states; every
-    table has exactly one marked enum."""
+    table has exactly one marked enum; every enum whose name says it holds a state is
+    marked, as a state machine or as not one."""
     found: dict[str, str] = {}
+    unmarked: list[str] = []
     for path in sorted(CRATES.glob("*/src/**/*.rs")):
+        file = path.relative_to(ROOT).as_posix()
         lines = path.read_text(encoding="utf-8").splitlines()
+        marked: set[int] = set()
         for i, line in enumerate(lines):
-            m = MARKER.match(line)
-            if not m:
+            m, x = MARKER.match(line), EXEMPT.match(line)
+            if not (m or x):
                 continue
-            name, where = m.group(1), f"{path.relative_to(ROOT).as_posix()}:{i + 1}"
+            where = f"{file}:{i + 1}"
+            if x and not x.group(1).strip():
+                raise Fail(f"{where}: `// not a state machine:` needs its reason after the "
+                           "colon: why no transition of this enum needs a counter")
+            begin, variants = enum_at(lines, i + 1, where)
+            marked.add(begin)
+            if x:
+                continue
+            name = m.group(1)
             if name not in machines:
                 raise Fail(f"{where}: `// state machine: {name}` has no [[state_machine]] "
                            "in counters.toml")
@@ -308,37 +336,60 @@ def check_enums(machines: dict[str, dict]) -> None:
                 raise Fail(f"{where}: state machine {name!r} is also marked at {found[name]}; "
                            "one enum per machine")
             found[name] = where
-            variants, states = enum_variants(lines, i + 1, where), machines[name]["states"]
+            states = machines[name]["states"]
             if sorted(variants) != sorted(states):
                 raise Fail(f"{where}: the enum's variants {sorted(variants)} are not the "
                            f"states of {name!r}, {sorted(states)}")
+        for i, line in enumerate(lines):
+            e = ENUM.match(line)
+            if e and STATEFUL.search(e.group(1)) and i not in marked:
+                unmarked.append(f"{file}:{i + 1} ({e.group(1)})")
+    if unmarked:
+        raise Fail(f"{', '.join(unmarked)}: an enum whose name ends in State, Status or Phase "
+                   "carries, on the line before it, `// state machine: <name>` with a "
+                   "[[state_machine]] in counters.toml whose every [[transition]] names a "
+                   "counter, or `// not a state machine: <why>` (CLAUDE.md, invariant 4; "
+                   "docs/reference/counters.md, State machines)")
     for name in machines:
         if name not in found:
             raise Fail(f"counters.toml: state machine {name!r} has no enum under crates/*/src "
                        f"marked `// state machine: {name}` on the line before it")
 
 
-def enum_variants(lines: list[str], start: int, where: str) -> list[str]:
-    """The variants of the enum that begins at line `start`, after any attributes and
-    docs, as lowercase names with an underscore between words (`WriteFailed` is
-    `write_failed`)."""
+def enum_at(lines: list[str], start: int, where: str) -> tuple[int, list[str]]:
+    """The line of the enum that begins at line `start`, after any attributes and docs,
+    and its variants as lowercase names with an underscore between words (`WriteFailed`
+    is `write_failed`). One variant per line; a tuple or struct variant's fields may span
+    lines, and an attribute may span lines."""
     variants: list[str] = []
-    depth, started, opened = 0, False, False
-    for line in lines[start:]:
-        if not started:
-            if ENUM.match(line):
-                started = True
-            elif line.strip() and not line.strip().startswith(("#[", "///")):
-                raise Fail(f"{where}: the line after `// state machine:` must begin an enum; "
-                           "attributes and docs may sit between")
-            else:
+    begin, attribute, depth, opened = None, 0, 0, None
+    for i in range(start, len(lines)):
+        line, stripped = lines[i], lines[i].strip()
+        if begin is None:
+            if attribute == 0 and ENUM.match(line):
+                begin = i
+            elif attribute > 0 or stripped.startswith("#["):
+                attribute = max(0, attribute + line.count("[") - line.count("]"))
                 continue
-        if opened and depth == 1 and (m := VARIANT.match(line)):
+            elif not stripped or stripped.startswith("//"):
+                continue
+            else:
+                raise Fail(f"{where}: the line after the marker must begin an enum; "
+                           "comments, docs and attributes may sit between")
+        if opened is not None and depth == 1 and (m := VARIANT.match(line)):
+            if re.search(r",\s*[A-Z]", re.sub(r"\([^)]*\)|\{[^}]*\}", "", line)):
+                raise Fail(f"{where}: line {i + 1} holds more than one variant; write the "
+                           "enum one variant per line, so that this check can read it")
             variants.append(re.sub(r"(?<!^)(?=[A-Z])", "_", m.group(1)).lower())
-        depth += line.count("{") - line.count("}")
-        opened = opened or depth > 0
-        if opened and depth == 0:
-            return variants
+        if opened is None and "{" in line.split("//")[0]:
+            opened = i
+        code = line.split("//")[0]
+        depth += code.count("{") + code.count("(") - code.count("}") - code.count(")")
+        if opened is not None and depth == 0:
+            if opened == i:
+                raise Fail(f"{where}: the enum opens and closes on line {i + 1}; write it "
+                           "one variant per line, so that this check can read it")
+            return begin, variants
     raise Fail(f"{where}: the marked enum never closes")
 
 
@@ -376,10 +427,15 @@ def render_page(counters: list[dict], machines: list[dict]) -> str:
         "",
         "Every state machine on the data plane registers its states and transitions in "
         "`counters.toml` too, and `just lint-counters` fails a transition that names no "
-        "counter, a counter that is not in the table above, or an enum whose variants are "
-        "not the machine's states (CLAUDE.md, invariant 4). The enum that holds the states "
-        "carries the comment `// state machine: <name>` on the line before its definition. "
-        "Each machine is listed here with the counter every transition adds one to.",
+        "counter, a counter that is not of kind `counter` in the table above, or an enum "
+        "whose variants are not the machine's states (CLAUDE.md, invariant 4). The enum "
+        "that holds the states carries the comment `// state machine: <name>` on the line "
+        "before its definition. The check fails closed: every enum under `crates/*/src` "
+        "whose name is or ends in `State`, `Status` or `Phase` carries that comment, or "
+        "`// not a state machine: <why>` with the reason no transition of it needs a "
+        "counter, and `just lint-counters` names the file and line of one that has "
+        "neither. Each machine is listed here with the counter every transition adds one "
+        "to.",
     ]
     if not machines:
         lines += ["", "None registered yet."]
