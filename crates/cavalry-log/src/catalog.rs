@@ -249,8 +249,10 @@ impl CatalogWriter {
         let whole = CatalogHeader::slot_offset(slots);
         if length > whole {
             // Bytes past the last whole slot, which a crash while the file grew leaves:
-            // the page says the driver truncates them at start-up.
+            // the page says the driver truncates them at start-up, and the truncation is
+            // synced so that a crash before the next sync cannot bring them back.
             file.set_len(whole).map_err(io("truncate", &path))?;
+            file.sync_all().map_err(io("sync", &path))?;
         }
         if slots > 0 && read_slot_bytes(&file, &path, slots - 1)?[..4] == [0u8; 4] {
             // An empty last slot, a creation torn by a crash: the page says the driver

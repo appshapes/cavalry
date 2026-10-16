@@ -19,6 +19,16 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   at most once per millisecond so that the publisher's cache line is not read on every
   cycle (ADR 0022). The strategy it runs is stored once in the
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
+- Records a stream to the durable log on a second thread, the recorder, with the same
+  idle strategy: `start recording` and `stop recording` (`spec/client-protocol.md`,
+  "Commands") name a stream, the conductor hands the recorder each start and stop
+  through a bounded queue and never touches the disk, the recorder takes blocks of
+  committed frames from the publication's log buffer and writes them into the log
+  directory's segment files with one positional write each, syncing once per second,
+  and its position, `recording.position`, bounds the publisher's limit, so that a slow
+  disk back-pressures the publisher and never loses a byte (ADR 0025). The log
+  directory is opened under a lock at start and recovered (`spec/durable-log.md`, "The
+  driver"); a second driver on it refuses to start.
 - Will run dedicated threads for the sender and the receiver, pinned when the operating
   system allows, when the UDP slice arrives: a receiver that detects a gap sends a NAK,
   the sender retransmits from its own term buffer, and status messages drive flow
@@ -44,6 +54,9 @@ In Aeron, this is the media driver ([glossary](../../docs/glossary.md)).
   subscriber (invariant 1).
 - Remove a file whose creator is alive. A directory with a fresh heartbeat is
   `driver-active`, and the driver refuses to start.
+- Report a recording's position before the operating system holds the bytes, or a
+  synced position before a sync made them durable; clean a recorded byte before the
+  recorder has written it; or share a log directory with another driver (invariant 1).
 
 ## Example
 
@@ -55,25 +68,33 @@ it left. This is the crate's doctest.
 use cavalry_driver::{Driver, DriverError};
 
 fn main() -> Result<(), DriverError> {
-    let dir = std::env::temp_dir().join(format!("cavalry-driver-readme-{}", std::process::id()));
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("cavalry-driver-readme-{pid}"));
+    // The durable log's directory, on disk and never under the driver directory, which
+    // is memory; `Driver::default_log_dir()` is the rule a running driver uses.
+    let log_dir = std::env::temp_dir().join(format!("cavalry-driver-readme-{pid}-log"));
 
-    // Start: the directory and its three files exist, and the conductor is running.
-    let driver = Driver::start(&dir)?;
+    // Start: the directory and its three files exist, the log directory holds its
+    // catalog under this driver's lock, and the conductor and recorder are running.
+    let driver = Driver::start(&dir, &log_dir)?;
     for file in ["counters", "command-ring", "broadcast-buffer"] {
         assert!(dir.join(file).is_file(), "{file}");
     }
+    assert!(log_dir.join("catalog").is_file());
 
     // A second driver on the same directory finds this one's heartbeat and refuses.
-    let refused = Driver::start(&dir).unwrap_err();
+    let refused = Driver::start(&dir, &log_dir).unwrap_err();
     assert_eq!(refused.reason(), "driver-active");
     println!("{refused}");
 
     // Close: the heartbeat becomes -1 and the directory stays for `doctor`. The next
-    // driver to start finds a dead driver there and makes the directory anew.
+    // driver to start finds a dead driver there and makes the directory anew; the log
+    // directory it finds whole, with nothing to repair.
     driver.close()?;
-    let again = Driver::start(&dir)?;
+    let again = Driver::start(&dir, &log_dir)?;
     again.close()?;
     std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&log_dir).ok();
     Ok(())
 }
 ```
@@ -98,3 +119,6 @@ driver refused (driver-active): /tmp/cavalry-driver-readme-4242 holds a driver w
 - [ADR 0007](../../docs/decisions/0007-build-ipc-pub-sub-first.md), the slice this
   driver is the fourth feature of; `tests/driver.rs`, a client attaching through
   `cavalry-shm` and `cavalry-proto` and exercising every command.
+- [ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md), the recorder
+  thread, its queues and its counters; [`spec/durable-log.md`](../../spec/durable-log.md),
+  what it writes; `src/recorder.rs`.

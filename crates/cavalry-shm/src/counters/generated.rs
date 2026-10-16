@@ -59,6 +59,45 @@ pub const DRIVER_LOG_CREATE_FAILED: CounterId = CounterId(16);
 /// `conductor.idle_strategy`, a static gauge: The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin.
 pub const CONDUCTOR_IDLE_STRATEGY: CounterId = CounterId(17);
 
+/// `recording.started`, a static counter: Recordings the driver started: a catalog slot taken, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands).
+pub const RECORDING_STARTED: CounterId = CounterId(20);
+
+/// `recording.stopped`, a static counter: Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands).
+pub const RECORDING_STOPPED: CounterId = CounterId(21);
+
+/// `recording.write_failed`, a static counter: Writes or syncs the recorder could not make to a recording's segment file or time index, each of which stopped the recording at the position written (spec/client-protocol.md, Commands).
+pub const RECORDING_WRITE_FAILED: CounterId = CounterId(22);
+
+/// `recording.start_failed`, a static counter: Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands).
+pub const RECORDING_START_FAILED: CounterId = CounterId(23);
+
+/// `recording.catalog_full`, a static counter: Start recording commands refused with error code 10 because the catalog holds every one of its 1048576 slots (spec/durable-log.md, Catalog header).
+pub const RECORDING_CATALOG_FULL: CounterId = CounterId(24);
+
+/// `recording.recovered`, a static counter: Recordings found live, or with a torn stop, when the driver opened the log directory, whose stop fields recovery rebuilt from their files (spec/durable-log.md, The driver).
+pub const RECORDING_RECOVERED: CounterId = CounterId(25);
+
+/// `recording.invalidated`, a static counter: Catalog slots recovery set to state 2 because their files cannot repair them: an empty slot before the last, a creation checksum that fails, or a segment file missing between the start and the last (spec/durable-log.md, The driver).
+pub const RECORDING_INVALIDATED: CounterId = CounterId(26);
+
+/// `recording.index_rewritten`, a static counter: Time indexes recovery wrote again with their start entry, gave a first entry, or truncated to whole entries in order or to the entries at or before the rebuilt stop (spec/durable-log.md, The driver).
+pub const RECORDING_INDEX_REWRITTEN: CounterId = CounterId(27);
+
+/// `recording.catalog_truncated`, a static counter: Catalog files recovery truncated to whole slots because a crash left bytes past the last slot: 0 or 1 at each driver start (spec/durable-log.md, The driver).
+pub const RECORDING_CATALOG_TRUNCATED: CounterId = CounterId(28);
+
+/// `recording.slot_dropped`, a static counter: Empty last catalog slots recovery dropped because a crash tore a recording's creation: 0 or 1 at each driver start, and the next recording takes the id (spec/durable-log.md, The driver).
+pub const RECORDING_SLOT_DROPPED: CounterId = CounterId(29);
+
+/// `recording.files_removed`, a static counter: Files recovery removed: segment files wholly past a rebuilt stop, and the files of a deleted recording that were still present (spec/durable-log.md, The driver).
+pub const RECORDING_FILES_REMOVED: CounterId = CounterId(30);
+
+/// `recording.position`, a instance gauge: The position of one recording up to which the recorder has written its segment files, what the operating system holds, stored with a release store after each block; the publisher's limit respects it (spec/log-buffer.md, The driver); key: recording id (i64), little-endian; label text: the recording id, the session id and the stream id in decimal, space-separated.
+pub const RECORDING_POSITION: CounterId = CounterId(31);
+
+/// `recording.synced_position`, a instance gauge: The position of one recording up to which a sync has made its segment files and time index durable, stored with a release store after each sync, at most a second behind recording.position; key and label as recording.position.
+pub const RECORDING_SYNCED_POSITION: CounterId = CounterId(32);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -204,5 +243,109 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin.",
         doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_STARTED,
+        name: "recording.started",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Recordings the driver started: a catalog slot taken, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_STOPPED,
+        name: "recording.stopped",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_WRITE_FAILED,
+        name: "recording.write_failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Writes or syncs the recorder could not make to a recording's segment file or time index, each of which stopped the recording at the position written (spec/client-protocol.md, Commands).",
+        doctor: "The log directory's filesystem is full, read-only or failing: `cavalry doctor` names it. Free space, or move the log directory with `--log-dir`, then start the recording again; what was written up to the stop position is whole and replayable.",
+    },
+    CounterDef {
+        id: RECORDING_START_FAILED,
+        name: "recording.start_failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands).",
+        doctor: "Free space on the log directory's filesystem, or move the directory with `--log-dir`; a recording needs a 128 MiB segment file when it starts.",
+    },
+    CounterDef {
+        id: RECORDING_CATALOG_FULL,
+        name: "recording.catalog_full",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Start recording commands refused with error code 10 because the catalog holds every one of its 1048576 slots (spec/durable-log.md, Catalog header).",
+        doctor: "The log directory has held 1048576 recordings in its life: move or archive it, and start the driver on a new directory, which gets a new catalog.",
+    },
+    CounterDef {
+        id: RECORDING_RECOVERED,
+        name: "recording.recovered",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Recordings found live, or with a torn stop, when the driver opened the log directory, whose stop fields recovery rebuilt from their files (spec/durable-log.md, The driver).",
+        doctor: "The previous driver did not stop cleanly; the recordings are whole up to the rebuilt stop. If this climbs at every start, find what kills the driver before `close`.",
+    },
+    CounterDef {
+        id: RECORDING_INVALIDATED,
+        name: "recording.invalidated",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Catalog slots recovery set to state 2 because their files cannot repair them: an empty slot before the last, a creation checksum that fails, or a segment file missing between the start and the last (spec/durable-log.md, The driver).",
+        doctor: "A recording in the log directory is damaged beyond repair and `cavalry doctor` names its slot: check the disk, and restore the directory from a backup if the recording matters; the slot is never reused.",
+    },
+    CounterDef {
+        id: RECORDING_INDEX_REWRITTEN,
+        name: "recording.index_rewritten",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Time indexes recovery wrote again with their start entry, gave a first entry, or truncated to whole entries in order or to the entries at or before the rebuilt stop (spec/durable-log.md, The driver).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_CATALOG_TRUNCATED,
+        name: "recording.catalog_truncated",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Catalog files recovery truncated to whole slots because a crash left bytes past the last slot: 0 or 1 at each driver start (spec/durable-log.md, The driver).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_SLOT_DROPPED,
+        name: "recording.slot_dropped",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Empty last catalog slots recovery dropped because a crash tore a recording's creation: 0 or 1 at each driver start, and the next recording takes the id (spec/durable-log.md, The driver).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_FILES_REMOVED,
+        name: "recording.files_removed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Files recovery removed: segment files wholly past a rebuilt stop, and the files of a deleted recording that were still present (spec/durable-log.md, The driver).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_POSITION,
+        name: "recording.position",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The position of one recording up to which the recorder has written its segment files, what the operating system holds, stored with a release store after each block; the publisher's limit respects it (spec/log-buffer.md, The driver); key: recording id (i64), little-endian; label text: the recording id, the session id and the stream id in decimal, space-separated.",
+        doctor: "A recording.position that does not move while its publication.position does is a recorder behind a slow or failing disk, and the publisher is back-pressured when it reaches the window: check recording.write_failed and the log directory's disk with `cavalry doctor`.",
+    },
+    CounterDef {
+        id: RECORDING_SYNCED_POSITION,
+        name: "recording.synced_position",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The position of one recording up to which a sync has made its segment files and time index durable, stored with a release store after each sync, at most a second behind recording.position; key and label as recording.position.",
+        doctor: "A synced position far behind recording.position is a disk whose sync is slow; a power cut loses what lies between the two.",
     },
 ];

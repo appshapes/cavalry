@@ -53,7 +53,8 @@ use cavalry::{Driver, DriverError, doctor};
 
 fn main() -> Result<(), DriverError> {
     let dir = std::env::temp_dir().join(format!("cavalry-readme-{}", std::process::id()));
-    let driver = Driver::start(&dir)?;
+    let log_dir = std::env::temp_dir().join(format!("cavalry-readme-{}-log", std::process::id()));
+    let driver = Driver::start(&dir, &log_dir)?;
 
     // While it runs, doctor finds a fresh heartbeat and nothing to fix.
     let report = doctor::examine(&dir);
@@ -68,6 +69,7 @@ fn main() -> Result<(), DriverError> {
     assert!(report.findings[0].message.contains("closed"));
     println!("{report}");
     std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&log_dir).ok();
     Ok(())
 }
 ```

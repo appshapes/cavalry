@@ -174,10 +174,15 @@ is at or past the end of stream position has seen everything the publication wro
 
 ## The driver
 
-The driver creates the log, and on its duty cycle:
+The driver creates the log, and on its duty cycle keeps it as below. A recorded
+publication (`spec/client-protocol.md`, "Commands") has one more reader, the driver's
+recorder, whose position is `recording.position` (`counters.toml`); below, the *consumer
+position* is the minimum subscriber position, or, for a recorded publication, the lesser
+of that and the recording's position, which is the recording's position alone when there
+is no subscriber.
 
 - **Positions.** It stores the producer position in `publication.position`, and the
-  publisher limit, the minimum subscriber position + the publication window length, in
+  publisher limit, the consumer position + the publication window length, in
   `publication.limit`, each with a release store. For this store and for unblocking it
   loads the producer position at most once per millisecond per publication, by its
   own clock, so that the publisher's cache line is not read on every cycle;
@@ -185,13 +190,13 @@ The driver creates the log, and on its duty cycle:
   subscription's join load it afresh: a join below the clean position would read
   cleaned bytes (ADR 0022). It raises the limit only when the new value is at least
   window ÷ 8 beyond the last, so that the publisher's cache line is not written on
-  every cycle, and only after cleaning. With no subscriber the limit is the consumer
-  position, the largest position any subscriber reached, so the publisher
-  is told `not connected`. It sets is connected to 1 while a subscriber has a position
-  and to 0 otherwise.
+  every cycle, and only after cleaning. With neither a subscriber nor a recording the
+  limit is the largest position any subscriber reached, so the publisher is told `not
+  connected`; a recording alone connects the publication. It sets is connected to 1 while
+  a subscriber has a position or a recording is live, and to 0 otherwise.
 - **Cleaning.** Before it raises the limit to L, it zeroes every byte from the clean
-  position, the end of the last cleaning, up to L − window, the minimum subscriber
-  position, one term at a time: the bytes after the first eight of the range with plain
+  position, the end of the last cleaning, up to L − window, the consumer position, one
+  term at a time, so that no recorded byte is cleaned before the recorder has written it: the bytes after the first eight of the range with plain
   stores, then the first eight bytes with a release store, so a reader that loads a
   frame length of 0 never sees a half-cleaned frame. The clean position becomes the end
   of the range.
@@ -210,7 +215,9 @@ The driver creates the log, and on its duty cycle:
 - **Closing.** When the publication is closed it loads the producer position afresh
   and stores it in the end of stream position with a release store, and removes the
   file once every subscriber has reached that position or the publication's linger has
-  passed.
+  passed, and, for a recorded publication, once its recording has stopped: the recorder
+  has written up to the end of stream position and the catalog holds the stop
+  (`spec/client-protocol.md`, "Commands").
 - **Checks.** Before it uses a value a client wrote, a subscriber position or a tail, it
   checks the bound the tables name; a value outside it adds one to
   `log_buffer.rejected_position` or `log_buffer.rejected_tail`, and the client is
@@ -230,8 +237,11 @@ stream id (i32), little-endian, 16 bytes; the label is the counter's name, a spa
 the three values in decimal separated by spaces. A position is stored with a release
 store and loaded with an acquire load by whoever branches on it, the driver on a
 subscriber's position and the publisher on its limit, the one exception to the counters
-file's relaxed rule (ADR 0013). `publication.unblocked` and the three
-`log_buffer.rejected_*` counters are static.
+file's relaxed rule (ADR 0013). A recording's `recording.position` and
+`recording.synced_position` are the client protocol page's, keyed by the recording id;
+the driver loads `recording.position` with an acquire load before it cleans, as it loads a
+subscriber's position. `publication.unblocked` and the three `log_buffer.rejected_*`
+counters are static.
 
 ## What a reader rejects
 

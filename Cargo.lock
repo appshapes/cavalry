@@ -66,6 +66,7 @@ version = "0.1.0"
 dependencies = [
  "cavalry-client",
  "cavalry-driver",
+ "cavalry-log",
  "cavalry-shm",
  "core_affinity",
  "hdrhistogram",
@@ -93,6 +94,7 @@ dependencies = [
 name = "cavalry-driver"
 version = "0.1.0"
 dependencies = [
+ "cavalry-log",
  "cavalry-proto",
  "cavalry-shm",
 ]

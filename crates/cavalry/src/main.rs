@@ -144,7 +144,17 @@ fn run(config: &Config) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let dir = &config.dir;
-    let driver = match Driver::start_with(dir, config.conductor_idle_strategy) {
+    // The log directory's rule is the driver's until the `log.dir` key, its flag and its
+    // variable arrive with card 93's control-plane feature (ADR 0025).
+    let Some(log_dir) = Driver::default_log_dir() else {
+        eprintln!(
+            "cavalry run: no log directory: HOME and XDG_DATA_HOME are unset and the driver \
+             does not run as root; set HOME, or run as root; see \
+             docs/reference/durable-log.md#the-driver"
+        );
+        return ExitCode::FAILURE;
+    };
+    let driver = match Driver::start_with(dir, &log_dir, config.conductor_idle_strategy) {
         Ok(driver) => driver,
         Err(error) => {
             eprintln!("cavalry run: {error}");
@@ -152,10 +162,11 @@ fn run(config: &Config) -> ExitCode {
         }
     };
     eprintln!(
-        "cavalry run: driver started on {} (pid {}), conductor idle strategy {}; Ctrl-C or \
-         SIGTERM stops it",
+        "cavalry run: driver started on {} (pid {}), recording into {}, conductor idle \
+         strategy {}; Ctrl-C or SIGTERM stops it",
         dir.display(),
         std::process::id(),
+        log_dir.display(),
         config.conductor_idle_strategy.name()
     );
     match stopped.recv() {

@@ -7,11 +7,19 @@
 //! buffer alone, and the conductor only moves the limit that bounds the publisher. It
 //! loads a publication's producer position at most once per millisecond, so that the
 //! publisher's cache line is not read on every cycle, and a move of that position is
-//! not work for the idle strategy (ADR 0022).
+//! not work for the idle strategy (ADR 0022). Recording is the recorder thread's
+//! (`crate::recorder`): the conductor registers each recording, hands the recorder its
+//! starts and stops through a bounded queue, takes its replies, allocates the two
+//! counters once the recording id is known, and lets the recorder's position bound the
+//! publisher's limit and the cleaning, so a slow disk back-pressures the publisher and
+//! never loses a byte (ADR 0025).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use cavalry_log::dir::Recovery;
 
 use cavalry_proto::client_protocol::{
     Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, ProtocolError,
@@ -26,14 +34,20 @@ use cavalry_shm::counters::generated::{
     COMMAND_RING_REJECTED_RECORD, COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED,
     CONDUCTOR_IDLE_STRATEGY, DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL,
     LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT,
-    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, SUBSCRIPTION_POSITION,
+    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_CATALOG_FULL,
+    RECORDING_CATALOG_TRUNCATED, RECORDING_FILES_REMOVED, RECORDING_INDEX_REWRITTEN,
+    RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED, RECORDING_SLOT_DROPPED,
+    RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_SYNCED_POSITION,
+    SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
 use cavalry_shm::log::{HeaderFields, LogBuffers, LogType, UnblockOutcome as LogUnblock};
+use cavalry_shm::spsc;
 
 use crate::error::DriverError;
 use crate::idle::{IdleStrategy, Idler};
+use crate::recorder::{Reply, Request, Start, StartFailure};
 use crate::spec;
 
 /// The docs anchor an error event's message names.
@@ -50,8 +64,9 @@ const FRAME_ALIGN: i64 = FRAME_ALIGNMENT as i64;
 const NOT_READY_POLL: Duration = Duration::from_millis(10);
 
 /// The driver's clock: nanoseconds since the Unix epoch, the clock the consumer
-/// heartbeat stores and every timeout is measured on.
-fn now_nanos() -> i64 {
+/// heartbeat stores and every timeout is measured on; the recorder reads the same clock
+/// once per duty cycle.
+pub(crate) fn now_nanos() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
@@ -157,6 +172,49 @@ struct Image {
     position: Counter,
 }
 
+/// The driver's one recorder, seen from the conductor: the request queue it offers
+/// starts, attaches and stops to, the reply queue it takes answers from, and the next
+/// recording id, the catalog's slot count, which every reply refreshes (ADR 0025).
+pub(crate) struct RecorderLink {
+    /// Starts, attaches and stops to the recorder.
+    pub requests: spsc::Producer<Request>,
+    /// The recorder's answers.
+    pub replies: spsc::Consumer<Reply>,
+    /// The catalog's slot count: a `stop recording` naming an id at or past it is code 21.
+    pub next_recording_id: i64,
+}
+
+/// Where one recording is in its life, as the conductor sees it, from the command to
+/// the reply that ends it; every transition adds one to a counter, and `counters.toml`
+/// lists them (`spec/client-protocol.md`, "Commands").
+// state machine: recording
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordingState {
+    /// The start is with the recorder; the limit respects the start position.
+    Starting,
+    /// The slot and files exist, the counters are allocated, `recording ready` went out.
+    Live,
+    /// The recorder wrote the stop; `recording stopped` went out, the counters are freed.
+    Stopped,
+    /// The start failed, or the counters could not be allocated: the client got an error.
+    Failed,
+}
+
+/// One recording the conductor registers: its publication, the command that started
+/// it, its start position, and, once the recorder has given the id, the two counters.
+struct RecordingEntry {
+    publication_id: i64,
+    session_id: i32,
+    stream_id: i32,
+    start_position: i64,
+    state: RecordingState,
+    recording_id: Option<i64>,
+    position: Option<Counter>,
+    synced: Option<Counter>,
+    /// A stop is with the recorder; a second `stop recording` is answered at once.
+    stop_requested: bool,
+}
+
 /// The static counters the conductor moves.
 struct Statics {
     client_timed_out: Counter,
@@ -170,6 +228,10 @@ struct Statics {
     command_ring_rejected_record: Counter,
     log_buffer_rejected_position: Counter,
     log_buffer_rejected_tail: Counter,
+    recording_started: Counter,
+    recording_stopped: Counter,
+    recording_start_failed: Counter,
+    recording_catalog_full: Counter,
 }
 
 impl Statics {
@@ -187,6 +249,10 @@ impl Statics {
             command_ring_rejected_record: get(COMMAND_RING_REJECTED_RECORD)?,
             log_buffer_rejected_position: get(LOG_BUFFER_REJECTED_POSITION)?,
             log_buffer_rejected_tail: get(LOG_BUFFER_REJECTED_TAIL)?,
+            recording_started: get(RECORDING_STARTED)?,
+            recording_stopped: get(RECORDING_STOPPED)?,
+            recording_start_failed: get(RECORDING_START_FAILED)?,
+            recording_catalog_full: get(RECORDING_CATALOG_FULL)?,
         })
     }
 }
@@ -229,6 +295,11 @@ pub(crate) struct Conductor {
     publications: Vec<Publication>,
     subscriptions: Vec<Subscription>,
     images: Vec<Image>,
+    recordings: Vec<RecordingEntry>,
+    recorder: RecorderLink,
+    /// Attaches and stops the request queue had no room for, offered again each cycle;
+    /// at most one of each per recording, so never past its capacity.
+    deferred: VecDeque<Request>,
     /// Registrations across every publication: the publications registry's fill.
     registration_count: usize,
     next_session_id: i32,
@@ -247,9 +318,14 @@ pub(crate) struct Conductor {
 
 impl Conductor {
     /// Creates the counters file, the command ring and the broadcast buffer in `dir`,
-    /// in that order, with the sizes of [`spec`], and records `idle` in the
-    /// `conductor.idle_strategy` counter for `doctor`.
-    pub(crate) fn create(dir: &Path, idle: IdleStrategy) -> Result<Self, DriverError> {
+    /// in that order, with the sizes of [`spec`], records `idle` in the
+    /// `conductor.idle_strategy` counter for `doctor`, and keeps `recorder`, the queues
+    /// to the recorder thread.
+    pub(crate) fn create(
+        dir: &Path,
+        idle: IdleStrategy,
+        recorder: RecorderLink,
+    ) -> Result<Self, DriverError> {
         let counters = CountersFile::create(dir, spec::COUNTERS_CAPACITY)?;
         let statics = Statics::new(&counters)?;
         counters
@@ -273,6 +349,9 @@ impl Conductor {
             publications: Vec::with_capacity(spec::MAX_PUBLICATIONS),
             subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             images: Vec::with_capacity(spec::MAX_IMAGES),
+            recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
+            recorder,
+            deferred: VecDeque::with_capacity(2 * spec::MAX_RECORDINGS),
             registration_count: 0,
             next_session_id: i32::from_le_bytes(
                 (now >> 8).to_le_bytes()[..4].try_into().unwrap_or([0; 4]),
@@ -286,6 +365,32 @@ impl Conductor {
             _ring: ring,
             _broadcast: broadcast,
         })
+    }
+
+    /// A handle on a static counter, for the recorder's two.
+    pub(crate) fn counter(&self, id: CounterId) -> Result<Counter, CountersError> {
+        self.counters.counter(id.record())
+    }
+
+    /// Stores what the recovery pass did when the log directory was opened in the six
+    /// `recording.*` recovery counters, so that `doctor` reads it from the counters file
+    /// (`spec/durable-log.md`, "The driver"; invariant 4).
+    pub(crate) fn record_recovery(&self, recovery: &Recovery) -> Result<(), CountersError> {
+        let set = |id: CounterId, value: u64| -> Result<(), CountersError> {
+            self.counters
+                .counter(id.record())?
+                .set(i64::try_from(value).unwrap_or(i64::MAX));
+            Ok(())
+        };
+        set(RECORDING_RECOVERED, recovery.recovered)?;
+        set(RECORDING_INVALIDATED, recovery.invalidated)?;
+        set(RECORDING_INDEX_REWRITTEN, recovery.index_rewritten)?;
+        set(RECORDING_CATALOG_TRUNCATED, u64::from(recovery.truncated))?;
+        set(
+            RECORDING_SLOT_DROPPED,
+            u64::from(recovery.dropped_empty_slot),
+        )?;
+        set(RECORDING_FILES_REMOVED, recovery.files_removed)
     }
 
     /// The conductor's loop: duty cycles until `stop`, then −1 in the heartbeat.
@@ -311,6 +416,8 @@ impl Conductor {
         work += self.read_commands(now);
         work += self.unblock_ring(now);
         work += self.time_out_clients(now);
+        work += self.take_replies(now);
+        work += self.flush_deferred();
         work += self.keep_publications(now);
         work
     }
@@ -441,6 +548,17 @@ impl Conductor {
             } => self.remove_subscription(client_id, correlation_id, registration_id, now),
             Command::ClientKeepalive { .. } => {}
             Command::ClientClose { client_id, .. } => self.remove_client(client_id, now),
+            Command::StartRecording {
+                correlation_id,
+                stream_id,
+                channel,
+                ..
+            } => self.start_recording(correlation_id, stream_id, channel, now),
+            Command::StopRecording {
+                correlation_id,
+                recording_id,
+                ..
+            } => self.stop_recording(correlation_id, recording_id),
         }
     }
 
@@ -843,10 +961,12 @@ impl Conductor {
         self.images
             .reserve(spec::MAX_IMAGES.saturating_sub(self.images.len()));
         for publication in &mut self.publications {
-            let connected = self
-                .images
-                .iter()
-                .any(|image| image.publication_id == publication.registration_id);
+            let id = publication.registration_id;
+            let connected = self.images.iter().any(|image| image.publication_id == id)
+                || self
+                    .recordings
+                    .iter()
+                    .any(|recording| recording.publication_id == id);
             let _ = publication.log.set_connected(connected);
         }
     }
@@ -953,6 +1073,18 @@ impl Conductor {
                 self.send(&Event::ClientTimeout { client_id });
             }
         }
+        // The recorder's position, one more reader the limit and the cleaning respect:
+        // its counter once attached, the start position until then (ADR 0025).
+        let recording_floor = self
+            .recordings
+            .iter()
+            .find(|recording| recording.publication_id == publication_id)
+            .map(|recording| {
+                recording
+                    .position
+                    .as_ref()
+                    .map_or(recording.start_position, Counter::load_acquire)
+            });
         let publication = &mut self.publications[index];
         // The producer position at most once per millisecond (ADR 0022): the publisher
         // stores to that line on every commit, and a load on every cycle kept the line
@@ -994,9 +1126,16 @@ impl Conductor {
             publication.consumer_position = max;
             moved = true;
         }
-        // The slowest subscriber bounds everything below; with none, the largest
-        // position any subscriber reached, so that the publisher is told not connected.
-        let consumer = min_subscriber.unwrap_or(publication.consumer_position);
+        // The consumer position bounds everything below: the slowest subscriber, or the
+        // recorder when it is slower (`spec/log-buffer.md`, "The driver"); with neither,
+        // the largest position any subscriber reached, so that the publisher is told not
+        // connected.
+        let floor = match (min_subscriber, recording_floor) {
+            (Some(subscriber), Some(recorder)) => Some(subscriber.min(recorder)),
+            (subscriber, recorder) => subscriber.or(recorder),
+        };
+        let connected = floor.is_some();
+        let consumer = floor.unwrap_or(publication.consumer_position);
         // Cleaning behind the slowest subscriber, one term at a time; a clean that does
         // not advance is not work.
         if publication.clean_position < consumer
@@ -1007,18 +1146,19 @@ impl Conductor {
             moved = true;
         }
         // The limit: consumer + window once cleaned, raised in steps of window ÷ 8; the
-        // consumer position alone with no subscriber, so the publisher is told not connected.
+        // consumer position alone with neither a subscriber nor a recording, so the
+        // publisher is told not connected.
         let window = i64::from(spec::IPC_PUBLICATION_WINDOW);
-        let candidate = if min_subscriber.is_some() {
+        let candidate = if connected {
             consumer.saturating_add(window)
         } else {
             consumer
         };
         let step = window / 8;
         let raise = candidate > publication.last_limit
-            && (candidate - publication.last_limit >= step || min_subscriber.is_none())
+            && (candidate - publication.last_limit >= step || !connected)
             && publication.clean_position >= consumer;
-        let lower = candidate < publication.last_limit && min_subscriber.is_none();
+        let lower = candidate < publication.last_limit && !connected;
         if raise || lower {
             publication.limit.store_release(candidate);
             publication.last_limit = candidate;
@@ -1055,6 +1195,16 @@ impl Conductor {
             return false;
         };
         let publication_id = self.publications[index].registration_id;
+        // A recorded publication's log stays until its recording has stopped: the
+        // recorder reaches the end of stream, at most a window away, and the catalog
+        // holds the stop (`spec/log-buffer.md`, "Closing"; ADR 0025).
+        if self
+            .recordings
+            .iter()
+            .any(|recording| recording.publication_id == publication_id)
+        {
+            return false;
+        }
         let all_reached = self
             .images
             .iter()
@@ -1090,6 +1240,419 @@ impl Conductor {
         drop(publication.log);
         remove_log(&self.dir, publication_id);
         true
+    }
+
+    /// `start recording` (`spec/client-protocol.md`, "Commands"): of the live
+    /// publications on the stream, the one with the lowest registration id that is not
+    /// yet being recorded; none live is code 20, every one recorded is code 22, the
+    /// registry or the recorder's queue full is code 10. The recording starts at the
+    /// producer position loaded afresh, the limit respects it from now on, and the
+    /// recorder is asked for the catalog slot; `recording ready` follows its reply.
+    fn start_recording(&mut self, correlation_id: i64, stream_id: i32, channel: &[u8], now: i64) {
+        if channel != IPC_CHANNEL {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::InvalidChannel,
+                &format!("the channel must be cavalry:ipc in this version; see {ERRORS_DOC}"),
+            );
+            return;
+        }
+        let mut live = false;
+        let mut lowest: Option<usize> = None;
+        let mut chosen: Option<usize> = None;
+        for (index, publication) in self.publications.iter().enumerate() {
+            if publication.stream_id != stream_id || publication.closing.is_some() {
+                continue;
+            }
+            live = true;
+            let lower = |best: Option<usize>| {
+                best.is_none_or(|best| {
+                    self.publications[best].registration_id > publication.registration_id
+                })
+            };
+            if lower(lowest) {
+                lowest = Some(index);
+            }
+            let recorded = self
+                .recordings
+                .iter()
+                .any(|recording| recording.publication_id == publication.registration_id);
+            if !recorded && lower(chosen) {
+                chosen = Some(index);
+            }
+        }
+        if !live {
+            self.send_error(
+                correlation_id,
+                ErrorCode::NoPublicationToRecord,
+                &format!(
+                    "no live publication on stream {stream_id} and channel cavalry:ipc; add the \
+                     publication first; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        }
+        let Some(index) = chosen else {
+            let recording_id = lowest.and_then(|index| {
+                let publication_id = self.publications[index].registration_id;
+                self.recordings
+                    .iter()
+                    .find(|recording| recording.publication_id == publication_id)
+                    .and_then(|recording| recording.recording_id)
+            });
+            let text = match recording_id {
+                Some(id) => format!(
+                    "stream {stream_id} is already recording {id}; stop recording {id} first; \
+                     see {ERRORS_DOC}"
+                ),
+                None => format!(
+                    "stream {stream_id} is already starting a recording; wait for its \
+                     recording ready; see {ERRORS_DOC}"
+                ),
+            };
+            self.send_error(correlation_id, ErrorCode::AlreadyRecording, &text);
+            return;
+        };
+        if self.recordings.len() >= spec::MAX_RECORDINGS {
+            self.registry_full(correlation_id, "recordings", spec::MAX_RECORDINGS);
+            return;
+        }
+        let publication = &self.publications[index];
+        let start_position = match publication.log.producer_position() {
+            Ok(position) => position,
+            Err(error) => {
+                self.statics.log_buffer_rejected_tail.increment();
+                self.send_error(correlation_id, ErrorCode::GenericError, &format!("{error}"));
+                return;
+            }
+        };
+        let reader = match publication.log.reader(start_position) {
+            Ok(reader) => reader,
+            Err(error) => {
+                self.send_error(correlation_id, ErrorCode::GenericError, &format!("{error}"));
+                return;
+            }
+        };
+        let header = publication.log.header();
+        let (publication_id, session_id) = (publication.registration_id, publication.session_id);
+        let channel = String::from_utf8_lossy(IPC_CHANNEL).into_owned();
+        let start = Start {
+            publication_id,
+            correlation_id,
+            start_timestamp: now,
+            start_position,
+            initial_term_id: header.initial_term_id(),
+            term_length: i32::try_from(header.term_length()).unwrap_or(i32::MAX),
+            mtu_length: i32::try_from(header.mtu_length()).unwrap_or(i32::MAX),
+            session_id,
+            stream_id,
+            source_identity: channel.clone(),
+            channel,
+            reader,
+        };
+        if self.recorder.requests.offer(Request::Start(start)).is_err() {
+            self.statics.registry_full.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::ResourceTemporarilyUnavailable,
+                &format!(
+                    "the recorder's request queue holds {} and is full; try again once the \
+                     recorder has caught up; see {ERRORS_DOC}",
+                    spec::RECORDER_QUEUE_CAPACITY
+                ),
+            );
+            return;
+        }
+        self.recordings.push(RecordingEntry {
+            publication_id,
+            session_id,
+            stream_id,
+            start_position,
+            state: RecordingState::Starting,
+            recording_id: None,
+            position: None,
+            synced: None,
+            stop_requested: false,
+        });
+        let _ = self.publications[index].log.set_connected(true);
+    }
+
+    /// `stop recording` (`spec/client-protocol.md`, "Commands"): an id the catalog does
+    /// not hold is code 21; one no live recording holds is already stopped, answered
+    /// with `operation success` and nothing written; a live one is handed to the
+    /// recorder, whose reply answers the command. A second stop while one is with the
+    /// recorder is answered at once, since the stop is on its way.
+    fn stop_recording(&mut self, correlation_id: i64, recording_id: i64) {
+        if recording_id < 0 || recording_id >= self.recorder.next_recording_id {
+            self.send_error(
+                correlation_id,
+                ErrorCode::UnknownRecording,
+                &format!(
+                    "recording {recording_id} is not in the catalog, whose next id is {}; \
+                     `cavalry doctor` lists the recordings; see {ERRORS_DOC}",
+                    self.recorder.next_recording_id
+                ),
+            );
+            return;
+        }
+        let found = self
+            .recordings
+            .iter()
+            .position(|recording| recording.recording_id == Some(recording_id));
+        match found {
+            Some(index) if !self.recordings[index].stop_requested => {
+                self.recordings[index].stop_requested = true;
+                self.request(Request::Stop {
+                    recording_id,
+                    correlation_id: Some(correlation_id),
+                });
+            }
+            _ => self.send(&Event::OperationSuccess { correlation_id }),
+        }
+    }
+
+    /// Offers a request to the recorder, or keeps it for the next cycle when the queue
+    /// is full; the deferred list holds at most one attach and one stop per recording.
+    fn request(&mut self, request: Request) {
+        if let Err(request) = self.recorder.requests.offer(request)
+            && self.deferred.len() < 2 * spec::MAX_RECORDINGS
+        {
+            self.deferred.push_back(request);
+        }
+    }
+
+    /// Offers the deferred requests in order until the queue is full again.
+    fn flush_deferred(&mut self) -> usize {
+        let mut sent = 0;
+        while let Some(request) = self.deferred.pop_front() {
+            match self.recorder.requests.offer(request) {
+                Ok(()) => sent += 1,
+                Err(request) => {
+                    self.deferred.push_front(request);
+                    break;
+                }
+            }
+        }
+        sent
+    }
+
+    /// Takes every reply the recorder has queued and acts on it.
+    fn take_replies(&mut self, now: i64) -> usize {
+        let mut taken = 0;
+        while let Some(reply) = self.recorder.replies.poll() {
+            match reply {
+                Reply::Ready {
+                    publication_id,
+                    correlation_id,
+                    recording_id,
+                    next_recording_id,
+                } => {
+                    self.recorder.next_recording_id = next_recording_id;
+                    self.on_ready(publication_id, correlation_id, recording_id, now);
+                }
+                Reply::StartFailed {
+                    publication_id,
+                    correlation_id,
+                    failure,
+                    next_recording_id,
+                } => {
+                    self.recorder.next_recording_id = next_recording_id;
+                    self.on_start_failed(publication_id, correlation_id, failure);
+                }
+                Reply::Stopped {
+                    recording_id,
+                    publication_id,
+                    stop_position,
+                    correlation_id,
+                } => self.on_stopped(
+                    recording_id,
+                    publication_id,
+                    stop_position,
+                    correlation_id,
+                    now,
+                ),
+                Reply::StopIgnored { correlation_id } => {
+                    if let Some(correlation_id) = correlation_id {
+                        self.send(&Event::OperationSuccess { correlation_id });
+                    }
+                }
+            }
+            taken += 1;
+        }
+        taken
+    }
+
+    /// The recorder took the slot and created the files: the two counters are
+    /// allocated, keyed by the recording id and set to the start position, the recorder
+    /// gets their handles, and the client gets `recording ready`. A counters file with
+    /// no free record fails the start with code 10 and asks the recorder to stop the
+    /// slot at its start.
+    fn on_ready(&mut self, publication_id: i64, correlation_id: i64, recording_id: i64, now: i64) {
+        let Some(index) = self.recordings.iter().position(|recording| {
+            recording.publication_id == publication_id
+                && recording.state == RecordingState::Starting
+        }) else {
+            return;
+        };
+        let (session_id, stream_id, start_position) = {
+            let entry = &self.recordings[index];
+            (entry.session_id, entry.stream_id, entry.start_position)
+        };
+        let key = recording_id.to_le_bytes();
+        let label = |name: &str| format!("{name} {recording_id} {session_id} {stream_id}");
+        let position =
+            match self
+                .counters
+                .allocate(RECORDING_POSITION, &key, &label("recording.position"))
+            {
+                Ok(counter) => counter,
+                Err(error) => {
+                    self.fail_start(index, recording_id, correlation_id, &error);
+                    return;
+                }
+            };
+        let synced = match self.counters.allocate(
+            RECORDING_SYNCED_POSITION,
+            &key,
+            &label("recording.synced_position"),
+        ) {
+            Ok(counter) => counter,
+            Err(error) => {
+                let _ = self.counters.free(
+                    position.id(),
+                    now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT)),
+                );
+                self.fail_start(index, recording_id, correlation_id, &error);
+                return;
+            }
+        };
+        position.store_release(start_position);
+        synced.store_release(start_position);
+        let (position_id, synced_id) = (counter_id(&position), counter_id(&synced));
+        {
+            let entry = &mut self.recordings[index];
+            entry.state = RecordingState::Live;
+            entry.recording_id = Some(recording_id);
+            entry.position = Some(position.clone());
+            entry.synced = Some(synced.clone());
+        }
+        self.statics.recording_started.increment();
+        self.request(Request::Attach {
+            recording_id,
+            position,
+            synced,
+        });
+        self.send(&Event::RecordingReady {
+            correlation_id,
+            recording_id,
+            session_id,
+            recording_position_counter_id: position_id,
+            recording_synced_position_counter_id: synced_id,
+        });
+    }
+
+    /// A start the counters file refused after the slot was taken: the client gets
+    /// code 10, the entry fails, and the recorder stops the slot at its start position.
+    fn fail_start(
+        &mut self,
+        index: usize,
+        recording_id: i64,
+        correlation_id: i64,
+        error: &CountersError,
+    ) {
+        self.counters_full(correlation_id, error);
+        self.recordings[index].state = RecordingState::Failed;
+        let publication_id = self.recordings.swap_remove(index).publication_id;
+        self.request(Request::Stop {
+            recording_id,
+            correlation_id: None,
+        });
+        self.refresh_connected(publication_id);
+    }
+
+    /// The recorder could not take a slot or create the files: the entry fails and the
+    /// client gets code 10 (catalog full) or 12 (files), each with its counter.
+    fn on_start_failed(&mut self, publication_id: i64, correlation_id: i64, failure: StartFailure) {
+        if let Some(index) = self.recordings.iter().position(|recording| {
+            recording.publication_id == publication_id
+                && recording.state == RecordingState::Starting
+        }) {
+            self.recordings[index].state = RecordingState::Failed;
+            self.recordings.swap_remove(index);
+        }
+        match failure {
+            StartFailure::CatalogFull => {
+                self.statics.recording_catalog_full.increment();
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::ResourceTemporarilyUnavailable,
+                    &format!(
+                        "the catalog of the log directory holds every one of its slots; move or \
+                         archive the log directory and start the driver on a new one; see \
+                         {ERRORS_DOC}"
+                    ),
+                );
+            }
+            StartFailure::Files(text) => {
+                self.statics.recording_start_failed.increment();
+                self.send_error(correlation_id, ErrorCode::StorageSpace, &text);
+            }
+        }
+        self.refresh_connected(publication_id);
+    }
+
+    /// The recorder stopped a recording: its entry goes, its counters are freed after
+    /// the reuse timeout, a command that asked gets `operation success`, and every
+    /// client gets `recording stopped`.
+    fn on_stopped(
+        &mut self,
+        recording_id: i64,
+        publication_id: i64,
+        stop_position: i64,
+        correlation_id: Option<i64>,
+        now: i64,
+    ) {
+        if let Some(index) = self
+            .recordings
+            .iter()
+            .position(|recording| recording.recording_id == Some(recording_id))
+        {
+            self.recordings[index].state = RecordingState::Stopped;
+            let entry = self.recordings.swap_remove(index);
+            let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+            for counter in [entry.position, entry.synced].into_iter().flatten() {
+                let _ = self.counters.free(counter.id(), reuse);
+            }
+        }
+        self.statics.recording_stopped.increment();
+        if let Some(correlation_id) = correlation_id {
+            self.send(&Event::OperationSuccess { correlation_id });
+        }
+        self.send(&Event::RecordingStopped {
+            recording_id,
+            stop_position,
+        });
+        self.refresh_connected(publication_id);
+    }
+
+    /// Sets is connected for one publication from its images and its recording.
+    fn refresh_connected(&mut self, publication_id: i64) {
+        let connected = self
+            .images
+            .iter()
+            .any(|image| image.publication_id == publication_id)
+            || self
+                .recordings
+                .iter()
+                .any(|recording| recording.publication_id == publication_id);
+        if let Some(publication) = self
+            .publications
+            .iter_mut()
+            .find(|publication| publication.registration_id == publication_id)
+        {
+            let _ = publication.log.set_connected(connected);
+        }
     }
 
     /// Answers a command with `error`, code 10, when a registry is full.
@@ -1221,17 +1784,17 @@ mod tests {
     use super::*;
 
     /// A temporary driver directory, removed on drop so a failed assert does not leave it.
-    struct TestDir(PathBuf);
+    pub(super) struct TestDir(PathBuf);
 
     impl TestDir {
-        fn new(test: &str) -> Self {
+        pub(super) fn new(test: &str) -> Self {
             let path =
                 std::env::temp_dir().join(format!("cavalry-driver-{}-{test}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             TestDir(path)
         }
 
-        fn path(&self) -> &Path {
+        pub(super) fn path(&self) -> &Path {
             &self.0
         }
     }
@@ -1249,8 +1812,15 @@ mod tests {
     fn the_producer_position_is_loaded_once_per_interval_and_its_move_is_not_work() {
         let dir = TestDir::new("producer-cadence");
         prepare_dir(dir.path()).expect("the directory is prepared");
-        let mut conductor =
-            Conductor::create(dir.path(), IdleStrategy::Backoff).expect("the conductor is created");
+        let (requests, _requests) = spsc::queue::<Request>(4);
+        let (_replies, replies) = spsc::queue::<Reply>(4);
+        let link = RecorderLink {
+            requests,
+            replies,
+            next_recording_id: 0,
+        };
+        let mut conductor = Conductor::create(dir.path(), IdleStrategy::Backoff, link)
+            .expect("the conductor is created");
         let t0 = now_nanos();
         let interval = spec::nanos(spec::PRODUCER_POSITION_INTERVAL);
 
@@ -1302,5 +1872,416 @@ mod tests {
 
         // The conductor unmaps its files before the guard removes the directory.
         drop(conductor);
+    }
+}
+
+#[cfg(test)]
+mod recording {
+    //! The conductor and the recorder driven by hand, duty cycle by duty cycle, on a
+    //! clock the test advances, with a publisher appending straight into the log: the
+    //! full cases of invariant 3 first, then the seams.
+
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::FileExt;
+
+    use cavalry_log::catalog::CatalogError;
+    use cavalry_log::dir::LogDir;
+    use cavalry_log::layout::locate;
+    use cavalry_log::recorder::RecorderError;
+    use cavalry_proto::frame::{DataFrameHeader, FrameType, HEADER_LENGTH as FRAME_HEADER};
+    use cavalry_shm::broadcast::{BroadcastBuffer, Receiver};
+    use cavalry_shm::counters::generated::{
+        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, RECORDING_CATALOG_FULL,
+        RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_WRITE_FAILED,
+    };
+    use cavalry_shm::log::ClaimError;
+
+    use super::tests::TestDir;
+    use super::*;
+    use crate::recorder::{Recorder, start_failure};
+
+    const MS: i64 = 1_000_000;
+    const WINDOW: i64 = spec::IPC_PUBLICATION_WINDOW as i64;
+
+    /// Both threads' state, with no thread: the test calls each duty cycle.
+    struct Harness {
+        dir: TestDir,
+        log_dir: PathBuf,
+        conductor: Conductor,
+        recorder: Recorder,
+        /// A client's view of the events, attached before the first command.
+        receiver: Receiver,
+        now: i64,
+    }
+
+    impl Harness {
+        fn new(test: &str) -> Self {
+            let dir = TestDir::new(test);
+            prepare_dir(dir.path()).expect("the directory is prepared");
+            let log_dir = dir.path().join("log");
+            let now = now_nanos();
+            let (log, recovery) = LogDir::open(&log_dir, now).expect("the log directory opens");
+            assert_eq!(recovery, cavalry_log::dir::Recovery::default());
+            let (requests, request_consumer) =
+                spsc::queue::<Request>(spec::RECORDER_QUEUE_CAPACITY);
+            let (reply_producer, replies) = spsc::queue::<Reply>(spec::RECORDER_QUEUE_CAPACITY);
+            let link = RecorderLink {
+                requests,
+                replies,
+                next_recording_id: 0,
+            };
+            let conductor = Conductor::create(dir.path(), IdleStrategy::Backoff, link)
+                .expect("the conductor is created");
+            let receiver = BroadcastBuffer::open(dir.path(), false)
+                .expect("the buffer opens")
+                .receiver()
+                .expect("a receiver");
+            let recorder = Recorder::new(
+                log,
+                request_consumer,
+                reply_producer,
+                conductor
+                    .counter(RECORDING_WRITE_FAILED)
+                    .expect("a counter"),
+                conductor
+                    .counter(LOG_BUFFER_REJECTED_FRAME)
+                    .expect("a counter"),
+                IdleStrategy::Backoff,
+            );
+            Harness {
+                dir,
+                log_dir,
+                conductor,
+                recorder,
+                receiver,
+                now,
+            }
+        }
+
+        /// One cycle of each, a millisecond later.
+        fn cycle(&mut self) {
+            self.now += MS;
+            self.conductor.duty_cycle(self.now);
+            self.recorder.duty_cycle(self.now);
+            self.conductor.duty_cycle(self.now);
+        }
+
+        fn counter(&self, id: CounterId) -> i64 {
+            self.conductor.counter(id).expect("a counter").get()
+        }
+
+        /// The last error event with `correlation_id` among the events not yet read,
+        /// as (code, message).
+        fn last_error(&mut self, correlation_id: i64) -> Option<(i32, String)> {
+            let mut found = None;
+            while self
+                .receiver
+                .receive(|type_id, message| {
+                    if let Ok(Event::Error {
+                        offending_correlation_id,
+                        error_code,
+                        error_message,
+                    }) = Event::parse(type_id, message)
+                        && offending_correlation_id == correlation_id
+                    {
+                        found = Some((
+                            error_code,
+                            String::from_utf8_lossy(error_message).into_owned(),
+                        ));
+                    }
+                })
+                .expect("the receiver reads")
+            {}
+            found
+        }
+    }
+
+    /// Every frame of the recording in order, from its segment files, folded into one
+    /// number the same way the publisher folded what it offered.
+    fn fold_recording(log_dir: &Path, recording_id: i64) -> (i64, u64) {
+        let reader = cavalry_log::catalog::CatalogReader::open(log_dir).expect("the catalog opens");
+        let descriptor = reader
+            .get(recording_id)
+            .expect("the slot reads")
+            .expect("the slot holds the recording");
+        let stop = descriptor.stop_position();
+        let mut position = descriptor.start_position();
+        let mut fold = 0u64;
+        let mut header = [0u8; FRAME_HEADER];
+        while position < stop {
+            let located = locate(&descriptor, position).expect("the position locates");
+            let file = std::fs::File::open(log_dir.join(&located.segment_file)).expect("segment");
+            file.read_exact_at(&mut header, located.offset_in_segment as u64)
+                .expect("the header reads");
+            let left = (descriptor.term_length() - located.term_offset) as usize;
+            let parsed = DataFrameHeader::parse_within(&header, left).expect("the frame checks");
+            if parsed.frame_type() == FrameType::Data {
+                let mut body = vec![0u8; parsed.frame_length() as usize - FRAME_HEADER];
+                file.read_exact_at(
+                    &mut body,
+                    located.offset_in_segment as u64 + FRAME_HEADER as u64,
+                )
+                .expect("the body reads");
+                fold = fold_bytes(fold, &body);
+            }
+            position += parsed.aligned_length() as i64;
+        }
+        (stop, fold)
+    }
+
+    fn fold_bytes(mut fold: u64, bytes: &[u8]) -> u64 {
+        for &byte in bytes {
+            fold = fold
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(u64::from(byte));
+        }
+        fold
+    }
+
+    /// The full case first (invariant 3): a publisher that writes as fast as it can,
+    /// a recording and no subscriber. The limit never passes the recorder's position
+    /// plus the window, the publisher is back-pressured while the recorder does not
+    /// run and released as it writes, two terms are crossed and cleaned under the
+    /// recorder, a roll that fails stops the recording at the position written, and
+    /// every byte up to the stop reads back from the segment files as it was offered.
+    #[test]
+    fn a_publisher_faster_than_the_recorder_is_back_pressured_and_nothing_is_lost() {
+        let mut h = Harness::new("recorder-back-pressure");
+        let now = h.now;
+        h.conductor.add_publication(1, 2, 7, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(3, 7, IPC_CHANNEL, now);
+        assert_eq!(h.conductor.recordings.len(), 1, "the entry is registered");
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Starting);
+        h.conductor.duty_cycle(now);
+        let limit = h.conductor.publications[0].limit.get();
+        assert_eq!(limit, WINDOW, "a recording alone connects the publication");
+
+        // The recorder takes the slot; the conductor allocates the counters and attaches.
+        h.recorder.duty_cycle(now);
+        h.conductor.duty_cycle(now);
+        h.recorder.duty_cycle(now);
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Live);
+        assert_eq!(h.conductor.recordings[0].recording_id, Some(0));
+        assert_eq!(h.counter(RECORDING_STARTED), 1);
+        let position_counter = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+
+        // The publisher fills the window while the recorder sleeps: back pressured at
+        // start + window, and the limit does not move however often the conductor cycles.
+        let segment = i64::from(cavalry_log::layout::SEGMENT_FILE_LENGTH);
+        let mut fold = 0u64;
+        let mut offered: i64 = 0;
+        let mut message = [0u8; 32];
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let mut offer = |appender: &mut cavalry_shm::log::TermAppender,
+                         limit: i64,
+                         fold: &mut u64,
+                         offered: &mut i64|
+         -> bool {
+            message[..8].copy_from_slice(&offered.to_le_bytes());
+            loop {
+                match appender.offer(&message, limit, 0) {
+                    Ok(_) => {
+                        *fold = fold_bytes(*fold, &message);
+                        *offered += 1;
+                        return true;
+                    }
+                    Err(ClaimError::AdminAction) => continue,
+                    Err(ClaimError::BackPressured) => return false,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+        };
+        while offer(
+            &mut appender,
+            h.conductor.publications[0].limit.get(),
+            &mut fold,
+            &mut offered,
+        ) {}
+        let producer = appender.position().expect("the position");
+        assert_eq!(producer, WINDOW, "back pressured at the window");
+        for _ in 0..3 {
+            h.now += MS;
+            h.conductor.duty_cycle(h.now);
+            assert_eq!(
+                h.conductor.publications[0].limit.get(),
+                WINDOW,
+                "the limit waits for the recorder"
+            );
+        }
+
+        // The recorder writes a block per cycle; the limit follows it, never ahead of
+        // recording.position + window; the publisher crosses two terms. A file in the
+        // next segment's place makes the roll at the segment's end fail.
+        let in_the_way = h
+            .log_dir
+            .join(cavalry_log::layout::segment_file_name(0, segment));
+        std::fs::write(&in_the_way, b"").expect("a file in the way");
+        let mut stopped = false;
+        for _ in 0..100_000 {
+            h.cycle();
+            let recorded = position_counter.load_acquire();
+            let limit = h.conductor.publications[0].limit.get();
+            if h.conductor.recordings.is_empty() {
+                stopped = true;
+                break;
+            }
+            assert!(
+                limit <= recorded + WINDOW,
+                "limit {limit} past recorded {recorded} + window"
+            );
+            while offer(
+                &mut appender,
+                h.conductor.publications[0].limit.get(),
+                &mut fold,
+                &mut offered,
+            ) {}
+        }
+        assert!(
+            stopped,
+            "the roll into the segment in the way stops the recording"
+        );
+        assert_eq!(h.counter(RECORDING_WRITE_FAILED), 1);
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        assert!(
+            offered * 64 >= segment,
+            "the publisher crossed both terms: {offered}"
+        );
+
+        // Everything up to the stop reads back as offered, in order.
+        let (stop, read_back) = fold_recording(&h.log_dir, 0);
+        assert_eq!(stop, segment, "stopped where the roll failed");
+        let mut expected = 0u64;
+        for n in 0..(segment / 64) {
+            message[..8].copy_from_slice(&n.to_le_bytes());
+            expected = fold_bytes(expected, &message);
+        }
+        assert_eq!(
+            read_back, expected,
+            "the recording is what the publisher offered"
+        );
+        assert_eq!(position_counter.load_acquire(), segment);
+        // Freed from the recording, the publication with no subscriber is not connected.
+        h.cycle();
+        assert!(!h.conductor.publications[0].log.is_connected());
+        drop(appender);
+    }
+
+    /// The recordings registry at capacity (invariant 3): live publications are at
+    /// most 1024, so the registry fills only through recordings of closed publications
+    /// still with the recorder; the 1025th start recording is code 10 and counted.
+    #[test]
+    fn the_recordings_registry_is_bounded_and_says_so() {
+        let mut h = Harness::new("recordings-registry");
+        let now = h.now;
+        let n = spec::MAX_RECORDINGS as i64;
+        for i in 0..n {
+            h.conductor
+                .add_publication(1, 10 + i, 7, IPC_CHANNEL, true, now);
+            h.conductor.start_recording(10_000 + i, 7, IPC_CHANNEL, now);
+        }
+        assert_eq!(h.conductor.recordings.len(), spec::MAX_RECORDINGS);
+        for i in 0..n {
+            h.conductor.remove_publication(1, 20_000 + i, 10 + i, now);
+        }
+        assert_eq!(
+            h.conductor.registration_count, 0,
+            "every publication is closing"
+        );
+        h.conductor
+            .add_publication(1, 30_000, 7, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(30_001, 7, IPC_CHANNEL, now);
+        let (code, message) = h.last_error(30_001).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("recordings registry"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
+        assert_eq!(h.conductor.recordings.len(), spec::MAX_RECORDINGS);
+    }
+
+    /// The catalog's bound, at the seam: a full catalog is answered with code 10 and
+    /// counted, files that cannot be created with code 12 and counted. The catalog's
+    /// own test covers the writer at its bound; a real full catalog is a gigabyte.
+    #[test]
+    fn a_full_catalog_and_a_failed_start_are_answered_and_counted() {
+        let mut h = Harness::new("catalog-full");
+        let now = h.now;
+        h.conductor.add_publication(1, 2, 7, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(3, 7, IPC_CHANNEL, now);
+        let failure = start_failure(RecorderError::Catalog(CatalogError::Full));
+        assert!(matches!(failure, StartFailure::CatalogFull));
+        h.conductor.on_start_failed(2, 3, failure);
+        let (code, message) = h.last_error(3).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("catalog"), "{message}");
+        assert_eq!(h.counter(RECORDING_CATALOG_FULL), 1);
+        assert!(
+            h.conductor.recordings.is_empty(),
+            "the entry failed and went"
+        );
+
+        h.conductor.start_recording(4, 7, IPC_CHANNEL, now);
+        let io = RecorderError::Io {
+            what: "create",
+            path: h.log_dir.join("0-0.rec"),
+            source: std::io::Error::other("no space left on device"),
+        };
+        let failure = start_failure(io);
+        assert!(matches!(failure, StartFailure::Files(_)));
+        h.conductor.on_start_failed(2, 4, failure);
+        let (code, message) = h.last_error(4).expect("an error event");
+        assert_eq!(code, 12, "{message}");
+        assert!(message.contains("no space left"), "{message}");
+        assert_eq!(h.counter(RECORDING_START_FAILED), 1);
+        // The requests the recorder never took are still queued; drop them with it.
+        assert!(h.conductor.recordings.is_empty());
+    }
+
+    /// A committed frame that fails a check of spec/frame.md stops the recording at
+    /// that frame, counted as a subscriber's report is; the frames before it are kept.
+    #[test]
+    fn a_frame_that_fails_its_check_stops_the_recording_there() {
+        let mut h = Harness::new("recorder-bad-frame");
+        let now = h.now;
+        h.conductor.add_publication(1, 2, 7, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(3, 7, IPC_CHANNEL, now);
+        h.cycle();
+        h.cycle();
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Live);
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 0..4u8 {
+            appender.offer(&[n; 32], limit, 0).expect("offered");
+        }
+        // Frame 3, at position 192, gets a version byte no reader accepts.
+        let log_file = h.dir.path().join(log_layout::file_name(2));
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&log_file)
+            .expect("the log opens");
+        file.write_all_at(&[0xFF], 192 + 4)
+            .expect("the version byte is poisoned");
+        for _ in 0..8 {
+            h.cycle();
+            if h.conductor.recordings.is_empty() {
+                break;
+            }
+        }
+        assert!(h.conductor.recordings.is_empty(), "the recording stopped");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 1);
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        let (stop, _) = fold_recording(&h.log_dir, 0);
+        assert_eq!(
+            stop, 192,
+            "the recording ends at the last frame that checked"
+        );
+        drop(appender);
     }
 }

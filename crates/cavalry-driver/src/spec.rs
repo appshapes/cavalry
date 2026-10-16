@@ -71,6 +71,23 @@ pub const MAX_SUBSCRIPTIONS: usize = 1024;
 /// How many images the driver holds: pairs of a subscription and a publication that match.
 pub const MAX_IMAGES: usize = 2048;
 
+/// How many recordings the driver holds: starting or live, one per publication at most
+/// (ADR 0025).
+pub const MAX_RECORDINGS: usize = 1024;
+
+/// The capacity of each queue between the conductor and the recorder, in requests or
+/// replies; a start or stop that finds the request queue full is answered with error
+/// code 10, and the recorder keeps a reply the reply queue has no room for until it has.
+pub(crate) const RECORDER_QUEUE_CAPACITY: usize = 2 * MAX_RECORDINGS;
+
+/// The most bytes the recorder takes from a term in one block, 1 MiB (ADR 0025); the
+/// first committed frame is always taken, so a block makes progress under any limit.
+pub(crate) const RECORDER_BLOCK_LIMIT: usize = 1024 * 1024;
+
+/// How many requests the recorder handles per duty cycle before it turns to the
+/// recordings.
+pub(crate) const RECORDER_REQUESTS_PER_CYCLE: usize = 16;
+
 /// A duration as the nanoseconds the driver's clock counts in.
 pub(crate) const fn nanos(duration: Duration) -> i64 {
     let nanos = duration.as_nanos();

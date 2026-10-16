@@ -86,3 +86,6 @@ pages elsewhere mention Aeron at most once.
 | catalog | The durable log's index of recordings: a header and one 1024-byte slot per recording. | catalog | `docs/reference/durable-log.md` |
 | segment file | One file of a recording holding the log buffer's raw term bytes from a segment base position. | recording segment | `docs/reference/durable-log.md` |
 | time index | A recording's list of (timestamp, position) entries, at most one per millisecond, that resolves an instant to a position. | none | `docs/reference/durable-log.md` |
+| recorder | The driver's thread that writes a recording: it scans blocks of committed frames from the log buffer and writes them into segment files, keeps the time index, syncs once per second, and holds the recording's position the publisher's limit respects. | `RecordingWriter` / `RecordingSession` (Archive) | `docs/reference/client-protocol.md` |
+| recording position | How far the recorder has written one recording into its segment files, what the operating system holds: the `recording.position` counter. | `rec-pos` (Archive) | `docs/reference/counters.md` |
+| synced position | How far a sync has made one recording durable on disk, at most a second behind the recording position: the `recording.synced_position` counter. | none | `docs/reference/counters.md` |

@@ -182,11 +182,16 @@ truncated to whole entries and a last entry that breaks the order is dropped. Se
 an empty recording: when no segment file of the recording exists, or the segment
 holding the start position exists and the frame length there is 0, the recorder
 crashed before the first frame; the stop position is the start position, the stop
-timestamp is the start timestamp, and the slot stays valid. Third, the scan's start:
+timestamp is the start timestamp, and the slot stays valid; a start segment file shorter
+than the start position's offset in it, which a pre-extension torn by a crash can leave,
+reads as a frame length of 0 there, an empty recording and not damage, and the scan below
+stops the same way at a position past the end of its segment file. Third, the scan's start:
 the driver walks the index back from its last entry to the first entry at whose
 position a frame checks, and starts there, or at the start position when none does;
 after a power loss an entry can point past what its segment kept, since the two files
-are synced apart, and walking back skips it. Fourth, the scan: from that position it
+are synced apart, and walking back skips it; the walk costs one header read per entry
+skipped, and the entries that can point past the data are those appended since the last
+sync, at most a second's worth, since the index and the segment are synced on one cadence. Fourth, the scan: from that position it
 reads frame by frame, to the end of the last segment file at most, and stops at the
 first frame that fails the `frame` check or whose length is 0; the stop position is the
 end of the last frame that checks; index entries past it are dropped; the stop

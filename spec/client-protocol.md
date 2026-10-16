@@ -1,4 +1,4 @@
-# Client protocol, version 0
+# Client protocol, version 1
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -9,7 +9,10 @@ defer to, and it says what the driver does with a command and what it rejects, w
 what bounds the late message write of ADR 0018. It is control plane: a command per
 publication or subscription, never a message per frame. In Aeron, this is the control
 protocol of `io.aeron.command`, its type ids and flyweights (ADR 0019;
-`docs/glossary.md`).
+`docs/glossary.md`). Version 1 adds the recording commands and events, the first of
+Cavalry's own, in type id ranges of its own beside Aeron's, and the error codes they
+answer with (ADR 0025); every version 0 encoding is unchanged, so a version 0 client's
+commands are version 1 commands.
 
 ## The driver directory
 
@@ -73,10 +76,16 @@ whose bytes or padding run past the message is `string`.
 | 5 | remove subscription | client id, correlation id, registration id |
 | 6 | client keepalive | client id, correlation id |
 | 11 | client close | client id, correlation id |
+| 257 (`0x0101`) | start recording | client id, correlation id, stream id, channel |
+| 258 (`0x0102`) | stop recording | client id, correlation id, recording id |
 
-Type ids 7 to 10 and 12 and above are reserved for the commands later versions specify
-with their features; the driver answers one with an `error` event whose code is 6.
-Every command begins with the same 16 bytes:
+Type ids 1 to 255 (`0x01` to `0xFF`) are Aeron's: 7 to 10 and 12 to 255 are reserved for
+the commands Aeron's control protocol numbers, present and future, and a later version
+takes one with its feature under Aeron's number. Type ids 257 to 511 (`0x0101` to
+`0x01FF`) are Cavalry's own, taken in order from 257, and 259 to 511 are reserved for
+later versions; 256, and 512 and above, lie outside both ranges and are reserved too. The
+driver answers any reserved id with an `error` event whose code is 6. Every command
+begins with the same 16 bytes:
 
 | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- |
@@ -87,9 +96,10 @@ Then, by command:
 
 | Command | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- | --- |
-| add publication, add exclusive publication, add subscription | 16 | 4 | stream id | i32 | any |
-| add publication, add exclusive publication, add subscription | 20 | 4 + n + pad | channel | string | in this version exactly `cavalry:ipc`; any other channel is answered with error code 1 |
+| add publication, add exclusive publication, add subscription, start recording | 16 | 4 | stream id | i32 | any |
+| add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | in this version exactly `cavalry:ipc`; any other channel is answered with error code 1 |
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
+| stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 
 What the driver does with each, after the checks of "What the driver rejects":
 
@@ -127,6 +137,32 @@ What the driver does with each, after the checks of "What the driver rejects":
 - **client keepalive.** The driver refreshes the client's liveness. No answer.
 - **client close.** The driver removes the client's publications and subscriptions as if
   each had been removed, and forgets the client. No answer.
+- **start recording.** The driver finds the live publications whose stream id and channel
+  match, those whose end of stream position is not stored, and takes the one with the
+  lowest registration id that is not yet being recorded, so that a second command records
+  the next one. None live: error code 20. Every one being recorded, or its recording
+  starting: error code 22, and the message names the recording id once the recorder has
+  given it. The recordings registry at capacity, or the counters file with no free record:
+  code 10. Otherwise the recording starts at the publication's producer position, loaded
+  afresh as a join loads it (ADR 0022): from this command on the publication's limit and
+  cleaning respect that position (`spec/log-buffer.md`, "The driver"), and the driver asks
+  its recorder for a catalog slot. The recorder takes the slot and creates the time index
+  and the first segment file as `spec/durable-log.md`, "The driver" says; the driver then
+  allocates the recording's `recording.position` and `recording.synced_position` counters
+  (`counters.toml`), keyed by the recording id and set to the start position, adds one to
+  `recording.started`, and answers `recording ready` with the recording id, the session id
+  and the two counter ids, within the client's response timeout. The catalog's slots used
+  up is code 10 and adds one to `recording.catalog_full`; a time index or segment file
+  that cannot be created is code 12 and adds one to `recording.start_failed`; either frees
+  the publication's limit from the recording. A recording belongs to the driver, not to
+  the client that started it: it outlives that client, and any client may stop it.
+- **stop recording.** The driver stops the recording at the position the recorder has
+  written and answers `operation success` once the catalog's stop fields are written and
+  synced (`spec/durable-log.md`, "The driver"); then every client gets `recording
+  stopped`. A recording id below 0, or at or past the next recording id, the number of
+  slots the catalog holds, is error code 21; one below the next id that no live recording
+  holds is already stopped, and the answer is `operation success` with nothing written,
+  since a recording id is never reused.
 
 Session ids are the driver's to choose: it starts at a random i32 and adds 1 per new
 publication, skipping any id a live publication of the same stream id holds, as Aeron's
@@ -138,6 +174,18 @@ is what `publication ready` and `exclusive publication ready` carry as registrat
 and it is the correlation id of the publication's images in `available image` and
 `unavailable image`. For an exclusive publication, or a concurrent one with one
 registration, the two are the same number.
+
+The driver stops a recording by itself when its publication closes: at the end of stream
+position, once the recorder has written up to it. It also stops a recording whose write
+failed, at the position written, adding one to `recording.write_failed`; and one whose
+block scan found a committed frame that fails a check of `spec/frame.md`, at that frame,
+adding one to `log_buffer.rejected_frame`, as a subscriber that found it would stop
+delivering, so the recording ends at the last frame that checked. Every stop, by command,
+by close or by failure, adds one to `recording.stopped`, is announced to every client with
+`recording stopped`, and frees the recording's two counters after the counter reuse
+timeout; the log of a recorded publication is removed only once its recording is stopped
+(`spec/log-buffer.md`, "Closing"). The recorder's lag behind the publisher is bounded by
+the publication window, since the limit respects its position.
 
 ## Events
 
@@ -151,10 +199,18 @@ registration, the two are the same number.
 | 3846 (`0x0F06`) | exclusive publication ready | as publication ready |
 | 3847 (`0x0F07`) | subscription ready | correlation id |
 | 3850 (`0x0F0A`) | client timeout | client id |
+| 4097 (`0x1001`) | recording ready | correlation id, recording id, session id, recording position counter id, recording synced position counter id |
+| 4098 (`0x1002`) | recording stopped | recording id, stop position |
 
-Type ids 3848, 3849 and 3851 and above are reserved for the events later versions
-specify; a client that receives one reports `type` and closes, since an event it cannot
-decode may be the one it needed.
+Type ids 3841 to 4095 (`0x0F01` to `0x0FFF`) are Aeron's: 3848, 3849 and 3851 to 4095 are
+reserved for the events Aeron's control protocol numbers, present and future. Type ids
+4097 to 4351 (`0x1001` to `0x10FF`) are Cavalry's own, taken in order from 4097, and 4099
+to 4351 are reserved for later versions; 4096, and 4352 and above, lie outside both ranges
+and are reserved too. A client that receives any reserved id reports `type` and closes,
+since an event it cannot decode may be the one it needed. A version 0 client therefore
+closes on the first recording event a version 1 driver sends, so an upgrade restarts the
+clients before the driver; a version 1 client that sends a recording command to a version
+0 driver is answered with code 6 and keeps running.
 
 | Event | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- | --- |
@@ -181,14 +237,22 @@ decode may be the one it needed.
 | unavailable image | 20 | 4 + n + pad | channel | string | the publisher's channel |
 | subscription ready | 0 | 8 | correlation id | i64 | 0 or more: the add command's, which is the subscription's registration id |
 | client timeout | 0 | 8 | client id | i64 | 0 or more: the client the driver timed out |
+| recording ready | 0 | 8 | correlation id | i64 | 0 or more: the start recording command's |
+| recording ready | 8 | 8 | recording id | i64 | 0 or more: the recording's slot in the catalog (`spec/durable-log.md`) |
+| recording ready | 16 | 4 | session id | i32 | any: the session of the publication being recorded |
+| recording ready | 20 | 4 | recording position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.position` counter, what the operating system holds |
+| recording ready | 24 | 4 | recording synced position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.synced_position` counter, what a sync has made durable |
+| recording stopped | 0 | 8 | recording id | i64 | 0 or more |
+| recording stopped | 8 | 8 | stop position | i64 | 0 or more, a multiple of 32: the catalog's stop position |
 
 The driver sends `unavailable image` for an image once the publication's end of stream
 position is stored and every subscriber of the image has reached it or the linger has
-passed, then removes the log (`spec/log-buffer.md`, "Closing"). It sends `client
-timeout` after it has removed a timed-out client's publications and subscriptions, so
-that the client, if it is only slow, learns that it must attach again. Every event goes
-to every client; a client acts on the ones whose correlation id, registration id or
-client id is its own and ignores the rest.
+passed, then removes the log (`spec/log-buffer.md`, "Closing"). It sends `client timeout`
+after it has removed a timed-out client's publications and subscriptions, so that the
+client, if it is only slow, learns that it must attach again. It sends `recording stopped`
+after the catalog's stop fields are synced, so the position a client reads from the event
+is what the catalog holds. Every event goes to every client; a client acts on the ones
+whose correlation id, registration id or client id is its own and ignores the rest.
 
 ## Error codes
 
@@ -201,10 +265,14 @@ client id is its own and ignores the rest.
 | 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read |
 | 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
 | 11 | generic error | anything else; the message says what |
-| 12 | storage space | the log file could not be created or sized |
+| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized |
+| 20 | no publication to record | start recording names a stream id and channel no live publication has |
+| 21 | unknown recording | stop recording names a recording id the catalog does not hold |
+| 22 | already recording | start recording names a stream whose live publications are all being recorded; the message names the recording id |
 
-Codes 4, 5, 8, 9, 13 and 14 are Aeron's for features outside this version and are
-reserved.
+Codes 4, 5, 8, 9, 13 and 14 are Aeron's for features outside this version, 15 to 19 are
+left free for Aeron's later codes, and all are reserved; Cavalry's own codes count up
+from 20.
 
 ## Liveness and timeouts
 
@@ -244,10 +312,11 @@ with error code 10 and registers nothing:
 | publications | 1024 | every registration of a publication, shared or not |
 | subscriptions | 1024 | every registration of a subscription |
 | images | 2048 | every pair of a subscription and a publication that match |
+| recordings | 1024 | every recording that is starting or live, one per publication at most |
 
 The counters file is sized so that the registries fill before it does: the static
-counters of `counters.toml`, two per publication and one per image come to fewer than
-8192.
+counters of `counters.toml`, 31 in this version, two per publication (2048), one per
+image (2048) and two per recording (2048) come to 6175, fewer than 8192.
 
 ## What the driver rejects
 
@@ -269,8 +338,12 @@ codes are the ones "Commands" and "Error codes" name: a channel that is not
 `cavalry:ipc` is `channel`, code 1, and adds one to `client_protocol.rejected_command`;
 an unknown or another client's registration is code 2 or 3; a registry or the counters
 file at capacity is code 10 and adds one to `driver.registry_full`; a log that could not
-be created or sized is code 12 and adds one to `driver.log_create_failed`. Every `error`
-event sent adds one to `client_protocol.errors`.
+be created or sized is code 12 and adds one to `driver.log_create_failed`; a stream id and
+channel no live publication has is code 20; a stream whose live publications are all being
+recorded is code 22; a recording id the catalog does not hold is code 21; the catalog's
+slots used up is code 10 and adds one to `recording.catalog_full`; a recording's files
+that could not be created is code 12 and adds one to `recording.start_failed`. Every
+`error` event sent adds one to `client_protocol.errors`.
 
 A record the ring itself rejects (`spec/command-ring.md`, "Reading") never reaches these
 checks and gets no answer: the client's response timeout reports it. A client runs the
@@ -279,9 +352,19 @@ reports the first that fails and closes, as the broadcast buffer page says of `r
 
 ## Counters
 
-Five static counters in `counters.toml` (`spec/counters-file.md`), written by the driver:
+Static counters in `counters.toml` (`spec/counters-file.md`), written by the driver:
 `client.timed_out`, `client_protocol.rejected_command`, `client_protocol.errors`,
-`driver.registry_full` and `driver.log_create_failed`.
+`driver.registry_full`, `driver.log_create_failed`, `recording.started`,
+`recording.stopped`, `recording.write_failed`, `recording.start_failed`,
+`recording.catalog_full`, and the recovery pass's `recording.recovered`,
+`recording.invalidated`, `recording.index_rewritten`, `recording.catalog_truncated`,
+`recording.slot_dropped` and `recording.files_removed` (`spec/durable-log.md`, "The
+driver"). Instance gauges `recording.position` and `recording.synced_position`, one pair
+per recording: the key is the recording id as an i64, little-endian, 8 bytes; the label is
+the counter's name, a space, and the recording id, the session id and the stream id in
+decimal separated by spaces. The driver stores both with release stores, and loads
+`recording.position` with an acquire load before it cleans, as it loads a subscriber's
+position (`spec/log-buffer.md`, "The driver").
 
 ## Vectors
 
