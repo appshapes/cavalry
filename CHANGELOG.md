@@ -400,3 +400,11 @@ user-visible change, added in the same commit as the change. The format follows
   A start that fails after its slot is written stops the slot at its start, as recovery
   would. The README
   example is this path, from open to read-back.
+- A weekly release-notes email (ADR 0026): the `send release notes` workflow runs on
+  Mondays, covers the commits on `master` since the last email, has a writer agent draft
+  what a reader can now do and what was decided, refuses a draft that names a recipe,
+  command, key, counter, ADR, path or link that does not exist in the checkout, has a
+  reviewer agent read it against the sources, and sends only an approved draft, `bcc`, to
+  the list in the secret `RELEASE_NOTES_RECIPIENTS`. A run by hand is a preview to one
+  address; `draft_run` sends what a preview approved. `docs/how-to/send-the-release-notes.md`
+  is the page, and `just test-scripts`, which `just test` now runs first, tests the scripts.
