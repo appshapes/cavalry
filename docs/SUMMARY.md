@@ -19,6 +19,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Run the bench and compare it with the baseline](how-to/run-the-bench.md)
 - [Run a driver and read doctor](how-to/run-the-driver.md)
 - [Set up a bench host for the latency gate](how-to/set-up-a-bench-host.md)
+- [Send the weekly release-notes email](how-to/send-the-release-notes.md)
 
 # Reference
 
@@ -61,3 +62,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0023. Build the durable log and replay second, in four features](decisions/0023-build-the-durable-log-second.md)
 - [0024. Lay out the durable log as a fixed-slot catalog, Aeron's segment files and a time index](decisions/0024-lay-out-the-durable-log.md)
 - [0025. Record a stream in the driver, with Aeron Archive's commands in the client protocol](decisions/0025-record-a-stream-in-the-driver.md)
+- [0026. Email the week's changes to a list, drafted by an agent and gated before it is sent](decisions/0026-email-the-weeks-changes.md)

@@ -178,3 +178,82 @@ kind = "gauge"
 scope = "static"
 doc = "The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin."
 doctor = ""
+
+[[counter]]
+id = 18
+name = "counters.allocations"
+kind = "counter"
+scope = "static"
+doc = "Counter allocations made since the driver started, the static counters' own records included: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for, so that counters.allocations minus counters.freed is counters.allocated (spec/counters-file.md, Metadata record)."
+doctor = ""
+
+[[counter]]
+id = 19
+name = "counters.freed"
+kind = "counter"
+scope = "static"
+doc = "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout."
+doctor = ""
+
+[[counter]]
+id = 20
+name = "recording.started"
+kind = "counter"
+scope = "static"
+doc = "Recordings the driver started: a catalog slot taken from empty to valid, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands; spec/durable-log.md, The driver)."
+doctor = ""
+
+[[counter]]
+id = 21
+name = "recording.invalidated"
+kind = "counter"
+scope = "static"
+doc = "Catalog slots recovery set to state 2, invalid, because their files cannot repair them: an empty slot before the last, a creation checksum that fails, or a segment file missing between the start and the last (spec/durable-log.md, The driver)."
+doctor = "A recording in the log directory is damaged beyond repair and `cavalry doctor` names its slot: check the disk, and restore the directory from a backup if the recording matters; the slot is never reused."
+
+# The state machines (CLAUDE.md, invariant 4): the counters file's metadata record and
+# the recording catalog's descriptor; the recorder's own registers with its thread.
+
+[[state_machine]]
+name = "counters_record"
+states = ["unused", "allocated", "reclaimed"]
+
+[[transition]]
+machine = "counters_record"
+from = "unused"
+to = "allocated"
+counter = "counters.allocations"
+
+[[transition]]
+machine = "counters_record"
+from = "reclaimed"
+to = "allocated"
+counter = "counters.allocations"
+
+[[transition]]
+machine = "counters_record"
+from = "allocated"
+to = "reclaimed"
+counter = "counters.freed"
+
+[[state_machine]]
+name = "catalog_slot"
+states = ["empty", "valid", "invalid", "deleted"]
+
+[[transition]]
+machine = "catalog_slot"
+from = "empty"
+to = "valid"
+counter = "recording.started"
+
+[[transition]]
+machine = "catalog_slot"
+from = "valid"
+to = "invalid"
+counter = "recording.invalidated"
+
+[[transition]]
+machine = "catalog_slot"
+from = "deleted"
+to = "invalid"
+counter = "recording.invalidated"

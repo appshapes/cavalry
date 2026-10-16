@@ -1,0 +1,499 @@
+# The weekly release-notes email (ADR 0026): once a week, email the people on the list what
+# changed on master since the last email. The shape is Brigade's
+# `.github/workflows/send-release-notes.yml`, the house's: a weekly cron, a writer agent that
+# drafts, a deterministic lint, a reviewer agent, one fix cycle, a gate, one mail step. Four
+# things differ, for Cavalry's state and conventions.
+#
+# 1. The email covers COMMITS, not releases: Cavalry has no release yet (ADR 0003, `publish =
+#    false`). `scripts/release-notes.py window` takes the commits on master after the last email
+#    and up to this run's commit, merge commits left out, and lays out the writer's sources: the
+#    lines the window added to CHANGELOG.md, every commit message, the ADRs added or changed,
+#    the pages touched. "The last email" is the newest successful run in which the step named
+#    "Send to the recipients" concluded `success`, so a preview, a run with nothing to send and
+#    a failed run all leave the mark where it was. The step's name is retyped in the script and
+#    joined to this file by scripts/release-notes-test.py: rename it in both or in neither. With
+#    no earlier email the window is seven days. The `from` input, a commit or a date, overrides
+#    both and is inclusive.
+#
+# 2. The list is a SECRET, RELEASE_NOTES_RECIPIENTS, kept by hand, never a variable or a file.
+#    This repository is public and so are its run logs, and a variable is printed unmasked. No
+#    address is ever printed, uploaded or shown to another reader: the script registers every
+#    address as a mask before anything can print it; the artifact carries the draft and never
+#    the list; every reader is `bcc`; and the list is read AFTER the last agent step has ended,
+#    so no agent session coexists with it. The mail credentials reach the two mail steps and
+#    the configured check, nothing else. There is no subscribe or unsubscribe capability: the
+#    footer asks the reader to answer the email to stop, and the answer goes to the sender's
+#    address, SMTP_FROM_ADDRESS, which must be an inbox someone reads; no Reply-To is set.
+#
+# 3. The text is gated, because an email cannot be taken back. A writer agent drafts from the
+#    sources; `release-notes.py lint` refuses a `just` recipe, a `cavalry` command, a key, a
+#    counter, an ADR, a path or a link that does not exist in the checkout, and a commit hash,
+#    a card number, an address, a placeholder; a reviewer agent reads the draft against the
+#    sources; the writer gets exactly one fix cycle; and only an APPROVED, lint-clean draft is
+#    sent. Both agents follow `.claude/agents/release-notes-email.md`. Neither can write to the
+#    repository: the job's token is `contents: read` and the edit tools are denied. Brigade's
+#    scheduled run of 2026-10-12 (38265059855) is the gate working: the lint was clean and the
+#    reviewer refused a sentence that stated an older release's behaviour; nothing was sent.
+#
+# 4. The email is laid out as HTML by scripts/release-notes-email.py: a 600 px card, each
+#    fenced block as a terminal card with its label, "Before you update" as a callout, the
+#    footer in grey; inline styles, no picture, under 100 KB. The lint runs the renderer's
+#    --check on every draft, so a construct it would refuse is a finding for the fix cycle. The
+#    text part of the email is the Markdown itself, unchanged.
+#
+# What was previewed can be what is sent. Every run writes a new draft, and the gate can approve
+# one and refuse the next (Brigade's first send, run 36636440249, was refused after the preview
+# of the same releases, run 36626521185, had been approved and read). The `draft_run` input names
+# an earlier run, and `release-notes.py adopt` takes that run's draft in place of a new one, no
+# agent writes or reviews, provided the run succeeded on master, its review says APPROVED and it
+# covered the very commits this run covers. The lint still runs on it, against the tree as it is.
+#
+#   gh workflow run send-release-notes.yml -f audience=preview                        # look at it first
+#   gh workflow run send-release-notes.yml -f audience=recipients -f draft_run=<id>   # then send that draft
+#
+# A run by hand is a PREVIEW unless it says otherwise: the email goes to RELEASE_NOTES_PREVIEW_ADDRESS
+# (the sender's own address when that secret is unset) and to nobody else, and the draft is
+# attached to the run either way, so a preview needs no mail server at all. The scheduled run
+# sends to the recipients, and the recipients are written to from master only.
+#
+# Without the mail configuration the scheduled run is a green no-op that says so on the run page,
+# which is what a fork sees; a half-configured repository fails, because that is a
+# misconfiguration and not a fork. The configuration, by name, and the steps a person takes are
+# in docs/how-to/send-the-release-notes.md.
+name: send release notes
+run-name: send release notes (${{ inputs.audience || 'recipients' }})
+
+on:
+  schedule: [{cron: "41 14 * * 1"}]      # Mondays 14:41 UTC; off the hour, on GitHub's own advice
+  workflow_dispatch:
+    inputs:
+      audience:
+        description: "preview: only the preview address receives it. recipients: the whole list receives it."
+        type: choice
+        options: [preview, recipients]
+        default: preview
+      from:
+        description: The first commit the email covers (a hash or a ref), or a date YYYY-MM-DD. Empty means every commit since the last email.
+        required: false
+        type: string
+      draft_run:
+        description: The id of an earlier run whose approved draft is sent as it is, e.g. a preview's. Empty means a new draft is written.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# One email at a time, queued, never cancelled: a run cancelled between the gate and the mail
+# step would have spent two agent sessions for nothing, and two runs side by side would both
+# find the same last email and send the same commits twice.
+concurrency:
+  group: send-release-notes
+  cancel-in-progress: false
+
+jobs:
+  email:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # A bound for a hung agent, not a measurement: Brigade's longest run with four agent
+    # sessions took 27 min 25 s (run 37694159920), and twice that is under 60. Re-measure
+    # after the first Cavalry runs.
+    timeout-minutes: 60
+    permissions:
+      contents: read            # the checkout
+      actions: read             # this workflow's own run history, where the last email is found, and an earlier run's artifact
+      id-token: write           # claude-code-action's OIDC exchange
+    env:
+      AUDIENCE: ${{ inputs.audience || 'recipients' }}
+      RELEASE_NOTES_DIR: /tmp/cavalry-email
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0       # the window is a range of commits; a depth-1 clone has none
+
+      - name: Is the mail server configured?
+        id: mail
+        # The two secrets arrive as `true` or `false`, never as themselves: this step prints
+        # what is missing. The recipients are written to from master only, whatever the inputs.
+        env:
+          SMTP_SERVER: ${{ vars.SMTP_SERVER }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_FROM_ADDRESS: ${{ vars.SMTP_FROM_ADDRESS }}
+          SMTP_USERNAME_SET: ${{ secrets.SMTP_USERNAME != '' }}
+          SMTP_PASSWORD_SET: ${{ secrets.SMTP_PASSWORD != '' }}
+        run: |
+          if [ "$AUDIENCE" = recipients ] && [ "$GITHUB_REF" != refs/heads/master ]; then
+            echo "::error::the recipients receive the email from master only; this run is on $GITHUB_REF"
+            exit 1
+          fi
+          missing=''; present=0
+          for name in SMTP_SERVER SMTP_PORT SMTP_FROM_ADDRESS; do
+            if [ -n "${!name}" ]; then present=$((present + 1)); else missing="$missing $name (variable)"; fi
+          done
+          if [ "$SMTP_USERNAME_SET" = true ]; then present=$((present + 1)); else missing="$missing SMTP_USERNAME (secret)"; fi
+          if [ "$SMTP_PASSWORD_SET" = true ]; then present=$((present + 1)); else missing="$missing SMTP_PASSWORD (secret)"; fi
+          if [ -z "$missing" ]; then
+            echo "the mail server is configured"
+            echo "configured=true" >> "$GITHUB_OUTPUT"; echo "compose=true" >> "$GITHUB_OUTPUT"
+          elif [ "$present" -gt 0 ]; then
+            echo "::error::the mail server is half-configured; missing:$missing (docs/how-to/send-the-release-notes.md)"
+            exit 1
+          elif [ "$AUDIENCE" = preview ]; then
+            echo "::notice::the mail server is not configured: the preview is attached to this run and mailed to nobody"
+            echo "configured=false" >> "$GITHUB_OUTPUT"; echo "compose=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::the mail server is not configured; nothing to do (a fork, or the variables are not set yet: docs/how-to/send-the-release-notes.md)"
+            echo "configured=false" >> "$GITHUB_OUTPUT"; echo "compose=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide what the email covers
+        id: window
+        if: steps.mail.outputs.compose == 'true'
+        run: python3 scripts/release-notes.py window
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES_FROM: ${{ inputs.from }}
+
+      # ---- or the draft of an earlier run, approved there ----------------------------------
+      - name: Take the approved draft of an earlier run
+        if: steps.window.outputs.count > 0 && inputs.draft_run != ''
+        run: |
+          case "$RELEASE_NOTES_DRAFT_RUN" in ''|*[!0-9]*) echo "::error::draft_run is not the id of a run: digits only"; exit 1 ;; esac
+          gh run download "$RELEASE_NOTES_DRAFT_RUN" --repo "$GITHUB_REPOSITORY" --name "release-notes-email-$RELEASE_NOTES_DRAFT_RUN" --dir "$RELEASE_NOTES_DRAFT_DIR"
+          python3 scripts/release-notes.py adopt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NOTES_DRAFT_RUN: ${{ inputs.draft_run }}
+          RELEASE_NOTES_DRAFT_DIR: /tmp/cavalry-email-draft
+
+      # ---- round 1 --------------------------------------------------------------------------
+      # Every agent step: pinned by SHA like every action here (ADR 0003), and this one matters
+      # most, since it runs a model; `show_full_output` off, because run logs are public; no web
+      # tool, no `gh`, no `git`, no `just`, no `cargo`: the draft is composed from the sources the
+      # window step laid out and from the checkout, and the token in the agent's environment is
+      # reachable to anything it runs. The Write and Edit tools are denied; the one file the
+      # agent writes is under /tmp/cavalry-email, outside the checkout, through `tee`.
+      # `--add-dir /tmp/cavalry-email` makes that directory a working directory of the
+      # session: without it the CLI refuses `tee` to a path outside the checkout whatever the
+      # Bash allow rule says, and the writer prints its draft into its own log instead (the
+      # first preview, run 38973732554 on 2026-10-16: two writer sessions, no file, the gate
+      # refused). scripts/release-notes-test.py checks every agent step carries it.
+      - name: Draft the email
+        id: draft1
+        if: steps.window.outputs.count > 0 && inputs.draft_run == ''
+        continue-on-error: true   # the file it wrote (or did not) is judged by the lint and the verdict step; the action also fails a step whose agent exceeded --max-turns after writing
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        with:
+          allowed_bots: "claude,github-actions"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
+          show_full_output: false
+          prompt: |
+            You are the WRITER of Cavalry's release-notes email. Read `.claude/agents/release-notes-email.md`
+            and follow it exactly. The email covers ${{ steps.window.outputs.count }} commit(s),
+            ${{ steps.window.outputs.first }} to ${{ steps.window.outputs.last }}, and its first line is exactly:
+
+            # ${{ steps.window.outputs.title }}
+
+            DRAFT the email: write it to the file /tmp/cavalry-email/notes.md and do nothing else. The Write
+            tool is NOT available in this job: write the file from the Bash tool with a quoted heredoc, exactly
+            `tee /tmp/cavalry-email/notes.md <<'EOF'` … `EOF`. You do not send: a lint and a reviewer read that
+            file after you, and a mail step sends it if they approve.
+
+            Do not edit any file in the repository. Do not push.
+          settings: |
+            {
+              "permissions": {
+                "allow": [
+                  "Bash(tee /tmp/cavalry-email/notes.md:*)",
+                  "Read(//tmp/cavalry-email/**)",
+                  "Bash(ls:*)",
+                  "Bash(cat:*)",
+                  "Bash(head:*)",
+                  "Bash(tail:*)",
+                  "Bash(wc:*)",
+                  "Bash(grep:*)",
+                  "Bash(rg:*)",
+                  "Bash(find:*)"
+                ],
+                "deny": [
+                  "Write",
+                  "Edit",
+                  "MultiEdit",
+                  "NotebookEdit",
+                  "WebFetch",
+                  "WebSearch",
+                  "Read(./.env)",
+                  "Read(./.env.*)"
+                ]
+              }
+            }
+
+      - name: Keep the drafter's execution log
+        if: always() && steps.draft1.outcome != 'skipped'
+        run: cp "$RUNNER_TEMP/claude-execution-output.json" "$RELEASE_NOTES_DIR/draft1-execution.json" 2>/dev/null || true
+      - name: Lint the draft
+        id: lint1
+        if: steps.window.outputs.count > 0
+        continue-on-error: true   # a failure is a finding for the fix cycle, recorded for the writer to read
+        run: python3 scripts/release-notes.py lint "$RELEASE_NOTES_DIR/notes.md" | tee "$RELEASE_NOTES_DIR/lint.txt"; exit "${PIPESTATUS[0]}"
+        env:
+          RELEASE_NOTES_TITLE: ${{ steps.window.outputs.title }}
+
+      - name: Review the draft
+        id: review1
+        if: steps.window.outputs.count > 0 && inputs.draft_run == ''
+        continue-on-error: true   # as the drafter's
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        with:
+          allowed_bots: "claude,github-actions"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
+          show_full_output: false
+          prompt: |
+            You are the REVIEWER of a DRAFT of Cavalry's release-notes email, at /tmp/cavalry-email/notes.md. Read
+            `.claude/agents/release-notes-email.md` and follow it exactly, "When you review" above all. The email
+            covers ${{ steps.window.outputs.count }} commit(s), ${{ steps.window.outputs.first }} to
+            ${{ steps.window.outputs.last }}; its first line must be exactly `# ${{ steps.window.outputs.title }}`.
+
+            Write your verdict to /tmp/cavalry-email/review.md from the Bash tool with a quoted heredoc, exactly
+            `tee /tmp/cavalry-email/review.md <<'EOF'` … `EOF` (the Write tool is NOT available in this job): the
+            FIRST line is exactly `APPROVED` or `CHANGES_REQUESTED`, then one finding per line, each naming the
+            sentence and what is wrong. Do not edit any file but review.md. Do not push.
+          settings: |
+            {
+              "permissions": {
+                "allow": [
+                  "Bash(tee /tmp/cavalry-email/review.md:*)",
+                  "Read(//tmp/cavalry-email/**)",
+                  "Bash(ls:*)",
+                  "Bash(cat:*)",
+                  "Bash(head:*)",
+                  "Bash(tail:*)",
+                  "Bash(wc:*)",
+                  "Bash(grep:*)",
+                  "Bash(rg:*)",
+                  "Bash(find:*)"
+                ],
+                "deny": [
+                  "Write",
+                  "Edit",
+                  "MultiEdit",
+                  "NotebookEdit",
+                  "WebFetch",
+                  "WebSearch",
+                  "Read(./.env)",
+                  "Read(./.env.*)"
+                ]
+              }
+            }
+
+      - name: Keep the reviewer's execution log
+        if: always() && steps.review1.outcome != 'skipped'
+        run: cp "$RUNNER_TEMP/claude-execution-output.json" "$RELEASE_NOTES_DIR/review1-execution.json" 2>/dev/null || true
+      - name: Read the round-1 verdict
+        id: verdict1
+        if: steps.window.outputs.count > 0 && inputs.draft_run == ''
+        run: |
+          if [ -f "$RELEASE_NOTES_DIR/review.md" ]; then
+            verdict=$(head -n 1 "$RELEASE_NOTES_DIR/review.md" | grep -o -E 'CHANGES_REQUESTED|APPROVED' | head -n 1)
+          else
+            echo "the reviewer wrote no review.md; the fix cycle runs on the lint alone" >&2
+            printf 'CHANGES_REQUESTED\nThe reviewer wrote no review; address the lint findings, if any, and recheck every claim against the sources.\n' > "$RELEASE_NOTES_DIR/review.md"
+            verdict=CHANGES_REQUESTED
+          fi
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "round 1: lint ${{ steps.lint1.outcome }}, review $verdict"; cat "$RELEASE_NOTES_DIR/review.md"
+
+      # ---- round 2: exactly one fix cycle ---------------------------------------------------
+      - name: Fix the draft
+        id: draft2
+        if: steps.window.outputs.count > 0 && inputs.draft_run == '' && (steps.lint1.outcome != 'success' || steps.verdict1.outputs.verdict != 'APPROVED')
+        continue-on-error: true   # as the drafter's
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        with:
+          allowed_bots: "claude,github-actions"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
+          show_full_output: false
+          prompt: |
+            You are the WRITER of Cavalry's release-notes email, and your draft, /tmp/cavalry-email/notes.md, was
+            not approved. Read `.claude/agents/release-notes-email.md` again, then /tmp/cavalry-email/lint.txt
+            (deterministic checks; every `FAIL:` line is a fact) and /tmp/cavalry-email/review.md (the reviewer's
+            findings). Fix EVERY finding and rewrite /tmp/cavalry-email/notes.md from the Bash tool with a quoted
+            heredoc, exactly `tee /tmp/cavalry-email/notes.md <<'EOF'` … `EOF` (the Write tool is NOT available).
+            The email covers ${{ steps.window.outputs.count }} commit(s), ${{ steps.window.outputs.first }} to
+            ${{ steps.window.outputs.last }}, and its first line is exactly `# ${{ steps.window.outputs.title }}`.
+            Do nothing else: do not send, do not edit the repository, do not push.
+          settings: |
+            {
+              "permissions": {
+                "allow": [
+                  "Bash(tee /tmp/cavalry-email/notes.md:*)",
+                  "Read(//tmp/cavalry-email/**)",
+                  "Bash(ls:*)",
+                  "Bash(cat:*)",
+                  "Bash(head:*)",
+                  "Bash(tail:*)",
+                  "Bash(wc:*)",
+                  "Bash(grep:*)",
+                  "Bash(rg:*)",
+                  "Bash(find:*)"
+                ],
+                "deny": [
+                  "Write",
+                  "Edit",
+                  "MultiEdit",
+                  "NotebookEdit",
+                  "WebFetch",
+                  "WebSearch",
+                  "Read(./.env)",
+                  "Read(./.env.*)"
+                ]
+              }
+            }
+
+      - name: Keep the fixer's execution log
+        if: always() && steps.draft2.outcome != 'skipped'
+        run: cp "$RUNNER_TEMP/claude-execution-output.json" "$RELEASE_NOTES_DIR/draft2-execution.json" 2>/dev/null || true
+      - name: Lint the fix
+        id: lint2
+        if: steps.draft2.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/release-notes.py lint "$RELEASE_NOTES_DIR/notes.md" | tee "$RELEASE_NOTES_DIR/lint.txt"; exit "${PIPESTATUS[0]}"
+        env:
+          RELEASE_NOTES_TITLE: ${{ steps.window.outputs.title }}
+
+      - name: Review the fix
+        id: review2
+        if: steps.draft2.outcome == 'success'
+        continue-on-error: true   # as the drafter's
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        with:
+          allowed_bots: "claude,github-actions"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--model claude-opus-5-5 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
+          show_full_output: false
+          prompt: |
+            You are the REVIEWER of the SECOND draft of Cavalry's release-notes email, at
+            /tmp/cavalry-email/notes.md; your first review is /tmp/cavalry-email/review.md and the lint's result
+            is /tmp/cavalry-email/lint.txt. Read `.claude/agents/release-notes-email.md` and follow it exactly,
+            "When you review" above all. The email covers ${{ steps.window.outputs.count }} commit(s),
+            ${{ steps.window.outputs.first }} to ${{ steps.window.outputs.last }}; its first line must be exactly
+            `# ${{ steps.window.outputs.title }}`.
+
+            Overwrite /tmp/cavalry-email/review.md from the Bash tool with a quoted heredoc, exactly
+            `tee /tmp/cavalry-email/review.md <<'EOF'` … `EOF` (the Write tool is NOT available): the FIRST line
+            is exactly `APPROVED` or `CHANGES_REQUESTED`, then one finding per line. Do nothing else.
+          settings: |
+            {
+              "permissions": {
+                "allow": [
+                  "Bash(tee /tmp/cavalry-email/review.md:*)",
+                  "Read(//tmp/cavalry-email/**)",
+                  "Bash(ls:*)",
+                  "Bash(cat:*)",
+                  "Bash(head:*)",
+                  "Bash(tail:*)",
+                  "Bash(wc:*)",
+                  "Bash(grep:*)",
+                  "Bash(rg:*)",
+                  "Bash(find:*)"
+                ],
+                "deny": [
+                  "Write",
+                  "Edit",
+                  "MultiEdit",
+                  "NotebookEdit",
+                  "WebFetch",
+                  "WebSearch",
+                  "Read(./.env)",
+                  "Read(./.env.*)"
+                ]
+              }
+            }
+
+      # ---- the gate -------------------------------------------------------------------------
+      # An adopted draft arrives with the review that approved it and is judged by this run's own
+      # lint: the fix cycle was skipped, so the gate below reads round 1.
+      - name: Keep the second reviewer's execution log
+        if: always() && steps.review2.outcome != 'skipped'
+        run: cp "$RUNNER_TEMP/claude-execution-output.json" "$RELEASE_NOTES_DIR/review2-execution.json" 2>/dev/null || true
+      - name: Gate on the final lint and verdict
+        if: steps.window.outputs.count > 0
+        run: |
+          if [ "${{ steps.draft2.outcome }}" = "skipped" ]; then
+            lint="${{ steps.lint1.outcome }}"; round=1
+          else
+            lint="${{ steps.lint2.outcome }}"; round=2
+          fi
+          verdict=$(head -n 1 "$RELEASE_NOTES_DIR/review.md" | grep -o -E 'CHANGES_REQUESTED|APPROVED' | head -n 1)
+          echo "round $round: lint $lint, review $verdict"
+          if [ "$lint" != "success" ] || [ "$verdict" != "APPROVED" ]; then
+            echo "::error::the email was not approved after $round round(s); nothing was sent (draft, lint and review are attached as an artifact)"
+            exit 1
+          fi
+      - name: Put the footer under the email and render the HTML
+        if: steps.window.outputs.count > 0
+        run: python3 scripts/release-notes.py finish
+
+      # The list is read here, after the last agent step and after the gate, and lives in the
+      # job's temporary directory until the runner is destroyed. It is in no artifact below.
+      - name: Read the recipients
+        id: recipients
+        if: steps.window.outputs.count > 0 && env.AUDIENCE == 'recipients'
+        run: python3 scripts/release-notes.py recipients
+        env:
+          RELEASE_NOTES_RECIPIENTS: ${{ secrets.RELEASE_NOTES_RECIPIENTS }}
+
+      - name: Attach the draft, lint and review
+        if: always() && steps.window.outputs.count > 0
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes-email-${{ github.run_id }}
+          path: |
+            /tmp/cavalry-email/window.txt
+            /tmp/cavalry-email/title.txt
+            /tmp/cavalry-email/sources/
+            /tmp/cavalry-email/notes.md
+            /tmp/cavalry-email/email.md
+            /tmp/cavalry-email/email.html
+            /tmp/cavalry-email/lint.txt
+            /tmp/cavalry-email/review.md
+            /tmp/cavalry-email/*-execution.json
+          if-no-files-found: ignore
+
+      # ---- the one email --------------------------------------------------------------------
+      # The name of the next step is how the NEXT run finds this email (the header): rename it in
+      # scripts/release-notes.py too. `to` is the sender's own address and every reader is `bcc`.
+      - name: Send to the recipients
+        if: steps.window.outputs.count > 0 && env.AUDIENCE == 'recipients' && steps.recipients.outputs.count > 0
+        uses: dawidd6/action-send-mail@67ce3558d613188179559c61d3565140cf389968 # v22
+        with:
+          server_address: ${{ vars.SMTP_SERVER }}
+          server_port: ${{ vars.SMTP_PORT }}
+          require_tls: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: ${{ steps.window.outputs.subject }}
+          from: "Cavalry <${{ vars.SMTP_FROM_ADDRESS }}>"
+          to: ${{ vars.SMTP_FROM_ADDRESS }}
+          bcc: ${{ steps.recipients.outputs.bcc }}
+          body: file:///tmp/cavalry-email/email.md
+          html_body: file:///tmp/cavalry-email/email.html
+          convert_markdown: false
+
+      - name: Send the preview
+        if: steps.window.outputs.count > 0 && env.AUDIENCE == 'preview' && steps.mail.outputs.configured == 'true'
+        uses: dawidd6/action-send-mail@67ce3558d613188179559c61d3565140cf389968 # v22
+        with:
+          server_address: ${{ vars.SMTP_SERVER }}
+          server_port: ${{ vars.SMTP_PORT }}
+          require_tls: true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[preview] ${{ steps.window.outputs.subject }}"
+          from: "Cavalry <${{ vars.SMTP_FROM_ADDRESS }}>"
+          to: ${{ secrets.RELEASE_NOTES_PREVIEW_ADDRESS || vars.SMTP_FROM_ADDRESS }}
+          body: file:///tmp/cavalry-email/email.md
+          html_body: file:///tmp/cavalry-email/email.html
+          convert_markdown: false

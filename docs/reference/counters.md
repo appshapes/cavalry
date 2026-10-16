@@ -23,9 +23,31 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 15 | `driver.registry_full` | counter | static | Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions or images, or the counters file, was at capacity (spec/client-protocol.md, Sizes). | A fixed capacity of the driver is reached: clients, publications or subscriptions are not being closed, or this host needs more than one driver's worth. Close what is not used; the error event's message names the registry; the capacities are the driver's in this version. |
 | 16 | `driver.log_create_failed` | counter | static | Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands). | Free space on the filesystem under the driver directory (/dev/shm on Linux): each cavalry:ipc publication needs 3 × 64 MiB + 4 KiB there while it is live or lingers. Close publications that are not used, or move the driver directory to a filesystem with room. |
 | 17 | `conductor.idle_strategy` | gauge | static | The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin. |  |
+| 18 | `counters.allocations` | counter | static | Counter allocations made since the driver started, the static counters' own records included: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for, so that counters.allocations minus counters.freed is counters.allocated (spec/counters-file.md, Metadata record). |  |
+| 19 | `counters.freed` | counter | static | Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout. |  |
+| 20 | `recording.started` | counter | static | Recordings the driver started: a catalog slot taken from empty to valid, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands; spec/durable-log.md, The driver). |  |
+| 21 | `recording.invalidated` | counter | static | Catalog slots recovery set to state 2, invalid, because their files cannot repair them: an empty slot before the last, a creation checksum that fails, or a segment file missing between the start and the last (spec/durable-log.md, The driver). | A recording in the log directory is damaged beyond repair and `cavalry doctor` names its slot: check the disk, and restore the directory from a backup if the recording matters; the slot is never reused. |
 
 ## State machines
 
 Every state machine on the data plane registers its states and transitions in `counters.toml` too, and `just lint-counters` fails a transition that names no counter, a counter that is not of kind `counter` in the table above, or an enum whose variants are not the machine's states (CLAUDE.md, invariant 4). The enum that holds the states carries the comment `// state machine: <name>` on the line before its definition. The check fails closed: every enum under `crates/*/src` whose name is or ends in `State`, `Status` or `Phase` carries that comment, or `// not a state machine: <why>` with the reason no transition of it needs a counter, and `just lint-counters` names the file and line of one that has neither. Each machine is listed here with the counter every transition adds one to.
 
-None registered yet.
+### `counters_record`
+
+States: `unused`, `allocated`, `reclaimed`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `unused` | `allocated` | `counters.allocations` |
+| `reclaimed` | `allocated` | `counters.allocations` |
+| `allocated` | `reclaimed` | `counters.freed` |
+
+### `catalog_slot`
+
+States: `empty`, `valid`, `invalid`, `deleted`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `empty` | `valid` | `recording.started` |
+| `valid` | `invalid` | `recording.invalidated` |
+| `deleted` | `invalid` | `recording.invalidated` |
