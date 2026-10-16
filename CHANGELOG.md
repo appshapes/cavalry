@@ -405,7 +405,10 @@ user-visible change, added in the same commit as the change. The format follows
   one to, and the enum marked `// state machine: <name>` has those states as its
   variants; the counters reference page lists each machine with its transitions. It
   fails closed: an enum named `*State`, `*Status` or `*Phase` with neither that mark nor
-  `// not a state machine: <why>` fails it. This is the gate CLAUDE.md names for a
-  transition with no counter, and it fails today on the two state machines already on
-  `master` without counters for every transition: the counters file's metadata record
-  and the recording catalog's descriptor (ADR 0024, card 93).
+  `// not a state machine: <why>` fails it. Two machines register with it: the counters
+  file's metadata record, whose allocation and free `counters.allocations` and
+  `counters.freed` count, and the recording catalog's descriptor, whose slot taken and
+  slot invalidated `recording.started` and `recording.invalidated` count, the first two
+  of the recorder's counters (ADR 0024, ADR 0025); the two ring record states are exempt
+  with their reasons. This is the gate CLAUDE.md names for a transition with no counter
+  (card 93).
