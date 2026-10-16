@@ -186,7 +186,8 @@ pub struct CountersFile {
 impl CountersFile {
     /// Creates `dir/counters` for `capacity` counters and publishes it: sizes the file,
     /// allocates every static counter of `counters.toml` in the record whose index is
-    /// its id, sets `counters.allocated` to their number, and writes the magic last
+    /// its id, sets `counters.allocated` and `counters.allocations` to their number, so
+    /// that allocations minus freed is the gauge from the start, and writes the magic last
     /// (`spec/counters-file.md`, "Header"). The capacity is a power of two from
     /// [`super::layout::MIN_CAPACITY`] to [`super::layout::MAX_CAPACITY`], or the error is
     /// [`CountersError::Capacity`]; a file already at that path is
@@ -233,6 +234,7 @@ impl CountersFile {
             static_record(COUNTERS_FREED, capacity)?,
         )?;
         allocated.set(count);
+        allocations.set(count);
         mapped.header_cells().publish(&fields);
         Ok(Self {
             mapped,

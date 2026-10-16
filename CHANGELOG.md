@@ -409,6 +409,7 @@ user-visible change, added in the same commit as the change. The format follows
   address; `draft_run` sends what a preview approved. `docs/how-to/send-the-release-notes.md`
   is the page, and `just test-scripts`, which `just test` now runs first, tests the scripts.
 - Two counters for the counters file's own transitions: `counters.allocations` adds one
-  for every record allocated and `counters.freed` for every record freed, so that the
-  `counters.allocated` gauge's moves are counted, as invariant 4 asks of every state
+  for every record allocated, the static counters' own records included, and
+  `counters.freed` for every record freed, so that the `counters.allocated` gauge's moves
+  are counted and allocations minus freed is the gauge, as invariant 4 asks of every state
   transition (`spec/counters-file.md`, Metadata record).

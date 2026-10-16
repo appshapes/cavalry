@@ -163,7 +163,7 @@ id = 18
 name = "counters.allocations"
 kind = "counter"
 scope = "static"
-doc = "Counter allocations made since the driver started: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for (spec/counters-file.md, Metadata record)."
+doc = "Counter allocations made since the driver started, the static counters' own records included: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for, so that counters.allocations minus counters.freed is counters.allocated (spec/counters-file.md, Metadata record)."
 doctor = ""
 
 [[counter]]
@@ -172,4 +172,4 @@ name = "counters.freed"
 kind = "counter"
 scope = "static"
 doc = "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout."
-doctor = "Allocations minus freed is counters.allocated. A freed count that climbs while allocations do not is normal churn of publications and subscriptions closing; nothing to do."
+doctor = ""

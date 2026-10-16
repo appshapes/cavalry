@@ -723,24 +723,40 @@ fn every_allocation_and_every_free_is_counted() {
     let dir = Dir::new("transitions");
     let mut file = CountersFile::create(dir.path(), 64).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
-    assert_eq!(reader.read(COUNTERS_ALLOCATIONS.record()).unwrap(), 0);
-    assert_eq!(reader.read(COUNTERS_FREED.record()).unwrap(), 0);
+    let read = |id: CounterId| reader.read(id.record()).unwrap();
+    let statics = statics() as i64;
+    assert_eq!(
+        read(COUNTERS_ALLOCATIONS),
+        statics,
+        "create allocates every static counter's record"
+    );
+    assert_eq!(read(COUNTERS_FREED), 0);
+    assert_eq!(
+        read(COUNTERS_ALLOCATIONS) - read(COUNTERS_FREED),
+        read(COUNTERS_ALLOCATED),
+        "allocations minus freed is the gauge after create"
+    );
     let first = file.allocate(INSTANCE, &[1], "first").unwrap();
     let second = file.allocate(INSTANCE, &[2], "second").unwrap();
-    assert_eq!(reader.read(COUNTERS_ALLOCATIONS.record()).unwrap(), 2);
+    assert_eq!(read(COUNTERS_ALLOCATIONS), statics + 2);
     file.free(first.id(), 0).unwrap();
-    assert_eq!(reader.read(COUNTERS_FREED.record()).unwrap(), 1);
+    assert_eq!(read(COUNTERS_FREED), 1);
     assert_eq!(
-        reader.read(COUNTERS_ALLOCATED.record()).unwrap(),
-        statics() as i64 + 1,
-        "allocations minus freed is the gauge"
+        read(COUNTERS_ALLOCATIONS) - read(COUNTERS_FREED),
+        read(COUNTERS_ALLOCATED),
+        "allocations minus freed is the gauge after a free"
     );
     let _again = file.allocate(INSTANCE, &[3], "again").unwrap();
     assert_eq!(
-        reader.read(COUNTERS_ALLOCATIONS.record()).unwrap(),
-        3,
+        read(COUNTERS_ALLOCATIONS),
+        statics + 3,
         "a reclaimed record allocated again is an allocation"
     );
-    assert_eq!(reader.read(COUNTERS_FREED.record()).unwrap(), 1);
+    assert_eq!(read(COUNTERS_FREED), 1);
+    assert_eq!(
+        read(COUNTERS_ALLOCATIONS) - read(COUNTERS_FREED),
+        read(COUNTERS_ALLOCATED),
+        "allocations minus freed is the gauge after a reallocation"
+    );
     drop(second);
 }
