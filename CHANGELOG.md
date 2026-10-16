@@ -470,3 +470,8 @@ user-visible change, added in the same commit as the change. The format follows
   `recording-write-failed` and `recording-invalid`, which names the catalog slots recovery
   could not repair when run with `--log-dir`. The how-to page is
   `docs/how-to/record-a-stream.md` (ADR 0025).
+- Bench rows with a recording on: `claim_commit_<body>_recorded` and
+  `one_way_<body>_recorded` repeat the client rows while the driver's recorder writes the
+  stream to the durable log under the bench directory, and the run fails unless the
+  recording reached the publisher's final position; new rows, reported until the bench
+  host records their baseline (ADR 0025, ADR 0023's measurement with recording on).

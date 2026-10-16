@@ -500,16 +500,23 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 /// thread that spawns it. The log is the driver's, 64 MiB terms (`spec/client-protocol.md`,
 /// "Sizes"), so the warm-up is one rotation of that log, not of `--term-length`'s, for the
 /// same reason as the log rows': no measured message first-touches a page.
-fn bench_client(options: &Options) -> Result<LogRun, String> {
-    let dir = bench_dir().join(format!("cavalry-bench-{}-client", std::process::id()));
+fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
+    let name = if recorded { "recorded" } else { "client" };
+    let dir = bench_dir().join(format!("cavalry-bench-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_client(options, &dir);
+    let result = run_client(options, &dir, recorded);
     let _ = std::fs::remove_dir_all(&dir);
     result
 }
 
-fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
+/// The client rows, and with `recorded` the same rows while the driver's recorder writes
+/// the stream to the log directory under the bench directory (ADR 0025): the recorder is
+/// one more reader of the log, whose position the publisher's limit respects, and its
+/// writes run on the driver's recorder thread, which inherits the conductor's CPU under
+/// `--pin`. The recording must reach the publisher's final position before the run
+/// counts, so a recorder that lost a byte or fell behind fails the run, never a row.
+fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Result<LogRun, String> {
     pin_to(options.pin.map(|pin| pin[2]))?;
     let driver = Driver::start_with(dir, dir.join("log"), IdleStrategy::Backoff)
         .map_err(|e| e.to_string())?;
@@ -520,6 +527,15 @@ fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String
     let mut publication = client
         .add_publication("cavalry:ipc", STREAM_ID)
         .map_err(|e| e.to_string())?;
+    let recording = if recorded {
+        Some(
+            client
+                .start_recording("cavalry:ipc", STREAM_ID)
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
     pin_to(options.pin.map(|pin| pin[0]))?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !subscription.is_connected() {
@@ -618,6 +634,25 @@ fn run_client(options: &Options, dir: &std::path::Path) -> Result<LogRun, String
         Ok(Ok(hist)) => hist,
         failed => return Err(subscriber_failure(failed)),
     };
+    if let Some(recording) = recording {
+        // The recorder's lag is bounded by the window; it reaches the publisher within
+        // a window's worth of writing, or the run says so.
+        let end = publication.position().map_err(|e| e.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while recording.position() < end {
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "the recorder stopped at {} of {end} bytes: a byte lost, or a disk that \
+                     fell behind by over 30 s; see docs/how-to/record-a-stream.md",
+                    recording.position()
+                ));
+            }
+            std::hint::spin_loop();
+        }
+        client
+            .stop_recording(recording.recording_id())
+            .map_err(|e| e.to_string())?;
+    }
     publication.close().map_err(|e| e.to_string())?;
     client.close().map_err(|e| e.to_string())?;
     driver.close().map_err(|e| e.to_string())?;
@@ -858,8 +893,8 @@ struct Pass {
     allocations: usize,
 }
 
-/// Every benchmark once: the timer, both log types, the client path, the three slot
-/// spacings, and last the recorder's block path.
+/// Every benchmark once: the timer, both log types, the client path with and without a
+/// recording on, the three slot spacings, and last the recorder's block path.
 fn run_pass(options: &Options) -> Result<Pass, String> {
     let mut pass = Pass {
         benchmarks: BTreeMap::new(),
@@ -882,16 +917,18 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
         pass.retries.insert(name.into(), run.retries);
         pass.allocations += run.allocations;
     }
-    let client = bench_client(options)
-        .map_err(|message| format!("the client benchmark failed: {message}"))?;
-    pass.benchmarks.insert(
-        format!("claim_commit_{}_client", options.body),
-        client.claim_commit,
-    );
-    pass.benchmarks
-        .insert(format!("one_way_{}_client", options.body), client.one_way);
-    pass.retries.insert("client".into(), client.retries);
-    pass.allocations += client.allocations;
+    for (recorded, name) in [(false, "client"), (true, "recorded")] {
+        let client = bench_client(options, recorded)
+            .map_err(|message| format!("the {name} benchmark failed: {message}"))?;
+        pass.benchmarks.insert(
+            format!("claim_commit_{}_{name}", options.body),
+            client.claim_commit,
+        );
+        pass.benchmarks
+            .insert(format!("one_way_{}_{name}", options.body), client.one_way);
+        pass.retries.insert(name.into(), client.retries);
+        pass.allocations += client.allocations;
+    }
     for spacing in [0usize, 64, 128] {
         let (loads, stores) = bench_slot(options, spacing)
             .map_err(|message| format!("the slot_padding_{spacing} benchmark failed: {message}"))?;
