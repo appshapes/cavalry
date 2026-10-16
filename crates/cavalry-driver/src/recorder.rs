@@ -34,7 +34,7 @@ use crate::spec;
 /// recording, which may stop on its own, and one per request handled in a cycle. With
 /// the pending replies at this bound the recorder handles no request and stops no
 /// recording until the conductor takes replies again; it keeps writing.
-const PENDING_REPLIES: usize = spec::MAX_RECORDINGS + spec::RECORDER_REQUESTS_PER_CYCLE;
+pub(crate) const PENDING_REPLIES: usize = spec::MAX_RECORDINGS + spec::RECORDER_REQUESTS_PER_CYCLE;
 
 /// What a `start recording` command fixed about the recording, carried to the recorder
 /// once: the descriptor's fields and a reader on the log at the start position.
@@ -214,8 +214,12 @@ impl Recorder {
                 self.idler.reset();
             }
         }
+        // The conductor stops on the same flag and takes no more replies, so a stop here
+        // keeps its reply only while the pending replies have room; the catalog's stop
+        // is what the next open reads.
         let now = now_nanos();
         while let Some(last) = self.live.len().checked_sub(1) {
+            self.flush_replies();
             self.stop_at(last, now, None);
         }
         self.flush_replies();
@@ -384,7 +388,11 @@ impl Recorder {
             // The block was taken exactly when the position moved, whatever `write`
             // returned; a block not taken is scanned again next cycle.
             if live.writer.position() != before {
-                let _ = live.reader.seek(end);
+                // `end` is the end of a block of the reader's current term, a multiple
+                // of 32 at most the term's end, which `seek` accepts: it cannot fail
+                // without the reader and the writer disagreeing from here on.
+                let sought = live.reader.seek(end);
+                debug_assert!(sought.is_ok(), "the block's end is in the reader's term");
                 if let Some(position) = &live.position {
                     position.store_release(live.writer.position());
                 }
@@ -439,13 +447,29 @@ impl Recorder {
         if let Some(position) = &live.position {
             position.store_release(stop_position);
         }
-        self.pending.push_back(Reply::Stopped {
-            recording_id: live.recording_id,
-            publication_id: live.publication_id,
-            stop_position,
-            correlation_id,
-        });
+        // During duty cycles a stop happens only with room for its reply; only the
+        // shutdown loop finds none, after the conductor has stopped reading.
+        if self.pending.len() < PENDING_REPLIES {
+            self.pending.push_back(Reply::Stopped {
+                recording_id: live.recording_id,
+                publication_id: live.publication_id,
+                stop_position,
+                correlation_id,
+            });
+        }
         Step::Stopped
+    }
+
+    /// How many replies wait for room in the reply queue.
+    #[cfg(test)]
+    pub(crate) fn pending_replies(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// How many recordings the recorder writes.
+    #[cfg(test)]
+    pub(crate) fn live_recordings(&self) -> usize {
+        self.live.len()
     }
 
     /// Offers the pending replies in order until the queue is full; returns how many went.

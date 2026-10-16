@@ -56,6 +56,10 @@ const ERRORS_DOC: &str = "docs/reference/client-protocol.md#error-codes";
 /// How many commands one duty cycle reads before it turns to the publications.
 const COMMANDS_PER_CYCLE: usize = 16;
 
+/// The deferred requests' bound: one attach and one stop per registered recording
+/// (`Conductor::deferred` says why it holds).
+const DEFERRED_CAPACITY: usize = 2 * spec::MAX_RECORDINGS;
+
 /// A frame's alignment as the positions count.
 const FRAME_ALIGN: i64 = FRAME_ALIGNMENT as i64;
 
@@ -197,6 +201,8 @@ enum RecordingState {
     /// The recorder wrote the stop; `recording stopped` went out, the counters are freed.
     Stopped,
     /// The start failed, or the counters could not be allocated: the client got an error.
+    /// A failed start whose slot the recorder holds stays registered, a floor at its
+    /// start position, until the recorder's stop reply removes it.
     Failed,
 }
 
@@ -297,8 +303,12 @@ pub(crate) struct Conductor {
     images: Vec<Image>,
     recordings: Vec<RecordingEntry>,
     recorder: RecorderLink,
-    /// Attaches and stops the request queue had no room for, offered again each cycle;
-    /// at most one of each per recording, so never past its capacity.
+    /// Attaches and stops the request queue had no room for, offered again each cycle
+    /// in order, before anything newer. While it holds any, `start recording` is
+    /// answered with code 10, so no recording is registered until it empties; every
+    /// request it takes meanwhile is one attach or one stop of a recording already
+    /// registered, at most [`spec::MAX_RECORDINGS`], so it never holds more than two per
+    /// recording, its capacity.
     deferred: VecDeque<Request>,
     /// Registrations across every publication: the publications registry's fill.
     registration_count: usize,
@@ -351,7 +361,7 @@ impl Conductor {
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
             recorder,
-            deferred: VecDeque::with_capacity(2 * spec::MAX_RECORDINGS),
+            deferred: VecDeque::with_capacity(DEFERRED_CAPACITY),
             registration_count: 0,
             next_session_id: i32::from_le_bytes(
                 (now >> 8).to_le_bytes()[..4].try_into().unwrap_or([0; 4]),
@@ -1294,15 +1304,23 @@ impl Conductor {
             return;
         }
         let Some(index) = chosen else {
-            let recording_id = lowest.and_then(|index| {
+            let recording = lowest.and_then(|index| {
                 let publication_id = self.publications[index].registration_id;
                 self.recordings
                     .iter()
                     .find(|recording| recording.publication_id == publication_id)
-                    .and_then(|recording| recording.recording_id)
+                    .and_then(|recording| {
+                        recording
+                            .recording_id
+                            .map(|id| (id, recording.stop_requested))
+                    })
             });
-            let text = match recording_id {
-                Some(id) => format!(
+            let text = match recording {
+                Some((id, true)) => format!(
+                    "stream {stream_id} is stopping recording {id}; start again once its \
+                     recording stopped arrives; see {ERRORS_DOC}"
+                ),
+                Some((id, false)) => format!(
                     "stream {stream_id} is already recording {id}; stop recording {id} first; \
                      see {ERRORS_DOC}"
                 ),
@@ -1316,6 +1334,12 @@ impl Conductor {
         };
         if self.recordings.len() >= spec::MAX_RECORDINGS {
             self.registry_full(correlation_id, "recordings", spec::MAX_RECORDINGS);
+            return;
+        }
+        // Requests still waiting for room go first, and none of a new recording's join
+        // them: this is what bounds the deferred list (`Conductor::deferred`).
+        if !self.deferred.is_empty() {
+            self.recorder_queue_full(correlation_id);
             return;
         }
         let publication = &self.publications[index];
@@ -1352,16 +1376,7 @@ impl Conductor {
             reader,
         };
         if self.recorder.requests.offer(Request::Start(start)).is_err() {
-            self.statics.registry_full.increment();
-            self.send_error(
-                correlation_id,
-                ErrorCode::ResourceTemporarilyUnavailable,
-                &format!(
-                    "the recorder's request queue holds {} and is full; try again once the \
-                     recorder has caught up; see {ERRORS_DOC}",
-                    spec::RECORDER_QUEUE_CAPACITY
-                ),
-            );
+            self.recorder_queue_full(correlation_id);
             return;
         }
         self.recordings.push(RecordingEntry {
@@ -1413,13 +1428,23 @@ impl Conductor {
     }
 
     /// Offers a request to the recorder, or keeps it for the next cycle when the queue
-    /// is full; the deferred list holds at most one attach and one stop per recording.
+    /// is full or earlier requests are still waiting, so that the recorder sees them in
+    /// order. Nothing is dropped: the deferred list never passes its capacity, by the
+    /// argument on `Conductor::deferred`, which the capacity test drives to the bound.
     fn request(&mut self, request: Request) {
-        if let Err(request) = self.recorder.requests.offer(request)
-            && self.deferred.len() < 2 * spec::MAX_RECORDINGS
-        {
-            self.deferred.push_back(request);
-        }
+        let request = if self.deferred.is_empty() {
+            match self.recorder.requests.offer(request) {
+                Ok(()) => return,
+                Err(request) => request,
+            }
+        } else {
+            request
+        };
+        debug_assert!(
+            self.deferred.len() < DEFERRED_CAPACITY,
+            "the deferred requests passed one attach and one stop per recording"
+        );
+        self.deferred.push_back(request);
     }
 
     /// Offers the deferred requests in order until the queue is full again.
@@ -1487,7 +1512,7 @@ impl Conductor {
     /// allocated, keyed by the recording id and set to the start position, the recorder
     /// gets their handles, and the client gets `recording ready`. A counters file with
     /// no free record fails the start with code 10 and asks the recorder to stop the
-    /// slot at its start.
+    /// recording (`fail_start`).
     fn on_ready(&mut self, publication_id: i64, correlation_id: i64, recording_id: i64, now: i64) {
         let Some(index) = self.recordings.iter().position(|recording| {
             recording.publication_id == publication_id
@@ -1553,7 +1578,12 @@ impl Conductor {
     }
 
     /// A start the counters file refused after the slot was taken: the client gets
-    /// code 10, the entry fails, and the recorder stops the slot at its start position.
+    /// code 10 and the entry fails, but the recorder is already reading the log and
+    /// writing the slot, and goes on until it handles the stop asked for here. So the
+    /// entry stays registered, a floor at its start position for the limit, the
+    /// cleaning and the closing, and leaves only with the recorder's `Stopped` reply
+    /// (`on_stopped`), which ends the slot at the position written and tells every
+    /// client `recording stopped` (`spec/client-protocol.md`, "Commands"; invariant 1).
     fn fail_start(
         &mut self,
         index: usize,
@@ -1562,13 +1592,14 @@ impl Conductor {
         error: &CountersError,
     ) {
         self.counters_full(correlation_id, error);
-        self.recordings[index].state = RecordingState::Failed;
-        let publication_id = self.recordings.swap_remove(index).publication_id;
+        let entry = &mut self.recordings[index];
+        entry.state = RecordingState::Failed;
+        entry.recording_id = Some(recording_id);
+        entry.stop_requested = true;
         self.request(Request::Stop {
             recording_id,
             correlation_id: None,
         });
-        self.refresh_connected(publication_id);
     }
 
     /// The recorder could not take a slot or create the files: the entry fails and the
@@ -1664,6 +1695,21 @@ impl Conductor {
             &format!(
                 "the driver's {registry} registry holds {capacity} and is full; remove what is not \
                  used; see {ERRORS_DOC}"
+            ),
+        );
+    }
+
+    /// Answers `start recording` with `error`, code 10, when the recorder's request
+    /// queue is full or requests are still waiting for room in it.
+    fn recorder_queue_full(&mut self, correlation_id: i64) {
+        self.statics.registry_full.increment();
+        self.send_error(
+            correlation_id,
+            ErrorCode::ResourceTemporarilyUnavailable,
+            &format!(
+                "the recorder's request queue holds {} and is full; try again once the \
+                 recorder has caught up; see {ERRORS_DOC}",
+                spec::RECORDER_QUEUE_CAPACITY
             ),
         );
     }
@@ -1898,7 +1944,7 @@ mod recording {
 
     use super::tests::TestDir;
     use super::*;
-    use crate::recorder::{Recorder, start_failure};
+    use crate::recorder::{PENDING_REPLIES, Recorder, start_failure};
 
     const MS: i64 = 1_000_000;
     const WINDOW: i64 = spec::IPC_PUBLICATION_WINDOW as i64;
@@ -2282,6 +2328,336 @@ mod recording {
             stop, 192,
             "the recording ends at the last frame that checked"
         );
+        drop(appender);
+    }
+
+    /// Offers 32-byte messages, each numbered from `offered`, until back pressured at
+    /// `limit`, folding what went as `fold_recording` folds what was recorded.
+    fn offer_to(
+        appender: &mut cavalry_shm::log::TermAppender,
+        limit: i64,
+        offered: &mut i64,
+    ) -> u64 {
+        let mut fold = 0u64;
+        let mut message = [0u8; 32];
+        loop {
+            message[..8].copy_from_slice(&offered.to_le_bytes());
+            match appender.offer(&message, limit, 0) {
+                Ok(_) => {
+                    fold = fold_bytes(fold, &message);
+                    *offered += 1;
+                }
+                Err(ClaimError::AdminAction) => {}
+                Err(ClaimError::BackPressured) => return fold,
+                Err(error) => panic!("{error}"),
+            }
+        }
+    }
+
+    /// The fold of the first `count` messages `offer_to` numbers.
+    fn fold_offered(count: i64) -> u64 {
+        let mut message = [0u8; 32];
+        let mut fold = 0u64;
+        for n in 0..count {
+            message[..8].copy_from_slice(&n.to_le_bytes());
+            fold = fold_bytes(fold, &message);
+        }
+        fold
+    }
+
+    /// A start the counters file refuses once the recorder has taken the slot: the
+    /// recorder goes on reading the log until it handles the stop, so the entry stays
+    /// a floor at its start position until the recorder's reply. A subscriber that
+    /// read everything does not lift the limit past start + window meanwhile, the
+    /// recording stops at the position written, and its bytes are what was offered.
+    #[test]
+    fn a_start_the_counters_file_refuses_holds_the_limit_until_the_recorder_stops() {
+        let mut h = Harness::new("recorder-counters-full");
+        let now = h.now;
+        h.conductor.add_publication(1, 2, 7, IPC_CHANNEL, true, now);
+        h.conductor.add_subscription(1, 5, 7, IPC_CHANNEL);
+        assert_eq!(h.conductor.images.len(), 1, "the subscriber has an image");
+        h.conductor.start_recording(3, 7, IPC_CHANNEL, now);
+        h.conductor.duty_cycle(now);
+        assert_eq!(h.conductor.publications[0].limit.get(), WINDOW);
+
+        // The recorder takes the slot; its Ready waits in the reply queue while every
+        // free record of the counters file is taken.
+        h.recorder.duty_cycle(now);
+        let mut taken = 0;
+        while h
+            .conductor
+            .counters
+            .allocate(RECORDING_POSITION, &[0; 8], "filler")
+            .is_ok()
+        {
+            taken += 1;
+        }
+        assert!(taken > 0, "the counters file had free records");
+
+        // The publisher fills the window; the recorder writes a block of it, before
+        // the conductor has read its Ready.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let mut offered = 0;
+        offer_to(&mut appender, WINDOW, &mut offered);
+        assert_eq!(appender.position().expect("the position"), WINDOW);
+        h.recorder.duty_cycle(now);
+        assert_eq!(h.recorder.live_recordings(), 1, "the recorder is writing");
+
+        // The conductor finds no counters, while the subscriber reads everything: the
+        // limit waits for the recorder's stop.
+        h.conductor.images[0].position.store_release(WINDOW);
+        h.conductor.duty_cycle(now);
+        for _ in 0..3 {
+            h.now += MS;
+            h.conductor.duty_cycle(h.now);
+            assert_eq!(
+                h.conductor.publications[0].limit.get(),
+                WINDOW,
+                "the limit stays at start + window while the recorder reads the log"
+            );
+        }
+        // Code 10 and counted, the entry failed but still registered.
+        let (code, message) = h.last_error(3).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
+        assert_eq!(h.conductor.recordings.len(), 1, "the floor stays");
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Failed);
+        // A second start on the stream is told the recording is stopping.
+        h.conductor.start_recording(4, 7, IPC_CHANNEL, h.now);
+        let (code, message) = h.last_error(4).expect("an error event");
+        assert_eq!(code, 22, "{message}");
+        assert!(message.contains("stopping recording 0"), "{message}");
+
+        // The recorder handles the stop at the position written; only its reply
+        // removes the entry.
+        h.now += MS;
+        h.recorder.duty_cycle(h.now);
+        h.conductor.duty_cycle(h.now);
+        assert!(
+            h.conductor.recordings.is_empty(),
+            "the stop removed the floor"
+        );
+        assert_eq!(h.counter(RECORDING_STARTED), 0);
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        let (stop, read_back) = fold_recording(&h.log_dir, 0);
+        assert!(stop > 0 && stop <= WINDOW, "stopped at {stop}");
+        assert_eq!(
+            read_back,
+            fold_offered(stop / 64),
+            "the recording is what the publisher offered"
+        );
+        drop(appender);
+    }
+
+    /// The deferred requests ahead of a start: a stop that found the request queue
+    /// full waits, a start behind it is code 10 and counted and registers nothing, and
+    /// once the recorder catches up the stop is answered and a start goes through.
+    #[test]
+    fn a_start_waits_behind_the_deferred_requests() {
+        let mut h = Harness::new("recorder-deferred-order");
+        let now = h.now;
+        h.conductor.add_publication(1, 2, 7, IPC_CHANNEL, true, now);
+        h.conductor.add_publication(1, 4, 8, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(3, 7, IPC_CHANNEL, now);
+        h.cycle();
+        h.cycle();
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Live);
+
+        // The request queue full of stops of ids no recording holds.
+        let mut filler = 0;
+        while h
+            .conductor
+            .recorder
+            .requests
+            .offer(Request::Stop {
+                recording_id: 1_000_000 + filler,
+                correlation_id: None,
+            })
+            .is_ok()
+        {
+            filler += 1;
+        }
+        assert_eq!(filler, spec::RECORDER_QUEUE_CAPACITY as i64);
+        h.conductor.stop_recording(50, 0);
+        assert_eq!(h.conductor.deferred.len(), 1, "the stop waits");
+        h.conductor.start_recording(51, 8, IPC_CHANNEL, now);
+        let (code, message) = h.last_error(51).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("request queue"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
+        assert_eq!(h.conductor.recordings.len(), 1, "nothing registered");
+
+        for _ in 0..1_000 {
+            h.cycle();
+            if h.conductor.recordings.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            h.conductor.recordings.is_empty(),
+            "the stop reached the recorder"
+        );
+        assert!(h.conductor.deferred.is_empty());
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        h.conductor.start_recording(52, 8, IPC_CHANNEL, h.now);
+        assert_eq!(h.last_error(52), None);
+        assert_eq!(h.conductor.recordings.len(), 1, "the start went through");
+    }
+
+    /// The deferred requests at capacity (invariant 3): the registry full of
+    /// recordings, each given its attach and its stop while the request queue is
+    /// full, fills the list to exactly its bound and not past its allocation, and
+    /// every request reaches the recorder once it catches up.
+    #[test]
+    fn the_deferred_requests_are_bounded_by_one_attach_and_one_stop_per_recording() {
+        let mut h = Harness::new("recorder-deferred-capacity");
+        let now = h.now;
+        let allocated = h.conductor.deferred.capacity();
+        while h
+            .conductor
+            .recorder
+            .requests
+            .offer(Request::Stop {
+                recording_id: 1_000_000,
+                correlation_id: None,
+            })
+            .is_ok()
+        {}
+        let n = spec::MAX_RECORDINGS as i64;
+        for i in 0..n {
+            h.conductor.recordings.push(RecordingEntry {
+                publication_id: 100_000 + i,
+                session_id: 0,
+                stream_id: 9,
+                start_position: 0,
+                state: RecordingState::Starting,
+                recording_id: None,
+                position: None,
+                synced: None,
+                stop_requested: false,
+            });
+        }
+        h.conductor.recorder.next_recording_id = n;
+        for i in 0..n {
+            h.conductor.on_ready(100_000 + i, 60_000 + i, i, now);
+            h.conductor.stop_recording(70_000 + i, i);
+        }
+        assert_eq!(h.conductor.deferred.len(), DEFERRED_CAPACITY);
+        assert_eq!(
+            h.conductor.deferred.capacity(),
+            allocated,
+            "the list did not grow"
+        );
+        assert_eq!(h.counter(RECORDING_STARTED), n);
+
+        for _ in 0..10_000 {
+            h.cycle();
+            if h.conductor.deferred.is_empty() && h.conductor.recorder.requests.is_empty() {
+                break;
+            }
+        }
+        assert!(h.conductor.deferred.is_empty(), "every request was offered");
+        assert!(
+            h.conductor.recorder.requests.is_empty(),
+            "the recorder took every one"
+        );
+    }
+
+    /// The recorder's pending replies at capacity (invariant 3): with the conductor
+    /// taking no replies, the reply queue and then the pending replies fill; at the
+    /// bound the recorder handles no request and stops nothing, but keeps writing,
+    /// and once the conductor takes replies the held stop goes through.
+    #[test]
+    fn the_recorders_pending_replies_are_bounded_and_it_keeps_writing() {
+        let mut h = Harness::new("recorder-pending");
+        let now = h.now;
+        h.conductor.add_publication(1, 2, 7, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(3, 7, IPC_CHANNEL, now);
+        h.cycle();
+        h.cycle();
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Live);
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+
+        // Stops of ids no recording holds, each answered, until the replies are at
+        // their bound.
+        let fill = |h: &mut Harness| {
+            while h
+                .conductor
+                .recorder
+                .requests
+                .offer(Request::Stop {
+                    recording_id: 1_000_000,
+                    correlation_id: None,
+                })
+                .is_ok()
+            {}
+        };
+        for _ in 0..10_000 {
+            if h.recorder.pending_replies() >= PENDING_REPLIES {
+                break;
+            }
+            fill(&mut h);
+            h.now += MS;
+            h.recorder.duty_cycle(h.now);
+        }
+        assert_eq!(h.recorder.pending_replies(), PENDING_REPLIES);
+        assert_eq!(
+            h.conductor.recorder.replies.len(),
+            spec::RECORDER_QUEUE_CAPACITY
+        );
+        fill(&mut h);
+        let queued = h.conductor.recorder.requests.len();
+
+        // Four frames, the fourth with a version byte no reader accepts: the recorder
+        // writes the three before it, and does not stop at it while it has no room.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 0..4u8 {
+            appender.offer(&[n; 32], limit, 0).expect("offered");
+        }
+        let log_file = h.dir.path().join(log_layout::file_name(2));
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&log_file)
+            .expect("the log opens");
+        file.write_all_at(&[0xFF], 192 + 4)
+            .expect("the version byte is poisoned");
+        for _ in 0..8 {
+            h.now += MS;
+            h.recorder.duty_cycle(h.now);
+        }
+        assert_eq!(position.load_acquire(), 192, "the recorder kept writing");
+        assert_eq!(h.recorder.live_recordings(), 1, "it stopped nothing");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 0);
+        assert_eq!(
+            h.conductor.recorder.requests.len(),
+            queued,
+            "it handled no request"
+        );
+        assert_eq!(h.recorder.pending_replies(), PENDING_REPLIES);
+
+        // The conductor takes replies again; the stop goes through.
+        for _ in 0..10_000 {
+            h.cycle();
+            if h.conductor.recordings.is_empty() {
+                break;
+            }
+        }
+        assert!(h.conductor.recordings.is_empty(), "the recording stopped");
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 1);
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        let (stop, _) = fold_recording(&h.log_dir, 0);
+        assert_eq!(stop, 192);
         drop(appender);
     }
 }

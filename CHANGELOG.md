@@ -428,7 +428,10 @@ user-visible change, added in the same commit as the change. The format follows
   through two bounded queues. `recording.position` bounds the publisher's limit and the
   cleaning, so a slow disk back-pressures the publisher and never loses a byte; a
   recording alone connects its publication; a closed publication's log goes only once
-  its recording has stopped. `Driver::start` takes the log directory, opened under a
+  its recording has stopped; a start the counters file refuses after the recorder took
+  the slot is answered with code 10 and stopped, and the limit holds at the start
+  position until that stop is written; a `start recording` while stops and attaches wait
+  for room in the recorder's queue is answered with code 10. `Driver::start` takes the log directory, opened under a
   lock and recovered at start, with `Driver::default_log_dir()` as the rule until the
   `log.dir` key arrives; counters `recording.started`, `recording.stopped`,
   `recording.write_failed`, `recording.start_failed`, `recording.catalog_full`, the six
