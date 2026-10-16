@@ -8,7 +8,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use cavalry_shm::counters::generated::{COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED};
+use cavalry_shm::counters::generated::{
+    COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, COUNTERS_ALLOCATIONS, COUNTERS_FREED,
+};
 use cavalry_shm::counters::layout::{
     FILE_NAME, HEADER_LENGTH, HeaderFields, MAX_LABEL_LENGTH, RECORD_LENGTH, RecordFields,
     SLOT_LENGTH, State, encode_header, encode_record,
@@ -711,4 +713,34 @@ fn a_writer_stores_the_value_of_the_counter_the_driver_allocated_for_it() {
             .reason(),
         "io"
     );
+}
+
+/// Invariant 4: an allocation and a free each add one to a counter of their own, so the
+/// record's transitions are counted and not inferred from the `counters.allocated` gauge.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn every_allocation_and_every_free_is_counted() {
+    let dir = Dir::new("transitions");
+    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let reader = CountersReader::open(dir.path()).unwrap();
+    assert_eq!(reader.read(COUNTERS_ALLOCATIONS.record()).unwrap(), 0);
+    assert_eq!(reader.read(COUNTERS_FREED.record()).unwrap(), 0);
+    let first = file.allocate(INSTANCE, &[1], "first").unwrap();
+    let second = file.allocate(INSTANCE, &[2], "second").unwrap();
+    assert_eq!(reader.read(COUNTERS_ALLOCATIONS.record()).unwrap(), 2);
+    file.free(first.id(), 0).unwrap();
+    assert_eq!(reader.read(COUNTERS_FREED.record()).unwrap(), 1);
+    assert_eq!(
+        reader.read(COUNTERS_ALLOCATED.record()).unwrap(),
+        statics() as i64 + 1,
+        "allocations minus freed is the gauge"
+    );
+    let _again = file.allocate(INSTANCE, &[3], "again").unwrap();
+    assert_eq!(
+        reader.read(COUNTERS_ALLOCATIONS.record()).unwrap(),
+        3,
+        "a reclaimed record allocated again is an allocation"
+    );
+    assert_eq!(reader.read(COUNTERS_FREED.record()).unwrap(), 1);
+    drop(second);
 }

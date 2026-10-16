@@ -400,3 +400,7 @@ user-visible change, added in the same commit as the change. The format follows
   A start that fails after its slot is written stops the slot at its start, as recovery
   would. The README
   example is this path, from open to read-back.
+- Two counters for the counters file's own transitions: `counters.allocations` adds one
+  for every record allocated and `counters.freed` for every record freed, so that the
+  `counters.allocated` gauge's moves are counted, as invariant 4 asks of every state
+  transition (`spec/counters-file.md`, Metadata record).

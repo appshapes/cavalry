@@ -11,7 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
 use super::cells::{HeaderCells, RecordCells, SlotCells};
-use super::generated::{COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED};
+use super::generated::{
+    COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, COUNTERS_ALLOCATIONS, COUNTERS_FREED,
+};
 use super::layout::{
     FILE_NAME, HEADER_LENGTH, HeaderFields, MAX_CAPACITY, RECORD_LENGTH, RecordFields, SLOT_LENGTH,
     State,
@@ -177,6 +179,8 @@ pub struct CountersFile {
     mapped: Arc<Mapped>,
     allocated: Counter,
     allocation_failed: Counter,
+    allocations: Counter,
+    freed: Counter,
 }
 
 impl CountersFile {
@@ -220,12 +224,22 @@ impl CountersFile {
             Arc::clone(&mapped),
             static_record(COUNTERS_ALLOCATION_FAILED, capacity)?,
         )?;
+        let allocations = Counter::new(
+            Arc::clone(&mapped),
+            static_record(COUNTERS_ALLOCATIONS, capacity)?,
+        )?;
+        let freed = Counter::new(
+            Arc::clone(&mapped),
+            static_record(COUNTERS_FREED, capacity)?,
+        )?;
         allocated.set(count);
         mapped.header_cells().publish(&fields);
         Ok(Self {
             mapped,
             allocated,
             allocation_failed,
+            allocations,
+            freed,
         })
     }
 
@@ -241,7 +255,8 @@ impl CountersFile {
 
     /// Allocates a counter of type `type_id` with `key` and `label` in the first record
     /// that is unused or reclaimed past its deadline, sets its value to 0, publishes
-    /// the record, and adds one to `counters.allocated`. When no record is free the
+    /// the record, and adds one to `counters.allocated` and to `counters.allocations`,
+    /// the transition's own count (invariant 4). When no record is free the
     /// error is [`CountersError::Full`] and `counters.allocation_failed` gains one
     /// (`spec/counters-file.md`, "When the file is full"). A key over
     /// [`super::layout::KEY_LENGTH`] bytes is [`CountersError::Key`] and a label over
@@ -276,12 +291,15 @@ impl CountersFile {
         self.mapped.slot(id)?.reset();
         self.mapped.record(id)?.publish(&fields);
         self.allocated.increment();
+        self.allocations.increment();
         Counter::new(Arc::clone(&self.mapped), id)
     }
 
     /// Frees counter `id`: its record becomes reclaimed and may be allocated again after
-    /// `reusable_after` nanoseconds since the Unix epoch, and `counters.allocated` loses
-    /// one. A handle on the counter keeps working on its slot; readers see no counter.
+    /// `reusable_after` nanoseconds since the Unix epoch, `counters.allocated` loses one
+    /// and `counters.freed` gains one, so that how often records were freed is read from
+    /// a counter and not inferred from a gauge that moved back (invariant 4). A handle
+    /// on the counter keeps working on its slot; readers see no counter.
     /// [`CountersError::Id`] when `id` is not below the capacity, and
     /// [`CountersError::Unallocated`] when the record holds no counter.
     pub fn free(&mut self, id: u32, reusable_after: i64) -> Result<(), CountersError> {
@@ -291,6 +309,7 @@ impl CountersFile {
         }
         record.free(reusable_after);
         self.allocated.add(-1);
+        self.freed.increment();
         Ok(())
     }
 
