@@ -18,6 +18,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Implement a feature, from card to commit](how-to/implement-a-feature.md)
 - [Run the bench and compare it with the baseline](how-to/run-the-bench.md)
 - [Run a driver and read doctor](how-to/run-the-driver.md)
+- [Record a stream to the durable log](how-to/record-a-stream.md)
 - [Set up a bench host for the latency gate](how-to/set-up-a-bench-host.md)
 - [Send the weekly release-notes email](how-to/send-the-release-notes.md)
 

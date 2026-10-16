@@ -455,3 +455,20 @@ user-visible change, added in the same commit as the change. The format follows
   (`recording.started`, `recording.stopped`, the failure counters); the two ring record
   states are exempt with their reasons. This is the gate CLAUDE.md names for a transition
   with no counter (ADR 0024, ADR 0025, card 93).
+- The `log.dir` configuration key: the log directory, `--log-dir` on `run` and `doctor`
+  or `CAVALRY_LOG_DIR`, defaulting to `$XDG_DATA_HOME/cavalry/log`, else
+  `~/.local/share/cavalry/log`, and `/var/lib/cavalry/log` as root; with neither a home
+  nor root `cavalry run` refuses to start and names the key. Its doctor check,
+  `log-directory-backing`, warns on a directory in memory, on an overlay or network
+  filesystem, not writable by this user (the directory's mode bits, before any driver
+  has used it, and the catalog once there is one), or under 1 GiB free (ADR 0025).
+- `cavalry record <stream id>` records a stream's live publication to the durable log and
+  prints the recording id; `cavalry record --stop <id>` stops it. `Cavalry::start_recording`
+  and `Cavalry::stop_recording` are the same in the client API, with a `Recording` handle
+  whose two positions read from the counters file and whose `stop` stops it; dropping it
+  stops nothing. `cavalry
+  doctor` lists every recording's position and synced position, and adds
+  `recording-stalled` (a recorder a full window behind its publisher),
+  `recording-write-failed` and `recording-invalid`, which names the catalog slots recovery
+  could not repair when run with `--log-dir`. The how-to page is
+  `docs/how-to/record-a-stream.md` (ADR 0025).

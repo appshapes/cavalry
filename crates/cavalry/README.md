@@ -13,18 +13,21 @@ binary's `main`.
   `just quickstart` runs it end to end.
 - `cargo install cavalry` gives the `cavalry` binary: `run` starts a driver and stops
   it on Ctrl-C or SIGTERM, leaving the directory for `doctor`; `doctor` explains the
-  driver from its counters and exits 0 when no check failed; `replay` and `console`
-  arrive with their features.
+  driver from its counters and exits 0 when no check failed, listing every recording's
+  two positions; `record <stream id>` records a stream's live publication to the durable
+  log and `record --stop <id>` stops it (ADR 0025); `replay` and `console` arrive with
+  their features.
 - Control-plane and command-line dependencies sit behind the `cli` feature, on by
   default so that `cargo install cavalry` needs no flag. `cargo add cavalry --no-
   default-features` is the lean library build; it skips the binary and `doctor`.
 - Needs no arguments and no configuration: the directory is
   `spec/client-protocol.md`'s default, `/dev/shm/cavalry-<user>` on Linux and
-  `<tmp>/cavalry-<user>` elsewhere, and the conductor backs off when idle. The two keys
-  of `config.toml` change that: `--dir <path>` on `run` and `doctor`, or `CAVALRY_DIR`,
-  and `CAVALRY_CONDUCTOR_IDLE_STRATEGY`, `backoff`, `yield` or `busy-spin`; the flag
-  wins over the variable, and a value a key does not take exits 2 before anything
-  starts, saying what to do. Each key carries its `why_not_default` and its `doctor`
+  `<tmp>/cavalry-<user>` elsewhere, the log directory is `~/.local/share/cavalry/log`,
+  and the conductor backs off when idle. The three keys of `config.toml` change that:
+  `--dir <path>` on every command, or `CAVALRY_DIR`; `--log-dir <path>` on `run` and
+  `doctor`, or `CAVALRY_LOG_DIR`; and `CAVALRY_CONDUCTOR_IDLE_STRATEGY`, `backoff`,
+  `yield` or `busy-spin`; the flag wins over the variable, and a value a key does not
+  take exits 2 before anything starts, saying what to do. Each key carries its `why_not_default` and its `doctor`
   check (invariant 5; ADR 0020), and `cavalry::config` is the reader behind both.
 
 In Aeron, this is the client library and the media driver, which are separate artifacts

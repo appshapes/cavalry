@@ -18,6 +18,9 @@ cavalry-shm = { path = "../cavalry-shm" }
 # `IdleStrategy` and default directory; control plane depending on the data plane is
 # the allowed direction (`scripts/lint-workspace.py`, planes).
 cavalry-driver = { path = "../cavalry-driver" }
+# `doctor` names the catalog slots recovery set to invalid, read through the durable
+# log's read-only catalog reader (spec/durable-log.md; ADR 0025).
+cavalry-log = { path = "../cavalry-log" }
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]

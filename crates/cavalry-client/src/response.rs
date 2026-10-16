@@ -20,6 +20,14 @@ pub(crate) enum Response {
     SubscriptionReady { correlation_id: i64 },
     /// `operation success`.
     Success { correlation_id: i64 },
+    /// `recording ready`.
+    RecordingReady {
+        correlation_id: i64,
+        recording_id: i64,
+        session_id: i32,
+        position_counter_id: i32,
+        synced_position_counter_id: i32,
+    },
     /// `error`, with Aeron's code and the driver's message.
     Error {
         correlation_id: i64,
@@ -34,6 +42,7 @@ impl Response {
             Response::PublicationReady { correlation_id, .. }
             | Response::SubscriptionReady { correlation_id }
             | Response::Success { correlation_id }
+            | Response::RecordingReady { correlation_id, .. }
             | Response::Error { correlation_id, .. } => *correlation_id,
         }
     }
