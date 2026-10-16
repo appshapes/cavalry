@@ -477,3 +477,6 @@ user-visible change, added in the same commit as the change. The format follows
   stream to the durable log under the bench directory, and the run fails unless the
   recording reached the publisher's final position; new rows, reported until the bench
   host records their baseline (ADR 0025, ADR 0023's measurement with recording on).
+  The rows found the one allocation the recorder made after a start, at a segment
+  roll, and the roll now formats the next file's name on the stack into a path the
+  writer keeps, so the bench's zero-allocation gate holds with a recording on.

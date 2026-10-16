@@ -14,8 +14,9 @@ The durable log: recording and replay. Data plane.
   block of committed frames with one positional write, appends an index entry at most
   once per millisecond, rolls segments at their length, and syncs once per second
   behind two positions, what is written and what is synced; `LogDir::stop` writes the
-  stop (ADR 0025). A roll that fails on a full disk is an `io` error and is retried at
-  the next write, never a stuck writer. On any error from `write`, the block was taken
+  stop (ADR 0025). A roll allocates nothing: the next segment's name is formatted on
+  the stack into a path the writer keeps. A roll that fails on a full disk is an `io`
+  error and is retried at the next write, never a stuck writer. On any error from `write`, the block was taken
   exactly when `position()` moved. The delete of a stopped recording, state 3, arrives
   with card 95's purge, with its counter and its caller in the driver; until then the
   catalog writer has no `delete`, so every transition it writes is one the driver counts.
