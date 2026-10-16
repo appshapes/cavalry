@@ -441,3 +441,18 @@ user-visible change, added in the same commit as the change. The format follows
   counter and its caller in the driver, so that every catalog transition on `master` is
   one the driver performs and counts (CLAUDE.md, invariant 4); the catalog's truncation
   of a torn tail at open is now synced.
+- The `log.dir` configuration key: the log directory, `--log-dir` on `run` and `doctor`
+  or `CAVALRY_LOG_DIR`, defaulting to `$XDG_DATA_HOME/cavalry/log`, else
+  `~/.local/share/cavalry/log`, and `/var/lib/cavalry/log` as root; with neither a home
+  nor root `cavalry run` refuses to start and names the key. Its doctor check,
+  `log-directory-backing`, warns on a directory in memory, on an overlay or network
+  filesystem, not writable, or under 1 GiB free (ADR 0025).
+- `cavalry record <stream id>` records a stream's live publication to the durable log and
+  prints the recording id; `cavalry record --stop <id>` stops it. `Cavalry::start_recording`
+  and `Cavalry::stop_recording` are the same in the client API, with a `Recording` handle
+  whose two positions read from the counters file; dropping it stops nothing. `cavalry
+  doctor` lists every recording's position and synced position, and adds
+  `recording-stalled` (a recorder a full window behind its publisher),
+  `recording-write-failed` and `recording-invalid`, which names the catalog slots recovery
+  could not repair when run with `--log-dir`. The how-to page is
+  `docs/how-to/record-a-stream.md` (ADR 0025).

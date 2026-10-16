@@ -214,3 +214,59 @@ fn a_value_a_key_does_not_take_stops_the_command_before_anything_starts() {
         );
     }
 }
+
+/// `cavalry record` against a running driver with nothing publishing: the start and the
+/// stop are refused with the driver's own messages and codes, exit 1; `--log-dir` names
+/// the log directory on `run`, and `doctor --log-dir` checks it without failing.
+#[test]
+fn record_is_refused_with_the_drivers_message_when_nothing_publishes() {
+    let dir = TestDir::new("record");
+    let log_dir = format!("{}-log", dir.arg());
+    let _ = std::fs::remove_dir_all(&log_dir);
+    let mut run = cavalry()
+        .args(["run", "--dir", &dir.arg(), "--log-dir", &log_dir])
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run starts");
+    wait_until_running(&mut run, || {
+        let mut c = cavalry();
+        c.args(["doctor", "--dir", &dir.arg()]);
+        c
+    });
+    let output = cavalry()
+        .args(["record", "61", "--dir", &dir.arg()])
+        .output()
+        .expect("record runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no live publication on stream 61"),
+        "{stderr}"
+    );
+    let output = cavalry()
+        .args(["record", "--stop", "7", "--dir", &dir.arg()])
+        .output()
+        .expect("record runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not in the catalog"), "{stderr}");
+    let output = cavalry()
+        .args(["doctor", "--dir", &dir.arg(), "--log-dir", &log_dir])
+        .output()
+        .expect("doctor runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        Path::new(&log_dir).join("catalog").is_file(),
+        "the driver opened the log directory"
+    );
+    let stderr = terminate(run);
+    assert!(
+        stderr.contains(&format!("recording into {log_dir}")),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&log_dir);
+}

@@ -33,10 +33,14 @@ In Aeron, this is the media driver ([glossary](../glossary.md)).
 
    To run it elsewhere, or a second one beside the first, give the directory:
    `cargo run --release -p cavalry -- run --dir /dev/shm/cavalry-two`, or set
-   `CAVALRY_DIR`; the flag wins. On a host with isolated CPUs, run the driver on one of
-   them with `CAVALRY_CONDUCTOR_IDLE_STRATEGY=busy-spin`. Those are the two
-   configuration keys this version has; [the configuration reference](../reference/config.md)
-   says what each does and why its default is not always right.
+   `CAVALRY_DIR`; the flag wins. The log directory, where recordings go on disk, is
+   `~/.local/share/cavalry/log` by default; `--log-dir <path>` or `CAVALRY_LOG_DIR`
+   chooses another, and `doctor` checks what it is on (`log-directory-backing`). On a
+   host with isolated CPUs, run the driver on one of them with
+   `CAVALRY_CONDUCTOR_IDLE_STRATEGY=busy-spin`. Those are the three configuration keys
+   this version has; [the configuration reference](../reference/config.md) says what each
+   does and why its default is not always right. Recording a stream is
+   [its own page](record-a-stream.md).
 
 2. In another terminal, read `doctor`:
 
