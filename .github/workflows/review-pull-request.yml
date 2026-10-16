@@ -129,7 +129,10 @@ jobs:
           # bound: 1.5 times its largest observed reviewer session (42 turns), rounded up.
           # Re-measure when a Cavalry session reaches 47 turns or the pin moves.
           # --add-dir pr-head: the pull request's tree, checked out above (ADR 0005).
-          claude_args: "--model claude-opus-5-5 --max-turns 70 --add-dir pr-head"
+          # Fable 5.1 at xhigh effort (owner, 2026-10-16): the highest reasoning available, for the
+          # agents that gate and write this repository. The turn and time bounds were measured
+          # on Opus and on Brigade, so the first Fable runs are read for duration.
+          claude_args: "--model claude-fable-5-1 --effort xhigh --max-turns 70 --add-dir pr-head"
           # Public repository: run logs are world readable. Keep the agent's output out.
           show_full_output: false
           prompt: |

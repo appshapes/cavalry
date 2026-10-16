@@ -203,7 +203,10 @@ jobs:
           # 1.5 times its largest observed writer session (124 turns), rounded up. Re-measure
           # when a Cavalry session passes 150. The spend ceiling is the plan behind the OAuth
           # token; there is no second ceiling to set here.
-          claude_args: "--model claude-opus-5-5 --max-turns 200"
+          # Fable 5.1 at xhigh effort (owner, 2026-10-16): the highest reasoning available, for the
+          # agents that gate and write this repository. The turn and time bounds were measured
+          # on Opus and on Brigade, so the first Fable runs are read for duration.
+          claude_args: "--model claude-fable-5-1 --effort xhigh --max-turns 200"
           # Public repository: run logs are world readable. Keep the agent's output out.
           show_full_output: false
           # Lets the agent read its own workflow run logs when a gate fails in CI.

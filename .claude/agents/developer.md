@@ -3,7 +3,7 @@ name: developer
 description: The writer and fixer role for the agentic loop. Implements a labelled issue on a
   branch, and applies the reviewer's blockers on a pull request branch. Runs through the claude
   workflow.
-model: opus
+model: fable
 color: blue
 tools: Read, Write, Edit, Bash, Glob, Grep
 ---

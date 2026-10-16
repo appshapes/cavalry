@@ -408,3 +408,6 @@ user-visible change, added in the same commit as the change. The format follows
   the list in the secret `RELEASE_NOTES_RECIPIENTS`. A run by hand is a preview to one
   address; `draft_run` sends what a preview approved. `docs/how-to/send-the-release-notes.md`
   is the page, and `just test-scripts`, which `just test` now runs first, tests the scripts.
+- The writer, the reviewer and the release-notes agents run on Fable 5.1 at xhigh effort,
+  in the three workflows and in their briefs' frontmatter, so that the agents that gate
+  and write this repository have the highest reasoning available.

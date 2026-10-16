@@ -3,7 +3,7 @@ name: release-notes-email
 description: Writes and reviews the weekly release-notes email that goes to Cavalry's list of
   recipients, from the week's commits on master. Runs through the send release notes workflow,
   read-only.
-model: opus
+model: fable
 color: green
 tools: Read, Bash, Grep, Glob
 ---
