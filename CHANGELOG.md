@@ -449,7 +449,9 @@ user-visible change, added in the same commit as the change. The format follows
   `*State`, `*Status` or `*Phase` with neither that mark nor `// not a state machine:
   <why>` fails it. Three machines register with it: the counters file's metadata record
   (`counters.allocations`, `counters.freed`), the recording catalog's descriptor
-  (`recording.started`, `recording.invalidated`) and the driver's view of a recording
+  (a slot taken in `recording.started`, `recording.start_failed` or
+  `driver.registry_full`, a slot set to invalid in `recording.invalidated`) and the
+  driver's view of a recording
   (`recording.started`, `recording.stopped`, the failure counters); the two ring record
   states are exempt with their reasons. This is the gate CLAUDE.md names for a transition
   with no counter (ADR 0024, ADR 0025, card 93).
