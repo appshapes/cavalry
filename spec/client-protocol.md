@@ -142,20 +142,21 @@ What the driver does with each, after the checks of "What the driver rejects":
   lowest registration id that is not yet being recorded, so that a second command records
   the next one. None live: error code 20. Every one being recorded, or its recording
   starting: error code 22, and the message names the recording id once the recorder has
-  given it. The recordings registry at capacity, or the counters file with no free record:
-  code 10. Otherwise the recording starts at the publication's producer position, loaded
-  afresh as a join loads it (ADR 0022): from this command on the publication's limit and
-  cleaning respect that position (`spec/log-buffer.md`, "The driver"), and the driver asks
-  its recorder for a catalog slot. The recorder takes the slot and creates the time index
-  and the first segment file as `spec/durable-log.md`, "The driver" says; the driver then
-  allocates the recording's `recording.position` and `recording.synced_position` counters
-  (`counters.toml`), keyed by the recording id and set to the start position, adds one to
-  `recording.started`, and answers `recording ready` with the recording id, the session id
-  and the two counter ids, within the client's response timeout. The catalog's slots used
-  up is code 10 and adds one to `recording.catalog_full`; a time index or segment file
-  that cannot be created is code 12 and adds one to `recording.start_failed`; either frees
-  the publication's limit from the recording. A recording belongs to the driver, not to
-  the client that started it: it outlives that client, and any client may stop it.
+  given it. The recordings registry at capacity, the counters file with no free record, or
+  the recorder's request queue full: code 10. Otherwise the recording starts at the
+  publication's producer position, loaded afresh as a join loads it (ADR 0022): from this
+  command on the publication's limit and cleaning respect that position
+  (`spec/log-buffer.md`, "The driver"), and the driver asks its recorder for a catalog
+  slot. The recorder takes the slot and creates the time index and the first segment file
+  as `spec/durable-log.md`, "The driver" says; the driver then allocates the recording's
+  `recording.position` and `recording.synced_position` counters (`counters.toml`), keyed
+  by the recording id and set to the start position, adds one to `recording.started`, and
+  answers `recording ready` with the recording id, the session id and the two counter ids,
+  within the client's response timeout. The catalog's slots used up is code 10 and adds
+  one to `recording.catalog_full`; a time index or segment file that cannot be created is
+  code 12 and adds one to `recording.start_failed`; either frees the publication's limit
+  from the recording. A recording belongs to the driver, not to the client that started
+  it: it outlives that client, and any client may stop it.
 - **stop recording.** The driver stops the recording at the position the recorder has
   written and answers `operation success` once the catalog's stop fields are written and
   synced (`spec/durable-log.md`, "The driver"); then every client gets `recording
