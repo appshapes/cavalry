@@ -371,23 +371,10 @@ impl CatalogWriter {
         self.rewrite(self.slot(recording_id)?, &descriptor)
     }
 
-    /// Writes state 3 on a stopped recording: the delete the page defines, after which
-    /// the caller removes the recording's files. A live, deleted or invalid recording
-    /// is `transition`, and nothing is written.
-    pub fn delete(&mut self, recording_id: i64) -> Result<(), CatalogError> {
-        let slot = self.slot(recording_id)?;
-        let descriptor = self
-            .get(recording_id)?
-            .ok_or(CatalogError::Unknown { recording_id })?;
-        if descriptor.state() != State::Valid || descriptor.is_live() {
-            return Err(CatalogError::Transition {
-                recording_id,
-                from: descriptor.state(),
-                needed: "a stopped recording",
-            });
-        }
-        self.write_state(slot, State::Deleted)
-    }
+    // The delete the page defines, state 3 on a stopped recording, arrives with card
+    // 95's purge, with its counter and its caller in the driver: a transition the driver
+    // cannot yet perform is not written here, so that every catalog transition on master
+    // is one the driver performs and counts (CLAUDE.md, invariant 4).
 
     /// Writes state 2 on a slot recovery found damaged: valid or deleted, whatever its
     /// checksums say, since damage is why. An empty slot is `unknown`, an invalid one

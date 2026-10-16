@@ -434,3 +434,7 @@ user-visible change, added in the same commit as the change. The format follows
   `recording.write_failed`, `recording.start_failed`, `recording.catalog_full`, the six
   recovery counters, and the gauges `recording.position` and `recording.synced_position`
   per recording (ADR 0025).
+- `cavalry-log`: `CatalogWriter::delete` leaves until card 95 brings the purge with its
+  counter and its caller in the driver, so that every catalog transition on `master` is
+  one the driver performs and counts (CLAUDE.md, invariant 4); the catalog's truncation
+  of a torn tail at open is now synced.
