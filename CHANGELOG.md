@@ -383,3 +383,20 @@ user-visible change, added in the same commit as the change. The format follows
   wholly past the stop are removed, and a deleted recording's files are removed again;
   every action is reported for the driver to count. The workspace's Rust floor moves
   from 1.85 to 1.89 for the lock (ADR 0025).
+- `cavalry-log`: the recorder's side of a recording. `LogDir::start` takes the catalog
+  slot in the page's order and creates the time index with its start entry and the
+  first segment file at its full length, synced; `recorder::RecordingWriter::write`
+  writes one block of committed frames with one positional write, a padding block as its
+  header alone, appends a time index entry at most once per millisecond with timestamps
+  that never go back, and rolls into the next segment file at the segment's end, syncing
+  the one it closes; `sync` syncs the segment and the index once per second while bytes
+  are unsynced and moves `synced_position` up to `position`; `LogDir::stop` writes the
+  stop entry, syncs, removes a segment wholly past the stop and then writes the
+  catalog's stop fields, so a crash between the two leaves a live slot recovery repairs.
+  A block that is empty, unaligned, longer in bytes than in length or that would cross
+  its segment is refused with nothing moved (ADR 0025). A roll that fails, a full disk
+  at the next segment, is `io` and is retried at the next write; on any error, the block
+  was taken exactly when `position()` moved, so the caller compares it before and after.
+  A start that fails after its slot is written stops the slot at its start, as recovery
+  would. The README
+  example is this path, from open to read-back.
