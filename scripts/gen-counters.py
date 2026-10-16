@@ -317,7 +317,6 @@ def check_enums(machines: dict[str, dict]) -> None:
     table has exactly one marked enum; every enum whose name says it holds a state is
     marked, as a state machine or as not one."""
     found: dict[str, str] = {}
-    crate_of: dict[str, str] = {}
     unmarked: list[str] = []
     for path in sorted(CRATES.glob("*/src/**/*.rs")):
         file = path.relative_to(ROOT).as_posix()
@@ -344,7 +343,6 @@ def check_enums(machines: dict[str, dict]) -> None:
                 raise Fail(f"{where}: state machine {name!r} is also marked at {found[name]}; "
                            "one enum per machine")
             found[name] = where
-            crate_of[name] = crate
             states = machines[name]["states"]
             if sorted(variants) != sorted(states):
                 raise Fail(f"{where}: the enum's variants {sorted(variants)} are not the "
