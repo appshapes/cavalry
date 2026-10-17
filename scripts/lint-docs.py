@@ -207,7 +207,12 @@ def check_glossary() -> tuple[int, int]:
     first_words = {t.split()[0] for t in terms if t}
     names: list[str] = []
     if COUNTERS.exists():
-        names = re.findall(r'^name\s*=\s*"([^"]+)"', COUNTERS.read_text(encoding="utf-8"), re.M)
+        # The names of [[counter]] tables only: a [[state_machine]] names a machine, not a
+        # counter, and its transitions name counters that are checked here through theirs.
+        text = COUNTERS.read_text(encoding="utf-8")
+        for block in re.split(r"^\[\[", text, flags=re.M)[1:]:
+            if block.startswith("counter]]"):
+                names += re.findall(r'^name\s*=\s*"([^"]+)"', block, re.M)
     for name in names:
         segment = name.split(".", 1)[0].replace("_", " ")
         if segment not in terms and segment not in first_words:

@@ -21,6 +21,8 @@ cavalry-proto = { path = "../cavalry-proto" }
 [dev-dependencies]
 # The tests run a real driver in the test process (ADR 0007: one driver, Rust clients).
 cavalry-driver = { path = "../cavalry-driver" }
+# The recording test reads the catalog's stop back (ADR 0025). Dev only.
+cavalry-log = { path = "../cavalry-log" }
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]

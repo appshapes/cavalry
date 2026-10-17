@@ -86,10 +86,13 @@ fmt-check:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# counters.toml is the single source of every counter (ADR 0012). gen-counters checks
-# it and writes docs/reference/counters.md and the constants in cavalry-shm from it;
-# lint-counters runs the same checks and fails when either generated file is stale.
-# The state-transition check CLAUDE.md names arrives with the first state machine.
+# counters.toml is the single source of every counter and of every data-plane state
+# machine (ADR 0012). gen-counters checks it and writes docs/reference/counters.md and the
+# constants in cavalry-shm from it; lint-counters runs the same checks and fails when
+# either generated file is stale, when a [[transition]] names no counter, when the enum
+# marked `// state machine: <name>` does not have the machine's states as variants, or
+# when an enum named *State, *Status or *Phase has neither that mark nor
+# `// not a state machine: <why>`.
 gen-counters:
     python3 scripts/gen-counters.py
 

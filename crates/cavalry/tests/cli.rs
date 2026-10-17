@@ -12,9 +12,12 @@ use std::time::{Duration, Instant};
 
 fn cavalry() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cavalry"));
-    // The tests set what they test; the developer's shell does not leak in.
+    // The tests set what they test; the developer's shell does not leak in. A test that
+    // runs a driver sets XDG_DATA_HOME to its own directory, so the default log directory
+    // (`Driver::default_log_dir`) lands there and never under the developer's home.
     command.env_remove("CAVALRY_DIR");
     command.env_remove("CAVALRY_CONDUCTOR_IDLE_STRATEGY");
+    command.env_remove("XDG_DATA_HOME");
     command
 }
 
@@ -112,6 +115,7 @@ fn run_on_a_dir_flag_starts_a_driver_doctor_sees_and_sigterm_closes_it() {
     let dir = TestDir::new("flag");
     let mut run = cavalry()
         .args(["run", "--dir", &dir.arg()])
+        .env("XDG_DATA_HOME", dir.arg())
         .stderr(Stdio::piped())
         .spawn()
         .expect("run starts");
@@ -153,6 +157,7 @@ fn the_environment_sets_the_directory_and_the_idle_strategy_and_the_flag_wins() 
     let mut run = cavalry()
         .arg("run")
         .env("CAVALRY_DIR", from_env.arg())
+        .env("XDG_DATA_HOME", from_env.arg())
         .env("CAVALRY_CONDUCTOR_IDLE_STRATEGY", "yield")
         .stderr(Stdio::piped())
         .spawn()
@@ -170,6 +175,7 @@ fn the_environment_sets_the_directory_and_the_idle_strategy_and_the_flag_wins() 
     let mut run = cavalry()
         .args(["run", "--dir", &from_flag.arg()])
         .env("CAVALRY_DIR", from_env.arg())
+        .env("XDG_DATA_HOME", from_flag.arg())
         .stderr(Stdio::piped())
         .spawn()
         .expect("run starts");
@@ -207,4 +213,60 @@ fn a_value_a_key_does_not_take_stops_the_command_before_anything_starts() {
             "{command} created the directory"
         );
     }
+}
+
+/// `cavalry record` against a running driver with nothing publishing: the start and the
+/// stop are refused with the driver's own messages and codes, exit 1; `--log-dir` names
+/// the log directory on `run`, and `doctor --log-dir` checks it without failing.
+#[test]
+fn record_is_refused_with_the_drivers_message_when_nothing_publishes() {
+    let dir = TestDir::new("record");
+    let log_dir = format!("{}-log", dir.arg());
+    let _ = std::fs::remove_dir_all(&log_dir);
+    let mut run = cavalry()
+        .args(["run", "--dir", &dir.arg(), "--log-dir", &log_dir])
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run starts");
+    wait_until_running(&mut run, || {
+        let mut c = cavalry();
+        c.args(["doctor", "--dir", &dir.arg()]);
+        c
+    });
+    let output = cavalry()
+        .args(["record", "61", "--dir", &dir.arg()])
+        .output()
+        .expect("record runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no live publication on stream 61"),
+        "{stderr}"
+    );
+    let output = cavalry()
+        .args(["record", "--stop", "7", "--dir", &dir.arg()])
+        .output()
+        .expect("record runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not in the catalog"), "{stderr}");
+    let output = cavalry()
+        .args(["doctor", "--dir", &dir.arg(), "--log-dir", &log_dir])
+        .output()
+        .expect("doctor runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        Path::new(&log_dir).join("catalog").is_file(),
+        "the driver opened the log directory"
+    );
+    let stderr = terminate(run);
+    assert!(
+        stderr.contains(&format!("recording into {log_dir}")),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&log_dir);
 }

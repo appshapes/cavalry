@@ -23,9 +23,9 @@ impl XorShift {
 
 const REASONS: [&str; 4] = ["too-short", "type", "string", "length"];
 
-const COMMAND_TYPES: [i32; 7] = [1, 2, 3, 4, 5, 6, 11];
-const EVENT_TYPES: [i32; 8] = [
-    0x0F01, 0x0F02, 0x0F03, 0x0F04, 0x0F05, 0x0F06, 0x0F07, 0x0F0A,
+const COMMAND_TYPES: [i32; 9] = [1, 2, 3, 4, 5, 6, 11, 0x0101, 0x0102];
+const EVENT_TYPES: [i32; 10] = [
+    0x0F01, 0x0F02, 0x0F03, 0x0F04, 0x0F05, 0x0F06, 0x0F07, 0x0F0A, 0x1001, 0x1002,
 ];
 
 fn check(type_id: i32, bytes: &[u8]) {
@@ -78,6 +78,17 @@ fn valid_messages() -> Vec<(i32, Vec<u8>)> {
             client_id: 5,
             correlation_id: 7,
         },
+        Command::StartRecording {
+            client_id: 5,
+            correlation_id: 11,
+            stream_id: 1001,
+            channel: b"cavalry:ipc",
+        },
+        Command::StopRecording {
+            client_id: 5,
+            correlation_id: 12,
+            recording_id: 0,
+        },
     ];
     let events = [
         Event::Error {
@@ -103,6 +114,17 @@ fn valid_messages() -> Vec<(i32, Vec<u8>)> {
             log_file_name: b"publications/7.logbuffer",
         },
         Event::ClientTimeout { client_id: 5 },
+        Event::RecordingReady {
+            correlation_id: 11,
+            recording_id: 0,
+            session_id: -2,
+            recording_position_counter_id: 16,
+            recording_synced_position_counter_id: 17,
+        },
+        Event::RecordingStopped {
+            recording_id: 0,
+            stop_position: 4096,
+        },
     ];
     let mut out = Vec::new();
     for command in commands {
@@ -127,10 +149,10 @@ fn random_bytes_under_every_type_never_panic() {
         for byte in &mut buf[..len] {
             *byte = rng.next() as u8;
         }
-        let pick = rng.next() % 16;
+        let pick = rng.next() % 20;
         let type_id = match pick {
-            0..=6 => COMMAND_TYPES[pick as usize],
-            7..=14 => EVENT_TYPES[(pick - 7) as usize],
+            0..=8 => COMMAND_TYPES[pick as usize],
+            9..=18 => EVENT_TYPES[(pick - 9) as usize],
             _ => rng.next() as i32,
         };
         check(type_id, &buf[..len]);
@@ -158,7 +180,7 @@ fn one_byte_mutations_of_valid_messages_never_panic() {
 #[test]
 fn every_type_id_is_a_command_an_event_or_rejected() {
     let message = [0u8; 16];
-    for type_id in -2..=0x1000 {
+    for type_id in -2..=0x1200 {
         let is_command = CommandType::try_from(type_id).is_ok();
         let is_event = EventType::try_from(type_id).is_ok();
         assert!(!(is_command && is_event), "type {type_id} is both");

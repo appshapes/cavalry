@@ -46,7 +46,7 @@ fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) -> bool {
 #[test]
 fn a_client_connects_to_a_running_driver_and_closes() {
     let dir = TestDir::new("connect");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let client = Cavalry::connect_to(dir.path()).expect("the client connects");
     assert!(
         client.client_id() >= 0,
@@ -75,7 +75,7 @@ fn no_driver_is_not_found_and_a_closed_one_is_gone() {
     assert_eq!(error.reason(), "not-found");
     assert!(error.to_string().contains("cavalry run"), "{error}");
 
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     driver.close().expect("the driver closes");
     let error = Cavalry::connect_to(dir.path()).expect_err("a closed driver");
     assert_eq!(error.reason(), "driver-gone");
@@ -85,7 +85,7 @@ fn no_driver_is_not_found_and_a_closed_one_is_gone() {
 #[test]
 fn a_driver_that_closes_closes_the_client() {
     let dir = TestDir::new("driver-closes");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let client = Cavalry::connect_to(dir.path()).expect("the client connects");
     driver.close().expect("the driver closes");
     assert!(
@@ -103,7 +103,7 @@ fn a_driver_that_closes_closes_the_client() {
 #[test]
 fn a_quiet_client_stays_alive_past_the_liveness_timeout() {
     let dir = TestDir::new("quiet");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let client = Cavalry::connect_to(dir.path()).expect("the client connects");
     // The client liveness timeout is 10 s: a client that sent nothing for that long is
     // timed out and told. The conductor's keepalives keep this one alive.

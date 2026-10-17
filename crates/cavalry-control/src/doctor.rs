@@ -1,8 +1,10 @@
 //! `cavalry doctor`: explains a driver's state from its directory alone, counters first
 //! (CLAUDE.md, invariant 4). [`examine`] opens the counters file and the command ring
 //! read-only, as the layouts' pages say a reader does, runs every check, and returns a
-//! [`Report`] whose findings each name the docs anchor that explains them. Nothing here
-//! writes, and nothing here is on the data plane.
+//! [`Report`] whose findings each name the docs anchor that explains them;
+//! [`examine_with`] adds the log directory: its backing, every recording's two positions,
+//! and the catalog slots recovery could not repair (ADR 0025). Nothing here writes, and
+//! nothing here is on the data plane.
 //!
 //! ```
 //! use cavalry_control::doctor::{Level, examine};
@@ -22,15 +24,20 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cavalry_driver::IdleStrategy;
+use cavalry_driver::{IdleStrategy, spec};
+use cavalry_log::catalog::CatalogReader;
+use cavalry_log::layout::State as SlotState;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
     CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
-    COUNTERS_ALLOCATION_FAILED,
+    COUNTERS_ALLOCATION_FAILED, PUBLICATION_POSITION, RECORDING_INVALIDATED, RECORDING_POSITION,
+    RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
-use crate::config::generated::{CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_KEY, DIR as DIR_KEY};
+use crate::config::generated::{
+    CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_KEY, DIR as DIR_KEY, LOG_DIR as LOG_DIR_KEY,
+};
 
 /// The driver timeout of `spec/client-protocol.md`: a heartbeat older than this is a
 /// stopped driver.
@@ -55,6 +62,27 @@ const DOC_HOST: &str = "docs/how-to/set-up-a-bench-host.md";
 /// The Linux filesystem types that live in memory: a log buffer on one of these never
 /// waits on write-back. `/dev/shm` is a tmpfs on every common distribution.
 const MEMORY_FILESYSTEMS: [&str; 3] = ["tmpfs", "ramfs", "hugetlbfs"];
+
+/// Filesystem types that are not a disk of this host's own: an overlay a container
+/// loses, or a network mount, where a sync and an advisory lock mean little. A log
+/// directory on one is a finding (ADR 0025).
+const OVERLAY_OR_NETWORK_FILESYSTEMS: [&str; 8] = [
+    "overlay",
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smb3",
+    "9p",
+    "fuse.sshfs",
+    "afs",
+];
+
+/// The least free space under the log directory worth no finding: eight segment files
+/// of 128 MiB, 1 GiB (ADR 0025).
+const LOG_FREE_WARNING: u64 = 8 * 128 * 1024 * 1024;
+
+const DOC_DURABLE_LOG_DRIVER: &str = "docs/reference/durable-log.md#the-driver";
+const DOC_RECORDING_COMMANDS: &str = "docs/reference/client-protocol.md#commands";
 
 /// How serious a finding is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -164,9 +192,23 @@ fn seconds(nanos: i64) -> f64 {
 
 /// Runs every check on the driver directory `dir` and returns the report. A missing
 /// directory or a dead driver stops the checks that need a running driver, and says so.
+/// The log directory's checks need its path: [`examine_with`].
 pub fn examine(dir: &Path) -> Report {
+    examine_with(dir, None)
+}
+
+/// [`examine`], and with `log_dir` the log directory's checks too: its backing, whether
+/// the driver's user can write it and how much room it has (`log-directory-backing`,
+/// the `log.dir` key's check), the catalog slots recovery set to invalid, named
+/// (`recording-invalid`), and every recording's two positions from the counters file,
+/// with a recorder a full window behind its publisher (`recording-stalled`) and failed
+/// writes (`recording-write-failed`) as findings (ADR 0025).
+pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
     let mut findings = Vec::new();
     let mut checks = 0;
+    if let Some(log_dir) = log_dir {
+        checks += log_directory_checks(log_dir, &mut findings);
+    }
 
     checks += 1;
     if !dir.is_dir() {
@@ -278,14 +320,208 @@ pub fn examine(dir: &Path) -> Report {
         }
     };
 
-    checks += counters_checks(dir, running, &mut findings);
+    checks += counters_checks(dir, running, log_dir, &mut findings);
     checks += host_checks(&mut findings);
     finish(dir, findings, checks)
 }
 
+/// The `log.dir` key's check: the directory in memory loses every recording at a reboot;
+/// on an overlay or a network filesystem a sync and a lock mean little; a directory the
+/// driver's user cannot write, or with less than eight segment files of room, stops the
+/// next recording. A directory that does not exist yet is a note: the driver creates it.
+fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
+    let mut checks = 1;
+    if !log_dir.is_dir() {
+        findings.push(Finding {
+            check: "log-directory-backing",
+            level: Level::Note,
+            message: format!(
+                "no log directory at {} yet; the driver creates it when it starts, under its \
+                 lock",
+                log_dir.display()
+            ),
+            doc: LOG_DIR_KEY.anchor,
+        });
+        return checks;
+    }
+    let canonical = log_dir
+        .canonicalize()
+        .unwrap_or_else(|_| log_dir.to_path_buf());
+    match backing(&canonical) {
+        Backing::Memory => findings.push(Finding {
+            check: "log-directory-backing",
+            level: Level::Warn,
+            message: format!(
+                "the log directory {} is in memory: a reboot loses every recording; set {}=<a \
+                 directory on a disk with room for the recordings>, or --log-dir",
+                log_dir.display(),
+                LOG_DIR_KEY.env
+            ),
+            doc: LOG_DIR_KEY.anchor,
+        }),
+        Backing::Disk { fstype, mount }
+            if OVERLAY_OR_NETWORK_FILESYSTEMS.contains(&fstype.as_str()) =>
+        {
+            findings.push(Finding {
+                check: "log-directory-backing",
+                level: Level::Warn,
+                message: format!(
+                    "the log directory {} is on {fstype} at {mount}, an overlay or network \
+                     filesystem, where a sync does not make a byte durable on this host and the \
+                     catalog's lock may not hold against another driver; set {}=<a directory on \
+                     a disk of this host>, or --log-dir",
+                    log_dir.display(),
+                    LOG_DIR_KEY.env
+                ),
+                doc: LOG_DIR_KEY.anchor,
+            })
+        }
+        Backing::Disk { .. } => {}
+        Backing::Unknown => findings.push(Finding {
+            check: "log-directory-backing",
+            level: Level::Note,
+            message: format!(
+                "whether {} is on a disk of this host cannot be read here: on macOS the default \
+                 is under the home directory, on disk; on Linux doctor reads the mount",
+                log_dir.display()
+            ),
+            doc: LOG_DIR_KEY.anchor,
+        }),
+    }
+    // Writable, without writing: the driver creates the catalog and every segment file in
+    // the directory, so the directory's mode bits must let this user add entries; and
+    // opening the catalog for writing is what the driver's lock needs, when there is one.
+    checks += 1;
+    let catalog = log_dir.join(cavalry_log::layout::CATALOG_FILE_NAME);
+    if let Some(user) = UserIds::current()
+        && let Ok(metadata) = std::fs::metadata(log_dir)
+        && !user.may_add_entries(&metadata)
+    {
+        findings.push(Finding {
+            check: "log-directory-backing",
+            level: Level::Warn,
+            message: format!(
+                "the log directory {} cannot be written by this user (uid {}): its mode is \
+                 {:o}, owner uid {}, group gid {}; the driver cannot create the catalog or a \
+                 segment file there; run the driver as a user that owns the log directory, \
+                 give the directory to it, or set {}=<a directory it can write>, or --log-dir",
+                log_dir.display(),
+                user.uid,
+                std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o7777,
+                std::os::unix::fs::MetadataExt::uid(&metadata),
+                std::os::unix::fs::MetadataExt::gid(&metadata),
+                LOG_DIR_KEY.env
+            ),
+            doc: LOG_DIR_KEY.anchor,
+        });
+    } else if catalog.is_file()
+        && let Err(error) = std::fs::OpenOptions::new().append(true).open(&catalog)
+    {
+        findings.push(Finding {
+            check: "log-directory-backing",
+            level: Level::Warn,
+            message: format!(
+                "the catalog at {} cannot be opened for writing by this user: {error}; the \
+                 driver must run as a user that owns the log directory, or the directory must \
+                 be given to it",
+                catalog.display()
+            ),
+            doc: LOG_DIR_KEY.anchor,
+        });
+    }
+    checks += 1;
+    if let Some(free) = free_bytes(&canonical)
+        && free < LOG_FREE_WARNING
+    {
+        findings.push(Finding {
+            check: "log-directory-backing",
+            level: Level::Warn,
+            message: format!(
+                "the filesystem under {} has {} MiB free, less than eight segment files of \
+                 128 MiB: the next recording, or the next segment of a live one, cannot be \
+                 created; free space, or set {}=<a directory with room>",
+                log_dir.display(),
+                free / (1024 * 1024),
+                LOG_DIR_KEY.env
+            ),
+            doc: LOG_DIR_KEY.anchor,
+        });
+    }
+    checks
+}
+
+/// This process's effective user and groups, read from `id -u` and `id -G`, which every
+/// Unix has; `None` when either cannot be run or read, which is not a finding.
+struct UserIds {
+    uid: u32,
+    gids: Vec<u32>,
+}
+
+impl UserIds {
+    fn current() -> Option<UserIds> {
+        let id = |flag: &str| -> Option<Vec<u32>> {
+            let output = std::process::Command::new("id").arg(flag).output().ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .map(|field| field.parse().ok())
+                .collect()
+        };
+        let uid = *id("-u")?.first()?;
+        Some(UserIds {
+            uid,
+            gids: id("-G")?,
+        })
+    }
+
+    /// Whether the mode bits of a directory let this user create an entry in it: write
+    /// and search, from the owner's, the group's or the others' bits, the first class
+    /// that applies, as the kernel decides; root may always. An ACL is not read.
+    fn may_add_entries(&self, metadata: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if self.uid == 0 {
+            return true;
+        }
+        let mode = metadata.permissions().mode();
+        let bits = if metadata.uid() == self.uid {
+            mode >> 6
+        } else if self.gids.contains(&metadata.gid()) {
+            mode >> 3
+        } else {
+            mode
+        };
+        bits & 0o3 == 0o3
+    }
+}
+
+/// The free bytes on the filesystem under `path`, read from `df -P -k`, which every
+/// Unix has; `None` when it cannot be run or read, which is not a finding.
+fn free_bytes(path: &Path) -> Option<u64> {
+    let output = std::process::Command::new("df")
+        .args(["-P", "-k"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // POSIX output: a header, then one line whose fourth field is the available 1K blocks.
+    let line = text.lines().nth(1)?;
+    let available: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    Some(available.saturating_mul(1024))
+}
+
 /// The counters file: full or filling, then every static counter whose `doctor` text
-/// applies when it is above 0.
-fn counters_checks(dir: &Path, running: bool, findings: &mut Vec<Finding>) -> usize {
+/// applies when it is above 0, then the recordings.
+fn counters_checks(
+    dir: &Path,
+    running: bool,
+    log_dir: Option<&Path>,
+    findings: &mut Vec<Finding>,
+) -> usize {
     let reader = match CountersReader::open(dir) {
         Ok(reader) => reader,
         Err(CountersError::NotReady) => {
@@ -317,36 +553,8 @@ fn counters_checks(dir: &Path, running: bool, findings: &mut Vec<Finding>) -> us
     };
     let mut checks = 1;
     let capacity = i64::from(reader.capacity());
-    // A counter that cannot be read is a finding, never a silent zero: the file is the
-    // one instrument, so a reader that rejects it reports it (spec/counters-file.md).
-    let read = |name: &'static str, id: CounterId, findings: &mut Vec<Finding>| match reader
-        .read(id.record())
-    {
-        Ok(value) => Some(value),
-        Err(CountersError::Unallocated { .. } | CountersError::Id { .. }) => {
-            findings.push(Finding {
-                check: name,
-                level: Level::Note,
-                message: format!(
-                    "counter {name} is not in this driver's file: the driver is older than \
-                         doctor; upgrade it when convenient"
-                ),
-                doc: DOC_COUNTERS,
-            });
-            None
-        }
-        Err(error) => {
-            findings.push(Finding {
-                check: name,
-                level: Level::Fail,
-                message: format!(
-                    "counter {name} cannot be read: {error}; the counters file is corrupt or \
-                         not a driver's; restart the driver, which remakes it"
-                ),
-                doc: DOC_COUNTERS_REJECTS,
-            });
-            None
-        }
+    let read = |name: &'static str, id: CounterId, findings: &mut Vec<Finding>| {
+        read_static(&reader, name, id, findings)
     };
     let allocated = read("counters.allocated", COUNTERS_ALLOCATED, findings);
     let failed = read(
@@ -379,12 +587,15 @@ fn counters_checks(dir: &Path, running: bool, findings: &mut Vec<Finding>) -> us
             });
         }
     }
-    // The two counters read above are reported there, never a second time here.
+    // The counters with a check of their own below are reported there, never a second
+    // time here.
     for def in COUNTERS.iter().filter(|def| {
         def.scope == Scope::Static
             && !def.doctor.is_empty()
             && def.id != COUNTERS_ALLOCATED
             && def.id != COUNTERS_ALLOCATION_FAILED
+            && def.id != RECORDING_WRITE_FAILED
+            && def.id != RECORDING_INVALIDATED
     }) {
         checks += 1;
         let Some(value) = read(def.name, def.id, findings) else {
@@ -407,6 +618,228 @@ fn counters_checks(dir: &Path, running: bool, findings: &mut Vec<Finding>) -> us
         if let Some(value) = read("conductor.idle_strategy", IDLE_STRATEGY_COUNTER, findings) {
             idle_strategy_check(value, findings);
         }
+    }
+    checks += recording_checks(&reader, log_dir, findings);
+    checks
+}
+
+/// A static counter's value, or a finding: a counter that cannot be read is never a
+/// silent zero, since the file is the one instrument, so a reader that rejects it reports
+/// it (spec/counters-file.md); one the file does not hold is a driver older than doctor.
+fn read_static(
+    reader: &CountersReader,
+    name: &'static str,
+    id: CounterId,
+    findings: &mut Vec<Finding>,
+) -> Option<i64> {
+    match reader.read(id.record()) {
+        Ok(value) => Some(value),
+        Err(CountersError::Unallocated { .. } | CountersError::Id { .. }) => {
+            findings.push(Finding {
+                check: name,
+                level: Level::Note,
+                message: format!(
+                    "counter {name} is not in this driver's file: the driver is older than \
+                     doctor; upgrade it when convenient"
+                ),
+                doc: DOC_COUNTERS,
+            });
+            None
+        }
+        Err(error) => {
+            findings.push(Finding {
+                check: name,
+                level: Level::Fail,
+                message: format!(
+                    "counter {name} cannot be read: {error}; the counters file is corrupt or \
+                     not a driver's; restart the driver, which remakes it"
+                ),
+                doc: DOC_COUNTERS_REJECTS,
+            });
+            None
+        }
+    }
+}
+
+/// One recording as the counters file shows it: the `recording.position` record's key
+/// and label, and its value.
+struct RecordingCounters {
+    recording_id: i64,
+    session_id: i32,
+    stream_id: i32,
+    position: i64,
+    synced: Option<i64>,
+}
+
+/// The recordings: every `recording.position` counter with its `recording.synced_position`,
+/// listed; a recorder a full publication window behind its publisher
+/// (`recording-stalled`); writes that failed (`recording-write-failed`); and the catalog
+/// slots recovery set to invalid, named from the catalog when the log directory is
+/// known (`recording-invalid`) (`spec/client-protocol.md`, "Commands"; ADR 0025).
+fn recording_checks(
+    reader: &CountersReader,
+    log_dir: Option<&Path>,
+    findings: &mut Vec<Finding>,
+) -> usize {
+    let mut checks = 0;
+    let capacity = reader.capacity();
+    let record = |id: u32| reader.record(id).ok().flatten();
+    // The instance counters, by type id: a recording's two, and every publication's
+    // position, keyed by correlation id, session id and stream id.
+    let mut recordings: Vec<RecordingCounters> = Vec::new();
+    let mut synced: Vec<([u8; 8], i64)> = Vec::new();
+    let mut publications: Vec<(i32, i32, i64)> = Vec::new();
+    for id in 0..capacity {
+        let Some(fields) = record(id) else { continue };
+        let Ok(value) = reader.read_acquire(id) else {
+            continue;
+        };
+        let key = fields.key();
+        if fields.type_id() == RECORDING_POSITION.0 {
+            // The label: the name, the recording id, the session id and the stream id.
+            let mut words = fields.label().split_whitespace().skip(1);
+            let (Some(rid), Some(session), Some(stream)) =
+                (words.next(), words.next(), words.next())
+            else {
+                continue;
+            };
+            let (Ok(recording_id), Ok(session_id), Ok(stream_id)) = (
+                rid.parse::<i64>(),
+                session.parse::<i32>(),
+                stream.parse::<i32>(),
+            ) else {
+                continue;
+            };
+            recordings.push(RecordingCounters {
+                recording_id,
+                session_id,
+                stream_id,
+                position: value,
+                synced: None,
+            });
+        } else if fields.type_id() == RECORDING_SYNCED_POSITION.0 {
+            let mut rid = [0u8; 8];
+            rid.copy_from_slice(&key[..8]);
+            synced.push((rid, value));
+        } else if fields.type_id() == PUBLICATION_POSITION.0 {
+            let session = i32::from_le_bytes([key[8], key[9], key[10], key[11]]);
+            let stream = i32::from_le_bytes([key[12], key[13], key[14], key[15]]);
+            publications.push((session, stream, value));
+        }
+    }
+    for recording in &mut recordings {
+        let rid = recording.recording_id.to_le_bytes();
+        recording.synced = synced.iter().find(|(key, _)| *key == rid).map(|(_, v)| *v);
+    }
+    let window = i64::from(spec::IPC_PUBLICATION_WINDOW);
+    for recording in &recordings {
+        checks += 1;
+        let synced = recording
+            .synced
+            .map_or("unknown".to_string(), |value| value.to_string());
+        findings.push(Finding {
+            check: "recording",
+            level: Level::Note,
+            message: format!(
+                "recording {} of stream {} session {}: position {}, synced {}",
+                recording.recording_id,
+                recording.stream_id,
+                recording.session_id,
+                recording.position,
+                synced
+            ),
+            doc: DOC_RECORDING_COMMANDS,
+        });
+        let publisher = publications
+            .iter()
+            .find(|(session, stream, _)| {
+                *session == recording.session_id && *stream == recording.stream_id
+            })
+            .map(|(_, _, position)| *position);
+        if let Some(publisher) = publisher
+            && publisher.saturating_sub(recording.position) >= window
+        {
+            findings.push(Finding {
+                check: "recording-stalled",
+                level: Level::Warn,
+                message: format!(
+                    "recording {} is {} bytes behind its publisher, a full publication window: \
+                     the recorder's disk is slow or failing, and the publisher is \
+                     back-pressured until it catches up; check recording.write_failed and the \
+                     log directory's disk, and `recording stopped` if it gives up",
+                    recording.recording_id,
+                    publisher - recording.position
+                ),
+                doc: DOC_RECORDING_COMMANDS,
+            });
+        }
+    }
+    checks += 1;
+    if let Some(failed) = read_static(
+        reader,
+        "recording.write_failed",
+        RECORDING_WRITE_FAILED,
+        findings,
+    ) && failed > 0
+    {
+        findings.push(Finding {
+            check: "recording-write-failed",
+            level: Level::Warn,
+            message: format!(
+                "{failed} recording writes failed, each stopping its recording at the position \
+                 written: the log directory's filesystem is full, read-only or failing; free \
+                 space, or move the log directory with {}, then start the recording again; \
+                 what was written up to the stop is whole and replayable",
+                LOG_DIR_KEY.env
+            ),
+            doc: DOC_RECORDING_COMMANDS,
+        });
+    }
+    checks += 1;
+    if let Some(invalid) = read_static(
+        reader,
+        "recording.invalidated",
+        RECORDING_INVALIDATED,
+        findings,
+    ) && invalid > 0
+    {
+        let slots = log_dir
+            .and_then(|log_dir| CatalogReader::open(log_dir).ok())
+            .and_then(|catalog| {
+                let slots = catalog.slots().ok()?;
+                // A reader reports an invalid slot as `invalid` and reads nothing else
+                // from it (spec/durable-log.md, "Descriptor"); that report names the slot.
+                let mut named = Vec::new();
+                for slot in 0..slots {
+                    match catalog.get(i64::try_from(slot).ok()?) {
+                        Err(error) if error.reason() == "invalid" => named.push(slot.to_string()),
+                        Ok(Some(descriptor)) if descriptor.state() == SlotState::Invalid => {
+                            named.push(slot.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                Some(named)
+            });
+        let which = match slots {
+            Some(named) if !named.is_empty() => format!("catalog slots {}", named.join(", ")),
+            Some(_) => "no slot of the catalog reads as invalid now".to_string(),
+            None => format!(
+                "run doctor with {} or --log-dir set to the log directory to see which slots",
+                LOG_DIR_KEY.env
+            ),
+        };
+        findings.push(Finding {
+            check: "recording-invalid",
+            level: Level::Warn,
+            message: format!(
+                "{invalid} catalog slots were set to invalid when the driver opened the log \
+                 directory, recordings their files cannot repair ({which}): check the disk, and \
+                 restore the directory from a backup if the recording matters; the slots are \
+                 never reused"
+            ),
+            doc: DOC_DURABLE_LOG_DRIVER,
+        });
     }
     checks
 }
@@ -672,6 +1105,8 @@ fn finish(dir: &Path, mut findings: Vec<Finding>, checks: usize) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cavalry_log::catalog::CatalogWriter;
+    use cavalry_log::layout::{CatalogHeader, Recording};
     use cavalry_shm::command_ring::CommandRing;
     use cavalry_shm::counters::CountersFile;
     use cavalry_shm::counters::generated::CLIENT_TIMED_OUT;
@@ -743,6 +1178,270 @@ mod tests {
         drop(counters);
     }
 
+    /// The `log.dir` key's check: a directory not yet created is a note; one that exists
+    /// is judged by its backing, in memory a warning, a disk nothing, unreadable a note.
+    #[test]
+    fn a_missing_log_directory_is_a_note_and_an_existing_one_is_judged_by_its_backing() {
+        let dir = TestDir::new("log-dir");
+        let missing = dir.0.join("log-missing");
+        let report = examine_with(&dir.0, Some(&missing));
+        let found = finding(&report, "log-directory-backing");
+        assert_eq!(found.level, Level::Note);
+        assert!(
+            found.message.contains("no log directory"),
+            "{}",
+            found.message
+        );
+        assert_eq!(found.doc, LOG_DIR_KEY.anchor);
+
+        let present = dir.0.join("log");
+        std::fs::create_dir_all(&present).expect("the log directory");
+        let report = examine_with(&dir.0, Some(&present));
+        let about: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.check == "log-directory-backing")
+            .collect();
+        match backing(&present.canonicalize().expect("canonical")) {
+            Backing::Memory => {
+                assert!(
+                    about
+                        .iter()
+                        .any(|f| f.level == Level::Warn && f.message.contains("in memory")),
+                    "{report}"
+                );
+            }
+            Backing::Disk { .. } => {
+                assert!(
+                    about.iter().all(|f| !f.message.contains("in memory")),
+                    "{report}"
+                );
+            }
+            Backing::Unknown => {
+                assert!(
+                    about
+                        .iter()
+                        .any(|f| f.level == Level::Note && f.message.contains("cannot be read")),
+                    "{report}"
+                );
+            }
+        }
+        if cfg!(target_os = "linux") && Path::new("/dev/shm").is_dir() {
+            let shm = PathBuf::from(format!(
+                "/dev/shm/cavalry-doctor-{}-log",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&shm).expect("a directory in memory");
+            let report = examine_with(&dir.0, Some(&shm));
+            let _ = std::fs::remove_dir_all(&shm);
+            let found = finding(&report, "log-directory-backing");
+            assert_eq!(found.level, Level::Warn);
+            assert!(
+                found.message.contains("in memory") && found.message.contains(LOG_DIR_KEY.env),
+                "{}",
+                found.message
+            );
+        }
+    }
+
+    /// A log directory this user cannot add entries to warns before any driver has used
+    /// it, and so does a catalog this user cannot open for writing; root may write both,
+    /// so the test says nothing as root.
+    #[test]
+    fn a_log_directory_or_catalog_this_user_cannot_write_warns() {
+        use std::os::unix::fs::PermissionsExt;
+        let user = UserIds::current().expect("id -u and id -G");
+        if user.uid == 0 {
+            return;
+        }
+        let dir = TestDir::new("log-dir-mode");
+        let log_dir = dir.0.join("log");
+        std::fs::create_dir_all(&log_dir).expect("the log directory");
+        let unwritable = |report: &Report| {
+            report
+                .findings
+                .iter()
+                .find(|f| {
+                    f.check == "log-directory-backing"
+                        && f.level == Level::Warn
+                        && f.message.contains("by this user")
+                })
+                .cloned()
+        };
+        let report = examine_with(&dir.0, Some(&log_dir));
+        assert!(unwritable(&report).is_none(), "{report}");
+
+        // No catalog yet, a directory of mode 0500: the driver could not create one.
+        let set = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod")
+        };
+        set(&log_dir, 0o500);
+        let report = examine_with(&dir.0, Some(&log_dir));
+        set(&log_dir, 0o700);
+        let found = unwritable(&report).unwrap_or_else(|| panic!("no warning: {report}"));
+        assert!(
+            found.message.contains("cannot be written")
+                && found.message.contains("mode is 500")
+                && found.message.contains(LOG_DIR_KEY.env),
+            "{}",
+            found.message
+        );
+        assert_eq!(found.doc, LOG_DIR_KEY.anchor);
+
+        // A catalog of mode 0400 in a directory this user may write.
+        let catalog = log_dir.join(cavalry_log::layout::CATALOG_FILE_NAME);
+        drop(CatalogWriter::open(&log_dir, now_nanos()).expect("the catalog"));
+        set(&catalog, 0o400);
+        let report = examine_with(&dir.0, Some(&log_dir));
+        set(&catalog, 0o600);
+        let found = unwritable(&report).unwrap_or_else(|| panic!("no warning: {report}"));
+        assert!(
+            found.message.contains("cannot be opened for writing"),
+            "{}",
+            found.message
+        );
+    }
+
+    /// Every recording is listed with its two positions, and a recorder a full
+    /// publication window behind its publisher is `recording-stalled`.
+    #[test]
+    fn recordings_are_listed_and_a_recorder_a_window_behind_warns() {
+        let dir = TestDir::new("recordings");
+        let mut counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&7i64.to_le_bytes());
+        key[8..12].copy_from_slice(&(-5i32).to_le_bytes());
+        key[12..].copy_from_slice(&1001i32.to_le_bytes());
+        let publisher = counters
+            .allocate(PUBLICATION_POSITION, &key, "publication.position 7 -5 1001")
+            .expect("the publication's position");
+        publisher.store_release(40 * 1024 * 1024);
+        let rid = 3i64.to_le_bytes();
+        let position = counters
+            .allocate(RECORDING_POSITION, &rid, "recording.position 3 -5 1001")
+            .expect("the recording's position");
+        let synced = counters
+            .allocate(
+                RECORDING_SYNCED_POSITION,
+                &rid,
+                "recording.synced_position 3 -5 1001",
+            )
+            .expect("the recording's synced position");
+        position.store_release(2 * 1024 * 1024);
+        synced.store_release(1024 * 1024);
+
+        let report = examine(&dir.0);
+        let listed = finding(&report, "recording");
+        assert_eq!(listed.level, Level::Note);
+        assert_eq!(
+            listed.message,
+            "recording 3 of stream 1001 session -5: position 2097152, synced 1048576"
+        );
+        let stalled = finding(&report, "recording-stalled");
+        assert_eq!(stalled.level, Level::Warn);
+        assert!(
+            stalled
+                .message
+                .starts_with("recording 3 is 39845888 bytes behind"),
+            "{}",
+            stalled.message
+        );
+
+        position.store_release(40 * 1024 * 1024);
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "recording-stalled"),
+            "caught up: {report}"
+        );
+    }
+
+    /// `recording-write-failed` and `recording-invalid`, the latter naming the catalog's
+    /// invalid slots when the log directory is given, and saying how to see them when not.
+    #[test]
+    fn failed_writes_and_invalid_slots_are_findings_that_name_the_slots() {
+        use std::os::unix::fs::FileExt;
+        let dir = TestDir::new("recording-failures");
+        let counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        counters
+            .counter(RECORDING_WRITE_FAILED.record())
+            .expect("static")
+            .increment();
+        counters
+            .counter(RECORDING_INVALIDATED.record())
+            .expect("static")
+            .add(2);
+        let log_dir = dir.0.join("log");
+        std::fs::create_dir_all(&log_dir).expect("the log directory");
+        let now = now_nanos();
+        {
+            let mut catalog = CatalogWriter::open(&log_dir, now).expect("the catalog");
+            for stream_id in [1, 2] {
+                catalog
+                    .add(&Recording {
+                        recording_id: 0,
+                        start_timestamp: now,
+                        start_position: 0,
+                        initial_term_id: 1,
+                        term_length: 65536,
+                        mtu_length: 1408,
+                        session_id: 1,
+                        stream_id,
+                        channel: "cavalry:ipc",
+                        source_identity: "cavalry:ipc",
+                    })
+                    .expect("a slot");
+            }
+        }
+        let catalog = std::fs::OpenOptions::new()
+            .write(true)
+            .open(log_dir.join(cavalry_log::layout::CATALOG_FILE_NAME))
+            .expect("the catalog opens");
+        catalog
+            .write_all_at(
+                &(SlotState::Invalid as i32).to_le_bytes(),
+                CatalogHeader::slot_offset(0),
+            )
+            .expect("state 2 on slot 0");
+
+        let report = examine_with(&dir.0, Some(&log_dir));
+        let failed = finding(&report, "recording-write-failed");
+        assert_eq!(failed.level, Level::Warn);
+        assert!(
+            failed.message.starts_with("1 recording writes failed"),
+            "{}",
+            failed.message
+        );
+        let invalid = finding(&report, "recording-invalid");
+        assert_eq!(invalid.level, Level::Warn);
+        assert!(
+            invalid.message.contains("(catalog slots 0)"),
+            "{}",
+            invalid.message
+        );
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "recording.write_failed" || f.check == "recording.invalidated"),
+            "each counter is reported once: {report}"
+        );
+
+        let report = examine(&dir.0);
+        assert!(
+            finding(&report, "recording-invalid")
+                .message
+                .contains("--log-dir"),
+            "{report}"
+        );
+    }
+
     #[test]
     fn a_counter_above_zero_brings_its_doctor_text() {
         let dir = TestDir::new("counter");
@@ -810,6 +1509,29 @@ mod tests {
             found.message
         );
         assert!(report.ok(), "{report}");
+
+        // A corrupt record: a state the spec does not define fails that counter's read,
+        // and the finding names the page that says what a reader rejects.
+        {
+            use std::os::unix::fs::FileExt;
+            let header = CountersReader::open(&dir.0).expect("opens").header();
+            let offset = header.record_offset(last).expect("a record");
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(dir.0.join("counters"))
+                .expect("writable");
+            file.write_at(&7i32.to_le_bytes(), offset as u64)
+                .expect("written");
+        }
+        let report = examine(&dir.0);
+        let found = finding(&report, name);
+        assert_eq!(found.level, Level::Fail, "{}", found.message);
+        assert_eq!(found.doc, DOC_COUNTERS_REJECTS);
+        assert!(
+            found.message.contains("cannot be read") && found.message.contains("restart"),
+            "{}",
+            found.message
+        );
 
         // A corrupt file: the magic is wrong, and every read fails loudly.
         {

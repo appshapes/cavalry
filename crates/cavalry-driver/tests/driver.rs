@@ -1,19 +1,23 @@
 //! The driver on disk, driven by a client that attaches through cavalry-shm and speaks
 //! cavalry-proto's client protocol: the full cases first, the directory protocol, every
-//! command, a registry at capacity, the linger and the client timeout
-//! (`spec/client-protocol.md`; CLAUDE.md, invariants 1, 3 and 4).
+//! command, a registry at capacity, the linger, the client timeout, and the recording
+//! commands against the durable log (`spec/client-protocol.md`; CLAUDE.md, invariants
+//! 1, 3 and 4).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cavalry_driver::{Driver, IdleStrategy, spec};
+use cavalry_log::catalog::{CatalogReader, CatalogWriter};
+use cavalry_log::layout::{Recording, State};
 use cavalry_proto::client_protocol::{Command, CommandType, Event, IPC_CHANNEL};
 use cavalry_shm::broadcast::{BroadcastBuffer, Receiver};
 use cavalry_shm::command_ring::{CommandRing, Producer};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLIENT_PROTOCOL_ERRORS, CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT,
-    CONDUCTOR_IDLE_STRATEGY, DRIVER_REGISTRY_FULL, PUBLICATION_POSITION,
+    CONDUCTOR_IDLE_STRATEGY, DRIVER_REGISTRY_FULL, PUBLICATION_POSITION, RECORDING_INDEX_REWRITTEN,
+    RECORDING_RECOVERED, RECORDING_STARTED, RECORDING_STOPPED,
 };
 use cavalry_shm::log::LogBuffers;
 
@@ -201,11 +205,12 @@ fn counter(dir: &Path, id: cavalry_shm::counters::CounterId) -> i64 {
 #[test]
 fn a_live_directory_is_refused_and_a_dead_one_is_remade() {
     let dir = TestDir::new("directory");
-    let driver = Driver::start(dir.path()).expect("the driver starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     for file in ["counters", "command-ring", "broadcast-buffer"] {
         assert!(dir.path().join(file).is_file(), "{file} exists");
     }
-    let refused = Driver::start(dir.path()).expect_err("a second driver is refused");
+    let refused =
+        Driver::start(dir.path(), dir.path().join("log")).expect_err("a second driver is refused");
     assert_eq!(refused.reason(), "driver-active");
     assert!(
         refused
@@ -225,7 +230,8 @@ fn a_live_directory_is_refused_and_a_dead_one_is_remade() {
         "a closed driver leaves -1 in the heartbeat"
     );
     // A dead driver's directory: a ring whose heartbeat is older than the driver timeout.
-    let again = Driver::start(dir.path()).expect("the next driver remakes the directory");
+    let again = Driver::start(dir.path(), dir.path().join("log"))
+        .expect("the next driver remakes the directory");
     let second_start = CommandRing::open(dir.path(), false)
         .expect("opens")
         .header()
@@ -235,8 +241,8 @@ fn a_live_directory_is_refused_and_a_dead_one_is_remade() {
 
     // A half-created directory, the ring missing, is a dead driver's too.
     std::fs::remove_file(dir.path().join("command-ring")).expect("remove the ring");
-    let third =
-        Driver::start_with(dir.path(), IdleStrategy::Yield).expect("starts on a half directory");
+    let third = Driver::start_with(dir.path(), dir.path().join("log"), IdleStrategy::Yield)
+        .expect("starts on a half directory");
     assert!(dir.path().join("command-ring").is_file());
     third.close().expect("closes");
 }
@@ -250,12 +256,12 @@ fn the_idle_strategy_is_recorded_in_its_counter() {
             .read(CONDUCTOR_IDLE_STRATEGY.record())
             .expect("reads")
     };
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     assert_eq!(strategy(dir.path()), IdleStrategy::Backoff.counter_value());
     assert_eq!(strategy(dir.path()), 0, "the default reads 0");
     driver.close().expect("closes");
     for idle in IdleStrategy::ALL {
-        let driver = Driver::start_with(dir.path(), idle).expect("starts");
+        let driver = Driver::start_with(dir.path(), dir.path().join("log"), idle).expect("starts");
         let value = strategy(dir.path());
         assert_eq!(
             IdleStrategy::from_counter_value(value),
@@ -269,7 +275,7 @@ fn the_idle_strategy_is_recorded_in_its_counter() {
 #[test]
 fn a_publication_gets_a_log_and_a_subscription_gets_an_image_at_the_producer_position() {
     let dir = TestDir::new("pubsub");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
 
     let (correlation_id, registration_id, session_id, limit_id, log_file_name) =
@@ -397,7 +403,7 @@ fn a_publication_gets_a_log_and_a_subscription_gets_an_image_at_the_producer_pos
 #[test]
 fn refused_commands_get_the_spec_error_codes_and_count() {
     let dir = TestDir::new("errors");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
 
     // An unknown type: code 6.
@@ -481,7 +487,7 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
 #[test]
 fn the_publication_registry_is_bounded_and_says_so() {
     let dir = TestDir::new("capacity");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     let (_, registration_id, _, _, _) = client.add_publication(42, false);
     for _ in 1..spec::MAX_PUBLICATIONS {
@@ -505,7 +511,7 @@ fn the_publication_registry_is_bounded_and_says_so() {
 #[test]
 fn a_removed_publication_lingers_then_its_images_go_and_its_log_is_removed() {
     let dir = TestDir::new("linger");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     let (correlation_id, registration_id, _, limit_id, log_file_name) =
         client.add_publication(5, false);
@@ -574,7 +580,7 @@ fn a_removed_publication_lingers_then_its_images_go_and_its_log_is_removed() {
 #[test]
 fn a_silent_client_is_timed_out_and_told() {
     let dir = TestDir::new("timeout");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     let (_, registration_id, _, _, log_file_name) = client.add_publication(9, false);
     assert!(dir.path().join(&log_file_name).is_file());
@@ -651,7 +657,7 @@ fn wait_counter(dir: &Path, id: cavalry_shm::counters::CounterId, at_least: i64)
 #[test]
 fn a_second_subscriber_never_cleans_under_a_slower_one() {
     let dir = TestDir::new("two-subscribers");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     let (_, publication_id, _, limit_id, _) = client.add_publication(31, false);
     let subscription_a = client.add_subscription(31);
@@ -722,7 +728,7 @@ fn find_position_gauge(dir: &Path, correlation_id: i64, session_id: i32, stream_
 #[test]
 fn the_publication_position_gauge_follows_the_publisher() {
     let dir = TestDir::new("position-gauge");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     let (correlation_id, publication_id, session_id, limit_id, _) =
         client.add_publication(51, false);
@@ -770,7 +776,7 @@ fn the_publication_position_gauge_follows_the_publisher() {
 #[test]
 fn a_subscriber_position_outside_its_bound_evicts_the_client() {
     let dir = TestDir::new("evict");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     let (_, _, _, _, log_file_name) = client.add_publication(33, false);
     let subscription_id = client.add_subscription(33);
@@ -821,7 +827,7 @@ fn a_subscriber_position_outside_its_bound_evicts_the_client() {
 #[test]
 fn the_client_registry_is_bounded_and_says_so() {
     let dir = TestDir::new("clients");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     // The attached client is one, once it has sent a command; crafted client ids fill
     // the rest.
@@ -859,7 +865,7 @@ fn the_client_registry_is_bounded_and_says_so() {
 #[test]
 fn the_subscription_registry_is_bounded_and_says_so() {
     let dir = TestDir::new("subscriptions");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     for _ in 0..spec::MAX_SUBSCRIPTIONS {
         client.add_subscription(3);
@@ -881,7 +887,7 @@ fn the_subscription_registry_is_bounded_and_says_so() {
 #[test]
 fn the_image_registry_is_bounded_and_says_so() {
     let dir = TestDir::new("images");
-    let driver = Driver::start(dir.path()).expect("starts");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     // 64 exclusive publications times 32 subscriptions: 2048 images, the capacity.
     let publications = 64;
@@ -901,5 +907,342 @@ fn the_image_registry_is_bounded_and_says_so() {
     assert_eq!(code, 10, "{message}");
     assert!(message.contains("images registry"), "{message}");
     assert!(wait_counter(dir.path(), DRIVER_REGISTRY_FULL, 1) >= 1);
+    driver.close().expect("closes");
+}
+
+// ---- recording ---------------------------------------------------------------------
+
+/// `start recording` on `stream_id`, answered with `recording ready`: (recording id,
+/// session id, recording.position counter id, recording.synced_position counter id).
+fn start_recording(client: &mut Client, stream_id: i32) -> (i64, i32, i32, i32) {
+    let correlation_id = client.correlation_id();
+    client.send(&Command::StartRecording {
+        client_id: client.id,
+        correlation_id,
+        stream_id,
+        channel: IPC_CHANNEL,
+    });
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::RecordingReady {
+            correlation_id: id,
+            recording_id,
+            session_id,
+            recording_position_counter_id,
+            recording_synced_position_counter_id,
+        } if id == correlation_id => Some((
+            recording_id,
+            session_id,
+            recording_position_counter_id,
+            recording_synced_position_counter_id,
+        )),
+        _ => None,
+    })
+}
+
+/// `stop recording`, answered with `operation success`.
+fn stop_recording(client: &mut Client, recording_id: i64) {
+    let correlation_id = client.correlation_id();
+    client.send(&Command::StopRecording {
+        client_id: client.id,
+        correlation_id,
+        recording_id,
+    });
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::OperationSuccess { correlation_id: id } if id == correlation_id => Some(()),
+        _ => None,
+    });
+}
+
+/// The `recording stopped` event for `recording_id`: its stop position.
+fn wait_stopped(client: &mut Client, recording_id: i64) -> i64 {
+    client.wait(Duration::from_secs(10), |event| match *event {
+        Event::RecordingStopped {
+            recording_id: id,
+            stop_position,
+        } if id == recording_id => Some(stop_position),
+        _ => None,
+    })
+}
+
+/// Waits up to five seconds for the counter at `id` to hold `expected`.
+fn wait_value(dir: &Path, id: i32, expected: i64) {
+    let reader = CountersReader::open(dir).expect("the counters file opens");
+    let id = u32::try_from(id).expect("a counter id");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let value = reader.read_acquire(id).expect("the counter reads");
+        if value == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "counter {id} stayed at {value}, not {expected}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// `n` messages of 32 bytes through the publication's own log; returns the position after.
+fn publish(dir: &Path, publication_id: i64, limit_id: i32, n: u8) -> i64 {
+    let reader = CountersReader::open(dir).expect("the counters file opens");
+    let limit = u32::try_from(limit_id).expect("a counter id");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reader.read_acquire(limit).expect("limit") < 64 * i64::from(n) {
+        assert!(Instant::now() < deadline, "the limit did not rise");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let log = LogBuffers::open(dir, publication_id, true).expect("the log opens");
+    let mut appender = log.appender().expect("an appender");
+    let mut after = 0;
+    for i in 0..n {
+        after = appender
+            .offer(&[i; 32], reader.read_acquire(limit).expect("limit"), 0)
+            .expect("the message is offered");
+    }
+    after
+}
+
+/// The full case of the commands (invariant 1): a recording starts with its two
+/// counters, whose labels name it; the publication is connected by the recording alone;
+/// recording.position follows the publisher and recording.synced_position follows within
+/// the sync cadence; `stop recording` is answered once the catalog holds the stop, every
+/// client hears `recording stopped`, and the segment file holds the log's bytes.
+#[test]
+fn a_recording_starts_follows_the_publisher_and_stops_on_command() {
+    let dir = TestDir::new("recording");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(dir.path(), &log_dir).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (_, publication_id, session_id, limit_id, _) = client.add_publication(61, true);
+    let (recording_id, session, position_id, synced_id) = start_recording(&mut client, 61);
+    assert_eq!(recording_id, 0, "the first slot");
+    assert_eq!(session, session_id, "the event names the session recorded");
+    let reader = CountersReader::open(dir.path()).expect("opens");
+    for (id, name) in [
+        (position_id, "recording.position"),
+        (synced_id, "recording.synced_position"),
+    ] {
+        let record = reader
+            .record(u32::try_from(id).expect("a counter id"))
+            .expect("the record reads")
+            .expect("the counter is allocated");
+        assert_eq!(record.label(), format!("{name} 0 {session_id} 61"));
+        assert_eq!(&record.key()[..8], &0i64.to_le_bytes());
+    }
+    assert_eq!(wait_counter(dir.path(), RECORDING_STARTED, 1), 1);
+
+    let after = publish(dir.path(), publication_id, limit_id, 100);
+    wait_value(dir.path(), position_id, after);
+    wait_value(dir.path(), synced_id, after);
+
+    stop_recording(&mut client, recording_id);
+    assert_eq!(wait_stopped(&mut client, recording_id), after);
+    assert_eq!(wait_counter(dir.path(), RECORDING_STOPPED, 1), 1);
+    let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
+    let descriptor = catalog
+        .get(0)
+        .expect("reads")
+        .expect("the slot holds the recording");
+    assert_eq!(descriptor.state(), State::Valid);
+    assert_eq!(descriptor.stop_position(), after);
+    // The segment holds every frame as published: a 32-byte header and the body
+    // `publish` wrote, in order, up to the stop.
+    let segment = std::fs::read(log_dir.join("0-0.rec")).expect("the segment reads");
+    assert_eq!(after, 100 * 64, "100 frames of 64 bytes");
+    for i in 0..100usize {
+        let frame = &segment[i * 64..(i + 1) * 64];
+        assert_eq!(&frame[..4], &64i32.to_le_bytes(), "frame {i}: length");
+        assert_eq!(&frame[32..], &[i as u8; 32], "frame {i}: body");
+    }
+
+    // Stopped: nothing written, operation success.
+    stop_recording(&mut client, recording_id);
+    driver.close().expect("closes");
+}
+
+/// A publication removed while recorded: the recorder reaches the end of stream, the
+/// recording stops there, every client hears it, and only then the log file goes.
+#[test]
+fn a_closed_publications_recording_stops_at_the_end_of_stream_and_only_then_its_log_goes() {
+    let dir = TestDir::new("recording-close");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(dir.path(), &log_dir).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (registration, publication_id, _, limit_id, log_file_name) =
+        client.add_publication(62, true);
+    let (recording_id, _, _, _) = start_recording(&mut client, 62);
+    let after = publish(dir.path(), publication_id, limit_id, 10);
+    let log_path = dir.path().join(&log_file_name);
+    assert!(log_path.is_file());
+
+    let correlation_id = client.correlation_id();
+    client.send(&Command::RemovePublication {
+        client_id: client.id,
+        correlation_id,
+        registration_id: registration,
+    });
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::OperationSuccess { correlation_id: id } if id == correlation_id => Some(()),
+        _ => None,
+    });
+    assert_eq!(wait_stopped(&mut client, recording_id), after);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while log_path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the log stayed after the recording stopped"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
+    assert_eq!(
+        catalog
+            .get(0)
+            .expect("reads")
+            .expect("the slot")
+            .stop_position(),
+        after
+    );
+    driver.close().expect("closes");
+}
+
+/// Every refusal of the recording commands, with the spec's code and a message that
+/// says what to do (`spec/client-protocol.md`, "Error codes").
+#[test]
+fn recording_commands_get_the_spec_error_codes() {
+    let dir = TestDir::new("recording-errors");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
+    let mut client = Client::attach(dir.path());
+
+    let other_channel = client.correlation_id();
+    client.send(&Command::StartRecording {
+        client_id: client.id,
+        correlation_id: other_channel,
+        stream_id: 63,
+        channel: b"cavalry:udp?endpoint=localhost:40123",
+    });
+    let (code, message) = client.wait_error(other_channel);
+    assert_eq!(code, 1, "{message}");
+
+    let no_publication = client.correlation_id();
+    client.send(&Command::StartRecording {
+        client_id: client.id,
+        correlation_id: no_publication,
+        stream_id: 63,
+        channel: IPC_CHANNEL,
+    });
+    let (code, message) = client.wait_error(no_publication);
+    assert_eq!(code, 20, "{message}");
+    assert!(
+        message.contains("no live publication on stream 63"),
+        "{message}"
+    );
+
+    client.add_publication(63, true);
+    let (recording_id, _, _, _) = start_recording(&mut client, 63);
+    let again = client.correlation_id();
+    client.send(&Command::StartRecording {
+        client_id: client.id,
+        correlation_id: again,
+        stream_id: 63,
+        channel: IPC_CHANNEL,
+    });
+    let (code, message) = client.wait_error(again);
+    assert_eq!(code, 22, "{message}");
+    assert!(
+        message.contains(&format!("recording {recording_id}")),
+        "{message}"
+    );
+
+    for unknown in [-1, recording_id + 1, i64::MAX] {
+        let correlation_id = client.correlation_id();
+        client.send(&Command::StopRecording {
+            client_id: client.id,
+            correlation_id,
+            recording_id: unknown,
+        });
+        let (code, message) = client.wait_error(correlation_id);
+        assert_eq!(code, 21, "{message}");
+        assert!(message.contains("not in the catalog"), "{message}");
+    }
+
+    // A reserved type id in Cavalry's range is code 6, as any reserved id.
+    let reserved = client.correlation_id();
+    let mut message = [0u8; 16];
+    message[..8].copy_from_slice(&client.id.to_le_bytes());
+    message[8..].copy_from_slice(&reserved.to_le_bytes());
+    client.send_raw(0x0103, &message);
+    let (code, text) = client.wait_error(reserved);
+    assert_eq!(code, 6, "{text}");
+
+    stop_recording(&mut client, recording_id);
+    assert_eq!(wait_stopped(&mut client, recording_id), 0);
+    driver.close().expect("closes");
+}
+
+/// Closing the driver stops every live recording at what was written, so the catalog
+/// holds a clean stop and the next driver on the directory repairs nothing.
+#[test]
+fn closing_the_driver_stops_its_recordings_and_the_next_open_repairs_nothing() {
+    let dir = TestDir::new("recording-driver-close");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(dir.path(), &log_dir).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (_, publication_id, _, limit_id, _) = client.add_publication(64, true);
+    let (recording_id, _, position_id, _) = start_recording(&mut client, 64);
+    let after = publish(dir.path(), publication_id, limit_id, 20);
+    wait_value(dir.path(), position_id, after);
+    driver.close().expect("closes");
+    let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
+    let descriptor = catalog.get(recording_id).expect("reads").expect("the slot");
+    assert_eq!(
+        descriptor.stop_position(),
+        after,
+        "stopped at what was written"
+    );
+
+    let again = Driver::start(dir.path(), &log_dir).expect("starts again");
+    assert_eq!(
+        counter(dir.path(), RECORDING_RECOVERED),
+        0,
+        "nothing to repair"
+    );
+    assert_eq!(counter(dir.path(), RECORDING_INDEX_REWRITTEN), 0);
+    again.close().expect("closes");
+}
+
+/// The recovery pass counts what it did (invariant 4): a slot left live by a crash,
+/// with no files, is stopped as an empty recording and its index written.
+#[test]
+fn the_recovery_pass_counts_what_it_did() {
+    // The log directory beside the driver directory, not under it: a driver that finds
+    // no live driver in its directory removes it before it opens the log.
+    let root = TestDir::new("recording-recovery");
+    let driver_dir = root.path().join("driver");
+    let log_dir = root.path().join("log");
+    let now = now_nanos();
+    std::fs::create_dir_all(&log_dir).expect("the log directory is created");
+    let mut catalog = CatalogWriter::open(&log_dir, now).expect("the catalog is created");
+    catalog
+        .add(&Recording {
+            recording_id: 0,
+            start_timestamp: now,
+            start_position: 0,
+            initial_term_id: 1,
+            term_length: 64 * 1024 * 1024,
+            mtu_length: 1408,
+            session_id: 1,
+            stream_id: 1,
+            channel: "cavalry:ipc",
+            source_identity: "cavalry:ipc",
+        })
+        .expect("a live slot, as a crash leaves it");
+    drop(catalog);
+    let driver = Driver::start(&driver_dir, &log_dir).expect("starts");
+    assert_eq!(counter(&driver_dir, RECORDING_RECOVERED), 1);
+    assert_eq!(counter(&driver_dir, RECORDING_INDEX_REWRITTEN), 1);
+    let reader = CatalogReader::open(&log_dir).expect("the catalog opens");
+    let descriptor = reader.get(0).expect("reads").expect("the slot");
+    assert_eq!(descriptor.stop_position(), 0, "an empty recording");
     driver.close().expect("closes");
 }

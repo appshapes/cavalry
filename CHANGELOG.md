@@ -413,6 +413,73 @@ user-visible change, added in the same commit as the change. The format follows
   `counters.freed` for every record freed, so that the `counters.allocated` gauge's moves
   are counted and allocations minus freed is the gauge, as invariant 4 asks of every state
   transition (`spec/counters-file.md`, Metadata record).
+- `spec/client-protocol.md` version 1: `start recording` (type id `0x0101`) and `stop
+  recording` (`0x0102`), the first commands of Cavalry's own, in a type id range beside
+  Aeron's; `recording ready` (`0x1001`) with the recording id, the session id and the two
+  position counter ids, and `recording stopped` (`0x1002`) with the stop position, sent to
+  every client; error codes 20 (no publication to record), 21 (unknown recording) and 22
+  (already recording); a `recordings` registry of 1024; 22 new vectors, among them one
+  reserved id per range the page names. A version 0 client closes on the first recording
+  event, so an upgrade restarts the clients before the driver (ADR 0025, accepted).
+- The driver records a stream: a second thread, the recorder, with the conductor's idle
+  strategy, takes blocks of committed frames from the publication's log buffer and writes
+  them into the log directory with one positional write each, syncing once per second;
+  the conductor never touches the disk and hands the recorder its starts and stops
+  through two bounded queues. `recording.position` bounds the publisher's limit and the
+  cleaning, so a slow disk back-pressures the publisher and never loses a byte; a
+  recording alone connects its publication; a closed publication's log goes only once
+  its recording has stopped; a start the counters file refuses after the recorder took
+  the slot is answered with code 10 and stopped, and the limit holds at the start
+  position until that stop is written; a `start recording` while stops and attaches wait
+  for room in the recorder's queue is answered with code 10. `Driver::start` takes the log directory, opened under a
+  lock and recovered at start, with `Driver::default_log_dir()` as the rule until the
+  `log.dir` key arrives; counters `recording.started`, `recording.stopped`,
+  `recording.write_failed`, `recording.start_failed`, `recording.catalog_full`, the six
+  recovery counters, and the gauges `recording.position` and `recording.synced_position`
+  per recording (ADR 0025).
+- `cavalry-log`: `CatalogWriter::delete` leaves until card 95 brings the purge with its
+  counter and its caller in the driver, so that every catalog transition on `master` is
+  one the driver performs and counts (CLAUDE.md, invariant 4); the catalog's truncation
+  of a torn tail at open is now synced.
+- `just lint-counters` checks the state machines of the data plane: a `[[state_machine]]`
+  in `counters.toml` names its states, every `[[transition]]` names the counter of kind
+  `counter` it adds one to, whose generated constant some crate's code names, and the
+  enum marked `// state machine: <name>` has those states as its variants; the counters
+  reference page lists each machine with its transitions. It fails closed: an enum named
+  `*State`, `*Status` or `*Phase` with neither that mark nor `// not a state machine:
+  <why>` fails it. Three machines register with it: the counters file's metadata record
+  (`counters.allocations`, `counters.freed`), the recording catalog's descriptor
+  (a slot taken in `recording.started`, `recording.start_failed` or
+  `driver.registry_full`, a slot set to invalid in `recording.invalidated`) and the
+  driver's view of a recording
+  (`recording.started`, `recording.stopped`, the failure counters); the two ring record
+  states are exempt with their reasons. This is the gate CLAUDE.md names for a transition
+  with no counter (ADR 0024, ADR 0025, card 93).
+- The `log.dir` configuration key: the log directory, `--log-dir` on `run` and `doctor`
+  or `CAVALRY_LOG_DIR`, defaulting to `$XDG_DATA_HOME/cavalry/log`, else
+  `~/.local/share/cavalry/log`, and `/var/lib/cavalry/log` as root; with neither a home
+  nor root `cavalry run` refuses to start and names the key. Its doctor check,
+  `log-directory-backing`, warns on a directory in memory, on an overlay or network
+  filesystem, not writable by this user (the directory's mode bits, before any driver
+  has used it, and the catalog once there is one), or under 1 GiB free (ADR 0025).
+- `cavalry record <stream id>` records a stream's live publication to the durable log and
+  prints the recording id; `cavalry record --stop <id>` stops it. `Cavalry::start_recording`
+  and `Cavalry::stop_recording` are the same in the client API, with a `Recording` handle
+  whose two positions read from the counters file and whose `stop` stops it; dropping it
+  stops nothing. `cavalry
+  doctor` lists every recording's position and synced position, and adds
+  `recording-stalled` (a recorder a full window behind its publisher),
+  `recording-write-failed` and `recording-invalid`, which names the catalog slots recovery
+  could not repair when run with `--log-dir`. The how-to page is
+  `docs/how-to/record-a-stream.md` (ADR 0025).
+- Bench rows with a recording on: `claim_commit_<body>_recorded` and
+  `one_way_<body>_recorded` repeat the client rows while the driver's recorder writes the
+  stream to the durable log under the bench directory, and the run fails unless the
+  recording reached the publisher's final position; new rows, reported until the bench
+  host records their baseline (ADR 0025, ADR 0023's measurement with recording on).
+  The rows found the one allocation the recorder made after a start, at a segment
+  roll, and the roll now formats the next file's name on the stack into a path the
+  writer keeps, so the bench's zero-allocation gate holds with a recording on.
 - The writer, the reviewer and the release-notes agents run on Fable 5.1 at xhigh effort,
   in the three workflows and in their briefs' frontmatter, so that the agents that gate
   and write this repository have the highest reasoning available.

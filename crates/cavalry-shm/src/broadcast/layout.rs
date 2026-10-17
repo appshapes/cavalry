@@ -138,6 +138,8 @@ pub const fn max_message_length(capacity: u32) -> u32 {
     ring::max_message_length(capacity)
 }
 
+// not a state machine: what `RecordHeader::state` reads in one header; the transmitter
+// writes a record as a message or as padding and never moves it from one to the other.
 /// What a record's header says it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecordState {

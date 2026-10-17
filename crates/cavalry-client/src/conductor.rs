@@ -530,9 +530,9 @@ fn log_id(log_file_name: &[u8]) -> Option<i64> {
 /// an event it cannot decode may be the one it needed (`spec/client-protocol.md`, "What
 /// the driver rejects"); `available image` and `unavailable image` are for the
 /// subscription they name, whatever is pending; `publication ready`, `exclusive
-/// publication ready`, `subscription ready`, `operation success` and `error` with the
-/// pending correlation id are the answer; every other event leaves the client open and
-/// is nothing to it. An `available image` whose log file name is not the page's shape
+/// publication ready`, `subscription ready`, `operation success`, `recording ready` and
+/// `error` with the pending correlation id are the answer; every other event, `recording
+/// stopped` among them, leaves the client open and is nothing to it. An `available image` whose log file name is not the page's shape
 /// is `corrupt`.
 fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<Outcome, Closed> {
     let event = Event::parse(type_id, message).map_err(|_| Closed::Corrupt)?;
@@ -614,6 +614,19 @@ fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<O
         Event::OperationSuccess { correlation_id } if correlation_id == pending => {
             Outcome::Answer(Response::Success { correlation_id })
         }
+        Event::RecordingReady {
+            correlation_id,
+            recording_id,
+            session_id,
+            recording_position_counter_id,
+            recording_synced_position_counter_id,
+        } if correlation_id == pending => Outcome::Answer(Response::RecordingReady {
+            correlation_id,
+            recording_id,
+            session_id,
+            position_counter_id: recording_position_counter_id,
+            synced_position_counter_id: recording_synced_position_counter_id,
+        }),
         Event::Error {
             offending_correlation_id,
             error_code,

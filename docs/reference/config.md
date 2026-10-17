@@ -21,6 +21,7 @@ In Aeron, the keys are system properties in the Java driver, `aeron.dir`, and en
 | --- | --- | --- | --- | --- | --- |
 | [`dir`](#dir) | path | `cavalry-<user> under /dev/shm on Linux when /dev/shm exists, else under the temporary directory` | `CAVALRY_DIR` | `--dir` | `driver-directory-backing` |
 | [`conductor.idle.strategy`](#conductoridlestrategy) | one of `backoff`, `yield`, `busy-spin` | `backoff` | `CAVALRY_CONDUCTOR_IDLE_STRATEGY` | none | `conductor-idle-strategy` |
+| [`log.dir`](#logdir) | path | `cavalry/log under $XDG_DATA_HOME when that variable is set, else ~/.local/share/cavalry/log, and /var/lib/cavalry/log when the driver runs as root; with neither a home nor root the driver refuses to start and names this key` | `CAVALRY_LOG_DIR` | `--log-dir` | `log-directory-backing` |
 
 ## dir
 
@@ -47,3 +48,16 @@ The driver directory: where the driver creates its counters file, command ring, 
 What the conductor's thread does on a duty cycle that found no work: backoff spins, then yields, then sleeps for longer and longer up to 1 ms; yield gives the CPU up on every idle cycle; busy-spin never leaves the CPU. The running driver records its choice in the conductor.idle_strategy counter.
 
 **Why the default cannot always be right.** Backoff is right on a laptop and on a cloud VM, where a spinning conductor would take a core from the clients; busy-spin is right on an isolated core, where backoff's sleep of up to 1 ms delays the limit a publisher waits on; the driver cannot tell from inside which core it was given.
+
+## log.dir
+
+- **Type:** path
+- **Default:** `cavalry/log under $XDG_DATA_HOME when that variable is set, else ~/.local/share/cavalry/log, and /var/lib/cavalry/log when the driver runs as root; with neither a home nor root the driver refuses to start and names this key`
+- **Environment variable:** `CAVALRY_LOG_DIR`
+- **Flag:** `--log-dir` on `cavalry run` and `cavalry doctor`
+- **Doctor check:** `log-directory-backing`
+- **Glossary:** log directory
+
+The log directory: where the driver's recorder writes the durable log, the catalog, the segment files and the time indexes, on disk and never under the driver directory, held under an advisory lock by one driver at a time (spec/durable-log.md); run, doctor and record read it.
+
+**Why the default cannot always be right.** The home filesystem can be small, a network mount where a sync and a lock mean little, or absent for a service user; a container's is ephemeral; the operator usually wants the log on a disk chosen for room and durability, which the driver cannot pick.

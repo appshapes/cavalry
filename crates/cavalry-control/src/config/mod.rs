@@ -75,16 +75,21 @@ pub struct KeyDef {
 pub struct Config {
     /// `dir`: the driver directory.
     pub dir: PathBuf,
+    /// `log.dir`: the log directory, where the recorder writes the durable log; `None`
+    /// when the key is unset and the host has neither a home nor root, which `cavalry
+    /// run` refuses to start on, naming the key ([`Driver::default_log_dir`]; ADR 0025).
+    pub log_dir: Option<PathBuf>,
     /// `conductor.idle.strategy`: what the conductor does on an idle duty cycle.
     pub conductor_idle_strategy: IdleStrategy,
 }
 
 impl Default for Config {
-    /// Every key at its default: the directory of [`Driver::default_dir`] and
-    /// [`IdleStrategy::Backoff`].
+    /// Every key at its default: the directory of [`Driver::default_dir`], the log
+    /// directory of [`Driver::default_log_dir`] and [`IdleStrategy::Backoff`].
     fn default() -> Self {
         Self {
             dir: Driver::default_dir(),
+            log_dir: Driver::default_log_dir(),
             conductor_idle_strategy: IdleStrategy::Backoff,
         }
     }
@@ -109,6 +114,9 @@ impl Config {
         let set = |key: &'static KeyDef| lookup(key.env).filter(|value| !value.is_empty());
         if let Some(value) = set(&generated::DIR) {
             config.dir = PathBuf::from(value);
+        }
+        if let Some(value) = set(&generated::LOG_DIR) {
+            config.log_dir = Some(PathBuf::from(value));
         }
         if let Some(value) = set(&generated::CONDUCTOR_IDLE_STRATEGY) {
             config.conductor_idle_strategy =
@@ -197,6 +205,18 @@ mod tests {
     }
 
     #[test]
+    fn the_log_directory_comes_from_its_variable_or_the_drivers_rule() {
+        let config = Config::from_vars(table(&[])).unwrap();
+        assert_eq!(config.log_dir, Driver::default_log_dir());
+        let config =
+            Config::from_vars(table(&[("CAVALRY_LOG_DIR", "/var/tmp/cavalry-log")])).unwrap();
+        assert_eq!(config.log_dir, Some(PathBuf::from("/var/tmp/cavalry-log")));
+        assert_eq!(generated::LOG_DIR.flag, Some("--log-dir"));
+        assert_eq!(generated::LOG_DIR.doctor, "log-directory-backing");
+        assert_eq!(generated::LOG_DIR.env, "CAVALRY_LOG_DIR");
+    }
+
+    #[test]
     fn nothing_set_is_the_defaults() {
         let config = Config::from_vars(|_| None).expect("defaults");
         assert_eq!(config, Config::default());
@@ -276,6 +296,6 @@ mod tests {
             assert!(!envs.contains(&key.env), "{} twice", key.env);
             envs.push(key.env);
         }
-        assert_eq!(generated::KEYS.len(), 2);
+        assert_eq!(generated::KEYS.len(), 3);
     }
 }

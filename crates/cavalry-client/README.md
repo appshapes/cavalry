@@ -19,6 +19,12 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   driver went, a publication's next refusal is `Offer::Closed` and every poll of a
   subscription is `Fault::Closed`. A subscription the client cannot hold is refused with
   `subscriptions-full`; it is never left open without its images.
+- Records a stream to the durable log: `Cavalry::start_recording(channel, stream_id)`
+  asks the driver to record the stream's live publication and returns a `Recording`
+  whose `position()` and `synced_position()` read the recorder's two counters;
+  `Cavalry::stop_recording(id)`, or `Recording::stop(&mut client)`, stops it from any
+  client. The recording is the driver's:
+  it outlives the client, and dropping the handle stops nothing (ADR 0025).
 
 In Aeron, this is the client, with `tryClaim` and `commit`
 ([glossary](../../docs/glossary.md)).
@@ -46,7 +52,8 @@ use cavalry_client::{Cavalry, Offer};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A driver of our own for the doctest; `cavalry run` is the usual shape.
     let dir = std::env::temp_dir().join(format!("cavalry-client-readme-{}", std::process::id()));
-    let driver = cavalry_driver::Driver::start(&dir)?;
+    let log_dir = dir.with_extension("log");
+    let driver = cavalry_driver::Driver::start(&dir, &log_dir)?;
 
     // `Cavalry::connect()` reads CAVALRY_DIR or the default directory; this names one.
     let mut client = Cavalry::connect_to(&dir)?;
@@ -82,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.close()?;
     driver.close()?;
     std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&log_dir).ok();
     Ok(())
 }
 ```

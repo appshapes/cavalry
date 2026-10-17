@@ -11,7 +11,7 @@ use cavalry_proto::client_protocol::{Command, ErrorCode};
 use cavalry_shm::broadcast::BroadcastBuffer;
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, Producer};
-use cavalry_shm::counters::{CountersReader, CountersWriter};
+use cavalry_shm::counters::{CounterValue, CountersReader, CountersWriter};
 use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
@@ -21,6 +21,7 @@ use crate::conductor::{
 };
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
+use crate::recording::Recording;
 use crate::response::Response;
 use crate::subscription::{
     IMAGE_QUEUE, ImageEvent, RETIRE_QUEUE, Registration, Retired, Subscription,
@@ -336,6 +337,79 @@ impl Cavalry {
             }
             other => Err(ClientError::Driver {
                 what: format!("{other:?} in answer to {name}"),
+            }),
+        }
+    }
+
+    /// Asks the driver to record the live publication on `channel` and `stream_id` to
+    /// the durable log, from its producer position: of the stream's live publications,
+    /// the one with the lowest registration id not yet being recorded, so that a second
+    /// call records the next one (`spec/client-protocol.md`, "Commands"; ADR 0025).
+    /// Waits for `recording ready` up to the response timeout and returns the
+    /// [`Recording`], whose two positions read from the counters file. The recording
+    /// belongs to the driver: it outlives this client, dropping the handle stops nothing,
+    /// and [`Cavalry::stop_recording`] from any client stops it. No live publication is
+    /// [`ClientError::Refused`] with error code 20, every one already recorded code 22, a
+    /// channel other than `cavalry:ipc` code 1, and a catalog, registry or counters file
+    /// at capacity code 10.
+    pub fn start_recording(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+    ) -> Result<Recording, ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let command = Command::StartRecording {
+            client_id: self.client_id,
+            correlation_id,
+            stream_id,
+            channel: channel.as_bytes(),
+        };
+        match self.request(&command, correlation_id, "start recording")? {
+            Response::RecordingReady {
+                recording_id,
+                session_id,
+                position_counter_id,
+                synced_position_counter_id,
+                ..
+            } => {
+                let counter = |id: i32| -> Result<CounterValue, ClientError> {
+                    Ok(self.counters.value(u32::try_from(id).map_err(|_| {
+                        ClientError::Driver {
+                            what: format!("recording counter id {id}"),
+                        }
+                    })?)?)
+                };
+                Ok(Recording::new(
+                    recording_id,
+                    session_id,
+                    stream_id,
+                    channel.to_string(),
+                    counter(position_counter_id)?,
+                    counter(synced_position_counter_id)?,
+                ))
+            }
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to start recording"),
+            }),
+        }
+    }
+
+    /// Stops recording `recording_id`, whichever client started it: the driver writes the
+    /// catalog's stop at the position written and answers once it is synced
+    /// (`spec/client-protocol.md`, "Commands"). A recording already stopped is success
+    /// with nothing written; an id the catalog does not hold is [`ClientError::Refused`]
+    /// with error code 21.
+    pub fn stop_recording(&mut self, recording_id: i64) -> Result<(), ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let command = Command::StopRecording {
+            client_id: self.client_id,
+            correlation_id,
+            recording_id,
+        };
+        match self.request(&command, correlation_id, "stop recording")? {
+            Response::Success { .. } => Ok(()),
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to stop recording"),
             }),
         }
     }
