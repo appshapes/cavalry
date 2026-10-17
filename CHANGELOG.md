@@ -480,6 +480,9 @@ user-visible change, added in the same commit as the change. The format follows
   The rows found the one allocation the recorder made after a start, at a segment
   roll, and the roll now formats the next file's name on the stack into a path the
   writer keeps, so the bench's zero-allocation gate holds with a recording on.
-- The writer, the reviewer and the release-notes agents run on Fable 5.1 at xhigh effort,
-  in the three workflows and in their briefs' frontmatter, so that the agents that gate
-  and write this repository have the highest reasoning available.
+- The writer and the reviewer of the pull-request workflows run on Fable 5.1 at xhigh
+  effort, in `claude.yml`, `review-pull-request.yml` and their briefs' frontmatter, so that
+  the agents that gate and write this repository have the highest reasoning available. The
+  release-notes agents stay on Opus 5.5: the account's Fable usage limit was reached inside
+  a preview run and nothing was sent, and a weekly email that fails at a limit is worse than
+  one reviewed by Opus.

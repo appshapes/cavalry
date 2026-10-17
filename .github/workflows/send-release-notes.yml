@@ -177,9 +177,12 @@ jobs:
       # Bash allow rule says, and the writer prints its draft into its own log instead (the
       # first preview, run 38973732554 on 2026-10-16: two writer sessions, no file, the gate
       # refused). scripts/release-notes-test.py checks every agent step carries it.
-      # Fable 5.1 at xhigh effort (owner, 2026-10-16), as the writer and the reviewer of
-      # claude.yml and review-pull-request.yml: the highest reasoning available, for the agents
-      # that decide what leaves this repository.
+      # Opus 5.5 on all four agent steps (owner, 2026-10-17), while claude.yml and
+      # review-pull-request.yml run Fable 5.1 at xhigh effort: the account's Fable usage limit
+      # was reached inside the second Fable preview (run 38991604611, after seven Fable agent
+      # runs in 55 minutes), the fixer stopped with "You've reached your Fable limit" and
+      # nothing was sent. Opus sent the first preview end to end (run 38976056292); a weekly
+      # email that fails at a usage limit on Monday is worse than one reviewed by Opus.
       - name: Draft the email
         id: draft1
         if: steps.window.outputs.count > 0 && inputs.draft_run == ''
@@ -188,7 +191,7 @@ jobs:
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model claude-fable-5-1 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
+          claude_args: "--model claude-opus-5-5 --max-turns 50 --add-dir /tmp/cavalry-email"
           show_full_output: false
           prompt: |
             You are the WRITER of Cavalry's release-notes email. Read `.claude/agents/release-notes-email.md`
@@ -250,7 +253,7 @@ jobs:
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model claude-fable-5-1 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
+          claude_args: "--model claude-opus-5-5 --max-turns 50 --add-dir /tmp/cavalry-email"
           show_full_output: false
           prompt: |
             You are the REVIEWER of a DRAFT of Cavalry's release-notes email, at /tmp/cavalry-email/notes.md. Read
@@ -316,7 +319,7 @@ jobs:
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model claude-fable-5-1 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
+          claude_args: "--model claude-opus-5-5 --max-turns 50 --add-dir /tmp/cavalry-email"
           show_full_output: false
           prompt: |
             You are the WRITER of Cavalry's release-notes email, and your draft, /tmp/cavalry-email/notes.md, was
@@ -374,7 +377,7 @@ jobs:
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: "--model claude-fable-5-1 --effort xhigh --max-turns 50 --add-dir /tmp/cavalry-email"
+          claude_args: "--model claude-opus-5-5 --max-turns 50 --add-dir /tmp/cavalry-email"
           show_full_output: false
           prompt: |
             You are the REVIEWER of the SECOND draft of Cavalry's release-notes email, at
