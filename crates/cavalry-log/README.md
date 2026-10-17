@@ -9,16 +9,19 @@ The durable log: recording and replay. Data plane.
   advisory lock on the catalog, so two drivers never write one directory, and runs the
   recovery pass of the spec before any recording is added, reporting every action for
   the driver to count (ADR 0025).
-- Writes a recording for the driver: `LogDir::start` takes the catalog slot and creates
-  the time index and the first segment file; `recorder::RecordingWriter` writes each
-  block of committed frames with one positional write, appends an index entry at most
-  once per millisecond, rolls segments at their length, and syncs once per second
+- Writes a recording for the driver: `LogDir::start` takes the catalog slot and
+  creates the time index and the first segment file; `recorder::RecordingWriter` writes
+  each block of committed frames with one positional write, appends an index entry at
+  most once per millisecond, rolls segments at their length, and syncs once per second
   behind two positions, what is written and what is synced; `LogDir::stop` writes the
-  stop (ADR 0025). A roll that fails on a full disk is an `io` error and is retried at
-  the next write, never a stuck writer. On any error from `write`, the block was taken
-  exactly when `position()` moved. The delete of a stopped recording, state 3, arrives
-  with card 95's purge, with its counter and its caller in the driver; until then the
-  catalog writer has no `delete`, so every transition it writes is one the driver counts.
+  stop (ADR 0025). A roll allocates nothing while the log directory's path is under 384
+  bytes, the standard library's stack buffer for `open`: the next segment's name is
+  formatted on the stack into a path the writer keeps. A roll that fails on a full disk
+  is an `io` error and is retried at the next write, never a stuck writer. On any error
+  from `write`, the block was taken exactly when `position()` moved. The delete of a
+  stopped recording, state 3, arrives with card 95's purge, with its counter and its
+  caller in the driver; until then the catalog writer has no `delete`, so every
+  transition it writes is one the driver counts.
 - Replays a log back into a subscription from a given position, at original or maximum
   speed. `cavalry replay` answers "what did this service see between two instants" in
   one command.

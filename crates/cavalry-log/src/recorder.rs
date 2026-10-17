@@ -7,7 +7,7 @@
 //! duty cycle, so nothing here reads a clock.
 
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Write as _};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ use crate::catalog::CatalogError;
 use crate::dir::LogDir;
 use crate::layout::{
     Descriptor, ENTRY_LENGTH, FRAME_ALIGNMENT, HEADER_LENGTH, IndexEntry, IndexHeader, LayoutError,
-    Recording, index_file_name, locate, segment_file_name,
+    Recording, SEGMENT_SUFFIX, index_file_name, locate,
 };
 
 const DOC: &str = "docs/reference/durable-log.md#the-driver";
@@ -23,6 +23,10 @@ const DOC: &str = "docs/reference/durable-log.md#the-driver";
 /// How often the recorder syncs a recording's segment and index: once per second while
 /// it has unsynced bytes (ADR 0025). Nanoseconds.
 pub const SYNC_INTERVAL: i64 = 1_000_000_000;
+
+/// The longest segment file name: two i64s in decimal with a sign, a dash and `.rec`,
+/// with room to spare, so a roll formats the name on the stack.
+const SEGMENT_NAME_CAPACITY: usize = 64;
 
 /// How often the recorder appends a time index entry while the position moves: at most
 /// once per millisecond (`spec/durable-log.md`, "Time index"). Nanoseconds.
@@ -126,8 +130,12 @@ fn io<'a>(what: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> Recor
 
 /// A live recording's writer: the segment file the position is in, the time index, and
 /// the two positions a reader of the counters sees, what is written and what is synced.
-/// It holds no buffer: a block is written from the caller's bytes with one positional
-/// write, and nothing here allocates after [`LogDir::start`].
+/// It holds no data buffer: a block is written from the caller's bytes with one
+/// positional write, and nothing here allocates after [`LogDir::start`], a segment roll
+/// included, which formats the next file's name into a path the writer keeps and opens
+/// it on the standard library's stack buffer for paths under 384 bytes (invariant 2:
+/// the recorder is a data-plane thread, and the bench counts every thread's
+/// allocations; a longer log directory path makes `open` allocate a C string).
 pub struct RecordingWriter {
     descriptor: Descriptor,
     dir: PathBuf,
@@ -135,6 +143,9 @@ pub struct RecordingWriter {
     synced_position: i64,
     segment: File,
     segment_path: PathBuf,
+    /// The next segment's path, formatted in place at a roll; the two paths swap, so
+    /// both keep their capacity for the life of the writer.
+    next_path: PathBuf,
     segment_base: i64,
     segment_length: i64,
     index: File,
@@ -219,7 +230,13 @@ impl LogDir {
         index.sync_all().map_err(io("sync", &index_path))?;
         let located = locate(&descriptor, start)?;
         let segment_length = i64::from(descriptor.segment_file_length());
-        let segment_path = dir.join(&located.segment_file);
+        // Room for the directory and the longest segment name, so a roll's formatting
+        // never grows either path.
+        let path_capacity = dir.as_os_str().len() + 1 + SEGMENT_NAME_CAPACITY;
+        let mut segment_path = PathBuf::with_capacity(path_capacity);
+        segment_path.push(&dir);
+        segment_path.push(&located.segment_file);
+        let next_path = PathBuf::with_capacity(path_capacity);
         let segment = open_segment(&segment_path, segment_length)?;
         Ok(RecordingWriter {
             descriptor,
@@ -228,6 +245,7 @@ impl LogDir {
             synced_position: start,
             segment,
             segment_path,
+            next_path,
             segment_base: located.segment_base_position,
             segment_length,
             index,
@@ -417,16 +435,47 @@ impl RecordingWriter {
         Ok(())
     }
 
+    /// Syncs the segment that is full and opens the next, at its full length. The next
+    /// file's name is formatted into a buffer on the stack and pushed onto a path the
+    /// writer keeps, so the roll allocates nothing; the operating system call takes a
+    /// short path on its own stack buffer too.
     fn roll(&mut self) -> Result<(), RecorderError> {
         self.segment
             .sync_data()
             .map_err(io("sync", &self.segment_path))?;
         let base = self.segment_base + self.segment_length;
-        let path = self
-            .dir
-            .join(segment_file_name(self.descriptor.recording_id(), base));
-        self.segment = open_segment(&path, self.segment_length)?;
-        self.segment_path = path;
+        let mut name = [0u8; SEGMENT_NAME_CAPACITY];
+        let length = {
+            let mut cursor = io::Cursor::new(&mut name[..]);
+            // Two i64s in decimal and the suffix fit the buffer by construction, so
+            // the write cannot fail; a short write would name a wrong file, which the
+            // debug assertion below catches.
+            let _ = write!(
+                cursor,
+                "{}-{}{}",
+                self.descriptor.recording_id(),
+                base,
+                SEGMENT_SUFFIX
+            );
+            cursor.position() as usize
+        };
+        debug_assert!(
+            length < SEGMENT_NAME_CAPACITY,
+            "the segment name fits its buffer"
+        );
+        let Ok(file_name) = std::str::from_utf8(&name[..length]) else {
+            return Err(RecorderError::Block {
+                position: self.position,
+                length: 0,
+                bytes: 0,
+                reason: "has a segment name that is not UTF-8, which is a bug",
+            });
+        };
+        self.next_path.clear();
+        self.next_path.push(&self.dir);
+        self.next_path.push(file_name);
+        self.segment = open_segment(&self.next_path, self.segment_length)?;
+        std::mem::swap(&mut self.segment_path, &mut self.next_path);
         self.segment_base = base;
         Ok(())
     }

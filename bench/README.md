@@ -32,7 +32,10 @@ nothing depends on it.
   p99.99 regression over 5 percent against `bench/baseline.json` for the profile, on
   the `claim_commit` and `one_way` rows; the `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017). Only the bench host's profiles have
-  a baseline: a shared runner's run is a report.
+  a baseline: a shared runner's run is a report. The `_recorded` rows repeat the client
+  rows with the driver's recorder writing the stream to the durable log under the bench
+  directory, and `record_block` times the recorder's own block path; both are new rows
+  with no baseline until the bench host records one (ADR 0025).
 
 ## What it must never do
 
