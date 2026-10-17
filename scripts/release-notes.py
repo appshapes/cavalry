@@ -428,14 +428,17 @@ def justfile_recipes(root):
 
 def cavalry_commands(root):
     """The commands the `cavalry` binary lists in its usage text, read from the USAGE constant of
-    crates/cavalry/src/main.rs: the text the binary prints, without building it."""
+    crates/cavalry/src/main.rs: the text the binary prints, without building it. A command line is
+    indented by two spaces and starts with the name, followed by its arguments or its description
+    (`  run      start a driver`, `  record <stream id>  record ...`); flag lines start with `--`
+    and continuation lines are indented further, so neither matches."""
     path = root / "crates" / "cavalry" / "src" / "main.rs"
     if not path.is_file():
         return set()
     m = re.search(r'const USAGE: &str = "(.*?)";', path.read_text(encoding="utf-8"), re.S)
     if not m:
         return set()
-    return {c.group(1) for c in re.finditer(r"^ {2}([a-z][a-z-]*) {2,}", m.group(1), re.M)}
+    return {c.group(1) for c in re.finditer(r"^ {2}([a-z][a-z-]*)(?= |$)", m.group(1), re.M)}
 
 
 def toml_names(path):

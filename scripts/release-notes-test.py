@@ -93,7 +93,7 @@ class Repo:
         self.git("config", "user.name", "Tester")
         self.git("config", "user.email", "tester@example.invalid")
         self.write("justfile", "set shell := [\"bash\", \"-c\"]\n\ntest *ARGS: test-scripts\n    cargo test\n\nbench *ARGS:\n    cargo bench\n\nalias t := test\n")
-        self.write("crates/cavalry/src/main.rs", 'const USAGE: &str = "usage: cavalry <command>\n\n  run       start a driver\n  doctor    explain the driver\n  --version print the version\n";\n')
+        self.write("crates/cavalry/src/main.rs", 'const USAGE: &str = "usage: cavalry <command>\n\n  run       start a driver\n  doctor    explain the driver\n  record <stream id>  record the live publication on that stream\n  record --stop <id>  stop that recording\n  --version print the version\n";\n')
         self.write("config.toml", 'schema = 0\n\n[[key]]\nname = "dir"\n\n[[key]]\nname = "conductor.idle.strategy"\n')
         self.write("counters.toml", '[[counter]]\nname = "publication.position"\n')
         self.write("README.md", "# Cavalry\n\n## The ten-minute path\n\nWords.\n")
@@ -495,7 +495,7 @@ class Lint(Base):
         for want in ("the draft carries a placeholder", "the draft says Unreleased",
                      "the first line is '# Another title'; it must be exactly `# The title`",
                      "just nosuch is not a recipe of the justfile (have: bench test)",
-                     "cavalry replay is not a command of the binary (have: doctor run)",
+                     "cavalry replay is not a command of the binary (have: doctor record run)",
                      "CAVALRY_NOPE is not the environment variable of a key in config.toml",
                      "`foo.bar` is neither a counter in counters.toml nor a key in config.toml",
                      "`docs/missing.md` is not a file of the checkout", "ADR 0099 has no file under docs/decisions/",
@@ -542,7 +542,25 @@ class Readers(unittest.TestCase):
         self.assertNotIn("set", recipes)
 
     def test_the_binarys_usage(self):
-        self.assertTrue({"run", "doctor"} <= rn.cavalry_commands(ROOT), rn.cavalry_commands(ROOT))
+        self.assertTrue({"run", "doctor", "record"} <= rn.cavalry_commands(ROOT), rn.cavalry_commands(ROOT))
+
+    def test_the_usage_layout(self):
+        """A command may be followed by its arguments after one space (`record <stream id>`); a flag
+        line, a continuation line and the prose below the list are not commands."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "crates" / "cavalry" / "src").mkdir(parents=True)
+            (root / "crates" / "cavalry" / "src" / "main.rs").write_text(
+                'const USAGE: &str = "usage: cavalry <command> [--dir <path>]\n\n'
+                '  run                      start a driver\n'
+                '  doctor                   explain the driver; exits 1 when a check\n'
+                '                           failed\n'
+                '  record <stream id>       record the live publication on that stream\n'
+                '  record --stop <id>       stop that recording\n'
+                '  --version                print the version\n\n'
+                '  --dir <path>      the driver directory\n\n'
+                'Every configuration key is read from its environment variable.";\n')
+            self.assertEqual(rn.cavalry_commands(root), {"run", "doctor", "record"})
 
     def test_the_registries(self):
         self.assertIn("dir", rn.toml_names(ROOT / "config.toml"))
