@@ -59,6 +59,12 @@ pub const DRIVER_LOG_CREATE_FAILED: CounterId = CounterId(16);
 /// `conductor.idle_strategy`, a static gauge: The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin.
 pub const CONDUCTOR_IDLE_STRATEGY: CounterId = CounterId(17);
 
+/// `counters.allocations`, a static counter: Counter allocations made since the driver started, the static counters' own records included: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for, so that counters.allocations minus counters.freed is counters.allocated (spec/counters-file.md, Metadata record).
+pub const COUNTERS_ALLOCATIONS: CounterId = CounterId(18);
+
+/// `counters.freed`, a static counter: Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout.
+pub const COUNTERS_FREED: CounterId = CounterId(19);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -203,6 +209,22 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Gauge,
         scope: Scope::Static,
         doc: "The idle strategy the conductor runs, what its thread does on a duty cycle that found no work, stored once when the driver starts: 0 backoff, 1 yield, 2 busy-spin.",
+        doctor: "",
+    },
+    CounterDef {
+        id: COUNTERS_ALLOCATIONS,
+        name: "counters.allocations",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Counter allocations made since the driver started, the static counters' own records included: every record that went from unused or reclaimed to allocated, the transition counters.allocated adds one for, so that counters.allocations minus counters.freed is counters.allocated (spec/counters-file.md, Metadata record).",
+        doctor: "",
+    },
+    CounterDef {
+        id: COUNTERS_FREED,
+        name: "counters.freed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Counters freed since the driver started: every record that went from allocated to reclaimed, the transition counters.allocated loses one for; a reclaimed record is allocated again after the counter reuse timeout.",
         doctor: "",
     },
 ];
