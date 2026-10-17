@@ -152,7 +152,7 @@ jobs:
       # reaches for them, and the install stays out of the turn budget.
       - name: Install the Rust toolchain
         if: github.event_name != 'pull_request_review' || !startsWith(github.event.review.user.login, 'claude') || steps.fix_gate.outputs.proceed == 'true'
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
           components: clippy, rustfmt
@@ -163,7 +163,7 @@ jobs:
         # For `just docs`, which the writer runs before every push (.claude/agents/developer.md).
         # The same pin as ci.yml (ADR 0006); bump both together.
         if: github.event_name != 'pull_request_review' || !startsWith(github.event.review.user.login, 'claude') || steps.fix_gate.outputs.proceed == 'true'
-        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: mdbook@0.5.4
       - name: Restore the Rust cache
@@ -186,7 +186,7 @@ jobs:
         # a model with repository write access. Re-resolve the current `v1` when bumping:
         #   gh api repos/anthropics/claude-code-action/git/ref/tags/v1 --jq '.object.sha'
         #   (an annotated tag needs one more hop: gh api .../git/tags/<sha> --jq '.object.sha')
-        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        uses: anthropics/claude-code-action@a26b07d8c778b0c43f64618e5fd29fd0f8af72e8 # v1.0.250
         with:
           # EXACTLY ONE login, explicit, never '*': claude, the Claude GitHub App, the actor of
           # the fixer's own push and of the changes-requested review that arms this job. Pull
