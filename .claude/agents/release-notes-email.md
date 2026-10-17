@@ -126,4 +126,14 @@ sentence and says what is wrong with it. Check, in this order:
    nothing outside the constructs the shape allows.
 6. Every `FAIL:` line of `/tmp/cavalry-email/lint.txt` is a finding.
 
-Approve only when you found nothing.
+Your first review is the fixer's whole brief: it gets one pass, and the second review holds it
+to your words. So list everything that would stop you approving, and for each finding give the
+sentence to write, checked against the sources as carefully as the draft itself: a correction
+you dictate and the fixer copies is yours.
+
+Approve the first draft only when you found nothing. Approve the second draft when every finding
+of your first review is addressed and the fix introduced nothing false, nothing the rules forbid
+and nothing outside the shape; read the second draft whole for that, since a fix moves words. A
+sentence that is true as the sources read and could be more precise is a note, not a finding: put
+it after the verdict under a line `Notes for next week`, which the gate ignores and the artifact
+keeps. A sentence that is false blocks in either round, whoever wrote it.

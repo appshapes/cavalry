@@ -387,6 +387,10 @@ jobs:
             ${{ steps.window.outputs.first }} to ${{ steps.window.outputs.last }}; its first line must be exactly
             `# ${{ steps.window.outputs.title }}`.
 
+            This is the second and last round: approve when every finding of your first review is addressed and
+            the fix introduced nothing false, nothing the rules forbid and nothing outside the shape; a sentence
+            that is true and could be more precise goes under `Notes for next week`, after the verdict.
+
             Overwrite /tmp/cavalry-email/review.md from the Bash tool with a quoted heredoc, exactly
             `tee /tmp/cavalry-email/review.md <<'EOF'` … `EOF` (the Write tool is NOT available): the FIRST line
             is exactly `APPROVED` or `CHANGES_REQUESTED`, then one finding per line. Do nothing else.

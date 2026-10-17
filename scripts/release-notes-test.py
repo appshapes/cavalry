@@ -621,6 +621,15 @@ class Workflow(unittest.TestCase):
         self.assertIn("/tmp/cavalry-email/lint.txt", self.brief)
         self.assertIn("scripts/release-notes-email-sample.md", self.brief)
 
+    def test_the_second_review_converges(self):
+        """The brief's rule for the second round and the second reviewer's prompt agree: the fix is held to the
+        first review, a true sentence that could be more precise is a note under one heading, and the gate reads
+        only the first line of review.md, so the notes do not change the verdict."""
+        self.assertIn("Notes for next week", self.brief)
+        self.assertIn("Notes for next week", self.text)
+        self.assertEqual(self.text.count("second and last round"), 1)
+        self.assertEqual(self.text.count('head -n 1 "$RELEASE_NOTES_DIR/review.md"'), 2, "both verdict steps read the first line only")
+
     def test_the_workflow_runs_this_script_and_the_renderer(self):
         self.assertIn("python3 scripts/release-notes.py window", self.text)
         self.assertIn("python3 scripts/release-notes.py adopt", self.text)
