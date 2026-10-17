@@ -132,9 +132,10 @@ fn io<'a>(what: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> Recor
 /// the two positions a reader of the counters sees, what is written and what is synced.
 /// It holds no data buffer: a block is written from the caller's bytes with one
 /// positional write, and nothing here allocates after [`LogDir::start`], a segment roll
-/// included, which formats the next file's name into a path the writer keeps
-/// (invariant 2: the recorder is a data-plane thread, and the bench counts every
-/// thread's allocations).
+/// included, which formats the next file's name into a path the writer keeps and opens
+/// it on the standard library's stack buffer for paths under 384 bytes (invariant 2:
+/// the recorder is a data-plane thread, and the bench counts every thread's
+/// allocations; a longer log directory path makes `open` allocate a C string).
 pub struct RecordingWriter {
     descriptor: Descriptor,
     dir: PathBuf,
