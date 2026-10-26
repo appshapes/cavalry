@@ -425,14 +425,19 @@ jobs:
             --reason completed \
             --comment "The agent finished this run without changes, so there is no pull request to close this issue. Closing automatically; its comment above records what was reviewed. Reopen if the run looks wrong."
 
-  # GitHub holds every run a fixer push raises: `ci` and `review pr` on the new head sit at
+  # GitHub holds every run a fixer push raises: `ci` on the new head sits at
   # `action_required` whatever the fork approval policy says (Brigade measured it on
   # 2026-09-17: the push is attributed to github-actions[bot], which no policy value
-  # exempts). This job makes the call a human would make, `POST .../actions/runs/<id>/approve`,
-  # from the token-holding side of the boundary above: no agent runs here, nothing here reads
-  # model output, and GH_ACTIONS_TOKEN stays out of the agent's job exactly as it does for
-  # `open-pr`. It runs after the agent job on every pull-request-bound event and is a no-op
-  # when the head raised no held run. `needs: agent` skips it when the agent job failed.
+  # exempts). And it raises no `pull_request_target` run for that push at all, so the
+  # dispatcher never starts the review of the fix (pull requests 52 and 53 on 2026-10-26:
+  # `ci` held on 063f079 and 75fdba0, no `dispatch review` run on either, while a person's
+  # push to the same branches raised both within ten seconds). This job makes the two
+  # calls a person would make, `POST .../actions/runs/<id>/approve` and then the `review`
+  # label, from the token-holding side of the boundary above: no agent runs here, nothing
+  # here reads model output, and GH_ACTIONS_TOKEN stays out of the agent's job exactly as
+  # it does for `open-pr`. It runs after the agent job on every pull-request-bound event
+  # and is a no-op when the head raised no held run and has its dispatch run already.
+  # `needs: agent` skips it when the agent job failed.
   approve-fixer-runs:
     needs: agent
     if: |
@@ -474,3 +479,34 @@ jobs:
             sleep 10
           done
           echo "runs on ${head}: $(printf '%s\n' "$runs" | grep -c . || true); approved ${approved}"
+
+      # The owner's token adds the label, so the `labeled` event fires and the dispatcher
+      # (dispatch-review.yml) takes the label off and starts the reviewer: the signal a
+      # person sends today, sent by the run that pushed. Nothing is sent for a head that
+      # has a `dispatch review` run already, which every head a person pushed has, so no
+      # head is reviewed twice and a run that pushed nothing sends nothing. A skipped
+      # dispatch run is a `labeled` event for another label, not a review, so it does not
+      # count. The dispatcher refuses a fork, so a fork head gets no label either.
+      - name: Ask for the review of the agent's push
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          if ! IFS=$'\t' read -r head head_repo < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.repo.full_name] | @tsv' 2>/dev/null); then
+            echo "#${PR_NUMBER} is not a pull request; nothing to review"
+            exit 0
+          fi
+          if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "#${PR_NUMBER} is from ${head_repo}; the reviewer does not run on forks (ADR 0005)"
+            exit 0
+          fi
+          dispatched=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/dispatch-review.yml/runs?head_sha=${head}&per_page=50" \
+            --jq '[.workflow_runs[] | select(.conclusion != "skipped")] | length')
+          if [ "$dispatched" -gt 0 ]; then
+            echo "head ${head} has ${dispatched} dispatch review run(s) already; nothing to do"
+            exit 0
+          fi
+          gh pr edit "$PR_NUMBER" --add-label review
+          echo "added the review label to #${PR_NUMBER}: the push to ${head} raised no dispatch review run"

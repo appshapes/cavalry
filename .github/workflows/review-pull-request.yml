@@ -17,8 +17,13 @@
 # `cargo`, no write tool, and the agent's own configuration is master's. Only a workflow
 # of this repository or a person with write access can dispatch it, and the first step
 # refuses a pull request whose head is not in this repository. Adding the `review` label
-# to a pull request runs it again, through the dispatcher.
+# to a pull request runs it again, through the dispatcher. A session that ends without
+# submitting a review is run again once, by the `retry` job at the end of this file,
+# which sends the same dispatch a person's label would; the second miss fails the run.
 name: review pr
+# The Actions list is where a person looks for a late review (docs/how-to/ask-the-agent.md,
+# "When it does not work"), so the run says which pull request and which attempt it is.
+run-name: "review pr ${{ inputs.pr_number }}, attempt ${{ inputs.attempt }}"
 
 on:
   workflow_dispatch:
@@ -30,6 +35,11 @@ on:
       head_sha:
         description: The pull request's head commit, the one the review is for
         required: true
+        type: string
+      attempt:
+        description: "1 for a dispatch from the pull request or the review label; 2 for the retry job's own dispatch, which fails loud on a second miss"
+        required: false
+        default: "1"
         type: string
 
 # One reviewer per pull request, and the newest head wins: the fixer can push more than
@@ -52,6 +62,10 @@ jobs:
       pull-requests: read      # the verify step reads the reviews; the review itself is posted with the App token
       id-token: write          # claude-code-action's OIDC exchange for the Claude App token
       actions: read
+    # 'false' when the first attempt ended without a review: the `retry` job's cue. The
+    # write permissions a retry needs stay in that job, which runs no agent.
+    outputs:
+      reviewed: ${{ steps.verify.outputs.reviewed }}
     steps:
       # The inputs come from dispatch-review.yml or from a person with write access.
       # Check their shape before they reach a command line; refuse a pull request whose
@@ -65,6 +79,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          ATTEMPT: ${{ inputs.attempt }}
         run: |
           set -euo pipefail
           if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
@@ -72,6 +87,9 @@ jobs:
           fi
           if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::head_sha must be a full commit SHA, got '$HEAD_SHA'"; exit 1
+          fi
+          if ! [[ "$ATTEMPT" =~ ^[12]$ ]]; then
+            echo "::error::attempt must be 1 or 2, got '$ATTEMPT'"; exit 1
           fi
           IFS=$'\t' read -r head_repo head_now < <(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '[.head.repo.full_name, .head.sha] | @tsv')
           if [ "$head_repo" != "$GH_REPO" ]; then
@@ -197,32 +215,117 @@ jobs:
 
       # A reviewer session can end "successfully" without ever submitting the review
       # (observed in Brigade's reference repositories: green check, zero reviews,
-      # auto-merge never armed). This step is the job's verdict: a claude review at the
-      # head SHA passes, none fails, whatever the action reported.
+      # auto-merge never armed; in Cavalry, runs 38983393674, 40322905586 and
+      # 40357199403, each a "success" result with no `gh pr review`, after 28 and 32
+      # turns where the log survives). This step is the job's verdict: a claude review
+      # at the head SHA passes; none on attempt 1 hands the head to the `retry` job
+      # below; none on attempt 2 fails, whatever the action reported. It also writes the
+      # job summary: the session's result line, the tool calls the settings above
+      # denied, and on a miss the session's final text, which the action discards, so
+      # the second attempt can be read against the first. Bounded excerpts, on a page as
+      # public as the log; the full output stays out (`show_full_output` is off above).
       - name: Verify a review was submitted
+        id: verify
         if: steps.pr.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          ATTEMPT: ${{ inputs.attempt }}
           REVIEW_OUTCOME: ${{ steps.review.outcome }}
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
         run: |
           set -euo pipefail
           # One line per claude review at head: "STATE<TAB>has-trailer". Paginated so a
           # long-lived pull request cannot hide the newest review.
           reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" \
             --jq ".[] | select((.user.login // \"\" | startswith(\"claude\")) and .commit_id == \"$HEAD_SHA\") | [.state, (.body // \"\" | contains(\"@claude\") | tostring)] | @tsv")
-          if [ -z "$reviews" ]; then
-            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA (the Review step's outcome was '$REVIEW_OUTCOME'; its log says why)"
-            exit 1
-          fi
           last=$(printf '%s\n' "$reviews" | tail -n 1)
           state=${last%%$'\t'*}
           has_trailer=${last##*$'\t'}
+          # The summary. The execution file is the action's record of the session, a JSON
+          # array of its messages ending in the SDK's result; it is absent when the action
+          # never ran the session.
+          {
+            echo "## Reviewer session, attempt $ATTEMPT of 2, head $HEAD_SHA"
+            echo
+            if [ -n "$reviews" ]; then echo "- Verdict: $state"; else echo "- Verdict: none submitted"; fi
+            if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
+              jq -r '.[] | select(.type == "result") | "- Result: \(.subtype), is_error \(.is_error), \(.num_turns // "?") turns, \((.duration_ms // 0) / 1000 | floor) s, \(.permission_denials // [] | length) denied tool calls"' "$EXECUTION_FILE"
+              echo
+              echo "Denied tool calls, the tool then its command or path, cut at 200 characters:"
+              echo
+              echo '```text'
+              jq -r '.[] | select(.type == "result") | .permission_denials[]? | "\(.tool_name): \(.tool_input | if type == "object" then (.command // .file_path // tostring) else tostring end | .[0:200])"' "$EXECUTION_FILE"
+              echo '```'
+              if [ -z "$reviews" ]; then
+                echo
+                echo "The session's final text, which the action discards, cut at 2000 characters:"
+                echo
+                echo '````text'
+                jq -r '[.[] | select(.type == "assistant")] | last | .message.content[]? | select(.type == "text") | .text' "$EXECUTION_FILE" | head -c 2000
+                echo
+                echo '````'
+              fi
+            else
+              echo "- No execution file; the Review step's outcome was '$REVIEW_OUTCOME'."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY" || echo "::warning::The job summary could not be written"
+          if [ -z "$reviews" ]; then
+            if [ "$ATTEMPT" = "1" ]; then
+              echo "::warning::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt 1 of 2 (the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did); the retry job dispatches attempt 2"
+              echo "reviewed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt $ATTEMPT of 2 (the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did): add the review label to the pull request to run it again (docs/how-to/ask-the-agent.md, \"When it does not work\")"
+            exit 1
+          fi
+          echo "reviewed=true" >> "$GITHUB_OUTPUT"
           # A changes-requested verdict without the '@claude' trailer never arms the fixer:
           # the pull request would silently park, so fail loud.
           if [ "$state" = "CHANGES_REQUESTED" ] && [ "$has_trailer" != "true" ]; then
             echo "::error::CHANGES_REQUESTED review at $HEAD_SHA lacks the @claude fixer trailer; the fix loop will not arm"
             exit 1
           fi
+
+  # The second attempt, in a job that runs no agent, so the reviewer's job above keeps
+  # the token it has (ADR 0004: a job with a write permission holds no agent). Three of
+  # Cavalry's first hundred completed reviewer runs ended with a "success" result and
+  # no review (38983393674, 40322905586 and 40357199403, 2026-10-16 and 2026-10-26),
+  # and each time the `review` label, which dispatches this workflow again for the same
+  # head, produced a normal review on the second run. This job sends that dispatch once,
+  # with a note on the pull request, so a person is needed only for a second miss. It
+  # dispatches for the head it was given: when the pull request has moved on, the
+  # dispatch for the new head is the one that reviews it, and a second dispatch for the
+  # old one would cancel that run through the concurrency group above.
+  retry:
+    needs: review
+    if: needs.review.outputs.reviewed == 'false'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5          # two API calls and a dispatch; not a p90, a floor
+    permissions:
+      actions: write            # `gh workflow run`: the one job-token write that does raise a run
+      pull-requests: write      # the note on the pull request; a job-token comment raises no event
+    steps:
+      - name: Dispatch attempt 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          REF: ${{ github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          head_now=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '.head.sha')
+          if [ "$head_now" != "$HEAD_SHA" ]; then
+            echo "::notice::pull request $PR_NUMBER moved from $HEAD_SHA to $head_now; the run dispatched for the new head reviews it"
+            exit 0
+          fi
+          gh pr comment "$PR_NUMBER" --body "The reviewer session for $HEAD_SHA ended without submitting a review ($RUN_URL; its job summary says what the session did). Running it once more. If the second run ends the same way, its \`review pr\` run fails on the Actions tab: add the \`review\` label to this pull request to run it again (\`docs/how-to/ask-the-agent.md\`, \"When it does not work\")."
+          # Last on purpose: the new run joins this pull request's concurrency group and
+          # cancels this one, so nothing may follow the dispatch.
+          gh workflow run review-pull-request.yml --ref "$REF" \
+            -f "pr_number=$PR_NUMBER" -f "head_sha=$HEAD_SHA" -f "attempt=2"
+          echo "dispatched attempt 2 for pull request $PR_NUMBER at $HEAD_SHA"

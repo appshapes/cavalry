@@ -30,7 +30,8 @@ first one. Why the loop is built this way is in ADR 0004
      the Actions tab rather than among the pull request's checks because it runs on
      `master`, which either approves or requests changes;
    - on requested changes, a second `claude` run applies the blockers on the same
-     branch and pushes, which starts a new review, up to three times;
+     branch and pushes, then adds the `review` label itself, because a push by the
+     agent starts no review on its own; the label starts one, up to three times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
      pull request merges as one squash commit when `gates (linux)`, `gates (macos)`
      and `bench (linux)` pass. The issue closes.
@@ -67,9 +68,13 @@ branch locally; GitHub has already deleted it on origin.
 - **"Autonomous fix cap reached."** The reviewer requested changes three times. The
   pull request is yours now: fix it by hand, or write `@claude` with instructions in
   a review to start the loop again.
-- **No review arrived.** The `review pr` run on the Actions tab is red with the reason
-  in its last step. Pull requests from forks are not reviewed by the agent, only by a
-  person.
+- **No review arrived.** A review lands within about ten minutes of the push. A
+  reviewer session that ends without submitting one is run again once, on its own,
+  and a comment on the pull request says so. When the review is more than fifteen
+  minutes late, run `gh run list --workflow "review pr"`: each run is named with its
+  pull request number and attempt, and a `failure` is the second miss, with what the
+  session did in its job summary. Add the `review` label to the pull request to run
+  it again. Pull requests from forks are not reviewed by the agent, only by a person.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
   label, or a required check failed. `gh pr checks <number>` shows which.
 - **The pull request conflicts with `master`.** `gh pr view <number>` says
