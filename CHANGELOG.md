@@ -505,3 +505,12 @@ user-visible change, added in the same commit as the change. The format follows
   publication or subscription is added, not as the stream reaches it, so a host holds as
   many live publications as its driver directory holds whole logs, 192 MiB each for the
   spec's three 64 MiB terms, and the next `add_publication` is refused by name.
+- The bench's third pin holds the driver's conductor alone: under `--pin P,S,C` the
+  driver's recorder and the client's conductor run on the lowest CPU outside the pins,
+  through `Driver::start_with_threads`, a hook each driver thread runs first, which
+  `cavalry` re-exports with its `DriverThread` and `ThreadStart`, and every histogram's
+  counts are written once before the measured loop, so a rare sample never first-touches
+  a page of them. Both came from the second bench host's trace (card 136). A pin a
+  driver thread could not take, or a process with no CPU outside the pins, fails the run
+  with the next step in the message; `docs/how-to/run-the-bench.md`, "When it does not
+  work", is the page.

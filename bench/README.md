@@ -13,8 +13,11 @@ nothing depends on it.
   (ADR 0022; counted in spins, since a clock read per spin costs the other threads),
   through a real counters file, all under `/dev/shm` on Linux and the system's
   temporary directory elsewhere. The warm-up before recording is one rotation through
-  all three terms, so no measured message first-touches a page. `--pin P,S,C` binds the
-  three threads to those CPUs on Linux, and `--repeat N` runs everything N times and
+  all three terms, so no measured message first-touches a page, and every histogram's
+  counts are written once before the loop, so no rare sample first-touches one either.
+  `--pin P,S,C` binds the three threads to those CPUs on Linux, with the driver's
+  recorder and the client's conductor on the lowest CPU outside them in the client rows,
+  so each pinned CPU runs one thread, and `--repeat N` runs everything N times and
   reports each benchmark's median run by p99.99, every run's on record; the bench host
   runs it with both (ADR 0016).
 - Times every message with `Instant` and records it in an HdrHistogram with fixed bounds,
@@ -34,8 +37,9 @@ nothing depends on it.
   probes and are reported, never failed (ADR 0017). Only the bench host's profiles have
   a baseline: a shared runner's run is a report. The `_recorded` rows repeat the client
   rows with the driver's recorder writing the stream to the durable log under the bench
-  directory, and `record_block` times the recorder's own block path; both are new rows
-  with no baseline until the bench host records one (ADR 0025).
+  directory, from a housekeeping CPU under `--pin`, and `record_block` times the
+  recorder's own block path; both are new rows with no baseline until the bench host
+  records one (ADR 0025).
 
 ## What it must never do
 

@@ -19,6 +19,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   at most once per millisecond so that the publisher's cache line is not read on every
   cycle (ADR 0022). The strategy it runs is stored once in the
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
+  `Driver::start_with_threads` takes a hook each thread runs first, named the thread it
+  is on, where a caller that owns the host's CPUs pins the conductor to a CPU of its own
+  and leaves the recorder on the housekeeping CPUs, as the bench does under `--pin`;
+  otherwise both threads keep the affinity of the thread that started the driver.
 - Records a stream to the durable log on a second thread, the recorder, with the same
   idle strategy: `start recording` and `stop recording` (`spec/client-protocol.md`,
   "Commands") name a stream, the conductor hands the recorder each start and stop

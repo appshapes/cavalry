@@ -36,8 +36,9 @@ the gate fails only on the dedicated bench host is
    `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `linux` or `macos`,
    and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier,
-   `just bench --pin 8,10,12` binds the publisher, the subscriber and the conductor to
-   those CPUs, on Linux only, and `just bench --repeat 21` runs every benchmark
+   `just bench --pin 8,10,12` binds the publisher, the subscriber and the driver's
+   conductor to those CPUs, on Linux only, with the driver's recorder and the client's
+   conductor on the lowest CPU outside them, so each pinned CPU runs one thread, and `just bench --repeat 21` runs every benchmark
    twenty-one times and reports each one's median run by p99.99, with every run's
    p99.99 in the last column and in the result file. The bench host runs it with all
    three: on an isolated core, one run's 0.01 percent tail of a few hundred nanoseconds
@@ -57,7 +58,7 @@ the gate fails only on the dedicated bench host is
    | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor loads the publisher's tail at most once per millisecond on its duty cycle (ADR 0022), as a user's does. |
    | `one_way_<body>_client` | From the publisher's timestamp to `Subscription::poll`'s handler, through a real driver and the client's conductor hand-off; the path a user's message takes (ADR 0021). |
    | `claim_commit_<body>_recorded` | The client row's claim, write and commit while the driver's recorder writes the same stream to the durable log under the bench directory (ADR 0025): what recording costs the publisher, whose limit respects the recorder's position. The run fails unless the recording reached the publisher's final position. |
-   | `one_way_<body>_recorded` | The client row's publish to delivery with the recorder on: one more reader of the log, on the driver's recorder thread. |
+   | `one_way_<body>_recorded` | The client row's publish to delivery with the recorder on: one more reader of the log, on the driver's recorder thread, which runs on a housekeeping CPU under `--pin` (the CPUs left to everything but the pinned threads, [the host's set](set-up-a-bench-host.md#steps)) (until card 136 it shared the conductor's CPU, where ADR 0025's cost of 80 ns at p99.99 was measured). |
    | `slot_padding_<spacing>_load` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
    | `slot_padding_<spacing>_store` | The other side of the same pair: one store while the other thread loads. |
    | `record_block_<body>` | The recorder's block path: one scan of a 1 MiB block of committed frames (`TermReader::block`) and its one positional write into a segment file under the bench directory (`RecordingWriter::write`), per block, under the counting allocator (ADR 0025). It runs last, so its writes reach no other row, and has no baseline until the bench host records one. |
@@ -136,15 +137,15 @@ the gate fails only on the dedicated bench host is
   With the kernel's tracepoints enabled as root for one run, read-only apart from the
   trace buffer, no `exceptions:page_fault_user` event on a pinned CPU has an `address=`
   inside one of those mappings, whose ranges are the first column of the process's
-  `maps` taken during the same benchmark; a fault there is a bug, not a cost. Faults in
-  the harness's own memory remain at this commit: each histogram takes one fault per
-  4 KiB page of its counts as a rare sample first lands in a new bucket, 55 to 68 per
-  histogram on the second bench host, and the publisher's heap takes a few more.
-  `sched:sched_waking` to the pinned CPUs names no Cavalry thread woken from another
-  pinned CPU, but still names the driver's conductor waking its recorder and the
-  client's conductor, which share the third pin with it. Both are the harness's, not
-  the log's, and stay until card 136's second pull request moves the recorder and the
-  client's conductor off that pin.
+  `maps` taken during the same benchmark; a fault there is a bug, not a cost. The faults
+  that remain on a pinned CPU are the harness's own, and each is a burst at a row's
+  setup, before its measured loop: the 54 pages of a histogram's counts, written once
+  when the histogram is made, so that a rare sample never first-touches one inside the
+  loop. A fault spread through a loop is a bug. `sched:sched_waking` to the pinned CPUs
+  names no Cavalry thread as the wakee, apart from the driver's conductor waking from
+  idle on its own CPU: the driver's recorder and the client's conductor run on the
+  lowest CPU outside the pins, so nothing shares a pinned CPU with a measured thread
+  (`ps -L -o tid,psr,comm` during a run shows one Cavalry thread per pinned CPU).
 
   ```text
   T=/sys/kernel/tracing
@@ -188,15 +189,35 @@ the gate fails only on the dedicated bench host is
   `cavalry-shm`, where every `create` and `open` pre-touches before it hands the
   mapping out and `tests/pre_touch.rs` reads the residency back
   ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)). A fault in
-  the harness's own memory, or a wake-up between the driver's conductor, its recorder
-  and the client's conductor on the third pin, is the harness's design at this commit,
-  not a regression; `ps -L -o tid,psr,comm` during the run shows where each thread
-  sits. A p99.99 that a second host reads far above `bench`'s with the same p50 is how
-  the second bench host found the faults.
+  the harness's own memory inside a measured loop, rather than in the burst at the
+  row's setup: the histogram was not written through before the loop, which
+  `histogram()` in `bench/src/main.rs` does. A wake-up of a Cavalry thread on a pinned
+  CPU from another CPU: a thread shares that CPU with a measured one; `ps -L -o
+  tid,psr,comm` during the run shows where each thread sits, and under `--pin` the
+  driver's recorder and the client's conductor belong on the lowest CPU outside the
+  pins. A p99.99 that a second host reads far above `bench`'s with the same p50 and
+  none of the above is the host's own tail, and its profile's baseline is where it is
+  held; the second bench host reads one_way at 1.6 µs against `bench`'s 0.6 µs with no
+  fault and no wake-up in its loops, for a reason not yet found.
 - `no baseline for profile`: expected on a laptop and on a shared runner. On the bench
   host it means the baseline was not recorded yet; record one as step 4 says.
-- `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the
-  process's allowed set; `cat /sys/devices/system/cpu/online` says which CPUs exist.
+- `--pin: could not bind the thread to CPU N`, or `could not bind the driver's conductor`
+  (or `recorder`) `to CPU N`: the CPU is offline or outside the process's allowed set;
+  `cat /sys/devices/system/cpu/online` says which CPUs exist. The harness's own threads
+  fail as they pin, before a row runs. A driver thread pins itself from the hook
+  `Driver::start_with_threads` runs first on that thread, so the harness checks the
+  conductor's pin once the driver has answered its first command, and both driver
+  threads' pins again once the driver has closed at the end of the row, which is where
+  the recorder's is first known. A failed pin fails the run either way, and the row's
+  numbers are never written.
+- `--pin: no CPU outside P,S,C in the process's allowed set`: the harness was started
+  from a shell or a cgroup whose allowed set lies inside the three pins, and the
+  driver's recorder and the client's conductor need one CPU outside them. `taskset -cp
+  $$` prints the shell's allowed set. Run the harness from a shell that holds a
+  housekeeping CPU too: `taskset -c 0-7 just bench --pin 8,10,12` runs it with CPUs 0 to
+  7 in the set, and the pins themselves need not be in it, since a thread may bind
+  itself to any online CPU its cgroup allows, as the bench host's runner does from a set
+  of housekeeping CPUs alone.
 - `the client benchmark failed: the client subscriber failed: ...`: the subscriber of the
   client rows got an error from `Subscription::poll`, and the rest of the line is that
   error, which says what to do. The publisher stops as soon as its subscriber has
