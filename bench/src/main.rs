@@ -366,23 +366,44 @@ fn summarize(hist: &Histogram<u64>, elapsed: Duration) -> Summary {
     }
 }
 
-fn nanos(epoch: Instant) -> u64 {
-    u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+/// The harness's clock for every sample: the time stamp counter, calibrated once at
+/// start, with the monotonic clock as the fallback where the counter is not invariant
+/// (ADR 0028). Made in `main` before the first row; `clock()` is one acquire load.
+static CLOCK: std::sync::OnceLock<quanta::Clock> = std::sync::OnceLock::new();
+
+#[inline(always)]
+fn clock() -> &'static quanta::Clock {
+    CLOCK.get_or_init(quanta::Clock::new)
 }
 
-fn span_ns(from: Instant, to: Instant) -> u64 {
-    u64::try_from(to.duration_since(from).as_nanos()).unwrap_or(u64::MAX)
+/// A reading of the clock, in its own units: what a stamp and a span are made from.
+#[inline(always)]
+fn tick() -> u64 {
+    clock().raw()
 }
 
-/// Two `Instant::now()` back to back: the harness's own overhead, present in every
+/// Nanoseconds from the reading `epoch` to now.
+#[inline(always)]
+fn nanos(epoch: u64) -> u64 {
+    let clock = clock();
+    clock.delta_as_nanos(epoch, clock.raw())
+}
+
+/// Nanoseconds between two readings.
+#[inline(always)]
+fn span_ns(from: u64, to: u64) -> u64 {
+    clock().delta_as_nanos(from, to)
+}
+
+/// Two readings of the harness's clock back to back: its own overhead, present in every
 /// other sample.
 fn bench_timer(options: &Options) -> Summary {
     let mut hist = histogram();
     let warmup = options.warmup();
     let start = Instant::now();
     for i in 0..warmup + options.messages {
-        let t0 = Instant::now();
-        let t1 = Instant::now();
+        let t0 = tick();
+        let t1 = tick();
         if i >= warmup {
             hist.saturating_record(span_ns(t0, t1));
         }
@@ -454,7 +475,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 
     let warmup = options.warmup();
     let total = warmup + options.messages;
-    let epoch = Instant::now();
+    let epoch = tick();
     let done = Arc::new(AtomicBool::new(false));
 
     // The subscriber: a read-only mapping of its own, as a client has.
@@ -554,7 +575,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
             start = Instant::now();
         }
         let stamp = nanos(epoch);
-        let t0 = Instant::now();
+        let t0 = tick();
         loop {
             match appender.try_claim(options.body, limit.load_acquire()) {
                 Ok(mut claim) => {
@@ -570,7 +591,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
             }
         }
         if i >= warmup {
-            hist.saturating_record(span_ns(t0, Instant::now()));
+            hist.saturating_record(span_ns(t0, tick()));
         }
     }
     let elapsed = start.elapsed();
@@ -678,7 +699,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
 
     let warmup = options.warmup_for(spec::IPC_TERM_LENGTH);
     let total = warmup + options.messages;
-    let epoch = Instant::now();
+    let epoch = tick();
 
     let subscriber = {
         let cpu = options.pin.map(|pin| pin[1]);
@@ -727,7 +748,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
             start = Instant::now();
         }
         let stamp = nanos(epoch);
-        let t0 = Instant::now();
+        let t0 = tick();
         loop {
             match publication.try_claim(options.body) {
                 Ok(mut claim) => {
@@ -741,7 +762,9 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
                     if subscriber.is_finished() {
                         return Err(subscriber_failure(subscriber.join()));
                     }
-                    if stalled.is_multiple_of(STALL_CHECK) && t0.elapsed() > STALL_LIMIT {
+                    if stalled.is_multiple_of(STALL_CHECK)
+                        && span_ns(t0, tick()) > STALL_LIMIT.as_nanos() as u64
+                    {
                         return Err(format!(
                             "the publisher was back-pressured for over {} s at message {i} of \
                              {total}, so the subscriber stopped reading; see \
@@ -756,7 +779,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         }
         stalled = 0;
         if i >= warmup {
-            hist.saturating_record(span_ns(t0, Instant::now()));
+            hist.saturating_record(span_ns(t0, tick()));
         }
     }
     let elapsed = start.elapsed();
@@ -839,9 +862,9 @@ fn bench_slot(options: &Options, spacing: usize) -> Result<(Summary, Summary), S
                 if i == warmup {
                     start = Instant::now();
                 }
-                let t0 = Instant::now();
+                let t0 = tick();
                 words.words[0].store(i as i64, Ordering::Release);
-                let t1 = Instant::now();
+                let t1 = tick();
                 if i >= warmup {
                     hist.saturating_record(span_ns(t0, t1));
                 }
@@ -860,9 +883,9 @@ fn bench_slot(options: &Options, spacing: usize) -> Result<(Summary, Summary), S
         if i == warmup {
             start = Instant::now();
         }
-        let t0 = Instant::now();
+        let t0 = tick();
         sink = sink.wrapping_add(words.words[index].load(Ordering::Acquire));
-        let t1 = Instant::now();
+        let t1 = tick();
         if i >= warmup {
             hist.saturating_record(span_ns(t0, t1));
         }
@@ -1000,7 +1023,7 @@ fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, Str
             }
         }
         now += MS;
-        let t0 = Instant::now();
+        let t0 = tick();
         let scanned = reader.block(BLOCK).map_err(|e| e.to_string())?;
         let end = scanned.end();
         writer
@@ -1008,7 +1031,7 @@ fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, Str
             .map_err(|e| e.to_string())?;
         reader.seek(end).map_err(|e| e.to_string())?;
         if block >= warmup {
-            hist.saturating_record(span_ns(t0, Instant::now()));
+            hist.saturating_record(span_ns(t0, tick()));
         }
     }
     let elapsed = start.elapsed();
@@ -1082,6 +1105,8 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
 }
 
 fn main() -> ExitCode {
+    // The clock calibrates once, for up to 200 ms, before the first row.
+    let _ = clock();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = match parse(&args) {
         Ok(options) => options,

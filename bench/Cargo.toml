@@ -31,6 +31,14 @@ stats_alloc = "0.1"
 # `--pin`: each measured thread on a CPU of its own on the bench host (ADR 0016). It
 # carries the `unsafe` the affinity call needs, so this crate carries none.
 core_affinity = "0.8"
+# The harness's clock for every sample: the time stamp counter, read with `rdtsc` on x86_64
+# and `cntvct_el0` on aarch64, calibrated once against the monotonic clock, with that clock
+# as the fallback where the counter is not invariant. The OS clock through the vDSO was
+# the bench's own tail: the housekeeping CPU's tick rewrites the timekeeper's data a
+# thousand times a second, and the next reader on a pinned core paid 1.4 µs on the second
+# bench host and 280 ns on the first, once a millisecond, which is the p99.99 (ADR 0028).
+# Its wasm dependencies are target-gated and never built here. Not a data-plane crate.
+quanta = "0.13.0"
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]

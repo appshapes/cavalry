@@ -514,3 +514,10 @@ user-visible change, added in the same commit as the change. The format follows
   driver thread could not take, or a process with no CPU outside the pins, fails the run
   with the next step in the message; `docs/how-to/run-the-bench.md`, "When it does not
   work", is the page.
+- The bench harness stamps every sample with the time stamp counter, calibrated once
+  against the monotonic clock through `quanta` (ADR 0028), instead of the OS clock
+  through the vDSO, which the timekeeper's tick rewrites a thousand times a second and
+  which was the harness's own tail: 280 ns at p99.99 on the bench host and 1.4 µs on the
+  second, in clusters spaced exactly 1 ms apart. `one_way` p99.99 reads 330 ns on `bench`
+  and 350 ns on `kip` with the counter, against 610 and 1,650 with the OS clock; every
+  baseline moves down and is re-recorded by a person (card 138, card 109).
