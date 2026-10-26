@@ -35,9 +35,10 @@ nothing depends on it.
   ADR 0010's checks.
 - Runs the measured loops under a counting allocator and fails the run when they
   allocate: the zero-allocations-per-message assertion of the gate.
-- Writes `bench/results/<profile>-<unix time>.json`; `scripts/bench-compare.py` fails a
-  p99.99 regression over 5 percent against `bench/baseline.json` for the profile, on
-  the `claim_commit` and `one_way` rows; the `timer` and `slot_padding` rows are host
+- Writes `bench/results/<profile>-<unix time>.json`, the clock's step included;
+  `scripts/bench-compare.py` fails a p99.99 regression over 5 percent and over one clock
+  step against `bench/baseline.json` for the profile, on the `claim_commit` and
+  `one_way` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017). The two bench hosts' profiles have
   baselines, `bench-linux` and `kip-linux` with their `-unchecked` twins: a shared
   runner's run is a report. The `_recorded` rows repeat the client

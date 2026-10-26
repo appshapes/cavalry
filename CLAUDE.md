@@ -24,7 +24,7 @@ This file is context, not enforcement. The gates below are the enforcement. If a
 | Invariant | Gate |
 | --- | --- |
 | 1 Delivery | `conformance/` runs every client against `spec/`. `just replay-check` replays a recorded log twice and diffs state. Frame parsers are fuzzed. `cavalry-shm` passes `loom` and Miri. |
-| 2 Latency | `just bench` writes HdrHistogram p50 / p99 / p99.99 / max to `bench/results/`. CI diffs against `bench/baseline.json` and fails on a p99.99 regression over 5%. An allocation-counting test asserts zero allocations per message. A workspace lint denies `async` and `std::sync::Mutex` in data-plane crates. |
+| 2 Latency | `just bench` writes HdrHistogram p50 / p99 / p99.99 / max to `bench/results/`. CI diffs against `bench/baseline.json` and fails on a p99.99 regression over 5% and over one clock step. An allocation-counting test asserts zero allocations per message. A workspace lint denies `async` and `std::sync::Mutex` in data-plane crates. |
 | 3 Bounded | Every collection in the driver is built with explicit capacity and has a test at capacity. Fault-injection tests cover loss, reordering, CPU throttling and shm exhaustion. `conformance/upgrade/` runs N and N+1 together. |
 | 4 Counters | Counters are generated from `counters.toml`. `just lint-counters` fails on a state transition with no counter. Each known pathology has a `doctor` test. |
 | 5 Defaults | `just quickstart` runs the README's ten-minute path end to end in CI on Linux and macOS. Config keys live in `config.toml` with a non-empty `why_not_default` field, linted. |

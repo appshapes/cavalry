@@ -20,10 +20,12 @@ test *ARGS: test-scripts
 
 # The tests of the Python scripts that have them (ADR 0026): the release-notes email's
 # layout and its deterministic steps, against a made-up checkout and a fake GitHub API on
-# loopback. Standard library only, no network.
+# loopback, and the latency gate's rule on made-up results (ADR 0029). Standard library
+# only, no network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
+    python3 scripts/bench-compare-test.py
 
 # Latency and throughput harness (CLAUDE.md, gate 2; ADR 0015): HdrHistogram p50, p99,
 # p99.99 and max of claim and commit, of publish to delivery, and of the slot-padding
