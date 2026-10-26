@@ -429,7 +429,7 @@ fn clock_step_ns() -> u64 {
     let ticks = counts
         .iter()
         .enumerate()
-        .filter(|(_, &n)| n >= frequent)
+        .filter(|&(_, &n)| n >= frequent)
         .fold(0u64, |acc, (advance, _)| gcd(acc, advance as u64));
     span_ns(0, ticks.max(1)).max(1)
 }
