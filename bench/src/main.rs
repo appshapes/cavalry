@@ -4,8 +4,8 @@
 //! conductor thread does the driver's duties, the limit and the cleaning, through a real
 //! counters file. The client rows take the path a user takes: `cavalry-client` against a
 //! real `cavalry-driver` in this process, publication to subscription (ADR 0021). Every
-//! sample is one message, timed with `Instant`, and every number reported is a percentile
-//! or a max of an HdrHistogram, never a mean. The measured loops run under a counting
+//! sample is one message, timed with the time stamp counter, calibrated once (ADR 0028),
+//! and every number reported is a percentile or a max of an HdrHistogram, never a mean. The measured loops run under a counting
 //! allocator and the run fails when they allocate.
 //!
 //! `cavalry-bench --help` lists the options; `docs/how-to/run-the-bench.md` is the page.

@@ -73,8 +73,9 @@ second compares the newest result with the baseline for the profile and ends wit
 - [`docs/how-to/run-the-bench.md`](../docs/how-to/run-the-bench.md): running it,
   reading the table, recording a baseline, what to do on a regression.
 - [ADR 0015](../docs/decisions/0015-measure-in-process-with-per-runner-baselines.md):
-  why the harness is in process, why `Instant` and HdrHistogram, why one baseline per
-  runner; [ADR 0016](../docs/decisions/0016-run-the-latency-gate-on-a-dedicated-host.md):
+  why the harness is in process, why HdrHistogram and one baseline per runner, and
+  [ADR 0028](../docs/decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md),
+  why the clock is the time stamp counter; [ADR 0016](../docs/decisions/0016-run-the-latency-gate-on-a-dedicated-host.md):
   why the gate fails only on the dedicated bench host, and
   [`docs/how-to/set-up-a-bench-host.md`](../docs/how-to/set-up-a-bench-host.md), how
   that host is built from `bench/host/`.

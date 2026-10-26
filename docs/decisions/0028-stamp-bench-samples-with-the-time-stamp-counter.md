@@ -33,6 +33,10 @@ Stamping with the time stamp counter instead removed the clusters on both hosts:
 | `client` | 5,895 ns | 386 ns | 560 and 590 ns | 320 and 330 ns |
 | `recorded` | 1,015 ns | 421 and 427 ns | 790 and 780 ns | 750 and 760 ns |
 
+ADR 0015 chose `Instant` and set a cycle counter aside "for now", because reading one is
+an `unsafe` intrinsic and the repository keeps `unsafe` to two crates; `quanta` reads it
+behind a safe call, which removes that reason.
+
 Two runs of each, `--messages 1000000`, pinned, 2026-10-26. On kip p50 fell by 40 ns too,
 the cost of the two vDSO reads; every max halved. The `recorded` row's remaining tail is
 the recorder's back-pressure on the publisher, not the clock. Cavalry's data plane reads
@@ -77,6 +81,11 @@ implements this, with the bench host's rows before and after in the pull request
 - A host whose counter is not invariant measures with the monotonic clock and its tick,
   and reads the clock's tail at exactly 1 ms spacing, which the how-to names.
 - `quanta` is a dependency of the bench, not of a Cavalry crate.
+- ADR 0017's Revisit clause, "when the harness has a cycle counter and the probes resolve
+  below a clock step", half fires: the harness has the counter, and `timer` reads 20 ns
+  on both hosts, two readings of about 10 ns, which still sits on a step of the
+  reported percentiles. Whether the probe rows become gates is a later decision; this
+  one leaves them reported.
 
 ## References
 

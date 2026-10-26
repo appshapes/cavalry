@@ -197,8 +197,9 @@ the gate fails only on the dedicated bench host is
   driver's recorder and the client's conductor belong on the lowest CPU outside the
   pins. A p99.99 that a second host reads far above `bench`'s with the same p50 and
   none of the above is the host's own tail, and its profile's baseline is where it is
-  held; the second bench host reads one_way at 1.6 µs against `bench`'s 0.6 µs with no
-  fault and no wake-up in its loops, for a reason not yet found.
+  held. The second bench host's 1.6 µs against `bench`'s 0.6 µs, with no fault and no
+  wake-up in its loops, was the clock, the next bullet and
+  [ADR 0028](../decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md).
 - A p99.99 far above the p99 whose slow samples come one or two messages at a time,
   spaced exactly 1 ms apart: the host's timekeeper, not the log. The harness's clock is
   the time stamp counter ([ADR 0028](../decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)),
