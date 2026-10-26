@@ -270,7 +270,7 @@ struct Summary {
 fn histogram() -> Histogram<u64> {
     let mut hist = Histogram::new_with_bounds(1, MAX_NS, 3).expect("the fixed bounds are valid");
     // Three significant digits is 2048 sub-buckets per doubling: a step of value ÷ 2048
-    // lands in every one of them, about 60,000 records in all, once.
+    // lands in every one of them, about 38,000 records in all, once.
     let mut value: u64 = 1;
     while value <= MAX_NS {
         hist.saturating_record(value);
@@ -593,9 +593,11 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 /// The client rows: a real driver and a real client in this process, a publication and a
 /// subscription on one stream, the publisher on this thread and the subscriber on its
 /// own, each message claimed, written in place and committed, then delivered to the
-/// subscription's handler (ADR 0021). The driver's and the client's conductor threads
-/// inherit the conductor CPU under `--pin`, since a thread inherits the affinity of the
-/// thread that spawns it. The log is the driver's, 64 MiB terms (`spec/client-protocol.md`,
+/// subscription's handler (ADR 0021). Under `--pin` the driver's conductor pins itself
+/// to the third CPU and the driver's recorder and the client's conductor run on the
+/// lowest CPU outside the pins, as `run_client` says and does; a thread inherits the
+/// affinity of the thread that spawns it, which is what the placement arranges. The log
+/// is the driver's, 64 MiB terms (`spec/client-protocol.md`,
 /// "Sizes"), so the warm-up is one rotation of that log, not of `--term-length`'s, for the
 /// same reason as the log rows': no measured message first-touches a page.
 fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
