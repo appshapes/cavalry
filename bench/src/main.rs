@@ -398,11 +398,12 @@ fn span_ns(from: u64, to: u64) -> u64 {
 /// The clock's step in nanoseconds: the greatest common divisor of the counter's own
 /// non-zero advances between a million pairs of consecutive readings, converted to
 /// nanoseconds and at least 1. The divisor is taken over the raw ticks, which are exact,
-/// not over spans in nanoseconds, which round: Apple silicon's 41.67 ns tick would read
-/// 41 and 42 and divide to 1. The step is 10 on the bench host, whose counter advances
-/// in 10 ns steps, 1 on a part whose counter resolves below a nanosecond, 41 on Apple
-/// silicon. `bench-compare` fails a gated row only beyond one step as well as beyond 5
-/// percent (ADR 0029). Measured once, before the first row.
+/// not over spans in nanoseconds, which round. The step is 10 on the bench host, whose
+/// counter advances in 10 ns steps, and 1 on a part whose counter resolves below a
+/// nanosecond; on Apple silicon `quanta` reads the monotonic clock in nanoseconds with a
+/// 41.67 ns tick, whose advances of 41 and 42 divide to 1, and a laptop has no baseline.
+/// `bench-compare` fails a gated row only beyond one step as well as beyond 5 percent
+/// (ADR 0029). Measured once, before the first row.
 fn clock_step_ns() -> u64 {
     fn gcd(a: u64, b: u64) -> u64 {
         if b == 0 { a } else { gcd(b, a % b) }

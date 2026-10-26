@@ -23,8 +23,8 @@ run of 160, and `claim_commit_32_exclusive` at 170 to 180 against 170: an unchan
 commit whose median lands one step up fails the gate at +6.3 percent, and a gate that
 fails an unchanged commit teaches people to re-run it until it passes. The second bench
 host's counter resolves to a nanosecond, so the same rows there read 117 to 223 and the
-5 percent rule is a measured 5 percent; Apple silicon's counter steps by 41.67 ns, and
-a laptop has no baseline.
+5 percent rule is a measured 5 percent; on Apple silicon `quanta` reads the monotonic
+clock in nanoseconds with a 41.67 ns tick, and a laptop has no baseline.
 
 ## Decision
 
@@ -62,7 +62,8 @@ a fine clock keeps the 5 percent rule, a probe row is reported.
 ## Consequences
 
 - The result and the baseline carry `clock_step_ns`; the bench host's is 10, the second
-  bench host's 1, an Apple silicon laptop's 41.
+  bench host's 1. An Apple silicon laptop's reads 1 too, since its clock's advances of
+  41 and 42 ns divide to 1; its percentiles step by 41 or 42 and it has no baseline.
 - On the bench host a `claim_commit_*` row can move one step, 10 ns of 160, without
   failing; a `one_way_*` row at 290 is held at 5 percent, 15 ns, as before, since one
   step is less.
