@@ -81,10 +81,16 @@ the gate fails only on the dedicated bench host is
    It takes the newest file under `bench/results/`, finds the profile in
    `bench/baseline.json` and prints each benchmark's p99.99 against the baseline's,
    with the lowest and highest run beside it when the result has several. A p99.99
-   more than 5 percent above the baseline is a regression and the recipe exits 1; when
-   the baseline was recorded with `--repeat`, the baseline's slowest run is the number
-   compared, so a commit fails when its median tail is slower than anything the baseline
-   measured, by more than 5 percent. On the bench host that is the rule on every row.
+   more than 5 percent above the baseline, and more than one step of the harness's
+   clock above it, is a regression and the recipe exits 1; when the baseline was
+   recorded with `--repeat`, the baseline's slowest run is the number compared, so a
+   commit fails when its median tail is slower than anything the baseline measured, by
+   more than 5 percent and by more than one clock step. The harness measures its
+   clock's step at start, prints it in its first line (`clock step 10 ns` on the bench
+   host, whose counter advances in tens) and writes it into the result; a row over 5
+   percent but within one step is printed `within a step` and passes
+   ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). On
+   the bench host that is the rule on every row.
    Until ADR 0022 one row escaped it: `claim_commit_32_exclusive` landed anywhere
    between 270 and 430 ns at p99.99 from one process to the next, which was the
    harness's own conductor loading the publisher's tail on every spin; with that load at
@@ -167,6 +173,11 @@ the gate fails only on the dedicated bench host is
   remove it. Nothing on the per-message path may allocate (`.claude/rules/data-plane.md`).
 - `reported` beside a `timer` or `slot_padding` row that moved: expected; those rows
   flip between two adjacent clock steps from run to run and never fail the gate.
+- `within a step` beside a gated row: the row is over 5 percent above the baseline's
+  slowest run but by no more than one step of the clock, which on the bench host is
+  10 ns of a 160 ns row; the gate cannot tell that from an unchanged commit and passes
+  it ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)).
+  Two steps fail.
 - `REGRESSION` on a p99.99: measure again on an idle machine before you believe either
   number; if it holds, the change under a data-plane crate is slower at the tail and
   does not merge until it is not, or the baseline is raised in a commit whose message

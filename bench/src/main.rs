@@ -395,6 +395,30 @@ fn span_ns(from: u64, to: u64) -> u64 {
     clock().delta_as_nanos(from, to)
 }
 
+/// The clock's step in nanoseconds: the greatest common divisor of the counter's own
+/// non-zero advances between a million pairs of consecutive readings, converted to
+/// nanoseconds and at least 1. The divisor is taken over the raw ticks, which are exact,
+/// not over spans in nanoseconds, which round: Apple silicon's 41.67 ns tick would read
+/// 41 and 42 and divide to 1. The step is 10 on the bench host, whose counter advances
+/// in 10 ns steps, 1 on a part whose counter resolves below a nanosecond, 41 on Apple
+/// silicon. `bench-compare` fails a gated row only beyond one step as well as beyond 5
+/// percent (ADR 0029). Measured once, before the first row.
+fn clock_step_ns() -> u64 {
+    fn gcd(a: u64, b: u64) -> u64 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let mut ticks = 0;
+    for _ in 0..1_000_000 {
+        let a = tick();
+        let b = tick();
+        let advance = b.wrapping_sub(a);
+        if advance != 0 && advance < 1 << 32 {
+            ticks = gcd(ticks, advance);
+        }
+    }
+    span_ns(0, ticks.max(1)).max(1)
+}
+
 /// Two readings of the harness's clock back to back: its own overhead, present in every
 /// other sample.
 fn bench_timer(options: &Options) -> Summary {
@@ -1105,8 +1129,10 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
 }
 
 fn main() -> ExitCode {
-    // The clock calibrates once, for up to 200 ms, before the first row.
+    // The clock calibrates once, for up to 200 ms, before the first row; its step is
+    // measured then too (ADR 0029).
     let _ = clock();
+    let clock_step = clock_step_ns();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = match parse(&args) {
         Ok(options) => options,
@@ -1135,7 +1161,7 @@ fn main() -> ExitCode {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     println!(
-        "cavalry-bench: profile {}, git {sha}, {} {}, {cpus} cores, {pinned}, {} messages after {} warm-up, body {} bytes, term {} bytes, files under {}, {} run(s) per benchmark",
+        "cavalry-bench: profile {}, git {sha}, {} {}, {cpus} cores, {pinned}, clock step {clock_step} ns, {} messages after {} warm-up, body {} bytes, term {} bytes, files under {}, {} run(s) per benchmark",
         options.profile,
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -1246,6 +1272,7 @@ fn main() -> ExitCode {
         out,
         "  \"allocations_per_message\": {allocations_per_message},"
     );
+    let _ = writeln!(out, "  \"clock_step_ns\": {clock_step},");
     let _ = writeln!(out, "  \"benchmarks\": {{");
     let entries: Vec<String> = benchmarks
         .iter()
