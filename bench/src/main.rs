@@ -263,10 +263,22 @@ struct Summary {
 /// allocated zeroed and lazily, so a rare value's first landing in a new bucket took a
 /// page fault inside the measured loop, on the sample that was rare by construction:
 /// 55 to 68 faults per histogram on the second bench host, in the p99.99 (card 136).
-/// `reset` writes every count once, before the loop.
+/// Every sub-bucket is recorded once before the loop, which writes every page of the
+/// counts, and the histogram is reset; the references through `black_box` keep the
+/// compiler from folding those writes into the zeroed allocation, which it did to a
+/// plain `reset` (the faults stayed, spread over the loop, in the trace on kip).
 fn histogram() -> Histogram<u64> {
     let mut hist = Histogram::new_with_bounds(1, MAX_NS, 3).expect("the fixed bounds are valid");
+    // Three significant digits is 2048 sub-buckets per doubling: a step of value ÷ 2048
+    // lands in every one of them, about 60,000 records in all, once.
+    let mut value: u64 = 1;
+    while value <= MAX_NS {
+        hist.saturating_record(value);
+        value += (value >> 11).max(1);
+    }
+    std::hint::black_box(&mut hist);
     hist.reset();
+    std::hint::black_box(&mut hist);
     hist
 }
 
