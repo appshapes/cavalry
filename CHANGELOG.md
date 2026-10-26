@@ -486,3 +486,10 @@ user-visible change, added in the same commit as the change. The format follows
   release-notes agents stay on Opus 5.5: the account's Fable usage limit was reached inside
   a preview run and nothing was sent, and a weekly email that fails at a limit is worse than
   one reviewed by Opus.
+- The second bench host, `kip` (card 91), a Minisforum MS-01 with an Intel Core
+  i9-13900H, tuned on three P-cores, joined to `bench` by a direct cable with hardware
+  timestamps at both ends and chrony across it. `bench/host/setup-ubuntu.sh` now turns
+  turbo off through intel_pstate's `no_turbo` and limits Intel's idle driver to C1 with
+  `intel_idle.max_cstate=1`, both inert on AMD; `bench/host/check.sh` prints the turbo
+  switch and the idle states and fails when turbo is on or a state deeper than C1 is
+  enabled; the how-to covers hybrid parts, a second host's runner label and the link.
