@@ -396,27 +396,41 @@ fn span_ns(from: u64, to: u64) -> u64 {
 }
 
 /// The clock's step in nanoseconds: the greatest common divisor of the counter's own
-/// non-zero advances between a million pairs of consecutive readings, converted to
-/// nanoseconds and at least 1. The divisor is taken over the raw ticks, which are exact,
-/// not over spans in nanoseconds, which round. The step is 10 on the bench host, whose
-/// counter advances in 10 ns steps, and 1 on a part whose counter resolves below a
-/// nanosecond; on Apple silicon `quanta` reads the monotonic clock in nanoseconds with a
-/// 41.67 ns tick, whose advances of 41 and 42 divide to 1, and a laptop has no baseline.
-/// `bench-compare` fails a gated row only beyond one step as well as beyond 5 percent
-/// (ADR 0029). Measured once, before the first row.
+/// advances between a million pairs of consecutive readings, over the advances that occur
+/// often, converted to nanoseconds and at least 1. The divisor is taken over the raw
+/// ticks, which are exact, not over spans in nanoseconds, which round; and over the
+/// frequent advances only, since one pair interrupted or moved to a core whose counter
+/// sits at another offset would divide everything to 1, which the first run on the bench
+/// host did. The step is 10 on the bench host, whose counter advances in 10 ns steps, and
+/// 1 on a part whose counter resolves below a nanosecond; on Apple silicon `quanta` reads
+/// the monotonic clock in nanoseconds with a 41.67 ns tick, whose advances of 41 and 42
+/// divide to 1, and a laptop has no baseline. `bench-compare` fails a gated row only
+/// beyond one step as well as beyond 5 percent (ADR 0029). Measured once, on the
+/// publisher's CPU once it is pinned, before the first row.
 fn clock_step_ns() -> u64 {
     fn gcd(a: u64, b: u64) -> u64 {
         if b == 0 { a } else { gcd(b, a % b) }
     }
-    let mut ticks = 0;
-    for _ in 0..1_000_000 {
+    const PAIRS: usize = 1_000_000;
+    const LARGEST: usize = 4096;
+    // How often each advance below LARGEST ticks occurred; the rest are outliers.
+    let mut counts = vec![0u32; LARGEST];
+    for _ in 0..PAIRS {
         let a = tick();
         let b = tick();
-        let advance = b.wrapping_sub(a);
-        if advance != 0 && advance < 1 << 32 {
-            ticks = gcd(ticks, advance);
+        let advance = b.wrapping_sub(a) as usize;
+        if advance != 0 && advance < LARGEST {
+            counts[advance] += 1;
         }
     }
+    // An advance seen in at least one pair in a thousand is the counter's own step or a
+    // multiple of it; anything rarer is an interrupt or a migration.
+    let frequent = (PAIRS / 1000) as u32;
+    let ticks = counts
+        .iter()
+        .enumerate()
+        .filter(|(_, &n)| n >= frequent)
+        .fold(0u64, |acc, (advance, _)| gcd(acc, advance as u64));
     span_ns(0, ticks.max(1)).max(1)
 }
 
@@ -1130,10 +1144,8 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
 }
 
 fn main() -> ExitCode {
-    // The clock calibrates once, for up to 200 ms, before the first row; its step is
-    // measured then too (ADR 0029).
+    // The clock calibrates once, for up to 200 ms, before the first row (ADR 0028).
     let _ = clock();
-    let clock_step = clock_step_ns();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = match parse(&args) {
         Ok(options) => options,
@@ -1153,6 +1165,8 @@ fn main() -> ExitCode {
         eprintln!("cavalry-bench: {message}");
         return ExitCode::FAILURE;
     }
+    // The clock's step, on the publisher's CPU now that it is pinned (ADR 0029).
+    let clock_step = clock_step_ns();
     let pinned = options.pin.map_or_else(
         || "unpinned".to_string(),
         |pin| format!("pinned to CPUs {},{},{}", pin[0], pin[1], pin[2]),

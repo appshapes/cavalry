@@ -30,9 +30,12 @@ clock in nanoseconds with a 41.67 ns tick, and a laptop has no baseline.
 
 A gated row fails when its median p99.99 is more than 5 percent above the baseline's
 slowest run **and** more than one step of the harness's clock above it. The harness
-measures the step once at start, the greatest common divisor of the counter's own
-non-zero advances between a million pairs of consecutive readings, converted to
-nanoseconds, prints it in its first line and writes
+measures the step once at start, on the publisher's CPU once it is pinned: the greatest
+common divisor of the counter's own advances between a million pairs of consecutive
+readings, over the advances that occur in at least one pair in a thousand, converted to
+nanoseconds. The rare advances are left out because one pair interrupted, or moved to a
+core whose counter sits at another offset, divides everything to 1, which the first run on
+the bench host showed. It prints the step in its first line and writes
 it into the result as `clock_step_ns`; `bench-compare` reads it from the result under
 judgement, prints it, stores it in the baseline with `--update`, and marks a row that is
 over 5 percent but within one step "within a step". A result from before the field is
