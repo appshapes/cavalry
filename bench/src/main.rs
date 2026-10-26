@@ -63,6 +63,9 @@ struct Options {
     /// `--pin`; the driver's recorder and the client's conductor run on the lowest CPU
     /// outside them.
     pin: Option<[usize; 3]>,
+    /// That lowest CPU outside the pins, from the process's allowed set as it was before
+    /// this thread pinned itself: the affinity a thread reads is its own.
+    housekeeping: Option<usize>,
     /// How many times every benchmark runs; the reported run is the median by p99.99,
     /// and the result lists every run's.
     repeat: u32,
@@ -103,6 +106,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         profile_suffix: String::new(),
         out: Some(PathBuf::from("bench/results")),
         pin: None,
+        housekeeping: None,
         repeat: 1,
     };
     let mut iter = args.iter();
@@ -166,6 +170,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         );
     }
     options.profile.push_str(&options.profile_suffix);
+    // Read here, before `main` pins this thread to the publisher's CPU, since the
+    // allowed set a thread reads is its own.
+    options.housekeeping = options.pin.map(housekeeping_cpu).transpose()?;
     Ok(options)
 }
 
@@ -263,9 +270,11 @@ fn histogram() -> Histogram<u64> {
     hist
 }
 
-/// The lowest CPU in this process's allowed set outside the three pins: where the
+/// The lowest CPU in the calling thread's allowed set outside the three pins: where the
 /// driver's recorder and the client's conductor run under `--pin`, so that the third
-/// pin holds the driver's conductor alone (card 136).
+/// pin holds the driver's conductor alone (card 136). Read before any thread pins
+/// itself: the bench host's shells and runner start with the housekeeping CPUs alone
+/// in their set, and a thread already pinned to one CPU reads a set of one.
 fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
     core_affinity::get_core_ids()
         .unwrap_or_default()
@@ -550,7 +559,7 @@ fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
 /// position before the run counts, so a recorder that lost a byte or fell behind fails
 /// the run, never a row.
 fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Result<LogRun, String> {
-    let housekeeping = options.pin.map(housekeeping_cpu).transpose()?;
+    let housekeeping = options.housekeeping;
     let conductor_cpu = options.pin.map(|pin| pin[2]);
     // A pin the driver's thread could not take is reported here, since the hook returns
     // nothing: the CPU plus one, 0 for none.
