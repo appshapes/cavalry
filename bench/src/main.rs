@@ -297,10 +297,57 @@ fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
         .ok_or_else(|| {
             format!(
                 "--pin: no CPU outside {},{},{} in the process's allowed set for the \
-                 driver's recorder and the client's conductor (bench/host/check.sh)",
+                 driver's recorder and the client's conductor; run the harness from a shell \
+                 whose allowed set holds a housekeeping CPU as well: `taskset -cp $$` prints \
+                 the shell's, and `taskset -c 0-7 just bench --pin 8,10,12` runs with CPUs 0 \
+                 to 7 in it (docs/how-to/run-the-bench.md#when-it-does-not-work)",
                 pin[0], pin[1], pin[2]
             )
         })
+}
+
+/// What each driver thread could not pin under `--pin`, one slot per thread: the hook
+/// returns nothing, so a thread whose `pin_to` failed stores its CPU plus one here, 0 for
+/// none, and the publisher reads a slot once it is ordered after that thread's hook.
+struct DriverPins {
+    conductor: AtomicUsize,
+    recorder: AtomicUsize,
+}
+
+impl DriverPins {
+    fn new() -> Self {
+        DriverPins {
+            conductor: AtomicUsize::new(0),
+            recorder: AtomicUsize::new(0),
+        }
+    }
+
+    /// The slot of `thread`.
+    fn slot(&self, thread: DriverThread) -> &AtomicUsize {
+        match thread {
+            DriverThread::Conductor => &self.conductor,
+            DriverThread::Recorder => &self.recorder,
+        }
+    }
+
+    /// The error a failed pin of `thread` fails the run with, or nothing. Sound only
+    /// where the caller is ordered after that thread's hook: after an answer from the
+    /// driver's conductor for the conductor, after the driver has closed for both.
+    fn check(&self, thread: DriverThread) -> Result<(), String> {
+        match self.slot(thread).load(Ordering::Acquire) {
+            0 => Ok(()),
+            failed => Err(format!(
+                "--pin: could not bind the driver's {} to CPU {}; is it online? \
+                 `cat /sys/devices/system/cpu/online` says which CPUs exist \
+                 (docs/how-to/run-the-bench.md#when-it-does-not-work)",
+                match thread {
+                    DriverThread::Conductor => "conductor",
+                    DriverThread::Recorder => "recorder",
+                },
+                failed - 1
+            )),
+        }
+    }
 }
 
 fn summarize(hist: &Histogram<u64>, elapsed: Duration) -> Summary {
@@ -573,18 +620,25 @@ fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
 fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Result<LogRun, String> {
     let housekeeping = options.housekeeping;
     let conductor_cpu = options.pin.map(|pin| pin[2]);
-    // A pin the driver's thread could not take is reported here, since the hook returns
-    // nothing: the CPU plus one, 0 for none.
-    let pin_failed = Arc::new(AtomicUsize::new(0));
+    // A pin a driver thread could not take is reported through `pins`, since the hook
+    // returns nothing. `Driver::start_with_threads` returns as soon as both threads are
+    // spawned and `Cavalry::connect_to` waits for no answer, so a load here would race
+    // the hooks: the conductor's slot is read after the driver's first answer, which its
+    // conductor sends from its loop, after its hook, and reaches this thread through
+    // release and acquire stores; both slots are read again once `driver.close()` has
+    // joined both threads, which is where the recorder's is first ordered. A failed pin
+    // fails the run either way, and the row's numbers are never written.
+    let pins = Arc::new(DriverPins::new());
     let on_thread_start: ThreadStart = {
-        let pin_failed = Arc::clone(&pin_failed);
+        let pins = Arc::clone(&pins);
         Arc::new(move |thread| {
             let cpu = match thread {
                 DriverThread::Conductor => conductor_cpu,
                 DriverThread::Recorder => housekeeping,
             };
             if pin_to(cpu).is_err() {
-                pin_failed.store(cpu.map_or(0, |cpu| cpu + 1), Ordering::Release);
+                pins.slot(thread)
+                    .store(cpu.map_or(0, |cpu| cpu + 1), Ordering::Release);
             }
         })
     };
@@ -594,19 +648,11 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         Driver::start_with_threads(dir, dir.join("log"), IdleStrategy::Backoff, on_thread_start)
             .map_err(|e| e.to_string())?;
     let mut client = Cavalry::connect_to(dir).map_err(|e| e.to_string())?;
-    match pin_failed.load(Ordering::Acquire) {
-        0 => {}
-        failed => {
-            return Err(format!(
-                "--pin: could not bind a driver thread to CPU {}; is it online? \
-                 (bench/host/check.sh)",
-                failed - 1
-            ));
-        }
-    }
     let mut subscription = client
         .add_subscription("cavalry:ipc", STREAM_ID)
         .map_err(|e| e.to_string())?;
+    // The driver's conductor has answered, so its hook has run.
+    pins.check(DriverThread::Conductor)?;
     let mut publication = client
         .add_publication("cavalry:ipc", STREAM_ID)
         .map_err(|e| e.to_string())?;
@@ -739,6 +785,9 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     publication.close().map_err(|e| e.to_string())?;
     client.close().map_err(|e| e.to_string())?;
     driver.close().map_err(|e| e.to_string())?;
+    // Both driver threads are joined, so both hooks are ordered before these loads.
+    pins.check(DriverThread::Conductor)?;
+    pins.check(DriverThread::Recorder)?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
         one_way: summarize(&one_way, elapsed),

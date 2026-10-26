@@ -201,8 +201,23 @@ the gate fails only on the dedicated bench host is
   fault and no wake-up in its loops, for a reason not yet found.
 - `no baseline for profile`: expected on a laptop and on a shared runner. On the bench
   host it means the baseline was not recorded yet; record one as step 4 says.
-- `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the
-  process's allowed set; `cat /sys/devices/system/cpu/online` says which CPUs exist.
+- `--pin: could not bind the thread to CPU N`, or `could not bind the driver's conductor`
+  (or `recorder`) `to CPU N`: the CPU is offline or outside the process's allowed set;
+  `cat /sys/devices/system/cpu/online` says which CPUs exist. The harness's own threads
+  fail as they pin, before a row runs. A driver thread pins itself from the hook
+  `Driver::start_with_threads` runs first on that thread, so the harness checks the
+  conductor's pin once the driver has answered its first command, and both driver
+  threads' pins again once the driver has closed at the end of the row, which is where
+  the recorder's is first known. A failed pin fails the run either way, and the row's
+  numbers are never written.
+- `--pin: no CPU outside P,S,C in the process's allowed set`: the harness was started
+  from a shell or a cgroup whose allowed set lies inside the three pins, and the
+  driver's recorder and the client's conductor need one CPU outside them. `taskset -cp
+  $$` prints the shell's allowed set. Run the harness from a shell that holds a
+  housekeeping CPU too: `taskset -c 0-7 just bench --pin 8,10,12` runs it with CPUs 0 to
+  7 in the set, and the pins themselves need not be in it, since a thread may bind
+  itself to any online CPU its cgroup allows, as the bench host's runner does from a set
+  of housekeeping CPUs alone.
 - `the client benchmark failed: the client subscriber failed: ...`: the subscriber of the
   client rows got an error from `Subscription::poll`, and the rest of the line is that
   error, which says what to do. The publisher stops as soon as its subscriber has

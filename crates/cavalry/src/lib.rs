@@ -5,7 +5,7 @@ pub use cavalry_client::{
     BufferClaim, Cavalry, ClientError, Closed, DataFrameHeader, Fault, Image, MAX_IMAGES, Offer,
     Publication, Subscription,
 };
-pub use cavalry_driver::{Driver, DriverError, IdleStrategy, spec};
+pub use cavalry_driver::{Driver, DriverError, DriverThread, IdleStrategy, ThreadStart, spec};
 
 #[cfg(feature = "cli")]
 pub use cavalry_control::{config, doctor};

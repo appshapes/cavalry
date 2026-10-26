@@ -7,8 +7,10 @@ binary's `main`.
 
 - `cargo add cavalry` gives the client API, `cavalry::Cavalry`, `Publication` and
   `Subscription`, re-exported from `cavalry-client`, and an embeddable driver,
-  `cavalry::Driver`, re-exported from `cavalry-driver`, so a program can run with no
-  separate daemon. One shared driver per host, `cavalry run`, is the production shape
+  `cavalry::Driver`, re-exported from `cavalry-driver` with its `IdleStrategy`, and with
+  `DriverThread` and `ThreadStart`, the hook `Driver::start_with_threads` takes, so a
+  program can run with no separate daemon and can pin the driver's threads with no
+  second dependency. One shared driver per host, `cavalry run`, is the production shape
   and the ten-minute path's; `examples/quickstart.rs` is that path's program, and
   `just quickstart` runs it end to end.
 - `cargo install cavalry` gives the `cavalry` binary: `run` starts a driver and stops

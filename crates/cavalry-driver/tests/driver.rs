@@ -5,9 +5,11 @@
 //! 1, 3 and 4).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cavalry_driver::{Driver, IdleStrategy, spec};
+use cavalry_driver::{Driver, DriverThread, IdleStrategy, ThreadStart, spec};
 use cavalry_log::catalog::{CatalogReader, CatalogWriter};
 use cavalry_log::layout::{Recording, State};
 use cavalry_proto::client_protocol::{Command, CommandType, Event, IPC_CHANNEL};
@@ -269,6 +271,97 @@ fn the_idle_strategy_is_recorded_in_its_counter() {
             "{idle:?}"
         );
         driver.close().expect("closes");
+    }
+}
+
+/// `Driver::start_with_threads`'s hook runs once on each driver thread, on the thread it
+/// names, before that thread's loop (card 136): the bench pins the conductor from it. The
+/// conductor's hook is held until the test releases it, and while it is held the driver
+/// answers no command, which is what "before its loop" means; the counts are read once
+/// `close` has joined both threads, which orders both hooks before the reads.
+#[test]
+fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop() {
+    let dir = TestDir::new("thread-start");
+    const CONDUCTOR: usize = 0;
+    const RECORDER: usize = 1;
+    // Per thread: how many times the hook ran, and how many of those on the thread of
+    // the expected name. Atomics, not a mutex: the lock ban covers the test target.
+    let runs = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let named = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let release = Arc::new(AtomicBool::new(false));
+    let hook: ThreadStart = {
+        let runs = Arc::clone(&runs);
+        let named = Arc::clone(&named);
+        let release = Arc::clone(&release);
+        Arc::new(move |thread| {
+            let (index, expected) = match thread {
+                DriverThread::Conductor => (CONDUCTOR, "cavalry-conductor"),
+                DriverThread::Recorder => (RECORDER, "cavalry-recorder"),
+            };
+            runs[index].fetch_add(1, Ordering::AcqRel);
+            if std::thread::current().name() == Some(expected) {
+                named[index].fetch_add(1, Ordering::AcqRel);
+            }
+            if thread == DriverThread::Conductor {
+                while !release.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            }
+        })
+    };
+    let driver = Driver::start_with_threads(
+        dir.path(),
+        dir.path().join("log"),
+        IdleStrategy::Yield,
+        hook,
+    )
+    .expect("starts");
+
+    // The conductor is in its hook, held there: a command goes unanswered.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while runs[CONDUCTOR].load(Ordering::Acquire) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the conductor's hook did not run"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut client = Client::attach(dir.path());
+    let correlation_id = client.correlation_id();
+    client.send(&Command::AddSubscription {
+        client_id: client.id,
+        correlation_id,
+        stream_id: 1,
+        channel: IPC_CHANNEL,
+    });
+    let held_until = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < held_until {
+        let answered = client
+            .receiver
+            .receive(|_, _| {})
+            .expect("the receiver reads");
+        assert!(!answered, "the conductor answered from inside its hook");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Released, the loop begins and the command is answered.
+    release.store(true, Ordering::Release);
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::SubscriptionReady { correlation_id: id } if id == correlation_id => Some(()),
+        _ => None,
+    });
+    driver.close().expect("closes");
+    for (index, thread) in [(CONDUCTOR, "conductor"), (RECORDER, "recorder")] {
+        assert_eq!(
+            runs[index].load(Ordering::Acquire),
+            1,
+            "the {thread}'s hook ran once"
+        );
+        assert_eq!(
+            named[index].load(Ordering::Acquire),
+            1,
+            "the {thread}'s hook ran on the thread named cavalry-{thread}"
+        );
     }
 }
 
