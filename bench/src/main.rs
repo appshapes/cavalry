@@ -404,10 +404,10 @@ fn span_ns(from: u64, to: u64) -> u64 {
 /// readings, with a one-tick residual in 2 percent of them, and a divisor over everything
 /// read 1 there. The step is the greatest common divisor of what remains: 37 ticks on the
 /// bench host; 2 ticks, a third of a nanosecond each, on kip, whose readings are 26 to 54
-/// ticks apart in even numbers, so its percentiles resolve to the nanosecond; one tick of
-/// the 24 MHz counter, 42 ns, on the macOS CI runner; and 1 ns on a laptop where `quanta`
-/// fell back to the monotonic clock in nanoseconds, whose advances of 41 and 42 divide
-/// to one; neither Apple machine has a baseline. `bench-compare` fails a gated row only
+/// ticks apart in even numbers, so its percentiles resolve to the nanosecond; and on
+/// Apple silicon one tick of the machine's own counter, which `quanta` reads on every
+/// aarch64 build (ADR 0028): 42 ns of the 24 MHz counter on the macOS CI runner, 1 ns on
+/// the laptop this was first run on; neither has a baseline. `bench-compare` fails a gated row only
 /// beyond one step as well as beyond 5 percent (ADR 0029). Measured once, on the
 /// publisher's CPU once it is pinned, before the first row, with its counts on the
 /// stack, since a heap allocation here moved the raw rows' tail by 60 ns on the bench

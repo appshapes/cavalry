@@ -86,11 +86,13 @@ the gate fails only on the dedicated bench host is
    recorded with `--repeat`, the baseline's slowest run is the number compared, so a
    commit fails when its median tail is slower than anything the baseline measured, by
    more than 5 percent and by more than one clock step. The harness measures its
-   clock's step at start, prints it in its first line (`clock step 10 ns` on the bench
-   host, whose counter advances in tens) and writes it into the result; a row over 5
-   percent but within one step is printed `within a step` and passes
-   ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). On
-   the bench host that is the rule on every row.
+   clock's step at start, prints it in its first line in nanoseconds and in the
+   counter's own ticks (`clock step 10 ns (37 ticks)` on the bench host, whose counter
+   moves by 37 ticks every 10 ns) and writes it into the result as `clock_step_ns`; a
+   row over 5 percent but within one step is printed `within a step` and passes
+   ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). A
+   result from before the field is printed `clock step unknown` and judged by the 5
+   percent rule alone. On the bench host that is the rule on every row.
    Until ADR 0022 one row escaped it: `claim_commit_32_exclusive` landed anywhere
    between 270 and 430 ns at p99.99 from one process to the next, which was the
    harness's own conductor loading the publisher's tail on every spin; with that load at
@@ -178,6 +180,10 @@ the gate fails only on the dedicated bench host is
   10 ns of a 160 ns row; the gate cannot tell that from an unchanged commit and passes
   it ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)).
   Two steps fail.
+- `clock step unknown` in `bench-compare`'s first line: the result was written by a
+  harness from before the step was measured, so the 5 percent rule alone applies and
+  `--update` writes no step from it. Run `just bench` again; every result the harness
+  writes now carries the step.
 - `REGRESSION` on a p99.99: measure again on an idle machine before you believe either
   number; if it holds, the change under a data-plane crate is slower at the tail and
   does not merge until it is not, or the baseline is raised in a commit whose message

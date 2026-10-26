@@ -16,17 +16,20 @@ would resolve below a clock step.
 
 ADR 0028 gave the harness that counter, and the bench host's rows moved to where the
 step matters. Its counter advances in steps of 10 ns, so every percentile it reports is
-a multiple of 10, and the `claim_commit_*` rows now sit at 150 to 170 ns, where one step
-is 6 to 7 percent. The run that recorded the baselines (#56, run 40379532297) read
+a multiple of 10 or one below it (the baseline recorded at 377a190 holds 159 beside 160
+and 150 in one process: the spans are truncated, and the step is not a whole number of
+nanoseconds once calibrated), and the `claim_commit_*` rows now sit at 150 to 170 ns,
+where one step is 6 to 7 percent. The run that recorded the baselines (#56, run 40379532297) read
 `claim_commit_32_client` at 160 to 170 ns across its 21 runs against a baseline slowest
 run of 160, and `claim_commit_32_exclusive` at 170 to 180 against 170: an unchanged
 commit whose median lands one step up fails the gate at +6.3 percent, and a gate that
 fails an unchanged commit teaches people to re-run it until it passes. The second bench
 host's counter resolves to a nanosecond, so the same rows there read 117 to 223 and the
-5 percent rule is a measured 5 percent. On Apple silicon it depends on the clock `quanta`
-chose: the macOS CI runner read one tick of the 24 MHz counter, 41 to 42 ns, and a laptop
-read 1 ns where `quanta` fell back to the monotonic clock in nanoseconds; neither has a
-baseline.
+5 percent rule is a measured 5 percent. On Apple silicon the step is the machine's own
+counter's tick: `quanta` reads `cntvct_el0` on every aarch64 build (its detection names
+the counter as always present outside iOS, so there is no fallback there; ADR 0028), and
+the macOS CI runner read one tick of its 24 MHz counter, 42 ns, while the laptop this was
+first run on read 1 ns. Neither has a baseline.
 
 ## Decision
 
@@ -62,12 +65,32 @@ the clock's, not a number chosen per host.
   the floor adds to that rule, it does not replace it.
 - **Report the percentiles with more digits.** Lost: the counter's step is the
   measurement's; printing a finer number would print a lie.
+- **The greatest common divisor of every frequent advance.** Lost: the bench host's
+  one-tick residual, in 2 percent of its pairs, divides 37 and 74 to 1, and CI read
+  `clock step 1 ns` there on both passes of runs 40386774358 and 40387901949, the
+  hazard ADR 0017 named for the OS clock's residuals; a floor of 1 ns is no floor.
+- **The smallest frequent advance.** Lost: on the bench host that is the residual
+  itself, 1 tick.
+- **Counting the advances in a heap vector.** Lost: a 16 KiB allocation at startup
+  moved the raw rows' `one_way` p99.99 by 60 ns on the bench host, in every run of an
+  interleaved comparison (#57); the counts live on the stack.
 
 ## Evidence
 
-The runs in Context, on card 143 and in #56's body. `scripts/bench-compare-test.py` holds
-the rule on made-up results: one step up at 160 ns passes and says so, two steps fail,
-a fine clock keeps the 5 percent rule, a probe row is reported.
+- CI runs 40386774358 (047def1) and 40387901949 (e5e2752), job `bench (linux)`: the
+  plain divisor read `clock step 1 ns` on both passes; the second run also read the raw
+  rows' `one_way` p99.99 at 290 and 300 ns against baselines of 230 and 240, the heap
+  vector's cost, and failed the gate.
+- CI run 40389997682 (c281f1b), job `bench (linux)`: `clock step 10 ns (37 ticks)` on
+  both passes, the raw rows back at 220 to 240, `bench-compare: ok`; its
+  `gates (macos)` job: `clock step 42 ns (1 ticks)`, with the `timer` row's p50 at 0
+  and its p99 at 41. The advances on the bench host at 5712454: 37 in 965,497 pairs of
+  a million, 1 in 23,282, 74 in 11,203. The interleaved comparison of the heap vector
+  against the stack array is in #57's body.
+- `scripts/bench-compare-test.py` holds the rule on made-up results: one step up at
+  160 ns passes and says so, two steps fail, a fine clock keeps the 5 percent rule, a
+  probe row is reported, a result without the step is judged by the tolerance alone and
+  `--update` writes no step from it.
 
 ## Consequences
 
@@ -86,8 +109,9 @@ a fine clock keeps the 5 percent rule, a probe row is reported.
 
 ## References
 
-- Card 143; `scripts/bench-compare.py`, `scripts/bench-compare-test.py`;
-  `bench/src/main.rs`, `clock_step_ns`.
+- Card 143; card 144, the harness's sensitivity to a heap allocation at startup;
+  `scripts/bench-compare.py`, `scripts/bench-compare-test.py`; `bench/src/main.rs`,
+  `clock_step`.
 - [ADR 0016](0016-run-the-latency-gate-on-a-dedicated-host.md),
   [ADR 0017](0017-gate-the-message-rows-and-report-the-host-probes.md),
   [ADR 0028](0028-stamp-bench-samples-with-the-time-stamp-counter.md).

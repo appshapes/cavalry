@@ -531,7 +531,9 @@ user-visible change, added in the same commit as the change. The format follows
   baseline moves down and is re-recorded by a person (card 138, card 109).
 - The latency gate fails a row only when its p99.99 is more than 5 percent and more than
   one step of the harness's clock above the baseline's slowest run (ADR 0029): the
-  harness measures its clock's step at start, prints it and writes it into the result as
-  `clock_step_ns`, and `bench-compare` prints `within a step` for a row the clock cannot
-  tell from an unchanged commit, 10 ns of a 160 ns row on the bench host. The rule has
-  its tests, `scripts/bench-compare-test.py`, under `just test-scripts` (card 143).
+  harness measures its clock's step at start, prints it in nanoseconds and in the
+  counter's ticks, and writes it into the result as `clock_step_ns`; `bench-compare`
+  prints `within a step` for a row the clock cannot tell from an unchanged commit, 10 ns
+  of a 160 ns row on the bench host, and `clock step unknown` for a result from before
+  the field, which the 5 percent rule alone judges. The rule has its tests,
+  `scripts/bench-compare-test.py`, under `just test-scripts` (card 143).
