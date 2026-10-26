@@ -121,6 +121,24 @@ the gate fails only on the dedicated bench host is
   expected.
 - The table's last line reads `allocations per message: 0`.
 - `just bench-compare` ends with `bench-compare: ok`.
+- On a Linux host, no measured thread took a page fault or a cross-CPU wake-up: with
+  the kernel's tracepoints enabled as root for one run, read-only apart from the trace
+  buffer, `exceptions:page_fault_user` counts no faults on the pinned CPUs after the
+  driver and the client have started, and `sched:sched_waking` filtered to those CPUs
+  names no Cavalry thread as the wakee. Every mapping is pre-touched when it is made
+  ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)), so a fault
+  there is a bug, not a cost.
+
+  ```text
+  T=/sys/kernel/tracing
+  echo "target_cpu == 8 || target_cpu == 10 || target_cpu == 12" > $T/events/sched/sched_waking/filter
+  echo 1 > $T/events/sched/sched_waking/enable
+  echo 1 > $T/events/exceptions/page_fault_user/enable
+  echo 1 > $T/tracing_on
+  # run the harness with --pin 8,10,12, then:
+  echo 0 > $T/tracing_on
+  grep -c page_fault_user $T/trace
+  ```
 
 ## When it does not work
 
@@ -146,6 +164,11 @@ the gate fails only on the dedicated bench host is
   ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A person
   decides whether to re-record the baseline from that run, as step 4 says, in a commit
   whose message names the harness change and carries both histograms.
+- Page faults on a pinned CPU in the trace above, or a p99.99 that a second host reads
+  far above `bench`'s with the same p50: a mapping was not pre-touched, or a thread of
+  the driver or the client shares a pinned CPU with a measured thread (`ps -L -o
+  tid,psr,comm` during the run shows where each thread sits). The second bench host
+  found both ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)).
 - `no baseline for profile`: expected on a laptop and on a shared runner. On the bench
   host it means the baseline was not recorded yet; record one as step 4 says.
 - `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the

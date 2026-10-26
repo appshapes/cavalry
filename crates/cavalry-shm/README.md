@@ -14,6 +14,13 @@ the two crates where `unsafe` is permitted.
   ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)), and the
   driver's duties, the limit, cleaning, unblocking and end of stream, are methods on the
   log ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
+- Pre-touches every mapping it makes: in `create` and `open`, every page of a log buffer,
+  the counters file, the command ring and the broadcast buffer is made resident before
+  the mapping is handed out, with Linux's populate advice where the kernel has it and one
+  read per page elsewhere, so the data plane never takes a page fault and two mappings
+  never race on a fresh page
+  ([ADR 0027](../../docs/decisions/0027-pre-touch-shared-mappings-at-map-time.md)). A
+  directory that cannot hold the file fails here, by name.
 - Carries the control plane's two queues between the processes on a host: the command
   ring, through which every client sends the driver its commands, with a `Producer` per
   client thread and the driver's one `Consumer`, which only the ring's creator hands
@@ -59,7 +66,9 @@ In Aeron, this is the log buffer layout and the CnC file, which Agrona provides
 - Grow. Every buffer, queue and map has a capacity fixed at startup and a documented
   behaviour when full (invariant 3). Back-pressure is returned to the caller, never
   absorbed.
-- Allocate, lock, make a syscall, await or panic per message (invariant 2).
+- Allocate, lock, make a syscall, await or panic per message (invariant 2). A page fault
+  is a kernel entry too, so no mapping leaves `create` or `open` with a page that is not
+  resident.
 - Trust a field another process wrote. A reader checks every field against the bound
   the spec names before using it, and a check that fails is an error with a name,
   never "no data".
@@ -153,6 +162,9 @@ The counters file has its own example, the doctest of the `counters` module.
 - [`docs/reference/counters.md`](../../docs/reference/counters.md): every counter, what
   a change means and what to do, generated from [`counters.toml`](../../counters.toml)
   by `scripts/gen-counters.py`. `just lint-counters` fails when it is stale.
+- [ADR 0027](../../docs/decisions/0027-pre-touch-shared-mappings-at-map-time.md), why
+  every mapping is made resident when it is made, with the trace that found the faults;
+  `tests/pre_touch.rs` reads the residency back from `/proc/self/smaps` on Linux.
 - [ADR 0012](../../docs/decisions/0012-lay-out-the-counters-file.md), why the layout is
   Aeron's records behind a Cavalry header and why `memmap2` maps it;
   [ADR 0010](../../docs/decisions/0010-validate-peer-written-shared-memory.md), why
