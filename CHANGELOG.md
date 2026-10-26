@@ -493,3 +493,8 @@ user-visible change, added in the same commit as the change. The format follows
   `intel_idle.max_cstate=1`, both inert on AMD; `bench/host/check.sh` prints the turbo
   switch and the idle states and fails when turbo is on or a state deeper than C1 is
   enabled; the how-to covers hybrid parts, a second host's runner label and the link.
+- The bench's third pin holds the driver's conductor alone: under `--pin P,S,C` the
+  driver's recorder and the client's conductor run on the lowest CPU outside the pins,
+  through `Driver::start_with_threads`, a hook each driver thread runs first, and every
+  histogram's counts are written once before the measured loop, so a rare sample never
+  first-touches a page of them. Both came from the second bench host's trace (card 136).

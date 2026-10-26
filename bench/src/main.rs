@@ -16,12 +16,12 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cavalry_client::{Cavalry, Offer};
-use cavalry_driver::{Driver, IdleStrategy, spec};
+use cavalry_driver::{Driver, DriverThread, IdleStrategy, ThreadStart, spec};
 use cavalry_log::dir::LogDir;
 use cavalry_log::layout::Recording;
 use cavalry_shm::counters::CountersFile;
@@ -59,7 +59,9 @@ struct Options {
     profile: String,
     profile_suffix: String,
     out: Option<PathBuf>,
-    /// The CPUs of the publisher, the subscriber and the conductor, from `--pin`.
+    /// The CPUs of the publisher, the subscriber and the driver's conductor, from
+    /// `--pin`; the driver's recorder and the client's conductor run on the lowest CPU
+    /// outside them.
     pin: Option<[usize; 3]>,
     /// How many times every benchmark runs; the reported run is the median by p99.99,
     /// and the result lists every run's.
@@ -79,8 +81,10 @@ Options:
   --profile NAME    the baseline profile; default $CAVALRY_BENCH_PROFILE or local-<os>-<arch>
   --profile-suffix S  appended to the profile; `just bench-unchecked` passes -unchecked
   --out DIR         where the result JSON goes (default bench/results); --no-write writes none
-  --pin P,S,C       pin the publisher, the subscriber and the conductor to CPUs P, S and C,
-                    three distinct CPUs, Linux only; the bench host passes 8,10,12 (ADR 0016)
+  --pin P,S,C       pin the publisher, the subscriber and the driver's conductor to CPUs P,
+                    S and C, three distinct CPUs, Linux only, and the driver's recorder and
+                    the client's conductor to the lowest CPU outside them; the bench host
+                    passes 8,10,12 (ADR 0016)
   --repeat N        run every benchmark N times, report each one's median run by p99.99,
                     and list every run's p99.99 in the result (default 1; CI passes 21)
   --help            this text
@@ -248,8 +252,34 @@ struct Summary {
     rate_per_s: f64,
 }
 
+/// A histogram with the fixed bounds, every page of its counts resident. The counts are
+/// allocated zeroed and lazily, so a rare value's first landing in a new bucket took a
+/// page fault inside the measured loop, on the sample that was rare by construction:
+/// 55 to 68 faults per histogram on the second bench host, in the p99.99 (card 136).
+/// `reset` writes every count once, before the loop.
 fn histogram() -> Histogram<u64> {
-    Histogram::new_with_bounds(1, MAX_NS, 3).expect("the fixed bounds are valid")
+    let mut hist = Histogram::new_with_bounds(1, MAX_NS, 3).expect("the fixed bounds are valid");
+    hist.reset();
+    hist
+}
+
+/// The lowest CPU in this process's allowed set outside the three pins: where the
+/// driver's recorder and the client's conductor run under `--pin`, so that the third
+/// pin holds the driver's conductor alone (card 136).
+fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
+    core_affinity::get_core_ids()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|core| core.id)
+        .filter(|id| !pin.contains(id))
+        .min()
+        .ok_or_else(|| {
+            format!(
+                "--pin: no CPU outside {},{},{} in the process's allowed set for the \
+                 driver's recorder and the client's conductor (bench/host/check.sh)",
+                pin[0], pin[1], pin[2]
+            )
+        })
 }
 
 fn summarize(hist: &Histogram<u64>, elapsed: Duration) -> Summary {
@@ -513,14 +543,46 @@ fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
 /// The client rows, and with `recorded` the same rows while the driver's recorder writes
 /// the stream to the log directory under the bench directory (ADR 0025): the recorder is
 /// one more reader of the log, whose position the publisher's limit respects, and its
-/// writes run on the driver's recorder thread, which inherits the conductor's CPU under
-/// `--pin`. The recording must reach the publisher's final position before the run
-/// counts, so a recorder that lost a byte or fell behind fails the run, never a row.
+/// writes run on the driver's recorder thread. Under `--pin` the driver's conductor has
+/// the third CPU to itself, and the recorder and the client's conductor run on the
+/// lowest CPU outside the pins: three threads on one pinned CPU kept it ticking and
+/// waking within itself (card 136). The recording must reach the publisher's final
+/// position before the run counts, so a recorder that lost a byte or fell behind fails
+/// the run, never a row.
 fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Result<LogRun, String> {
-    pin_to(options.pin.map(|pin| pin[2]))?;
-    let driver = Driver::start_with(dir, dir.join("log"), IdleStrategy::Backoff)
-        .map_err(|e| e.to_string())?;
+    let housekeeping = options.pin.map(housekeeping_cpu).transpose()?;
+    let conductor_cpu = options.pin.map(|pin| pin[2]);
+    // A pin the driver's thread could not take is reported here, since the hook returns
+    // nothing: the CPU plus one, 0 for none.
+    let pin_failed = Arc::new(AtomicUsize::new(0));
+    let on_thread_start: ThreadStart = {
+        let pin_failed = Arc::clone(&pin_failed);
+        Arc::new(move |thread| {
+            let cpu = match thread {
+                DriverThread::Conductor => conductor_cpu,
+                DriverThread::Recorder => housekeeping,
+            };
+            if pin_to(cpu).is_err() {
+                pin_failed.store(cpu.map_or(0, |cpu| cpu + 1), Ordering::Release);
+            }
+        })
+    };
+    // This thread's affinity is what the client's conductor inherits.
+    pin_to(housekeeping)?;
+    let driver =
+        Driver::start_with_threads(dir, dir.join("log"), IdleStrategy::Backoff, on_thread_start)
+            .map_err(|e| e.to_string())?;
     let mut client = Cavalry::connect_to(dir).map_err(|e| e.to_string())?;
+    match pin_failed.load(Ordering::Acquire) {
+        0 => {}
+        failed => {
+            return Err(format!(
+                "--pin: could not bind a driver thread to CPU {}; is it online? \
+                 (bench/host/check.sh)",
+                failed - 1
+            ));
+        }
+    }
     let mut subscription = client
         .add_subscription("cavalry:ipc", STREAM_ID)
         .map_err(|e| e.to_string())?;

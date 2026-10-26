@@ -19,6 +19,25 @@ use cavalry_shm::spsc;
 pub use error::DriverError;
 pub use idle::IdleStrategy;
 
+/// A thread of the driver, as [`Driver::start_with_threads`] names it to the hook each
+/// thread runs first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverThread {
+    /// The conductor: the duty cycle, on the data plane.
+    Conductor,
+    /// The recorder: the durable log's writer, on the data plane but not on the
+    /// message path.
+    Recorder,
+}
+
+/// What each driver thread runs first, once, before its loop. A caller that owns the
+/// host's CPUs pins the conductor to a CPU of its own here and leaves the recorder on
+/// the housekeeping CPUs, as the bench does under `--pin` (card 136): the two threads
+/// are spawned with the caller's affinity otherwise, and a conductor that shares a CPU
+/// with the recorder keeps that CPU ticking. The hook returns nothing; what it could not
+/// do, it reports through what the caller gave it.
+pub type ThreadStart = Arc<dyn Fn(DriverThread) + Send + Sync>;
+
 /// A running driver: its directory, its log directory, and its two threads, the
 /// conductor and the recorder. [`Driver::start`] creates the directory's files, opens
 /// the log directory under its lock and recovers it, and starts both threads;
@@ -97,6 +116,18 @@ impl Driver {
         log_dir: impl AsRef<Path>,
         idle: IdleStrategy,
     ) -> Result<Self, DriverError> {
+        Self::start_with_threads(dir, log_dir, idle, Arc::new(|_| {}))
+    }
+
+    /// [`Driver::start_with`] with a hook each thread runs first, once, before its loop,
+    /// named the [`DriverThread`] it is on: where a caller pins the conductor and places
+    /// the recorder ([`ThreadStart`]).
+    pub fn start_with_threads(
+        dir: impl AsRef<Path>,
+        log_dir: impl AsRef<Path>,
+        idle: IdleStrategy,
+        on_thread_start: ThreadStart,
+    ) -> Result<Self, DriverError> {
         let dir = dir.as_ref().to_path_buf();
         let log_dir = log_dir.as_ref().to_path_buf();
         conductor::prepare_dir(&dir)?;
@@ -126,15 +157,22 @@ impl Driver {
             move |source| DriverError::Io { what, path, source }
         };
         let flag = Arc::clone(&stop);
+        let on_start = Arc::clone(&on_thread_start);
         let conductor_handle = std::thread::Builder::new()
             .name("cavalry-conductor".to_string())
-            .spawn(move || conductor.run(&flag))
+            .spawn(move || {
+                on_start(DriverThread::Conductor);
+                conductor.run(&flag)
+            })
             .map_err(io("start the conductor thread", &dir))?;
         let flag = Arc::clone(&stop);
+        let on_start = on_thread_start;
         let recorder_handle = match std::thread::Builder::new()
             .name("cavalry-recorder".to_string())
-            .spawn(move || recorder.run(&flag))
-        {
+            .spawn(move || {
+                on_start(DriverThread::Recorder);
+                recorder.run(&flag)
+            }) {
             Ok(handle) => handle,
             Err(source) => {
                 stop.store(true, Ordering::Release);

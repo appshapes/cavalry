@@ -36,8 +36,9 @@ the gate fails only on the dedicated bench host is
    `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `linux` or `macos`,
    and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier,
-   `just bench --pin 8,10,12` binds the publisher, the subscriber and the conductor to
-   those CPUs, on Linux only, and `just bench --repeat 21` runs every benchmark
+   `just bench --pin 8,10,12` binds the publisher, the subscriber and the driver's
+   conductor to those CPUs, on Linux only, with the driver's recorder and the client's
+   conductor on the lowest CPU outside them, so each pinned CPU runs one thread, and `just bench --repeat 21` runs every benchmark
    twenty-one times and reports each one's median run by p99.99, with every run's
    p99.99 in the last column and in the result file. The bench host runs it with all
    three: on an isolated core, one run's 0.01 percent tail of a few hundred nanoseconds
@@ -57,7 +58,7 @@ the gate fails only on the dedicated bench host is
    | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor loads the publisher's tail at most once per millisecond on its duty cycle (ADR 0022), as a user's does. |
    | `one_way_<body>_client` | From the publisher's timestamp to `Subscription::poll`'s handler, through a real driver and the client's conductor hand-off; the path a user's message takes (ADR 0021). |
    | `claim_commit_<body>_recorded` | The client row's claim, write and commit while the driver's recorder writes the same stream to the durable log under the bench directory (ADR 0025): what recording costs the publisher, whose limit respects the recorder's position. The run fails unless the recording reached the publisher's final position. |
-   | `one_way_<body>_recorded` | The client row's publish to delivery with the recorder on: one more reader of the log, on the driver's recorder thread. |
+   | `one_way_<body>_recorded` | The client row's publish to delivery with the recorder on: one more reader of the log, on the driver's recorder thread, which runs on a housekeeping CPU under `--pin` (until card 136 it shared the conductor's CPU, where ADR 0025's cost of 80 ns at p99.99 was measured). |
    | `slot_padding_<spacing>_load` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
    | `slot_padding_<spacing>_store` | The other side of the same pair: one store while the other thread loads. |
    | `record_block_<body>` | The recorder's block path: one scan of a 1 MiB block of committed frames (`TermReader::block`) and its one positional write into a segment file under the bench directory (`RecordingWriter::write`), per block, under the counting allocator (ADR 0025). It runs last, so its writes reach no other row, and has no baseline until the bench host records one. |
