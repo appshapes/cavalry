@@ -38,12 +38,14 @@ nothing depends on it.
 - Writes `bench/results/<profile>-<unix time>.json`; `scripts/bench-compare.py` fails a
   p99.99 regression over 5 percent against `bench/baseline.json` for the profile, on
   the `claim_commit` and `one_way` rows; the `timer` and `slot_padding` rows are host
-  probes and are reported, never failed (ADR 0017). Only the bench host's profiles have
-  a baseline: a shared runner's run is a report. The `_recorded` rows repeat the client
+  probes and are reported, never failed (ADR 0017). The two bench hosts' profiles have
+  baselines, `bench-linux` and `kip-linux` with their `-unchecked` twins: a shared
+  runner's run is a report. The `_recorded` rows repeat the client
   rows with the driver's recorder writing the stream to the durable log under the bench
-  directory, from a housekeeping CPU under `--pin`, and `record_block` times the
-  recorder's own block path; both are new rows with no baseline until the bench host
-  records one (ADR 0025).
+  directory, from a housekeeping CPU under `--pin`, and are gated against their baseline
+  like the other message rows; `record_block` times the recorder's own block path and is
+  reported against its own, not gated (ADR 0025, ADR 0017). Both got their first
+  baselines at 7f62673 (card 109).
 
 ## What it must never do
 
