@@ -187,9 +187,15 @@ are joined.
 
    On `kip`, `chronyc sources` marks `bench` with `^*` once selected, `chronyc
    sourcestats` gives the offset's standard deviation against it, and `chronyc tracking`
-   the offset and the root distance; `chronyc clients` on `bench` lists `kip`. The
-   link's record on the host's card holds those numbers with `ping -c 100` in each
-   direction while both hosts are idle, the MTU, and `ethtool -T` on both ports.
+   the offset and the root distance; `chronyc clients` on `bench` lists `kip`. It
+   worked when the standard deviation against `bench` is under 1 µs and the last offset
+   is within a few microseconds: over this cable with hardware timestamps `kip` reads
+   186 ns and a last offset of 1 ns. An offset of milliseconds means the host still
+   follows the internet pools, which `trust` on the `server` line fixes; the root
+   distance of tens of milliseconds is `bench`'s own distance to UTC and does not enter
+   a number between the two hosts. The link's record on the host's card holds those
+   numbers with `ping -c 100` in each direction while both hosts are idle, the MTU, and
+   `ethtool -T` on both ports.
 
 ## Access to the host
 
@@ -217,9 +223,9 @@ the host.
 - `check.sh` reports `turbo is on`: the same service did not write intel_pstate's
   `no_turbo` or cpufreq's `boost`; `systemctl status cavalry-bench-host.service` says
   why, and `cat /sys/devices/system/cpu/intel_pstate/no_turbo` reads 1 once it has.
-- `check.sh` reports an idle state with a long exit latency: the kernel line lacks
-  `intel_idle.max_cstate=1` or `processor.max_cstate=1`, or did not apply; `cat
-  /proc/cmdline` on the host, then `sudo update-grub` and reboot.
+- `check.sh` reports `CPU N can enter an idle state with a N µs exit latency`: the
+  kernel line lacks `intel_idle.max_cstate=1` or `processor.max_cstate=1`, or did not
+  apply; `cat /proc/cmdline` on the host, then `sudo update-grub` and reboot.
 - The harness reports `could not bind the thread to CPU N`: the CPU is offline or
   outside the runner's allowed set. `cat /sys/devices/system/cpu/online` on the host,
   and remember that `nosmt` takes every odd CPU offline on this part.
