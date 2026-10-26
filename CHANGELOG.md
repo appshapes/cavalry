@@ -514,6 +514,14 @@ user-visible change, added in the same commit as the change. The format follows
   driver thread could not take, or a process with no CPU outside the pins, fails the run
   with the next step in the message; `docs/how-to/run-the-bench.md`, "When it does not
   work", is the page.
+- A reviewer session that ends without submitting a review is run again once by the
+  `review pr` workflow itself, with a comment on the pull request saying so; the second
+  miss fails the run. Every run is named with its pull request number and attempt, and
+  its job summary carries the session's result, the tool calls the settings denied and,
+  on a miss, the session's final text. A push by the agent to a pull request branch now
+  gets its review without a person: GitHub raises no `dispatch review` run for it, so
+  the `claude` workflow adds the `review` label after the push. `docs/how-to/ask-the-agent.md`,
+  "When it does not work", says what to do when a review is fifteen minutes late (card 139).
 - The bench harness stamps every sample with the time stamp counter, calibrated once
   against the monotonic clock through `quanta` (ADR 0028), instead of the OS clock
   through the vDSO, which the timekeeper's tick rewrites a thousand times a second and
