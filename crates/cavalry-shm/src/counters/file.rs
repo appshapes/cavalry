@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
+use crate::pretouch;
+
 use super::cells::{HeaderCells, RecordCells, SlotCells};
 use super::generated::{
     COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, COUNTERS_ALLOCATIONS, COUNTERS_FREED,
@@ -208,6 +210,7 @@ impl CountersFile {
         // shared layout assumes: ADR 0010 bounds the values a peer writes, not whether
         // the file exists. A truncation is a fault, never silent misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
+        pretouch::writable(&map)?;
         let mapped = Arc::new(Mapped::new(Map::Writer(map), fields)?);
         let mut count: i64 = 0;
         for def in COUNTERS.iter().filter(|def| def.scope == Scope::Static) {
@@ -526,10 +529,14 @@ fn open_mapped(dir: &Path, writable: bool) -> Result<Arc<Mapped>, CountersError>
         // allocated for it can store the value, which the spec gives the owner alone
         // ("Value slot"; ADR 0013). ADR 0010 bounds what a peer writes; the driver's
         // directory is the trust boundary, as for every mapping here.
-        Map::Writer(unsafe { MmapOptions::new().len(length).map_mut(&file)? })
+        let map = unsafe { MmapOptions::new().len(length).map_mut(&file)? };
+        pretouch::writable(&map)?;
+        Map::Writer(map)
     } else {
         // SAFETY: as above.
-        Map::Reader(unsafe { MmapOptions::new().len(length).map(&file)? })
+        let map = unsafe { MmapOptions::new().len(length).map(&file)? };
+        pretouch::readable(&map)?;
+        Map::Reader(map)
     };
     let mapped = Mapped::new(map, first)?;
     let second = mapped.header_cells().read(file_length)?;

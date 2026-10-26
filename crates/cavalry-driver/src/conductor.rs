@@ -302,6 +302,9 @@ pub(crate) struct Conductor {
     subscriptions: Vec<Subscription>,
     images: Vec<Image>,
     recordings: Vec<RecordingEntry>,
+    /// The term length of every log this conductor creates: the spec's, and the
+    /// smallest in a test at a registry's capacity (ADR 0027).
+    term_length: u32,
     recorder: RecorderLink,
     /// Attaches and stops the request queue had no room for, offered again each cycle
     /// in order, before anything newer. While it holds any, `start recording` is
@@ -361,6 +364,7 @@ impl Conductor {
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
             recorder,
+            term_length: spec::IPC_TERM_LENGTH,
             deferred: VecDeque::with_capacity(DEFERRED_CAPACITY),
             registration_count: 0,
             next_session_id: i32::from_le_bytes(
@@ -657,13 +661,17 @@ impl Conductor {
         } else {
             LogType::Concurrent
         };
+        // The spec's term and window (`IPC_PUBLICATION_WINDOW` is half the term, checked
+        // below); a test at the registry's capacity shrinks the term, since every log is
+        // made resident when it is created (ADR 0027).
+        const _: () = assert!(spec::IPC_PUBLICATION_WINDOW == spec::IPC_TERM_LENGTH / 2);
         let fields = match HeaderFields::new(
             log_type,
             correlation_id,
             initial_term_id,
-            spec::IPC_TERM_LENGTH,
+            self.term_length,
             spec::IPC_MTU_LENGTH,
-            spec::IPC_PUBLICATION_WINDOW,
+            self.term_length / 2,
             session_id,
             stream_id,
         ) {
@@ -1157,8 +1165,10 @@ impl Conductor {
         }
         // The limit: consumer + window once cleaned, raised in steps of window ÷ 8; the
         // consumer position alone with neither a subscriber nor a recording, so the
-        // publisher is told not connected.
-        let window = i64::from(spec::IPC_PUBLICATION_WINDOW);
+        // publisher is told not connected. The window is the one the log was created
+        // with in `add_publication`, half this conductor's term: the spec's for every
+        // production log, and half the smallest term in a test at a registry's capacity.
+        let window = i64::from(self.term_length / 2);
         let candidate = if connected {
             consumer.saturating_add(window)
         } else {
@@ -2220,10 +2230,14 @@ mod recording {
 
     /// The recordings registry at capacity (invariant 3): live publications are at
     /// most 1024, so the registry fills only through recordings of closed publications
-    /// still with the recorder; the 1025th start recording is code 10 and counted.
+    /// still with the recorder; the 1025th start recording is code 10 and counted. The
+    /// logs take the smallest term: each is made resident when it is created (ADR
+    /// 0027), and 1,024 of the spec's 64 MiB terms would commit 192 GiB, while the bound
+    /// under test is the registry's.
     #[test]
     fn the_recordings_registry_is_bounded_and_says_so() {
         let mut h = Harness::new("recordings-registry");
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
         let now = h.now;
         let n = spec::MAX_RECORDINGS as i64;
         for i in 0..n {

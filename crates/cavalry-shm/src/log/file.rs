@@ -14,6 +14,8 @@ use cavalry_proto::frame::{
 };
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
+use crate::pretouch;
+
 use super::LogError;
 use super::cells::{FrameCells, MetaDataCells};
 use super::layout::{
@@ -379,6 +381,7 @@ impl LogBuffers {
         // assumes (ADR 0010 bounds the values a peer writes, not whether the file
         // exists); a truncation is a fault, never silent misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
+        pretouch::writable(&map)?;
         let mapped = Arc::new(Mapped::new(Map::Writer(map), *fields)?);
         let meta = mapped.meta();
         let initial = fields.initial_term_id();
@@ -418,14 +421,18 @@ impl LogBuffers {
         // process could truncate the file underneath it, and the driver's directory is
         // the trust boundary; a truncation faults, never lies.
         let map = if writable {
-            Map::Writer(unsafe {
+            let map = unsafe {
                 MmapOptions::new()
                     .len(file_length as usize)
                     .map_mut(&file)?
-            })
+            };
+            pretouch::writable(&map)?;
+            Map::Writer(map)
         } else {
             // SAFETY: as above.
-            Map::Reader(unsafe { MmapOptions::new().len(file_length as usize).map(&file)? })
+            let map = unsafe { MmapOptions::new().len(file_length as usize).map(&file)? };
+            pretouch::readable(&map)?;
+            Map::Reader(map)
         };
         let mapped = Mapped::new(map, first)?;
         let second = mapped.meta().header.read(file_length)?;

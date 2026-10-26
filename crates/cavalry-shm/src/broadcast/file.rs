@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
+use crate::pretouch;
+
 use super::BroadcastError;
 use super::cells::{self, Received, ReceiverState, TrailerCells};
 use super::layout::{self, FILE_NAME, HEADER_LENGTH, HeaderFields, Positions, TRAILER_LENGTH};
@@ -147,6 +149,7 @@ impl BroadcastBuffer {
         // assumes (ADR 0010 bounds the values a peer writes, not whether the file
         // exists); a truncation is a fault, never silent misbehaviour.
         let map = unsafe { MmapOptions::new().len(length as usize).map_mut(&file)? };
+        pretouch::writable(&map)?;
         let mapped = Arc::new(Mapped::new(Map::Writer(map), fields, true)?);
         mapped.trailer().publish(&fields);
         Ok(Self { mapped })
@@ -175,14 +178,18 @@ impl BroadcastBuffer {
         // process could truncate the file underneath it, and the driver's directory is
         // the trust boundary; a truncation faults, never lies.
         let map = if writable {
-            Map::Writer(unsafe {
+            let map = unsafe {
                 MmapOptions::new()
                     .len(file_length as usize)
                     .map_mut(&file)?
-            })
+            };
+            pretouch::writable(&map)?;
+            Map::Writer(map)
         } else {
             // SAFETY: as above.
-            Map::Reader(unsafe { MmapOptions::new().len(file_length as usize).map(&file)? })
+            let map = unsafe { MmapOptions::new().len(file_length as usize).map(&file)? };
+            pretouch::readable(&map)?;
+            Map::Reader(map)
         };
         let mapped = Mapped::new(map, first, false)?;
         let second = mapped.trailer().read(file_length)?;
