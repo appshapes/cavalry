@@ -493,6 +493,18 @@ user-visible change, added in the same commit as the change. The format follows
   `intel_idle.max_cstate=1`, both inert on AMD; `bench/host/check.sh` prints the turbo
   switch and the idle states and fails when turbo is on or a state deeper than C1 is
   enabled; the how-to covers hybrid parts, a second host's runner label and the link.
+- Every shared mapping is pre-touched when it is made (ADR 0027): the log buffers, the
+  counters file, the command ring and the broadcast buffer are made resident in `create`
+  and `open`, in the driver, every client, the recorder, `doctor` and the bench, so the
+  data plane never takes a page fault; on Linux the kernel's populate advice does it in
+  one call. Found on the second bench host, where the first touch of every page of every
+  term faulted inside the measured loops and the threads woke each other across CPUs
+  (card 136). A driver directory that cannot hold a log now fails at creation with an
+  error that names `--dir` and the `driver-directory-backing` doctor check, instead of a
+  bus error in a publisher later; and a log buffer's memory is allocated when the
+  publication or subscription is added, not as the stream reaches it, so a host holds as
+  many live publications as its driver directory holds whole logs, 192 MiB each for the
+  spec's three 64 MiB terms, and the next `add_publication` is refused by name.
 - The bench's third pin holds the driver's conductor alone: under `--pin P,S,C` the
   driver's recorder and the client's conductor run on the lowest CPU outside the pins,
   through `Driver::start_with_threads`, a hook each driver thread runs first, and every
