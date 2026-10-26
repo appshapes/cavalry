@@ -137,15 +137,15 @@ the gate fails only on the dedicated bench host is
   With the kernel's tracepoints enabled as root for one run, read-only apart from the
   trace buffer, no `exceptions:page_fault_user` event on a pinned CPU has an `address=`
   inside one of those mappings, whose ranges are the first column of the process's
-  `maps` taken during the same benchmark; a fault there is a bug, not a cost. Faults in
-  the harness's own memory remain at this commit: each histogram takes one fault per
-  4 KiB page of its counts as a rare sample first lands in a new bucket, 55 to 68 per
-  histogram on the second bench host, and the publisher's heap takes a few more.
-  `sched:sched_waking` to the pinned CPUs names no Cavalry thread woken from another
-  pinned CPU, but still names the driver's conductor waking its recorder and the
-  client's conductor, which share the third pin with it. Both are the harness's, not
-  the log's, and stay until card 136's second pull request moves the recorder and the
-  client's conductor off that pin.
+  `maps` taken during the same benchmark; a fault there is a bug, not a cost. The faults
+  that remain on a pinned CPU are the harness's own, and each is a burst at a row's
+  setup, before its measured loop: the 54 pages of a histogram's counts, written once
+  when the histogram is made, so that a rare sample never first-touches one inside the
+  loop. A fault spread through a loop is a bug. `sched:sched_waking` to the pinned CPUs
+  names no Cavalry thread as the wakee, apart from the driver's conductor waking from
+  idle on its own CPU: the driver's recorder and the client's conductor run on the
+  lowest CPU outside the pins, so nothing shares a pinned CPU with a measured thread
+  (`ps -L -o tid,psr,comm` during a run shows one Cavalry thread per pinned CPU).
 
   ```text
   T=/sys/kernel/tracing
@@ -189,11 +189,16 @@ the gate fails only on the dedicated bench host is
   `cavalry-shm`, where every `create` and `open` pre-touches before it hands the
   mapping out and `tests/pre_touch.rs` reads the residency back
   ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)). A fault in
-  the harness's own memory, or a wake-up between the driver's conductor, its recorder
-  and the client's conductor on the third pin, is the harness's design at this commit,
-  not a regression; `ps -L -o tid,psr,comm` during the run shows where each thread
-  sits. A p99.99 that a second host reads far above `bench`'s with the same p50 is how
-  the second bench host found the faults.
+  the harness's own memory inside a measured loop, rather than in the burst at the
+  row's setup: the histogram was not written through before the loop, which
+  `histogram()` in `bench/src/main.rs` does. A wake-up of a Cavalry thread on a pinned
+  CPU from another CPU: a thread shares that CPU with a measured one; `ps -L -o
+  tid,psr,comm` during the run shows where each thread sits, and under `--pin` the
+  driver's recorder and the client's conductor belong on the lowest CPU outside the
+  pins. A p99.99 that a second host reads far above `bench`'s with the same p50 and
+  none of the above is the host's own tail, and its profile's baseline is where it is
+  held; the second bench host reads one_way at 1.6 µs against `bench`'s 0.6 µs with no
+  fault and no wake-up in its loops, for a reason not yet found.
 - `no baseline for profile`: expected on a laptop and on a shared runner. On the bench
   host it means the baseline was not recorded yet; record one as step 4 says.
 - `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the
