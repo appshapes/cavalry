@@ -20,7 +20,11 @@ nothing depends on it.
   so each pinned CPU runs one thread, and `--repeat N` runs everything N times and
   reports each benchmark's median run by p99.99, every run's on record; the bench host
   runs it with both (ADR 0016).
-- Times every message with `Instant` and records it in an HdrHistogram with fixed bounds,
+- Times every message with the time stamp counter, calibrated once against the
+  monotonic clock through `quanta` ([ADR 0028](../docs/decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)):
+  the OS clock through the vDSO was the harness's own tail, 280 ns at p99.99 on the
+  bench host and 1.4 µs on the second, once per millisecond when the timekeeper's tick
+  rewrites what it reads. Records each sample in an HdrHistogram with fixed bounds,
   so recording never allocates, and reports p50, p99, p99.99 and max, never a mean. A
   `timer` row reports the harness's own overhead.
 - Measures the publisher's claim and commit, the one-way latency from the publisher's
@@ -69,8 +73,9 @@ second compares the newest result with the baseline for the profile and ends wit
 - [`docs/how-to/run-the-bench.md`](../docs/how-to/run-the-bench.md): running it,
   reading the table, recording a baseline, what to do on a regression.
 - [ADR 0015](../docs/decisions/0015-measure-in-process-with-per-runner-baselines.md):
-  why the harness is in process, why `Instant` and HdrHistogram, why one baseline per
-  runner; [ADR 0016](../docs/decisions/0016-run-the-latency-gate-on-a-dedicated-host.md):
+  why the harness is in process, why HdrHistogram and one baseline per runner, and
+  [ADR 0028](../docs/decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md),
+  why the clock is the time stamp counter; [ADR 0016](../docs/decisions/0016-run-the-latency-gate-on-a-dedicated-host.md):
   why the gate fails only on the dedicated bench host, and
   [`docs/how-to/set-up-a-bench-host.md`](../docs/how-to/set-up-a-bench-host.md), how
   that host is built from `bench/host/`.

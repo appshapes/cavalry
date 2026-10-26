@@ -52,7 +52,7 @@ the gate fails only on the dedicated bench host is
 
    | Benchmark | What one sample is |
    | --- | --- |
-   | `timer` | Two `Instant::now()` calls back to back: the harness's own overhead, present in every other row. |
+   | `timer` | Two readings of the harness's clock back to back, the time stamp counter calibrated once ([ADR 0028](../decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)): the harness's own overhead, present in every other row, about 20 ns on the bench host and 0 or 42 ns on Apple silicon, whose counter ticks at 24 MHz. |
    | `claim_commit_<body>` | The publisher's `try_claim`, writing the body, and `commit`, for a body of that many bytes. |
    | `one_way_<body>` | From the publisher's timestamp before its claim to the subscriber's handler receiving the frame, across two threads. |
    | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor loads the publisher's tail at most once per millisecond on its duty cycle (ADR 0022), as a user's does. |
@@ -197,8 +197,16 @@ the gate fails only on the dedicated bench host is
   driver's recorder and the client's conductor belong on the lowest CPU outside the
   pins. A p99.99 that a second host reads far above `bench`'s with the same p50 and
   none of the above is the host's own tail, and its profile's baseline is where it is
-  held; the second bench host reads one_way at 1.6 µs against `bench`'s 0.6 µs with no
-  fault and no wake-up in its loops, for a reason not yet found.
+  held. The second bench host's 1.6 µs against `bench`'s 0.6 µs, with no fault and no
+  wake-up in its loops, was the clock, the next bullet and
+  [ADR 0028](../decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md).
+- A p99.99 far above the p99 whose slow samples come one or two messages at a time,
+  spaced exactly 1 ms apart: the host's timekeeper, not the log. The harness's clock is
+  the time stamp counter ([ADR 0028](../decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)),
+  which reads no shared data; a host whose counter is not invariant falls back to the
+  monotonic clock, and every `clock_gettime` after the housekeeping CPU's tick then pays
+  for the timekeeper's write. `grep -o -E 'constant_tsc|nonstop_tsc' /proc/cpuinfo | sort -u`
+  says which the host has.
 - `no baseline for profile`: expected on a laptop and on a shared runner. On the bench
   host it means the baseline was not recorded yet; record one as step 4 says.
 - `--pin: could not bind the thread to CPU N`, or `could not bind the driver's conductor`

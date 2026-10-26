@@ -65,3 +65,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0025. Record a stream in the driver, with Aeron Archive's commands in the client protocol](decisions/0025-record-a-stream-in-the-driver.md)
 - [0026. Email the week's changes to a list, drafted by an agent and gated before it is sent](decisions/0026-email-the-weeks-changes.md)
 - [0027. Pre-touch every shared mapping when it is made, with no key to turn it off](decisions/0027-pre-touch-shared-mappings-at-map-time.md)
+- [0028. Stamp bench samples with the time stamp counter, calibrated once](decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)
