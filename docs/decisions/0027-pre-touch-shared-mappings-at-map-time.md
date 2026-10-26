@@ -54,8 +54,8 @@ and a knob whose only use is a faster-looking benchmark is refused by `CLAUDE.md
 - **Aeron's key, default off.** Lost to invariant 5: the default would be the one that
   faults, and a new key needs a reason its default cannot be right, which this one has
   not; and to `CLAUDE.md`, which refuses a knob added to make a benchmark pass.
-- **Huge pages, by host policy (`shmem_enabled`) or `MAP_HUGETLB`.** Lost: a 32 MiB term
-  still faults 16 times per mapping, the race remains, and the fix would live in the
+- **Huge pages, by host policy (`shmem_enabled`) or `MAP_HUGETLB`.** Lost: the spec's
+  64 MiB term still faults 32 times per mapping, the race remains, and the fix would live in the
   host's configuration, where `doctor` can only recommend it; `MAP_HUGETLB` needs reserved
   pages and fails on a laptop.
 - **One mapping per process, shared between the client and an embedded driver.** Lost:
@@ -84,7 +84,7 @@ since an ADR is accepted on the evidence that informed it.
 ## Consequences
 
 - A log buffer's pages are allocated at `add_publication` and `add_subscription`, not as
-  the stream reaches them: some tens of milliseconds for a 96 MiB log on the control
+  the stream reaches them: some tens of milliseconds for the spec's 192 MiB log on the control
   plane, and a visibly larger resident set from the start. A bound moves with it
   (invariant 3): tmpfs charges a page against the mount's `size=` and against memory
   when the page is allocated, not when `ftruncate` sizes the file, so a log that cost

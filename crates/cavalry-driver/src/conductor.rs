@@ -1165,8 +1165,10 @@ impl Conductor {
         }
         // The limit: consumer + window once cleaned, raised in steps of window ÷ 8; the
         // consumer position alone with neither a subscriber nor a recording, so the
-        // publisher is told not connected.
-        let window = i64::from(spec::IPC_PUBLICATION_WINDOW);
+        // publisher is told not connected. The window is the one the log was created
+        // with in `add_publication`, half this conductor's term: the spec's for every
+        // production log, and half the smallest term in a test at a registry's capacity.
+        let window = i64::from(self.term_length / 2);
         let candidate = if connected {
             consumer.saturating_add(window)
         } else {
