@@ -121,13 +121,30 @@ the gate fails only on the dedicated bench host is
   expected.
 - The table's last line reads `allocations per message: 0`.
 - `just bench-compare` ends with `bench-compare: ok`.
-- On a Linux host, no measured thread took a page fault or a cross-CPU wake-up: with
-  the kernel's tracepoints enabled as root for one run, read-only apart from the trace
-  buffer, `exceptions:page_fault_user` counts no faults on the pinned CPUs after the
-  driver and the client have started, and `sched:sched_waking` filtered to those CPUs
-  names no Cavalry thread as the wakee. Every mapping is pre-touched when it is made
-  ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)), so a fault
-  there is a bug, not a cost.
+- On a Linux host, every Cavalry mapping is resident and no measured thread took a
+  page fault in one. While a benchmark runs, every mapping under its directory,
+  `/dev/shm/cavalry-bench-<pid>-<benchmark>`, has `Rss` equal to `Size` in the
+  process's `smaps`, because every mapping is pre-touched when it is made
+  ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)); this needs
+  no root:
+
+  ```text
+  pid=$(pgrep -x cavalry-bench)
+  awk '/cavalry-bench-/ {m=$0} /^Size:/ {s=$2} /^Rss:/ && m {print s, $2, m; m=""}' /proc/$pid/smaps
+  ```
+
+  With the kernel's tracepoints enabled as root for one run, read-only apart from the
+  trace buffer, no `exceptions:page_fault_user` event on a pinned CPU has an `address=`
+  inside one of those mappings, whose ranges are the first column of the process's
+  `maps` taken during the same benchmark; a fault there is a bug, not a cost. Faults in
+  the harness's own memory remain at this commit: each histogram takes one fault per
+  4 KiB page of its counts as a rare sample first lands in a new bucket, 55 to 68 per
+  histogram on the second bench host, and the publisher's heap takes a few more.
+  `sched:sched_waking` to the pinned CPUs names no Cavalry thread woken from another
+  pinned CPU, but still names the driver's conductor waking its recorder and the
+  client's conductor, which share the third pin with it. Both are the harness's, not
+  the log's, and stay until card 136's second pull request moves the recorder and the
+  client's conductor off that pin.
 
   ```text
   T=/sys/kernel/tracing
@@ -135,9 +152,11 @@ the gate fails only on the dedicated bench host is
   echo 1 > $T/events/sched/sched_waking/enable
   echo 1 > $T/events/exceptions/page_fault_user/enable
   echo 1 > $T/tracing_on
-  # run the harness with --pin 8,10,12, then:
+  # run the harness with --pin 8,10,12; while a benchmark runs, keep its mappings' ranges:
+  cat /proc/$(pgrep -x cavalry-bench)/maps > maps.txt
+  # when the harness has finished:
   echo 0 > $T/tracing_on
-  grep -c page_fault_user $T/trace
+  grep page_fault_user $T/trace > faults.txt
   ```
 
 ## When it does not work
@@ -164,11 +183,16 @@ the gate fails only on the dedicated bench host is
   ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A person
   decides whether to re-record the baseline from that run, as step 4 says, in a commit
   whose message names the harness change and carries both histograms.
-- Page faults on a pinned CPU in the trace above, or a p99.99 that a second host reads
-  far above `bench`'s with the same p50: a mapping was not pre-touched, or a thread of
-  the driver or the client shares a pinned CPU with a measured thread (`ps -L -o
-  tid,psr,comm` during the run shows where each thread sits). The second bench host
-  found both ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)).
+- A fault in `faults.txt` whose address lies in a Cavalry mapping, or a mapping whose
+  `Rss` is below its `Size`: a mapping was not pre-touched, which is a bug in
+  `cavalry-shm`, where every `create` and `open` pre-touches before it hands the
+  mapping out and `tests/pre_touch.rs` reads the residency back
+  ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)). A fault in
+  the harness's own memory, or a wake-up between the driver's conductor, its recorder
+  and the client's conductor on the third pin, is the harness's design at this commit,
+  not a regression; `ps -L -o tid,psr,comm` during the run shows where each thread
+  sits. A p99.99 that a second host reads far above `bench`'s with the same p50 is how
+  the second bench host found the faults.
 - `no baseline for profile`: expected on a laptop and on a shared runner. On the bench
   host it means the baseline was not recorded yet; record one as step 4 says.
 - `--pin: could not bind the thread to CPU N`: the CPU is offline or outside the

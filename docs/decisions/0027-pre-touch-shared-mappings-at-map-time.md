@@ -66,6 +66,11 @@ and a knob whose only use is a faster-looking benchmark is refused by `CLAUDE.md
   have a peer writing the page, and a read-modify-write of one byte could revert that
   write; a read touches the page as surely, and on Linux the populate advice makes the
   page writable without writing it.
+- **`MAP_POPULATE` at `mmap`, memmap2's `MmapOptions::populate`.** Lost: on a shared
+  mapping it populates for reading only, so the first store to each page of a writable
+  mapping still faults to make the page writable, and `mmap` does not fail when a page
+  cannot be populated, so a directory that cannot hold the log is still found by the
+  publisher's bus error; the populate advice does both.
 - **Doing nothing, and calling kip's number the host's.** Lost: the trace names
   Cavalry's own threads, and `bench` pays the same faults with less to show for them.
 
@@ -80,8 +85,14 @@ since an ADR is accepted on the evidence that informed it.
 
 - A log buffer's pages are allocated at `add_publication` and `add_subscription`, not as
   the stream reaches them: some tens of milliseconds for a 96 MiB log on the control
-  plane, and a visibly larger resident set from the start. The shared memory was
-  committed and counted at creation already (invariant 3), so no bound moves.
+  plane, and a visibly larger resident set from the start. A bound moves with it
+  (invariant 3): tmpfs charges a page against the mount's `size=` and against memory
+  when the page is allocated, not when `ftruncate` sizes the file, so a log that cost
+  the host the pages its stream had reached now costs the whole log, and a host holds
+  as many live publications and subscriptions as its driver directory holds whole logs,
+  192 MiB each for the spec's three 64 MiB terms, and the next is refused by name. That
+  is the trade this decision accepts under invariant 3: an explicit bound, returned to
+  the caller at creation, in place of a directory that ran out under a live stream.
 - A driver directory that cannot hold the log fails at creation with an error that names
   `--dir` and `doctor`, instead of a bus error in a publisher later. The changelog says
   so.
