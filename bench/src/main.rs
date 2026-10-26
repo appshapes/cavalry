@@ -406,12 +406,13 @@ fn span_ns(from: u64, to: u64) -> u64 {
 /// bench host; 2 ticks, a third of a nanosecond each, on kip, whose readings are 26 to 54
 /// ticks apart in even numbers, so its percentiles resolve to the nanosecond; one tick of
 /// the 24 MHz counter, 42 ns, on the macOS CI runner; and 1 ns on a laptop where `quanta`
-/// fell back to the monotonic clock in nanoseconds, whose advances of 41 and 42 divide to
-/// 1. Neither Apple machine has a baseline. `bench-compare` fails a gated row only beyond
-/// one step as well as beyond 5 percent (ADR 0029). Measured once, on the publisher's
-/// CPU once it is pinned, before the first row, with its counts on the stack, since a
-/// heap allocation here moved the raw rows' tail by 60 ns on the bench host; the first
-/// line prints both numbers, so the log shows which clock the harness is on.
+/// fell back to the monotonic clock in nanoseconds, whose advances of 41 and 42 divide
+/// to one; neither Apple machine has a baseline. `bench-compare` fails a gated row only
+/// beyond one step as well as beyond 5 percent (ADR 0029). Measured once, on the
+/// publisher's CPU once it is pinned, before the first row, with its counts on the
+/// stack, since a heap allocation here moved the raw rows' tail by 60 ns on the bench
+/// host; the first line prints both numbers, so the log shows which clock the harness
+/// is on.
 fn clock_step() -> (u64, u64) {
     const PAIRS: usize = 1_000_000;
     const LARGEST: usize = 4096;
