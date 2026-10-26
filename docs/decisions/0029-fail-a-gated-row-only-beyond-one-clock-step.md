@@ -23,19 +23,26 @@ run of 160, and `claim_commit_32_exclusive` at 170 to 180 against 170: an unchan
 commit whose median lands one step up fails the gate at +6.3 percent, and a gate that
 fails an unchanged commit teaches people to re-run it until it passes. The second bench
 host's counter resolves to a nanosecond, so the same rows there read 117 to 223 and the
-5 percent rule is a measured 5 percent; on Apple silicon `quanta` reads the monotonic
-clock in nanoseconds with a 41.67 ns tick, and a laptop has no baseline.
+5 percent rule is a measured 5 percent. On Apple silicon it depends on the clock `quanta`
+chose: the macOS CI runner read one tick of the 24 MHz counter, 41 to 42 ns, and a laptop
+read 1 ns where `quanta` fell back to the monotonic clock in nanoseconds; neither has a
+baseline.
 
 ## Decision
 
 A gated row fails when its median p99.99 is more than 5 percent above the baseline's
 slowest run **and** more than one step of the harness's clock above it. The harness
-measures the step once at start, on the publisher's CPU once it is pinned: the greatest
-common divisor of the counter's own advances between a million pairs of consecutive
-readings, over the advances that occur in at least one pair in a thousand, converted to
-nanoseconds. The rare advances are left out because one pair interrupted, or moved to a
-core whose counter sits at another offset, divides everything to 1, which the first run on
-the bench host showed. It prints the step in its first line and writes
+measures the step once at start, on the publisher's CPU once it is pinned, with its
+counts on the stack: a million pairs of consecutive readings, the counter's advances
+between them counted, the advances that occur in fewer than one pair in a thousand left
+out as interrupts or migrations, those below half the most frequent one left out as the
+counter's own residual, and the greatest common divisor of the rest converted to
+nanoseconds, rounded to the nearest. On the bench host the counter advances by 37 ticks,
+10 ns, at a time, reads 37 or 74 between two readings and a single tick in 2 percent of
+them, which a divisor over everything turned into a step of 1, as the first runs of #57
+showed; on kip the advances are 26 to 54 ticks in even numbers and divide to 2, a third of
+a nanosecond each, so its step is 1 ns. It prints the step in ticks and nanoseconds in its
+first line and writes
 it into the result as `clock_step_ns`; `bench-compare` reads it from the result under
 judgement, prints it, stores it in the baseline with `--update`, and marks a row that is
 over 5 percent but within one step "within a step". A result from before the field is
@@ -65,8 +72,10 @@ a fine clock keeps the 5 percent rule, a probe row is reported.
 ## Consequences
 
 - The result and the baseline carry `clock_step_ns`; the bench host's is 10, the second
-  bench host's 1. An Apple silicon laptop's reads 1 too, since its clock's advances of
-  41 and 42 ns divide to 1; its percentiles step by 41 or 42 and it has no baseline.
+  bench host's 1, the macOS CI runner's 42 and a laptop's 1, as the Context says.
+- The measurement keeps its counts on the stack: a 16 KiB heap allocation at startup
+  moved the raw rows' one_way tail on the bench host by 60 ns at p99.99 in every run of
+  an interleaved comparison, which is a fragility of the harness with a card of its own.
 - On the bench host a `claim_commit_*` row can move one step, 10 ns of 160, without
   failing; a `one_way_*` row at 290 is held at 5 percent, 15 ns, as before, since one
   step is less.

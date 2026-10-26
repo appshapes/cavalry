@@ -87,7 +87,7 @@ class Rule(unittest.TestCase):
         del res["clock_step_ns"]
         code, out = run(res, baseline(claim_commit_32_client=row(160)))
         self.assertEqual(code, 1, out)
-        self.assertIn("clock step 1 ns", out)
+        self.assertIn("clock step unknown", out)
 
     def test_allocations_fail_the_gate(self):
         res = result(10, one_way_32_client=row(300))
@@ -107,6 +107,15 @@ class Update(unittest.TestCase):
         self.assertEqual(entry["clock_step_ns"], 10)
         self.assertEqual(entry["benchmarks"]["one_way_32_client"]["p99_99_ns_runs"], [290, 300, 310])
         self.assertTrue(bench_compare.BASELINE.exists())
+
+    def test_update_leaves_the_step_out_when_the_result_has_none(self):
+        bench_compare.BASELINE = Path(__import__("tempfile").mkdtemp()) / "baseline.json"
+        base = {"schema": 0, "profiles": {}}
+        res = result(10, one_way_32_client=row(300))
+        del res["clock_step_ns"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            bench_compare.update(res, base)
+        self.assertNotIn("clock_step_ns", base["profiles"]["test-host"])
 
 
 if __name__ == "__main__":

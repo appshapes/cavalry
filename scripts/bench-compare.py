@@ -76,8 +76,9 @@ def fmt(ns) -> str:
 def compare(result: dict, baseline: dict) -> int:
     profile = result["profile"]
     step = clock_step(result)
-    print(f"bench-compare: {profile}, {result.get('messages', '?')} messages, git {result.get('git', '?')}, "
-          f"clock step {step} ns")
+    shown = f"clock step {step} ns" if step else "clock step unknown, the 5 percent rule alone"
+    print(f"bench-compare: {profile}, {result.get('messages', '?')} messages, git {result.get('git', '?')}, {shown}")
+    floor = step or 0
     failures = 0
     allocations = result.get("allocations_per_message")
     if allocations is None or allocations > 0:
@@ -96,7 +97,7 @@ def compare(result: dict, baseline: dict) -> int:
             verdict = f"{ratio:+.1%}"
             if not name.startswith(GATED_ROWS):
                 verdict += " reported"
-            elif ratio > TOLERANCE and now[GATED] - slowest > step:
+            elif ratio > TOLERANCE and now[GATED] - slowest > floor:
                 verdict += " REGRESSION"
                 failures += 1
             elif ratio > TOLERANCE:
@@ -114,18 +115,18 @@ def compare(result: dict, baseline: dict) -> int:
               "nothing compared. Set one from this machine's run with --update (ADR 0015).")
     if failures:
         print(f"bench-compare: {failures} finding(s); a message row's p99.99 more than {TOLERANCE:.0%} and more "
-              f"than one clock step ({step} ns) above the baseline's slowest run fails (CLAUDE.md, gate 2; "
+              f"than one clock step ({floor} ns) above the baseline's slowest run fails (CLAUDE.md, gate 2; "
               "ADR 0029). Measure again on an idle machine before you believe either number.")
         return 1
     print("bench-compare: ok")
     return 0
 
 
-def clock_step(result: dict) -> int:
-    """The step of the clock the result was measured with, in whole nanoseconds, at least 1;
-    a result from before the field is judged by the tolerance alone."""
+def clock_step(result: dict):
+    """The step of the clock the result was measured with, in whole nanoseconds, at least 1,
+    or None for a result from before the field, which is judged by the tolerance alone."""
     step = result.get(STEP_FIELD)
-    return int(step) if isinstance(step, (int, float)) and step >= 1 else 1
+    return int(step) if isinstance(step, (int, float)) and step >= 1 else None
 
 
 def update(result: dict, baseline: dict) -> int:
@@ -135,7 +136,7 @@ def update(result: dict, baseline: dict) -> int:
         "date": result.get("date"),
         "messages": result.get("messages"),
         "repeat": result.get("repeat"),
-        STEP_FIELD: clock_step(result),
+        **({STEP_FIELD: clock_step(result)} if clock_step(result) else {}),
         "benchmarks": {
             name: {k: now[k] for k in SHOWN + ("p99_99_ns_runs",) if k in now}
             for name, now in sorted(result["benchmarks"].items())

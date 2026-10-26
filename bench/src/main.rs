@@ -395,26 +395,28 @@ fn span_ns(from: u64, to: u64) -> u64 {
     clock().delta_as_nanos(from, to)
 }
 
-/// The clock's step in nanoseconds: the greatest common divisor of the counter's own
-/// advances between a million pairs of consecutive readings, over the advances that occur
-/// often, converted to nanoseconds and at least 1. The divisor is taken over the raw
-/// ticks, which are exact, not over spans in nanoseconds, which round; and over the
-/// frequent advances only, since one pair interrupted or moved to a core whose counter
-/// sits at another offset would divide everything to 1, which the first run on the bench
-/// host did. The step is 10 on the bench host, whose counter advances in 10 ns steps, and
-/// 1 on a part whose counter resolves below a nanosecond; on Apple silicon `quanta` reads
-/// the monotonic clock in nanoseconds with a 41.67 ns tick, whose advances of 41 and 42
-/// divide to 1, and a laptop has no baseline. `bench-compare` fails a gated row only
-/// beyond one step as well as beyond 5 percent (ADR 0029). Measured once, on the
-/// publisher's CPU once it is pinned, before the first row.
-fn clock_step_ns() -> u64 {
-    fn gcd(a: u64, b: u64) -> u64 {
-        if b == 0 { a } else { gcd(b, a % b) }
-    }
+/// The clock's step: the smallest change the counter reports, in nanoseconds rounded to
+/// the nearest and in the counter's own ticks. A million pairs of consecutive readings
+/// are taken and their advances counted. An advance seen in fewer than one pair in a
+/// thousand is an interrupt or a migration and is ignored; an advance below half the most
+/// frequent one is the counter's own residual, not a step, and is ignored too: the bench
+/// host's counter moves by 37 ticks, 10 ns, at a time and reads 37 or 74 between two
+/// readings, with a one-tick residual in 2 percent of them, and a divisor over everything
+/// read 1 there. The step is the greatest common divisor of what remains: 37 ticks on the
+/// bench host; 2 ticks, a third of a nanosecond each, on kip, whose readings are 26 to 54
+/// ticks apart in even numbers, so its percentiles resolve to the nanosecond; one tick of
+/// the 24 MHz counter, 42 ns, on the macOS CI runner; and 1 ns on a laptop where `quanta`
+/// fell back to the monotonic clock in nanoseconds, whose advances of 41 and 42 divide to
+/// 1. Neither Apple machine has a baseline. `bench-compare` fails a gated row only beyond
+/// one step as well as beyond 5 percent (ADR 0029). Measured once, on the publisher's
+/// CPU once it is pinned, before the first row, with its counts on the stack, since a
+/// heap allocation here moved the raw rows' tail by 60 ns on the bench host; the first
+/// line prints both numbers, so the log shows which clock the harness is on.
+fn clock_step() -> (u64, u64) {
     const PAIRS: usize = 1_000_000;
     const LARGEST: usize = 4096;
     // How often each advance below LARGEST ticks occurred; the rest are outliers.
-    let mut counts = vec![0u32; LARGEST];
+    let mut counts = [0u32; LARGEST];
     for _ in 0..PAIRS {
         let a = tick();
         let b = tick();
@@ -423,15 +425,22 @@ fn clock_step_ns() -> u64 {
             counts[advance] += 1;
         }
     }
-    // An advance seen in at least one pair in a thousand is the counter's own step or a
-    // multiple of it; anything rarer is an interrupt or a migration.
+    fn gcd(a: u64, b: u64) -> u64 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    // An advance seen in at least one pair in a thousand is the counter's own; anything
+    // rarer is an interrupt or a migration. Below half the most frequent advance it is
+    // the counter's residual, not a step.
     let frequent = (PAIRS / 1000) as u32;
-    let ticks = counts
-        .iter()
-        .enumerate()
-        .filter(|&(_, &n)| n >= frequent)
-        .fold(0u64, |acc, (advance, _)| gcd(acc, advance as u64));
-    span_ns(0, ticks.max(1)).max(1)
+    let mode = (1..LARGEST).max_by_key(|&a| counts[a]).unwrap_or(1);
+    let ticks = (mode / 2..LARGEST)
+        .filter(|&a| a > 0 && counts[a] >= frequent)
+        .fold(0u64, |acc, a| gcd(acc, a as u64))
+        .max(1);
+    // To the nearest nanosecond, not truncated: 37 ticks of a counter calibrated at
+    // 3.7001 GHz are 9.9997 ns, and a floor of 9 would still fail a move of 10.
+    let ns = (span_ns(0, ticks * 1000) + 500) / 1000;
+    (ns.max(1), ticks)
 }
 
 /// Two readings of the harness's clock back to back: its own overhead, present in every
@@ -1166,7 +1175,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     // The clock's step, on the publisher's CPU now that it is pinned (ADR 0029).
-    let clock_step = clock_step_ns();
+    let (clock_step, clock_step_ticks) = clock_step();
     let pinned = options.pin.map_or_else(
         || "unpinned".to_string(),
         |pin| format!("pinned to CPUs {},{},{}", pin[0], pin[1], pin[2]),
@@ -1176,7 +1185,7 @@ fn main() -> ExitCode {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     println!(
-        "cavalry-bench: profile {}, git {sha}, {} {}, {cpus} cores, {pinned}, clock step {clock_step} ns, {} messages after {} warm-up, body {} bytes, term {} bytes, files under {}, {} run(s) per benchmark",
+        "cavalry-bench: profile {}, git {sha}, {} {}, {cpus} cores, {pinned}, clock step {clock_step} ns ({clock_step_ticks} ticks), {} messages after {} warm-up, body {} bytes, term {} bytes, files under {}, {} run(s) per benchmark",
         options.profile,
         std::env::consts::OS,
         std::env::consts::ARCH,
