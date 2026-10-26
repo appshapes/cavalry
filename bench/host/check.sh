@@ -7,7 +7,9 @@
 #     bench/host/check.sh            print the state
 #     bench/host/check.sh 8,10,12    print it and fail unless those CPUs are isolated and
 #                                    tickless, SMT is off, the governor is performance,
-#                                    boost is off, transparent huge pages are off and
+#                                    turbo is off (cpufreq boost, or intel_pstate's
+#                                    no_turbo), no idle state deeper than C1 is enabled
+#                                    on those CPUs, transparent huge pages are off and
 #                                    swap is off
 set -euo pipefail
 
@@ -19,9 +21,40 @@ nohz_full=$(read_or $cpu/nohz_full "")
 smt=$(read_or $cpu/smt/control unknown)
 governor=$(sort -u $cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | paste -sd, - || echo unknown)
 boost=$(read_or $cpu/cpufreq/boost none)
+no_turbo=$(read_or $cpu/intel_pstate/no_turbo none)
+# Turbo is cpufreq's boost switch on AMD and intel_pstate's no_turbo on Intel.
+case "$boost:$no_turbo" in
+    *:1) turbo=off ;;
+    *:0) turbo=on ;;
+    1:*) turbo=on ;;
+    0:*) turbo=off ;;
+    *) turbo=none ;;
+esac
 thp=$(read_or /sys/kernel/mm/transparent_hugepage/enabled unknown | sed -E 's/.*\[([a-z]+)\].*/\1/')
 swap=$(swapon --show --noheadings 2>/dev/null | wc -l | tr -d ' ')
 online=$(read_or $cpu/online unknown)
+
+# The idle states a CPU may enter, "name(exit latency in µs)" for each enabled one, and
+# the deepest enabled exit latency. C1 exits in a microsecond or two; C2 and deeper in
+# hundreds (an i9-13900H: C2 127 µs, C3 1,048 µs), the stall the kernel line removes
+# with processor.max_cstate=1 (acpi_idle) and intel_idle.max_cstate=1 (intel_idle).
+idle_states() {
+    local s
+    for s in $cpu/cpu$1/cpuidle/state*; do
+        [ -r "$s/disable" ] && [ "$(cat "$s/disable")" = 0 ] || continue
+        printf '%s(%s) ' "$(cat "$s/name")" "$(cat "$s/latency")"
+    done
+}
+deepest_idle_latency() {
+    local s lat max=0
+    for s in $cpu/cpu$1/cpuidle/state*; do
+        [ -r "$s/disable" ] && [ "$(cat "$s/disable")" = 0 ] || continue
+        lat=$(cat "$s/latency")
+        [ "$lat" -gt "$max" ] && max=$lat
+    done
+    echo "$max"
+}
+first=${1:-0}; first=${first%%,*}; first=${first%%-*}
 
 echo "bench host: $(hostname), $(uname -sr), $(grep -m1 'model name' /proc/cpuinfo | sed 's/.*: //')"
 echo "  online CPUs:    $online"
@@ -29,7 +62,8 @@ echo "  isolated:       ${isolated:-none}"
 echo "  nohz_full:      ${nohz_full:-none}"
 echo "  smt:            $smt"
 echo "  governor:       $governor"
-echo "  boost:          $boost"
+echo "  turbo:          $turbo (cpufreq boost $boost, intel_pstate no_turbo $no_turbo)"
+echo "  idle states:    $(idle_states "$first")on CPU $first"
 echo "  huge pages:     $thp"
 echo "  swap devices:   $swap"
 echo "  cmdline:        $(cat /proc/cmdline)"
@@ -54,10 +88,12 @@ fail() { echo "check.sh: $1" >&2; failures=$((failures + 1)); }
 for pin in $(expand "$1"); do
     expand "$isolated" | grep -qx "$pin" || fail "CPU $pin is not isolated (isolcpus)"
     expand "$nohz_full" | grep -qx "$pin" || fail "CPU $pin is not tickless (nohz_full)"
+    latency=$(deepest_idle_latency "$pin")
+    [ "$latency" -le 10 ] || fail "CPU $pin can enter an idle state with a $latency µs exit latency ($(idle_states "$pin")); add processor.max_cstate=1 and intel_idle.max_cstate=1 to the kernel line and reboot"
 done
 case "$smt" in off|forceoff|notsupported|notimplemented) ;; *) fail "SMT is $smt, not off" ;; esac
 [ "$governor" = performance ] || fail "governor is $governor, not performance"
-case "$boost" in 0|none) ;; *) fail "boost is on" ;; esac
+[ "$turbo" != on ] || fail "turbo is on (cpufreq boost $boost, intel_pstate no_turbo $no_turbo); cavalry-bench-host.service did not run"
 [ "$thp" = never ] || fail "transparent huge pages are $thp, not never"
 [ "$swap" = 0 ] || fail "$swap swap devices are active"
 if [ "$failures" -gt 0 ]; then

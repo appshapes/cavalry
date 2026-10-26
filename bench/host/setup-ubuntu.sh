@@ -11,6 +11,11 @@
 # The defaults are for an 8-core part with two core complexes of 4 cores and SMT, with
 # siblings numbered 2n and 2n+1, such as the Ryzen 7 2700X: the second complex is
 # isolated. Read `lscpu -e` and the L3 column before accepting them for another part.
+# On a hybrid Intel part (P-cores and E-cores), /sys/devices/cpu_core/cpus names the
+# P-cores: isolate three of them with their SMT siblings and leave the E-cores to
+# housekeeping. On the i9-13900H (six P-cores at CPUs 0 to 11, siblings 2n and 2n+1,
+# eight E-cores at 12 to 19) that is ISOLATED=6-11 HOUSEKEEPING=0-5,12-19 and
+# `--pin 6,8,10`.
 set -euo pipefail
 
 ISOLATED="${ISOLATED:-8-15}"
@@ -31,6 +36,9 @@ fi
 #    irqaffinity     every interrupt defaults to the housekeeping CPUs
 #    processor.max_cstate=1  no deep sleep states: a wake from C2 or deeper costs tens of
 #                    microseconds, and the spinning threads never sleep anyway
+#    intel_idle.max_cstate=1  the same for Intel's idle driver, which does not read
+#                    processor.max_cstate: without it an i9-13900H keeps C2 (127 µs
+#                    exit) and C3 (1,048 µs) enabled on the isolated CPUs
 #    tsc=reliable    keep the TSC as the clocksource; the clocksource watchdog otherwise
 #                    runs a timer on every CPU and can demote it to a slow clock
 #    nowatchdog      no lockup-detector timer on every CPU
@@ -40,7 +48,7 @@ fi
 cat > /etc/default/grub.d/90-cavalry-bench.cfg <<CFG
 # Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016). Delete, run update-grub and
 # reboot to undo.
-GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT nosmt isolcpus=domain,managed_irq,${ISOLATED} nohz_full=${ISOLATED} rcu_nocbs=${ISOLATED} irqaffinity=${HOUSEKEEPING} processor.max_cstate=1 tsc=reliable nowatchdog skew_tick=1 transparent_hugepage=never"
+GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT nosmt isolcpus=domain,managed_irq,${ISOLATED} nohz_full=${ISOLATED} rcu_nocbs=${ISOLATED} irqaffinity=${HOUSEKEEPING} processor.max_cstate=1 intel_idle.max_cstate=1 tsc=reliable nowatchdog skew_tick=1 transparent_hugepage=never"
 CFG
 update-grub
 echo "setup-ubuntu.sh: kernel command line written; it applies at the next boot"
@@ -57,6 +65,10 @@ for governor in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
 done
 if [ -w /sys/devices/system/cpu/cpufreq/boost ]; then
     echo 0 > /sys/devices/system/cpu/cpufreq/boost
+fi
+# intel_pstate has no cpufreq/boost file; its turbo switch is no_turbo.
+if [ -w /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+    echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo
 fi
 TUNE
 chmod 755 /usr/local/sbin/cavalry-bench-host-tune
@@ -96,7 +108,7 @@ DROPIN
 done
 systemctl daemon-reload
 systemctl enable --now cavalry-bench-host.service >/dev/null
-echo "setup-ubuntu.sh: governor $(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | paste -sd, -), boost $(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo none)"
+echo "setup-ubuntu.sh: governor $(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | paste -sd, -), boost $(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo none), intel_pstate no_turbo $(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo none)"
 
 # 4. No swap: a page-out is a stall of milliseconds, and the host has the memory.
 swapoff -a || true

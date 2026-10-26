@@ -10,7 +10,9 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 
 - A machine that will do nothing else. The gate is a 5 percent rule on p99.99, and one
   other process on the measured cores moves p99.99 by more than that. An 8-core desktop
-  part is enough; the first host is an AMD Ryzen 7 2700X with 60 GiB.
+  part is enough; the first host, `bench`, is an AMD Ryzen 7 2700X with 60 GiB, and
+  the second, `kip`, a Minisforum MS-01 with an Intel Core i9-13900H and 64 GB, whose
+  six P-cores are the part that counts.
 - Ubuntu Server, 24.04 LTS or later, installed with one administrative user and SSH.
   The scripts use systemd, GRUB and apt and have run on 26.04.1.
 - Administrator rights on the GitHub organization, to register a runner and put it in
@@ -25,6 +27,14 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    else. On the Ryzen 7 2700X, CPUs 0 to 7 are one complex and 8 to 15 the other, with
    each core's two SMT threads numbered 2n and 2n+1; the isolated set is `8-15` and
    the housekeeping set `0-7`, which are the scripts' defaults.
+
+   On a hybrid Intel part, `/sys/devices/cpu_core/cpus` names the P-cores and
+   `/sys/devices/cpu_atom/cpus` the E-cores. Isolate three P-cores with their SMT
+   siblings and leave the other P-cores and every E-core to everything else; an E-core
+   never carries a measured thread. On the i9-13900H the P-cores are CPUs 0 to 11 in
+   sibling pairs 2n and 2n+1, the E-cores 12 to 19, with one L3 for all; the isolated
+   set is `6-11`, the housekeeping set `0-5,12-19`, and `nosmt` leaves 6, 8 and 10
+   online for `--pin 6,8,10`.
 
 2. Register the runner under a user of its own. A job on this host runs whatever a
    branch or a dependency bump compiles, build scripts included, as the runner's user,
@@ -41,7 +51,10 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    GitHub prints as the `runner` user (`sudo -u runner -H bash`), which download the
    runner into `/home/runner/actions-runner` and run `./config.sh` with a one-hour
    registration token. Give the runner the custom label `bench-linux`, which is the
-   label the bench job names. Then install it as a service so it starts at boot:
+   label the bench job names. A second host gets a label of its own, `kip-linux` for
+   the host `kip`, and never `bench-linux`: the gate job selects that label, and its
+   baseline belongs to the host that recorded it. Then install it as a service so it
+   starts at boot:
 
    ```sh
    # ignore: run on the bench host, not in this repository
@@ -69,7 +82,12 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    huge pages off it; a boot-time service that sets the performance governor and turns
    boost off; a drop-in that keeps the runner on the housekeeping CPUs; swap off; and
    unattended upgrades off. Every file it writes names it, and its header says how to
-   undo each one. The kernel command line applies at the reboot.
+   undo each one. The kernel command line applies at the reboot. On Intel the deep
+   sleep states go through `intel_idle.max_cstate=1`, because the idle driver there
+   does not read `processor.max_cstate`, and turbo through intel_pstate's `no_turbo`,
+   because there is no `cpufreq/boost` file; the script sets both on every host, and
+   both are inert on AMD, so running it again on `bench` changes nothing `bench`
+   measures and its baseline stands.
 
 4. Check the host. After the reboot:
 
@@ -80,9 +98,11 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 
    The three CPUs are the ones the bench job pins the publisher, the subscriber and the
    conductor to: one per core, inside the isolated set, with the SMT siblings offline.
-   The script prints the host's state and ends with `check.sh: ok`. The bench job runs
-   the same check first, so a host that lost its tuning fails the job before it produces
-   a number.
+   The script prints the host's state, including the turbo switch and the idle states
+   the pinned CPUs may enter, and ends with `check.sh: ok`; it fails when turbo is on
+   or an idle state deeper than C1 is enabled, the two settings a host loses when the
+   service or the kernel line did not apply. The bench job runs the same check first,
+   so a host that lost its tuning fails the job before it produces a number.
 
 5. Give the runner a toolchain. The bench job installs a stable toolchain and `just` on
    every run through the same actions as the other jobs, and installs `rustup` when the
@@ -112,6 +132,71 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 - A push to `master` runs `bench (linux)` on it, and the run's log opens with the
   state `check.sh` printed, then the harness's line `pinned to CPUs 8,10,12`.
 
+## A second host: the direct link and the clock
+
+The UDP rows need a sender and a receiver on two tuned hosts, and a one-way number
+across hosts is only as good as the clock offset between them. The second host is set
+up by the steps above with its own sets and its own runner label; then the two hosts
+are joined.
+
+1. One straight patch cable from a wired port with hardware timestamps on each host,
+   port to port, with nothing between them. `ethtool -T <port>` lists
+   `hardware-transmit` and `hardware-receive` on a port that qualifies; gigabit ports
+   swap the pairs themselves, so no crossover cable is needed. Each host keeps its other
+   link for SSH, CI and packages. On `bench` the port is `enp5s0` (Intel I211) and on
+   `kip` `enp87s0` (Intel I226-V).
+
+2. Static addresses on the link, no gateway, as a netplan drop-in on each host, applied
+   to that port alone so the other link is not touched:
+
+   ```sh
+   # ignore: run on each host with its own port and address (bench: enp5s0 10.0.0.1/30; kip: enp87s0 10.0.0.2/30)
+   sudo tee /etc/netplan/90-cavalry-link.yaml >/dev/null <<'YAML'
+   network:
+     version: 2
+     ethernets:
+       enp87s0:
+         dhcp4: false
+         dhcp6: false
+         accept-ra: false
+         addresses: [10.0.0.2/30]
+         optional: true
+   YAML
+   sudo chmod 0600 /etc/netplan/90-cavalry-link.yaml
+   sudo netplan generate && sudo networkctl reload && sudo networkctl reconfigure enp87s0
+   ```
+
+   `ping` from each end confirms the link, and `/etc/hosts` on both hosts names the
+   ends `bench-link` and `kip-link`.
+
+3. The clock. `bench` serves it and `kip` follows it over the link, both with hardware
+   timestamps on the port, so the offset between the two hosts is bounded by the link
+   and not by the internet:
+
+   ```sh
+   # ignore: run on bench, the host that serves the clock
+   printf 'allow 10.0.0.2\nhwtimestamp enp5s0\n' | sudo tee /etc/chrony/conf.d/90-cavalry-link.conf
+   sudo systemctl restart chrony
+   ```
+
+   ```sh
+   # ignore: run on kip, the host that follows it
+   printf 'server 10.0.0.1 iburst minpoll 0 maxpoll 2 prefer\nhwtimestamp enp87s0\n' | sudo tee /etc/chrony/conf.d/90-cavalry-link.conf
+   sudo systemctl restart chrony
+   ```
+
+   On `kip`, `chronyc sources` marks `bench` with `^*` once selected, `chronyc
+   sourcestats` gives the offset's standard deviation against it, and `chronyc tracking`
+   the offset and the root distance; `chronyc clients` on `bench` lists `kip`. It
+   worked when the standard deviation against `bench` is under 1 µs and the last offset
+   is within a few microseconds: over this cable with hardware timestamps `kip` reads
+   186 ns and a last offset of 1 ns. An offset of milliseconds means the host still
+   follows the internet pools, which `trust` on the `server` line fixes; the root
+   distance of tens of milliseconds is `bench`'s own distance to UTC and does not enter
+   a number between the two hosts. The link's record on the host's card holds those
+   numbers with `ping -c 100` in each direction while both hosts are idle, the MTU, and
+   `ethtool -T` on both ports.
+
 ## Access to the host
 
 The administrative user reaches the host by SSH key only, with `PasswordAuthentication
@@ -135,6 +220,12 @@ the host.
   and reboot, and look for `90-cavalry-bench.cfg` under `/etc/default/grub.d/`.
 - `check.sh` reports `governor is schedutil`: `cavalry-bench-host.service` did not
   run; `systemctl status cavalry-bench-host.service` on the host says why.
+- `check.sh` reports `turbo is on`: the same service did not write intel_pstate's
+  `no_turbo` or cpufreq's `boost`; `systemctl status cavalry-bench-host.service` says
+  why, and `cat /sys/devices/system/cpu/intel_pstate/no_turbo` reads 1 once it has.
+- `check.sh` reports `CPU N can enter an idle state with a N µs exit latency`: the
+  kernel line lacks `intel_idle.max_cstate=1` or `processor.max_cstate=1`, or did not
+  apply; `cat /proc/cmdline` on the host, then `sudo update-grub` and reboot.
 - The harness reports `could not bind the thread to CPU N`: the CPU is offline or
   outside the runner's allowed set. `cat /sys/devices/system/cpu/online` on the host,
   and remember that `nosmt` takes every odd CPU offline on this part.
