@@ -502,4 +502,6 @@ user-visible change, added in the same commit as the change. The format follows
   (card 136). A driver directory that cannot hold a log now fails at creation with an
   error that names `--dir` and the `driver-directory-backing` doctor check, instead of a
   bus error in a publisher later; and a log buffer's memory is allocated when the
-  publication or subscription is added, not as the stream reaches it.
+  publication or subscription is added, not as the stream reaches it, so a host holds as
+  many live publications as its driver directory holds whole logs, 192 MiB each for the
+  spec's three 64 MiB terms, and the next `add_publication` is refused by name.
