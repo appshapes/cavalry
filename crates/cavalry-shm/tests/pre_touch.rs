@@ -3,7 +3,8 @@
 //! buffer is resident in every mapping of it, writable or read-only, so the data plane
 //! never takes a page fault. Linux reports residency per mapping in `/proc/self/smaps`;
 //! on other systems the touch loop runs but nothing readable says what it did, and the
-//! Linux gate is the proof. Miri has no file-backed mapping, so `just miri` skips this.
+//! Linux gate is the proof. Miri has no file-backed mapping and no file system, so each
+//! test is ignored under `just miri`, as the other file-backed tests are.
 #![cfg(target_os = "linux")]
 
 use std::fs;
@@ -125,6 +126,7 @@ fn assert_resident(path: &Path, expected_mappings: usize) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_log_buffer_is_resident_in_the_creator_a_publisher_and_a_subscriber() {
     let dir = Dir::new("log");
     let fields = HeaderFields::new(LogType::Exclusive, 7, 0, 65_536, 1408, 32_768, 1, 1001)
@@ -137,6 +139,7 @@ fn a_log_buffer_is_resident_in_the_creator_a_publisher_and_a_subscriber() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_counters_file_is_resident_in_the_driver_a_writer_and_a_reader() {
     let dir = Dir::new("counters");
     let file = CountersFile::create(dir.path(), 64).expect("create");
@@ -147,6 +150,7 @@ fn the_counters_file_is_resident_in_the_driver_a_writer_and_a_reader() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_command_ring_is_resident_in_the_driver_a_client_and_doctor() {
     let dir = Dir::new("ring");
     let ring = CommandRing::create(dir.path(), 65_536).expect("create");
@@ -157,6 +161,7 @@ fn the_command_ring_is_resident_in_the_driver_a_client_and_doctor() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_broadcast_buffer_is_resident_in_the_driver_and_a_client() {
     let dir = Dir::new("broadcast");
     let buffer = BroadcastBuffer::create(dir.path(), 65_536).expect("create");
