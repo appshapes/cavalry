@@ -76,6 +76,11 @@ feature that followed this page, commit by commit.
      words `just bench` is not built yet. Merges only, never a rebase.
    - The agent: open an issue with the card's title and body and label it `claude`;
      [Ask the agent to make a change](ask-the-agent.md) says what happens next.
+   - A Claude Code session on a branch: `/pr <card>` runs the four gates one command
+     at a time, commits, merges `master` in, pushes and opens the pull request with the
+     review record as its body and the `auto-merge` label, then follows the review
+     loop from the author's side; `/pr watch <number>` follows one that is open. The
+     pull request's title and body become the commit on `master`.
    - When the feature's last commit is on `master`, comment the commit hashes on the
      card and archive it, and run `just tidy`: it retires every branch whose pull
      request merged, locally and on origin, with its worktree; `just tidy <branch>`

@@ -87,3 +87,9 @@ branch locally; GitHub has already deleted it on origin.
   `git pull --no-edit origin master`, keep both sides with `master`'s lines first in the
   files everyone appends to (listed in `CLAUDE.md`, "Working rules for agents"), run the
   gates and push; the next review starts on the push.
+- **The fixer answered an old review.** Fix runs queue one at a time per pull request,
+  and GitHub keeps one pending run per queue: a second changes-requested review while a
+  fix run is working queues its run, and a third cancels the queued one. A push of your
+  own while a fix run is working is what produces those extra reviews, so push nothing
+  while a `claude` run is in progress or queued on the pull request; wait for it to end
+  and for the review of its push, which it asks for itself. One writer per cycle.

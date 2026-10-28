@@ -74,8 +74,10 @@ they confirm the files are safe.
 
 ## 4. Run the gates
 
-Run `just lint`, `just test`, `just docs`, then `just lint-docs`. All four must pass
-before the commit. `just lint-docs` on a dirty tree checks the change about to be
+Run `just lint`, `just test`, `just docs`, then `just lint-docs`, each as its own
+command, and read its exit code before the next; never chain a gate through a pipe
+(`just lint | tail -1 && ...` reports `tail`'s exit code, and the failed gate goes
+through). All four must pass before the commit. `just lint-docs` on a dirty tree checks the change about to be
 committed; on a clean tree it checks the last commit.
 
 - A recipe that prints `not built yet` is a gate that does not exist yet, not a pass.
