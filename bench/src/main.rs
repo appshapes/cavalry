@@ -395,53 +395,60 @@ fn span_ns(from: u64, to: u64) -> u64 {
     clock().delta_as_nanos(from, to)
 }
 
+/// How many pairs of consecutive readings `clock_step` takes.
+const STEP_PAIRS: usize = 1_000_000;
+/// The largest advance `clock_step` counts; a larger one is an interrupt or a migration.
+const STEP_ADVANCES: usize = 4096;
+
 /// The clock's step: the smallest change the counter reports, in nanoseconds rounded to
-/// the nearest and in the counter's own ticks. A million pairs of consecutive readings
-/// are taken and their advances counted. An advance seen in fewer than one pair in a
-/// thousand is an interrupt or a migration and is ignored; an advance below half the most
-/// frequent one is the counter's own residual, not a step, and is ignored too: the bench
-/// host's counter moves by 37 ticks, 10 ns, at a time and reads 37 or 74 between two
-/// readings, with a one-tick residual in 2 percent of them, and a divisor over everything
-/// read 1 there. The step is the greatest common divisor of what remains: 37 ticks on the
-/// bench host; 2 ticks, a third of a nanosecond each, on kip, whose readings are 26 to 54
-/// ticks apart in even numbers, so its percentiles resolve to the nanosecond; and on
-/// Apple silicon one tick of the machine's own counter, which `quanta` reads on every
-/// aarch64 build (ADR 0028): 42 ns of the 24 MHz counter on the macOS CI runner, 1 ns on
-/// the laptop this was first run on; neither has a baseline. `bench-compare` fails a gated row only
-/// beyond one step as well as beyond 5 percent (ADR 0029). Measured once, on the
-/// publisher's CPU once it is pinned, before the first row, with its counts on the
-/// stack, since a heap allocation here moved the raw rows' tail by 60 ns on the bench
-/// host; the first line prints both numbers, so the log shows which clock the harness
-/// is on.
+/// the nearest and in the counter's own ticks. Measured once, on the publisher's CPU
+/// once it is pinned, before the first row: a million pairs of consecutive readings are
+/// taken and their advances counted, with the counts on the stack, since a heap
+/// allocation here moved the raw rows' tail by 60 ns on the bench host, and
+/// `step_ticks` reads the step off the counts. `bench-compare` fails a gated row only
+/// beyond one step as well as beyond 5 percent (ADR 0029), and the first line prints
+/// both numbers, so the log shows which clock the harness is on.
 fn clock_step() -> (u64, u64) {
-    const PAIRS: usize = 1_000_000;
-    const LARGEST: usize = 4096;
-    // How often each advance below LARGEST ticks occurred; the rest are outliers.
-    let mut counts = [0u32; LARGEST];
-    for _ in 0..PAIRS {
+    // How often each advance below STEP_ADVANCES ticks occurred; the rest are outliers.
+    let mut counts = [0u32; STEP_ADVANCES];
+    for _ in 0..STEP_PAIRS {
         let a = tick();
         let b = tick();
         let advance = b.wrapping_sub(a) as usize;
-        if advance != 0 && advance < LARGEST {
+        if advance != 0 && advance < STEP_ADVANCES {
             counts[advance] += 1;
         }
     }
-    fn gcd(a: u64, b: u64) -> u64 {
-        if b == 0 { a } else { gcd(b, a % b) }
-    }
-    // An advance seen in at least one pair in a thousand is the counter's own; anything
-    // rarer is an interrupt or a migration. Below half the most frequent advance it is
-    // the counter's residual, not a step.
-    let frequent = (PAIRS / 1000) as u32;
-    let mode = (1..LARGEST).max_by_key(|&a| counts[a]).unwrap_or(1);
-    let ticks = (mode / 2..LARGEST)
-        .filter(|&a| a > 0 && counts[a] >= frequent)
-        .fold(0u64, |acc, a| gcd(acc, a as u64))
-        .max(1);
+    let ticks = step_ticks(&counts, STEP_PAIRS);
     // To the nearest nanosecond, not truncated: 37 ticks of a counter calibrated at
     // 3.7001 GHz are 9.9997 ns, and a floor of 9 would still fail a move of 10.
     let ns = (span_ns(0, ticks * 1000) + 500) / 1000;
     (ns.max(1), ticks)
+}
+
+/// The step in ticks that `counts` shows, where `counts[a]` is how many of `pairs` pairs
+/// of readings advanced by `a` ticks. An advance seen in fewer than one pair in a
+/// thousand is an interrupt or a migration and is ignored; an advance below half the
+/// most frequent one is the counter's own residual, not a step, and is ignored too: the
+/// bench host's counter moves by 37 ticks, 10 ns, at a time and reads 37 or 74 between
+/// two readings, with a one-tick residual in 2 percent of them, and a divisor over
+/// everything read 1 there. The step is the greatest common divisor of what remains, at
+/// least 1: 37 ticks on the bench host; 2 ticks, a third of a nanosecond each, on kip,
+/// whose readings are 26 to 34 ticks apart in even numbers, so its percentiles resolve
+/// to the nanosecond; and on Apple silicon one tick of the machine's own counter, which
+/// `quanta` reads on every aarch64 build (ADR 0028): 42 ns of the 24 MHz counter on the
+/// macOS CI runner, 1 ns on the laptop this was first run on; neither has a baseline.
+/// Pure, so the tests below hold the two bench hosts' histograms.
+fn step_ticks(counts: &[u32; STEP_ADVANCES], pairs: usize) -> u64 {
+    fn gcd(a: u64, b: u64) -> u64 {
+        if b == 0 { a } else { gcd(b, a % b) }
+    }
+    let frequent = ((pairs / 1000) as u32).max(1);
+    let mode = (1..STEP_ADVANCES).max_by_key(|&a| counts[a]).unwrap_or(1);
+    (mode / 2..STEP_ADVANCES)
+        .filter(|&a| a > 0 && counts[a] >= frequent)
+        .fold(0u64, |acc, a| gcd(acc, a as u64))
+        .max(1)
 }
 
 /// Two readings of the harness's clock back to back: its own overhead, present in every
@@ -1337,4 +1344,78 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A histogram from `(advance, pairs)` entries, every other advance unseen.
+    fn counts(advances: &[(usize, u32)]) -> [u32; STEP_ADVANCES] {
+        let mut counts = [0u32; STEP_ADVANCES];
+        for &(advance, n) in advances {
+            counts[advance] = n;
+        }
+        counts
+    }
+
+    /// The bench host's counter on its publisher CPU at 5712454 (ADR 0029, Evidence):
+    /// 37 ticks in 965,497 pairs of a million, 74 in 11,203, and the one-tick residual in
+    /// 23,282, which a divisor over everything turned into a step of 1. Two more runs of
+    /// the same loop on 2026-10-28 counted 37: 968,470, 1: 24,772, 74: 6,758, and
+    /// 37: 972,972, 1: 27,027.
+    #[test]
+    fn the_bench_hosts_counter_steps_by_37_ticks_despite_its_residual() {
+        let bench = counts(&[(37, 965_497), (1, 23_282), (74, 11_203)]);
+        assert_eq!(step_ticks(&bench, STEP_PAIRS), 37);
+    }
+
+    /// kip's counter on its publisher CPU on 2026-10-28, from `clock_step`'s loop printing
+    /// its counts: every advance even, 26 to 34 ticks, so the step is 2 ticks, a third of
+    /// a nanosecond, and the harness prints `1 ns (2 ticks)`.
+    #[test]
+    fn kips_counter_steps_by_2_ticks() {
+        let kip = counts(&[
+            (26, 6_383),
+            (28, 216_425),
+            (30, 571_482),
+            (32, 173_417),
+            (34, 32_290),
+        ]);
+        assert_eq!(step_ticks(&kip, STEP_PAIRS), 2);
+    }
+
+    /// An advance in fewer than one pair in a thousand is an interrupt or a migration,
+    /// whatever it would divide the step to; at one in a thousand it counts.
+    #[test]
+    fn a_rare_advance_is_left_out() {
+        assert_eq!(
+            step_ticks(&counts(&[(37, 998_000), (1_001, 999)]), STEP_PAIRS),
+            37
+        );
+        assert_eq!(
+            step_ticks(&counts(&[(37, 998_000), (1_001, 1_000)]), STEP_PAIRS),
+            1
+        );
+    }
+
+    /// A residual below half the most frequent advance is left out however often it
+    /// occurs; at half it is a step.
+    #[test]
+    fn a_residual_below_half_the_mode_is_left_out() {
+        assert_eq!(
+            step_ticks(&counts(&[(40, 500_000), (19, 400_000)]), STEP_PAIRS),
+            40
+        );
+        assert_eq!(
+            step_ticks(&counts(&[(40, 500_000), (20, 400_000)]), STEP_PAIRS),
+            20
+        );
+    }
+
+    /// No frequent advance at all reads one tick: the floor is never zero.
+    #[test]
+    fn an_empty_histogram_reads_one_tick() {
+        assert_eq!(step_ticks(&counts(&[]), STEP_PAIRS), 1);
+    }
 }

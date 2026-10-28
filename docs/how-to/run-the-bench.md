@@ -90,7 +90,10 @@ the gate fails only on the dedicated bench host is
    counter's own ticks (`clock step 10 ns (37 ticks)` on the bench host, whose counter
    moves by 37 ticks every 10 ns) and writes it into the result as `clock_step_ns`; a
    row over 5 percent but within one step is printed `within a step` and passes
-   ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). A
+   ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). The
+   baseline's entry carries the step its recording measured, and the floor is the
+   smaller of the two steps, so a change to the harness that over-read its step cannot
+   widen the gate by itself; when they differ, the first line says which it took. A
    result from before the field is printed `clock step unknown` and judged by the 5
    percent rule alone. On the bench host that is the rule on every row.
    Until ADR 0022 one row escaped it: `claim_commit_32_exclusive` landed anywhere
@@ -115,10 +118,10 @@ the gate fails only on the dedicated bench host is
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
    `python3 scripts/bench-compare.py --update`, which writes the newest result's
-   percentiles into `bench/baseline.json` for that profile. Commit it with the
-   histograms in the message. The bench host's baseline is set from its own CI run:
-   download the `bench-results-bench-linux` artifact of a green run and pass each of
-   its two files, the `bench-linux` and the `bench-linux-unchecked` result, to
+   percentiles and its clock step into `bench/baseline.json` for that profile. Commit
+   it with the histograms in the message. The bench host's baseline is set from its own
+   CI run: download the `bench-results-bench-linux` artifact of a green run and pass
+   each of its two files, the `bench-linux` and the `bench-linux-unchecked` result, to
    `--update`. A new row joins a baseline that already exists by adding its entry from
    that run's result and leaving the other rows as they were recorded, in a commit that
    names the row and the run; `--update` rewrites the whole profile, which is for a host
@@ -181,9 +184,15 @@ the gate fails only on the dedicated bench host is
   it ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)).
   Two steps fail.
 - `clock step unknown` in `bench-compare`'s first line: the result was written by a
-  harness from before the step was measured, so the 5 percent rule alone applies and
+  harness from before the step was measured, so the 5 percent rule alone applies,
+  whatever step the baseline carries; the failure line says so in place of a step, and
   `--update` writes no step from it. Run `just bench` again; every result the harness
   writes now carries the step.
+- `the smaller of the result's 20 and the baseline's 10` in that line: the harness read
+  a different step from the one the baseline was recorded with, and the smaller one is
+  the floor, so a harness that over-reads its step gains nothing. If the host's clock
+  changed, re-record the baseline (step 4 above); if the harness's measurement changed,
+  that change is the one to look at.
 - `REGRESSION` on a p99.99: measure again on an idle machine before you believe either
   number; if it holds, the change under a data-plane crate is slower at the tail and
   does not merge until it is not, or the baseline is raised in a commit whose message

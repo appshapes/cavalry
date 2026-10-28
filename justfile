@@ -14,9 +14,12 @@ default:
 build:
     cargo build --workspace --release
 
-# Unit and integration tests, excluding bench and conformance, after the scripts' own tests.
+# Unit and integration tests, excluding bench and conformance, after the scripts' own
+# tests; then the harness's own unit tests, which run no benchmark: the clock-step reading
+# over the bench hosts' advance histograms (ADR 0029).
 test *ARGS: test-scripts
     cargo test --workspace --exclude cavalry-bench --exclude cavalry-conformance {{ARGS}}
+    cargo test -p cavalry-bench {{ARGS}}
 
 # The tests of the Python scripts that have them (ADR 0026): the release-notes email's
 # layout and its deterministic steps, against a made-up checkout and a fake GitHub API on

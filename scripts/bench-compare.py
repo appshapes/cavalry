@@ -6,9 +6,11 @@ its profile in bench/baseline.json, and fails when any benchmark's p99.99 is mor
 5 percent above the baseline's and more than one step of the harness's clock above it:
 the result carries the step, `clock_step_ns`, which the harness measures once at start
 (10 ns on the bench host, whose counter advances in tens), and a row whose percentiles
-sit at 150 to 170 ns moves 6 percent in one step on an unchanged commit (ADR 0029). A
-result without the field is judged by the 5 percent rule alone. Max is printed beside
-the p99.99 but does not fail the gate: one
+sit at 150 to 170 ns moves 6 percent in one step on an unchanged commit (ADR 0029). The
+baseline's entry carries the step its recording measured, once `--update` has written
+one, and the floor is the smaller of the two: a change to the harness that over-read its
+step would otherwise widen the gate by itself. A result without the field is judged by
+the 5 percent rule alone. Max is printed beside the p99.99 but does not fail the gate: one
 descheduling on a shared runner moves max, and the 5 percent rule on p99.99 is what
 CLAUDE.md's gate table promises. A result made with `--repeat N` carries each
 benchmark's median run by p99.99 as its p99.99 and lists every run's; the list is
@@ -75,8 +77,8 @@ def fmt(ns) -> str:
 
 def compare(result: dict, baseline: dict) -> int:
     profile = result["profile"]
-    step = clock_step(result)
-    shown = f"clock step {step} ns" if step else "clock step unknown, the 5 percent rule alone"
+    base = baseline.get("profiles", {}).get(profile)
+    step, shown = floor_step(result, base)
     print(f"bench-compare: {profile}, {result.get('messages', '?')} messages, git {result.get('git', '?')}, {shown}")
     floor = step or 0
     failures = 0
@@ -84,7 +86,6 @@ def compare(result: dict, baseline: dict) -> int:
     if allocations is None or allocations > 0:
         print(f"bench-compare: allocations per message is {allocations}, the gate requires 0 (CLAUDE.md, gate 2)")
         failures += 1
-    base = baseline.get("profiles", {}).get(profile)
     rows = []
     for name, now in sorted(result["benchmarks"].items()):
         then = (base or {}).get("benchmarks", {}).get(name)
@@ -114,9 +115,12 @@ def compare(result: dict, baseline: dict) -> int:
         print(f"bench-compare: no baseline for profile {profile!r} in {BASELINE.relative_to(ROOT)}; "
               "nothing compared. Set one from this machine's run with --update (ADR 0015).")
     if failures:
-        print(f"bench-compare: {failures} finding(s); a message row's p99.99 more than {TOLERANCE:.0%} and more "
-              f"than one clock step ({floor} ns) above the baseline's slowest run fails (CLAUDE.md, gate 2; "
-              "ADR 0029). Measure again on an idle machine before you believe either number.")
+        rule = (f"more than {TOLERANCE:.0%} and more than one clock step ({step} ns) above the baseline's "
+                "slowest run" if step else
+                f"more than {TOLERANCE:.0%} above the baseline's slowest run, clock step unknown, so the rule "
+                "has no floor")
+        print(f"bench-compare: {failures} finding(s); a message row's p99.99 fails the gate when it is {rule} "
+              "(CLAUDE.md, gate 2; ADR 0029). Measure again on an idle machine before you believe either number.")
         return 1
     print("bench-compare: ok")
     return 0
@@ -127,6 +131,24 @@ def clock_step(result: dict):
     or None for a result from before the field, which is judged by the tolerance alone."""
     step = result.get(STEP_FIELD)
     return int(step) if isinstance(step, (int, float)) and step >= 1 else None
+
+
+def floor_step(result: dict, base) -> tuple:
+    """The step the floor is one of, and how the first line says it. The result under
+    judgement carries the step the harness measured; the baseline's entry carries the one
+    its recording measured, once `--update` has written it; the floor is the smaller, so
+    that a change to the harness that over-read its step cannot widen the gate by itself
+    (ADR 0029). None for a result from before the field, which is judged by the tolerance
+    alone, whatever the baseline carries."""
+    now = clock_step(result)
+    then = clock_step(base or {})
+    if now is None:
+        return None, "clock step unknown, the 5 percent rule alone"
+    if then is None:
+        return now, f"clock step {now} ns, none in the baseline"
+    if now == then:
+        return now, f"clock step {now} ns"
+    return min(now, then), f"clock step {min(now, then)} ns, the smaller of the result's {now} and the baseline's {then}"
 
 
 def update(result: dict, baseline: dict) -> int:

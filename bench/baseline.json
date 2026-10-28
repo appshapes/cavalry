@@ -1,5 +1,5 @@
 {
-  "note": "p99.99 baselines per profile, read by scripts/bench-compare.py; a profile's entry is set from that runner's own run with --update (ADR 0015, docs/how-to/run-the-bench.md). bench-linux is the dedicated bench host, the only runner the gate fails on (ADR 0016, docs/how-to/set-up-a-bench-host.md); bench-linux-unchecked is the same host with the data-plane checks built out (just bench-unchecked). The shared runners report and are not compared.",
+  "note": "p99.99 baselines per profile, read by scripts/bench-compare.py; a profile's entry is set from that runner's own run with --update (ADR 0015, docs/how-to/run-the-bench.md). bench-linux is the dedicated bench host, the only runner the gate fails on (ADR 0016, docs/how-to/set-up-a-bench-host.md); bench-linux-unchecked is the same host with the data-plane checks built out (just bench-unchecked). The shared runners report and are not compared. Each entry's clock_step_ns is the step of the host's clock, the floor under the 5 percent rule; the comparison takes the smaller of it and the result's step (ADR 0029).",
   "profiles": {
     "bench-linux": {
       "benchmarks": {
@@ -468,6 +468,7 @@
           "p99_ns": 20
         }
       },
+      "clock_step_ns": 10,
       "date": null,
       "git": "7f62673f60406757c4fd9d71808ba7a3aa1b954d",
       "messages": 5000000,
@@ -940,6 +941,7 @@
           "p99_ns": 10
         }
       },
+      "clock_step_ns": 10,
       "date": null,
       "git": "7f62673f60406757c4fd9d71808ba7a3aa1b954d",
       "messages": 5000000,
@@ -1412,6 +1414,7 @@
           "p99_ns": 20
         }
       },
+      "clock_step_ns": 1,
       "date": null,
       "git": "7f62673",
       "messages": 5000000,
@@ -1884,6 +1887,7 @@
           "p99_ns": 20
         }
       },
+      "clock_step_ns": 1,
       "date": null,
       "git": "7f62673",
       "messages": 5000000,
