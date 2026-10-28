@@ -35,7 +35,7 @@ pub const CONDUCTOR_IDLE_STRATEGY: KeyDef = KeyDef {
     anchor: "docs/reference/config.md#conductoridlestrategy",
 };
 
-/// `log.dir`, path: The log directory: where the driver's recorder writes the durable log, the catalog, the segment files and the time indexes, on disk and never under the driver directory, held under an advisory lock by one driver at a time (spec/durable-log.md); run, doctor and record read it.
+/// `log.dir`, path: The log directory: where the driver's recorder writes the durable log, the catalog, the segment files and the time indexes, on disk and never under the driver directory, held under an advisory lock by one driver at a time (spec/durable-log.md); run, doctor and record read it. Its path is at most 337 bytes, so that a segment roll opens its file on the standard library's stack buffer instead of allocating on the recorder thread; doctor warns on a longer one.
 pub const LOG_DIR: KeyDef = KeyDef {
     name: "log.dir",
     env: "CAVALRY_LOG_DIR",
@@ -44,7 +44,7 @@ pub const LOG_DIR: KeyDef = KeyDef {
     values: &[],
     default: "cavalry/log under $XDG_DATA_HOME when that variable is set, else ~/.local/share/cavalry/log, and /var/lib/cavalry/log when the driver runs as root; with neither a home nor root the driver refuses to start and names this key",
     term: "log directory",
-    doc: "The log directory: where the driver's recorder writes the durable log, the catalog, the segment files and the time indexes, on disk and never under the driver directory, held under an advisory lock by one driver at a time (spec/durable-log.md); run, doctor and record read it.",
+    doc: "The log directory: where the driver's recorder writes the durable log, the catalog, the segment files and the time indexes, on disk and never under the driver directory, held under an advisory lock by one driver at a time (spec/durable-log.md); run, doctor and record read it. Its path is at most 337 bytes, so that a segment roll opens its file on the standard library's stack buffer instead of allocating on the recorder thread; doctor warns on a longer one.",
     why_not_default: "The home filesystem can be small, a network mount where a sync and a lock mean little, or absent for a service user; a container's is ephemeral; the operator usually wants the log on a disk chosen for room and durability, which the driver cannot pick.",
     doctor: "log-directory-backing",
     anchor: "docs/reference/config.md#logdir",
