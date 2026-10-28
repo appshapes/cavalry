@@ -14,9 +14,11 @@ The durable log: recording and replay. Data plane.
   each block of committed frames with one positional write, appends an index entry at
   most once per millisecond, rolls segments at their length, and syncs once per second
   behind two positions, what is written and what is synced; `LogDir::stop` writes the
-  stop (ADR 0025). A roll allocates nothing while the log directory's path is under 384
-  bytes, the standard library's stack buffer for `open`: the next segment's name is
-  formatted on the stack into a path the writer keeps. A roll that fails on a full disk
+  stop (ADR 0025). A roll allocates nothing while the log directory's path is at most
+  337 bytes (`recorder::LOG_DIR_PATH_LIMIT`): the standard library opens a path on its
+  stack only under 384 bytes, the longest segment name is 45, and the next segment's
+  name is formatted on the stack into a path the writer keeps; `cavalry doctor --log-dir`
+  warns on a longer path. A roll that fails on a full disk
   is an `io` error and is retried at the next write, never a stuck writer. On any error
   from `write`, the block was taken exactly when `position()` moved. The delete of a
   stopped recording, state 3, arrives with card 95's purge, with its counter and its

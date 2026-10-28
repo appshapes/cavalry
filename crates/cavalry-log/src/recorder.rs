@@ -27,6 +27,19 @@ pub const SYNC_INTERVAL: i64 = 1_000_000_000;
 /// The longest segment file name: two i64s in decimal with a sign, a dash and `.rec`,
 /// with room to spare, so a roll formats the name on the stack.
 const SEGMENT_NAME_CAPACITY: usize = 64;
+/// The standard library's stack buffer for a path handed to the operating system: a
+/// path of this many bytes or more is copied into a heap-allocated C string first
+/// (`std::sys::helpers::small_c_string::MAX_STACK_ALLOCATION`).
+const STACK_PATH_BOUND: usize = 384;
+/// The longest segment file name: two signed 64-bit numbers in decimal and the suffix,
+/// `-9223372036854775808--9223372036854775808.rec`.
+pub const LONGEST_SEGMENT_NAME: usize = 45;
+/// The longest log directory path under which a segment roll opens its file without
+/// allocating: the directory, a separator and the longest segment name stay under the
+/// 384 bytes the standard library opens from its stack. `cavalry doctor --log-dir`
+/// warns on a longer path (invariant 2: the recorder is a data-plane thread, and the
+/// bench counts every thread's allocations).
+pub const LOG_DIR_PATH_LIMIT: usize = STACK_PATH_BOUND - 1 - 1 - LONGEST_SEGMENT_NAME;
 
 /// How often the recorder appends a time index entry while the position moves: at most
 /// once per millisecond (`spec/durable-log.md`, "Time index"). Nanoseconds.
@@ -133,9 +146,10 @@ fn io<'a>(what: &'static str, path: &'a Path) -> impl FnOnce(io::Error) -> Recor
 /// It holds no data buffer: a block is written from the caller's bytes with one
 /// positional write, and nothing here allocates after [`LogDir::start`], a segment roll
 /// included, which formats the next file's name into a path the writer keeps and opens
-/// it on the standard library's stack buffer for paths under 384 bytes (invariant 2:
-/// the recorder is a data-plane thread, and the bench counts every thread's
-/// allocations; a longer log directory path makes `open` allocate a C string).
+/// it on the standard library's stack buffer, which takes a path under 384 bytes: a log
+/// directory path of at most [`LOG_DIR_PATH_LIMIT`] bytes, which `cavalry doctor`
+/// checks (invariant 2: the recorder is a data-plane thread, and the bench counts
+/// every thread's allocations; a longer path makes `open` allocate a C string).
 pub struct RecordingWriter {
     descriptor: Descriptor,
     dir: PathBuf,
@@ -478,5 +492,23 @@ impl RecordingWriter {
         std::mem::swap(&mut self.segment_path, &mut self.next_path);
         self.segment_base = base;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The limit's arithmetic: the longest name is what two i64 extremes format to, it
+    /// fits the roll's buffer, and a directory path at the limit, a separator and that
+    /// name are one byte under the standard library's stack buffer.
+    #[test]
+    fn the_log_directory_path_limit_keeps_a_roll_under_the_stack_buffer() {
+        let longest = format!("{}-{}{}", i64::MIN, i64::MIN, SEGMENT_SUFFIX);
+        assert_eq!(longest.len(), LONGEST_SEGMENT_NAME);
+        assert!(longest.len() < SEGMENT_NAME_CAPACITY);
+        let path_length = LOG_DIR_PATH_LIMIT + 1 + longest.len();
+        assert_eq!(path_length, STACK_PATH_BOUND - 1);
+        assert_eq!(path_length, 383);
     }
 }
