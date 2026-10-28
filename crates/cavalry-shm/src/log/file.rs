@@ -1056,6 +1056,14 @@ impl TermReader {
     /// stays at it, and nothing from it on is delivered. The read stops at a frame that
     /// is not committed or at the end of the term; the next poll continues, in the next
     /// term when this one is done.
+    ///
+    /// Always inlined into its caller: this is the subscriber's per-message loop, and
+    /// whether the compiler inlined it was the whole of a 60 ns move at p99.99 (and 20 ns
+    /// at p50) of the bench's `one_way` rows on the bench host, flipped by an unrelated
+    /// change to the size of the harness's subscriber closure, which the card 144
+    /// experiments found by reading the binaries' symbols. Out of line, the handler's
+    /// state lives in memory across the call instead of in registers.
+    #[inline(always)]
     pub fn poll<F>(&mut self, limit: usize, mut handler: F) -> Result<Poll, LogError>
     where
         F: FnMut(&[u8], &DataFrameHeader),
