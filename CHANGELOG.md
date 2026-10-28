@@ -537,3 +537,10 @@ user-visible change, added in the same commit as the change. The format follows
   of a 160 ns row on the bench host, and `clock step unknown` for a result from before
   the field, which the 5 percent rule alone judges. The rule has its tests,
   `scripts/bench-compare-test.py`, under `just test-scripts` (card 143).
+- The latency gate's floor is the smaller of the result's clock step and the baseline's:
+  `--update` writes the step into the baseline's entry, the two bench hosts' entries
+  carry it (10 ns on `bench`, 1 ns on `kip`), and `bench-compare` says which step it took
+  when the two differ, so a change to the harness that over-read its step cannot widen
+  the gate by itself. A result without the step is told so on the failure line too, in
+  place of a step of 0 ns. `cargo test -p cavalry-bench`, now under `just test`, holds
+  the step reading over the two hosts' advance histograms (ADR 0029, card 146).
