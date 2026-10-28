@@ -1269,9 +1269,6 @@ mod tests {
         }
     }
 
-    /// A log directory this user cannot add entries to warns before any driver has used
-    /// it, and so does a catalog this user cannot open for writing; root may write both,
-    /// so the test says nothing as root.
     /// The `log.dir` key's check on the path's length: over the limit a segment roll
     /// would allocate on the recorder thread, so doctor warns before the driver runs,
     /// whether or not the directory exists; at the limit it says nothing.
@@ -1307,13 +1304,20 @@ mod tests {
         );
         assert_eq!(found.doc, LOG_DIR_KEY.anchor);
 
+        // A test directory already at the limit leaves no room for a path at it exactly.
+        let Some(room) = LOG_DIR_PATH_LIMIT.checked_sub(dir.0.as_os_str().len() + 1) else {
+            return;
+        };
         let mut at = dir.0.clone();
-        at.push("y".repeat(LOG_DIR_PATH_LIMIT - dir.0.as_os_str().len() - 1));
+        at.push("y".repeat(room));
         assert_eq!(at.as_os_str().len(), LOG_DIR_PATH_LIMIT);
         let report = examine_with(&dir.0, Some(&at));
         assert!(over_the_limit(&report).is_none(), "{report}");
     }
 
+    /// A log directory this user cannot add entries to warns before any driver has used
+    /// it, and so does a catalog this user cannot open for writing; root may write both,
+    /// so the test says nothing as root.
     #[test]
     fn a_log_directory_or_catalog_this_user_cannot_write_warns() {
         use std::os::unix::fs::PermissionsExt;
