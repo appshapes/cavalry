@@ -209,7 +209,16 @@ the gate fails only on the dedicated bench host is
   processes on the host and compare their medians, since one process lands in one mode
   ([ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md)). A person
   decides whether to re-record the baseline from that run, as step 4 says, in a commit
-  whose message names the harness change and carries both histograms.
+  whose message names the harness change and carries both histograms. A change to the
+  harness's code can also move the raw rows through the compiler alone: 60 ns at p99.99
+  and 20 ns at p50 on the `one_way` rows, blamed on a 16 KiB heap allocation at startup,
+  was `TermReader::poll` compiled out of line in one binary and inlined into the
+  subscriber's loop in the other, flipped by the size of the closure around it (card
+  144). `poll` is `#[inline(always)]` since then. When the raw rows move with a change
+  that touched no data-plane crate, compare the two binaries' symbols before the heap or
+  the host: `nm -C target/release/cavalry-bench | grep 'TermReader>::poll'` prints the
+  symbol only when it is out of line, and the publisher's `try_claim` and `commit` are
+  out of line in every build.
 - A fault in `faults.txt` whose address lies in a Cavalry mapping, or a mapping whose
   `Rss` is below its `Size`: a mapping was not pre-touched, which is a bug in
   `cavalry-shm`, where every `create` and `open` pre-touches before it hands the

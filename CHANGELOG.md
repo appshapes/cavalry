@@ -544,3 +544,9 @@ user-visible change, added in the same commit as the change. The format follows
   the gate by itself. A result without the step is told so on the failure line too, in
   place of a step of 0 ns. `cargo test -p cavalry-bench`, now under `just test`, holds
   the step reading over the two hosts' advance histograms (ADR 0029, card 146).
+- `TermReader::poll`, the subscriber's per-message loop in `cavalry-shm`, is always
+  inlined into its caller. Whether the compiler inlined it was the whole of a 60 ns move
+  at p99.99, 20 ns at p50, of the bench's `one_way` rows on the bench host, flipped by an
+  unrelated change to the harness's code size and blamed on a 16 KiB heap allocation;
+  the rows no longer move with the harness's code, and the bench how-to says what to
+  check when they move with a change outside the data plane (card 144).
