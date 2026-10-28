@@ -550,6 +550,14 @@ user-visible change, added in the same commit as the change. The format follows
   unrelated change to the harness's code size and blamed on a 16 KiB heap allocation;
   the rows no longer move with the harness's code, and the bench how-to says what to
   check when they move with a change outside the data plane (card 144).
+- `/pr`, a Claude Code skill for a session that lands a card through a pull request: the
+  four gates one command at a time with each exit code read, CI's `lint-docs` range run
+  before the push, the review record as the pull request's body with the `auto-merge`
+  label, then the review loop from the author's side, with the wait each stage needs and
+  the one manual step each stall needs, and `just tidy` after the merge. `/commit` now
+  says to run each gate as its own command. `docs/how-to/ask-the-agent.md` gains the
+  rule that cost pull request 57 two fix runs: push nothing while a fix run is working,
+  one writer per cycle.
 - `cavalry doctor --log-dir` warns when the log directory's path is over 337 bytes, the
   most under which a segment roll opens its file on the standard library's stack buffer
   instead of allocating on the recorder thread; the bound is
