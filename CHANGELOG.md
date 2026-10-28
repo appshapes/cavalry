@@ -544,3 +544,8 @@ user-visible change, added in the same commit as the change. The format follows
   the gate by itself. A result without the step is told so on the failure line too, in
   place of a step of 0 ns. `cargo test -p cavalry-bench`, now under `just test`, holds
   the step reading over the two hosts' advance histograms (ADR 0029, card 146).
+- `cavalry doctor --log-dir` warns when the log directory's path is over 337 bytes, the
+  most under which a segment roll opens its file on the standard library's stack buffer
+  instead of allocating on the recorder thread; the bound is
+  `cavalry_log::recorder::LOG_DIR_PATH_LIMIT`, the log crate's README and the `log.dir`
+  key state it exactly, and the record how-to says what to do (card 108).

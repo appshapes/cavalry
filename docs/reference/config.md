@@ -58,6 +58,6 @@ What the conductor's thread does on a duty cycle that found no work: backoff spi
 - **Doctor check:** `log-directory-backing`
 - **Glossary:** log directory
 
-The log directory: where the driver's recorder writes the durable log, the catalog, the segment files and the time indexes, on disk and never under the driver directory, held under an advisory lock by one driver at a time (spec/durable-log.md); run, doctor and record read it.
+The log directory: where the driver's recorder writes the durable log, the catalog, the segment files and the time indexes, on disk and never under the driver directory, held under an advisory lock by one driver at a time (spec/durable-log.md); run, doctor and record read it. Its path is at most 337 bytes, so that a segment roll opens its file on the standard library's stack buffer instead of allocating on the recorder thread; doctor warns on a longer one.
 
 **Why the default cannot always be right.** The home filesystem can be small, a network mount where a sync and a lock mean little, or absent for a service user; a container's is ephemeral; the operator usually wants the log on a disk chosen for room and durability, which the driver cannot pick.

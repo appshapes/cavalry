@@ -197,7 +197,8 @@ pub fn examine(dir: &Path) -> Report {
     examine_with(dir, None)
 }
 
-/// [`examine`], and with `log_dir` the log directory's checks too: its backing, whether
+/// [`examine`], and with `log_dir` the log directory's checks too: the length of its
+/// path, its backing, whether
 /// the driver's user can write it and how much room it has (`log-directory-backing`,
 /// the `log.dir` key's check), the catalog slots recovery set to invalid, named
 /// (`recording-invalid`), and every recording's two positions from the counters file,
@@ -330,7 +331,31 @@ pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
 /// driver's user cannot write, or with less than eight segment files of room, stops the
 /// next recording. A directory that does not exist yet is a note: the driver creates it.
 fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
+    // The path's length first, directory or not: the recorder opens each segment file
+    // by its full path, and the standard library allocates a C string for a path of
+    // 384 bytes or more instead of using its stack buffer, so a roll on the recorder
+    // thread would allocate (`cavalry_log::recorder::LOG_DIR_PATH_LIMIT`).
     let mut checks = 1;
+    let length = log_dir.as_os_str().len();
+    if length > cavalry_log::recorder::LOG_DIR_PATH_LIMIT {
+        findings.push(Finding {
+            check: "log-directory-backing",
+            level: Level::Warn,
+            message: format!(
+                "the log directory's path {} is {length} bytes, over the {} under which a segment \
+                 roll opens its file without allocating on the recorder thread (the standard \
+                 library opens a path on its stack only under 384 bytes, and the longest segment \
+                 name is {}); set {}=<a path of at most {} bytes>, or --log-dir",
+                log_dir.display(),
+                cavalry_log::recorder::LOG_DIR_PATH_LIMIT,
+                cavalry_log::recorder::LONGEST_SEGMENT_NAME,
+                LOG_DIR_KEY.env,
+                cavalry_log::recorder::LOG_DIR_PATH_LIMIT
+            ),
+            doc: LOG_DIR_KEY.anchor,
+        });
+    }
+    checks += 1;
     if !log_dir.is_dir() {
         findings.push(Finding {
             check: "log-directory-backing",
@@ -1247,6 +1272,48 @@ mod tests {
     /// A log directory this user cannot add entries to warns before any driver has used
     /// it, and so does a catalog this user cannot open for writing; root may write both,
     /// so the test says nothing as root.
+    /// The `log.dir` key's check on the path's length: over the limit a segment roll
+    /// would allocate on the recorder thread, so doctor warns before the driver runs,
+    /// whether or not the directory exists; at the limit it says nothing.
+    #[test]
+    fn a_log_directory_path_over_the_limit_warns_and_one_at_it_does_not() {
+        use cavalry_log::recorder::LOG_DIR_PATH_LIMIT;
+        let dir = TestDir::new("log-dir-path");
+        let over_the_limit = |report: &Report| {
+            report
+                .findings
+                .iter()
+                .find(|f| {
+                    f.check == "log-directory-backing"
+                        && f.level == Level::Warn
+                        && f.message.contains("bytes, over the")
+                })
+                .cloned()
+        };
+        let mut long = dir.0.clone();
+        while long.as_os_str().len() <= LOG_DIR_PATH_LIMIT {
+            long.push("x".repeat(120));
+        }
+        let report = examine_with(&dir.0, Some(&long));
+        let found = over_the_limit(&report).unwrap_or_else(|| panic!("no warning: {report}"));
+        assert!(
+            found
+                .message
+                .contains(&format!("is {} bytes", long.as_os_str().len()))
+                && found.message.contains(&LOG_DIR_PATH_LIMIT.to_string())
+                && found.message.contains(LOG_DIR_KEY.env),
+            "{}",
+            found.message
+        );
+        assert_eq!(found.doc, LOG_DIR_KEY.anchor);
+
+        let mut at = dir.0.clone();
+        at.push("y".repeat(LOG_DIR_PATH_LIMIT - dir.0.as_os_str().len() - 1));
+        assert_eq!(at.as_os_str().len(), LOG_DIR_PATH_LIMIT);
+        let report = examine_with(&dir.0, Some(&at));
+        assert!(over_the_limit(&report).is_none(), "{report}");
+    }
+
     #[test]
     fn a_log_directory_or_catalog_this_user_cannot_write_warns() {
         use std::os::unix::fs::PermissionsExt;
