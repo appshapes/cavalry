@@ -3851,6 +3851,44 @@ mod replay {
         drop(appender);
     }
 
+    /// The other way to reason 2: a paced replay whose last subscriber leaves. The
+    /// clock starts when the image goes, and the replay ends where it stood, at the
+    /// window the subscriber at 0 allowed.
+    #[test]
+    fn a_replay_whose_last_subscriber_leaves_ends_with_reason_2_where_it_stood() {
+        let (mut h, mut appender) = recorded("replay-subscriber-leaves");
+        offer(&mut h, &mut appender, 0, 1600);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        let window = i64::from(h.conductor.term_length / 2);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(
+            replay_position.load_acquire(),
+            window,
+            "paced at the window"
+        );
+        let _ = events(&mut h);
+        h.conductor.remove_subscription(CLIENT, 7, 5, h.now);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(
+            h.conductor.replays.len(),
+            1,
+            "the clock starts when the image goes"
+        );
+        h.now += spec::nanos(spec::REPLAY_CONNECT_TIMEOUT);
+        wait_replay_end(&mut h, 6);
+        let got = events(&mut h);
+        assert_eq!(replay_stopped(&got, 6), Some((window, 2)));
+        assert_eq!(h.counter(REPLAY_NOT_CONNECTED), 1);
+        drop(appender);
+    }
+
     /// `stop replay` ends a paced replay at the position reached: `operation success`
     /// to the command, `replay stopped` with reason 1 to everyone; a second stop and a
     /// stop of an unknown id are `operation success` with nothing done.

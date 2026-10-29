@@ -224,8 +224,11 @@ What the driver does with each, after the checks of "What the driver rejects":
   a counters file with no free record is code 10, adding one to `driver.registry_full`;
   either leaves nothing of the replay behind. The replay publication is the driver's:
   no client holds a registration of it, `remove publication` cannot name it, and the
-  driver's duties on it are a publication's (`spec/log-buffer.md`, "The driver"). Its
-  limit is the publication window past the slowest subscriber's position, and the
+  driver's duties on it are a publication's (`spec/log-buffer.md`, "The driver"), and
+  so is every other command's view of it: `start recording` on the replay stream records
+  it as any publication, from the position the replay has reached, into a recording
+  whose positions are the recording's played, since the log carries its initial term id.
+  Its limit is the publication window past the slowest subscriber's position, and the
   replay goes no faster; with no subscriber the limit is the position reached, and the
   replay does not move. A start adds one to `replay.started`.
 - **stop replay.** A replay session id a live replay holds: the driver stops the replay
