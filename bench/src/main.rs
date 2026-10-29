@@ -37,7 +37,8 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const SCHEMA: u32 = 0;
 /// Spins of the conductor's loop between two reads of the clock, which decide when the
-/// producer position is loaded: once per millisecond, the driver's cadence (ADR 0022;
+/// producer position is loaded: once every two milliseconds, the driver's cadence (ADR
+/// 0022, ADR 0032;
 /// [`PRODUCER_POSITION_INTERVAL_NS`]). The cadence was a count of 10,000 spins, about a
 /// millisecond on the bench host, because a clock read on every spin cost the other two
 /// threads at p99.99; on kip the same count was about half a millisecond, which put the
@@ -604,7 +605,7 @@ struct LogRun {
     retries: u64,
     allocations: usize,
     /// How many times the harness's own conductor loaded the producer position during
-    /// the measured run, for the log rows: about one per millisecond of the run (ADR
+    /// the measured run, for the log rows: about one every two milliseconds of the run (ADR
     /// 0022; card 161). The client rows run the driver's conductor, which is not counted.
     producer_position_loads: Option<u64>,
 }
@@ -718,7 +719,8 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                 let mut clean_position: i64 = 0;
                 let mut limit_now = window;
                 let trip_gain = window / 8;
-                // The producer position once per millisecond by the clock, the driver's
+                // The producer position at the driver's cadence by the clock, two milliseconds
+                // (ADR 0032), the driver's
                 // cadence (ADR 0022): the publisher stores to that line on every commit,
                 // and a load on every spin kept the line moving between the two caches,
                 // which was the publisher's p50 and its p99.99 band on the bench host.
@@ -1452,7 +1454,7 @@ fn main() -> ExitCode {
         retries.get("client").copied().unwrap_or(0)
     );
     println!(
-        "  producer position loads by the harness's conductor, once per millisecond by the clock, the most of any run: {}",
+        "  producer position loads by the harness's conductor, at the driver's cadence by the clock, the most of any run: {}",
         if producer_position_loads.is_empty() {
             "no log row ran".to_string()
         } else {

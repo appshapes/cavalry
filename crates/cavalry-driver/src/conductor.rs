@@ -5,7 +5,7 @@
 //! `spec/client-protocol.md` (ADR 0019). Nothing here is on the message path: a
 //! message goes from a publisher's claim to a subscriber's handler through the log
 //! buffer alone, and the conductor only moves the limit that bounds the publisher. It
-//! loads a publication's producer position at most once per millisecond, so that the
+//! loads a publication's producer position at most once every two milliseconds, so that the
 //! publisher's cache line is not read on every cycle, and a move of that position is
 //! not work for the idle strategy (ADR 0022). Recording is the recorder thread's
 //! (`crate::recorder`): the conductor registers each recording, hands the recorder its
@@ -164,7 +164,7 @@ struct Publication {
     /// The limit last stored.
     last_limit: i64,
     /// The producer position as last loaded, and when, by the conductor's clock: loaded
-    /// at most once per [`spec::PRODUCER_POSITION_INTERVAL`] (ADR 0022).
+    /// at most once per [`spec::PRODUCER_POSITION_INTERVAL`] (ADR 0022, ADR 0032).
     producer: i64,
     producer_loaded_at: i64,
     /// The consumer position that has not moved, and since when.
@@ -1162,7 +1162,8 @@ impl Conductor {
     /// The driver's duties on every publication (`spec/log-buffer.md`, "The driver"):
     /// positions, cleaning, the limit, unblocking, and closing once the linger has passed
     /// or every subscriber has reached the end of stream. The producer position is loaded
-    /// at most once per millisecond per publication, and its move is not work (ADR 0022).
+    /// at most once every two milliseconds per publication, and its move is not work
+    /// (ADR 0022, ADR 0032).
     fn keep_publications(&mut self, now: i64) -> usize {
         let mut work = 0;
         let mut index = 0;
@@ -1227,7 +1228,8 @@ impl Conductor {
                     .map_or(recording.start_position, Counter::load_acquire)
             });
         let publication = &mut self.publications[index];
-        // The producer position at most once per millisecond (ADR 0022): the publisher
+        // The producer position at most once every two milliseconds (ADR 0022, ADR 0032):
+        // the publisher
         // stores to that line on every commit, and a load on every cycle kept the line
         // moving between the two caches, which the publisher paid at p50 and p99.99.
         // Closing loads it afresh (`drop_registration`), so the end of stream is exact.
@@ -1258,7 +1260,8 @@ impl Conductor {
         let mut moved = false;
         if publication.position.get() != producer {
             // Not work: a publisher that publishes while nothing else moves lets the
-            // conductor idle, and the gauge is at most a millisecond behind (ADR 0022).
+            // conductor idle, and the gauge is at most two milliseconds behind (ADR 0022,
+            // ADR 0032).
             publication.position.store_release(producer);
         }
         if let Some(max) = max_subscriber

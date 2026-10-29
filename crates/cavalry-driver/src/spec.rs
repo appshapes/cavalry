@@ -31,9 +31,12 @@ pub const PUBLICATION_UNBLOCK_TIMEOUT: Duration = Duration::from_secs(15);
 /// The least time between two loads of one publication's producer position by the
 /// conductor: the publisher stores to that line on every commit, and a load on every
 /// duty cycle kept the line moving between two caches, which the publisher paid at p50
-/// and p99.99 (`spec/log-buffer.md`, "The driver", Positions; ADR 0022). The backoff
-/// strategy's longest park, so a parked conductor loads once per cycle.
-pub const PRODUCER_POSITION_INTERVAL: Duration = Duration::from_millis(1);
+/// and p99.99 (`spec/log-buffer.md`, "The driver", Positions; ADR 0022). Two
+/// milliseconds, twice the backoff strategy's longest park: at one, a publisher at ten
+/// million claims a second paid the transfer that follows a load on one claim in ten
+/// thousand, the gate's own percentile, so the exclusive claim row read one of two
+/// values by the process (ADR 0032).
+pub const PRODUCER_POSITION_INTERVAL: Duration = Duration::from_millis(2);
 
 /// How long a closed publication's log stays for its subscribers to drain.
 pub const PUBLICATION_LINGER: Duration = Duration::from_secs(5);

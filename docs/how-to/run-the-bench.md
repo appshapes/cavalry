@@ -74,7 +74,8 @@ shared runner is
    `producer position loads` line under the table counts the loads of the producer
    position by the harness's own conductor in the run that loaded most, for the two
    log rows only, since the client rows run the driver's conductor: about one per
-   millisecond of the run, the driver's cadence (ADR 0022), written to the result as
+   two milliseconds of the run, the driver's cadence (ADR 0022, ADR 0032), written to the
+   result as
    `producer_position_loads`, so each host's cadence is on record (card 161). The
    last line says how many allocations the measured loops made per message. It is 0
    or the run has failed: the gate requires zero allocations per message. When no

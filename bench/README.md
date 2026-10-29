@@ -9,18 +9,17 @@ nothing depends on it.
 - Drives `cavalry-shm` directly, with no driver process yet: a publisher thread claims and
   commits into a real log buffer, a subscriber thread reads it through its own read-only
   mapping, and a conductor thread does the driver's duties, the publisher limit and the
-  cleaning, loading the producer position once per millisecond by the clock as the
-  driver does (ADR 0022), through a real counters file, all under `/dev/shm` on Linux
+  cleaning, loading the producer position at the driver's cadence, once every two
+  milliseconds by the clock (ADR 0022, ADR 0032), through a real counters file, all under `/dev/shm` on Linux
   and the system's temporary directory elsewhere. The conductor reads the clock once
   every 256 spins, since a clock read on every spin costs the other threads. The loads
   per run are printed and written to the result, so each host's cadence is on record
   (card 161). A load of the producer position makes the publisher's next store to that
   line fetch it back from the conductor's cache, about 50 ns on kip. At ten million
-  claims a second, one claim in about ten thousand pays it, which is the gate's own
-  percentile. A run of five million messages on kip holds about 500 loads, and the
-  exclusive row, whose ordinary tail is below that cost, reads 160 ns in the runs that
-  cross 500 and about 115 in the rest. The gate compares the median of its twenty-one
-  runs, which holds (card 161). The warm-up before recording is one rotation through
+  claims a second and a load every millisecond, one claim in about ten thousand paid it,
+  which is the gate's own percentile, so the exclusive row read 107 or 156 ns at p99.99
+  by the process (card 161); at two milliseconds it is one claim in about twenty
+  thousand, below the percentile on both hosts (ADR 0032). The warm-up before recording is one rotation through
   all three terms, so no measured message first-touches a page, and every histogram's
   counts are written once before the loop, so no rare sample first-touches one either.
   `--pin P,S,C` binds the three threads to those CPUs on Linux, with the driver's

@@ -1,6 +1,6 @@
 # 0032. Load a publication's producer position at most once every two milliseconds
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-29
 - **Invariants affected:** 2, 4
 - **Supersedes:** 0022, whose cadence this doubles; its reasoning stands

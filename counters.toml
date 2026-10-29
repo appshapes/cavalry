@@ -35,7 +35,7 @@ id = 2
 name = "publication.position"
 kind = "gauge"
 scope = "instance"
-doc = "The producer position of one publication's log buffer, written by the driver on its duty cycle from a load it makes at most once per millisecond, so at most a millisecond behind the publisher (ADR 0022); key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated."
+doc = "The producer position of one publication's log buffer, written by the driver on its duty cycle from a load it makes at most once every two milliseconds, so at most a millisecond behind the publisher (ADR 0022); key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated."
 doctor = ""
 
 [[counter]]

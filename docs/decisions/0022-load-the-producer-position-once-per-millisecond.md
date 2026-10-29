@@ -1,6 +1,6 @@
 # 0022. Load a publication's producer position at most once per millisecond
 
-- **Status:** Accepted
+- **Status:** Superseded by 0032
 - **Date:** 2026-10-13
 - **Invariants affected:** 1, 2, 4
 - **Supersedes:** none; amends `spec/log-buffer.md`, "The driver", Positions
