@@ -41,19 +41,22 @@ The driver loads a publication's producer position at most once every two millis
 (`cavalry_driver::spec::PRODUCER_POSITION_INTERVAL`, 2 ms), and the harness's conductor,
 which derives its cadence from the same constant, follows. At 10 million claims a second
 one claim in about 20,000 pays the transfer, below the gate's percentile with room on
-both hosts, which read about 500 and 540 loads a run today and will read about 250 and
-270. Everything ADR 0022 said of the load's consumers holds with the number doubled: the
-unblock test passes late by up to 2 ms against a timeout measured in seconds, the
-`rejected_tail` check catches a corrupt tail up to 2 ms later, closing and `add
-subscription` take the same loads they took. `spec/log-buffer.md`, "The driver", says
-two milliseconds where it said one; the driver's and the bench's READMEs and the
-`publication.position` counter's doc follow; ADR 0022's text stays as the record of why
-the load left the spin loop.
+both hosts, which read about 500 and 540 loads a run at one millisecond and 249 to 252
+and 271 to 272 at two (Evidence). Everything ADR 0022 said of the load's consumers
+holds with the number doubled: the unblock test passes late by up to 2 ms against a
+timeout measured in seconds, the `rejected_tail` check catches a corrupt tail up to 2 ms
+later, closing and `add subscription` take the same loads they took.
+`spec/log-buffer.md`, "The driver", says two milliseconds where it said one; the
+driver's and the bench's READMEs and the `publication.position` counter's doc follow;
+ADR 0022's text stays as the record of why the load left the spin loop.
 
-Both hosts' baselines are re-recorded from the first green run of master with this
-cadence, in a commit of their own with the histograms, since the exclusive row falls to
-its ordinary tail on both: about 107 ns on kip, and on bench whatever its first run
-reads, which today is 120 in the runs that miss the transfer.
+This decision moves no baseline: the gate passes on both hosts at this cadence against
+the baselines recorded at one millisecond, and the exclusive row's p99.99 is unchanged
+within its spread (Evidence). A later re-record of a host's baseline is a person's
+commit under `docs/how-to/run-the-bench.md`, step 4, with that run's histograms as its
+evidence, and the second alternative below bounds it: not from a run whose slowest
+exclusive run is above the baseline's, since that is the gate loosened to pass a
+benchmark.
 
 ## Alternatives considered
 
@@ -94,17 +97,46 @@ twenty-one runs where CI ran it and seven where a hand did:
 - The bench host, run 40942523199: the checked exclusive row's 21 values alternating 120
   and 160, median 120, loads 540 to 559 a run.
 
-To be added at acceptance: the first `bench (linux)` and `bench (kip)` runs at two
-milliseconds, with the loads per run near 250 and 270 and the exclusive rows at their
-ordinary tails, and the re-recorded baselines.
+The first runs at two milliseconds: CI run 40958773217 on 2026-10-29, `bench (kip)` and
+`bench (linux)` on the pull request's merge of 3532528 with master (git 64c8aec), the
+same harness, five million messages, twenty-one runs per row, both profiles. Below,
+`claim_commit_32_exclusive` p99.99 in ns is the median of the 21 runs, then their range,
+then the baseline's slowest run, which the gate compares with; "before" is the last run
+at one millisecond on the same host, master a4d7e5d on bench and 0e97c37's rerun on kip.
+
+- Producer position loads per run, the exclusive row: 249 and 252 on kip (checked,
+  unchecked) and 272 and 271 on bench, from 494 to 502 and 540 to 559 at one millisecond;
+  the concurrent row, whose run lasts longer, 284 and 288 on kip and 280 and 279 on
+  bench. Below the percentile's index of 500 on both hosts, as derived.
+- kip, checked: 130 (119 to 152) against 132, -1.5%; before, 114 (105 to 150). The 21
+  runs in order: 152 141 148 125 124 129 119 130 124 130 138 129 120 125 130 152 140 132
+  125 135 126; thirteen of them at 119 to 130 and eight from 132 to 152, inside one
+  process, where one millisecond had put a whole process on one side. The concurrent
+  row 153 (150 to 157) against 154.
+- kip, unchecked: 106 (103 to 150) against 165; before, 106 (102 to 132).
+- bench, checked: 150 (140 to 169) against 160; before, 150 (120 to 169). The 21 runs
+  alternate 140 and 160, with two at 150 and one at 169, where one millisecond alternated
+  120 and 160 (run 40942523199, above).
+- bench, unchecked: 120 (120 to 150) against 150; before, 130 (120 to 140).
+- `bench-compare: ok` on both hosts, both profiles; every gated row within 5 percent of
+  its baseline's slowest run.
+
+So the loads halved and the gate passes on both hosts, and the exclusive row's p99.99 is
+unchanged within its spread: what the cadence removed is the load-driven transfer at
+the percentile, which had decided a whole process's reading. A second and smaller
+source of slow claims, the runs from 132 to 152 inside one process on kip, remains, has
+no cause on record, and is here for the next reader. Re-recording kip's baseline from
+this run would set its slowest run at 152 where it is 132, which is the second
+alternative; so no baseline moved with this decision.
 
 ## Consequences
 
-Easier: the kip gate stops flipping per process on a row no commit touched, master's
-runs stay green on both hosts, and every publisher at this rate pays the transfer half
-as often. Harder: the driver's view of a publisher's position is up to 2 ms stale where
-it was 1 ms; both baselines move once. We now maintain one constant whose value has a
-derivation, which this page is.
+Easier: the kip gate no longer reads one of two values by the process on a row no
+commit touched, master's runs stay green on both hosts, and every publisher at this rate
+pays the transfer half as often. Harder: the driver's view of a publisher's position is
+up to 2 ms stale where it was 1 ms; the exclusive row's spread inside one run, 119 to
+152 on kip and 140 to 169 on bench, is now the row's own and has no cause on record. We
+now maintain one constant whose value has a derivation, which this page is.
 
 Revisit: when a host runs the exclusive row at about 20 million claims a second, where
 two milliseconds meets the percentile again; when a consumer of the producer position

@@ -11,7 +11,7 @@ pub const COUNTERS_ALLOCATED: CounterId = CounterId(0);
 /// `counters.allocation_failed`, a static counter: Counter allocations refused because every record was in use: the counters file is full, and whatever needed the counter was refused with it.
 pub const COUNTERS_ALLOCATION_FAILED: CounterId = CounterId(1);
 
-/// `publication.position`, a instance gauge: The producer position of one publication's log buffer, written by the driver on its duty cycle from a load it makes at most once every two milliseconds, so at most a millisecond behind the publisher (ADR 0022); key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated.
+/// `publication.position`, a instance gauge: The producer position of one publication's log buffer, written by the driver on its duty cycle from a load it makes at most once every two milliseconds, so at most two milliseconds behind the publisher (ADR 0022, ADR 0032); key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated.
 pub const PUBLICATION_POSITION: CounterId = CounterId(2);
 
 /// `publication.limit`, a instance gauge: The position up to which one publication may write: the slowest subscriber's position plus the publication window, written by the driver; key and label as publication.position.
@@ -148,7 +148,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "publication.position",
         kind: Kind::Gauge,
         scope: Scope::Instance,
-        doc: "The producer position of one publication's log buffer, written by the driver on its duty cycle from a load it makes at most once every two milliseconds, so at most a millisecond behind the publisher (ADR 0022); key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated.",
+        doc: "The producer position of one publication's log buffer, written by the driver on its duty cycle from a load it makes at most once every two milliseconds, so at most two milliseconds behind the publisher (ADR 0022, ADR 0032); key: correlation id (i64), session id (i32), stream id (i32), little-endian; label text: the three in decimal, space-separated.",
         doctor: "",
     },
     CounterDef {

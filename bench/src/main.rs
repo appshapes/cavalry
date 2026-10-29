@@ -719,11 +719,11 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                 let mut clean_position: i64 = 0;
                 let mut limit_now = window;
                 let trip_gain = window / 8;
-                // The producer position at the driver's cadence by the clock, two milliseconds
-                // (ADR 0032), the driver's
-                // cadence (ADR 0022): the publisher stores to that line on every commit,
-                // and a load on every spin kept the line moving between the two caches,
-                // which was the publisher's p50 and its p99.99 band on the bench host.
+                // The producer position at the driver's cadence by the clock, once every
+                // two milliseconds (ADR 0022, ADR 0032): the publisher stores to that line
+                // on every commit, and a load on every spin kept the line moving between
+                // the two caches, which was the publisher's p50 and its p99.99 band on the
+                // bench host.
                 // The clock is read once every CADENCE_SPINS spins, not on every spin: a
                 // clock read on every spin of this thread cost the publisher 100 ns and
                 // the subscriber 70 to 130 ns at p99.99 on the bench host, in every one
