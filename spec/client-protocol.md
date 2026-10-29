@@ -239,15 +239,17 @@ What the driver does with each, after the checks of "What the driver rejects":
   success` with nothing done, since a correlation id is never reused. Any client may
   stop any replay.
 
-The disk work of a replay is a third driver thread, the *replayer*, with the
-conductor's idle strategy, fed and answered through bounded queues as the recorder is:
-the conductor never touches the disk, and the recorder's writes never wait behind a
-replay's reads (ADR 0030). On each duty cycle the replayer visits every live replay: it
-reads the next block of the recording from its segment file, from the replay's position
-up to the nearest of its end position, the recording's extent, the end of the position's
-term, the end of the segment file, the publication's limit plus one MTU length and
-1048576 bytes on, and writes the block's frames into the replay log at their recorded
-term offsets, whole frames in order, each begun below the end position and the
+The disk work of a replay is a third driver thread, the *replayer*, fed and answered
+through bounded queues as the recorder is: the conductor never touches the disk, and the
+recorder's writes never wait behind a replay's reads (ADR 0030). While it holds a replay
+the replayer idles with the conductor's idle strategy; while it holds none it parks, for
+at most a second at a time, until the conductor hands it a request and unparks it, so a
+replayer with nothing to play wakes no CPU. On each duty cycle the replayer visits every
+live replay: it reads the next block of the recording from its segment file, from the
+replay's position up to the nearest of the recording's extent, the end of the position's
+term, the end of the segment file, the publication's limit plus one MTU length, its end
+position plus one MTU length and 1048576 bytes on, and writes the block's frames into
+the replay log at their recorded term offsets, whole frames in order, each begun below the end position and the
 publication's limit, each checked as `spec/frame.md` and `spec/durable-log.md`,
 "Segment files", say before it is written, and each as recorded
 but for the session id and the stream id, which are the replay publication's: a padding
@@ -255,8 +257,8 @@ frame is written as padding, a data frame's body before its header's first eight
 which go in with a release store as a commit's do, so that a subscriber's poll sees whole
 frames in order, and the tail is stored after each frame with a release store, as an
 exclusive publisher stores it. A frame that would start at or past the publication's
-limit waits for the limit to move; a term that is full is rotated as a publisher rotates
-it. After each block the replayer stores `replay.position` with a release store. A frame
+limit waits for the limit to move, and one that would start at or past the replay's end
+position ends the replay; a term that is full is rotated as a publisher rotates it. After each block the replayer stores `replay.position` with a release store. A frame
 that fails a check stops the replay with reason 3, adding one to
 `log_buffer.rejected_frame`; a segment file that cannot be read stops it with reason 3.
 A replay of a live recording reads up to the synced position and waits for it to move;

@@ -1288,10 +1288,12 @@ impl Conductor {
         }
         // The limit: consumer + window once cleaned, raised in steps of window ÷ 8; the
         // consumer position alone with neither a subscriber nor a recording, so the
-        // publisher is told not connected. The window is the one the log was created
-        // with in `add_publication`, half this conductor's term: the spec's for every
-        // production log, and half the smallest term in a test at a registry's capacity.
-        let window = i64::from(self.term_length / 2);
+        // publisher is told not connected. The window is the log's own, from its header:
+        // half this conductor's term for a publication's log, and half the recording's
+        // term for a replay's, which is the same number in this version and the right
+        // one if the two ever differ, since rotation into a partition a subscriber still
+        // reads is what the window forbids.
+        let window = i64::from(publication.log.header().publication_window_length());
         let candidate = if connected {
             consumer.saturating_add(window)
         } else {
