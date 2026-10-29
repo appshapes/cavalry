@@ -1,7 +1,7 @@
 # 0030. Replay a recording into a subscription, with Aeron Archive's replay commands
 
-- **Status:** Proposed
-- **Date:** 2026-10-28
+- **Status:** Accepted
+- **Date:** 2026-10-29
 - **Invariants affected:** 1, 2, 3, 4, 6
 - **Supersedes:** none; it takes the client protocol to version 2 (ADR 0019, ADR 0025)
 
@@ -42,13 +42,17 @@ order from the bottom of Cavalry's ranges (ADR 0025):
   extent, or −1 for the recording's start position, as Aeron's `NULL_POSITION`.
   `length` is how many bytes of the recording to replay from that position: 0 or more;
   −1, Aeron's `NULL_LENGTH`, for everything up to the recording's extent when the
-  replay starts, the stop position of a stopped recording or `recording.position` of a
-  live one; `i64::MAX`, as Aeron's `Long.MAX_VALUE`, to follow a live recording until it
-  stops. A client that wants "between two instants" resolves both through the time
+  replay starts, the stop position of a stopped recording or
+  `recording.synced_position` of a live one, the bytes a replay may read; `i64::MAX`,
+  as Aeron's `Long.MAX_VALUE`, to follow a live recording until it stops. The replay
+  ends at the earlier of its end position, the position plus the length, and the
+  recording's stop position, so a length past a live recording's extent follows it. A client that wants "between two instants" resolves both through the time
   index, as `spec/durable-log.md` says, and sends positions; the driver never reads the
   time index for a replay.
 - **`stop replay`** (type id 260, `0x0104`): client id, correlation id, replay session
-  id (i64). Any client may stop any replay.
+  id (i64). Any client may stop any replay; a replay session id no live replay holds is
+  already stopped, answered with `operation success` and nothing done, since a
+  correlation id is never reused.
 - **`replay ready`** (type id 4099, `0x1003`): correlation id, replay session id (i64),
   recording id (i64), start position (i64), session id (i32), stream id (i32). The
   replay session id is the correlation id of the `start replay` command, which is unique
@@ -66,12 +70,15 @@ then against its state: a recording id the catalog does not hold is code 21, as 
 `stop recording`; a position that is not a multiple of 32, before the start position or
 past the extent is code 23, position out of range; a length below −1 is code 7; a
 channel other than `cavalry:ipc` is code 1; the replays registry at capacity, or the
-counters file with no free record, is code 10. Otherwise it creates the replay
+counters file with no free record, is code 10; a segment file the replayer cannot open
+at the position is code 12. A start refused with code 21, 23 or 12 after the driver took
+it adds one to `replay.start_failed`. Otherwise it creates the replay
 publication: a log in `publications/<replay session id>.logbuffer` of the recorded
 publication's term length, MTU length and initial term id, type 1 (exclusive), with a
-new session id and the replay stream id, its tails set so that the first frame lands at
-its recorded term offset, as if the publication had started at the replay's start
-position; allocates `replay.position` for it, keyed by the replay session id; answers
+new session id and the replay stream id, created at the replay's start position, the
+active term count and the tails set so that the first frame lands at its recorded term
+offset, which `spec/log-buffer.md`, "Metadata page", now says how to do without a
+change to the layout; allocates `replay.position` for it, keyed by the replay session id; answers
 `replay ready`; and sends `available image` to every subscription on the replay stream
 id and channel, with the subscriber's position counter at the start position, now and
 whenever one is added while the replay lives, so a late subscriber joins where the
@@ -93,8 +100,9 @@ session id and the stream id, which are the replay publication's, a padding fram
 re-emitted as padding, and the frame length word stored last with a release store as a
 publisher commits, so a subscriber's poll sees whole frames in order; it stops at the
 publication's limit and continues when the limit moves. A replay that follows a live
-recording reads up to `recording.position` and waits for it to move, and ends when the
-recording stops, at its stop position. After each block it stores `replay.position`
+recording reads up to the synced position and waits for it to move, and ends when the
+recording stops, at its stop position, which the replayer learns from the catalog slot,
+read again once per second and whenever a frame length of 0 is found below the extent. After each block it stores `replay.position`
 with a release store. A replay reads no byte the recorder has not synced: it bounds
 its reads by `recording.synced_position`, so what it plays is what a restart would find
 (invariant 1). The replayer checks every frame as `spec/frame.md` says before it copies
@@ -192,9 +200,14 @@ conformance vector of its own.
   recording's extent.
 - ADR 0023's Decision, feature 3, and card 94's brief: the commands, the API, the CLI
   and the gate named here.
-- To be added at acceptance: the conformance vectors of version 2 in
-  `spec/vectors/client-protocol.py`, and `just replay-check`'s three equal hashes on
-  both runners.
+- The conformance vectors of version 2, 84 in `spec/vectors/client-protocol.py`, 26
+  of them new, land in the same change as this acceptance, with the driver's replayer
+  and its tests: a recording of a segment and a bit replayed across the segment roll to
+  a subscriber that reads every byte in order, a replay of a live recording that plays
+  only synced bytes and ends at the stop, and a replay paced through the log's terms by
+  a slow subscriber. `just replay-check`'s three equal hashes on both runners are the
+  gate's commit's evidence, in its message, as step 2.1 of
+  `docs/how-to/implement-a-feature.md` puts what the implementation proves.
 
 ## Consequences
 
@@ -202,8 +215,13 @@ conformance vector of its own.
   259, 260, 4099 and 4100 are taken, 23 is a new error code, and the next Cavalry
   command is 261, the next event 4101.
 - The driver has a third thread, `cavalry-replayer`, a replays registry of 64, one
-  counter per live replay, and five static counters; `counters.toml` registers the
-  replay's state machine so `just lint-counters` holds its transitions.
+  counter per live replay beside its publication's two, and six static counters;
+  `counters.toml` registers the replay's state machine so `just lint-counters` holds
+  its transitions.
+- `spec/log-buffer.md`, "Metadata page", says how a log is created at a position; no
+  field of the layout changes, so the log buffer stays at version 0, and
+  `cavalry-shm` gains `LogBuffers::create_at` and the replayer's `TermWriter`, which
+  writes by the claim protocol and adds no `unsafe` block.
 - `just replay-check` is a real gate, and ADR 0023's third feature is done when it
   passes on both runners.
 - A replay reads only synced bytes, so a live replay lags the recording by up to the

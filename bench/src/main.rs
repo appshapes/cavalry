@@ -312,6 +312,7 @@ fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
 struct DriverPins {
     conductor: AtomicUsize,
     recorder: AtomicUsize,
+    replayer: AtomicUsize,
 }
 
 impl DriverPins {
@@ -319,6 +320,7 @@ impl DriverPins {
         DriverPins {
             conductor: AtomicUsize::new(0),
             recorder: AtomicUsize::new(0),
+            replayer: AtomicUsize::new(0),
         }
     }
 
@@ -327,6 +329,7 @@ impl DriverPins {
         match thread {
             DriverThread::Conductor => &self.conductor,
             DriverThread::Recorder => &self.recorder,
+            DriverThread::Replayer => &self.replayer,
         }
     }
 
@@ -343,6 +346,7 @@ impl DriverPins {
                 match thread {
                     DriverThread::Conductor => "conductor",
                     DriverThread::Recorder => "recorder",
+                    DriverThread::Replayer => "replayer",
                 },
                 failed - 1
             )),
@@ -713,7 +717,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         Arc::new(move |thread| {
             let cpu = match thread {
                 DriverThread::Conductor => conductor_cpu,
-                DriverThread::Recorder => housekeeping,
+                DriverThread::Recorder | DriverThread::Replayer => housekeeping,
             };
             if pin_to(cpu).is_err() {
                 pins.slot(thread)
@@ -866,9 +870,10 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     publication.close().map_err(|e| e.to_string())?;
     client.close().map_err(|e| e.to_string())?;
     driver.close().map_err(|e| e.to_string())?;
-    // Both driver threads are joined, so both hooks are ordered before these loads.
+    // Every driver thread is joined, so every hook is ordered before these loads.
     pins.check(DriverThread::Conductor)?;
     pins.check(DriverThread::Recorder)?;
+    pins.check(DriverThread::Replayer)?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
         one_way: summarize(&one_way, elapsed),

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/client-protocol.json: the test vectors for spec/client-protocol.md,
-version 1.
+version 2.
 
 This script is the spec's reference encoder, independent of the Rust code: it packs
 each command's and event's fields with the standard library and nothing else, so an
@@ -29,6 +29,11 @@ ON_EXCLUSIVE_PUBLICATION_READY, ON_SUBSCRIPTION_READY, ON_CLIENT_TIMEOUT = 0x0F0
 # Cavalry's own ranges, beside Aeron's (ADR 0025): commands from 0x0101, events from 0x1001.
 START_RECORDING, STOP_RECORDING = 0x0101, 0x0102
 ON_RECORDING_READY, ON_RECORDING_STOPPED = 0x1001, 0x1002
+# Version 2: the replay commands and events (ADR 0030).
+START_REPLAY, STOP_REPLAY = 0x0103, 0x0104
+ON_REPLAY_READY, ON_REPLAY_STOPPED = 0x1003, 0x1004
+# The replay's conventions, Aeron's: NULL_POSITION, NULL_LENGTH and Long.MAX_VALUE.
+NULL_POSITION, NULL_LENGTH, FOLLOW_LENGTH = -1, -1, 2**63 - 1
 
 # The fields of each type, in order, with their encodings: "q" i64, "i" i32, "s" string.
 COMMANDS = {
@@ -49,6 +54,11 @@ COMMANDS = {
                                           ("stream_id", "i"), ("channel", "s"))),
     STOP_RECORDING: ("stop_recording", (("client_id", "q"), ("correlation_id", "q"),
                                         ("recording_id", "q"))),
+    START_REPLAY: ("start_replay", (("client_id", "q"), ("correlation_id", "q"),
+                                    ("recording_id", "q"), ("position", "q"), ("length", "q"),
+                                    ("replay_stream_id", "i"), ("replay_channel", "s"))),
+    STOP_REPLAY: ("stop_replay", (("client_id", "q"), ("correlation_id", "q"),
+                                  ("replay_session_id", "q"))),
 }
 EVENTS = {
     ON_ERROR: ("error", (("offending_correlation_id", "q"), ("error_code", "i"),
@@ -78,6 +88,11 @@ EVENTS = {
                                              ("recording_position_counter_id", "i"),
                                              ("recording_synced_position_counter_id", "i"))),
     ON_RECORDING_STOPPED: ("recording_stopped", (("recording_id", "q"), ("stop_position", "q"))),
+    ON_REPLAY_READY: ("replay_ready", (("correlation_id", "q"), ("replay_session_id", "q"),
+                                       ("recording_id", "q"), ("start_position", "q"),
+                                       ("session_id", "i"), ("stream_id", "i"))),
+    ON_REPLAY_STOPPED: ("replay_stopped", (("replay_session_id", "q"), ("position", "q"),
+                                           ("reason", "i"))),
 }
 
 
@@ -147,6 +162,26 @@ VECTORS = [
     command(STOP_RECORDING, "stop-recording", client_id=5, correlation_id=12, recording_id=0),
     command(STOP_RECORDING, "stop-recording-extremes", client_id=2**63 - 1,
             correlation_id=2**63 - 1, recording_id=2**63 - 1),
+    # Version 2: the replay commands, with Aeron's conventions for position and length.
+    command(START_REPLAY, "start-replay", client_id=5, correlation_id=13, recording_id=0,
+            position=4096, length=8192, replay_stream_id=2001, replay_channel=IPC),
+    command(START_REPLAY, "start-replay-from-the-start-to-the-extent", client_id=5,
+            correlation_id=13, recording_id=0, position=NULL_POSITION, length=NULL_LENGTH,
+            replay_stream_id=2001, replay_channel=IPC),
+    command(START_REPLAY, "start-replay-follow", client_id=5, correlation_id=13, recording_id=0,
+            position=NULL_POSITION, length=FOLLOW_LENGTH, replay_stream_id=2001,
+            replay_channel=IPC),
+    command(START_REPLAY, "start-replay-zero-length", client_id=5, correlation_id=13,
+            recording_id=0, position=0, length=0, replay_stream_id=2001, replay_channel=IPC),
+    command(START_REPLAY, "start-replay-extremes", client_id=2**63 - 1, correlation_id=2**63 - 1,
+            recording_id=2**63 - 1, position=2**63 - 1, length=2**63 - 1,
+            replay_stream_id=-2**31, replay_channel=IPC),
+    command(START_REPLAY, "start-replay-other-channel", client_id=5, correlation_id=13,
+            recording_id=0, position=NULL_POSITION, length=NULL_LENGTH, replay_stream_id=2001,
+            replay_channel="cavalry:udp?endpoint=localhost:40123"),
+    command(STOP_REPLAY, "stop-replay", client_id=5, correlation_id=14, replay_session_id=13),
+    command(STOP_REPLAY, "stop-replay-extremes", client_id=2**63 - 1, correlation_id=2**63 - 1,
+            replay_session_id=2**63 - 1),
     # Events.
     event(ON_ERROR, "error-invalid-channel", offending_correlation_id=4, error_code=1,
           error_message="channel must be cavalry:ipc in this version (client-protocol.md, Error codes)"),
@@ -180,6 +215,27 @@ VECTORS = [
           error_message="recording 7 is not in the catalog (client-protocol.md, Error codes)"),
     event(ON_ERROR, "error-already-recording", offending_correlation_id=11, error_code=22,
           error_message="stream 1001 is already recording 0; stop recording 0 first (client-protocol.md, Error codes)"),
+    # Version 2: the replay events, one per stop reason, and the replay's error codes.
+    event(ON_REPLAY_READY, "replay-ready", correlation_id=13, replay_session_id=13, recording_id=0,
+          start_position=4096, session_id=-1234567891, stream_id=2001),
+    event(ON_REPLAY_READY, "replay-ready-at-the-start", correlation_id=13, replay_session_id=13,
+          recording_id=0, start_position=0, session_id=99, stream_id=2001),
+    event(ON_REPLAY_READY, "replay-ready-extremes", correlation_id=2**63 - 1,
+          replay_session_id=2**63 - 1, recording_id=2**63 - 1, start_position=2**63 - 1,
+          session_id=-2**31, stream_id=2**31 - 1),
+    event(ON_REPLAY_STOPPED, "replay-stopped-ended", replay_session_id=13, position=12288,
+          reason=0),
+    event(ON_REPLAY_STOPPED, "replay-stopped-by-command", replay_session_id=13, position=8192,
+          reason=1),
+    event(ON_REPLAY_STOPPED, "replay-stopped-not-connected", replay_session_id=13,
+          position=4096, reason=2),
+    event(ON_REPLAY_STOPPED, "replay-stopped-failed", replay_session_id=13, position=4160,
+          reason=3),
+    event(ON_ERROR, "error-unknown-recording-to-replay", offending_correlation_id=13,
+          error_code=21,
+          error_message="recording 7 is not in the catalog (client-protocol.md, Error codes)"),
+    event(ON_ERROR, "error-position-out-of-range", offending_correlation_id=13, error_code=23,
+          error_message="position 4100 is not a multiple of 32 from 0 to 12288, the start position and extent of recording 0 (client-protocol.md, Error codes)"),
     # Invalid commands, by the reason a conforming implementation reports, in the order
     # the checks run.
     vector("command", ADD_PUBLICATION, "too-short-before-correlation-id", error="too-short",
@@ -192,7 +248,7 @@ VECTORS = [
            raw=struct.pack("<qq", 0, 1)),
     vector("command", 0x0100, "unknown-type-between", error="type",
            raw=struct.pack("<qq", 0, 1)),
-    vector("command", 0x0103, "unknown-type-cavalry-reserved", error="type",
+    vector("command", 0x0105, "unknown-type-cavalry-reserved", error="type",
            raw=struct.pack("<qq", 0, 1)),
     vector("command", 0x0200, "unknown-type-above", error="type",
            raw=struct.pack("<qq", 0, 1)),
@@ -204,6 +260,12 @@ VECTORS = [
            raw=struct.pack("<qqi", 5, 11, 1001)),
     vector("command", STOP_RECORDING, "stop-recording-too-short-no-recording-id",
            error="too-short", raw=struct.pack("<qq", 5, 12)),
+    vector("command", START_REPLAY, "start-replay-too-short-no-length", error="too-short",
+           raw=struct.pack("<qqqq", 5, 13, 0, -1)),
+    vector("command", START_REPLAY, "start-replay-too-short-no-channel", error="too-short",
+           raw=struct.pack("<qqqqqi", 5, 13, 0, -1, -1, 2001)),
+    vector("command", STOP_REPLAY, "stop-replay-too-short-no-replay-session-id",
+           error="too-short", raw=struct.pack("<qq", 5, 14)),
     vector("command", ADD_PUBLICATION, "string-negative-length", error="string",
            raw=struct.pack("<qqii", 0, 1, 1001, -1)),
     vector("command", ADD_PUBLICATION, "string-over-4096", error="string",
@@ -214,6 +276,8 @@ VECTORS = [
            raw=struct.pack("<qqii", 0, 1, 1001, 11) + b"cavalry:ipc"),
     vector("command", START_RECORDING, "start-recording-string-runs-past-message", error="string",
            raw=struct.pack("<qqii", 5, 11, 1001, 11) + b"cavalry:ip"),
+    vector("command", START_REPLAY, "start-replay-string-runs-past-message", error="string",
+           raw=struct.pack("<qqqqqii", 5, 13, 0, -1, -1, 2001, 11) + b"cavalry:ip"),
     vector("command", ADD_PUBLICATION, "length-trailing-bytes", error="length",
            raw=encode(COMMANDS[ADD_PUBLICATION][1],
                       dict(client_id=0, correlation_id=1, stream_id=1001, channel=IPC)) + b"\0\0\0\0"),
@@ -221,18 +285,30 @@ VECTORS = [
            raw=struct.pack("<qqi", 5, 9, 0)),
     vector("command", STOP_RECORDING, "stop-recording-length-trailing", error="length",
            raw=struct.pack("<qqqi", 5, 12, 0, 0)),
+    vector("command", START_REPLAY, "start-replay-length-trailing", error="length",
+           raw=encode(COMMANDS[START_REPLAY][1],
+                      dict(client_id=5, correlation_id=13, recording_id=0, position=-1, length=-1,
+                           replay_stream_id=2001, replay_channel=IPC)) + b"\0\0\0\0"),
+    vector("command", STOP_REPLAY, "stop-replay-length-trailing", error="length",
+           raw=struct.pack("<qqqi", 5, 14, 13, 0)),
     # Invalid events, the same checks on the client's side.
     vector("event", ON_OPERATION_SUCCESS, "event-too-short", error="too-short",
            raw=struct.pack("<i", 3)),
     vector("event", 0x0F08, "event-unknown-type", error="type", raw=struct.pack("<q", 3)),
     vector("event", 0x1000, "event-unknown-type-between", error="type", raw=struct.pack("<q", 3)),
-    vector("event", 0x1003, "event-unknown-type-cavalry-reserved", error="type",
+    vector("event", 0x1005, "event-unknown-type-cavalry-reserved", error="type",
            raw=struct.pack("<q", 3)),
     vector("event", 0x1100, "event-unknown-type-above", error="type", raw=struct.pack("<q", 3)),
     vector("event", ON_RECORDING_READY, "event-recording-ready-too-short", error="too-short",
            raw=struct.pack("<qqii", 11, 0, -1234567890, 16)),
     vector("event", ON_RECORDING_STOPPED, "event-recording-stopped-length-trailing", error="length",
            raw=struct.pack("<qqi", 0, 4096, 0)),
+    vector("event", ON_REPLAY_READY, "event-replay-ready-too-short", error="too-short",
+           raw=struct.pack("<qqqqi", 13, 13, 0, 4096, -1234567891)),
+    vector("event", ON_REPLAY_STOPPED, "event-replay-stopped-too-short", error="too-short",
+           raw=struct.pack("<qq", 13, 12288)),
+    vector("event", ON_REPLAY_STOPPED, "event-replay-stopped-length-trailing", error="length",
+           raw=struct.pack("<qqii", 13, 12288, 0, 0)),
     vector("event", ON_ERROR, "event-string-runs-past-message", error="string",
            raw=struct.pack("<qii", 4, 1, 8) + b"abc\0"),
     vector("event", ON_CLIENT_TIMEOUT, "event-length-trailing", error="length",
@@ -244,7 +320,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 1,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 2,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")

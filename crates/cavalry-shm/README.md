@@ -11,9 +11,12 @@ the two crates where `unsafe` is permitted.
   claims a frame in place and commits it with one release store, a `TermReader` reads
   committed frames where its position says, or scans a `Block` of them with their
   headers for the recorder to write in one go
-  ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)), and the
-  driver's duties, the limit, cleaning, unblocking and end of stream, are methods on the
-  log ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
+  ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)), a
+  `TermWriter` puts a recording's frames back into a replay's log, created at the
+  recording's position with `LogBuffers::create_at`, by the claim protocol
+  ([ADR 0030](../../docs/decisions/0030-replay-a-recording-into-a-subscription.md)),
+  and the driver's duties, the limit, cleaning, unblocking and end of stream, are
+  methods on the log ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
 - Pre-touches every mapping it makes: in `create` and `open`, every page of a log buffer,
   the counters file, the command ring and the broadcast buffer is made resident before
   the mapping is handed out, with Linux's populate advice where the kernel has it and one

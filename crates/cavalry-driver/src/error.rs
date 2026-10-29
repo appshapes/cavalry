@@ -54,11 +54,17 @@ pub enum DriverError {
         /// The log directory.
         log_dir: PathBuf,
     },
+    /// The replayer thread panicked; its replays stopped where they were, and nothing
+    /// of them is on disk.
+    Replayer {
+        /// The log directory.
+        log_dir: PathBuf,
+    },
 }
 
 impl DriverError {
     /// The reason's name: `driver-active`, `io`, `counters`, `command-ring`,
-    /// `broadcast`, `log`, `conductor`, `log-dir` or `recorder`.
+    /// `broadcast`, `log`, `conductor`, `log-dir`, `recorder` or `replayer`.
     pub const fn reason(&self) -> &'static str {
         match self {
             DriverError::Active { .. } => "driver-active",
@@ -70,6 +76,7 @@ impl DriverError {
             DriverError::Conductor { .. } => "conductor",
             DriverError::LogDir(_) => "log-dir",
             DriverError::Recorder { .. } => "recorder",
+            DriverError::Replayer { .. } => "replayer",
         }
     }
 }
@@ -109,6 +116,14 @@ impl fmt::Display for DriverError {
                  docs/reference/durable-log.md#the-driver",
                 log_dir.display()
             ),
+            DriverError::Replayer { log_dir } => write!(
+                f,
+                "driver failed (replayer): the replayer thread of the driver on {} panicked; \
+                 its replays stopped where they were, and a client that was reading one sees \
+                 its images end there; start the replays again on the next driver; see \
+                 docs/reference/client-protocol.md#commands",
+                log_dir.display()
+            ),
         }
     }
 }
@@ -124,7 +139,8 @@ impl std::error::Error for DriverError {
             DriverError::LogDir(error) => Some(error),
             DriverError::Active { .. }
             | DriverError::Conductor { .. }
-            | DriverError::Recorder { .. } => None,
+            | DriverError::Recorder { .. }
+            | DriverError::Replayer { .. } => None,
         }
     }
 }

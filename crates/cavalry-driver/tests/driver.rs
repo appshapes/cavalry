@@ -12,14 +12,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cavalry_driver::{Driver, DriverThread, IdleStrategy, ThreadStart, spec};
 use cavalry_log::catalog::{CatalogReader, CatalogWriter};
 use cavalry_log::layout::{Recording, State};
-use cavalry_proto::client_protocol::{Command, CommandType, Event, IPC_CHANNEL};
+use cavalry_proto::client_protocol::{
+    Command, CommandType, Event, IPC_CHANNEL, NULL_LENGTH, NULL_POSITION,
+};
 use cavalry_shm::broadcast::{BroadcastBuffer, Receiver};
 use cavalry_shm::command_ring::{CommandRing, Producer};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLIENT_PROTOCOL_ERRORS, CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT,
     CONDUCTOR_IDLE_STRATEGY, DRIVER_REGISTRY_FULL, PUBLICATION_POSITION, RECORDING_INDEX_REWRITTEN,
-    RECORDING_RECOVERED, RECORDING_STARTED, RECORDING_STOPPED,
+    RECORDING_RECOVERED, RECORDING_STARTED, RECORDING_STOPPED, REPLAY_ENDED, REPLAY_START_FAILED,
+    REPLAY_STARTED, REPLAY_STOPPED,
 };
 use cavalry_shm::log::LogBuffers;
 
@@ -284,10 +287,19 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
     let dir = TestDir::new("thread-start");
     const CONDUCTOR: usize = 0;
     const RECORDER: usize = 1;
+    const REPLAYER: usize = 2;
     // Per thread: how many times the hook ran, and how many of those on the thread of
     // the expected name. Atomics, not a mutex: the lock ban covers the test target.
-    let runs = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
-    let named = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let runs = Arc::new([
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    ]);
+    let named = Arc::new([
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+        AtomicUsize::new(0),
+    ]);
     let release = Arc::new(AtomicBool::new(false));
     let hook: ThreadStart = {
         let runs = Arc::clone(&runs);
@@ -297,6 +309,7 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
             let (index, expected) = match thread {
                 DriverThread::Conductor => (CONDUCTOR, "cavalry-conductor"),
                 DriverThread::Recorder => (RECORDER, "cavalry-recorder"),
+                DriverThread::Replayer => (REPLAYER, "cavalry-replayer"),
             };
             runs[index].fetch_add(1, Ordering::AcqRel);
             if std::thread::current().name() == Some(expected) {
@@ -351,7 +364,11 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
         _ => None,
     });
     driver.close().expect("closes");
-    for (index, thread) in [(CONDUCTOR, "conductor"), (RECORDER, "recorder")] {
+    for (index, thread) in [
+        (CONDUCTOR, "conductor"),
+        (RECORDER, "recorder"),
+        (REPLAYER, "replayer"),
+    ] {
         assert_eq!(
             runs[index].load(Ordering::Acquire),
             1,
@@ -1264,7 +1281,7 @@ fn recording_commands_get_the_spec_error_codes() {
     let mut message = [0u8; 16];
     message[..8].copy_from_slice(&client.id.to_le_bytes());
     message[8..].copy_from_slice(&reserved.to_le_bytes());
-    client.send_raw(0x0103, &message);
+    client.send_raw(0x0105, &message);
     let (code, text) = client.wait_error(reserved);
     assert_eq!(code, 6, "{text}");
 
@@ -1337,5 +1354,252 @@ fn the_recovery_pass_counts_what_it_did() {
     let reader = CatalogReader::open(&log_dir).expect("the catalog opens");
     let descriptor = reader.get(0).expect("reads").expect("the slot");
     assert_eq!(descriptor.stop_position(), 0, "an empty recording");
+    driver.close().expect("closes");
+}
+
+// ---- replay --------------------------------------------------------------------------
+
+/// `start replay` of `recording_id` from `position` for `length` onto `stream_id`,
+/// answered with `replay ready`: (replay session id, start position, session id).
+fn start_replay(
+    client: &mut Client,
+    recording_id: i64,
+    position: i64,
+    length: i64,
+    stream_id: i32,
+) -> (i64, i64, i32) {
+    let correlation_id = client.correlation_id();
+    client.send(&Command::StartReplay {
+        client_id: client.id,
+        correlation_id,
+        recording_id,
+        position,
+        length,
+        replay_stream_id: stream_id,
+        replay_channel: IPC_CHANNEL,
+    });
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::ReplayReady {
+            correlation_id: id,
+            replay_session_id,
+            recording_id: recorded,
+            start_position,
+            session_id,
+            stream_id: stream,
+        } if id == correlation_id => {
+            assert_eq!(
+                replay_session_id, correlation_id,
+                "the replay session id is the command's"
+            );
+            assert_eq!(recorded, recording_id);
+            assert_eq!(stream, stream_id);
+            Some((replay_session_id, start_position, session_id))
+        }
+        _ => None,
+    })
+}
+
+/// The `replay stopped` event for `replay_session_id`: (position, reason).
+fn wait_replay_stopped(client: &mut Client, replay_session_id: i64) -> (i64, i32) {
+    client.wait(Duration::from_secs(10), |event| match *event {
+        Event::ReplayStopped {
+            replay_session_id: id,
+            position,
+            reason,
+        } if id == replay_session_id => Some((position, reason)),
+        _ => None,
+    })
+}
+
+/// The full case through the threads (invariant 1): 100 messages recorded and
+/// stopped, replayed from the start to the extent onto a stream a subscription joined
+/// first; the subscription's image is the replay's publication at the start position,
+/// its log holds every frame at the recording's position with the replay's ids, `replay
+/// stopped` says reason 0 at the stop position, the counters moved, and once the
+/// subscriber reaches the end the image goes and the log with it.
+#[test]
+fn a_replay_plays_a_stopped_recording_into_a_subscription_and_ends() {
+    let dir = TestDir::new("replay");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(dir.path(), &log_dir).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (_, publication_id, _, limit_id, _) = client.add_publication(71, true);
+    let (recording_id, _, position_id, _) = start_recording(&mut client, 71);
+    let after = publish(dir.path(), publication_id, limit_id, 100);
+    wait_value(dir.path(), position_id, after);
+    stop_recording(&mut client, recording_id);
+    assert_eq!(wait_stopped(&mut client, recording_id), after);
+
+    let subscription_id = client.add_subscription(2071);
+    let (replay_session_id, start_position, session_id) =
+        start_replay(&mut client, recording_id, NULL_POSITION, NULL_LENGTH, 2071);
+    assert_eq!(start_position, 0);
+    let (image_id, subscriber_counter) = wait_image(&mut client, subscription_id);
+    assert_eq!(
+        image_id, replay_session_id,
+        "the image is the replay's publication"
+    );
+    assert_eq!(wait_counter(dir.path(), REPLAY_STARTED, 1), 1);
+    let (position, reason) = wait_replay_stopped(&mut client, replay_session_id);
+    assert_eq!((position, reason), (after, 0));
+    assert_eq!(wait_counter(dir.path(), REPLAY_STOPPED, 1), 1);
+    assert_eq!(wait_counter(dir.path(), REPLAY_ENDED, 1), 1);
+
+    // The replay's log, read as a subscriber reads it: every frame at its position.
+    let log = LogBuffers::open(dir.path(), replay_session_id, false).expect("the replay log opens");
+    assert_eq!(log.header().session_id(), session_id);
+    assert_eq!(log.header().stream_id(), 2071);
+    assert_eq!(log.end_of_stream_position(), after);
+    let mut reader = log.reader(0).expect("a reader");
+    let mut frames = Vec::new();
+    loop {
+        let before = reader.position();
+        let poll = reader
+            .poll(64, |body, header| frames.push((body.to_vec(), *header)))
+            .expect("the poll reads");
+        if poll.position == before {
+            break;
+        }
+    }
+    assert_eq!(frames.len(), 100);
+    for (i, (body, header)) in frames.iter().enumerate() {
+        assert_eq!(body, &vec![i as u8; 32], "frame {i}: body");
+        assert_eq!(header.term_offset(), i as i32 * 64, "frame {i}: position");
+        assert_eq!(header.session_id(), session_id, "frame {i}: session");
+        assert_eq!(header.stream_id(), 2071, "frame {i}: stream");
+    }
+    assert_eq!(reader.position(), after);
+    drop(reader);
+    drop(log);
+
+    // The subscriber reaches the end: the image goes, then the log. The gauge the
+    // driver keeps for the replay's publication is the one a publication has.
+    let _ = find_position_gauge(dir.path(), replay_session_id, session_id, 2071);
+    let reader = CountersReader::open(dir.path()).expect("the counters file opens");
+    let record = reader
+        .record(u32::try_from(subscriber_counter).expect("a counter id"))
+        .expect("the record reads")
+        .expect("the subscriber's counter is allocated");
+    assert_eq!(
+        record.label(),
+        format!("subscription.position {replay_session_id} {session_id} 2071")
+    );
+    let writer =
+        cavalry_shm::counters::CountersWriter::open(dir.path()).expect("the counters open");
+    writer
+        .counter(u32::try_from(subscriber_counter).expect("a counter id"))
+        .expect("the counter")
+        .store_release(after);
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::UnavailableImage {
+            correlation_id,
+            subscriber_registration_id,
+            ..
+        } if correlation_id == replay_session_id
+            && subscriber_registration_id == subscription_id =>
+        {
+            Some(())
+        }
+        _ => None,
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dir
+        .path()
+        .join(format!("publications/{replay_session_id}.logbuffer"))
+        .exists()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the replay's log was not removed"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    driver.close().expect("closes");
+}
+
+/// The replay commands' error codes through the threads: the channel (1), a length
+/// below −1 (7), a recording not in the catalog (21), a position out of range (23), a
+/// reserved id in Cavalry's range (6), and a stop of a replay nobody holds (operation
+/// success).
+#[test]
+fn replay_commands_get_the_spec_error_codes() {
+    let dir = TestDir::new("replay-errors");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (_, publication_id, _, limit_id, _) = client.add_publication(72, true);
+    let (recording_id, _, position_id, _) = start_recording(&mut client, 72);
+    let after = publish(dir.path(), publication_id, limit_id, 4);
+    wait_value(dir.path(), position_id, after);
+    stop_recording(&mut client, recording_id);
+    wait_stopped(&mut client, recording_id);
+    let errors_before = counter(dir.path(), CLIENT_PROTOCOL_ERRORS);
+
+    let send =
+        |client: &mut Client, recording_id: i64, position: i64, length: i64, channel: &[u8]| {
+            let correlation_id = client.correlation_id();
+            client.send(&Command::StartReplay {
+                client_id: client.id,
+                correlation_id,
+                recording_id,
+                position,
+                length,
+                replay_stream_id: 2072,
+                replay_channel: channel,
+            });
+            client.wait_error(correlation_id)
+        };
+    let (code, message) = send(
+        &mut client,
+        recording_id,
+        NULL_POSITION,
+        NULL_LENGTH,
+        b"cavalry:udp?endpoint=x",
+    );
+    assert_eq!(code, 1, "{message}");
+    let (code, message) = send(&mut client, recording_id, NULL_POSITION, -2, IPC_CHANNEL);
+    assert_eq!(code, 7, "{message}");
+    let (code, message) = send(&mut client, 9, NULL_POSITION, NULL_LENGTH, IPC_CHANNEL);
+    assert_eq!(code, 21, "{message}");
+    assert!(message.contains("recording 9"), "{message}");
+    let (code, message) = send(
+        &mut client,
+        recording_id,
+        after + 32,
+        NULL_LENGTH,
+        IPC_CHANNEL,
+    );
+    assert_eq!(code, 23, "{message}");
+    assert!(message.contains(&format!("from 0 to {after}")), "{message}");
+    assert_eq!(wait_counter(dir.path(), REPLAY_START_FAILED, 2), 2);
+    assert!(
+        message.ends_with("docs/reference/client-protocol.md#error-codes"),
+        "{message}"
+    );
+
+    // A reserved id in Cavalry's range after this version's: code 6.
+    let correlation_id = client.correlation_id();
+    let mut raw = [0u8; 16];
+    raw[..8].copy_from_slice(&client.id.to_le_bytes());
+    raw[8..].copy_from_slice(&correlation_id.to_le_bytes());
+    client.send_raw(0x0105, &raw);
+    let (code, _) = client.wait_error(correlation_id);
+    assert_eq!(code, 6);
+    assert_eq!(
+        CommandType::try_from(0x0104).ok(),
+        Some(CommandType::StopReplay)
+    );
+
+    // A stop of a replay nobody holds: operation success, nothing done.
+    let correlation_id = client.correlation_id();
+    client.send(&Command::StopReplay {
+        client_id: client.id,
+        correlation_id,
+        replay_session_id: 12345,
+    });
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::OperationSuccess { correlation_id: id } if id == correlation_id => Some(()),
+        _ => None,
+    });
+    assert!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS) >= errors_before + 5);
     driver.close().expect("closes");
 }

@@ -1038,3 +1038,355 @@ fn every_error_names_the_page_that_explains_it() {
         );
     }
 }
+
+// ---- the replayer's writer (ADR 0030) ------------------------------------------------
+
+/// The bytes a recording holds from `from` to the end of what is committed: every
+/// block's bytes in stream order, a padding frame as its header and zeros to its
+/// aligned length, as a segment file holds them (`spec/durable-log.md`, "Segment files").
+fn record(log: &LogBuffers, from: i64) -> Vec<u8> {
+    let mut reader = log.reader(from).unwrap();
+    let mut out = Vec::new();
+    loop {
+        let block = reader.block(usize::MAX).unwrap();
+        if block.is_empty() {
+            return out;
+        }
+        out.extend_from_slice(block.bytes);
+        if block.padding {
+            out.resize(out.len() + block.length - block.bytes.len(), 0);
+        }
+        reader.seek(block.end()).unwrap();
+    }
+}
+
+/// Every committed frame from `reader`: the body and its header.
+fn drain_with_headers(
+    reader: &mut cavalry_shm::log::TermReader,
+) -> Vec<(Vec<u8>, DataFrameHeader)> {
+    let mut frames = Vec::new();
+    loop {
+        let before = reader.position();
+        let poll = reader
+            .poll(64, |body, header| frames.push((body.to_vec(), *header)))
+            .unwrap();
+        if poll.position == before {
+            return frames;
+        }
+    }
+}
+
+/// The replay's log: another correlation id, session and stream than the recording's.
+fn replay_fields() -> HeaderFields {
+    HeaderFields::new(LogType::Exclusive, 77, -5, T, MTU, T / 2, 9, 2001).unwrap()
+}
+
+/// Writes all of `recorded` through `writer`, as the replayer does block by block, and
+/// returns how many bytes of the stream it consumed.
+fn replay_all(writer: &mut cavalry_shm::log::TermWriter, recorded: &[u8]) -> usize {
+    let mut consumed = 0;
+    while consumed < recorded.len() {
+        let step = writer.write(&recorded[consumed..], unlimited()).unwrap();
+        assert!(step > 0, "no progress at {consumed}");
+        consumed += step;
+    }
+    consumed
+}
+
+/// The full case first: a recording of two terms with a fragmented message, reserved
+/// values and the padding frame at the first term's end, replayed from its start into a
+/// log created at 0; a reader of the replay sees every frame at the recording's
+/// position with its flags and reserved value, the replay's session and stream ids in
+/// the header, and the replay rotated as the publisher did.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_replay_writer_copies_recorded_frames_at_the_recordings_positions() {
+    let dir = Dir::new("replay-writer");
+    let source = LogBuffers::create(dir.path(), &fields(LogType::Exclusive)).unwrap();
+    source.set_connected(true).unwrap();
+    let mut appender = source.appender().unwrap();
+    let body_len = 1000; // frame 1032, aligned 1056: 62 per term and 64 bytes of padding
+    let per_term = (T / 1056) as usize;
+    for n in 0..per_term {
+        let message = vec![n as u8; body_len];
+        appender.offer(&message, unlimited(), n as i64 * 7).unwrap();
+    }
+    // A message of three fragments goes into the next term, after the padding.
+    let long = (0..3000u32).map(|i| i as u8).collect::<Vec<_>>();
+    let end = loop {
+        match appender.offer(&long, unlimited(), -1) {
+            Ok(after) => break after,
+            Err(ClaimError::AdminAction) => continue,
+            Err(error) => panic!("{error}"),
+        }
+    };
+    assert_eq!(source.active_term_count(), 1);
+    let recorded = record(&source, 0);
+    assert_eq!(
+        recorded.len() as i64,
+        end,
+        "the recording is the stream's bytes"
+    );
+    let mut expected = source.reader(0).unwrap();
+    let expected = drain_with_headers(&mut expected);
+    assert_eq!(expected.len(), per_term + 3);
+
+    let replay = LogBuffers::create_at(dir.path(), &replay_fields(), 0).unwrap();
+    assert_eq!(replay.producer_position().unwrap(), 0);
+    let mut writer = replay.writer(1, 1001).unwrap();
+    assert_eq!(writer.position(), 0);
+    assert_eq!(writer.term_length(), T);
+    assert_eq!(writer.mtu_length(), MTU);
+    assert_eq!(replay_all(&mut writer, &recorded), recorded.len());
+    assert_eq!(writer.position(), end);
+    assert_eq!(replay.producer_position().unwrap(), end);
+    assert_eq!(
+        replay.active_term_count(),
+        1,
+        "the replay rotated as the publisher did"
+    );
+    assert_eq!(replay.tail(0), Tail::pack(-5, T));
+    assert_eq!(replay.tail(1), Tail::pack(-4, (end - i64::from(T)) as u32));
+
+    let mut reader = replay.reader(0).unwrap();
+    let got = drain_with_headers(&mut reader);
+    assert_eq!(got.len(), expected.len());
+    for (i, ((body, header), (want_body, want))) in got.iter().zip(&expected).enumerate() {
+        assert_eq!(body, want_body, "frame {i}: body");
+        assert_eq!(
+            header.frame_length(),
+            want.frame_length(),
+            "frame {i}: length"
+        );
+        assert_eq!(
+            header.term_offset(),
+            want.term_offset(),
+            "frame {i}: term offset"
+        );
+        assert_eq!(header.term_id(), want.term_id(), "frame {i}: term id");
+        assert_eq!(header.flags(), want.flags(), "frame {i}: flags");
+        assert_eq!(
+            header.reserved_value(),
+            want.reserved_value(),
+            "frame {i}: reserved"
+        );
+        assert_eq!(header.session_id(), 9, "frame {i}: the replay's session");
+        assert_eq!(header.stream_id(), 2001, "frame {i}: the replay's stream");
+    }
+    assert_eq!(
+        reader.position(),
+        end,
+        "the reader's positions are the recording's"
+    );
+    let file = fs::read(dir.file(77)).unwrap();
+    assert_eq!(
+        &file[T as usize - 64..T as usize - 64 + 4],
+        &64i32.to_le_bytes(),
+        "the padding frame was written as padding"
+    );
+    assert_eq!(
+        &file[T as usize - 64 + 6..T as usize - 64 + 8],
+        &0u16.to_le_bytes()
+    );
+}
+
+/// A log created at a position starts there: the active term count, the three tails
+/// and the producer position are the position's, a reader at the position reads what a
+/// writer puts there, and the rotations out of that term and the next find the tails
+/// they expect. A position that is not a multiple of 32 from 0 to below the largest is
+/// refused with nothing created.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_replay_log_created_at_a_position_starts_there() {
+    let dir = Dir::new("replay-create-at");
+    for bad in [-32, 33, i64::from(T) << 31] {
+        let error = LogBuffers::create_at(dir.path(), &replay_fields(), bad).unwrap_err();
+        assert!(
+            matches!(error, LogError::Position { found, .. } if found == bad),
+            "{error}"
+        );
+        assert!(!dir.file(77).exists(), "nothing created for {bad}");
+    }
+    // The recording: a term and a bit, so that the replay starts in term 1.
+    let source = LogBuffers::create(dir.path(), &fields(LogType::Exclusive)).unwrap();
+    source.set_connected(true).unwrap();
+    let mut appender = source.appender().unwrap();
+    let start = i64::from(T) + 64;
+    let mut position = 0;
+    let mut n = 0u8;
+    while position < i64::from(T) * 2 + 192 {
+        match appender.offer(&[n; 32], unlimited(), 0) {
+            Ok(after) => {
+                position = after;
+                n = n.wrapping_add(1);
+            }
+            Err(ClaimError::AdminAction) => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+    let end = position;
+    let recorded = record(&source, start);
+
+    let replay = LogBuffers::create_at(dir.path(), &replay_fields(), start).unwrap();
+    assert_eq!(replay.active_term_count(), 1);
+    assert_eq!(
+        replay.tail(1),
+        Tail::pack(-4, 64),
+        "the position's term at its offset"
+    );
+    assert_eq!(
+        replay.tail(2),
+        Tail::pack(-6, 0),
+        "three back from the term that follows"
+    );
+    assert_eq!(
+        replay.tail(0),
+        Tail::pack(-5, 0),
+        "three back from the term after that"
+    );
+    assert_eq!(replay.producer_position().unwrap(), start);
+    let mut writer = replay.writer(1, 1001).unwrap();
+    assert_eq!(writer.position(), start);
+    assert_eq!(replay_all(&mut writer, &recorded), recorded.len());
+    assert_eq!(writer.position(), end);
+    assert_eq!(
+        replay.active_term_count(),
+        2,
+        "rotated out of term 1 into term 2"
+    );
+    assert_eq!(replay.tail(2), Tail::pack(-3, 192));
+
+    let mut want = source.reader(start).unwrap();
+    let want = drain_with_headers(&mut want);
+    let mut reader = replay.reader(start).unwrap();
+    let got = drain_with_headers(&mut reader);
+    assert_eq!(got.len(), want.len());
+    for ((body, header), (want_body, want)) in got.iter().zip(&want) {
+        assert_eq!(body, want_body);
+        assert_eq!(header.term_offset(), want.term_offset());
+        assert_eq!(header.term_id(), want.term_id());
+    }
+    assert_eq!(reader.position(), end);
+}
+
+/// The writer stops at the publication limit, at a slice that ends inside a frame, and
+/// counts a last frame's alignment padding the slice cut off; each stop leaves the
+/// position where the next call continues.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_replay_writer_stops_at_the_limit_and_at_a_partial_frame() {
+    let dir = Dir::new("replay-writer-limit");
+    let source = LogBuffers::create(dir.path(), &fields(LogType::Exclusive)).unwrap();
+    source.set_connected(true).unwrap();
+    let mut appender = source.appender().unwrap();
+    for n in 0..4u8 {
+        appender.offer(&[n; 32], unlimited(), 0).unwrap(); // 64 bytes each
+    }
+    appender.offer(&[9u8; 40], unlimited(), 0).unwrap(); // frame 72, aligned 96
+    let recorded = record(&source, 0);
+    assert_eq!(recorded.len(), 256 + 96);
+
+    let replay = LogBuffers::create_at(dir.path(), &replay_fields(), 0).unwrap();
+    let mut writer = replay.writer(1, 1001).unwrap();
+    assert_eq!(
+        writer.write(&recorded, 128).unwrap(),
+        128,
+        "frames at 0 and 64, not 128"
+    );
+    assert_eq!(writer.position(), 128);
+    assert_eq!(
+        writer.write(&recorded[128..], 128).unwrap(),
+        0,
+        "at the limit"
+    );
+    assert_eq!(
+        writer.write(&recorded[128..200], unlimited()).unwrap(),
+        64,
+        "a cut frame waits"
+    );
+    assert_eq!(writer.position(), 192);
+    assert_eq!(writer.write(&recorded[192..], 256).unwrap(), 64);
+    // The last frame's 72 bytes with 8 of its 24 padding bytes: counted whole.
+    assert_eq!(
+        writer.write(&recorded[256..256 + 80], unlimited()).unwrap(),
+        96
+    );
+    assert_eq!(writer.position(), 352);
+    assert_eq!(
+        writer.write(&recorded[352..], unlimited()).unwrap(),
+        0,
+        "nothing left"
+    );
+    let mut reader = replay.reader(0).unwrap();
+    let got = drain(&mut reader);
+    assert_eq!(got.len(), 5);
+    assert_eq!(got[4], vec![9u8; 40]);
+}
+
+/// A recorded frame whose header is not its position's or its recording's is refused
+/// by name, with nothing of it written and the frames before it kept, as is one that
+/// fails a check of spec/frame.md; the writer stays at the frame, so a corrected
+/// recording continues there.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_replay_writer_refuses_a_frame_that_does_not_match_its_position_or_recording() {
+    let dir = Dir::new("replay-writer-mismatch");
+    let source = LogBuffers::create(dir.path(), &fields(LogType::Exclusive)).unwrap();
+    source.set_connected(true).unwrap();
+    let mut appender = source.appender().unwrap();
+    for n in 0..3u8 {
+        appender.offer(&[n; 32], unlimited(), 0).unwrap();
+    }
+    let recorded = record(&source, 0);
+    let replay = LogBuffers::create_at(dir.path(), &replay_fields(), 0).unwrap();
+    let mut writer = replay.writer(1, 1001).unwrap();
+    let poison = |at: usize, bytes: &[u8]| {
+        let mut copy = recorded.clone();
+        copy[64 + at..64 + at + bytes.len()].copy_from_slice(bytes);
+        copy
+    };
+    let cases: [(Vec<u8>, &str); 5] = [
+        (poison(8, &128i32.to_le_bytes()), "term offset"),
+        (poison(20, &(-4i32).to_le_bytes()), "term id"),
+        (poison(12, &2i32.to_le_bytes()), "session id"),
+        (poison(16, &1002i32.to_le_bytes()), "stream id"),
+        (poison(4, &[1u8]), "version"),
+    ];
+    assert_eq!(writer.write(&recorded[..64], unlimited()).unwrap(), 64);
+    for (bytes, what) in &cases {
+        let error = writer.write(&bytes[64..], unlimited()).unwrap_err();
+        assert_eq!(error.reason(), "frame", "{what}: {error}");
+        match &error {
+            LogError::Mismatch { field, .. } => assert_eq!(field, what),
+            LogError::Frame(_) => assert_eq!(*what, "version"),
+            other => panic!("{what}: {other}"),
+        }
+        assert!(error.to_string().contains("docs/reference/"), "{error}");
+        assert_eq!(
+            writer.position(),
+            64,
+            "{what}: the first frame went, the second did not"
+        );
+    }
+    assert_eq!(writer.write(&recorded[64..], unlimited()).unwrap(), 128);
+    let mut reader = replay.reader(0).unwrap();
+    assert_eq!(
+        drain(&mut reader),
+        vec![vec![0; 32], vec![1; 32], vec![2; 32]]
+    );
+}
+
+/// The writer needs a writable log of type 1.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_replay_writer_needs_an_exclusive_writable_log() {
+    let dir = Dir::new("replay-writer-type");
+    let concurrent = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    let error = concurrent.writer(1, 1001).unwrap_err();
+    assert_eq!(error.reason(), "type", "{error}");
+    let replay = LogBuffers::create(dir.path(), &replay_fields()).unwrap();
+    assert!(replay.writer(1, 1001).is_ok());
+    let read_only = LogBuffers::open(dir.path(), 77, false).unwrap();
+    let error = read_only.writer(1, 1001).unwrap_err();
+    assert_eq!(error.reason(), "io", "{error}");
+}

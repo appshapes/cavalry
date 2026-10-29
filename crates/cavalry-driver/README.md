@@ -21,8 +21,9 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
   `Driver::start_with_threads` takes a hook each thread runs first, named the thread it
   is on, where a caller that owns the host's CPUs pins the conductor to a CPU of its own
-  and leaves the recorder on the housekeeping CPUs, as the bench does under `--pin`;
-  otherwise both threads keep the affinity of the thread that started the driver.
+  and leaves the recorder and the replayer on the housekeeping CPUs, as the bench does
+  under `--pin`; otherwise every thread keeps the affinity of the thread that started
+  the driver.
 - Records a stream to the durable log on a second thread, the recorder, with the same
   idle strategy: `start recording` and `stop recording` (`spec/client-protocol.md`,
   "Commands") name a stream, the conductor hands the recorder each start and stop
@@ -33,6 +34,15 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   disk back-pressures the publisher and never loses a byte (ADR 0025). The log
   directory is opened under a lock at start and recovered (`spec/durable-log.md`, "The
   driver"); a second driver on it refuses to start.
+- Plays a recording back on a third thread, the replayer, with the same idle strategy:
+  `start replay` names a recording, a position, a length and a replay stream id, the
+  conductor creates the replay's publication, a log of the driver's own at the
+  recording's start position so that a position in the replay is the position in the
+  recording, and the replayer copies the recording's frames from its segment files into
+  that log, each checked and each as recorded but for the replay's session and stream
+  ids, no faster than the slowest subscriber's position plus the window and never past
+  what the recorder has synced; a subscription on the replay stream reads it as any
+  stream, and `replay stopped` says where it ended and why (ADR 0030).
 - Will run dedicated threads for the sender and the receiver, pinned when the operating
   system allows, when the UDP slice arrives: a receiver that detects a gap sends a NAK,
   the sender retransmits from its own term buffer, and status messages drive flow
@@ -61,6 +71,8 @@ In Aeron, this is the media driver ([glossary](../../docs/glossary.md)).
 - Report a recording's position before the operating system holds the bytes, or a
   synced position before a sync made them durable; clean a recorded byte before the
   recorder has written it; or share a log directory with another driver (invariant 1).
+- Play a byte of a recording a sync has not made durable, or a frame that fails a check,
+  or a frame under another session and stream than the replay's own (invariant 1).
 
 ## Example
 
@@ -126,3 +138,6 @@ driver refused (driver-active): /tmp/cavalry-driver-readme-4242 holds a driver w
 - [ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md), the recorder
   thread, its queues and its counters; [`spec/durable-log.md`](../../spec/durable-log.md),
   what it writes; `src/recorder.rs`.
+- [ADR 0030](../../docs/decisions/0030-replay-a-recording-into-a-subscription.md), the
+  replayer thread, the replay's publication, the pacing and the end rules;
+  `src/replayer.rs`.

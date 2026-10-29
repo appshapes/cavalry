@@ -44,7 +44,7 @@ pub const COMMAND_RING_REJECTED_RECORD: CounterId = CounterId(11);
 /// `client.timed_out`, a static counter: Clients the driver timed out because no command of theirs arrived within the client liveness timeout; their publications and subscriptions were removed and a client timeout event sent (spec/client-protocol.md, Liveness and timeouts).
 pub const CLIENT_TIMED_OUT: CounterId = CounterId(12);
 
-/// `client_protocol.rejected_command`, a static counter: Commands the driver refused at decoding or for their channel: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, or a channel that is not cavalry:ipc (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.
+/// `client_protocol.rejected_command`, a static counter: Commands the driver refused at decoding, for their channel or for a field outside its bound: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, a channel that is not cavalry:ipc, or a replay length below -1 (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.
 pub const CLIENT_PROTOCOL_REJECTED_COMMAND: CounterId = CounterId(13);
 
 /// `client_protocol.errors`, a static counter: Error events the driver sent, whatever the code: every command this version refused after the ring delivered it (spec/client-protocol.md, Error codes); the causes with a counter of their own are client_protocol.rejected_command, driver.registry_full and driver.log_create_failed.
@@ -103,6 +103,27 @@ pub const RECORDING_POSITION: CounterId = CounterId(31);
 
 /// `recording.synced_position`, a instance gauge: The position of one recording up to which a sync has made its segment files and time index durable, stored with a release store after each sync, at most a second behind recording.position; key and label as recording.position.
 pub const RECORDING_SYNCED_POSITION: CounterId = CounterId(32);
+
+/// `replay.started`, a static counter: Replays the driver started: the replay's publication created at the start position, its counters allocated and replay ready sent (spec/client-protocol.md, Commands; ADR 0030).
+pub const REPLAY_STARTED: CounterId = CounterId(33);
+
+/// `replay.stopped`, a static counter: Replays that ended, for any reason: each sent replay stopped with the position reached and the reason; replay.ended, replay.not_connected and replay.failed count the reasons other than a stop replay command (spec/client-protocol.md, Commands).
+pub const REPLAY_STOPPED: CounterId = CounterId(34);
+
+/// `replay.ended`, a static counter: Replays that reached their end position or their recording's stop position, reason 0 of replay stopped: the subscriber saw everything it asked for.
+pub const REPLAY_ENDED: CounterId = CounterId(35);
+
+/// `replay.not_connected`, a static counter: Replays the driver ended, reason 2 of replay stopped, because their publication had no subscriber for the replay connect timeout, from the start or from the moment the last subscriber went (spec/client-protocol.md, Liveness and timeouts).
+pub const REPLAY_NOT_CONNECTED: CounterId = CounterId(36);
+
+/// `replay.failed`, a static counter: Replays that ended on a failure, reason 3 of replay stopped: a segment file of the recording could not be read, or a frame in it failed a check, which log_buffer.rejected_frame counts as well; the position in the event is the last frame delivered.
+pub const REPLAY_FAILED: CounterId = CounterId(37);
+
+/// `replay.start_failed`, a static counter: Start replay commands refused after the driver took them, with error code 21 (a recording id the catalog does not hold as a valid recording), 23 (a position out of range) or 12 (a segment file that could not be opened); a start the registries refuse with code 10 is driver.registry_full's, and a replay log that could not be created is driver.log_create_failed's (spec/client-protocol.md, Commands).
+pub const REPLAY_START_FAILED: CounterId = CounterId(38);
+
+/// `replay.position`, a instance gauge: The position of one replay up to which the replayer has written the recording's frames into the replay's log, stored with a release store after each block; it moves no faster than the slowest subscriber's position plus the publication window, and not at all with no subscriber (spec/client-protocol.md, Commands); key: replay session id (i64), little-endian; label text: the replay session id, the recording id, the replay publication's session id and its stream id in decimal, space-separated.
+pub const REPLAY_POSITION: CounterId = CounterId(39);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -215,7 +236,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "client_protocol.rejected_command",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Commands the driver refused at decoding or for their channel: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, or a channel that is not cavalry:ipc (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.",
+        doc: "Commands the driver refused at decoding, for their channel or for a field outside its bound: a message too short to carry a correlation id, an unknown type, a message of the wrong length, a bad string, a channel that is not cavalry:ipc, or a replay length below -1 (spec/client-protocol.md, What the driver rejects); the client got an error event when its correlation id was readable.",
         doctor: "A client sent a command the protocol does not allow: a binding that does not conform to spec/client-protocol.md or was upgraded apart from the driver. The error event names the command; stop that client and check its version against the driver's.",
     },
     CounterDef {
@@ -369,5 +390,61 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Instance,
         doc: "The position of one recording up to which a sync has made its segment files and time index durable, stored with a release store after each sync, at most a second behind recording.position; key and label as recording.position.",
         doctor: "A synced position far behind recording.position is a disk whose sync is slow; a power cut loses what lies between the two.",
+    },
+    CounterDef {
+        id: REPLAY_STARTED,
+        name: "replay.started",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Replays the driver started: the replay's publication created at the start position, its counters allocated and replay ready sent (spec/client-protocol.md, Commands; ADR 0030).",
+        doctor: "",
+    },
+    CounterDef {
+        id: REPLAY_STOPPED,
+        name: "replay.stopped",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Replays that ended, for any reason: each sent replay stopped with the position reached and the reason; replay.ended, replay.not_connected and replay.failed count the reasons other than a stop replay command (spec/client-protocol.md, Commands).",
+        doctor: "",
+    },
+    CounterDef {
+        id: REPLAY_ENDED,
+        name: "replay.ended",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Replays that reached their end position or their recording's stop position, reason 0 of replay stopped: the subscriber saw everything it asked for.",
+        doctor: "",
+    },
+    CounterDef {
+        id: REPLAY_NOT_CONNECTED,
+        name: "replay.not_connected",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Replays the driver ended, reason 2 of replay stopped, because their publication had no subscriber for the replay connect timeout, from the start or from the moment the last subscriber went (spec/client-protocol.md, Liveness and timeouts).",
+        doctor: "A replay was started with no subscription on its replay stream id and channel, or the subscriber closed before the replay ended: add the subscription before the start replay command, or keep it until replay stopped arrives; the replay ended at the position it had reached and can be started again from there.",
+    },
+    CounterDef {
+        id: REPLAY_FAILED,
+        name: "replay.failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Replays that ended on a failure, reason 3 of replay stopped: a segment file of the recording could not be read, or a frame in it failed a check, which log_buffer.rejected_frame counts as well; the position in the event is the last frame delivered.",
+        doctor: "A recording's segment file is unreadable or damaged: `cavalry doctor` names the recording when its slot is invalid, and the log directory's disk is the first thing to check; what was delivered up to the position is whole, and a replay from that position fails at the same frame until the file is restored from a backup.",
+    },
+    CounterDef {
+        id: REPLAY_START_FAILED,
+        name: "replay.start_failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Start replay commands refused after the driver took them, with error code 21 (a recording id the catalog does not hold as a valid recording), 23 (a position out of range) or 12 (a segment file that could not be opened); a start the registries refuse with code 10 is driver.registry_full's, and a replay log that could not be created is driver.log_create_failed's (spec/client-protocol.md, Commands).",
+        doctor: "The error event's message names the recording, the position and the recording's bounds, or the file: `cavalry doctor` lists the recordings with their start and stop positions; resolve an instant through the time index before asking for a position, and check the log directory's files for a recording whose segment is missing.",
+    },
+    CounterDef {
+        id: REPLAY_POSITION,
+        name: "replay.position",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The position of one replay up to which the replayer has written the recording's frames into the replay's log, stored with a release store after each block; it moves no faster than the slowest subscriber's position plus the publication window, and not at all with no subscriber (spec/client-protocol.md, Commands); key: replay session id (i64), little-endian; label text: the replay session id, the recording id, the replay publication's session id and its stream id in decimal, space-separated.",
+        doctor: "A replay.position that does not move while the replay has a subscriber is a subscriber that stopped polling: compare the subscription.position counters of the replay stream; one with no subscriber waits, and ends with reason 2 after the replay connect timeout.",
     },
 ];

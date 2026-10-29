@@ -1,4 +1,4 @@
-# Client protocol, version 1
+# Client protocol, version 2
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -12,7 +12,9 @@ protocol of `io.aeron.command`, its type ids and flyweights (ADR 0019;
 `docs/glossary.md`). Version 1 adds the recording commands and events, the first of
 Cavalry's own, in type id ranges of its own beside Aeron's, and the error codes they
 answer with (ADR 0025); every version 0 encoding is unchanged, so a version 0 client's
-commands are version 1 commands.
+commands are version 1 commands. Version 2 adds the replay commands and events, the next
+ids in the same ranges, and error code 23 (ADR 0030); every version 1 encoding is
+unchanged.
 
 ## The driver directory
 
@@ -26,7 +28,7 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 | `counters` | `spec/counters-file.md` | when the driver starts, first |
 | `command-ring` | `spec/command-ring.md` | when the driver starts, second |
 | `broadcast-buffer` | `spec/broadcast-buffer.md` | when the driver starts, last |
-| `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id |
+| `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id; when a replay starts, named by the replay session id |
 
 A driver that starts and finds the directory loads the command ring's consumer heartbeat
 with an acquire load: a heartbeat fresher than the driver timeout is `driver-active`, and
@@ -78,11 +80,13 @@ whose bytes or padding run past the message is `string`.
 | 11 | client close | client id, correlation id |
 | 257 (`0x0101`) | start recording | client id, correlation id, stream id, channel |
 | 258 (`0x0102`) | stop recording | client id, correlation id, recording id |
+| 259 (`0x0103`) | start replay | client id, correlation id, recording id, position, length, replay stream id, replay channel |
+| 260 (`0x0104`) | stop replay | client id, correlation id, replay session id |
 
 Type ids 1 to 255 (`0x01` to `0xFF`) are Aeron's: 7 to 10 and 12 to 255 are reserved for
 the commands Aeron's control protocol numbers, present and future, and a later version
 takes one with its feature under Aeron's number. Type ids 257 to 511 (`0x0101` to
-`0x01FF`) are Cavalry's own, taken in order from 257, and 259 to 511 are reserved for
+`0x01FF`) are Cavalry's own, taken in order from 257, and 261 to 511 are reserved for
 later versions; 256, and 512 and above, lie outside both ranges and are reserved too. The
 driver answers any reserved id with an `error` event whose code is 6. Every command
 begins with the same 16 bytes:
@@ -100,6 +104,18 @@ Then, by command:
 | add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | in this version exactly `cavalry:ipc`; any other channel is answered with error code 1 |
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
+| start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
+| start replay | 24 | 8 | position | i64 | −1 for the recording's start position, else a multiple of 32 from the recording's start position to its extent |
+| start replay | 32 | 8 | length | i64 | −1 for everything up to the recording's extent when the replay starts; 0 or more bytes; 2^63 − 1 to follow a live recording until it stops |
+| start replay | 40 | 4 | replay stream id | i32 | any: the stream the replay's publication is on |
+| start replay | 44 | 4 + n + pad | replay channel | string | in this version exactly `cavalry:ipc`; any other channel is answered with error code 1 |
+| stop replay | 16 | 8 | replay session id | i64 | 0 or more: the replay session id that `replay ready` carried |
+
+A recording's *extent* is the bytes a replay may read: its stop position once it is
+stopped, and its synced position, `recording.synced_position`, while it is live, since a
+replay plays no byte a restart would not find (CLAUDE.md, invariant 1). The position and
+length conventions are Aeron Archive's: −1 is `NULL_POSITION` and `NULL_LENGTH`,
+2^63 − 1 is `Long.MAX_VALUE` (ADR 0030).
 
 What the driver does with each, after the checks of "What the driver rejects":
 
@@ -171,6 +187,84 @@ What the driver does with each, after the checks of "What the driver rejects":
   slots the catalog holds, is error code 21; one below the next id that no live recording
   holds is already stopped, and the answer is `operation success` with nothing written,
   since a recording id is never reused.
+- **start replay.** A channel other than `cavalry:ipc` is error code 1; a length below
+  −1 is code 7; the replays registry at capacity, or the replayer's request queue full
+  or holding requests that are still waiting for room in it, is code 10, adding one to
+  `driver.registry_full`. Otherwise the driver registers the replay under the command's
+  correlation id, which is its *replay session id*, and asks its replayer to read the
+  recording's catalog slot: a recording id the catalog does not hold as a valid
+  recording, state 1, is code 21; a position of −1 is the recording's start position,
+  and a position that is not a multiple of 32, below the start position or above the
+  extent is code 23, position out of range; a segment file the replayer cannot open at
+  the position is code 12. Each of the three adds one to `replay.start_failed`. The
+  replay's *end position* is the position plus the length: the extent when the replay
+  starts for a length of −1, and 2^63 − 1 for a length of 2^63 − 1 or a sum past it.
+  The replay plays the recording's bytes from the position up to the earlier of its end
+  position and the recording's stop position, so a length past a live recording's
+  extent, 2^63 − 1 among them, plays bytes as they are synced and ends when the
+  recording stops; a length within the extent ends at the end position. The driver
+  then creates the replay's *publication*: a log in `publications/<replay session
+  id>.logbuffer` of the recording's term length, MTU length and initial term id, type 1
+  (exclusive), with a new session id and the replay stream id, created at the replay's
+  start position (`spec/log-buffer.md`, "Metadata page") so that the first frame lands
+  at its recorded term offset and a position in the replay is the position in the
+  recording; allocates its `publication.position` and `publication.limit` counters,
+  keyed by the replay session id, the session id and the stream id as a publication's
+  are, and `replay.position`, keyed by the replay session id; answers `replay ready`;
+  and sends `available image` to every subscription whose stream id and channel match,
+  with the subscriber's position counter at the start position, now and whenever one is
+  added while the replay lives, so a late subscriber joins where the replay is. A log
+  that cannot be created or sized is code 12, adding one to `driver.log_create_failed`;
+  a counters file with no free record is code 10, adding one to `driver.registry_full`;
+  either leaves nothing of the replay behind. The replay publication is the driver's:
+  no client holds a registration of it, `remove publication` cannot name it, and the
+  driver's duties on it are a publication's (`spec/log-buffer.md`, "The driver"). Its
+  limit is the publication window past the slowest subscriber's position, and the
+  replay goes no faster; with no subscriber the limit is the position reached, and the
+  replay does not move. A start adds one to `replay.started`.
+- **stop replay.** A replay session id a live replay holds: the driver stops the replay
+  at the position reached, answers `operation success` once the replayer has written
+  its last frame, and sends `replay stopped` with reason 1 to every client; a second
+  stop while one is on its way is answered with `operation success` at once. A replay
+  session id no live replay holds is already stopped, and the answer is `operation
+  success` with nothing done, since a correlation id is never reused. Any client may
+  stop any replay.
+
+The disk work of a replay is a third driver thread, the *replayer*, with the
+conductor's idle strategy, fed and answered through bounded queues as the recorder is:
+the conductor never touches the disk, and the recorder's writes never wait behind a
+replay's reads (ADR 0030). On each duty cycle the replayer visits every live replay: it
+reads the next block of the recording from its segment file, from the replay's position
+up to the nearest of its end position, the recording's extent, the end of the position's
+term, the end of the segment file, the publication's limit plus one MTU length and
+1048576 bytes on, and writes the block's frames into the replay log at their recorded
+term offsets, whole frames in order, each checked as `spec/frame.md` and
+`spec/durable-log.md`, "Segment files", say before it is written, and each as recorded
+but for the session id and the stream id, which are the replay publication's: a padding
+frame is written as padding, a data frame's body before its header's first eight bytes,
+which go in with a release store as a commit's do, so that a subscriber's poll sees whole
+frames in order, and the tail is stored after each frame with a release store, as an
+exclusive publisher stores it. A frame that would start at or past the publication's
+limit waits for the limit to move; a term that is full is rotated as a publisher rotates
+it. After each block the replayer stores `replay.position` with a release store. A frame
+that fails a check stops the replay with reason 3, adding one to
+`log_buffer.rejected_frame`; a segment file that cannot be read stops it with reason 3.
+A replay of a live recording reads up to the synced position and waits for it to move;
+the replayer reads the recording's catalog slot again once per second and whenever a
+frame length of 0 is found below the extent, so that a recording that has stopped ends
+the replay at its stop position, reason 0, within a second.
+
+A replay ends by itself when its position reaches its end position or the recording's
+stop position: the driver stores the end of stream position on the replay log, as it
+does for a closed publication, and sends `replay stopped` with reason 0; the images go
+as a closed publication's do, once every subscriber has reached the end of stream
+position or the linger has passed, and then the log. `stop replay` ends a replay at the
+position reached, with reason 1. A replay whose publication has had no subscriber for
+the replay connect timeout, from its start or from the moment its last subscriber went,
+ends with reason 2. Every end adds one to `replay.stopped`, and reasons 0, 2 and 3 add
+one to `replay.ended`, `replay.not_connected` and `replay.failed`; the replay's
+`replay.position` counter is freed after the counter reuse timeout, and its publication's
+two with its log.
 
 Session ids are the driver's to choose: it starts at a random i32 and adds 1 per new
 publication, skipping any id a live publication of the same stream id holds, as Aeron's
@@ -209,16 +303,19 @@ the publication window, since the limit respects its position.
 | 3850 (`0x0F0A`) | client timeout | client id |
 | 4097 (`0x1001`) | recording ready | correlation id, recording id, session id, recording position counter id, recording synced position counter id |
 | 4098 (`0x1002`) | recording stopped | recording id, stop position |
+| 4099 (`0x1003`) | replay ready | correlation id, replay session id, recording id, start position, session id, stream id |
+| 4100 (`0x1004`) | replay stopped | replay session id, position, reason |
 
 Type ids 3841 to 4095 (`0x0F01` to `0x0FFF`) are Aeron's: 3848, 3849 and 3851 to 4095 are
 reserved for the events Aeron's control protocol numbers, present and future. Type ids
-4097 to 4351 (`0x1001` to `0x10FF`) are Cavalry's own, taken in order from 4097, and 4099
+4097 to 4351 (`0x1001` to `0x10FF`) are Cavalry's own, taken in order from 4097, and 4101
 to 4351 are reserved for later versions; 4096, and 4352 and above, lie outside both ranges
 and are reserved too. A client that receives any reserved id reports `type` and closes,
 since an event it cannot decode may be the one it needed. A version 0 client therefore
-closes on the first recording event a version 1 driver sends, so an upgrade restarts the
-clients before the driver; a version 1 client that sends a recording command to a version
-0 driver is answered with code 6 and keeps running.
+closes on the first recording event a version 1 driver sends, and a version 1 client on
+the first replay event a version 2 driver sends, so an upgrade restarts the clients
+before the driver; a client that sends a command to a driver of an earlier version is
+answered with code 6 and keeps running.
 
 | Event | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- | --- |
@@ -252,6 +349,15 @@ clients before the driver; a version 1 client that sends a recording command to 
 | recording ready | 24 | 4 | recording synced position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.synced_position` counter, what a sync has made durable |
 | recording stopped | 0 | 8 | recording id | i64 | 0 or more |
 | recording stopped | 8 | 8 | stop position | i64 | 0 or more, a multiple of 32: the catalog's stop position |
+| replay ready | 0 | 8 | correlation id | i64 | 0 or more: the start replay command's |
+| replay ready | 8 | 8 | replay session id | i64 | 0 or more: the command's correlation id, which names the replay's log and which `stop replay` names |
+| replay ready | 16 | 8 | recording id | i64 | 0 or more: the recording being played |
+| replay ready | 24 | 8 | start position | i64 | 0 or more, a multiple of 32: where the replay starts, the recording's start position when the command passed −1 |
+| replay ready | 32 | 4 | session id | i32 | any: the replay publication's, which its images carry |
+| replay ready | 36 | 4 | stream id | i32 | any: the replay stream id |
+| replay stopped | 0 | 8 | replay session id | i64 | 0 or more |
+| replay stopped | 8 | 8 | position | i64 | 0 or more, a multiple of 32: the position after the last frame written, where the replay's images end |
+| replay stopped | 16 | 4 | reason | i32 | 0 ended, the end position or the recording's stop position reached; 1 stopped by `stop replay`; 2 no subscriber for the replay connect timeout; 3 failed, a segment file could not be read or a frame failed a check |
 
 The driver sends `unavailable image` for an image once the publication's end of stream
 position is stored and every subscriber of the image has reached it or the linger has
@@ -259,7 +365,9 @@ passed, then removes the log (`spec/log-buffer.md`, "Closing"). It sends `client
 after it has removed a timed-out client's publications and subscriptions, so that the
 client, if it is only slow, learns that it must attach again. It sends `recording stopped`
 after the catalog's stop fields are synced, so the position a client reads from the event
-is what the catalog holds. Every event goes to every client; a client acts on the ones
+is what the catalog holds. It sends `replay stopped` after the replayer has written its
+last frame and the end of stream position is stored, so the position a client reads from
+the event is where the replay's images end. Every event goes to every client; a client acts on the ones
 whose correlation id, registration id or client id is its own and ignores the rest.
 
 ## Error codes
@@ -270,13 +378,14 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
 | 3 | unknown publication | remove publication names a registration id the driver does not know, or another client's |
 | 6 | unknown command type | the record's type is not a command of this version |
-| 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read |
+| 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read, or start replay's length is below −1 |
 | 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
 | 11 | generic error | anything else; the message says what |
-| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized |
+| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, or a replay's segment file could not be opened |
 | 20 | no publication to record | start recording names a stream id and channel no live publication has |
-| 21 | unknown recording | stop recording names a recording id the catalog does not hold |
+| 21 | unknown recording | stop recording or start replay names a recording id the catalog does not hold as a valid recording |
 | 22 | already recording | start recording names a stream whose live publications are all being recorded; the message names the recording id |
+| 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's start position or above its extent; the message names both |
 
 Codes 4, 5, 8, 9, 13 and 14 are Aeron's for features outside this version, 15 to 19 are
 left free for Aeron's later codes, and all are reserved; Cavalry's own codes count up
@@ -295,6 +404,7 @@ from 20.
 | publication unblock timeout | 15 s | the driver | `spec/log-buffer.md`, "Unblocking" |
 | publication linger | 5 s | the driver | `spec/log-buffer.md`, "Closing" |
 | counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`) |
+| replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber for this long ends with reason 2 |
 
 These are Aeron's values, and they are the driver's in this version. Each timeout is
 measured on the clock the driver stores in the consumer heartbeat, nanoseconds since the
@@ -321,10 +431,12 @@ with error code 10 and registers nothing:
 | subscriptions | 1024 | every registration of a subscription |
 | images | 2048 | every pair of a subscription and a publication that match |
 | recordings | 1024 | every recording that is starting or live, one per publication at most |
+| replays | 64 | every replay that is starting or live |
 
 The counters file is sized so that the registries fill before it does: the static
-counters of `counters.toml`, 31 in this version, two per publication (2048), one per
-image (2048) and two per recording (2048) come to 6175, fewer than 8192.
+counters of `counters.toml`, 37 in this version, two per publication (2048), one per
+image (2048), two per recording (2048) and three per replay (192) come to 6373, fewer
+than 8192.
 
 ## What the driver rejects
 
@@ -350,8 +462,12 @@ be created or sized is code 12 and adds one to `driver.log_create_failed`; a str
 channel no live publication has is code 20; a stream whose live publications are all being
 recorded is code 22; a recording id the catalog does not hold is code 21; the catalog's
 slots used up is code 10 and adds one to `recording.catalog_full`; a recording's files
-that could not be created is code 12 and adds one to `recording.start_failed`. Every
-`error` event sent adds one to `client_protocol.errors`.
+that could not be created is code 12 and adds one to `recording.start_failed`; a replay
+length below −1 is code 7 and adds one to `client_protocol.rejected_command`; a replay
+position out of range is code 23, and a replay's recording id the catalog does not hold
+is code 21, and a replay's segment file that could not be opened is code 12, each adding
+one to `replay.start_failed`. Every `error` event sent adds one to
+`client_protocol.errors`.
 
 A record the ring itself rejects (`spec/command-ring.md`, "Reading") never reaches these
 checks and gets no answer: the client's response timeout reports it. A client runs the
@@ -367,12 +483,20 @@ Static counters in `counters.toml` (`spec/counters-file.md`), written by the dri
 `recording.catalog_full`, and the recovery pass's `recording.recovered`,
 `recording.invalidated`, `recording.index_rewritten`, `recording.catalog_truncated`,
 `recording.slot_dropped` and `recording.files_removed` (`spec/durable-log.md`, "The
-driver"). Instance gauges `recording.position` and `recording.synced_position`, one pair
-per recording: the key is the recording id as an i64, little-endian, 8 bytes; the label is
-the counter's name, a space, and the recording id, the session id and the stream id in
-decimal separated by spaces. The driver stores both with release stores, and loads
-`recording.position` with an acquire load before it cleans, as it loads a subscriber's
-position (`spec/log-buffer.md`, "The driver").
+driver"); and the replay's `replay.started`, `replay.stopped`, `replay.ended`,
+`replay.not_connected`, `replay.failed` and `replay.start_failed`. Instance gauges
+`recording.position` and `recording.synced_position`, one pair per recording: the key is
+the recording id as an i64, little-endian, 8 bytes; the label is the counter's name, a
+space, and the recording id, the session id and the stream id in decimal separated by
+spaces. The driver stores both with release stores, and loads `recording.position` with
+an acquire load before it cleans, as it loads a subscriber's position
+(`spec/log-buffer.md`, "The driver"). Instance gauge `replay.position`, one per replay:
+the key is the replay session id as an i64, little-endian, 8 bytes; the label is the
+counter's name, a space, and the replay session id, the recording id, the replay
+publication's session id and its stream id in decimal separated by spaces; the replayer
+stores it with a release store after each block. A replay publication's
+`publication.position` and `publication.limit` are keyed and labelled as a publication's,
+with the replay session id where the correlation id goes.
 
 ## Vectors
 

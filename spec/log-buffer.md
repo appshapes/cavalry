@@ -72,7 +72,13 @@ sets tail counter 0 to (initial term id, 0) and tail counter i, for i of 1 and 2
 (initial term id + i − 3, 0), sets the active term count to 0, the end of stream
 position to 2^63 − 1, is connected to 0, fills the header fields after the magic, and
 writes the magic last with a release store. Nothing else in the file is written until a
-publisher claims.
+publisher claims. A replay's log (`spec/client-protocol.md`, "Commands"; ADR 0030) is
+created at a position instead, so that its positions are the recording's: with c the
+position's term count and t its term id, initial term id + c, the active term count is
+c, the tail counter of partition c modulo 3 is (t, the position's term offset), and the
+tail counters of partitions c + 1 and c + 2 modulo 3 are (t − 2, 0) and (t − 1, 0), the
+terms three back from the two terms that follow, as rotation expects them; every other
+field is as above.
 
 ## Positions
 
@@ -263,9 +269,13 @@ fails, by the name in the first column.
 | `changed` | The header read through the final mapping differs from the first read. |
 
 In use: `position` when a position given to a reader is not a multiple of 32, is below
-the reader's position or is beyond the end of its term; `tail` when the active tail's
-term id is not initial term id + active term count, which a publisher retries and the
-driver reports; and a frame's reasons are `spec/frame.md`'s.
+the reader's position or is beyond the end of its term, or a position a log is created
+at is not a multiple of 32 from 0 to below the largest position; `tail` when the active
+tail's term id is not initial term id + active term count, which a publisher retries and
+the driver reports; and a frame's reasons are `spec/frame.md`'s, with `frame` as well for
+a recorded frame a replay writes whose header does not carry its position's term id and
+term offset or its recording's session id and stream id (`spec/durable-log.md`, "Segment
+files").
 
 ## Vectors
 
