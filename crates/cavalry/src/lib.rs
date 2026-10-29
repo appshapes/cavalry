@@ -3,8 +3,8 @@
 
 pub use cavalry_client::{
     BufferClaim, Cavalry, ClientError, Closed, DataFrameHeader, FOLLOW_LENGTH, Fault, Flags,
-    FrameType, Image, MAX_IMAGES, NULL_LENGTH, NULL_POSITION, Offer, Publication, Recording,
-    Replay, ReplayStopReason, Subscription,
+    FrameType, Image, MAX_IMAGES, NULL_LENGTH, NULL_POSITION, Offer, Positions, Publication,
+    Recording, Replay, ReplayStopReason, Subscription,
 };
 pub use cavalry_driver::{Driver, DriverError, DriverThread, IdleStrategy, ThreadStart, spec};
 pub use cavalry_log::index;

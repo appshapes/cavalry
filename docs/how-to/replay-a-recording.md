@@ -36,9 +36,13 @@ In Aeron, this is Archive's `startReplay` ([glossary](../glossary.md)).
    The last line says where the replay started and ended and how many messages it
    printed. A message longer than the MTU arrives in fragments, one line each, the
    first marked `fragment begin`, the last `fragment end` and those between `fragment`.
-   The command subscribes to a replay stream of its own, so two commands on one
-   recording never mix their lines; `--stream <id>` names the stream instead, for a
-   program that is already subscribed to it.
+   A position is read from the frame's header, and feeding one back as `--from` plays
+   from that message. A padding frame, which fills the end of a term or covers a claim
+   that was aborted or unblocked, is not a message: it prints nothing, and the position
+   after it is past its length. The command subscribes to a replay stream of its own,
+   so two commands on one recording never mix their lines; `--stream <id>` names the
+   stream instead, for a program that is already subscribed to it, and only the
+   replay's frames are printed when other publications share that stream.
 
 2. Play a part, from an instant to an instant:
 
@@ -73,23 +77,36 @@ first, then `client.start_replay(recording_id, position, length, stream_id,
 the replayer's counter and `ended()`, the end position and the reason once `replay
 stopped` has arrived; `position` is `NULL_POSITION` for the start, `length` is
 `NULL_LENGTH` for the extent or `FOLLOW_LENGTH` to follow. The subscription's image
-of the replay carries the recording's positions: `image.position_of(&header)` is a
-frame's position in the recording. `cavalry::index::position_at(log_dir, recording_id,
-instant)` and `position_after` resolve instants as the command does. The replay is the
-driver's: dropping the handle stops nothing, and `client.stop_replay(id)?`, or
-`replay.stop(&mut client)?`, ends it from any client.
+of the replay, the one whose `session_id()` is `replay.session_id()`, carries the
+recording's positions: `image.position_of(&header)` is a frame's position in the
+recording, and `image.positions()` is the same arithmetic as a value the fragment
+handler holds, `positions.position(header.term_id(), header.term_offset() as u32)`,
+since the handler cannot reach the image while the subscription polls. The image
+joins at a poll; `subscription.poll(|_, _| {}, 0)?` applies the images the driver
+announced and reads no frame, so a program takes the positions before its first
+message. Poll until `image.position()` reaches the end `ended()` reports: an image
+that goes first took the rest with it, and the program has read to where it has.
+`cavalry::index::position_at(log_dir, recording_id, instant)` and `position_after`
+resolve instants as the command does. The replay is the driver's: dropping the handle
+stops nothing, and `client.stop_replay(id)?`, or `replay.stop(&mut client)?`, ends it
+from any client. The client follows the end of every replay it started while the
+handle lives, as many as the driver allows live at once, 64; one more is
+`replays-full`, and stopped again.
 
 ## How to verify it worked
 
 - The lines' positions start at the position the last line reports and rise by each
-  message's aligned length; the last line says `ended`.
+  message's aligned length, its body and 32-byte header rounded up to a multiple of
+  32, and by more over a padding frame, which prints nothing; the last line says
+  `ended`, with no `read to position` after the count.
 - `just doctor` after the replay reports no `replay-*` finding; the `replay.ended`
   counter grew by one.
 - Running the command twice prints the same lines: a replay of the same bytes is the
   same stream (invariant 1). `just replay-check` is that check as a gate: a recording
-  of 100,000 hash-chained messages, the live subscriber's lines and two replays' lines
-  hashed and compared, and a replay from an instant checked against the index
-  (`scripts/replay-check.sh`).
+  of 100,000 hash-chained messages with a padding frame a quarter of the way, the live
+  subscriber's lines and two replays' lines hashed and compared, and a replay from an
+  instant checked against the index, which a position summed over the lines would fail
+  past the padding (`scripts/replay-check.sh`).
 
 ## When it does not work
 
@@ -114,6 +131,16 @@ driver's: dropping the handle stops nothing, and `client.stop_replay(id)?`, or
 - The replay stops early with `failed`: a frame in a segment file failed a check, or the
   file could not be read; what was printed is whole, and `replay.failed` in `doctor`
   names the recording. The segment file needs restoring from a backup.
+- The last line ends in `read to position <position>`, stderr says which positions
+  `were not printed`, and the exit code is 1: the driver removed the replay's log
+  before the command had read it to the end. An ended replay's log stays for its
+  subscribers for the publication linger, 5 s, and the command's stdout held it up for
+  longer: a pager, or a pipe into a slow program. What was printed is whole and ends at
+  that position. Read faster, into a file for instance, or run the command again with
+  `--from` at that position for the rest.
+- `command refused (replays-full)` from a program: this client has 64 replays live at
+  once, the driver's bound, and the new one was stopped again; wait for one to end, or
+  stop one.
 - `time index refused (io)` or `rejected (empty)` on `--from <instant>`: the recording's
   index is missing, unreadable or has no entry yet; pass a position, or `--log-dir` the
   directory the driver uses.

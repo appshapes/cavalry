@@ -1,12 +1,15 @@
 //! The replay gate's program (`just replay-check`; CLAUDE.md, gate 1; ADR 0030): one
 //! process attaches to the driver running on this host, records a stream it publishes,
 //! and reads the stream live through a subscription, printing every message as
-//! `cavalry replay` prints it, `<position> <body as hex>`, so that the script can hash
-//! what the live subscriber saw and what two replays print and compare the three.
-//! Each message's body is its number and a hash chain over every body before it, so a
-//! byte out of place or a message missing changes every line after it. On stderr it
-//! prints what the script needs: the recording id, the end position, an instant taken
-//! half way, and the position the time index resolves that instant to.
+//! `cavalry replay` prints it, `<position> <body as hex>`, the position from the
+//! frame's header, so that the script can hash what the live subscriber saw and what
+//! two replays print and compare the three. Each message's body is its number and a
+//! hash chain over every body before it, so a byte out of place or a message missing
+//! changes every line after it. A quarter of the way the publisher aborts a claim,
+//! which leaves a padding frame in the recording that no line shows, so that every
+//! position after it is past a frame a sum of the lines' lengths would miss. On stderr
+//! it prints what the script needs: the recording id, the end position, an instant
+//! taken half way, and the position the time index resolves that instant to.
 //! `--messages <n>` sets the count, 100000 by default; `CAVALRY_DIR` names the driver's
 //! directory when it is not the default (`docs/reference/config.md`).
 
@@ -14,7 +17,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cavalry::{Cavalry, Offer, index};
+use cavalry::{Cavalry, Offer, Positions, index};
 
 const STREAM_ID: i32 = 1094;
 
@@ -82,21 +85,40 @@ fn run(messages: u64) -> Result<(), Box<dyn std::error::Error>> {
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
 
-    // The live subscriber: every message as `cavalry replay` prints it. The recording
-    // started at 0 on a fresh publication, so a frame's position is the sum of the
-    // aligned lengths before it, which is what the replay's image says too.
+    // The live subscriber's image, the publication's, joins at a poll: a poll with a
+    // fragment limit of 0 applies it and reads no frame. Its positions name each
+    // frame's position from its header, as `cavalry replay` does from the replay's
+    // image; the recording started at 0 on a fresh publication, so they are the
+    // recording's positions.
+    let positions: Positions = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            subscription.poll(|_, _| {}, 0)?;
+            if let Some(image) = subscription.images().first() {
+                break image.positions();
+            }
+            if Instant::now() > deadline {
+                return Err("the live subscriber's image did not join".into());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+
+    // The live subscriber: every message as `cavalry replay` prints it.
     let mut received: u64 = 0;
-    let mut position: i64 = 0;
     let mut line = String::new();
     let mut poll = |subscription: &mut cavalry::Subscription,
                     out: &mut std::io::BufWriter<_>|
      -> Result<u64, Box<dyn std::error::Error>> {
-        let mut lines: Vec<(usize, Vec<u8>)> = Vec::new();
+        let mut lines: Vec<(i64, Vec<u8>)> = Vec::new();
         subscription.poll(
-            |body, header| lines.push((header.aligned_length(), body.to_vec())),
+            |body, header| {
+                let position = positions.position(header.term_id(), header.term_offset() as u32);
+                lines.push((position, body.to_vec()));
+            },
             256,
         )?;
-        for (aligned, body) in &lines {
+        for (position, body) in &lines {
             use std::fmt::Write as _;
             line.clear();
             write!(line, "{position} ")?;
@@ -104,7 +126,6 @@ fn run(messages: u64) -> Result<(), Box<dyn std::error::Error>> {
                 write!(line, "{byte:02x}")?;
             }
             writeln!(out, "{line}")?;
-            position += *aligned as i64;
         }
         Ok(lines.len() as u64)
     };
@@ -128,6 +149,26 @@ fn run(messages: u64) -> Result<(), Box<dyn std::error::Error>> {
                 Err(other) => return Err(format!("offer refused: {other}").into()),
             }
         };
+        if n + 1 == messages / 4 {
+            // A quarter of the way: a claim aborted is a padding frame in the recording
+            // (`spec/log-buffer.md`, "Claim, commit and abort"), which the replayer
+            // plays as padding and no handler sees, so every line after it is 64 bytes
+            // past where a sum of the lines' lengths would put it; step 5 of the script
+            // checks the first line's position against the time index's.
+            loop {
+                match publication.try_claim(32) {
+                    Ok(claim) => {
+                        let _ = claim.abort();
+                        break;
+                    }
+                    Err(Offer::BackPressured | Offer::AdminAction) => {
+                        received += poll(&mut subscription, &mut out)?;
+                        std::hint::spin_loop();
+                    }
+                    Err(other) => return Err(format!("claim refused: {other}").into()),
+                }
+            }
+        }
         if n + 1 == messages / 2 {
             // Half way: once the recorder holds every byte so far and a millisecond has
             // passed, an instant the index can place, for `--from <instant>`.

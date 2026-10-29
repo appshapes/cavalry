@@ -20,8 +20,10 @@ binary's `main`.
   two positions; `record <stream id>` records a stream's live publication to the durable
   log and `record --stop <id>` stops it (ADR 0025); `replay --recording <id> --from
   <position or instant>` plays a recording back into a subscription of its own and prints
-  one line per message, from a position or an instant the time index resolves, to `--to`
-  or the recording's extent, or `--follow`ing a live recording to its stop (ADR 0030);
+  one line per message, the position from the frame's header and the body, from a
+  position or an instant the time index resolves, to `--to` or the recording's extent,
+  or `--follow`ing a live recording to its stop, and exits 1 naming the positions it did
+  not print when the replay's log went before it had read to the end (ADR 0030);
   `cavalry::index` is the lookup behind an instant; `console` arrives with its feature.
 - Control-plane and command-line dependencies sit behind the `cli` feature, on by
   default so that `cargo install cavalry` needs no flag. `cargo add cavalry --no-

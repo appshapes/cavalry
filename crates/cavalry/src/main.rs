@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cavalry::config::Config;
-use cavalry::{Cavalry, Driver, FOLLOW_LENGTH, NULL_LENGTH, doctor, index};
+use cavalry::{
+    Cavalry, Driver, FOLLOW_LENGTH, Image, NULL_LENGTH, Positions, Subscription, doctor, index,
+};
 
 const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
 
@@ -572,15 +574,17 @@ fn record(config: &Config, action: RecordAction) -> ExitCode {
 }
 
 /// `cavalry replay`: a client of the driver that subscribes to a replay stream, starts
-/// the replay and prints one line per message, `<position> <body>`, the body as UTF-8
-/// when it is printable and as hex otherwise, a fragment of a longer message marked
-/// `fragment begin`, `fragment` or `fragment end`, until the replay ends; then where it
-/// started and ended and how many messages it printed. An instant is resolved through
-/// the recording's time index in the log directory before the command is sent
-/// (`spec/durable-log.md`, "Time index"); `--to` becomes the length, `--follow`
-/// follows a live recording, and neither plays to the recording's extent. Exit 1 with
-/// the driver's message when the command is refused, and when the replay failed
-/// (`spec/client-protocol.md`, "Error codes" and `replay stopped`).
+/// the replay and prints one line per message, `<position> <body>`, the position from
+/// the frame's header, the body as UTF-8 when it is printable and as hex otherwise, a
+/// fragment of a longer message marked `fragment begin`, `fragment` or `fragment end`,
+/// until the replay ends; then where it started and ended and how many messages it
+/// printed. An instant is resolved through the recording's time index in the log
+/// directory before the command is sent (`spec/durable-log.md`, "Time index"); `--to`
+/// becomes the length, `--follow` follows a live recording, and neither plays to the
+/// recording's extent. Exit 1 with the driver's message when the command is refused,
+/// when the replay failed (`spec/client-protocol.md`, "Error codes" and `replay
+/// stopped`), and when the replay's log went before the command had read it to the end,
+/// with the positions it did not print (invariant 1).
 fn replay(config: &Config, request: ReplayRequest) -> ExitCode {
     let fail = |error: &dyn std::fmt::Display| {
         eprintln!("cavalry replay: {error}");
@@ -642,8 +646,26 @@ fn replay(config: &Config, request: ReplayRequest) -> ExitCode {
     }
 }
 
-/// The subscription, the replay, and the lines, until the replay ended and the image
-/// has been read to the end position.
+/// The replay's image among the subscription's: the one with the replay publication's
+/// session id. `--stream` may name a stream with other publications on it, whose images
+/// and frames are not the replay's.
+fn replay_image(subscription: &Subscription, session_id: i32) -> Option<&Image> {
+    subscription
+        .images()
+        .iter()
+        .find(|image| image.session_id() == session_id)
+}
+
+/// The subscription, the replay, and the lines, until the replay ended and its image
+/// has been read to the end position. Each line's position is the frame's, from its
+/// header and the image's positions (`spec/log-buffer.md`, "Positions"): a padding
+/// frame, at the end of a term or over an aborted or unblocked claim, is replayed as
+/// padding, prints nothing and moves the position, so a sum of the lines' lengths
+/// would be short from the first one on. An image that goes before it was read to the
+/// end is `Err`, with the positions not printed: the driver keeps an ended replay's log
+/// for its subscribers for the publication linger, 5 s (`spec/log-buffer.md`,
+/// "Closing"), and a command held up on its stdout for longer loses the rest, which a
+/// summary that read as complete would hide (invariant 1).
 fn replay_to_stdout(
     client: &mut Cavalry,
     request: &ReplayRequest,
@@ -655,37 +677,54 @@ fn replay_to_stdout(
     let mut subscription = client.add_subscription("cavalry:ipc", stream_id)?;
     let replay =
         client.start_replay(request.recording_id, from, length, stream_id, "cavalry:ipc")?;
+    let session_id = replay.session_id();
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     let mut messages = 0u64;
     let mut line = String::new();
-    let mut last = replay.start_position();
     let mut read_to = replay.start_position();
+    let mut positions: Option<Positions> = None;
     let ended = loop {
-        let mut io_error = None;
-        let polled = subscription.poll(
-            |body, header| {
-                line.clear();
-                format_line(&mut line, last, body, header);
-                last += header.aligned_length() as i64;
-                if header.flags().contains(cavalry::Flags::END) {
-                    messages += 1;
-                }
-                if let Err(error) = writeln!(out, "{line}") {
-                    io_error.get_or_insert(error);
-                }
-            },
-            256,
-        );
-        if let Some(error) = io_error {
-            return Err(error.into());
+        // The replay's image joins the subscription at a poll: until it has, a poll
+        // with a fragment limit of 0 applies the images the driver announced and reads
+        // no frame, so that the first frame printed has its position from the image.
+        if positions.is_none() {
+            subscription.poll(|_, _| {}, 0)?;
+            positions = replay_image(&subscription, session_id).map(Image::positions);
         }
-        let delivered = polled?;
-        if let Some(image) = subscription.images().first() {
+        let delivered = match positions {
+            None => 0,
+            Some(positions) => {
+                let mut io_error = None;
+                let polled = subscription.poll(
+                    |body, header| {
+                        if header.session_id() != session_id {
+                            return;
+                        }
+                        let position =
+                            positions.position(header.term_id(), header.term_offset() as u32);
+                        line.clear();
+                        format_line(&mut line, position, body, header);
+                        if header.flags().contains(cavalry::Flags::END) {
+                            messages += 1;
+                        }
+                        if let Err(error) = writeln!(out, "{line}") {
+                            io_error.get_or_insert(error);
+                        }
+                    },
+                    256,
+                );
+                if let Some(error) = io_error {
+                    return Err(error.into());
+                }
+                polled?
+            }
+        };
+        if let Some(image) = replay_image(&subscription, session_id) {
             read_to = image.position();
         }
         if let Some((end, reason)) = replay.ended()
-            && (read_to >= end || subscription.images().is_empty())
+            && (read_to >= end || replay_image(&subscription, session_id).is_none())
         {
             break (end, reason);
         }
@@ -704,12 +743,29 @@ fn replay_to_stdout(
         Some(cavalry::ReplayStopReason::Failed) => "failed".to_string(),
         None => "ended with a reason this version does not know".to_string(),
     };
+    let unread = read_to < end;
     println!(
-        "replay {} of recording {} {said} at position {end}: {messages} messages from position {}",
+        "replay {} of recording {} {said} at position {end}: {messages} messages from position {}{}",
         replay.replay_session_id(),
         request.recording_id,
-        replay.start_position()
+        replay.start_position(),
+        if unread {
+            format!(", read to position {read_to}")
+        } else {
+            String::new()
+        }
     );
+    if unread {
+        return Err(format!(
+            "the driver removed the replay's log before this command had read it to the end: \
+             positions {read_to} to {end}, {} bytes, were not printed; an ended replay's log \
+             stays for its subscribers for the publication linger, 5 s, and stdout held this \
+             command up for longer; read faster, or run the command again with --from \
+             {read_to}; see docs/how-to/replay-a-recording.md#when-it-does-not-work",
+            end - read_to
+        )
+        .into());
+    }
     if reason == Some(cavalry::ReplayStopReason::Failed) {
         return Err(format!(
             "the replay failed at position {end}: a segment file could not be read or a frame \

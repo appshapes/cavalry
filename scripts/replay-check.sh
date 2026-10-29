@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # The deterministic replay gate (CLAUDE.md, gate 1; ADR 0030). `just replay-check` runs
 # it; CI runs it on Linux and macOS. A driver on a directory of its own records a stream
-# of 100,000 messages whose bodies carry a hash chain while a live subscriber prints
-# every message; `cavalry replay` plays the recording twice from its start and once from
-# an instant resolved through the time index; the live lines and the two replays' lines
-# must hash the same, and the replay from the instant must start at the position the
-# index gives. A byte out of place or a message missing anywhere fails it.
+# of 100,000 messages whose bodies carry a hash chain, with a padding frame a quarter of
+# the way that no line shows, while a live subscriber prints every message; `cavalry
+# replay` plays the recording twice from its start and once from an instant resolved
+# through the time index; the live lines and the two replays' lines must hash the same,
+# and the replay from the instant must start at the position the index gives, which a
+# position summed over the lines would miss past the padding. A byte out of place or a
+# message missing anywhere fails it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
