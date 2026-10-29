@@ -34,22 +34,26 @@ the language clients, and a release on crates.io
 
 ## The ten-minute path
 
-Five commands, from a checkout, on a laptop or a cloud VM; `just quickstart` runs the
-same five in CI on Linux and macOS, and
+Six commands, from a checkout, on a laptop or a cloud VM; `just quickstart` runs the
+same six in CI on Linux and macOS, and
 [the tutorial](docs/tutorials/publish-and-subscribe.md) says what each one shows.
 
 ```sh
 cargo build --release -p cavalry --bin cavalry --example quickstart
 target/release/cavalry run &            # one driver per host; Ctrl-C or SIGTERM stops it
-target/release/examples/quickstart      # publishes 1,000 messages and reads them back
+target/release/examples/quickstart      # records the stream, publishes 1,000 messages and reads them back
+target/release/cavalry replay --recording 0 --from 0 | tail -2   # the id the program printed; the last message and the summary
 target/release/cavalry doctor           # explains the driver from its counters; exit 0
 kill -TERM %1                           # the driver closes and leaves its directory for doctor
 ```
 
 The program is [`crates/cavalry/examples/quickstart.rs`](crates/cavalry/examples/quickstart.rs),
-thirty lines with `cavalry::Cavalry`: connect, add a subscription and a publication on a
-stream, claim a frame and write in place, poll the subscription, every message once and in
-order. No configuration: the driver's directory is `/dev/shm/cavalry-<user>` on Linux and
+fifty lines with `cavalry::Cavalry`: connect, add a subscription and a publication on a
+stream, start a recording of the stream, claim a frame and write in place, poll the
+subscription, every message once and in order, wait until the recorder has written up
+to the publication's position, stop the recording. The replay plays the recording back
+from the durable log and prints each message's position and body. No
+configuration: the driver's directory is `/dev/shm/cavalry-<user>` on Linux and
 under the temporary directory elsewhere, and `CAVALRY_DIR` moves it
 ([configuration](docs/reference/config.md)).
 

@@ -14,8 +14,8 @@ started=$(date +%s)
 
 if [ -d /dev/shm ]; then base=/dev/shm; else base="${TMPDIR:-/tmp}"; fi
 export CAVALRY_DIR="${base%/}/cavalry-quickstart-$$"
-# The driver's log directory follows XDG_DATA_HOME (ADR 0025), so the run's recordings,
-# none yet, land beside its driver directory and never under the user's home.
+# The driver's log directory follows XDG_DATA_HOME (ADR 0025), so the run's recording
+# lands beside its driver directory and never under the user's home.
 export XDG_DATA_HOME="${CAVALRY_DIR}-data"
 rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME"
 cleanup() {
@@ -43,18 +43,30 @@ done
 running=$("$cavalry" doctor || true)
 grep -q 'is running' <<<"$running" || { echo "quickstart: the driver did not report running" >&2; exit 1; }
 
-step "3. the program: publish 1,000 messages and read them back"
+step "3. the program: record the stream, publish 1,000 messages and read them back"
 program=$(target/release/examples/quickstart)
 printf '%s\n' "$program"
 grep -q 'received once, in order' <<<"$program" || {
     echo "quickstart: the program did not report every message once, in order" >&2; exit 1; }
+recording=$(sed -n 's/^quickstart: recording \([0-9]*\) of stream .* stopped;.*/\1/p' <<<"$program")
+[ -n "$recording" ] || { echo "quickstart: the program did not report its recording" >&2; exit 1; }
 
-step "4. cavalry doctor"
+step "4. cavalry replay: the recording played back from the durable log"
+replayed=$("$cavalry" replay --recording "$recording" --from 0)
+tail -2 <<<"$replayed"
+grep -q "ended at position 64000: 1000 messages from position 0" <<<"$replayed" || {
+    echo "quickstart: the replay did not end at 64000 with 1000 messages" >&2; exit 1; }
+grep -q '^63936 e703000000000000$' <<<"$replayed" || {
+    echo "quickstart: the thousandth message is not at position 63936 with the body 999" >&2; exit 1; }
+[ "$(grep -c '^[0-9]* [0-9a-f]*$' <<<"$replayed")" = 1000 ] || {
+    echo "quickstart: the replay did not print 1000 message lines" >&2; exit 1; }
+
+step "5. cavalry doctor"
 report=$("$cavalry" doctor)
 printf '%s\n' "$report"
 grep -q '0 failed' <<<"$report" || { echo "quickstart: doctor reported a failure" >&2; exit 1; }
 
-step "5. stop the driver with SIGTERM"
+step "6. stop the driver with SIGTERM"
 kill -TERM "$driver_pid"
 wait "$driver_pid"
 driver_pid=""
