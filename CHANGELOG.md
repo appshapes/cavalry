@@ -627,3 +627,12 @@ user-visible change, added in the same commit as the change. The format follows
   command, which `just quickstart` checks on Linux and macOS: the second slice's
   acceptance test (card 95, ADR 0023;
   [the tutorial](docs/tutorials/publish-and-subscribe.md)).
+- The driver loads a publication's producer position at most once every two
+  milliseconds, where it was one: at ten million claims a second the transfer the
+  publisher's next store paid after each load landed on one claim in ten thousand, the
+  gate's percentile, so `claim_commit_32_exclusive` on kip read 107 or 156 ns by the
+  process; now one in twenty thousand, and the first runs at two milliseconds read 119
+  to 152 on kip inside one process, within its spread. The harness follows the same
+  constant; `publication.position` is at most two milliseconds behind the publisher;
+  neither bench host's baseline moves
+  ([ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md)).
