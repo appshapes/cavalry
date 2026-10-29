@@ -48,10 +48,11 @@ kill -TERM %1                           # the driver closes and leaves its direc
 ```
 
 The program is [`crates/cavalry/examples/quickstart.rs`](crates/cavalry/examples/quickstart.rs),
-forty lines with `cavalry::Cavalry`: connect, add a subscription and a publication on a
+fifty lines with `cavalry::Cavalry`: connect, add a subscription and a publication on a
 stream, start a recording of the stream, claim a frame and write in place, poll the
-subscription, every message once and in order, stop the recording. The replay plays the
-recording back from the durable log and prints each message's position and body. No
+subscription, every message once and in order, wait until the recorder has written up
+to the publication's position, stop the recording. The replay plays the recording back
+from the durable log and prints each message's position and body. No
 configuration: the driver's directory is `/dev/shm/cavalry-<user>` on Linux and
 under the temporary directory elsewhere, and `CAVALRY_DIR` moves it
 ([configuration](docs/reference/config.md)).

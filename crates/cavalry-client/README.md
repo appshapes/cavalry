@@ -54,8 +54,8 @@ In Aeron, this is the client, with `tryClaim` and `commit`
 ## Example
 
 One process publishes and subscribes through the driver on this host: this is the
-ten-minute path's program, and the crate's doctest. `cavalry run` in another terminal is
-the usual driver; the doctest embeds one.
+ten-minute path's program without its recording, and the crate's doctest. `cavalry run`
+in another terminal is the usual driver; the doctest embeds one.
 
 ```rust
 use cavalry_client::{Cavalry, Offer};

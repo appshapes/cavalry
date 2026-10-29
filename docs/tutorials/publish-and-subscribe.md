@@ -54,13 +54,16 @@ stopped; cavalry replay --recording 0 --from 0 plays it back`. The program is
 it connects with `Cavalry::connect()`, adds a subscription and a publication on stream
 1001, starts a recording of the stream with `start_recording`, claims a frame per
 message and writes it in place, and polls the subscription, which hands each message to
-a closure as a view into the shared log; then it stops the recording. Until the
-subscription's image joins, the claim is refused with `not-connected`; a full window is
-`back-pressured`; the program polls and tries again, which is what every refusal means.
-The recording is the driver's: its recorder thread wrote every committed frame to the
-log directory, `~/.local/share/cavalry/log` unless `CAVALRY_LOG_DIR` says otherwise, and
-it outlived the program. The recording id is 0 on a fresh log directory; a directory
-that holds earlier recordings gives the next id, which is the one the program printed.
+a closure as a view into the shared log; then it stops the recording once the recorder
+has written up to the publication's position, since a stop stops at what the recorder
+has written so far. Until the subscription's image joins, the claim is refused with
+`not-connected`; a full window is `back-pressured`; the program polls and tries again,
+which is what every refusal means. The recording is the driver's: its recorder thread
+wrote every committed frame to the log directory, `cavalry/log` under `$XDG_DATA_HOME`
+when that variable is set and `~/.local/share/cavalry/log` otherwise
+([`log.dir`](../reference/config.md#logdir)), and it outlived the program. The
+recording id is 0 on a fresh log directory; a directory that holds earlier recordings
+gives the next id, which is the one the program printed.
 
 ## 4. Replay the recording
 
@@ -114,7 +117,8 @@ replay. Every refusal is a result the program decides on, and every state is a c
   [Replay a recording](../how-to/replay-a-recording.md): the two commands from a shell,
   what the log directory holds, and replaying between two instants.
 - [`crates/cavalry-client/README.md`](../../crates/cavalry-client/README.md): the client
-  API, with the same program as its doctest, and what the crate must never do.
+  API, with the same program without the recording as its doctest, and what the crate
+  must never do.
 - [`spec/client-protocol.md`](../../spec/client-protocol.md) and
   [`spec/log-buffer.md`](../../spec/log-buffer.md): what the client and the driver say to
   each other, and how a message gets from a claim to a handler.
