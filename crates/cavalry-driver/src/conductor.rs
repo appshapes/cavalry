@@ -3359,9 +3359,9 @@ mod replay {
     //! cycle, on a clock the test advances: a recording made and stopped, then played
     //! into a subscription. The full case first, then pacing, the connect timeout, the
     //! stop, every error code, the registry's bound, a live recording followed, a
-    //! damaged segment, a replay across a segment roll, an end position inside a
-    //! frame, and the request queue, the deferred list and the pending replies at
-    //! their bounds.
+    //! damaged segment three ways, a replay across a segment roll, an end position
+    //! inside a frame, and the request queue, the deferred list and the pending
+    //! replies at their bounds.
 
     use std::fs::OpenOptions;
     use std::os::unix::fs::FileExt;
@@ -4107,6 +4107,80 @@ mod replay {
         assert_eq!(h.counter(REPLAY_FAILED), 1);
         assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 1);
         assert_eq!(read_replay(&h, 6, 0).len(), 3);
+        drop(appender);
+    }
+
+    /// A recorded frame whose length runs past the recording's extent (invariants 1
+    /// and 4; spec, "start replay"): the header passes `spec/frame.md`'s checks, since
+    /// the frame fits its term, but the block the replayer reads ends at the extent,
+    /// so the writer has no whole frame and writes nothing. That is the `length`
+    /// reason, damage, not a block to read again for ever: `replay stopped` reason 3 at
+    /// the frame before it, `replay.failed` and `log_buffer.rejected_frame` at 1, and
+    /// the frames before it delivered.
+    #[test]
+    fn a_frame_length_past_the_extent_ends_the_replay_with_reason_3_at_the_frame_before_it() {
+        let (mut h, mut appender) = recorded("replay-length-past-extent");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let segment = OpenOptions::new()
+            .write(true)
+            .open(h.log_dir.join("0-0.rec"))
+            .expect("the segment opens");
+        // The tenth frame, at 576, says it is 128 bytes long: 64 past the stop at 640.
+        segment
+            .write_all_at(&128i32.to_le_bytes(), 9 * 64)
+            .expect("the tenth frame's length is poisoned");
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((576, 3)));
+        assert_eq!(replay_position.load_acquire(), 576);
+        assert_eq!(h.counter(REPLAY_FAILED), 1);
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 1);
+        assert_eq!(read_replay(&h, 6, 0).len(), 9, "the frames before it");
+        drop(appender);
+    }
+
+    /// A recorded frame whose length is over the MTU (invariants 1 and 4): 65472 bytes
+    /// at 64 in a 64 KiB term, which is exactly the term's remaining bytes, so the
+    /// header passes `spec/frame.md`'s checks, while the recording is a term and a
+    /// half, so the extent does not cut the block; the publication's limit does, at
+    /// the window plus an MTU with the subscriber at 0, the one bound that may end a
+    /// block inside a frame and does so only for a frame over the MTU. The writer
+    /// writes nothing of it and the replayer calls it damage: `replay stopped` reason
+    /// 3 at 64, `replay.failed` and `log_buffer.rejected_frame` at 1, the frame before
+    /// it delivered.
+    #[test]
+    fn a_frame_length_over_the_mtu_ends_the_replay_with_reason_3_at_the_frame_before_it() {
+        let (mut h, mut appender) = recorded("replay-length-over-mtu");
+        offer(&mut h, &mut appender, 0, 1600);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let term = i64::from(h.conductor.term_length);
+        let window = term / 2;
+        let mtu = i64::from(spec::IPC_MTU_LENGTH);
+        let poisoned = i32::try_from(term - 64).expect("fits");
+        assert!(i64::from(poisoned) > mtu, "over the MTU");
+        assert!(
+            i64::from(poisoned) > window + mtu - 64,
+            "longer than the block"
+        );
+        let segment = OpenOptions::new()
+            .write(true)
+            .open(h.log_dir.join("0-0.rec"))
+            .expect("the segment opens");
+        segment
+            .write_all_at(&poisoned.to_le_bytes(), 64)
+            .expect("the second frame's length is poisoned");
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((64, 3)));
+        assert_eq!(replay_position.load_acquire(), 64);
+        assert_eq!(h.counter(REPLAY_FAILED), 1);
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 1);
+        assert_eq!(read_replay(&h, 6, 0).len(), 1, "the frame before it");
         drop(appender);
     }
 

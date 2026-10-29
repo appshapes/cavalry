@@ -115,7 +115,11 @@ with a release store. A replay reads no byte the recorder has not synced: it bou
 its reads by `recording.synced_position`, so what it plays is what a restart would find
 (invariant 1). The replayer checks every frame as `spec/frame.md` says before it copies
 it, and stops the replay with reason 3 at the first that fails, counting
-`log_buffer.rejected_frame`.
+`log_buffer.rejected_frame`. A block holds whole every frame a recorder could have
+written at its start, since each of its bounds is a frame boundary, the extent, the
+term or the segment, or an MTU past the limit or the end, so a frame whose length runs
+past the block, over the MTU or past the extent, fails the `length` check the same way
+and ends the replay, rather than being read again for ever.
 
 A replay ends by itself when its length is replayed or its end position is reached or
 passed, at the frame boundary: the replayer stores the end of stream position on the
@@ -213,8 +217,11 @@ conformance vector of its own.
   of them new, land in the same change as this acceptance, with the driver's replayer
   and its tests: a recording of a segment and a bit replayed across the segment roll to
   a subscriber that reads every byte in order, a replay of a live recording that plays
-  only synced bytes and ends at the stop, and a replay paced through the log's terms by
-  a slow subscriber. `just replay-check`'s three equal hashes on both runners are the
+  only synced bytes and ends at the stop, a replay paced through the log's terms by a
+  slow subscriber, and a segment damaged three ways, a version byte, a frame length
+  past the extent and one over the MTU, each ending the replay with reason 3 at the
+  frame before it and `log_buffer.rejected_frame` at 1. `just replay-check`'s three
+  equal hashes on both runners are the
   gate's commit's evidence, in its message, as step 2.1 of
   `docs/how-to/implement-a-feature.md` puts what the implementation proves.
 - The bench gate on the first head of the change that accepted this ADR (CI run

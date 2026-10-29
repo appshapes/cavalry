@@ -11,7 +11,12 @@
 //! 1 MiB, writes its frames into the replay log through a [`TermWriter`], which checks
 //! each one and stops at the lower of the limit and the end, so that a frame that
 //! begins below the end is played whole and the replay ends at the frame boundary after
-//! it, and stores `replay.position` with a release store. A replay reads no byte the
+//! it, and stores `replay.position` with a release store. A block holds whole every
+//! frame a recorder could have written at its start, since each of its bounds is a
+//! frame boundary or an MTU past the limit or the end, so a frame whose length runs
+//! past the block, over the MTU or past the extent, is damage, `spec/frame.md`'s
+//! `length` reason, and ends the replay with reason 3 as a frame that fails any check
+//! does, rather than being read again for ever. A replay reads no byte the
 //! recorder has not synced, so what it plays is what a restart would find (invariant
 //! 1); a replay of a live recording waits for the synced position to move, and learns
 //! the recording's stop from its catalog slot, read again once per second and whenever
@@ -586,7 +591,17 @@ impl Replayer {
             .writer
             .write(&self.buffer[..length], limit.min(end))
         {
-            Ok(0) => Step::Idle,
+            // The slice begins at a frame boundary below the limit and the end, and
+            // ends at a frame boundary, the extent, the term's end or the segment's
+            // end, or at least an MTU past the lower of the limit and the end, or
+            // 1 MiB on: it holds whole every frame a recorder could have written at
+            // its start, so the writer wrote nothing only because the first frame's
+            // length runs past the bytes given, over the MTU or past the extent. That
+            // is `spec/frame.md`'s `length` reason, damage as any other failed check
+            // is, and reading the same bytes again would find it again for ever. A
+            // live recording's synced counter may be another's once the recording
+            // stopped, so its slot is read again first, as for a frame length of 0.
+            Ok(0) => self.reject(index, now, may_stop, true),
             Ok(_) => {
                 attached.position.store_release(attached.writer.position());
                 Step::Worked
@@ -596,19 +611,29 @@ impl Replayer {
                 // have stopped at this position and the synced counter be another's by
                 // now, so the slot is read again before the frame is called damage.
                 let zero = matches!(error, LogError::Frame(FrameError::Length { found: 0, .. }));
-                if zero
-                    && matches!(replay.extent, Extent::Live { .. })
-                    && self.refresh_extent(index, now, true)
-                {
-                    return Step::Worked;
-                }
-                if !may_stop {
-                    return Step::Idle;
-                }
-                self.rejected_frame.increment();
-                self.stop_at(index, ReplayStopReason::Failed, None)
+                self.reject(index, now, may_stop, zero)
             }
         }
+    }
+
+    /// Ends the replay at `index` with reason 3 for a frame that failed a check, adding
+    /// one to `log_buffer.rejected_frame`, when there is room for the reply; with none
+    /// the frame is read again next cycle. With `recheck`, a live recording's catalog
+    /// slot is read again first, and a recording that turned out stopped is no failure:
+    /// the replay goes on under its stop position next cycle, and a frame that runs
+    /// past that too is damage then.
+    fn reject(&mut self, index: usize, now: i64, may_stop: bool, recheck: bool) -> Step {
+        if recheck
+            && matches!(self.replays[index].extent, Extent::Live { .. })
+            && self.refresh_extent(index, now, true)
+        {
+            return Step::Worked;
+        }
+        if !may_stop {
+            return Step::Idle;
+        }
+        self.rejected_frame.increment();
+        self.stop_at(index, ReplayStopReason::Failed, None)
     }
 
     /// Reads a live recording's catalog slot again when `force` or when a second has
