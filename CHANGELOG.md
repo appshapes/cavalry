@@ -601,3 +601,10 @@ user-visible change, added in the same commit as the change. The format follows
   hash the same and the replay from the instant start where the time index says; CI
   runs it on Linux and macOS. With it, the second slice's third feature is done
   (ADR 0023, ADR 0030).
+- The bench harness's conductor loads the producer position once per millisecond by
+  the clock, read every 256 spins, instead of every 10,000 spins, which was a
+  millisecond on the bench host and half of one on kip; the loads per run are printed
+  and written to the result as `producer_position_loads`, so each host's cadence is on
+  record. `cavalry-bench --only NAME` runs only the rows whose name contains NAME, for a
+  profile of one row, under the profile with `-only` appended (card 161;
+  [bench/README.md](bench/README.md)).

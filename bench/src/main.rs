@@ -36,11 +36,18 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const SCHEMA: u32 = 0;
-/// Spins of the conductor's loop between two loads of the producer position: about a
-/// millisecond on the bench host, the driver's cadence (ADR 0022;
-/// `cavalry_driver::spec::PRODUCER_POSITION_INTERVAL`), counted rather than timed
-/// because a clock read on every spin costs the other two threads at p99.99.
-const PRODUCER_POSITION_SPINS: u32 = 10_000;
+/// Spins of the conductor's loop between two reads of the clock, which decide when the
+/// producer position is loaded: once per millisecond, the driver's cadence (ADR 0022;
+/// [`PRODUCER_POSITION_INTERVAL_NS`]). The cadence was a count of 10,000 spins, about a
+/// millisecond on the bench host, because a clock read on every spin cost the other two
+/// threads at p99.99; on kip the same count was about half a millisecond, which put the
+/// loads at the gate's percentile of the exclusive row (card 161), so the clock decides,
+/// read once every this many spins, a 256th of that cost.
+const CADENCE_SPINS: u32 = 256;
+/// The driver's cadence for loading a publication's producer position, in nanoseconds
+/// (ADR 0022; `cavalry_driver::spec::PRODUCER_POSITION_INTERVAL`).
+const PRODUCER_POSITION_INTERVAL_NS: u64 =
+    cavalry_driver::spec::PRODUCER_POSITION_INTERVAL.as_nanos() as u64;
 
 const CORRELATION_ID: i64 = 7;
 const SESSION_ID: i32 = 1;
@@ -69,6 +76,17 @@ struct Options {
     /// How many times every benchmark runs; the reported run is the median by p99.99,
     /// and the result lists every run's.
     repeat: u32,
+    /// `--only`: run only the benchmarks whose name contains this, for a profile of one
+    /// row; the result is written under the profile with `-only` appended, so it is
+    /// never compared as a full run.
+    only: Option<String>,
+}
+
+impl Options {
+    /// Whether `--only` admits the benchmark `name`.
+    fn wanted(&self, name: &str) -> bool {
+        self.only.as_deref().is_none_or(|only| name.contains(only))
+    }
 }
 
 const USAGE: &str = "\
@@ -90,6 +108,8 @@ Options:
                     bench host passes 8,10,12 (ADR 0016)
   --repeat N        run every benchmark N times, report each one's median run by p99.99,
                     and list every run's p99.99 in the result (default 1; CI passes 21)
+  --only NAME       run only the benchmarks whose name contains NAME, for a profile of
+                    one row; the result goes under the profile with -only appended
   --help            this text
 
 Exit code 1 when a measured loop allocated, or a benchmark could not run.";
@@ -108,6 +128,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         pin: None,
         housekeeping: None,
         repeat: 1,
+        only: None,
     };
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -148,6 +169,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .parse()
                     .map_err(|e| format!("--repeat: {e}"))?
             }
+            "--only" => options.only = Some(value("--only")?.clone()),
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown option {other}\n\n{USAGE}")),
         }
@@ -170,6 +192,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
         );
     }
     options.profile.push_str(&options.profile_suffix);
+    if options.only.is_some() {
+        options.profile.push_str("-only");
+    }
     // Read here, before `main` pins this thread to the publisher's CPU, since the
     // allowed set a thread reads is its own.
     options.housekeeping = options.pin.map(housekeeping_cpu).transpose()?;
@@ -477,6 +502,10 @@ struct LogRun {
     one_way: Summary,
     retries: u64,
     allocations: usize,
+    /// How many times the harness's own conductor loaded the producer position during
+    /// the measured run, for the log rows: about one per millisecond of the run (ADR
+    /// 0022; card 161). The client rows run the driver's conductor, which is not counted.
+    producer_position_loads: Option<u64>,
 }
 
 /// A publisher, a subscriber and a conductor over a real log buffer and counters file
@@ -583,21 +612,26 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         let cpu = options.pin.map(|pin| pin[2]);
         thread::Builder::new()
             .name("conductor".into())
-            .spawn(move || -> Result<(), String> {
+            .spawn(move || -> Result<u64, String> {
                 pin_to(cpu)?;
                 let mut clean_position: i64 = 0;
                 let mut limit_now = window;
                 let trip_gain = window / 8;
-                // The producer position about once per millisecond, the driver's cadence
-                // (ADR 0022): the publisher stores to that line on every commit, and a
-                // load on every spin kept the line moving between the two caches, which
-                // was the publisher's p50 and its p99.99 band on the bench host. The
-                // cadence is counted in spins, not read from the clock: a clock read on
-                // every spin of this thread cost the publisher 100 ns and the subscriber
-                // 70 to 130 ns at p99.99 on the bench host, in every one of eight
-                // processes measured on 2026-10-13, for a reason not found; 10,000 spins
-                // of this loop are about a millisecond there.
+                // The producer position once per millisecond by the clock, the driver's
+                // cadence (ADR 0022): the publisher stores to that line on every commit,
+                // and a load on every spin kept the line moving between the two caches,
+                // which was the publisher's p50 and its p99.99 band on the bench host.
+                // The clock is read once every CADENCE_SPINS spins, not on every spin: a
+                // clock read on every spin of this thread cost the publisher 100 ns and
+                // the subscriber 70 to 130 ns at p99.99 on the bench host, in every one
+                // of eight processes measured on 2026-10-13, for a reason not found. A
+                // count of 10,000 spins stood in for the clock until card 161: about a
+                // millisecond on the bench host and about half of one on kip, where the
+                // loads then landed at the gate's percentile of the exclusive row. The
+                // loads are counted and reported, so each host's cadence is on record.
                 let mut spins: u32 = 0;
+                let mut last_load = tick();
+                let mut loads: u64 = 0;
                 while !done.load(Ordering::Acquire) {
                     let consumed = subscriber_position.load_acquire();
                     if consumed + window >= limit_now + trip_gain {
@@ -610,14 +644,19 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                         limit.store_release(limit_now);
                     }
                     spins += 1;
-                    if spins >= PRODUCER_POSITION_SPINS {
-                        publisher_position
-                            .store_release(log.producer_position().map_err(|e| e.to_string())?);
+                    if spins >= CADENCE_SPINS {
                         spins = 0;
+                        let now = tick();
+                        if span_ns(last_load, now) >= PRODUCER_POSITION_INTERVAL_NS {
+                            publisher_position
+                                .store_release(log.producer_position().map_err(|e| e.to_string())?);
+                            last_load = now;
+                            loads += 1;
+                        }
                     }
                     std::hint::spin_loop();
                 }
-                Ok(())
+                Ok(loads)
             })
             .map_err(|e| e.to_string())?
     };
@@ -660,7 +699,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         .join()
         .map_err(|_| "the subscriber thread panicked".to_string())??;
     done.store(true, Ordering::Release);
-    conductor
+    let producer_position_loads = conductor
         .join()
         .map_err(|_| "the conductor thread panicked".to_string())??;
     Ok(LogRun {
@@ -668,6 +707,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         one_way: summarize(&one_way, elapsed),
         retries,
         allocations,
+        producer_position_loads: Some(producer_position_loads),
     })
 }
 
@@ -881,6 +921,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         one_way: summarize(&one_way, elapsed),
         retries,
         allocations,
+        producer_position_loads: None,
     })
 }
 
@@ -1110,7 +1151,12 @@ fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, Str
 struct Pass {
     benchmarks: BTreeMap<String, Summary>,
     retries: BTreeMap<String, u64>,
+    producer_position_loads: BTreeMap<String, u64>,
     allocations: usize,
+    /// How many message rows ran, each of `--messages` messages, for the allocations
+    /// per message: the two log rows and the two client rows in a full pass, fewer
+    /// under `--only`.
+    message_rows: u64,
 }
 
 /// Every benchmark once: the timer, both log types, the client path with and without a
@@ -1119,13 +1165,22 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
     let mut pass = Pass {
         benchmarks: BTreeMap::new(),
         retries: BTreeMap::new(),
+        producer_position_loads: BTreeMap::new(),
         allocations: 0,
+        message_rows: 0,
     };
-    pass.benchmarks.insert("timer".into(), bench_timer(options));
+    if options.wanted("timer") {
+        pass.benchmarks.insert("timer".into(), bench_timer(options));
+    }
     for (log_type, name) in [
         (LogType::Exclusive, "exclusive"),
         (LogType::Concurrent, "concurrent"),
     ] {
+        if !options.wanted(&format!("claim_commit_{}_{name}", options.body))
+            && !options.wanted(&format!("one_way_{}_{name}", options.body))
+        {
+            continue;
+        }
         let run = bench_log(options, log_type)
             .map_err(|message| format!("the {name} log benchmark failed: {message}"))?;
         pass.benchmarks.insert(
@@ -1135,9 +1190,18 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
         pass.benchmarks
             .insert(format!("one_way_{}_{name}", options.body), run.one_way);
         pass.retries.insert(name.into(), run.retries);
+        if let Some(loads) = run.producer_position_loads {
+            pass.producer_position_loads.insert(name.into(), loads);
+        }
         pass.allocations += run.allocations;
+        pass.message_rows += 1;
     }
     for (recorded, name) in [(false, "client"), (true, "recorded")] {
+        if !options.wanted(&format!("claim_commit_{}_{name}", options.body))
+            && !options.wanted(&format!("one_way_{}_{name}", options.body))
+        {
+            continue;
+        }
         let client = bench_client(options, recorded)
             .map_err(|message| format!("the {name} benchmark failed: {message}"))?;
         pass.benchmarks.insert(
@@ -1148,8 +1212,12 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
             .insert(format!("one_way_{}_{name}", options.body), client.one_way);
         pass.retries.insert(name.into(), client.retries);
         pass.allocations += client.allocations;
+        pass.message_rows += 1;
     }
     for spacing in [0usize, 64, 128] {
+        if !options.wanted(&format!("slot_padding_{spacing}")) {
+            continue;
+        }
         let (loads, stores) = bench_slot(options, spacing)
             .map_err(|message| format!("the slot_padding_{spacing} benchmark failed: {message}"))?;
         pass.benchmarks
@@ -1157,13 +1225,15 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
         pass.benchmarks
             .insert(format!("slot_padding_{spacing}_store"), stores);
     }
-    let record = bench_record(options)
-        .map_err(|message| format!("the record benchmark failed: {message}"))?;
-    pass.benchmarks.insert(
-        format!("record_block_{}", options.body),
-        record.record_block,
-    );
-    pass.allocations += record.allocations;
+    if options.wanted(&format!("record_block_{}", options.body)) {
+        let record = bench_record(options)
+            .map_err(|message| format!("the record benchmark failed: {message}"))?;
+        pass.benchmarks.insert(
+            format!("record_block_{}", options.body),
+            record.record_block,
+        );
+        pass.allocations += record.allocations;
+    }
     Ok(pass)
 }
 
@@ -1219,7 +1289,9 @@ fn main() -> ExitCode {
     // the two middle runs is reported, never a mean of them.
     let mut passes: BTreeMap<String, Vec<Summary>> = BTreeMap::new();
     let mut retries: BTreeMap<String, u64> = BTreeMap::new();
+    let mut producer_position_loads: BTreeMap<String, u64> = BTreeMap::new();
     let mut allocations: usize = 0;
+    let mut message_rows: u64 = 0;
     for _ in 0..options.repeat {
         let pass = match run_pass(&options) {
             Ok(pass) => pass,
@@ -1235,7 +1307,12 @@ fn main() -> ExitCode {
             let worst = retries.entry(name).or_insert(0);
             *worst = (*worst).max(count);
         }
+        for (name, count) in pass.producer_position_loads {
+            let most = producer_position_loads.entry(name).or_insert(0);
+            *most = (*most).max(count);
+        }
         allocations += pass.allocations;
+        message_rows += pass.message_rows;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
     let mut runs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
@@ -1250,8 +1327,15 @@ fn main() -> ExitCode {
         benchmarks.insert(name, median);
     }
 
-    let messages_measured = 3 * options.messages * u64::from(options.repeat);
-    let allocations_per_message = allocations as f64 / messages_measured as f64;
+    // The message rows that ran, times their messages: four rows in a full pass, the
+    // two log rows and the two client rows; fewer under `--only`. The recorder's block
+    // row adds its allocations to the count and no messages.
+    let messages_measured = message_rows * options.messages;
+    let allocations_per_message = if messages_measured == 0 {
+        0.0
+    } else {
+        allocations as f64 / messages_measured as f64
+    };
 
     println!();
     println!(
@@ -1273,6 +1357,17 @@ fn main() -> ExitCode {
         retries.get("exclusive").copied().unwrap_or(0),
         retries.get("concurrent").copied().unwrap_or(0),
         retries.get("client").copied().unwrap_or(0)
+    );
+    println!(
+        "  producer position loads by the harness's conductor, once per millisecond by the clock, the most of any run: exclusive {}, concurrent {}",
+        producer_position_loads
+            .get("exclusive")
+            .copied()
+            .unwrap_or(0),
+        producer_position_loads
+            .get("concurrent")
+            .copied()
+            .unwrap_or(0)
     );
     println!(
         "  allocations per message: {allocations_per_message} ({allocations} in {messages_measured} messages)"
@@ -1306,6 +1401,18 @@ fn main() -> ExitCode {
         retries.get("exclusive").copied().unwrap_or(0),
         retries.get("concurrent").copied().unwrap_or(0),
         retries.get("client").copied().unwrap_or(0)
+    );
+    let _ = writeln!(
+        out,
+        "  \"producer_position_loads\": {{\"exclusive\": {}, \"concurrent\": {}}},",
+        producer_position_loads
+            .get("exclusive")
+            .copied()
+            .unwrap_or(0),
+        producer_position_loads
+            .get("concurrent")
+            .copied()
+            .unwrap_or(0)
     );
     let _ = writeln!(
         out,

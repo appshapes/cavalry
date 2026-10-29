@@ -9,8 +9,16 @@ nothing depends on it.
 - Drives `cavalry-shm` directly, with no driver process yet: a publisher thread claims and
   commits into a real log buffer, a subscriber thread reads it through its own read-only
   mapping, and a conductor thread does the driver's duties, the publisher limit and the
-  cleaning, loading the producer position about once per millisecond as the driver does
-  (ADR 0022; counted in spins, since a clock read per spin costs the other threads),
+  cleaning, loading the producer position once per millisecond by the clock as the
+  driver does (ADR 0022; the clock is read every 256 spins, since a clock read on every
+  spin costs the other threads, and the loads per run are reported, so each host's
+  cadence is on record: card 161). A load of the producer position makes the publisher's
+  next store to that line fetch it back from the conductor's cache, about 50 ns on
+  kip, so at ten million claims a second one claim in about ten thousand pays it, the
+  gate's own percentile: a run of five million messages on kip holds about 500 loads,
+  and the exclusive row, whose ordinary tail is below that cost, reads 160 ns in the
+  runs that cross 500 and about 115 in the rest. The gate compares the median of its
+  twenty-one runs, which holds (card 161),
   through a real counters file, all under `/dev/shm` on Linux and the system's
   temporary directory elsewhere. The warm-up before recording is one rotation through
   all three terms, so no measured message first-touches a page, and every histogram's
@@ -19,7 +27,9 @@ nothing depends on it.
   recorder and replayer and the client's conductor on the lowest CPU outside them in
   the client rows, so each pinned CPU runs one thread, and `--repeat N` runs everything N times and
   reports each benchmark's median run by p99.99, every run's on record; the bench host
-  runs it with both (ADR 0016).
+  runs it with both (ADR 0016). `--only NAME` runs only the rows whose name contains
+  NAME, for a profile of one row, and writes the result under the profile with `-only`
+  appended, so it is never compared as a full run.
 - Times every message with the time stamp counter, calibrated once against the
   monotonic clock through `quanta` ([ADR 0028](../docs/decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)):
   the OS clock through the vDSO was the harness's own tail, 280 ns at p99.99 on the
