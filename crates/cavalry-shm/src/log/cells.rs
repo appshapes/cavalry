@@ -131,6 +131,13 @@ impl ActiveTermCountCells {
         self.count.load(Ordering::Acquire)
     }
 
+    /// The creator's store, before the header's magic is published: 0 for a
+    /// publication's log, the start position's term count for a replay's (spec,
+    /// "Metadata page").
+    pub(crate) fn store(&self, count: i32) {
+        self.count.store(count, Ordering::Release);
+    }
+
     /// Rotation's compare-and-swap of the count: `expected` to `next`.
     pub(crate) fn compare_exchange(&self, expected: i32, next: i32) -> bool {
         self.count

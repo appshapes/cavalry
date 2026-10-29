@@ -67,3 +67,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0027. Pre-touch every shared mapping when it is made, with no key to turn it off](decisions/0027-pre-touch-shared-mappings-at-map-time.md)
 - [0028. Stamp bench samples with the time stamp counter, calibrated once](decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)
 - [0029. Fail a gated row only beyond one clock step as well as beyond 5 percent](decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)
+- [0030. Replay a recording into a subscription, with Aeron Archive's replay commands](decisions/0030-replay-a-recording-into-a-subscription.md)

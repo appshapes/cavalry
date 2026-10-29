@@ -1,6 +1,6 @@
 {
  "spec": "spec/client-protocol.md",
- "version": 1,
+ "version": 2,
  "generated_by": "spec/vectors/client-protocol.py",
  "vectors": [
   {
@@ -188,6 +188,126 @@
     "correlation_id": 9223372036854775807,
     "recording_id": 9223372036854775807,
     "name": "stop_recording"
+   }
+  },
+  {
+   "name": "start-replay",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d00000000000000000000000000000000100000000000000020000000000000d10700000b000000636176616c72793a69706300",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 13,
+    "recording_id": 0,
+    "position": 4096,
+    "length": 8192,
+    "replay_stream_id": 2001,
+    "replay_channel": "cavalry:ipc",
+    "name": "start_replay"
+   }
+  },
+  {
+   "name": "start-replay-from-the-start-to-the-extent",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d000000000000000000000000000000ffffffffffffffffffffffffffffffffd10700000b000000636176616c72793a69706300",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 13,
+    "recording_id": 0,
+    "position": -1,
+    "length": -1,
+    "replay_stream_id": 2001,
+    "replay_channel": "cavalry:ipc",
+    "name": "start_replay"
+   }
+  },
+  {
+   "name": "start-replay-follow",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d000000000000000000000000000000ffffffffffffffffffffffffffffff7fd10700000b000000636176616c72793a69706300",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 13,
+    "recording_id": 0,
+    "position": -1,
+    "length": 9223372036854775807,
+    "replay_stream_id": 2001,
+    "replay_channel": "cavalry:ipc",
+    "name": "start_replay"
+   }
+  },
+  {
+   "name": "start-replay-zero-length",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d00000000000000000000000000000000000000000000000000000000000000d10700000b000000636176616c72793a69706300",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 13,
+    "recording_id": 0,
+    "position": 0,
+    "length": 0,
+    "replay_stream_id": 2001,
+    "replay_channel": "cavalry:ipc",
+    "name": "start_replay"
+   }
+  },
+  {
+   "name": "start-replay-extremes",
+   "region": "command",
+   "type": 259,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7fffffffffffffff7fffffffffffffff7f000000800b000000636176616c72793a69706300",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "recording_id": 9223372036854775807,
+    "position": 9223372036854775807,
+    "length": 9223372036854775807,
+    "replay_stream_id": -2147483648,
+    "replay_channel": "cavalry:ipc",
+    "name": "start_replay"
+   }
+  },
+  {
+   "name": "start-replay-other-channel",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d000000000000000000000000000000ffffffffffffffffffffffffffffffffd107000024000000636176616c72793a7564703f656e64706f696e743d6c6f63616c686f73743a3430313233",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 13,
+    "recording_id": 0,
+    "position": -1,
+    "length": -1,
+    "replay_stream_id": 2001,
+    "replay_channel": "cavalry:udp?endpoint=localhost:40123",
+    "name": "start_replay"
+   }
+  },
+  {
+   "name": "stop-replay",
+   "region": "command",
+   "type": 260,
+   "bytes": "05000000000000000e000000000000000d00000000000000",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 14,
+    "replay_session_id": 13,
+    "name": "stop_replay"
+   }
+  },
+  {
+   "name": "stop-replay-extremes",
+   "region": "command",
+   "type": 260,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7f",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "replay_session_id": 9223372036854775807,
+    "name": "stop_replay"
    }
   },
   {
@@ -391,6 +511,123 @@
    }
   },
   {
+   "name": "replay-ready",
+   "region": "event",
+   "type": 4099,
+   "bytes": "0d000000000000000d00000000000000000000000000000000100000000000002dfd69b6d1070000",
+   "fields": {
+    "correlation_id": 13,
+    "replay_session_id": 13,
+    "recording_id": 0,
+    "start_position": 4096,
+    "session_id": -1234567891,
+    "stream_id": 2001,
+    "name": "replay_ready"
+   }
+  },
+  {
+   "name": "replay-ready-at-the-start",
+   "region": "event",
+   "type": 4099,
+   "bytes": "0d000000000000000d000000000000000000000000000000000000000000000063000000d1070000",
+   "fields": {
+    "correlation_id": 13,
+    "replay_session_id": 13,
+    "recording_id": 0,
+    "start_position": 0,
+    "session_id": 99,
+    "stream_id": 2001,
+    "name": "replay_ready"
+   }
+  },
+  {
+   "name": "replay-ready-extremes",
+   "region": "event",
+   "type": 4099,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7fffffffffffffff7f00000080ffffff7f",
+   "fields": {
+    "correlation_id": 9223372036854775807,
+    "replay_session_id": 9223372036854775807,
+    "recording_id": 9223372036854775807,
+    "start_position": 9223372036854775807,
+    "session_id": -2147483648,
+    "stream_id": 2147483647,
+    "name": "replay_ready"
+   }
+  },
+  {
+   "name": "replay-stopped-ended",
+   "region": "event",
+   "type": 4100,
+   "bytes": "0d00000000000000003000000000000000000000",
+   "fields": {
+    "replay_session_id": 13,
+    "position": 12288,
+    "reason": 0,
+    "name": "replay_stopped"
+   }
+  },
+  {
+   "name": "replay-stopped-by-command",
+   "region": "event",
+   "type": 4100,
+   "bytes": "0d00000000000000002000000000000001000000",
+   "fields": {
+    "replay_session_id": 13,
+    "position": 8192,
+    "reason": 1,
+    "name": "replay_stopped"
+   }
+  },
+  {
+   "name": "replay-stopped-not-connected",
+   "region": "event",
+   "type": 4100,
+   "bytes": "0d00000000000000001000000000000002000000",
+   "fields": {
+    "replay_session_id": 13,
+    "position": 4096,
+    "reason": 2,
+    "name": "replay_stopped"
+   }
+  },
+  {
+   "name": "replay-stopped-failed",
+   "region": "event",
+   "type": 4100,
+   "bytes": "0d00000000000000401000000000000003000000",
+   "fields": {
+    "replay_session_id": 13,
+    "position": 4160,
+    "reason": 3,
+    "name": "replay_stopped"
+   }
+  },
+  {
+   "name": "error-unknown-recording-to-replay",
+   "region": "event",
+   "type": 3841,
+   "bytes": "0d0000000000000015000000430000007265636f7264696e672037206973206e6f7420696e2074686520636174616c6f672028636c69656e742d70726f746f636f6c2e6d642c204572726f7220636f6465732900",
+   "fields": {
+    "offending_correlation_id": 13,
+    "error_code": 21,
+    "error_message": "recording 7 is not in the catalog (client-protocol.md, Error codes)",
+    "name": "error"
+   }
+  },
+  {
+   "name": "error-position-out-of-range",
+   "region": "event",
+   "type": 3841,
+   "bytes": "0d000000000000001700000085000000706f736974696f6e2034313030206973206e6f742061206d756c7469706c65206f662033322066726f6d203020746f2031323238382c2074686520737461727420706f736974696f6e20616e6420657874656e74206f66207265636f7264696e6720302028636c69656e742d70726f746f636f6c2e6d642c204572726f7220636f64657329000000",
+   "fields": {
+    "offending_correlation_id": 13,
+    "error_code": 23,
+    "error_message": "position 4100 is not a multiple of 32 from 0 to 12288, the start position and extent of recording 0 (client-protocol.md, Error codes)",
+    "name": "error"
+   }
+  },
+  {
    "name": "too-short-before-correlation-id",
    "region": "command",
    "type": 1,
@@ -421,7 +658,7 @@
   {
    "name": "unknown-type-cavalry-reserved",
    "region": "command",
-   "type": 259,
+   "type": 261,
    "bytes": "00000000000000000100000000000000",
    "error": "type"
   },
@@ -461,6 +698,27 @@
    "error": "too-short"
   },
   {
+   "name": "start-replay-too-short-no-length",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d000000000000000000000000000000ffffffffffffffff",
+   "error": "too-short"
+  },
+  {
+   "name": "start-replay-too-short-no-channel",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d000000000000000000000000000000ffffffffffffffffffffffffffffffffd1070000",
+   "error": "too-short"
+  },
+  {
+   "name": "stop-replay-too-short-no-replay-session-id",
+   "region": "command",
+   "type": 260,
+   "bytes": "05000000000000000e00000000000000",
+   "error": "too-short"
+  },
+  {
    "name": "string-negative-length",
    "region": "command",
    "type": 1,
@@ -496,6 +754,13 @@
    "error": "string"
   },
   {
+   "name": "start-replay-string-runs-past-message",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d000000000000000000000000000000ffffffffffffffffffffffffffffffffd10700000b000000636176616c72793a6970",
+   "error": "string"
+  },
+  {
    "name": "length-trailing-bytes",
    "region": "command",
    "type": 1,
@@ -514,6 +779,20 @@
    "region": "command",
    "type": 258,
    "bytes": "05000000000000000c00000000000000000000000000000000000000",
+   "error": "length"
+  },
+  {
+   "name": "start-replay-length-trailing",
+   "region": "command",
+   "type": 259,
+   "bytes": "05000000000000000d000000000000000000000000000000ffffffffffffffffffffffffffffffffd10700000b000000636176616c72793a6970630000000000",
+   "error": "length"
+  },
+  {
+   "name": "stop-replay-length-trailing",
+   "region": "command",
+   "type": 260,
+   "bytes": "05000000000000000e000000000000000d0000000000000000000000",
    "error": "length"
   },
   {
@@ -540,7 +819,7 @@
   {
    "name": "event-unknown-type-cavalry-reserved",
    "region": "event",
-   "type": 4099,
+   "type": 4101,
    "bytes": "0300000000000000",
    "error": "type"
   },
@@ -563,6 +842,27 @@
    "region": "event",
    "type": 4098,
    "bytes": "0000000000000000001000000000000000000000",
+   "error": "length"
+  },
+  {
+   "name": "event-replay-ready-too-short",
+   "region": "event",
+   "type": 4099,
+   "bytes": "0d000000000000000d00000000000000000000000000000000100000000000002dfd69b6",
+   "error": "too-short"
+  },
+  {
+   "name": "event-replay-stopped-too-short",
+   "region": "event",
+   "type": 4100,
+   "bytes": "0d000000000000000030000000000000",
+   "error": "too-short"
+  },
+  {
+   "name": "event-replay-stopped-length-trailing",
+   "region": "event",
+   "type": 4100,
+   "bytes": "0d0000000000000000300000000000000000000000000000",
    "error": "length"
   },
   {

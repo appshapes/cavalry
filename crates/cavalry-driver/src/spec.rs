@@ -1,7 +1,7 @@
 //! The values `spec/client-protocol.md` fixes for this version: the timeouts of
 //! "Liveness and timeouts", the file sizes and the registries' capacities of "Sizes";
 //! and the cadence `spec/log-buffer.md`, "The driver", fixes for the producer position.
-//! None is configurable in this version (ADR 0019, ADR 0022).
+//! None is configurable in this version (ADR 0019, ADR 0022, ADR 0030).
 
 use std::time::Duration;
 
@@ -74,6 +74,31 @@ pub const MAX_IMAGES: usize = 2048;
 /// How many recordings the driver holds: starting or live, one per publication at most
 /// (ADR 0025).
 pub const MAX_RECORDINGS: usize = 1024;
+
+/// How many replays the driver holds: starting or live (ADR 0030).
+pub const MAX_REPLAYS: usize = 64;
+
+/// How long a replay's publication may have no subscriber before the replay ends with
+/// reason 2, from its start or from the moment its last subscriber went: Aeron's replay
+/// connect timeout.
+pub const REPLAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The capacity of each queue between the conductor and the replayer, in requests or
+/// replies; a start that finds the request queue full is answered with error code 10,
+/// and the replayer keeps a reply the reply queue has no room for until it has.
+pub(crate) const REPLAYER_QUEUE_CAPACITY: usize = 2 * MAX_REPLAYS;
+
+/// The most bytes the replayer reads from a segment file for one replay in one duty
+/// cycle, 1 MiB (ADR 0030); a read is bounded by the term, the replay's end, the
+/// recording's extent and the publication's limit as well.
+pub(crate) const REPLAYER_BLOCK_LIMIT: usize = 1024 * 1024;
+
+/// How many requests the replayer handles per duty cycle before it turns to the replays.
+pub(crate) const REPLAYER_REQUESTS_PER_CYCLE: usize = 16;
+
+/// How often the replayer reads a live recording's catalog slot again, to learn its
+/// stop: once per second, the recorder's sync cadence.
+pub(crate) const REPLAYER_CATALOG_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The capacity of each queue between the conductor and the recorder, in requests or
 /// replies; a start or stop that finds the request queue full is answered with error

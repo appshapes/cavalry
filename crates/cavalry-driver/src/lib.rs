@@ -5,6 +5,7 @@ mod conductor;
 mod error;
 mod idle;
 mod recorder;
+mod replayer;
 pub mod spec;
 
 use std::path::{Path, PathBuf};
@@ -28,29 +29,33 @@ pub enum DriverThread {
     /// The recorder: the durable log's writer, on the data plane but not on the
     /// message path.
     Recorder,
+    /// The replayer: the durable log's reader, which plays a recording into a replay's
+    /// log buffer (ADR 0030); on the data plane but not on the live message path.
+    Replayer,
 }
 
 /// What each driver thread runs first, once, before its loop. A caller that owns the
-/// host's CPUs pins the conductor to a CPU of its own here and leaves the recorder on
-/// the housekeeping CPUs, as the bench does under `--pin` (card 136): the two threads
-/// are spawned with the caller's affinity otherwise, and a conductor that shares a CPU
-/// with the recorder keeps that CPU ticking. The hook returns nothing; what it could not
-/// do, it reports through what the caller gave it.
+/// host's CPUs pins the conductor to a CPU of its own here and leaves the recorder and
+/// the replayer on the housekeeping CPUs, as the bench does under `--pin` (card 136):
+/// the threads are spawned with the caller's affinity otherwise, and a conductor that
+/// shares a CPU with the recorder keeps that CPU ticking. The hook returns nothing; what
+/// it could not do, it reports through what the caller gave it.
 pub type ThreadStart = Arc<dyn Fn(DriverThread) + Send + Sync>;
 
-/// A running driver: its directory, its log directory, and its two threads, the
-/// conductor and the recorder. [`Driver::start`] creates the directory's files, opens
-/// the log directory under its lock and recovers it, and starts both threads;
-/// [`Driver::close`] stops them, storing −1 in the command ring's heartbeat so that
-/// every client learns `driver-closed`, stopping every live recording at what was
+/// A running driver: its directory, its log directory, and its three threads, the
+/// conductor, the recorder and the replayer. [`Driver::start`] creates the directory's
+/// files, opens the log directory under its lock and recovers it, and starts the
+/// threads; [`Driver::close`] stops them, storing −1 in the command ring's heartbeat so
+/// that every client learns `driver-closed`, stopping every live recording at what was
 /// written, and leaves the directory for `doctor` (`spec/client-protocol.md`, "The
-/// driver directory"; ADR 0025). Dropping a driver closes it the same way.
+/// driver directory"; ADR 0025, ADR 0030). Dropping a driver closes it the same way.
 pub struct Driver {
     dir: PathBuf,
     log_dir: PathBuf,
     stop: Arc<AtomicBool>,
     conductor: Option<JoinHandle<()>>,
     recorder: Option<JoinHandle<()>>,
+    replayer: Option<JoinHandle<()>>,
 }
 
 impl Driver {
@@ -102,14 +107,14 @@ impl Driver {
     /// log directory another driver holds is [`DriverError::LogDir`]; the counters file,
     /// the command ring and the broadcast buffer are created with the sizes of [`spec`],
     /// the log directory is opened under its lock and recovered, with the recovery's
-    /// actions in the `recording.*` counters, and the conductor and recorder threads
-    /// start (`spec/client-protocol.md`, "The driver directory"; `spec/durable-log.md`,
-    /// "The driver").
+    /// actions in the `recording.*` counters, and the conductor, recorder and replayer
+    /// threads start (`spec/client-protocol.md`, "The driver directory";
+    /// `spec/durable-log.md`, "The driver").
     pub fn start(dir: impl AsRef<Path>, log_dir: impl AsRef<Path>) -> Result<Self, DriverError> {
         Self::start_with(dir, log_dir, IdleStrategy::Backoff)
     }
 
-    /// [`Driver::start`] with the idle strategy of both threads chosen: what each does
+    /// [`Driver::start`] with the idle strategy of every thread chosen: what each does
     /// on a duty cycle that found no work.
     pub fn start_with(
         dir: impl AsRef<Path>,
@@ -121,7 +126,7 @@ impl Driver {
 
     /// [`Driver::start_with`] with a hook each thread runs first, once, before its loop,
     /// named the [`DriverThread`] it is on: where a caller pins the conductor and places
-    /// the recorder ([`ThreadStart`]).
+    /// the recorder and the replayer ([`ThreadStart`]).
     pub fn start_with_threads(
         dir: impl AsRef<Path>,
         log_dir: impl AsRef<Path>,
@@ -141,8 +146,24 @@ impl Driver {
             replies,
             next_recording_id: i64::try_from(log.catalog().slots()).unwrap_or(i64::MAX),
         };
-        let conductor = conductor::Conductor::create(&dir, idle, link)?;
+        let (replayer_requests, replayer_request_consumer) =
+            spsc::queue::<replayer::Request>(spec::REPLAYER_QUEUE_CAPACITY);
+        let (replayer_reply_producer, replayer_replies) =
+            spsc::queue::<replayer::Reply>(spec::REPLAYER_QUEUE_CAPACITY);
+        let replayer_link = conductor::ReplayerLink {
+            requests: replayer_requests,
+            replies: replayer_replies,
+        };
+        let mut conductor = conductor::Conductor::create(&dir, idle, link, replayer_link)?;
         conductor.record_recovery(&recovery)?;
+        let replayer = replayer::Replayer::new(
+            &log_dir,
+            replayer_request_consumer,
+            replayer_reply_producer,
+            conductor.counter(LOG_BUFFER_REJECTED_FRAME)?,
+            idle,
+        )
+        .map_err(|error| DriverError::LogDir(error.into()))?;
         let recorder = recorder::Recorder::new(
             log,
             request_consumer,
@@ -156,15 +177,35 @@ impl Driver {
             let path = path.clone();
             move |source| DriverError::Io { what, path, source }
         };
+        // The replayer first: it parks while it holds no replay, and the conductor
+        // unparks it with every request, so the conductor holds its thread before its
+        // own loop starts (`conductor::Conductor::set_replayer_thread`).
         let flag = Arc::clone(&stop);
         let on_start = Arc::clone(&on_thread_start);
-        let conductor_handle = std::thread::Builder::new()
+        let replayer_handle = std::thread::Builder::new()
+            .name("cavalry-replayer".to_string())
+            .spawn(move || {
+                on_start(DriverThread::Replayer);
+                replayer.run(&flag)
+            })
+            .map_err(io("start the replayer thread", &log_dir))?;
+        conductor.set_replayer_thread(replayer_handle.thread().clone());
+        let flag = Arc::clone(&stop);
+        let on_start = Arc::clone(&on_thread_start);
+        let conductor_handle = match std::thread::Builder::new()
             .name("cavalry-conductor".to_string())
             .spawn(move || {
                 on_start(DriverThread::Conductor);
                 conductor.run(&flag)
-            })
-            .map_err(io("start the conductor thread", &dir))?;
+            }) {
+            Ok(handle) => handle,
+            Err(source) => {
+                stop.store(true, Ordering::Release);
+                replayer_handle.thread().unpark();
+                let _ = replayer_handle.join();
+                return Err(io("start the conductor thread", &dir)(source));
+            }
+        };
         let flag = Arc::clone(&stop);
         let on_start = on_thread_start;
         let recorder_handle = match std::thread::Builder::new()
@@ -176,7 +217,9 @@ impl Driver {
             Ok(handle) => handle,
             Err(source) => {
                 stop.store(true, Ordering::Release);
+                replayer_handle.thread().unpark();
                 let _ = conductor_handle.join();
+                let _ = replayer_handle.join();
                 return Err(io("start the recorder thread", &log_dir)(source));
             }
         };
@@ -186,6 +229,7 @@ impl Driver {
             stop,
             conductor: Some(conductor_handle),
             recorder: Some(recorder_handle),
+            replayer: Some(replayer_handle),
         })
     }
 
@@ -199,16 +243,22 @@ impl Driver {
         &self.log_dir
     }
 
-    /// Stops both threads and waits for them: the conductor stores −1 in the heartbeat
-    /// on its way out, and the recorder stops every live recording at what it has
-    /// written. The directory stays. [`DriverError::Conductor`] or
-    /// [`DriverError::Recorder`] when a thread had panicked.
+    /// Stops the threads and waits for them: the conductor stores −1 in the heartbeat
+    /// on its way out, the recorder stops every live recording at what it has written,
+    /// and the replayer, woken if it was parked with no replay, dies with its replays.
+    /// The directory stays. [`DriverError::Conductor`], [`DriverError::Recorder`] or
+    /// [`DriverError::Replayer`] when a thread had panicked.
     pub fn close(mut self) -> Result<(), DriverError> {
         self.stop()
     }
 
     fn stop(&mut self) -> Result<(), DriverError> {
         self.stop.store(true, Ordering::Release);
+        // A replayer with no replay is parked until a request or this; it reads the
+        // flag as it wakes.
+        if let Some(handle) = &self.replayer {
+            handle.thread().unpark();
+        }
         let conductor = match self.conductor.take() {
             Some(handle) => handle.join().map_err(|_| DriverError::Conductor {
                 dir: self.dir.clone(),
@@ -221,7 +271,13 @@ impl Driver {
             }),
             None => Ok(()),
         };
-        conductor.and(recorder)
+        let replayer = match self.replayer.take() {
+            Some(handle) => handle.join().map_err(|_| DriverError::Replayer {
+                log_dir: self.log_dir.clone(),
+            }),
+            None => Ok(()),
+        };
+        conductor.and(recorder).and(replayer)
     }
 }
 

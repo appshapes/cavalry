@@ -16,8 +16,8 @@ nothing depends on it.
   all three terms, so no measured message first-touches a page, and every histogram's
   counts are written once before the loop, so no rare sample first-touches one either.
   `--pin P,S,C` binds the three threads to those CPUs on Linux, with the driver's
-  recorder and the client's conductor on the lowest CPU outside them in the client rows,
-  so each pinned CPU runs one thread, and `--repeat N` runs everything N times and
+  recorder and replayer and the client's conductor on the lowest CPU outside them in
+  the client rows, so each pinned CPU runs one thread, and `--repeat N` runs everything N times and
   reports each benchmark's median run by p99.99, every run's on record; the bench host
   runs it with both (ADR 0016).
 - Times every message with the time stamp counter, calibrated once against the
