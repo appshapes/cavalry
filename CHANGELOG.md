@@ -570,3 +570,8 @@ user-visible change, added in the same commit as the change. The format follows
   and `_exclusive` from 170 to 150 and the `one_way_32_concurrent` and `_exclusive` rows
   from 300 to 230 and 210 unchecked, the gain card 144 made
   ([Run the bench](docs/how-to/run-the-bench.md), step 4).
+- CI runs the latency gate on the second bench host too: the `bench (kip)` job in
+  `.github/workflows/ci.yml` runs on `kip` (`[self-hosted, kip-linux]`, pinned to CPUs
+  6,8,10) against the `kip-linux` and `kip-linux-unchecked` baselines, on every push and
+  on pull requests from this repository, beside `bench (linux)`
+  ([Set up a bench host](docs/how-to/set-up-a-bench-host.md), step 6).

@@ -115,7 +115,10 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    runs on `[self-hosted, bench-linux]` and pins to the CPUs from step 4; change the
    `--pin` list and the `check.sh` list together when the host's sets differ. Then add
    `bench (linux)` to the required checks of `master` in the repository's branch
-   protection, beside `gates (linux)` and `gates (macos)`.
+   protection, beside `gates (linux)` and `gates (macos)`. The second host has a job of
+   its own in the same file, `bench (kip)`, on `[self-hosted, kip-linux]` with its own
+   lists, `6,8,10`, and its own profiles, `kip-linux` and `kip-linux-unchecked`; it is
+   not among the required checks today.
 
 7. Record the baseline. The first run on the host reports every benchmark as
    `no baseline` and passes. Download its `bench-results-bench-linux` artifact and
@@ -130,14 +133,15 @@ the harness and read its table is [Run the bench](run-the-bench.md).
   hundreds while the housekeeping CPUs' is in the hundreds of thousands.
 - The organization's runner page shows the runner Idle after a reboot of the host.
 - A push to `master` runs `bench (linux)` on it, and the run's log opens with the
-  state `check.sh` printed, then the harness's line `pinned to CPUs 8,10,12`.
+  state `check.sh` printed, then the harness's line `pinned to CPUs 8,10,12`. On the
+  second host the job is `bench (kip)` and the line reads `pinned to CPUs 6,8,10`.
 
 ## A second host: the direct link and the clock
 
 The UDP rows need a sender and a receiver on two tuned hosts, and a one-way number
 across hosts is only as good as the clock offset between them. The second host is set
-up by the steps above with its own sets and its own runner label; then the two hosts
-are joined.
+up by the steps above with its own sets, its own runner label and its own job,
+`bench (kip)` (step 6); then the two hosts are joined.
 
 1. One straight patch cable from a wired port with hardware timestamps on each host,
    port to port, with nothing between them. `ethtool -T <port>` lists
