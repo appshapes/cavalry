@@ -558,6 +558,11 @@ user-visible change, added in the same commit as the change. The format follows
   says to run each gate as its own command. `docs/how-to/ask-the-agent.md` gains the
   rule that cost pull request 57 two fix runs: push nothing while a fix run is working,
   one writer per cycle.
+- `cavalry doctor --log-dir` warns when the log directory's path is over 337 bytes, the
+  most under which a segment roll opens its file on the standard library's stack buffer
+  instead of allocating on the recorder thread; the bound is
+  `cavalry_log::recorder::LOG_DIR_PATH_LIMIT`, the log crate's README and the `log.dir`
+  key state it exactly, and the record how-to says what to do (card 108).
 - Replay: the client protocol is at version 2 with `start replay` and `stop replay`,
   `replay ready` and `replay stopped`, and error code 23, position out of range; the
   driver plays a recording from a position or its start, for a length, to its extent

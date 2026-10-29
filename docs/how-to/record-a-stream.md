@@ -15,7 +15,8 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
   chooses another, on a disk with room. One driver holds a log directory at a time; a
   second refuses to start with `log directory locked`. `cavalry doctor --log-dir <path>`
   warns when the directory is in memory, on a network or overlay filesystem, not
-  writable by the driver's user, or under 1 GiB free (`log-directory-backing`).
+  writable by the driver's user, under 1 GiB free, or at a path over 337 bytes, where
+  a segment roll would allocate on the recorder thread (`log-directory-backing`).
 - A live publication on the stream. The tutorial's program publishes on stream 1001
   ([Publish and subscribe in ten minutes](../tutorials/publish-and-subscribe.md)); a
   program of your own adds one with `Cavalry::add_publication`. A publication closes
@@ -98,3 +99,11 @@ read from the counters file, and `client.stop_recording(id)?`, from any client, 
   log directory, and start the recording again.
 - `driver failed (log-dir): log directory locked`: another driver holds the directory;
   stop it, or give this one its own with `--log-dir`.
+- `log-directory-backing` in `doctor` says the log directory's path is over 337 bytes:
+  the recorder opens each segment file by its full path, and the standard library
+  allocates for a path of 384 bytes or more instead of using its stack buffer, so a
+  roll would allocate on the recorder thread, a data-plane thread, which the bench's
+  zero-allocation gate catches only on a host whose directory is that long. The bound
+  is `cavalry_log::recorder::LOG_DIR_PATH_LIMIT`, the directory and the longest segment
+  name under 384. Set `--log-dir` (`CAVALRY_LOG_DIR`) to a shorter absolute path before
+  starting the driver.
