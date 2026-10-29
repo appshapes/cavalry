@@ -574,3 +574,9 @@ user-visible change, added in the same commit as the change. The format follows
   ([ADR 0030](docs/decisions/0030-replay-a-recording-into-a-subscription.md),
   [the client protocol](docs/reference/client-protocol.md)). The client API, the
   `cavalry replay` command and `just replay-check` follow.
+- `Cavalry::start_replay` and `stop_replay` with the `Replay` handle, whose `ended()`
+  says where and why a replay ended; `Image::position_of`, a frame's position in the
+  recording; `cavalry::index::position_at` and `position_after`, an instant to a
+  position through the time index; and `cavalry replay --recording <id> --from
+  <position or instant> [--to ...] [--stream <id>] [--follow]`, which prints one line
+  per message ([Replay a recording](docs/how-to/replay-a-recording.md); ADR 0030).

@@ -72,12 +72,14 @@ fn recorded(dir: &TestDir, count: u8) -> (Driver, Cavalry, i64) {
     for i in 0..count {
         let mut message = [0u8; 32];
         message[..8].copy_from_slice(&i64::from(i).to_le_bytes());
-        wait("the offer goes through", || match publication.offer(&message) {
-            Ok(position) => {
-                after = position;
-                true
+        wait("the offer goes through", || {
+            match publication.offer(&message) {
+                Ok(position) => {
+                    after = position;
+                    true
+                }
+                Err(_) => false,
             }
-            Err(_) => false,
         });
     }
     wait("the recording is synced", || {
@@ -88,15 +90,22 @@ fn recorded(dir: &TestDir, count: u8) -> (Driver, Cavalry, i64) {
     (driver, client, after)
 }
 
+/// What a drained replay delivered: every frame's position and body in order, the end
+/// position and the reason.
+type Drained = (Vec<(i64, Vec<u8>)>, i64, Option<ReplayStopReason>);
+
 /// Polls `subscription` until `replay` has ended and its image was read to the end;
 /// returns every frame's position and body in order.
-fn drain(subscription: &mut Subscription, replay: &Replay) -> (Vec<(i64, Vec<u8>)>, i64, Option<ReplayStopReason>) {
+fn drain(subscription: &mut Subscription, replay: &Replay) -> Drained {
     let mut frames = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let mut batch = Vec::new();
         let delivered = subscription
-            .poll(|body, header| batch.push((header.term_offset(), header.term_id(), body.to_vec())), 64)
+            .poll(
+                |body, header| batch.push((header.term_offset(), header.term_id(), body.to_vec())),
+                64,
+            )
             .expect("the poll reads");
         for (term_offset, term_id, body) in batch {
             let image = subscription.images().first().expect("the image");
@@ -110,7 +119,10 @@ fn drain(subscription: &mut Subscription, replay: &Replay) -> (Vec<(i64, Vec<u8>
             .with_term_id(term_id);
             frames.push((image.position_of(&header), body));
         }
-        let read_to = subscription.images().first().map_or(i64::MAX, |image| image.position());
+        let read_to = subscription
+            .images()
+            .first()
+            .map_or(i64::MAX, |image| image.position());
         if let Some((end, reason)) = replay.ended()
             && (read_to >= end || subscription.images().is_empty())
         {
@@ -140,7 +152,10 @@ fn a_replay_plays_a_recording_into_a_subscription_at_the_recordings_positions() 
         .expect("a replay");
     assert_eq!(replay.recording_id(), 0);
     assert_eq!(replay.start_position(), 0);
-    assert_eq!((replay.stream_id(), replay.channel()), (2071, "cavalry:ipc"));
+    assert_eq!(
+        (replay.stream_id(), replay.channel()),
+        (2071, "cavalry:ipc")
+    );
     assert!(replay.replay_session_id() > 0);
     assert_eq!(replay.ended(), None);
 
@@ -148,7 +163,11 @@ fn a_replay_plays_a_recording_into_a_subscription_at_the_recordings_positions() 
     assert_eq!((ended_at, reason), (6400, Some(ReplayStopReason::Ended)));
     assert_eq!(frames.len(), 100);
     for (i, (position, body)) in frames.iter().enumerate() {
-        assert_eq!(*position, i as i64 * 64, "frame {i}: the recording's position");
+        assert_eq!(
+            *position,
+            i as i64 * 64,
+            "frame {i}: the recording's position"
+        );
         assert_eq!(&body[..8], &(i as i64).to_le_bytes(), "frame {i}: body");
     }
     assert_eq!(replay.position(), 6400);
@@ -160,7 +179,9 @@ fn a_replay_plays_a_recording_into_a_subscription_at_the_recordings_positions() 
     println!("{replay:?}");
 
     // A stop of an ended replay is success with nothing done.
-    replay.stop(&mut client).expect("a stopped replay's stop succeeds");
+    replay
+        .stop(&mut client)
+        .expect("a stopped replay's stop succeeds");
     client.close().expect("closes");
     driver.close().expect("closes");
 }
@@ -184,12 +205,14 @@ fn a_replay_takes_a_position_and_a_length_or_follows_a_live_recording() {
     let offer = |publication: &mut cavalry_client::Publication, from: u8, count: u8| {
         let mut after = 0;
         for i in from..from + count {
-            wait("the offer goes through", || match publication.offer(&[i; 32]) {
-                Ok(position) => {
-                    after = position;
-                    true
+            wait("the offer goes through", || {
+                match publication.offer(&[i; 32]) {
+                    Ok(position) => {
+                        after = position;
+                        true
+                    }
+                    Err(_) => false,
                 }
-                Err(_) => false,
             });
         }
         after
@@ -207,7 +230,13 @@ fn a_replay_takes_a_position_and_a_length_or_follows_a_live_recording() {
     assert_eq!(replay.start_position(), 128);
     let (frames, ended_at, reason) = drain(&mut part, &replay);
     assert_eq!((ended_at, reason), (320, Some(ReplayStopReason::Ended)));
-    assert_eq!(frames.iter().map(|(position, _)| *position).collect::<Vec<_>>(), vec![128, 192, 256]);
+    assert_eq!(
+        frames
+            .iter()
+            .map(|(position, _)| *position)
+            .collect::<Vec<_>>(),
+        vec![128, 192, 256]
+    );
     assert_eq!(frames[0].1, vec![2u8; 32]);
     drop(part);
 
@@ -223,7 +252,11 @@ fn a_replay_takes_a_position_and_a_length_or_follows_a_live_recording() {
     wait("the new bytes are synced and played", || {
         replay.position() == later
     });
-    assert_eq!(replay.ended(), None, "a follow goes on while the recording lives");
+    assert_eq!(
+        replay.ended(),
+        None,
+        "a follow goes on while the recording lives"
+    );
     // The handle dropped stops nothing: another handle on the same replay sees it end.
     let replay_session_id = replay.replay_session_id();
     drop(replay);
@@ -231,14 +264,17 @@ fn a_replay_takes_a_position_and_a_length_or_follows_a_live_recording() {
     // The image ends at the stop, and goes once the driver sees it was read to the end,
     // which can be before this thread looks: either is the end.
     let mut delivered = 0;
-    wait("the follow ends at the recording's stop and the image ends", || {
-        delivered += follow.poll(|_, _| {}, 64).expect("the poll reads");
-        delivered == 20
-            && follow
-                .images()
-                .first()
-                .is_none_or(|image| image.is_end_of_stream() && image.position() == later)
-    });
+    wait(
+        "the follow ends at the recording's stop and the image ends",
+        || {
+            delivered += follow.poll(|_, _| {}, 64).expect("the poll reads");
+            delivered == 20
+                && follow
+                    .images()
+                    .first()
+                    .is_none_or(|image| image.is_end_of_stream() && image.position() == later)
+        },
+    );
     assert_eq!(delivered, 20);
     client
         .stop_replay(replay_session_id)
@@ -289,13 +325,22 @@ fn start_replay_errors_carry_the_drivers_codes() {
         ErrorCode::MalformedCommand,
     );
     refused(
-        client.start_replay(0, NULL_POSITION, NULL_LENGTH, 2075, "cavalry:udp?endpoint=x"),
+        client.start_replay(
+            0,
+            NULL_POSITION,
+            NULL_LENGTH,
+            2075,
+            "cavalry:udp?endpoint=x",
+        ),
         ErrorCode::InvalidChannel,
     );
     match client.start_replay(0, 100, NULL_LENGTH, 2075, "cavalry:ipc") {
         Err(ClientError::Refused { message, .. }) => {
             assert!(message.contains("from 0 to 256"), "{message}");
-            assert!(message.ends_with("docs/reference/client-protocol.md#error-codes"), "{message}");
+            assert!(
+                message.ends_with("docs/reference/client-protocol.md#error-codes"),
+                "{message}"
+            );
         }
         other => panic!("{other:?}"),
     }

@@ -8,10 +8,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cavalry_proto::client_protocol::{Command, ErrorCode};
-use cavalry_shm::counters::generated::REPLAY_POSITION;
 use cavalry_shm::broadcast::BroadcastBuffer;
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, Producer};
+use cavalry_shm::counters::generated::REPLAY_POSITION;
 use cavalry_shm::counters::{CounterValue, CountersReader, CountersWriter};
 use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
@@ -518,7 +518,10 @@ impl Cavalry {
     /// (`spec/client-protocol.md`, "Counters"); `None` when the replay has already ended
     /// and the driver freed the counter, which a short replay does before its client
     /// looks, and then `replay stopped` is on its way with the end position.
-    fn replay_position_counter(&self, replay_session_id: i64) -> Result<Option<CounterValue>, ClientError> {
+    fn replay_position_counter(
+        &self,
+        replay_session_id: i64,
+    ) -> Result<Option<CounterValue>, ClientError> {
         let key = replay_session_id.to_le_bytes();
         for id in 0..self.counters.capacity() {
             if let Some(record) = self.counters.record(id)?

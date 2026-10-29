@@ -25,6 +25,14 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `Cavalry::stop_recording(id)`, or `Recording::stop(&mut client)`, stops it from any
   client. The recording is the driver's:
   it outlives the client, and dropping the handle stops nothing (ADR 0025).
+- Plays a recording back: `Cavalry::start_replay(recording_id, position, length,
+  stream_id, channel)` asks the driver for a replay onto a stream a subscription of this
+  or any client reads as any stream, its image's positions the recording's, and returns
+  a `Replay` whose `position()` reads the replayer's counter and whose `ended()` says
+  where and why it ended once `replay stopped` has arrived; `Cavalry::stop_replay(id)`,
+  or `Replay::stop(&mut client)`, ends it from any client, and dropping the handle stops
+  nothing (ADR 0030). `Image::position_of(&header)` is a frame's position in the
+  recording.
 
 In Aeron, this is the client, with `tryClaim` and `commit`
 ([glossary](../../docs/glossary.md)).

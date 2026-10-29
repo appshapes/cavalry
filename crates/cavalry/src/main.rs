@@ -271,9 +271,7 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 },
             ),
             (None, _) => Invocation::Wrong("replay needs --recording <id>".to_string()),
-            (_, None) => {
-                Invocation::Wrong("replay needs --from <position or instant>".to_string())
-            }
+            (_, None) => Invocation::Wrong("replay needs --from <position or instant>".to_string()),
         },
         _ => match (stream_id, stop) {
             (Some(stream_id), None) => Invocation::Record(
@@ -617,7 +615,9 @@ fn replay(config: &Config, request: ReplayRequest) -> ExitCode {
             None => NULL_LENGTH,
             Some(Ok(to)) if to >= from => to - from,
             Some(Ok(to)) => {
-                return fail(&format!("--to {to} is before --from {from}; nothing to play"));
+                return fail(&format!(
+                    "--to {to} is before --from {from}; nothing to play"
+                ));
             }
             Some(Err(error)) => return fail(&error),
         }
@@ -653,7 +653,8 @@ fn replay_to_stdout(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write as _;
     let mut subscription = client.add_subscription("cavalry:ipc", stream_id)?;
-    let replay = client.start_replay(request.recording_id, from, length, stream_id, "cavalry:ipc")?;
+    let replay =
+        client.start_replay(request.recording_id, from, length, stream_id, "cavalry:ipc")?;
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
     let mut messages = 0u64;
@@ -697,7 +698,9 @@ fn replay_to_stdout(
     let said = match reason {
         Some(cavalry::ReplayStopReason::Ended) => "ended".to_string(),
         Some(cavalry::ReplayStopReason::Stopped) => "stopped by command".to_string(),
-        Some(cavalry::ReplayStopReason::NotConnected) => "ended for want of a subscriber".to_string(),
+        Some(cavalry::ReplayStopReason::NotConnected) => {
+            "ended for want of a subscriber".to_string()
+        }
         Some(cavalry::ReplayStopReason::Failed) => "failed".to_string(),
         None => "ended with a reason this version does not know".to_string(),
     };
@@ -854,7 +857,15 @@ mod tests {
 
     #[test]
     fn replay_takes_a_recording_a_from_and_the_rest_and_nothing_else() {
-        match parsed(&["replay", "--recording", "3", "--from", "4096", "--to", "8192"]) {
+        match parsed(&[
+            "replay",
+            "--recording",
+            "3",
+            "--from",
+            "4096",
+            "--to",
+            "8192",
+        ]) {
             Invocation::Replay(flags, request) => {
                 assert!(flags.dir.is_none());
                 assert_eq!(
@@ -885,11 +896,20 @@ mod tests {
                 assert_eq!(flags.log_dir.as_deref(), Some(Path::new("/l")));
                 assert_eq!(request.recording_id, 0);
                 assert_eq!(request.from, Point::Instant(1_793_266_560_000_000_000));
-                assert_eq!((request.to, request.stream_id, request.follow), (None, Some(-7), true));
+                assert_eq!(
+                    (request.to, request.stream_id, request.follow),
+                    (None, Some(-7), true)
+                );
             }
             _ => panic!("not a replay"),
         }
-        match parsed(&["replay", "--recording", "0", "--from", "@1700000000000000000"]) {
+        match parsed(&[
+            "replay",
+            "--recording",
+            "0",
+            "--from",
+            "@1700000000000000000",
+        ]) {
             Invocation::Replay(_, request) => {
                 assert_eq!(request.from, Point::Instant(1_700_000_000_000_000_000));
             }
@@ -902,8 +922,27 @@ mod tests {
             ["replay", "--recording", "-1", "--from", "0"].as_slice(),
             ["replay", "--recording", "0", "--from", "33"].as_slice(),
             ["replay", "--recording", "0", "--from", "yesterday"].as_slice(),
-            ["replay", "--recording", "0", "--from", "0", "--to", "64", "--follow"].as_slice(),
-            ["replay", "--recording", "0", "--from", "0", "--follow", "--follow"].as_slice(),
+            [
+                "replay",
+                "--recording",
+                "0",
+                "--from",
+                "0",
+                "--to",
+                "64",
+                "--follow",
+            ]
+            .as_slice(),
+            [
+                "replay",
+                "--recording",
+                "0",
+                "--from",
+                "0",
+                "--follow",
+                "--follow",
+            ]
+            .as_slice(),
             ["replay", "--recording", "0", "--from", "0", "--stream", "x"].as_slice(),
             ["replay", "--recording", "0", "--from", "0", "--stop", "1"].as_slice(),
             ["replay", "--recording", "0", "--from", "0", "7"].as_slice(),
@@ -920,11 +959,26 @@ mod tests {
     fn an_rfc_3339_time_resolves_to_nanoseconds_since_the_epoch() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("1970-01-01T00:00:01.5Z"), Some(1_500_000_000));
-        assert_eq!(parse_rfc3339("2026-10-29T09:36:00Z"), Some(1_793_266_560_000_000_000));
-        assert_eq!(parse_rfc3339("2026-10-29 09:36:00z"), Some(1_793_266_560_000_000_000));
-        assert_eq!(parse_rfc3339("2026-10-29t10:36:00+01:00"), Some(1_793_266_560_000_000_000));
-        assert_eq!(parse_rfc3339("2026-10-29T04:36:00.123456789-05:00"), Some(1_793_266_560_123_456_789));
-        assert_eq!(parse_rfc3339("2000-02-29T00:00:00Z"), Some(951_782_400_000_000_000));
+        assert_eq!(
+            parse_rfc3339("2026-10-29T09:36:00Z"),
+            Some(1_793_266_560_000_000_000)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-10-29 09:36:00z"),
+            Some(1_793_266_560_000_000_000)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-10-29t10:36:00+01:00"),
+            Some(1_793_266_560_000_000_000)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-10-29T04:36:00.123456789-05:00"),
+            Some(1_793_266_560_123_456_789)
+        );
+        assert_eq!(
+            parse_rfc3339("2000-02-29T00:00:00Z"),
+            Some(951_782_400_000_000_000)
+        );
         assert_eq!(parse_rfc3339("1969-12-31T23:59:59Z"), Some(-1_000_000_000));
         for bad in [
             "",
@@ -949,12 +1003,18 @@ mod tests {
     #[test]
     fn a_line_is_the_position_the_fragment_mark_and_the_body_as_text_or_hex() {
         use cavalry::{DataFrameHeader, Flags, FrameType};
-        let header = |flags: Flags| DataFrameHeader::new(FrameType::Data, flags, 40).expect("a header");
+        let header =
+            |flags: Flags| DataFrameHeader::new(FrameType::Data, flags, 40).expect("a header");
         let mut line = String::new();
         format_line(&mut line, 64, b"hello\tworld", &header(Flags::UNFRAGMENTED));
         assert_eq!(line, "64 hello\tworld");
         line.clear();
-        format_line(&mut line, 128, &[0, 1, 2, 255], &header(Flags::UNFRAGMENTED));
+        format_line(
+            &mut line,
+            128,
+            &[0, 1, 2, 255],
+            &header(Flags::UNFRAGMENTED),
+        );
         assert_eq!(line, "128 000102ff");
         line.clear();
         format_line(&mut line, 192, b"line\nbreak", &header(Flags::BEGIN));

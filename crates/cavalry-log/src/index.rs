@@ -11,7 +11,9 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-use crate::layout::{ENTRY_LENGTH, HEADER_LENGTH, IndexEntry, IndexHeader, LayoutError, index_file_name};
+use crate::layout::{
+    ENTRY_LENGTH, HEADER_LENGTH, IndexEntry, IndexHeader, LayoutError, index_file_name,
+};
 
 const DOC: &str = "docs/reference/durable-log.md#time-index";
 
@@ -128,10 +130,7 @@ impl Index {
             source,
         };
         let file = File::open(&path).map_err(|source| io("open", source))?;
-        let length = file
-            .metadata()
-            .map_err(|source| io("stat", source))?
-            .len();
+        let length = file.metadata().map_err(|source| io("stat", source))?.len();
         let mut header = [0u8; HEADER_LENGTH];
         if length >= HEADER_LENGTH as u64 {
             file.read_exact_at(&mut header, 0)
@@ -295,11 +294,19 @@ mod tests {
     fn a_torn_or_out_of_order_last_entry_is_ignored() {
         let dir = Dir::new("torn");
         write_index(&dir.0, &ENTRIES, &[7u8; 9]);
-        assert_eq!(position_at(&dir.0, 3, 400).unwrap(), 192, "bytes past the last whole entry");
+        assert_eq!(
+            position_at(&dir.0, 3, 400).unwrap(),
+            192,
+            "bytes past the last whole entry"
+        );
         let mut broken = ENTRIES.to_vec();
         broken.push((250, 256));
         write_index(&dir.0, &broken, &[]);
-        assert_eq!(position_at(&dir.0, 3, 400).unwrap(), 192, "a last entry that breaks the order");
+        assert_eq!(
+            position_at(&dir.0, 3, 400).unwrap(),
+            192,
+            "a last entry that breaks the order"
+        );
         assert_eq!(position_after(&dir.0, 3, 400).unwrap(), 192);
     }
 
@@ -314,7 +321,11 @@ mod tests {
         write_index(&dir.0, &[(100, 0)], &[]);
         assert_eq!(position_at(&dir.0, 3, 0).unwrap(), 0);
         assert_eq!(position_after(&dir.0, 3, 0).unwrap(), 0);
-        fs::rename(dir.0.join(index_file_name(3)), dir.0.join(index_file_name(4))).unwrap();
+        fs::rename(
+            dir.0.join(index_file_name(3)),
+            dir.0.join(index_file_name(4)),
+        )
+        .unwrap();
         let error = position_at(&dir.0, 4, 0).unwrap_err();
         assert_eq!(error.reason(), "recording-id", "{error}");
         fs::write(dir.0.join(index_file_name(5)), b"not an index").unwrap();
