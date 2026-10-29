@@ -58,8 +58,16 @@ SHOWN = ("p50_ns", "p99_ns", "p99_99_ns", "max_ns")
 GATED_ROWS = ("claim_commit_", "one_way_")
 
 
+def recorded_order(path: Path) -> tuple[int, str]:
+    """The unix time the harness puts last in a result's name, then the name: so the newest
+    run is the newest, whatever its profile's suffix (`-unchecked`, `-only`), where a
+    sort by name put `-only-<time>` after every later full run of the profile."""
+    tail = path.stem.rsplit("-", 1)[-1]
+    return (int(tail) if tail.isdigit() else 0, path.name)
+
+
 def newest_result() -> Path:
-    files = sorted(RESULTS.glob("*.json")) if RESULTS.is_dir() else []
+    files = sorted(RESULTS.glob("*.json"), key=recorded_order) if RESULTS.is_dir() else []
     if not files:
         sys.exit(f"bench-compare: no result under {RESULTS.relative_to(ROOT)}; run `just bench` first")
     return files[-1]
@@ -83,9 +91,20 @@ def compare(result: dict, baseline: dict) -> int:
     print(f"bench-compare: {profile}, {result.get('messages', '?')} messages, git {result.get('git', '?')}, {shown}")
     floor = step or 0
     failures = 0
-    allocations = result.get("allocations_per_message")
-    if allocations is None or allocations > 0:
-        print(f"bench-compare: allocations per message is {allocations}, the gate requires 0 (CLAUDE.md, gate 2)")
+    # The gate requires zero allocations in the measured loops. The harness writes the
+    # count as `allocations` and, when a message row ran, the ratio per message; a
+    # `--only` run of the timer, slot or record rows has a `null` ratio and is judged by
+    # the count. A result with neither field is from before the count and fails, as a
+    # result without the ratio always did.
+    count = result.get("allocations")
+    ratio = result.get("allocations_per_message")
+    if count is None and ratio is None:
+        print("bench-compare: the result carries neither allocations nor allocations_per_message; "
+              "the gate requires 0 allocations (CLAUDE.md, gate 2); run `just bench` again with this harness")
+        failures += 1
+    elif (count or 0) > 0 or (ratio or 0) > 0:
+        print(f"bench-compare: {count if count is not None else '?'} allocations in the measured loops, "
+              f"{ratio if ratio is not None else 'no'} per message; the gate requires 0 (CLAUDE.md, gate 2)")
         failures += 1
     rows = []
     for name, now in sorted(result["benchmarks"].items()):

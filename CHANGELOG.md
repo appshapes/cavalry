@@ -605,3 +605,14 @@ user-visible change, added in the same commit as the change. The format follows
   --update` writes the result's `date_unix` as a UTC date-time under `date`, where it
   read a field the harness never wrote and left `null`; the four profiles carry their
   runs' dates (card 158; [Run the bench](docs/how-to/run-the-bench.md), step 4).
+- The bench harness's conductor loads the producer position once per millisecond by
+  the clock, which it reads every 256 spins, instead of every 10,000 spins, which was
+  a millisecond on the bench host and half of one on kip; the loads per run are
+  printed and written to the result as `producer_position_loads`, so each host's
+  cadence is on record. `cavalry-bench --only NAME` runs only the benchmarks with a row
+  whose name contains NAME, for a profile of one row, under the profile with `-only`
+  appended; a NAME no row contains is an error that lists the rows. The result carries
+  the allocation count as `allocations` beside the ratio, which `bench-compare` judges
+  when no message row ran, and `bench-compare` picks the newest result by the time in
+  its name, not by name (card 161;
+  [bench/README.md](bench/README.md)).

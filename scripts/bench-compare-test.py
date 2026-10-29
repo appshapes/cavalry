@@ -29,7 +29,7 @@ def row(p99_99, runs=None):
 
 def result(step, **rows):
     return {"schema": 0, "profile": "test-host", "git": "abc1234", "date_unix": 1793229856,
-            "messages": 1000, "repeat": 3, "allocations_per_message": 0,
+            "messages": 1000, "repeat": 3, "allocations_per_message": 0, "allocations": 0,
             "clock_step_ns": step, "benchmarks": rows}
 
 
@@ -108,6 +108,33 @@ class Rule(unittest.TestCase):
         code, out = run(res, baseline(step=10, one_way_32_client=row(300)))
         self.assertEqual(code, 1, out)
 
+    def test_an_only_result_with_no_message_row_passes_on_a_count_of_zero(self):
+        """`--only timer` writes a `null` ratio and the count; with the count 0 the run
+        passes, and its `-only` profile has no baseline (card 161)."""
+        res = result(10, timer=row(20))
+        res["profile"] = "test-host-only"
+        res["allocations_per_message"] = None
+        code, out = run(res, baseline(step=10, one_way_32_client=row(300)))
+        self.assertEqual(code, 0, out)
+        self.assertIn("no baseline", out)
+
+    def test_a_null_ratio_with_allocations_counted_fails(self):
+        res = result(10, timer=row(20))
+        res["profile"] = "test-host-only"
+        res["allocations_per_message"] = None
+        res["allocations"] = 3
+        code, out = run(res, baseline(step=10, one_way_32_client=row(300)))
+        self.assertEqual(code, 1, out)
+        self.assertIn("3 allocations", out)
+
+    def test_a_result_with_neither_allocation_field_fails(self):
+        res = result(10, one_way_32_client=row(300))
+        del res["allocations_per_message"]
+        del res["allocations"]
+        code, out = run(res, baseline(step=10, one_way_32_client=row(300)))
+        self.assertEqual(code, 1, out)
+        self.assertIn("neither", out)
+
 
 class Floor(unittest.TestCase):
     """The floor is the smaller of the result's step and the baseline's (ADR 0029): a
@@ -148,6 +175,20 @@ class Floor(unittest.TestCase):
         code, out = run(res, baseline(step=10, claim_commit_32_client=row(160)))
         self.assertEqual(code, 1, out)
         self.assertIn("clock step unknown", out)
+
+
+class Newest(unittest.TestCase):
+    """`newest_result` picks the newest run by the time in the file's name, so a `-only`
+    result does not shadow every later full run of its profile (card 161)."""
+
+    def test_the_newest_result_is_by_time_not_by_name(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        results = Path(directory.name)
+        for name in ("p-1000.json", "p-only-1500.json", "p-2000.json", "p-unchecked-1900.json"):
+            (results / name).write_text("{}", encoding="utf-8")
+        with mock.patch.object(bench_compare, "RESULTS", results):
+            self.assertEqual(bench_compare.newest_result().name, "p-2000.json")
 
 
 class Update(unittest.TestCase):
