@@ -1,5 +1,6 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 1
-//! (ADR 0019; the recording commands and events are ADR 0025).
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 2
+//! (ADR 0019; the recording commands and events are ADR 0025, the replay commands and
+//! events ADR 0030).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -41,7 +42,7 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 1;
+pub const VERSION: i32 = 2;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
@@ -51,6 +52,18 @@ pub const CORRELATED_LENGTH: usize = 16;
 
 /// The channel every publication and subscription of this version names.
 pub const IPC_CHANNEL: &[u8] = b"cavalry:ipc";
+
+/// The position a `start replay` passes for the recording's start position: Aeron's
+/// `NULL_POSITION` (`spec/client-protocol.md`, "Commands"; ADR 0030).
+pub const NULL_POSITION: i64 = -1;
+
+/// The length a `start replay` passes for everything up to the recording's extent when
+/// the replay starts: Aeron's `NULL_LENGTH`.
+pub const NULL_LENGTH: i64 = -1;
+
+/// The length a `start replay` passes to follow a live recording until it stops:
+/// Aeron's `Long.MAX_VALUE`.
+pub const FOLLOW_LENGTH: i64 = i64::MAX;
 
 /// The docs anchor every error message names.
 const DOC: &str = "docs/reference/client-protocol.md#what-the-driver-rejects";
@@ -79,6 +92,11 @@ pub enum CommandType {
     StartRecording = 0x0101,
     /// Stop a recording at the position the recorder has written.
     StopRecording = 0x0102,
+    /// Play a recording from a position into a publication on a replay stream, which
+    /// a subscription reads as any stream (ADR 0030).
+    StartReplay = 0x0103,
+    /// Stop a replay at the position reached.
+    StopReplay = 0x0104,
 }
 
 impl TryFrom<i32> for CommandType {
@@ -97,6 +115,8 @@ impl TryFrom<i32> for CommandType {
             11 => Ok(CommandType::ClientClose),
             0x0101 => Ok(CommandType::StartRecording),
             0x0102 => Ok(CommandType::StopRecording),
+            0x0103 => Ok(CommandType::StartReplay),
+            0x0104 => Ok(CommandType::StopReplay),
             found => Err(ProtocolError::Type { found }),
         }
     }
@@ -129,6 +149,12 @@ pub enum EventType {
     /// A recording stopped, by command, at its publication's end of stream, or on a
     /// failure; sent to every client.
     RecordingStopped = 0x1002,
+    /// A replay's publication exists at the recording's start position, with its
+    /// `replay.position` counter (ADR 0030).
+    ReplayReady = 0x1003,
+    /// A replay ended, by reaching its end, by command, for want of a subscriber, or on
+    /// a failure; sent to every client.
+    ReplayStopped = 0x1004,
 }
 
 impl TryFrom<i32> for EventType {
@@ -148,6 +174,8 @@ impl TryFrom<i32> for EventType {
             0x0F0A => Ok(EventType::ClientTimeout),
             0x1001 => Ok(EventType::RecordingReady),
             0x1002 => Ok(EventType::RecordingStopped),
+            0x1003 => Ok(EventType::ReplayReady),
+            0x1004 => Ok(EventType::ReplayStopped),
             found => Err(ProtocolError::Type { found }),
         }
     }
@@ -184,6 +212,9 @@ pub enum ErrorCode {
     UnknownRecording = 21,
     /// Start recording named a stream whose live publications are all being recorded.
     AlreadyRecording = 22,
+    /// Start replay named a position that is not a multiple of 32, below the
+    /// recording's start position or above its extent.
+    PositionOutOfRange = 23,
 }
 
 impl ErrorCode {
@@ -201,6 +232,41 @@ impl ErrorCode {
             20 => Some(ErrorCode::NoPublicationToRecord),
             21 => Some(ErrorCode::UnknownRecording),
             22 => Some(ErrorCode::AlreadyRecording),
+            23 => Some(ErrorCode::PositionOutOfRange),
+            _ => None,
+        }
+    }
+
+    /// The number on the wire.
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// Why a replay stopped: the `reason` of a `replay stopped` event
+/// (`spec/client-protocol.md`, "Events"; ADR 0030).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum ReplayStopReason {
+    /// The replay reached its end position or the recording's stop position.
+    Ended = 0,
+    /// A `stop replay` command ended it at the position reached.
+    Stopped = 1,
+    /// The replay's publication had no subscriber for the replay connect timeout.
+    NotConnected = 2,
+    /// A segment file could not be read, or a frame failed a check; the position is
+    /// the last frame delivered.
+    Failed = 3,
+}
+
+impl ReplayStopReason {
+    /// The reason for a number, or `None` for one this version does not send.
+    pub const fn from_code(code: i32) -> Option<ReplayStopReason> {
+        match code {
+            0 => Some(ReplayStopReason::Ended),
+            1 => Some(ReplayStopReason::Stopped),
+            2 => Some(ReplayStopReason::NotConnected),
+            3 => Some(ReplayStopReason::Failed),
             _ => None,
         }
     }
@@ -389,6 +455,36 @@ pub enum Command<'a> {
         /// The recording id that `recording ready` carried.
         recording_id: i64,
     },
+    /// Type 259 (`0x0103`).
+    StartReplay {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id, which becomes the replay session id; `replay ready` or
+        /// `error` names it.
+        correlation_id: i64,
+        /// The recording to play.
+        recording_id: i64,
+        /// Where to start: a multiple of 32 from the recording's start position to its
+        /// extent, or [`NULL_POSITION`] for the start position.
+        position: i64,
+        /// How many bytes to play: 0 or more, [`NULL_LENGTH`] for everything up to the
+        /// extent when the replay starts, or [`FOLLOW_LENGTH`] to follow a live
+        /// recording until it stops.
+        length: i64,
+        /// The stream the replay's publication is on.
+        replay_stream_id: i32,
+        /// The replay publication's channel, `cavalry:ipc` in this version.
+        replay_channel: &'a [u8],
+    },
+    /// Type 260 (`0x0104`).
+    StopReplay {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; `operation success` or `error` names it.
+        correlation_id: i64,
+        /// The replay session id that `replay ready` carried.
+        replay_session_id: i64,
+    },
 }
 
 impl<'a> Command<'a> {
@@ -404,6 +500,8 @@ impl<'a> Command<'a> {
             Command::ClientClose { .. } => CommandType::ClientClose,
             Command::StartRecording { .. } => CommandType::StartRecording,
             Command::StopRecording { .. } => CommandType::StopRecording,
+            Command::StartReplay { .. } => CommandType::StartReplay,
+            Command::StopReplay { .. } => CommandType::StopReplay,
         }
     }
 
@@ -418,7 +516,9 @@ impl<'a> Command<'a> {
             | Command::ClientKeepalive { client_id, .. }
             | Command::ClientClose { client_id, .. }
             | Command::StartRecording { client_id, .. }
-            | Command::StopRecording { client_id, .. } => client_id,
+            | Command::StopRecording { client_id, .. }
+            | Command::StartReplay { client_id, .. }
+            | Command::StopReplay { client_id, .. } => client_id,
         }
     }
 
@@ -433,7 +533,9 @@ impl<'a> Command<'a> {
             | Command::ClientKeepalive { correlation_id, .. }
             | Command::ClientClose { correlation_id, .. }
             | Command::StartRecording { correlation_id, .. }
-            | Command::StopRecording { correlation_id, .. } => correlation_id,
+            | Command::StopRecording { correlation_id, .. }
+            | Command::StartReplay { correlation_id, .. }
+            | Command::StopReplay { correlation_id, .. } => correlation_id,
         }
     }
 
@@ -501,6 +603,20 @@ impl<'a> Command<'a> {
                 correlation_id,
                 recording_id: cursor.i64()?,
             },
+            CommandType::StartReplay => Command::StartReplay {
+                client_id,
+                correlation_id,
+                recording_id: cursor.i64()?,
+                position: cursor.i64()?,
+                length: cursor.i64()?,
+                replay_stream_id: cursor.i32()?,
+                replay_channel: cursor.string()?,
+            },
+            CommandType::StopReplay => Command::StopReplay {
+                client_id,
+                correlation_id,
+                replay_session_id: cursor.i64()?,
+            },
         };
         cursor.finish()?;
         Ok(command)
@@ -557,6 +673,23 @@ impl<'a> Command<'a> {
                 registration_id, ..
             } => out.i64(registration_id),
             Command::StopRecording { recording_id, .. } => out.i64(recording_id),
+            Command::StartReplay {
+                recording_id,
+                position,
+                length,
+                replay_stream_id,
+                replay_channel,
+                ..
+            } => {
+                out.i64(recording_id)?;
+                out.i64(position)?;
+                out.i64(length)?;
+                out.i32(replay_stream_id)?;
+                out.string(replay_channel)
+            }
+            Command::StopReplay {
+                replay_session_id, ..
+            } => out.i64(replay_session_id),
             Command::ClientKeepalive { .. } | Command::ClientClose { .. } => Ok(()),
         }
     }
@@ -669,6 +802,32 @@ pub enum Event<'a> {
         /// The catalog's stop position.
         stop_position: i64,
     },
+    /// Type `0x1003`: a replay's publication exists and its counter is allocated.
+    ReplayReady {
+        /// The start replay command's correlation id.
+        correlation_id: i64,
+        /// The replay session id: the command's correlation id, which names the log and
+        /// which `stop replay` names.
+        replay_session_id: i64,
+        /// The recording being played.
+        recording_id: i64,
+        /// Where the replay starts: the recording's start position when the command
+        /// passed [`NULL_POSITION`].
+        start_position: i64,
+        /// The replay publication's session, which its images carry.
+        session_id: i32,
+        /// The replay stream id.
+        stream_id: i32,
+    },
+    /// Type `0x1004`: a replay stopped; sent to every client.
+    ReplayStopped {
+        /// The replay.
+        replay_session_id: i64,
+        /// The position after the last frame written.
+        position: i64,
+        /// One of [`ReplayStopReason`]'s numbers.
+        reason: i32,
+    },
 }
 
 impl<'a> Event<'a> {
@@ -685,6 +844,8 @@ impl<'a> Event<'a> {
             Event::ClientTimeout { .. } => EventType::ClientTimeout,
             Event::RecordingReady { .. } => EventType::RecordingReady,
             Event::RecordingStopped { .. } => EventType::RecordingStopped,
+            Event::ReplayReady { .. } => EventType::ReplayReady,
+            Event::ReplayStopped { .. } => EventType::ReplayStopped,
         }
     }
 
@@ -750,6 +911,19 @@ impl<'a> Event<'a> {
             EventType::RecordingStopped => Event::RecordingStopped {
                 recording_id: cursor.i64()?,
                 stop_position: cursor.i64()?,
+            },
+            EventType::ReplayReady => Event::ReplayReady {
+                correlation_id: cursor.i64()?,
+                replay_session_id: cursor.i64()?,
+                recording_id: cursor.i64()?,
+                start_position: cursor.i64()?,
+                session_id: cursor.i32()?,
+                stream_id: cursor.i32()?,
+            },
+            EventType::ReplayStopped => Event::ReplayStopped {
+                replay_session_id: cursor.i64()?,
+                position: cursor.i64()?,
+                reason: cursor.i32()?,
             },
         };
         cursor.finish()?;
@@ -863,6 +1037,30 @@ impl<'a> Event<'a> {
             } => {
                 out.i64(recording_id)?;
                 out.i64(stop_position)
+            }
+            Event::ReplayReady {
+                correlation_id,
+                replay_session_id,
+                recording_id,
+                start_position,
+                session_id,
+                stream_id,
+            } => {
+                out.i64(correlation_id)?;
+                out.i64(replay_session_id)?;
+                out.i64(recording_id)?;
+                out.i64(start_position)?;
+                out.i32(session_id)?;
+                out.i32(stream_id)
+            }
+            Event::ReplayStopped {
+                replay_session_id,
+                position,
+                reason,
+            } => {
+                out.i64(replay_session_id)?;
+                out.i64(position)?;
+                out.i32(reason)
             }
         }
     }
@@ -1107,6 +1305,44 @@ mod tests {
         );
         assert_eq!(ErrorCode::from_code(22), Some(ErrorCode::AlreadyRecording));
         assert_eq!(ErrorCode::AlreadyRecording.code(), 22);
+        assert_eq!(
+            ErrorCode::from_code(23),
+            Some(ErrorCode::PositionOutOfRange)
+        );
+        assert_eq!(ErrorCode::from_code(24), None);
+    }
+
+    #[test]
+    fn a_replay_stop_reason_round_trips_and_stops_at_three() {
+        for (code, reason) in [
+            (0, ReplayStopReason::Ended),
+            (1, ReplayStopReason::Stopped),
+            (2, ReplayStopReason::NotConnected),
+            (3, ReplayStopReason::Failed),
+        ] {
+            assert_eq!(ReplayStopReason::from_code(code), Some(reason));
+            assert_eq!(reason.code(), code);
+        }
+        assert_eq!(ReplayStopReason::from_code(4), None);
+        assert_eq!(ReplayStopReason::from_code(-1), None);
+    }
+
+    #[test]
+    fn the_replay_conventions_are_aerons() {
+        assert_eq!(NULL_POSITION, -1);
+        assert_eq!(NULL_LENGTH, -1);
+        assert_eq!(FOLLOW_LENGTH, i64::MAX);
+        let command = Command::StartReplay {
+            client_id: 5,
+            correlation_id: 13,
+            recording_id: 0,
+            position: NULL_POSITION,
+            length: NULL_LENGTH,
+            replay_stream_id: 2001,
+            replay_channel: IPC_CHANNEL,
+        };
+        // 16 bytes of ids, three i64s, an i32 and the padded channel.
+        assert_eq!(command.encoded_length(), Ok(16 + 24 + 4 + 16));
     }
 
     #[test]

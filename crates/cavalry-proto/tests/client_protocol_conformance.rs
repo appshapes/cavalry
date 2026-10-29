@@ -88,6 +88,24 @@ fn command_fields(command: &Command<'_>) -> Value {
         } => {
             json!({"name": "stop_recording", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id})
         }
+        Command::StartReplay {
+            client_id,
+            correlation_id,
+            recording_id,
+            position,
+            length,
+            replay_stream_id,
+            replay_channel,
+        } => {
+            json!({"name": "start_replay", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id, "position": position, "length": length, "replay_stream_id": replay_stream_id, "replay_channel": text(replay_channel)})
+        }
+        Command::StopReplay {
+            client_id,
+            correlation_id,
+            replay_session_id,
+        } => {
+            json!({"name": "stop_replay", "client_id": client_id, "correlation_id": correlation_id, "replay_session_id": replay_session_id})
+        }
     }
 }
 
@@ -164,17 +182,34 @@ fn event_fields(event: &Event<'_>) -> Value {
         } => {
             json!({"name": "recording_stopped", "recording_id": recording_id, "stop_position": stop_position})
         }
+        Event::ReplayReady {
+            correlation_id,
+            replay_session_id,
+            recording_id,
+            start_position,
+            session_id,
+            stream_id,
+        } => {
+            json!({"name": "replay_ready", "correlation_id": correlation_id, "replay_session_id": replay_session_id, "recording_id": recording_id, "start_position": start_position, "session_id": session_id, "stream_id": stream_id})
+        }
+        Event::ReplayStopped {
+            replay_session_id,
+            position,
+            reason,
+        } => {
+            json!({"name": "replay_stopped", "replay_session_id": replay_session_id, "position": position, "reason": reason})
+        }
     }
 }
 
 #[test]
 fn every_vector_in_spec_vectors_client_protocol_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("client-protocol.json parses");
-    assert_eq!(doc["version"], 1, "the vectors are for version 1");
+    assert_eq!(doc["version"], 2, "the vectors are for version 2");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
-        vectors.len() >= 58,
-        "client-protocol.py writes at least 58 vectors"
+        vectors.len() >= 80,
+        "client-protocol.py writes at least 80 vectors"
     );
 
     for vector in vectors {

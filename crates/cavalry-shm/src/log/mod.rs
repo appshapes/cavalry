@@ -7,7 +7,10 @@
 //! a publisher opens it with [`LogBuffers::open`] and writes through a [`TermAppender`],
 //! whose [`TermAppender::try_claim`] is one fetch-and-add and one release store on the
 //! way in and one release store on commit; a subscriber reads through a [`TermReader`],
-//! which checks every frame as `spec/frame.md` says before it hands the body over.
+//! which checks every frame as `spec/frame.md` says before it hands the body over. The
+//! driver's replayer creates a replay's log at a position with [`LogBuffers::create_at`]
+//! and writes recorded frames into it through a [`TermWriter`], by the claim protocol,
+//! so that a subscriber reads a replay as it reads any stream (ADR 0030).
 //!
 //! The module is in the layers of [`crate::counters`]: [`layout`] is the spec's bytes
 //! and arithmetic on plain values, with no `unsafe`, so Miri and the vectors run
@@ -26,7 +29,8 @@ pub mod layout;
 
 #[cfg(not(loom))]
 pub use file::{
-    Block, BufferClaim, ClaimError, LogBuffers, Poll, TermAppender, TermReader, UnblockOutcome,
+    Block, BufferClaim, ClaimError, LogBuffers, Poll, TermAppender, TermReader, TermWriter,
+    UnblockOutcome,
 };
 pub use layout::{ClaimRefused, HeaderFields, LogType, Positions, Tail};
 
@@ -109,6 +113,17 @@ pub enum LogError {
     },
     /// A frame in a term failed a check of `spec/frame.md`.
     Frame(FrameError),
+    /// A recorded frame a replay writes carries a header field that is not its
+    /// position's or its recording's: the term id, the term offset, the session id or
+    /// the stream id (`spec/durable-log.md`, "Segment files"). Reported as `frame`.
+    Mismatch {
+        /// The field: `term id`, `term offset`, `session id` or `stream id`.
+        field: &'static str,
+        /// The value in the header.
+        found: i64,
+        /// The value the position or the recording says.
+        expected: i64,
+    },
     /// A message longer than the log allows: the maximum payload for a claim, the
     /// maximum message for an offer.
     TooLong {
@@ -145,7 +160,7 @@ impl LogError {
             LogError::Changed => "changed",
             LogError::Position { .. } => "position",
             LogError::Tail { .. } => "tail",
-            LogError::Frame(_) => "frame",
+            LogError::Frame(_) | LogError::Mismatch { .. } => "frame",
             LogError::TooLong { .. } => "too-long",
             LogError::Io(_) => "io",
         }
@@ -241,6 +256,18 @@ impl fmt::Display for LogError {
                 f,
                 "log buffer rejected ({reason}): a frame in the term failed a check, nothing after it is \
                  delivered: {error}"
+            ),
+            LogError::Mismatch {
+                field,
+                found,
+                expected,
+            } => write!(
+                f,
+                "log buffer rejected ({reason}): a recorded frame's {field} is {found}, its position \
+                 and recording say {expected}; the segment file is damaged or is another recording's, \
+                 and the replay ends at the frame before it: restore the segment file from a backup, \
+                 and `cavalry doctor` names the recording; see \
+                 docs/reference/durable-log.md#segment-files"
             ),
             LogError::TooLong { found, limit } => write!(
                 f,

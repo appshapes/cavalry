@@ -1,7 +1,7 @@
 //! The log buffer on disk: creating it, mapping it, the publisher's appender, the
-//! subscriber's reader and the driver's duties, each over the cells of `cells`. Every
-//! `unsafe` block that touches a mapping is in this module; `cells` and `layout` never
-//! see a file.
+//! subscriber's reader, the replayer's writer and the driver's duties, each over the
+//! cells of `cells`. Every `unsafe` block that touches a mapping is in this module;
+//! `cells` and `layout` never see a file.
 
 use core::fmt;
 use std::fs::OpenOptions;
@@ -364,6 +364,27 @@ impl LogBuffers {
     /// to 0, and writes the header magic-last (`spec/log-buffer.md`, "Metadata page").
     /// A file already at that path is [`LogError::Io`].
     pub fn create(dir: &Path, fields: &HeaderFields) -> Result<Self, LogError> {
+        Self::create_at(dir, fields, 0)
+    }
+
+    /// [`LogBuffers::create`] at `position`: the active term count is the position's
+    /// term count, the tail of its partition is its term id at its term offset, and the
+    /// other two tails hold the terms three back from the two terms that follow, so
+    /// that the first frame written lands at the position and rotation finds what it
+    /// expects. A replay's log is created this way, at the replay's start position, so
+    /// that its positions are the recording's (`spec/log-buffer.md`, "Metadata page";
+    /// ADR 0030). A position that is not a multiple of 32 from 0 to below the largest
+    /// position is [`LogError::Position`], with nothing created.
+    pub fn create_at(dir: &Path, fields: &HeaderFields, position: i64) -> Result<Self, LogError> {
+        let positions = fields.positions();
+        let limit = positions.max_position();
+        if position < 0 || position >= limit || position % i64::from(FRAME_ALIGNMENT) != 0 {
+            return Err(LogError::Position {
+                found: position,
+                current: 0,
+                limit,
+            });
+        }
         let path = dir.join(fields.file_name());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -384,16 +405,20 @@ impl LogBuffers {
         pretouch::writable(&map)?;
         let mapped = Arc::new(Mapped::new(Map::Writer(map), *fields)?);
         let meta = mapped.meta();
-        let initial = fields.initial_term_id();
-        meta.tails[0].store(Tail::pack(initial, 0));
-        for (i, tail) in meta.tails.iter().enumerate().skip(1) {
-            tail.store(Tail::pack(
-                initial
-                    .wrapping_add(i as i32)
-                    .wrapping_sub(PARTITION_COUNT as i32),
-                0,
-            ));
+        // The term count fits an i32: the position is below term length × 2^31.
+        let term_count = positions.term_count_of(position) as i32;
+        let term_id = positions.term_id_of(position);
+        let active = Positions::partition_of_count(term_count);
+        meta.tails[active].store(Tail::pack(term_id, positions.term_offset_of(position)));
+        for back in 1..PARTITION_COUNT {
+            // The partition `back` terms on holds the term three back from that one.
+            let partition = (active + back) % PARTITION_COUNT;
+            let held = term_id
+                .wrapping_add(back as i32)
+                .wrapping_sub(PARTITION_COUNT as i32);
+            meta.tails[partition].store(Tail::pack(held, 0));
         }
+        meta.active_term_count.store(term_count);
         meta.stream.set_end_of_stream_position(NOT_ENDED);
         meta.stream.set_connected(false);
         meta.header.publish(fields);
@@ -632,6 +657,23 @@ impl LogBuffers {
     /// 0 to below the largest position; otherwise [`LogError::Position`].
     pub fn reader(&self, position: i64) -> Result<TermReader, LogError> {
         TermReader::new(Arc::clone(&self.mapped), position)
+    }
+
+    /// The replayer's writer on this log, which must be writable and of type 1
+    /// (exclusive), at the active tail: the frames it writes carry
+    /// `recorded_session_id` and `recorded_stream_id`, the recording's, which it checks
+    /// and replaces with this log's (ADR 0030). [`LogError::Type`] on a concurrent log,
+    /// [`LogError::Tail`] when the active tail is not the active term's.
+    pub fn writer(
+        &self,
+        recorded_session_id: i32,
+        recorded_stream_id: i32,
+    ) -> Result<TermWriter, LogError> {
+        TermWriter::new(
+            Arc::clone(&self.mapped),
+            recorded_session_id,
+            recorded_stream_id,
+        )
     }
 }
 
@@ -1166,6 +1208,182 @@ impl fmt::Debug for TermReader {
         f.debug_struct("TermReader")
             .field("correlation_id", &self.mapped.fields.correlation_id())
             .field("position", &self.position)
+            .finish()
+    }
+}
+
+/// The replayer's writer on a replay's log (`spec/client-protocol.md`, "Commands"; ADR
+/// 0030): it copies a recording's frames into the terms at their recorded term offsets
+/// by the claim protocol, one frame at a time, each with its header as recorded but for
+/// the session id and the stream id, which become this log's, so that a subscriber's
+/// [`TermReader`] reads a replay as it reads any stream. The log is type 1 and this is
+/// its one writer: it keeps the tail itself and stores it with a release store after
+/// each frame, as an exclusive publisher does, and rotates a full term as a publisher
+/// does. The handle is `Send` and keeps the mapping alive. It is the driver's replayer
+/// thread's, not a publisher's: it allocates nothing, and a frame it refuses is written
+/// in no part.
+pub struct TermWriter {
+    mapped: Arc<Mapped>,
+    term_count: i32,
+    term_id: i32,
+    term_offset: u32,
+    recorded_session_id: i32,
+    recorded_stream_id: i32,
+}
+
+impl TermWriter {
+    fn new(
+        mapped: Arc<Mapped>,
+        recorded_session_id: i32,
+        recorded_stream_id: i32,
+    ) -> Result<Self, LogError> {
+        mapped.require_writable()?;
+        if mapped.fields.log_type() != LogType::Exclusive {
+            return Err(LogError::Type {
+                found: mapped.fields.log_type() as i32,
+            });
+        }
+        let (term_count, tail) = mapped.active()?;
+        let term_offset = tail.term_offset(mapped.term_length());
+        Ok(Self {
+            mapped,
+            term_count,
+            term_id: tail.term_id(),
+            term_offset,
+            recorded_session_id,
+            recorded_stream_id,
+        })
+    }
+
+    /// The position the next frame goes to: the producer position of the log.
+    pub fn position(&self) -> i64 {
+        self.mapped
+            .positions
+            .position(self.term_id, self.term_offset)
+    }
+
+    /// The log's term length.
+    pub fn term_length(&self) -> u32 {
+        self.mapped.term_length()
+    }
+
+    /// The log's MTU length: the longest frame a recording of it holds.
+    pub fn mtu_length(&self) -> u32 {
+        self.mapped.fields.mtu_length()
+    }
+
+    /// Writes the frames at the front of `recorded`, the recording's bytes from this
+    /// writer's position within one term, into the log: whole frames in order, each
+    /// checked as `spec/frame.md` says and against its position and recording
+    /// (`spec/durable-log.md`, "Segment files") before any of it is written, until a
+    /// frame would begin at or past `limit`, the publication limit the driver maintains,
+    /// the term ends, or the bytes end inside a frame. A padding frame's bytes are its
+    /// header alone, as a recording holds them. Each frame goes in by the claim protocol:
+    /// its header with the length negated and this log's session id and stream id, its
+    /// body, then the positive length with a release store; then the tail. A term that
+    /// is full is rotated before the call returns, so the position is in the next term.
+    /// Returns the bytes of `recorded` consumed, which is where the caller's next bytes
+    /// begin; it can exceed `recorded.len()` by the alignment padding of the last frame
+    /// when the slice ends inside that padding, and [`TermWriter::position`] moved by
+    /// the same amount. A frame that fails a check is [`LogError::Frame`] or
+    /// [`LogError::Mismatch`], with the frames before it written and nothing of it.
+    pub fn write(&mut self, recorded: &[u8], limit: i64) -> Result<usize, LogError> {
+        let term_length = self.mapped.term_length();
+        let mut consumed = 0usize;
+        while self.term_offset < term_length {
+            if self.position() >= limit {
+                break;
+            }
+            let Some(bytes) = recorded.get(consumed..) else {
+                break;
+            };
+            let Some(head) = bytes.get(..FRAME_HEADER_LENGTH) else {
+                break;
+            };
+            let available = (term_length - self.term_offset) as usize;
+            let header = DataFrameHeader::parse_within(head, available)?;
+            self.check(&header)?;
+            let frame_length = header.frame_length() as u32;
+            let aligned = aligned_length(frame_length);
+            let is_data = header.frame_type() == FrameType::Data;
+            let body_end = if is_data {
+                frame_length as usize
+            } else {
+                FRAME_HEADER_LENGTH
+            };
+            if bytes.len() < body_end {
+                break;
+            }
+            let partition = Positions::partition_of_count(self.term_count);
+            let mut claimed = [0u8; FRAME_HEADER_LENGTH];
+            claimed.copy_from_slice(head);
+            claimed[..4].copy_from_slice(&(frame_length as i32).wrapping_neg().to_le_bytes());
+            claimed[12..16].copy_from_slice(&self.mapped.fields.session_id().to_le_bytes());
+            claimed[16..20].copy_from_slice(&self.mapped.fields.stream_id().to_le_bytes());
+            let frame = self.mapped.frame(partition, self.term_offset);
+            frame.claim(&claimed);
+            if is_data {
+                self.mapped
+                    .body_mut(partition, self.term_offset, frame_length)
+                    .copy_from_slice(&bytes[FRAME_HEADER_LENGTH..body_end]);
+            }
+            frame.publish(layout::frame_word(&layout::committed_header(&claimed)));
+            self.term_offset += aligned;
+            self.mapped.meta().tails[partition].store(Tail::pack(self.term_id, self.term_offset));
+            consumed = consumed.saturating_add(aligned as usize);
+        }
+        if self.term_offset >= term_length {
+            let rotation = rotation_after(self.term_count, self.term_id);
+            self.mapped.rotate(&rotation, self.term_count);
+            self.term_count = rotation.next_term_count;
+            self.term_id = rotation.next_tail.term_id();
+            self.term_offset = 0;
+        }
+        Ok(consumed)
+    }
+
+    /// The recorded frame's header against its position and its recording: the term
+    /// id and term offset the position computes, the session id and stream id of the
+    /// recording (`spec/durable-log.md`, "Segment files").
+    fn check(&self, header: &DataFrameHeader) -> Result<(), LogError> {
+        let mismatch = |field, found: i32, expected: i32| LogError::Mismatch {
+            field,
+            found: i64::from(found),
+            expected: i64::from(expected),
+        };
+        if header.term_id() != self.term_id {
+            return Err(mismatch("term id", header.term_id(), self.term_id));
+        }
+        if header.term_offset() != self.term_offset as i32 {
+            return Err(mismatch(
+                "term offset",
+                header.term_offset(),
+                self.term_offset as i32,
+            ));
+        }
+        if header.session_id() != self.recorded_session_id {
+            return Err(mismatch(
+                "session id",
+                header.session_id(),
+                self.recorded_session_id,
+            ));
+        }
+        if header.stream_id() != self.recorded_stream_id {
+            return Err(mismatch(
+                "stream id",
+                header.stream_id(),
+                self.recorded_stream_id,
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for TermWriter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TermWriter")
+            .field("correlation_id", &self.mapped.fields.correlation_id())
+            .field("position", &self.position())
             .finish()
     }
 }

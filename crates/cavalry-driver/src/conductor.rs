@@ -12,7 +12,13 @@
 //! starts and stops through a bounded queue, takes its replies, allocates the two
 //! counters once the recording id is known, and lets the recorder's position bound the
 //! publisher's limit and the cleaning, so a slow disk back-pressures the publisher and
-//! never loses a byte (ADR 0025).
+//! never loses a byte (ADR 0025). Replay is the replayer thread's (`crate::replayer`)
+//! the same way: the conductor registers each replay, hands the replayer its start,
+//! takes the reply that says the recording's slot and position check, creates the
+//! replay's publication, a log of the driver's own at the replay's start position,
+//! attaches the replayer's writer to it, and ends the replay when the replayer says it
+//! ended, a client stops it, or it has had no subscriber for the connect timeout; the
+//! publication's limit paces the replayer as it paces a publisher (ADR 0030).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -22,7 +28,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cavalry_log::dir::Recovery;
 
 use cavalry_proto::client_protocol::{
-    Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, ProtocolError,
+    Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NULL_LENGTH, ProtocolError,
+    ReplayStopReason,
 };
 use cavalry_proto::frame::FRAME_ALIGNMENT;
 use cavalry_shm::broadcast::{BroadcastBuffer, Transmitter};
@@ -38,7 +45,8 @@ use cavalry_shm::counters::generated::{
     RECORDING_CATALOG_TRUNCATED, RECORDING_FILES_REMOVED, RECORDING_INDEX_REWRITTEN,
     RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED, RECORDING_SLOT_DROPPED,
     RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_SYNCED_POSITION,
-    SUBSCRIPTION_POSITION,
+    REPLAY_ENDED, REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED,
+    REPLAY_STARTED, REPLAY_STOPPED, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
@@ -48,6 +56,7 @@ use cavalry_shm::spsc;
 use crate::error::DriverError;
 use crate::idle::{IdleStrategy, Idler};
 use crate::recorder::{Reply, Request, Start, StartFailure};
+use crate::replayer;
 use crate::spec;
 
 /// The docs anchor an error event's message names.
@@ -59,6 +68,10 @@ const COMMANDS_PER_CYCLE: usize = 16;
 /// The deferred requests' bound: one attach and one stop per registered recording
 /// (`Conductor::deferred` says why it holds).
 const DEFERRED_CAPACITY: usize = 2 * spec::MAX_RECORDINGS;
+
+/// The replayer's deferred requests' bound: one attach and one stop per registered
+/// replay, by the argument on `Conductor::deferred`.
+const REPLAYER_DEFERRED_CAPACITY: usize = 2 * spec::MAX_REPLAYS;
 
 /// A frame's alignment as the positions count.
 const FRAME_ALIGN: i64 = FRAME_ALIGNMENT as i64;
@@ -206,6 +219,46 @@ enum RecordingState {
     Failed,
 }
 
+/// The driver's one replayer, seen from the conductor: the queues to and from it
+/// (ADR 0030).
+pub(crate) struct ReplayerLink {
+    /// Starts, attaches and stops to the replayer.
+    pub requests: spsc::Producer<replayer::Request>,
+    /// The replayer's answers.
+    pub replies: spsc::Consumer<replayer::Reply>,
+}
+
+/// Where one replay is in its life, as the conductor sees it, from the command to the
+/// reply that ends it; every transition adds one to a counter, and `counters.toml`
+/// lists them (`spec/client-protocol.md`, "Commands"; ADR 0030).
+// state machine: replay
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayState {
+    /// The start is with the replayer, which reads the slot and checks the position.
+    Starting,
+    /// The publication exists at the start position, `replay ready` went out, the
+    /// replayer's writer is attached or on its way.
+    Live,
+    /// The replayer ended it; `replay stopped` went out, the publication is closing.
+    Stopped,
+    /// The start failed: the client got an error, and nothing of the replay is left.
+    Failed,
+}
+
+/// One replay the conductor registers: its id, which is its publication's registration
+/// id, the recording it plays, and, once live, its `replay.position` counter.
+struct ReplayEntry {
+    replay_session_id: i64,
+    recording_id: i64,
+    replay_stream_id: i32,
+    state: ReplayState,
+    position: Option<Counter>,
+    /// Since when the replay's publication has had no image, for the connect timeout.
+    unconnected_since: Option<i64>,
+    /// A stop is with the replayer; a second `stop replay` is answered at once.
+    stop_requested: bool,
+}
+
 /// One recording the conductor registers: its publication, the command that started
 /// it, its start position, and, once the recorder has given the id, the two counters.
 struct RecordingEntry {
@@ -238,6 +291,12 @@ struct Statics {
     recording_stopped: Counter,
     recording_start_failed: Counter,
     recording_catalog_full: Counter,
+    replay_started: Counter,
+    replay_stopped: Counter,
+    replay_ended: Counter,
+    replay_not_connected: Counter,
+    replay_failed: Counter,
+    replay_start_failed: Counter,
 }
 
 impl Statics {
@@ -259,15 +318,22 @@ impl Statics {
             recording_stopped: get(RECORDING_STOPPED)?,
             recording_start_failed: get(RECORDING_START_FAILED)?,
             recording_catalog_full: get(RECORDING_CATALOG_FULL)?,
+            replay_started: get(REPLAY_STARTED)?,
+            replay_stopped: get(REPLAY_STOPPED)?,
+            replay_ended: get(REPLAY_ENDED)?,
+            replay_not_connected: get(REPLAY_NOT_CONNECTED)?,
+            replay_failed: get(REPLAY_FAILED)?,
+            replay_start_failed: get(REPLAY_START_FAILED)?,
         })
     }
 }
 
-/// The longest command of this version: client id, correlation id, stream id, and a
-/// channel of [`MAX_STRING_LENGTH`] bytes with its length (`spec/client-protocol.md`,
-/// "Commands"). A record longer than this is no command, and is refused, by the spec's
-/// checks run on its first this many bytes, without being copied past this.
-const MAX_COMMAND_LENGTH: usize = 8 + 8 + 4 + 4 + MAX_STRING_LENGTH;
+/// The longest command of this version, `start replay`: client id, correlation id,
+/// recording id, position, length, replay stream id, and a channel of
+/// [`MAX_STRING_LENGTH`] bytes with its length (`spec/client-protocol.md`, "Commands").
+/// A record longer than this is no command, and is refused, by the spec's checks run on
+/// its first this many bytes, without being copied past this.
+const MAX_COMMAND_LENGTH: usize = 8 + 8 + 8 + 8 + 8 + 4 + 4 + MAX_STRING_LENGTH;
 
 /// A command the ring delivered, copied out so that the ring's read can finish before
 /// the command is handled. The buffer is sized once, at create, to
@@ -302,10 +368,20 @@ pub(crate) struct Conductor {
     subscriptions: Vec<Subscription>,
     images: Vec<Image>,
     recordings: Vec<RecordingEntry>,
+    replays: Vec<ReplayEntry>,
     /// The term length of every log this conductor creates: the spec's, and the
     /// smallest in a test at a registry's capacity (ADR 0027).
     term_length: u32,
     recorder: RecorderLink,
+    replayer: ReplayerLink,
+    /// The replayer's thread, once the driver has spawned it: unparked with every
+    /// request offered, since a replayer that holds no replay parks until one arrives
+    /// (`replayer::Replayer::run`). `None` in the tests that drive the duty cycles by
+    /// hand.
+    replayer_thread: Option<std::thread::Thread>,
+    /// The replayer's attaches and stops its request queue had no room for, kept and
+    /// bounded as `deferred` is; while it holds any, `start replay` is code 10.
+    replayer_deferred: VecDeque<replayer::Request>,
     /// Attaches and stops the request queue had no room for, offered again each cycle
     /// in order, before anything newer. While it holds any, `start recording` is
     /// answered with code 10, so no recording is registered until it empties; every
@@ -332,12 +408,13 @@ pub(crate) struct Conductor {
 impl Conductor {
     /// Creates the counters file, the command ring and the broadcast buffer in `dir`,
     /// in that order, with the sizes of [`spec`], records `idle` in the
-    /// `conductor.idle_strategy` counter for `doctor`, and keeps `recorder`, the queues
-    /// to the recorder thread.
+    /// `conductor.idle_strategy` counter for `doctor`, and keeps `recorder` and
+    /// `replayer`, the queues to the recorder and replayer threads.
     pub(crate) fn create(
         dir: &Path,
         idle: IdleStrategy,
         recorder: RecorderLink,
+        replayer: ReplayerLink,
     ) -> Result<Self, DriverError> {
         let counters = CountersFile::create(dir, spec::COUNTERS_CAPACITY)?;
         let statics = Statics::new(&counters)?;
@@ -359,11 +436,17 @@ impl Conductor {
             transmitter,
             statics,
             clients: Vec::with_capacity(spec::MAX_CLIENTS),
-            publications: Vec::with_capacity(spec::MAX_PUBLICATIONS),
+            // A replay's publication has no registration, so the publications sit
+            // beside the registrations' bound.
+            publications: Vec::with_capacity(spec::MAX_PUBLICATIONS + spec::MAX_REPLAYS),
             subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
+            replays: Vec::with_capacity(spec::MAX_REPLAYS),
             recorder,
+            replayer,
+            replayer_thread: None,
+            replayer_deferred: VecDeque::with_capacity(REPLAYER_DEFERRED_CAPACITY),
             term_length: spec::IPC_TERM_LENGTH,
             deferred: VecDeque::with_capacity(DEFERRED_CAPACITY),
             registration_count: 0,
@@ -384,6 +467,22 @@ impl Conductor {
     /// A handle on a static counter, for the recorder's two.
     pub(crate) fn counter(&self, id: CounterId) -> Result<Counter, CountersError> {
         self.counters.counter(id.record())
+    }
+
+    /// Names the replayer's thread, which `wake_replayer` unparks: a replayer that
+    /// holds no replay parks until a request arrives (`replayer::Replayer::run`), so
+    /// the driver sets this before the conductor's loop starts.
+    pub(crate) fn set_replayer_thread(&mut self, thread: std::thread::Thread) {
+        self.replayer_thread = Some(thread);
+    }
+
+    /// Unparks the replayer after a request went into its queue: an atomic swap, and a
+    /// futex wake only when the thread is parked. On the command path, never per
+    /// message.
+    fn wake_replayer(&self) {
+        if let Some(thread) = &self.replayer_thread {
+            thread.unpark();
+        }
     }
 
     /// Stores what the recovery pass did when the log directory was opened in the six
@@ -432,6 +531,9 @@ impl Conductor {
         work += self.time_out_clients(now);
         work += self.take_replies(now);
         work += self.flush_deferred();
+        work += self.take_replayer_replies(now);
+        work += self.flush_replayer_deferred();
+        work += self.keep_replays(now);
         work += self.keep_publications(now);
         work
     }
@@ -573,6 +675,27 @@ impl Conductor {
                 recording_id,
                 ..
             } => self.stop_recording(correlation_id, recording_id),
+            Command::StartReplay {
+                correlation_id,
+                recording_id,
+                position,
+                length,
+                replay_stream_id,
+                replay_channel,
+                ..
+            } => self.start_replay(
+                correlation_id,
+                recording_id,
+                position,
+                length,
+                replay_stream_id,
+                replay_channel,
+            ),
+            Command::StopReplay {
+                correlation_id,
+                replay_session_id,
+                ..
+            } => self.stop_replay(correlation_id, replay_session_id),
         }
     }
 
@@ -1165,10 +1288,12 @@ impl Conductor {
         }
         // The limit: consumer + window once cleaned, raised in steps of window ÷ 8; the
         // consumer position alone with neither a subscriber nor a recording, so the
-        // publisher is told not connected. The window is the one the log was created
-        // with in `add_publication`, half this conductor's term: the spec's for every
-        // production log, and half the smallest term in a test at a registry's capacity.
-        let window = i64::from(self.term_length / 2);
+        // publisher is told not connected. The window is the log's own, from its header:
+        // half this conductor's term for a publication's log, and half the recording's
+        // term for a replay's, which is the same number in this version and the right
+        // one if the two ever differ, since rotation into a partition a subscriber still
+        // reads is what the window forbids.
+        let window = i64::from(publication.log.header().publication_window_length());
         let candidate = if connected {
             consumer.saturating_add(window)
         } else {
@@ -1696,6 +1821,533 @@ impl Conductor {
         }
     }
 
+    /// `start replay` (`spec/client-protocol.md`, "Commands"): the channel, the length
+    /// and the registry are checked here; the recording's slot, the position and the
+    /// segment file are the replayer's, whose reply creates the publication
+    /// (`on_replay_ready`) or answers with code 21, 23 or 12 (`on_replay_start_failed`).
+    /// The replay session id is the command's correlation id.
+    fn start_replay(
+        &mut self,
+        correlation_id: i64,
+        recording_id: i64,
+        position: i64,
+        length: i64,
+        replay_stream_id: i32,
+        channel: &[u8],
+    ) {
+        if channel != IPC_CHANNEL {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::InvalidChannel,
+                &format!(
+                    "the replay channel must be cavalry:ipc in this version; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        }
+        if length < NULL_LENGTH {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::MalformedCommand,
+                &format!(
+                    "replay length {length} is below -1; -1 plays to the recording's extent, \
+                     {} follows a live recording, and 0 or more is a byte count; see {ERRORS_DOC}",
+                    i64::MAX
+                ),
+            );
+            return;
+        }
+        if self.replays.len() >= spec::MAX_REPLAYS {
+            self.registry_full(correlation_id, "replays", spec::MAX_REPLAYS);
+            return;
+        }
+        // Requests still waiting for room go first, and none of a new replay's join
+        // them: this is what bounds the deferred list (`Conductor::replayer_deferred`).
+        if !self.replayer_deferred.is_empty() {
+            self.replayer_queue_full(correlation_id);
+            return;
+        }
+        // A live recording's extent is its synced position, which the replayer reads
+        // from the counter the conductor holds for it.
+        let synced = self
+            .recordings
+            .iter()
+            .find(|recording| recording.recording_id == Some(recording_id))
+            .and_then(|recording| recording.synced.clone());
+        let start = replayer::Start {
+            replay_session_id: correlation_id,
+            recording_id,
+            position,
+            length,
+            synced,
+        };
+        if self
+            .replayer
+            .requests
+            .offer(replayer::Request::Start(start))
+            .is_err()
+        {
+            self.replayer_queue_full(correlation_id);
+            return;
+        }
+        self.wake_replayer();
+        self.replays.push(ReplayEntry {
+            replay_session_id: correlation_id,
+            recording_id,
+            replay_stream_id,
+            state: ReplayState::Starting,
+            position: None,
+            unconnected_since: None,
+            stop_requested: false,
+        });
+    }
+
+    /// `stop replay` (`spec/client-protocol.md`, "Commands"): a replay session id a
+    /// registered replay holds is handed to the replayer, whose reply answers the
+    /// command; one no replay holds is already stopped, answered with `operation
+    /// success` and nothing done; a second stop while one is on its way is answered at
+    /// once.
+    fn stop_replay(&mut self, correlation_id: i64, replay_session_id: i64) {
+        let found = self
+            .replays
+            .iter()
+            .position(|replay| replay.replay_session_id == replay_session_id);
+        match found {
+            Some(index) if !self.replays[index].stop_requested => {
+                self.replays[index].stop_requested = true;
+                self.replayer_request(replayer::Request::Stop {
+                    replay_session_id,
+                    correlation_id: Some(correlation_id),
+                    reason: ReplayStopReason::Stopped,
+                });
+            }
+            _ => self.send(&Event::OperationSuccess { correlation_id }),
+        }
+    }
+
+    /// Offers a request to the replayer and wakes it, or keeps the request for the
+    /// next cycle, as `request` does for the recorder.
+    fn replayer_request(&mut self, request: replayer::Request) {
+        let request = if self.replayer_deferred.is_empty() {
+            match self.replayer.requests.offer(request) {
+                Ok(()) => {
+                    self.wake_replayer();
+                    return;
+                }
+                Err(request) => request,
+            }
+        } else {
+            request
+        };
+        debug_assert!(
+            self.replayer_deferred.len() < REPLAYER_DEFERRED_CAPACITY,
+            "the replayer's deferred requests passed one attach and one stop per replay"
+        );
+        self.replayer_deferred.push_back(request);
+    }
+
+    /// Offers the replayer's deferred requests in order until the queue is full again,
+    /// and wakes the replayer when any went.
+    fn flush_replayer_deferred(&mut self) -> usize {
+        let mut sent = 0;
+        while let Some(request) = self.replayer_deferred.pop_front() {
+            match self.replayer.requests.offer(request) {
+                Ok(()) => sent += 1,
+                Err(request) => {
+                    self.replayer_deferred.push_front(request);
+                    break;
+                }
+            }
+        }
+        if sent > 0 {
+            self.wake_replayer();
+        }
+        sent
+    }
+
+    /// Takes every reply the replayer has queued and acts on it.
+    fn take_replayer_replies(&mut self, now: i64) -> usize {
+        let mut taken = 0;
+        while let Some(reply) = self.replayer.replies.poll() {
+            match reply {
+                replayer::Reply::Ready {
+                    replay_session_id,
+                    recording_id,
+                    start_position,
+                    initial_term_id,
+                    term_length,
+                    mtu_length,
+                    recorded_session_id,
+                    recorded_stream_id,
+                } => self.on_replay_ready(
+                    replay_session_id,
+                    recording_id,
+                    start_position,
+                    (initial_term_id, term_length, mtu_length),
+                    (recorded_session_id, recorded_stream_id),
+                    now,
+                ),
+                replayer::Reply::StartFailed {
+                    replay_session_id,
+                    failure,
+                } => self.on_replay_start_failed(replay_session_id, failure),
+                replayer::Reply::Stopped {
+                    replay_session_id,
+                    position,
+                    reason,
+                    correlation_id,
+                } => {
+                    self.on_replay_stopped(replay_session_id, position, reason, correlation_id, now)
+                }
+            }
+            taken += 1;
+        }
+        taken
+    }
+
+    /// The replayer read the slot and opened the segment file: the replay's publication
+    /// is created at the start position with the recording's term, a new session id and
+    /// the replay stream id, its three counters allocated, the replayer's writer
+    /// attached, `replay ready` sent, and an image given to every subscription on the
+    /// stream (`spec/client-protocol.md`, "Commands"). A log that cannot be created is
+    /// code 12, a counters file with no free record code 10; either removes the replay.
+    fn on_replay_ready(
+        &mut self,
+        replay_session_id: i64,
+        recording_id: i64,
+        start_position: i64,
+        (initial_term_id, term_length, mtu_length): (i32, i32, i32),
+        (recorded_session_id, recorded_stream_id): (i32, i32),
+        now: i64,
+    ) {
+        let Some(index) = self.replays.iter().position(|replay| {
+            replay.replay_session_id == replay_session_id && replay.state == ReplayState::Starting
+        }) else {
+            return;
+        };
+        debug_assert_eq!(self.replays[index].recording_id, recording_id);
+        let recording_id = self.replays[index].recording_id;
+        let stream_id = self.replays[index].replay_stream_id;
+        let session_id = self.advance_session_id(stream_id);
+        let term_length = u32::try_from(term_length).unwrap_or(0);
+        let fields = HeaderFields::new(
+            LogType::Exclusive,
+            replay_session_id,
+            initial_term_id,
+            term_length,
+            u32::try_from(mtu_length).unwrap_or(0),
+            term_length / 2,
+            session_id,
+            stream_id,
+        );
+        let log =
+            fields.and_then(|fields| LogBuffers::create_at(&self.dir, &fields, start_position));
+        let log = match log {
+            Ok(log) => log,
+            Err(error) => {
+                remove_log(&self.dir, replay_session_id);
+                self.statics.log_create_failed.increment();
+                self.fail_replay(index, ErrorCode::StorageSpace, &format!("{error}"));
+                return;
+            }
+        };
+        let key = position_key(replay_session_id, session_id, stream_id);
+        let label = |name: &str| format!("{name} {replay_session_id} {session_id} {stream_id}");
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        let position =
+            match self
+                .counters
+                .allocate(PUBLICATION_POSITION, &key, &label("publication.position"))
+            {
+                Ok(counter) => counter,
+                Err(error) => {
+                    drop(log);
+                    remove_log(&self.dir, replay_session_id);
+                    self.statics.registry_full.increment();
+                    self.fail_replay(
+                        index,
+                        ErrorCode::ResourceTemporarilyUnavailable,
+                        &format!("{error}"),
+                    );
+                    return;
+                }
+            };
+        let limit =
+            match self
+                .counters
+                .allocate(PUBLICATION_LIMIT, &key, &label("publication.limit"))
+            {
+                Ok(counter) => counter,
+                Err(error) => {
+                    let _ = self.counters.free(position.id(), reuse);
+                    drop(log);
+                    remove_log(&self.dir, replay_session_id);
+                    self.statics.registry_full.increment();
+                    self.fail_replay(
+                        index,
+                        ErrorCode::ResourceTemporarilyUnavailable,
+                        &format!("{error}"),
+                    );
+                    return;
+                }
+            };
+        let replay_label =
+            format!("replay.position {replay_session_id} {recording_id} {session_id} {stream_id}");
+        let replay_position = match self.counters.allocate(
+            REPLAY_POSITION,
+            &replay_session_id.to_le_bytes(),
+            &replay_label,
+        ) {
+            Ok(counter) => counter,
+            Err(error) => {
+                let _ = self.counters.free(position.id(), reuse);
+                let _ = self.counters.free(limit.id(), reuse);
+                drop(log);
+                remove_log(&self.dir, replay_session_id);
+                self.statics.registry_full.increment();
+                self.fail_replay(
+                    index,
+                    ErrorCode::ResourceTemporarilyUnavailable,
+                    &format!("{error}"),
+                );
+                return;
+            }
+        };
+        let writer = match log.writer(recorded_session_id, recorded_stream_id) {
+            Ok(writer) => writer,
+            Err(error) => {
+                let _ = self.counters.free(position.id(), reuse);
+                let _ = self.counters.free(limit.id(), reuse);
+                let _ = self.counters.free(replay_position.id(), reuse);
+                drop(log);
+                remove_log(&self.dir, replay_session_id);
+                self.statics.log_create_failed.increment();
+                self.fail_replay(index, ErrorCode::StorageSpace, &format!("{error}"));
+                return;
+            }
+        };
+        position.store_release(start_position);
+        limit.store_release(start_position);
+        replay_position.store_release(start_position);
+        let log_file_name = log_layout::file_name(replay_session_id)
+            .to_string_lossy()
+            .into_owned();
+        let limit_handle = limit.clone();
+        self.publications.push(Publication {
+            registration_id: replay_session_id,
+            session_id,
+            stream_id,
+            exclusive: true,
+            log,
+            position,
+            limit,
+            registrations: Vec::new(),
+            consumer_position: start_position,
+            clean_position: start_position,
+            last_limit: start_position,
+            producer: start_position,
+            producer_loaded_at: now,
+            stalled: None,
+            closing: None,
+            log_file_name,
+        });
+        let publication_index = self.publications.len() - 1;
+        {
+            let entry = &mut self.replays[index];
+            entry.state = ReplayState::Live;
+            entry.position = Some(replay_position.clone());
+            entry.unconnected_since = Some(now);
+        }
+        self.statics.replay_started.increment();
+        self.replayer_request(replayer::Request::Attach {
+            replay_session_id,
+            writer,
+            limit: limit_handle,
+            position: replay_position,
+        });
+        self.send(&Event::ReplayReady {
+            correlation_id: replay_session_id,
+            replay_session_id,
+            recording_id,
+            start_position,
+            session_id,
+            stream_id,
+        });
+        let matching: Vec<i64> = self
+            .subscriptions
+            .iter()
+            .filter(|subscription| subscription.stream_id == stream_id)
+            .map(|subscription| subscription.registration_id)
+            .collect();
+        for subscription_id in matching {
+            self.add_image(publication_index, subscription_id);
+        }
+        if self
+            .images
+            .iter()
+            .any(|image| image.publication_id == replay_session_id)
+        {
+            self.replays[index].unconnected_since = None;
+        }
+    }
+
+    /// A start that failed after the replayer took it: the client gets `code`, the
+    /// entry fails and goes, and the replayer is told to forget the replay.
+    fn fail_replay(&mut self, index: usize, code: ErrorCode, message: &str) {
+        self.replays[index].state = ReplayState::Failed;
+        let entry = self.replays.swap_remove(index);
+        self.send_error(entry.replay_session_id, code, message);
+        self.replayer_request(replayer::Request::Stop {
+            replay_session_id: entry.replay_session_id,
+            correlation_id: None,
+            reason: ReplayStopReason::Failed,
+        });
+    }
+
+    /// The replayer could not take the replay: the entry fails and the client gets
+    /// code 21, 23 or 12, each counted in `replay.start_failed`.
+    fn on_replay_start_failed(&mut self, replay_session_id: i64, failure: replayer::StartFailure) {
+        if let Some(index) = self.replays.iter().position(|replay| {
+            replay.replay_session_id == replay_session_id && replay.state == ReplayState::Starting
+        }) {
+            self.replays[index].state = ReplayState::Failed;
+            self.replays.swap_remove(index);
+        }
+        self.statics.replay_start_failed.increment();
+        match failure {
+            replayer::StartFailure::UnknownRecording { recording_id, why } => self.send_error(
+                replay_session_id,
+                ErrorCode::UnknownRecording,
+                &format!(
+                    "recording {recording_id} is not in the catalog as a valid recording: {why}; \
+                     `cavalry doctor` lists the recordings; see {ERRORS_DOC}"
+                ),
+            ),
+            replayer::StartFailure::PositionOutOfRange {
+                position,
+                start,
+                extent,
+            } => self.send_error(
+                replay_session_id,
+                ErrorCode::PositionOutOfRange,
+                &format!(
+                    "position {position} is not a multiple of 32 from {start} to {extent}, the \
+                     recording's start position and extent; resolve an instant through the time \
+                     index, or pass -1 for the start position; see {ERRORS_DOC}"
+                ),
+            ),
+            replayer::StartFailure::Files(text) => {
+                self.send_error(replay_session_id, ErrorCode::StorageSpace, &text);
+            }
+        }
+    }
+
+    /// The replayer ended a replay: a command that asked gets `operation success`, the
+    /// entry goes, its counter is freed after the reuse timeout, the publication closes
+    /// at the position reached, as a removed publication does, every client gets
+    /// `replay stopped`, and the end is counted by its reason. A reply for a replay the
+    /// conductor no longer holds, a failed start's, answers the command alone.
+    fn on_replay_stopped(
+        &mut self,
+        replay_session_id: i64,
+        position: i64,
+        reason: ReplayStopReason,
+        correlation_id: Option<i64>,
+        now: i64,
+    ) {
+        if let Some(correlation_id) = correlation_id {
+            self.send(&Event::OperationSuccess { correlation_id });
+        }
+        let Some(index) = self
+            .replays
+            .iter()
+            .position(|replay| replay.replay_session_id == replay_session_id)
+        else {
+            return;
+        };
+        self.replays[index].state = ReplayState::Stopped;
+        let entry = self.replays.swap_remove(index);
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        if let Some(counter) = entry.position {
+            let _ = self.counters.free(counter.id(), reuse);
+        }
+        let mut end = position;
+        if let Some(publication) = self
+            .publications
+            .iter_mut()
+            .find(|publication| publication.registration_id == replay_session_id)
+            && publication.closing.is_none()
+        {
+            end = publication.log.producer_position().unwrap_or(position);
+            let _ = publication.log.set_end_of_stream_position(end);
+            publication.closing = Some((end, now));
+        }
+        self.statics.replay_stopped.increment();
+        match reason {
+            ReplayStopReason::Ended => self.statics.replay_ended.increment(),
+            ReplayStopReason::NotConnected => self.statics.replay_not_connected.increment(),
+            ReplayStopReason::Failed => self.statics.replay_failed.increment(),
+            ReplayStopReason::Stopped => {}
+        }
+        self.send(&Event::ReplayStopped {
+            replay_session_id,
+            position: end,
+            reason: reason.code(),
+        });
+    }
+
+    /// The replay connect timeout (`spec/client-protocol.md`, "Liveness and timeouts"):
+    /// a live replay whose publication has had no image for the timeout is stopped
+    /// with reason 2; returns how many stops were asked for.
+    fn keep_replays(&mut self, now: i64) -> usize {
+        let timeout = spec::nanos(spec::REPLAY_CONNECT_TIMEOUT);
+        let mut stops = Vec::new();
+        for entry in &mut self.replays {
+            if entry.state != ReplayState::Live {
+                continue;
+            }
+            let id = entry.replay_session_id;
+            let connected = self.images.iter().any(|image| image.publication_id == id);
+            if connected {
+                entry.unconnected_since = None;
+                continue;
+            }
+            match entry.unconnected_since {
+                None => entry.unconnected_since = Some(now),
+                Some(since) if now.saturating_sub(since) >= timeout && !entry.stop_requested => {
+                    entry.stop_requested = true;
+                    stops.push(id);
+                }
+                Some(_) => {}
+            }
+        }
+        for replay_session_id in &stops {
+            self.replayer_request(replayer::Request::Stop {
+                replay_session_id: *replay_session_id,
+                correlation_id: None,
+                reason: ReplayStopReason::NotConnected,
+            });
+        }
+        stops.len()
+    }
+
+    /// Answers `start replay` with `error`, code 10, when the replayer's request queue
+    /// is full or requests are still waiting for room in it.
+    fn replayer_queue_full(&mut self, correlation_id: i64) {
+        self.statics.registry_full.increment();
+        self.send_error(
+            correlation_id,
+            ErrorCode::ResourceTemporarilyUnavailable,
+            &format!(
+                "the replayer's request queue holds {} and is full; try again once the \
+                 replayer has caught up; see {ERRORS_DOC}",
+                spec::REPLAYER_QUEUE_CAPACITY
+            ),
+        );
+    }
+
     /// Answers a command with `error`, code 10, when a registry is full.
     fn registry_full(&mut self, correlation_id: i64, registry: &str, capacity: usize) {
         self.statics.registry_full.increment();
@@ -1875,8 +2527,12 @@ mod tests {
             replies,
             next_recording_id: 0,
         };
-        let mut conductor = Conductor::create(dir.path(), IdleStrategy::Backoff, link)
-            .expect("the conductor is created");
+        let (requests, _replayer_requests) = spsc::queue::<replayer::Request>(4);
+        let (_replayer_replies, replies) = spsc::queue::<replayer::Reply>(4);
+        let replayer_link = ReplayerLink { requests, replies };
+        let mut conductor =
+            Conductor::create(dir.path(), IdleStrategy::Backoff, link, replayer_link)
+                .expect("the conductor is created");
         let t0 = now_nanos();
         let interval = spec::nanos(spec::PRODUCER_POSITION_INTERVAL);
 
@@ -1955,23 +2611,25 @@ mod recording {
     use super::tests::TestDir;
     use super::*;
     use crate::recorder::{PENDING_REPLIES, Recorder, start_failure};
+    use crate::replayer::Replayer;
 
     const MS: i64 = 1_000_000;
     const WINDOW: i64 = spec::IPC_PUBLICATION_WINDOW as i64;
 
-    /// Both threads' state, with no thread: the test calls each duty cycle.
-    struct Harness {
-        dir: TestDir,
-        log_dir: PathBuf,
-        conductor: Conductor,
-        recorder: Recorder,
+    /// The three threads' state, with no thread: the test calls each duty cycle.
+    pub(super) struct Harness {
+        pub(super) dir: TestDir,
+        pub(super) log_dir: PathBuf,
+        pub(super) conductor: Conductor,
+        pub(super) recorder: Recorder,
+        pub(super) replayer: Replayer,
         /// A client's view of the events, attached before the first command.
-        receiver: Receiver,
-        now: i64,
+        pub(super) receiver: Receiver,
+        pub(super) now: i64,
     }
 
     impl Harness {
-        fn new(test: &str) -> Self {
+        pub(super) fn new(test: &str) -> Self {
             let dir = TestDir::new(test);
             prepare_dir(dir.path()).expect("the directory is prepared");
             let log_dir = dir.path().join("log");
@@ -1986,12 +2644,31 @@ mod recording {
                 replies,
                 next_recording_id: 0,
             };
-            let conductor = Conductor::create(dir.path(), IdleStrategy::Backoff, link)
-                .expect("the conductor is created");
+            let (replayer_requests, replayer_request_consumer) =
+                spsc::queue::<replayer::Request>(spec::REPLAYER_QUEUE_CAPACITY);
+            let (replayer_reply_producer, replayer_replies) =
+                spsc::queue::<replayer::Reply>(spec::REPLAYER_QUEUE_CAPACITY);
+            let replayer_link = ReplayerLink {
+                requests: replayer_requests,
+                replies: replayer_replies,
+            };
+            let conductor =
+                Conductor::create(dir.path(), IdleStrategy::Backoff, link, replayer_link)
+                    .expect("the conductor is created");
             let receiver = BroadcastBuffer::open(dir.path(), false)
                 .expect("the buffer opens")
                 .receiver()
                 .expect("a receiver");
+            let replayer = Replayer::new(
+                &log_dir,
+                replayer_request_consumer,
+                replayer_reply_producer,
+                conductor
+                    .counter(LOG_BUFFER_REJECTED_FRAME)
+                    .expect("a counter"),
+                IdleStrategy::Backoff,
+            )
+            .expect("the replayer opens the catalog");
             let recorder = Recorder::new(
                 log,
                 request_consumer,
@@ -2009,26 +2686,28 @@ mod recording {
                 log_dir,
                 conductor,
                 recorder,
+                replayer,
                 receiver,
                 now,
             }
         }
 
         /// One cycle of each, a millisecond later.
-        fn cycle(&mut self) {
+        pub(super) fn cycle(&mut self) {
             self.now += MS;
             self.conductor.duty_cycle(self.now);
             self.recorder.duty_cycle(self.now);
+            self.replayer.duty_cycle(self.now);
             self.conductor.duty_cycle(self.now);
         }
 
-        fn counter(&self, id: CounterId) -> i64 {
+        pub(super) fn counter(&self, id: CounterId) -> i64 {
             self.conductor.counter(id).expect("a counter").get()
         }
 
         /// The last error event with `correlation_id` among the events not yet read,
         /// as (code, message).
-        fn last_error(&mut self, correlation_id: i64) -> Option<(i32, String)> {
+        pub(super) fn last_error(&mut self, correlation_id: i64) -> Option<(i32, String)> {
             let mut found = None;
             while self
                 .receiver
@@ -2672,6 +3351,1245 @@ mod recording {
         assert_eq!(h.counter(RECORDING_STOPPED), 1);
         let (stop, _) = fold_recording(&h.log_dir, 0);
         assert_eq!(stop, 192);
+        drop(appender);
+    }
+}
+
+#[cfg(test)]
+mod replay {
+    //! The conductor, the recorder and the replayer driven by hand, duty cycle by duty
+    //! cycle, on a clock the test advances: a recording made and stopped, then played
+    //! into a subscription. The full case first, then pacing, the connect timeout, the
+    //! stop, every error code, the registry's bound, a live recording followed, a
+    //! damaged segment three ways, a replay across a segment roll, an end position
+    //! inside a frame, and the request queue, the deferred list and the pending
+    //! replies at their bounds.
+
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::FileExt;
+
+    use cavalry_proto::client_protocol::{FOLLOW_LENGTH, NULL_LENGTH, NULL_POSITION};
+    use cavalry_shm::counters::generated::{
+        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, REPLAY_ENDED, REPLAY_FAILED,
+        REPLAY_NOT_CONNECTED, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
+    };
+    use cavalry_shm::log::ClaimError;
+
+    use super::recording::Harness;
+    use super::*;
+
+    const MS: i64 = 1_000_000;
+    const SECOND: i64 = 1_000_000_000;
+    const STREAM: i32 = 7;
+    const REPLAY_STREAM: i32 = 2001;
+    const CLIENT: i64 = 1;
+
+    /// Every event not yet read, as (type id, message).
+    fn events(h: &mut Harness) -> Vec<(i32, Vec<u8>)> {
+        let mut out = Vec::new();
+        while h
+            .receiver
+            .receive(|type_id, message| out.push((type_id, message.to_vec())))
+            .expect("the receiver reads")
+        {}
+        out
+    }
+
+    /// The first `replay ready` for `correlation_id` among `events`: (replay session
+    /// id, recording id, start position, session id, stream id).
+    fn replay_ready(
+        events: &[(i32, Vec<u8>)],
+        correlation_id: i64,
+    ) -> Option<(i64, i64, i64, i32, i32)> {
+        events
+            .iter()
+            .find_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::ReplayReady {
+                    correlation_id: id,
+                    replay_session_id,
+                    recording_id,
+                    start_position,
+                    session_id,
+                    stream_id,
+                }) if id == correlation_id => Some((
+                    replay_session_id,
+                    recording_id,
+                    start_position,
+                    session_id,
+                    stream_id,
+                )),
+                _ => None,
+            })
+    }
+
+    /// The first `replay stopped` for `replay_session_id`: (position, reason).
+    fn replay_stopped(events: &[(i32, Vec<u8>)], replay_session_id: i64) -> Option<(i64, i32)> {
+        events
+            .iter()
+            .find_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::ReplayStopped {
+                    replay_session_id: id,
+                    position,
+                    reason,
+                }) if id == replay_session_id => Some((position, reason)),
+                _ => None,
+            })
+    }
+
+    fn successes(events: &[(i32, Vec<u8>)]) -> Vec<i64> {
+        events
+            .iter()
+            .filter_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::OperationSuccess { correlation_id }) => Some(correlation_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn errors(events: &[(i32, Vec<u8>)]) -> Vec<(i64, i32, String)> {
+        events
+            .iter()
+            .filter_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::Error {
+                    offending_correlation_id,
+                    error_code,
+                    error_message,
+                }) => Some((
+                    offending_correlation_id,
+                    error_code,
+                    String::from_utf8_lossy(error_message).into_owned(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A harness with the smallest term, a recorded exclusive publication on `STREAM`
+    /// (registration 2, recording 0) live, and the recording's publication's appender.
+    fn recorded(test: &str) -> (Harness, cavalry_shm::log::TermAppender) {
+        let mut h = Harness::new(test);
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let now = h.now;
+        h.conductor
+            .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
+        h.conductor.start_recording(3, STREAM, IPC_CHANNEL, now);
+        h.cycle();
+        h.cycle();
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Live);
+        let appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        (h, appender)
+    }
+
+    /// Offers `count` messages of 32 bytes, the first eight the message's number from
+    /// `from`, with reserved value number × 7, cycling the harness while the limit
+    /// waits for the recorder. Returns the position after.
+    fn offer(
+        h: &mut Harness,
+        appender: &mut cavalry_shm::log::TermAppender,
+        from: i64,
+        count: i64,
+    ) -> i64 {
+        let mut message = [0u8; 32];
+        let mut after = 0;
+        for n in from..from + count {
+            message[..8].copy_from_slice(&n.to_le_bytes());
+            loop {
+                let limit = h.conductor.publications[0].limit.get();
+                match appender.offer(&message, limit, n * 7) {
+                    Ok(position) => {
+                        after = position;
+                        break;
+                    }
+                    Err(ClaimError::AdminAction) => {}
+                    Err(ClaimError::BackPressured) => h.cycle(),
+                    Err(error) => panic!("{error}"),
+                }
+            }
+        }
+        after
+    }
+
+    /// Cycles until the recorder has written and synced everything: a second on.
+    fn sync(h: &mut Harness) {
+        for _ in 0..50 {
+            h.cycle();
+        }
+        h.now += SECOND;
+        h.cycle();
+        h.cycle();
+    }
+
+    /// Stops recording 0 by command and cycles until the conductor forgot it.
+    fn stop_recording(h: &mut Harness, correlation_id: i64) {
+        h.conductor.stop_recording(correlation_id, 0);
+        for _ in 0..100 {
+            h.cycle();
+            if h.conductor.recordings.is_empty() {
+                return;
+            }
+        }
+        panic!("the recording did not stop");
+    }
+
+    /// `start replay` with a subscription (registration `subscription`) on the replay
+    /// stream when one is asked for; cycles until the replay is live or failed.
+    fn start_replay(
+        h: &mut Harness,
+        correlation_id: i64,
+        position: i64,
+        length: i64,
+        subscription: Option<i64>,
+    ) {
+        if let Some(registration) = subscription {
+            h.conductor
+                .add_subscription(CLIENT, registration, REPLAY_STREAM, IPC_CHANNEL);
+        }
+        h.conductor.start_replay(
+            correlation_id,
+            0,
+            position,
+            length,
+            REPLAY_STREAM,
+            IPC_CHANNEL,
+        );
+        for _ in 0..10 {
+            h.cycle();
+            let starting = h.conductor.replays.iter().any(|replay| {
+                replay.replay_session_id == correlation_id && replay.state == ReplayState::Starting
+            });
+            if !starting {
+                return;
+            }
+        }
+        panic!("the replay is still starting");
+    }
+
+    /// Cycles until the replay with `replay_session_id` is gone from the registry.
+    fn wait_replay_end(h: &mut Harness, replay_session_id: i64) {
+        for _ in 0..10_000 {
+            h.cycle();
+            if !h
+                .conductor
+                .replays
+                .iter()
+                .any(|replay| replay.replay_session_id == replay_session_id)
+            {
+                return;
+            }
+        }
+        panic!("the replay did not end");
+    }
+
+    /// Every committed frame of the replay log from `from`: (body, header).
+    fn read_replay(
+        h: &Harness,
+        replay_session_id: i64,
+        from: i64,
+    ) -> Vec<(Vec<u8>, cavalry_proto::frame::DataFrameHeader)> {
+        let log =
+            LogBuffers::open(h.dir.path(), replay_session_id, false).expect("the replay log opens");
+        let mut reader = log.reader(from).expect("a reader");
+        let mut frames = Vec::new();
+        loop {
+            let before = reader.position();
+            let poll = reader
+                .poll(64, |body, header| frames.push((body.to_vec(), *header)))
+                .expect("the poll reads");
+            if poll.position == before {
+                return frames;
+            }
+        }
+    }
+
+    /// The full case (invariant 1): 100 messages recorded and stopped; a replay from
+    /// the start to the extent into a subscription that joined first; `replay ready`
+    /// and `available image` with the replay's publication at the start position;
+    /// every frame read from the replay's log with the recording's position, flags and
+    /// reserved value and the replay's session and stream ids; `replay stopped` with
+    /// reason 0 at the stop position; the counters; and the image and the log going
+    /// once the subscriber reached the end.
+    #[test]
+    fn a_replay_of_a_stopped_recording_delivers_every_frame_at_the_recordings_positions() {
+        let (mut h, mut appender) = recorded("replay-full");
+        let end = offer(&mut h, &mut appender, 0, 100);
+        assert_eq!(end, 6400);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        assert_eq!(h.conductor.replays.len(), 1);
+        assert_eq!(h.conductor.replays[0].state, ReplayState::Live);
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        let got = events(&mut h);
+        let (replay_session_id, recording_id, start, session_id, stream_id) =
+            replay_ready(&got, 6).expect("replay ready");
+        assert_eq!(
+            (replay_session_id, recording_id, start, stream_id),
+            (6, 0, 0, REPLAY_STREAM)
+        );
+        let publication = h
+            .conductor
+            .publications
+            .iter()
+            .find(|publication| publication.registration_id == 6)
+            .expect("the replay's publication");
+        assert_eq!(publication.session_id, session_id);
+        assert!(publication.exclusive && publication.registrations.is_empty());
+        let image =
+            got.iter()
+                .find_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                    Ok(Event::AvailableImage {
+                        correlation_id: 6,
+                        session_id,
+                        stream_id,
+                        subscriber_registration_id,
+                        subscriber_position_counter_id,
+                        log_file_name,
+                        ..
+                    }) => Some((
+                        session_id,
+                        stream_id,
+                        subscriber_registration_id,
+                        subscriber_position_counter_id,
+                        String::from_utf8_lossy(log_file_name).into_owned(),
+                    )),
+                    _ => None,
+                });
+        let (image_session, image_stream, subscriber, position_counter, log_file_name) =
+            image.expect("the subscription got an image of the replay");
+        assert_eq!(
+            (image_session, image_stream, subscriber),
+            (session_id, REPLAY_STREAM, 5)
+        );
+        assert_eq!(log_file_name, "publications/6.logbuffer");
+        assert_eq!(h.counter(REPLAY_STARTED), 1);
+        let record = h
+            .conductor
+            .counters
+            .counter(replay_position.id())
+            .expect("the counter");
+        assert_eq!(record.id(), replay_position.id());
+
+        wait_replay_end(&mut h, 6);
+        let got = events(&mut h);
+        assert_eq!(replay_stopped(&got, 6), Some((6400, 0)));
+        assert_eq!(h.counter(REPLAY_STOPPED), 1);
+        assert_eq!(h.counter(REPLAY_ENDED), 1);
+        assert_eq!(replay_position.load_acquire(), 6400);
+        let frames = read_replay(&h, 6, 0);
+        assert_eq!(frames.len(), 100);
+        for (n, (body, header)) in frames.iter().enumerate() {
+            assert_eq!(&body[..8], &(n as i64).to_le_bytes(), "frame {n}: body");
+            assert_eq!(
+                header.term_offset(),
+                n as i32 * 64,
+                "frame {n}: the recording's position"
+            );
+            assert_eq!(
+                header.reserved_value(),
+                n as i64 * 7,
+                "frame {n}: reserved value"
+            );
+            assert_eq!(
+                header.session_id(),
+                session_id,
+                "frame {n}: the replay's session"
+            );
+            assert_eq!(
+                header.stream_id(),
+                REPLAY_STREAM,
+                "frame {n}: the replay stream"
+            );
+        }
+        let publication = h
+            .conductor
+            .publications
+            .iter()
+            .find(|publication| publication.registration_id == 6)
+            .expect("the publication lingers for its subscriber");
+        assert_eq!(publication.closing.map(|(end, _)| end), Some(6400));
+        assert_eq!(publication.log.end_of_stream_position(), 6400);
+
+        // The subscriber reaches the end: unavailable image, the log removed.
+        let image = h
+            .conductor
+            .images
+            .iter()
+            .find(|image| image.publication_id == 6)
+            .expect("the image");
+        assert_eq!(counter_id(&image.position), position_counter);
+        image.position.store_release(6400);
+        h.cycle();
+        assert!(
+            h.conductor
+                .publications
+                .iter()
+                .all(|publication| publication.registration_id != 6)
+        );
+        assert!(!h.dir.path().join("publications/6.logbuffer").exists());
+        let got = events(&mut h);
+        let unavailable = got.iter().any(|(type_id, message)| {
+            matches!(
+                Event::parse(*type_id, message),
+                Ok(Event::UnavailableImage {
+                    correlation_id: 6,
+                    subscriber_registration_id: 5,
+                    ..
+                })
+            )
+        });
+        assert!(unavailable, "the subscriber heard the image go");
+        drop(appender);
+    }
+
+    /// Pacing (invariants 2 and 3): a replay longer than the window moves only as far
+    /// as the slowest subscriber's position plus the window, continues as the
+    /// subscriber reads, rotates through the replay log's terms, and delivers every
+    /// byte in order.
+    #[test]
+    fn a_replay_is_paced_by_its_subscriber_through_the_terms() {
+        let (mut h, mut appender) = recorded("replay-paced");
+        let count = 1600; // 100 KiB of 64-byte frames: a term and a half
+        let end = offer(&mut h, &mut appender, 0, count);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        let window = i64::from(h.conductor.term_length / 2);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(
+            replay_position.load_acquire(),
+            window,
+            "the replay waits at the window with the subscriber at 0"
+        );
+        let log = LogBuffers::open(h.dir.path(), 6, false).expect("the replay log opens");
+        let mut reader = log.reader(0).expect("a reader");
+        let subscriber = h
+            .conductor
+            .images
+            .iter()
+            .find(|image| image.publication_id == 6)
+            .map(|image| image.position.clone())
+            .expect("the image");
+        let mut next = 0i64;
+        let mut delivered = 0;
+        for _ in 0..10_000 {
+            let poll = reader
+                .poll(64, |body, header| {
+                    assert_eq!(&body[..8], &next.to_le_bytes(), "frame {next} in order");
+                    assert_eq!(header.reserved_value(), next * 7);
+                    next += 1;
+                    delivered += 1;
+                })
+                .expect("the poll reads");
+            subscriber.store_release(poll.position);
+            h.cycle();
+            if h.conductor.replays.is_empty() && poll.position == end {
+                break;
+            }
+        }
+        assert_eq!(delivered, count, "every frame delivered in order");
+        assert_eq!(reader.position(), end);
+        assert_eq!(log.active_term_count(), 1, "the replay log rotated once");
+        let got = events(&mut h);
+        assert_eq!(replay_stopped(&got, 6), Some((end, 0)));
+        drop(appender);
+    }
+
+    /// A replay with no subscriber does not move, and ends with reason 2 once the
+    /// connect timeout has passed; one whose subscriber leaves ends the same way.
+    #[test]
+    fn a_replay_with_no_subscriber_waits_then_ends_with_reason_2() {
+        let (mut h, mut appender) = recorded("replay-not-connected");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, None);
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(
+            replay_position.load_acquire(),
+            0,
+            "nothing moves without a subscriber"
+        );
+        assert_eq!(h.conductor.replays.len(), 1);
+        h.now += spec::nanos(spec::REPLAY_CONNECT_TIMEOUT);
+        wait_replay_end(&mut h, 6);
+        let got = events(&mut h);
+        assert_eq!(replay_stopped(&got, 6), Some((0, 2)));
+        assert_eq!(h.counter(REPLAY_NOT_CONNECTED), 1);
+        assert_eq!(h.counter(REPLAY_STOPPED), 1);
+
+        // A subscriber that leaves: the clock starts then.
+        start_replay(&mut h, 8, NULL_POSITION, NULL_LENGTH, Some(7));
+        wait_replay_end(&mut h, 8);
+        let got = events(&mut h);
+        assert_eq!(
+            replay_stopped(&got, 8),
+            Some((640, 0)),
+            "ended with its subscriber"
+        );
+        start_replay(&mut h, 10, 0, 0, Some(9));
+        assert_eq!(
+            h.conductor.replays.len(),
+            1,
+            "a zero-length replay is live until it is read"
+        );
+        wait_replay_end(&mut h, 10);
+        let got = events(&mut h);
+        assert_eq!(
+            replay_stopped(&got, 10),
+            Some((0, 0)),
+            "nothing to play ends at once"
+        );
+        drop(appender);
+    }
+
+    /// The other way to reason 2: a paced replay whose last subscriber leaves. The
+    /// clock starts when the image goes, and the replay ends where it stood, at the
+    /// window the subscriber at 0 allowed.
+    #[test]
+    fn a_replay_whose_last_subscriber_leaves_ends_with_reason_2_where_it_stood() {
+        let (mut h, mut appender) = recorded("replay-subscriber-leaves");
+        offer(&mut h, &mut appender, 0, 1600);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        let window = i64::from(h.conductor.term_length / 2);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(
+            replay_position.load_acquire(),
+            window,
+            "paced at the window"
+        );
+        let _ = events(&mut h);
+        h.conductor.remove_subscription(CLIENT, 7, 5, h.now);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(
+            h.conductor.replays.len(),
+            1,
+            "the clock starts when the image goes"
+        );
+        h.now += spec::nanos(spec::REPLAY_CONNECT_TIMEOUT);
+        wait_replay_end(&mut h, 6);
+        let got = events(&mut h);
+        assert_eq!(replay_stopped(&got, 6), Some((window, 2)));
+        assert_eq!(h.counter(REPLAY_NOT_CONNECTED), 1);
+        drop(appender);
+    }
+
+    /// `stop replay` ends a paced replay at the position reached: `operation success`
+    /// to the command, `replay stopped` with reason 1 to everyone; a second stop and a
+    /// stop of an unknown id are `operation success` with nothing done.
+    #[test]
+    fn stop_replay_ends_a_replay_where_it_is_and_answers() {
+        let (mut h, mut appender) = recorded("replay-stop");
+        offer(&mut h, &mut appender, 0, 1600);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let window = i64::from(h.conductor.term_length / 2);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        let _ = events(&mut h);
+        h.conductor.stop_replay(9, 6);
+        h.conductor.stop_replay(11, 6);
+        wait_replay_end(&mut h, 6);
+        let got = events(&mut h);
+        assert_eq!(
+            successes(&got),
+            vec![11, 9],
+            "the second stop at once, the first on the reply"
+        );
+        assert_eq!(replay_stopped(&got, 6), Some((window, 1)));
+        assert_eq!(h.counter(REPLAY_STOPPED), 1);
+        assert_eq!(h.counter(REPLAY_ENDED), 0);
+        h.conductor.stop_replay(13, 6);
+        h.conductor.stop_replay(15, 99);
+        h.cycle();
+        let got = events(&mut h);
+        assert_eq!(successes(&got), vec![13, 15]);
+        assert_eq!(replay_stopped(&got, 6), None, "nothing else happened");
+        drop(appender);
+    }
+
+    /// Every error code of `start replay`, each counted: the channel (1), a length
+    /// below −1 (7), a recording the catalog does not hold (21), a position that is not
+    /// a multiple of 32, below the start position or above the extent (23), and a
+    /// segment file that is gone (12).
+    #[test]
+    fn start_replay_errors_get_the_spec_codes_and_count() {
+        let mut h = Harness::new("replay-errors");
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let now = h.now;
+        // The recording starts after 10 frames, so its start position is 640.
+        h.conductor
+            .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
+        h.conductor
+            .add_subscription(CLIENT, 20, STREAM, IPC_CHANNEL);
+        h.cycle();
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        offer(&mut h, &mut appender, 0, 10);
+        h.conductor.start_recording(3, STREAM, IPC_CHANNEL, h.now);
+        h.cycle();
+        h.cycle();
+        assert_eq!(h.conductor.recordings[0].start_position, 640);
+        offer(&mut h, &mut appender, 10, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+
+        h.conductor.start_replay(
+            30,
+            0,
+            NULL_POSITION,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            b"cavalry:udp?endpoint=x",
+        );
+        h.conductor
+            .start_replay(31, 0, NULL_POSITION, -2, REPLAY_STREAM, IPC_CHANNEL);
+        h.conductor.start_replay(
+            32,
+            1,
+            NULL_POSITION,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            IPC_CHANNEL,
+        );
+        h.conductor
+            .start_replay(33, 0, 700, NULL_LENGTH, REPLAY_STREAM, IPC_CHANNEL);
+        h.conductor
+            .start_replay(34, 0, 0, NULL_LENGTH, REPLAY_STREAM, IPC_CHANNEL);
+        h.conductor
+            .start_replay(35, 0, 1312, NULL_LENGTH, REPLAY_STREAM, IPC_CHANNEL);
+        for _ in 0..5 {
+            h.cycle();
+        }
+        let got = errors(&events(&mut h));
+        let codes: Vec<(i64, i32)> = got.iter().map(|(id, code, _)| (*id, *code)).collect();
+        assert_eq!(
+            codes,
+            vec![(30, 1), (31, 7), (32, 21), (33, 23), (34, 23), (35, 23)]
+        );
+        for (_, _, message) in &got {
+            assert!(message.contains(ERRORS_DOC), "{message}");
+        }
+        assert!(got[3].2.contains("from 640 to 1280"), "{}", got[3].2);
+        assert_eq!(h.counter(REPLAY_START_FAILED), 4);
+        assert!(h.conductor.replays.is_empty());
+
+        // The extent itself is a position: a zero-length replay from there.
+        start_replay(&mut h, 36, 1280, NULL_LENGTH, Some(37));
+        wait_replay_end(&mut h, 36);
+        assert_eq!(replay_stopped(&events(&mut h), 36), Some((1280, 0)));
+
+        // The segment file gone: code 12, counted, and the replayer forgot the start.
+        std::fs::remove_file(h.log_dir.join("0-0.rec")).expect("the segment is removed");
+        h.conductor.start_replay(
+            38,
+            0,
+            NULL_POSITION,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            IPC_CHANNEL,
+        );
+        for _ in 0..5 {
+            h.cycle();
+        }
+        let got = errors(&events(&mut h));
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].0, got[0].1), (38, 12));
+        assert!(got[0].2.contains("0-0.rec"), "{}", got[0].2);
+        assert_eq!(h.counter(REPLAY_START_FAILED), 5);
+        assert_eq!(h.replayer.live_replays(), 0);
+        drop(appender);
+    }
+
+    /// The replays registry at capacity (invariant 3): the 65th start is code 10 and
+    /// counted, with the replays' logs at the smallest term.
+    #[test]
+    fn the_replays_registry_is_bounded_and_says_so() {
+        let (mut h, mut appender) = recorded("replays-registry");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let n = spec::MAX_REPLAYS as i64;
+        for i in 0..n {
+            h.conductor.start_replay(
+                100 + i,
+                0,
+                NULL_POSITION,
+                NULL_LENGTH,
+                REPLAY_STREAM,
+                IPC_CHANNEL,
+            );
+        }
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(h.conductor.replays.len(), spec::MAX_REPLAYS);
+        assert!(
+            h.conductor
+                .replays
+                .iter()
+                .all(|replay| replay.state == ReplayState::Live)
+        );
+        assert_eq!(h.counter(REPLAY_STARTED), n);
+        h.conductor.start_replay(
+            200,
+            0,
+            NULL_POSITION,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            IPC_CHANNEL,
+        );
+        let got = errors(&events(&mut h));
+        let (id, code, message) = got.last().expect("an error event");
+        assert_eq!((*id, *code), (200, 10), "{message}");
+        assert!(message.contains("replays registry"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
+        assert_eq!(h.conductor.replays.len(), spec::MAX_REPLAYS);
+        drop(appender);
+    }
+
+    /// A replay that follows a live recording (invariant 1): it plays what is synced
+    /// and no more, moves when the recorder syncs, and ends at the recording's stop
+    /// position with reason 0 once the catalog holds the stop; a replay with length −1
+    /// of the same live recording ends at the extent it started with.
+    #[test]
+    fn a_replay_follows_a_live_recording_to_its_stop_and_plays_only_synced_bytes() {
+        let (mut h, mut appender) = recorded("replay-follow");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        start_replay(&mut h, 6, NULL_POSITION, FOLLOW_LENGTH, Some(5));
+        start_replay(&mut h, 8, NULL_POSITION, NULL_LENGTH, Some(7));
+        let follow = h.conductor.replays[0].position.clone().expect("allocated");
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(follow.load_acquire(), 640, "the synced bytes are played");
+        assert_eq!(read_replay(&h, 6, 0).len(), 10);
+        wait_replay_end(&mut h, 8);
+        assert_eq!(
+            replay_stopped(&events(&mut h), 8),
+            Some((640, 0)),
+            "-1 ends at the extent at its start"
+        );
+
+        // More is written but not synced: the follow waits.
+        offer(&mut h, &mut appender, 10, 10);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(follow.load_acquire(), 640, "unsynced bytes are not played");
+        assert_eq!(h.conductor.replays.len(), 1);
+        h.now += SECOND;
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(follow.load_acquire(), 1280, "synced, played");
+        assert_eq!(read_replay(&h, 6, 0).len(), 20);
+
+        // The recording stops: the replay learns it from the catalog within a second.
+        stop_recording(&mut h, 4);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(
+            h.conductor.replays.len(),
+            1,
+            "not yet: the slot is read once per second"
+        );
+        h.now += SECOND;
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((1280, 0)));
+        assert_eq!(h.counter(REPLAY_ENDED), 2);
+        drop(appender);
+    }
+
+    /// A frame in the segment file that fails a check ends the replay at the frame
+    /// before it with reason 3, counted in `replay.failed` and
+    /// `log_buffer.rejected_frame`; the frames before it were delivered.
+    #[test]
+    fn a_damaged_frame_ends_the_replay_with_reason_3_at_the_frame_before_it() {
+        let (mut h, mut appender) = recorded("replay-damaged");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let segment = OpenOptions::new()
+            .write(true)
+            .open(h.log_dir.join("0-0.rec"))
+            .expect("the segment opens");
+        segment
+            .write_all_at(&[0xFF], 3 * 64 + 4)
+            .expect("the fourth frame's version byte is poisoned");
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((192, 3)));
+        assert_eq!(h.counter(REPLAY_FAILED), 1);
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 1);
+        assert_eq!(read_replay(&h, 6, 0).len(), 3);
+        drop(appender);
+    }
+
+    /// A recorded frame whose length runs past the recording's extent (invariants 1
+    /// and 4; spec, "start replay"): the header passes `spec/frame.md`'s checks, since
+    /// the frame fits its term, but the block the replayer reads ends at the extent,
+    /// so the writer has no whole frame and writes nothing. That is the `length`
+    /// reason, damage, not a block to read again for ever: `replay stopped` reason 3 at
+    /// the frame before it, `replay.failed` and `log_buffer.rejected_frame` at 1, and
+    /// the frames before it delivered.
+    #[test]
+    fn a_frame_length_past_the_extent_ends_the_replay_with_reason_3_at_the_frame_before_it() {
+        let (mut h, mut appender) = recorded("replay-length-past-extent");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let segment = OpenOptions::new()
+            .write(true)
+            .open(h.log_dir.join("0-0.rec"))
+            .expect("the segment opens");
+        // The tenth frame, at 576, says it is 128 bytes long: 64 past the stop at 640.
+        segment
+            .write_all_at(&128i32.to_le_bytes(), 9 * 64)
+            .expect("the tenth frame's length is poisoned");
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((576, 3)));
+        assert_eq!(replay_position.load_acquire(), 576);
+        assert_eq!(h.counter(REPLAY_FAILED), 1);
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 1);
+        assert_eq!(read_replay(&h, 6, 0).len(), 9, "the frames before it");
+        drop(appender);
+    }
+
+    /// A recorded frame whose length is over the MTU (invariants 1 and 4): 65472 bytes
+    /// at 64 in a 64 KiB term, which is exactly the term's remaining bytes, so the
+    /// header passes `spec/frame.md`'s checks, while the recording is a term and a
+    /// half, so the extent does not cut the block; the publication's limit does, at
+    /// the window plus an MTU with the subscriber at 0, the one bound that may end a
+    /// block inside a frame and does so only for a frame over the MTU. The writer
+    /// writes nothing of it and the replayer calls it damage: `replay stopped` reason
+    /// 3 at 64, `replay.failed` and `log_buffer.rejected_frame` at 1, the frame before
+    /// it delivered.
+    #[test]
+    fn a_frame_length_over_the_mtu_ends_the_replay_with_reason_3_at_the_frame_before_it() {
+        let (mut h, mut appender) = recorded("replay-length-over-mtu");
+        offer(&mut h, &mut appender, 0, 1600);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let term = i64::from(h.conductor.term_length);
+        let window = term / 2;
+        let mtu = i64::from(spec::IPC_MTU_LENGTH);
+        let poisoned = i32::try_from(term - 64).expect("fits");
+        assert!(i64::from(poisoned) > mtu, "over the MTU");
+        assert!(
+            i64::from(poisoned) > window + mtu - 64,
+            "longer than the block"
+        );
+        let segment = OpenOptions::new()
+            .write(true)
+            .open(h.log_dir.join("0-0.rec"))
+            .expect("the segment opens");
+        segment
+            .write_all_at(&poisoned.to_le_bytes(), 64)
+            .expect("the second frame's length is poisoned");
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((64, 3)));
+        assert_eq!(replay_position.load_acquire(), 64);
+        assert_eq!(h.counter(REPLAY_FAILED), 1);
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 1);
+        assert_eq!(read_replay(&h, 6, 0).len(), 1, "the frame before it");
+        drop(appender);
+    }
+
+    /// A replay across a segment roll (invariant 1): a recording of a segment and a
+    /// bit, replayed in full to a subscriber that keeps up, delivers every byte in
+    /// order across the roll into the second segment file.
+    #[test]
+    fn a_replay_rolls_into_the_next_segment_file() {
+        let (mut h, mut appender) = recorded("replay-roll");
+        let segment = i64::from(cavalry_log::layout::SEGMENT_FILE_LENGTH);
+        // 1000-byte bodies: 62 frames and a padding frame per 64 KiB term.
+        let mut message = [0u8; 1000];
+        let mut n = 0i64;
+        let mut position = 0;
+        while position < segment + 4096 {
+            message[..8].copy_from_slice(&n.to_le_bytes());
+            let limit = h.conductor.publications[0].limit.get();
+            match appender.offer(&message, limit, 0) {
+                Ok(after) => {
+                    position = after;
+                    n += 1;
+                }
+                Err(ClaimError::AdminAction) => {}
+                Err(ClaimError::BackPressured) => h.cycle(),
+                Err(error) => panic!("{error}"),
+            }
+        }
+        let count = n;
+        let end = position;
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        assert!(
+            h.log_dir
+                .join(cavalry_log::layout::segment_file_name(0, segment))
+                .exists()
+        );
+
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let log = LogBuffers::open(h.dir.path(), 6, false).expect("the replay log opens");
+        let mut reader = log.reader(0).expect("a reader");
+        let subscriber = h
+            .conductor
+            .images
+            .iter()
+            .find(|image| image.publication_id == 6)
+            .map(|image| image.position.clone())
+            .expect("the image");
+        let mut next = 0i64;
+        for _ in 0..1_000_000 {
+            let poll = reader
+                .poll(1024, |body, _| {
+                    assert_eq!(&body[..8], &next.to_le_bytes(), "frame {next} in order");
+                    assert_eq!(body.len(), 1000);
+                    next += 1;
+                })
+                .expect("the poll reads");
+            subscriber.store_release(poll.position);
+            h.cycle();
+            if h.conductor.replays.is_empty() && poll.position == end {
+                break;
+            }
+        }
+        assert_eq!(next, count, "every frame delivered across the roll");
+        assert_eq!(reader.position(), end);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((end, 0)));
+        drop(appender);
+    }
+
+    /// An end position inside a frame (invariant 1; spec, "start replay"): the frame
+    /// that begins below it is played whole and the replay ends at the first frame
+    /// boundary at or after it, `replay stopped` reason 0 there, so a length that cuts
+    /// a frame moves and ends instead of waiting for ever at the cut. Over 64-byte
+    /// frames a length of 100 from 0 plays two frames and ends at 128, a length of 1
+    /// from 64 plays the frame at 64 and ends at 128, and a length of 32 from 0 ends
+    /// at 64.
+    #[test]
+    fn an_end_position_inside_a_frame_plays_that_frame_whole_and_ends_at_its_end() {
+        let (mut h, mut appender) = recorded("replay-end-inside-frame");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+
+        start_replay(&mut h, 6, NULL_POSITION, 100, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((128, 0)));
+        assert_eq!(replay_position.load_acquire(), 128);
+        let frames = read_replay(&h, 6, 0);
+        assert_eq!(
+            frames.len(),
+            2,
+            "the frame at 64 begins below 100 and is played whole"
+        );
+        assert_eq!(&frames[1].0[..8], &1i64.to_le_bytes());
+
+        start_replay(&mut h, 8, 64, 1, Some(7));
+        wait_replay_end(&mut h, 8);
+        assert_eq!(replay_stopped(&events(&mut h), 8), Some((128, 0)));
+        assert_eq!(read_replay(&h, 8, 64).len(), 1);
+
+        start_replay(&mut h, 10, NULL_POSITION, 32, Some(9));
+        wait_replay_end(&mut h, 10);
+        assert_eq!(replay_stopped(&events(&mut h), 10), Some((64, 0)));
+        assert_eq!(h.counter(REPLAY_ENDED), 3);
+        assert_eq!(h.counter(REPLAY_STOPPED), 3);
+        drop(appender);
+    }
+
+    /// The replayer's request queue full, and its deferred requests ahead of a start
+    /// (invariant 3; spec, "start replay"): a start that finds the queue full is code
+    /// 10, counted, and registers nothing; a stop that finds it full waits in the
+    /// deferred list; a start behind that is code 10 too; once the replayer catches up
+    /// the stop is answered, the replay ends with reason 1, and a start goes through.
+    #[test]
+    fn a_replay_start_waits_behind_a_full_queue_and_the_deferred_requests() {
+        let (mut h, mut appender) = recorded("replayer-deferred-order");
+        offer(&mut h, &mut appender, 0, 1600);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let window = i64::from(h.conductor.term_length / 2);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        let _ = events(&mut h);
+
+        // The request queue full of stops of ids no replay holds, which the replayer
+        // drops without an answer.
+        let mut filler = 0;
+        while h
+            .conductor
+            .replayer
+            .requests
+            .offer(replayer::Request::Stop {
+                replay_session_id: 1_000_000 + filler,
+                correlation_id: None,
+                reason: ReplayStopReason::Stopped,
+            })
+            .is_ok()
+        {
+            filler += 1;
+        }
+        assert_eq!(filler, spec::REPLAYER_QUEUE_CAPACITY as i64);
+
+        // A start that finds the queue full: code 10, counted, nothing registered.
+        h.conductor.start_replay(
+            49,
+            0,
+            NULL_POSITION,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            IPC_CHANNEL,
+        );
+        let (code, message) = h.last_error(49).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("request queue"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
+        assert_eq!(h.conductor.replays.len(), 1, "nothing registered");
+        assert!(h.conductor.replayer_deferred.is_empty());
+
+        // A stop waits for room; a start behind it is code 10 as well.
+        h.conductor.stop_replay(50, 6);
+        assert_eq!(h.conductor.replayer_deferred.len(), 1, "the stop waits");
+        h.conductor.start_replay(
+            51,
+            0,
+            NULL_POSITION,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            IPC_CHANNEL,
+        );
+        let (code, message) = h.last_error(51).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("request queue"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 2);
+        assert_eq!(h.conductor.replays.len(), 1, "nothing registered");
+
+        for _ in 0..1_000 {
+            h.cycle();
+            if h.conductor.replays.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            h.conductor.replays.is_empty(),
+            "the stop reached the replayer"
+        );
+        assert!(h.conductor.replayer_deferred.is_empty());
+        let got = events(&mut h);
+        assert_eq!(successes(&got), vec![50], "the stop was answered");
+        assert_eq!(replay_stopped(&got, 6), Some((window, 1)));
+        assert_eq!(h.counter(REPLAY_STOPPED), 1);
+        start_replay(&mut h, 52, NULL_POSITION, NULL_LENGTH, Some(53));
+        assert_eq!(h.last_error(52), None);
+        assert_eq!(h.conductor.replays.len(), 1, "the start went through");
+        drop(appender);
+    }
+
+    /// The replayer's deferred requests at capacity (invariant 3): the registry full of
+    /// replays, each given its attach and its stop while the request queue is full,
+    /// fills the list to exactly its bound and not past its allocation, and every
+    /// request reaches the replayer once it catches up.
+    #[test]
+    fn the_replayers_deferred_requests_are_bounded_by_one_attach_and_one_stop_per_replay() {
+        let (mut h, mut appender) = recorded("replayer-deferred-capacity");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let now = h.now;
+        let allocated = h.conductor.replayer_deferred.capacity();
+        while h
+            .conductor
+            .replayer
+            .requests
+            .offer(replayer::Request::Stop {
+                replay_session_id: 1_000_000,
+                correlation_id: None,
+                reason: ReplayStopReason::Stopped,
+            })
+            .is_ok()
+        {}
+        let n = spec::MAX_REPLAYS as i64;
+        for i in 0..n {
+            h.conductor.replays.push(ReplayEntry {
+                replay_session_id: 100_000 + i,
+                recording_id: 0,
+                replay_stream_id: REPLAY_STREAM,
+                state: ReplayState::Starting,
+                position: None,
+                unconnected_since: None,
+                stop_requested: false,
+            });
+        }
+        let term = cavalry_shm::log::layout::MIN_TERM_LENGTH as i32;
+        for i in 0..n {
+            h.conductor
+                .on_replay_ready(100_000 + i, 0, 0, (0, term, 1408), (0, STREAM), now);
+            h.conductor.stop_replay(70_000 + i, 100_000 + i);
+        }
+        assert_eq!(
+            h.conductor.replayer_deferred.len(),
+            REPLAYER_DEFERRED_CAPACITY
+        );
+        assert_eq!(
+            h.conductor.replayer_deferred.capacity(),
+            allocated,
+            "the list did not grow"
+        );
+        assert_eq!(h.counter(REPLAY_STARTED), n);
+        assert_eq!(h.conductor.replays.len(), spec::MAX_REPLAYS);
+
+        for _ in 0..10_000 {
+            h.cycle();
+            if h.conductor.replayer_deferred.is_empty() && h.conductor.replayer.requests.is_empty()
+            {
+                break;
+            }
+        }
+        assert!(
+            h.conductor.replayer_deferred.is_empty(),
+            "every request was offered"
+        );
+        assert!(
+            h.conductor.replayer.requests.is_empty(),
+            "the replayer took every one"
+        );
+        // The replayer held none of these replays, so each stop is answered with
+        // nothing written, and the conductor ends every one.
+        for _ in 0..100 {
+            h.cycle();
+            if h.conductor.replays.is_empty() {
+                break;
+            }
+        }
+        assert!(h.conductor.replays.is_empty(), "every stop was answered");
+        assert_eq!(h.counter(REPLAY_STOPPED), n);
+        drop(appender);
+    }
+
+    /// The replayer's pending replies at capacity (invariant 3): with the conductor
+    /// taking no replies, the reply queue and then the pending replies fill; at the
+    /// bound the replayer handles no request and ends no replay, but keeps writing,
+    /// across a term; and once the conductor takes replies again the held end goes
+    /// through with reason 0.
+    #[test]
+    fn the_replayers_pending_replies_are_bounded_and_it_keeps_writing() {
+        let (mut h, mut appender) = recorded("replayer-pending");
+        let count = 1600;
+        let end = offer(&mut h, &mut appender, 0, count);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        let window = i64::from(h.conductor.term_length / 2);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(
+            replay_position.load_acquire(),
+            window,
+            "paced at the window"
+        );
+
+        // Stops of an id no replay holds, each answered, until the replies are at
+        // their bound.
+        let fill = |h: &mut Harness| {
+            while h
+                .conductor
+                .replayer
+                .requests
+                .offer(replayer::Request::Stop {
+                    replay_session_id: 1_000_000,
+                    correlation_id: Some(1),
+                    reason: ReplayStopReason::Stopped,
+                })
+                .is_ok()
+            {}
+        };
+        for _ in 0..10_000 {
+            if h.replayer.pending_replies() >= replayer::PENDING_REPLIES {
+                break;
+            }
+            fill(&mut h);
+            h.now += MS;
+            h.replayer.duty_cycle(h.now);
+        }
+        assert_eq!(h.replayer.pending_replies(), replayer::PENDING_REPLIES);
+        assert_eq!(
+            h.conductor.replayer.replies.len(),
+            spec::REPLAYER_QUEUE_CAPACITY
+        );
+        fill(&mut h);
+        let queued = h.conductor.replayer.requests.len();
+
+        // Room to the end, stored by hand since the conductor is not cycling: the
+        // replayer writes everything, across the first term, and does not end the
+        // replay while it has no room for the reply.
+        h.conductor
+            .publications
+            .iter()
+            .find(|publication| publication.registration_id == 6)
+            .expect("the replay's publication")
+            .limit
+            .store_release(end);
+        for _ in 0..8 {
+            h.now += MS;
+            h.replayer.duty_cycle(h.now);
+        }
+        assert_eq!(
+            replay_position.load_acquire(),
+            end,
+            "the replayer kept writing"
+        );
+        assert_eq!(h.replayer.live_replays(), 1, "it ended nothing");
+        assert_eq!(
+            h.conductor.replayer.requests.len(),
+            queued,
+            "it handled no request"
+        );
+        assert_eq!(h.replayer.pending_replies(), replayer::PENDING_REPLIES);
+
+        // The conductor takes replies again; the end goes through.
+        wait_replay_end(&mut h, 6);
+        let got = events(&mut h);
+        assert_eq!(replay_stopped(&got, 6), Some((end, 0)));
+        assert_eq!(h.counter(REPLAY_ENDED), 1);
+        assert_eq!(h.counter(REPLAY_STOPPED), 1);
+        assert_eq!(read_replay(&h, 6, 0).len(), count as usize);
         drop(appender);
     }
 }

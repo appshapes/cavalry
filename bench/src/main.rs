@@ -60,8 +60,8 @@ struct Options {
     profile_suffix: String,
     out: Option<PathBuf>,
     /// The CPUs of the publisher, the subscriber and the driver's conductor, from
-    /// `--pin`; the driver's recorder and the client's conductor run on the lowest CPU
-    /// outside them.
+    /// `--pin`; the driver's recorder and replayer and the client's conductor run on
+    /// the lowest CPU outside them.
     pin: Option<[usize; 3]>,
     /// That lowest CPU outside the pins, from the process's allowed set as it was before
     /// this thread pinned itself: the affinity a thread reads is its own.
@@ -86,8 +86,8 @@ Options:
   --out DIR         where the result JSON goes (default bench/results); --no-write writes none
   --pin P,S,C       pin the publisher, the subscriber and the driver's conductor to CPUs P,
                     S and C, three distinct CPUs, Linux only, and the driver's recorder and
-                    the client's conductor to the lowest CPU outside them; the bench host
-                    passes 8,10,12 (ADR 0016)
+                    replayer and the client's conductor to the lowest CPU outside them; the
+                    bench host passes 8,10,12 (ADR 0016)
   --repeat N        run every benchmark N times, report each one's median run by p99.99,
                     and list every run's p99.99 in the result (default 1; CI passes 21)
   --help            this text
@@ -283,8 +283,8 @@ fn histogram() -> Histogram<u64> {
 }
 
 /// The lowest CPU in the calling thread's allowed set outside the three pins: where the
-/// driver's recorder and the client's conductor run under `--pin`, so that the third
-/// pin holds the driver's conductor alone (card 136). Read before any thread pins
+/// driver's recorder and replayer and the client's conductor run under `--pin`, so that
+/// the third pin holds the driver's conductor alone (card 136). Read before any thread pins
 /// itself: the bench host's shells and runner start with the housekeeping CPUs alone
 /// in their set, and a thread already pinned to one CPU reads a set of one.
 fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
@@ -297,7 +297,7 @@ fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
         .ok_or_else(|| {
             format!(
                 "--pin: no CPU outside {},{},{} in the process's allowed set for the \
-                 driver's recorder and the client's conductor; run the harness from a shell \
+                 driver's recorder and replayer and the client's conductor; run the harness from a shell \
                  whose allowed set holds a housekeeping CPU as well: `taskset -cp $$` prints \
                  the shell's, and `taskset -c 0-7 just bench --pin 8,10,12` runs with CPUs 0 \
                  to 7 in it (docs/how-to/run-the-bench.md#when-it-does-not-work)",
@@ -312,6 +312,7 @@ fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
 struct DriverPins {
     conductor: AtomicUsize,
     recorder: AtomicUsize,
+    replayer: AtomicUsize,
 }
 
 impl DriverPins {
@@ -319,6 +320,7 @@ impl DriverPins {
         DriverPins {
             conductor: AtomicUsize::new(0),
             recorder: AtomicUsize::new(0),
+            replayer: AtomicUsize::new(0),
         }
     }
 
@@ -327,6 +329,7 @@ impl DriverPins {
         match thread {
             DriverThread::Conductor => &self.conductor,
             DriverThread::Recorder => &self.recorder,
+            DriverThread::Replayer => &self.replayer,
         }
     }
 
@@ -343,6 +346,7 @@ impl DriverPins {
                 match thread {
                     DriverThread::Conductor => "conductor",
                     DriverThread::Recorder => "recorder",
+                    DriverThread::Replayer => "replayer",
                 },
                 failed - 1
             )),
@@ -671,8 +675,8 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 /// subscription on one stream, the publisher on this thread and the subscriber on its
 /// own, each message claimed, written in place and committed, then delivered to the
 /// subscription's handler (ADR 0021). Under `--pin` the driver's conductor pins itself
-/// to the third CPU and the driver's recorder and the client's conductor run on the
-/// lowest CPU outside the pins, as `run_client` says and does; a thread inherits the
+/// to the third CPU and the driver's recorder and replayer and the client's conductor
+/// run on the lowest CPU outside the pins, as `run_client` says and does; a thread inherits the
 /// affinity of the thread that spawns it, which is what the placement arranges. The log
 /// is the driver's, 64 MiB terms (`spec/client-protocol.md`,
 /// "Sizes"), so the warm-up is one rotation of that log, not of `--term-length`'s, for the
@@ -691,29 +695,31 @@ fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
 /// the stream to the log directory under the bench directory (ADR 0025): the recorder is
 /// one more reader of the log, whose position the publisher's limit respects, and its
 /// writes run on the driver's recorder thread. Under `--pin` the driver's conductor has
-/// the third CPU to itself, and the recorder and the client's conductor run on the
-/// lowest CPU outside the pins: three threads on one pinned CPU kept it ticking and
-/// waking within itself (card 136). The recording must reach the publisher's final
+/// the third CPU to itself, and the recorder, the replayer and the client's conductor
+/// run on the lowest CPU outside the pins: three threads on one pinned CPU kept it
+/// ticking and waking within itself (card 136); the replayer holds no replay in any row
+/// and stays parked. The recording must reach the publisher's final
 /// position before the run counts, so a recorder that lost a byte or fell behind fails
 /// the run, never a row.
 fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Result<LogRun, String> {
     let housekeeping = options.housekeeping;
     let conductor_cpu = options.pin.map(|pin| pin[2]);
     // A pin a driver thread could not take is reported through `pins`, since the hook
-    // returns nothing. `Driver::start_with_threads` returns as soon as both threads are
-    // spawned and `Cavalry::connect_to` waits for no answer, so a load here would race
-    // the hooks: the conductor's slot is read after the driver's first answer, which its
-    // conductor sends from its loop, after its hook, and reaches this thread through
-    // release and acquire stores; both slots are read again once `driver.close()` has
-    // joined both threads, which is where the recorder's is first ordered. A failed pin
-    // fails the run either way, and the row's numbers are never written.
+    // returns nothing. `Driver::start_with_threads` returns as soon as its three threads
+    // are spawned and `Cavalry::connect_to` waits for no answer, so a load here would
+    // race the hooks: the conductor's slot is read after the driver's first answer,
+    // which its conductor sends from its loop, after its hook, and reaches this thread
+    // through release and acquire stores; every slot is read again once `driver.close()`
+    // has joined the three threads, which is where the recorder's and the replayer's are
+    // first ordered. A failed pin fails the run either way, and the row's numbers are
+    // never written.
     let pins = Arc::new(DriverPins::new());
     let on_thread_start: ThreadStart = {
         let pins = Arc::clone(&pins);
         Arc::new(move |thread| {
             let cpu = match thread {
                 DriverThread::Conductor => conductor_cpu,
-                DriverThread::Recorder => housekeeping,
+                DriverThread::Recorder | DriverThread::Replayer => housekeeping,
             };
             if pin_to(cpu).is_err() {
                 pins.slot(thread)
@@ -866,9 +872,10 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     publication.close().map_err(|e| e.to_string())?;
     client.close().map_err(|e| e.to_string())?;
     driver.close().map_err(|e| e.to_string())?;
-    // Both driver threads are joined, so both hooks are ordered before these loads.
+    // Every driver thread is joined, so every hook is ordered before these loads.
     pins.check(DriverThread::Conductor)?;
     pins.check(DriverThread::Recorder)?;
+    pins.check(DriverThread::Replayer)?;
     Ok(LogRun {
         claim_commit: summarize(&hist, elapsed),
         one_way: summarize(&one_way, elapsed),
