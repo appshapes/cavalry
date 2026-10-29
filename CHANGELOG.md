@@ -583,6 +583,39 @@ user-visible change, added in the same commit as the change. The format follows
   ([ADR 0030](docs/decisions/0030-replay-a-recording-into-a-subscription.md),
   [the client protocol](docs/reference/client-protocol.md)). The client API, the
   `cavalry replay` command and `just replay-check` follow.
+- `Cavalry::start_replay` and `stop_replay` with the `Replay` handle, whose `ended()`
+  says where and why a replay ended; `Image::position_of` and `Image::positions`, a
+  frame's position in the recording from its header, which a padding frame moves
+  without a handler seeing it; `cavalry::index::position_at` and `position_after`, an
+  instant to a position through the time index; and `cavalry replay --recording <id>
+  --from <position or instant> [--to ...] [--stream <id>] [--follow]`, which prints
+  one line per message, the position from the frame's header, and exits 1 naming the
+  positions it did not print when the replay's log went before it had read to the end
+  ([Replay a recording](docs/how-to/replay-a-recording.md); ADR 0030). The client
+  follows the end of every replay it started while the handle lives, as many as the
+  driver allows live at once; one more is `ClientError::ReplaysFull` and stopped again.
+- `just replay-check` is built, the gate CLAUDE.md names for invariant 1: a driver on a
+  directory of its own records 100,000 hash-chained messages, with a padding frame a
+  quarter of the way, while a live subscriber prints them, `cavalry replay` plays the
+  recording twice from the start and once from an instant, and the three outputs must
+  hash the same and the replay from the instant start where the time index says; CI
+  runs it on Linux and macOS. With it, the second slice's third feature is done
+  (ADR 0023, ADR 0030).
+- A baseline profile records the date its numbers were measured: `bench-compare.py
+  --update` writes the result's `date_unix` as a UTC date-time under `date`, where it
+  read a field the harness never wrote and left `null`; the four profiles carry their
+  runs' dates (card 158; [Run the bench](docs/how-to/run-the-bench.md), step 4).
+- The bench harness's conductor loads the producer position once per millisecond by
+  the clock, which it reads every 256 spins, instead of every 10,000 spins, which was
+  a millisecond on the bench host and half of one on kip; the loads per run are
+  printed and written to the result as `producer_position_loads`, so each host's
+  cadence is on record. `cavalry-bench --only NAME` runs only the benchmarks with a row
+  whose name contains NAME, for a profile of one row, under the profile with `-only`
+  appended; a NAME no row contains is an error that lists the rows. The result carries
+  the allocation count as `allocations` beside the ratio, which `bench-compare` judges
+  when no message row ran, and `bench-compare` picks the newest result by the time in
+  its name, not by name (card 161;
+  [bench/README.md](bench/README.md)).
 - CI runs the latency gate on the second bench host too: the `bench (kip)` job in
   `.github/workflows/ci.yml` runs on `kip` (`[self-hosted, kip-linux]`, pinned to CPUs
   6,8,10) against the `kip-linux` and `kip-linux-unchecked` baselines, on every push and

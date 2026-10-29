@@ -12,13 +12,19 @@ binary's `main`.
   program can run with no separate daemon and can pin the driver's threads with no
   second dependency. One shared driver per host, `cavalry run`, is the production shape
   and the ten-minute path's; `examples/quickstart.rs` is that path's program, and
-  `just quickstart` runs it end to end.
+  `just quickstart` runs it end to end; `examples/replay-check.rs` is the replay gate's
+  program, which `just replay-check` runs.
 - `cargo install cavalry` gives the `cavalry` binary: `run` starts a driver and stops
   it on Ctrl-C or SIGTERM, leaving the directory for `doctor`; `doctor` explains the
   driver from its counters and exits 0 when no check failed, listing every recording's
   two positions; `record <stream id>` records a stream's live publication to the durable
-  log and `record --stop <id>` stops it (ADR 0025); `replay` and `console` arrive with
-  their features.
+  log and `record --stop <id>` stops it (ADR 0025); `replay --recording <id> --from
+  <position or instant>` plays a recording back into a subscription of its own and prints
+  one line per message, the position from the frame's header and the body, from a
+  position or an instant the time index resolves, to `--to` or the recording's extent,
+  or `--follow`ing a live recording to its stop, and exits 1 naming the positions it did
+  not print when the replay's log went before it had read to the end (ADR 0030);
+  `cavalry::index` is the lookup behind an instant; `console` arrives with its feature.
 - Control-plane and command-line dependencies sit behind the `cli` feature, on by
   default so that `cargo install cavalry` needs no flag. `cargo add cavalry --no-
   default-features` is the lean library build; it skips the binary and `doctor`.
@@ -92,8 +98,10 @@ cavalry doctor: /tmp/cavalry-readme-4242, checks run: 14
 ## What to read next
 
 - [Run a driver and read doctor](../../docs/how-to/run-the-driver.md), the how-to for
-  the binary, and [`spec/client-protocol.md`](../../spec/client-protocol.md), the
-  directory, the commands and the events it keeps.
+  the binary, [Record a stream](../../docs/how-to/record-a-stream.md) and
+  [Replay a recording](../../docs/how-to/replay-a-recording.md), the how-tos for
+  `record` and `replay`, and [`spec/client-protocol.md`](../../spec/client-protocol.md),
+  the directory, the commands and the events it keeps.
 - [Configuration](../../docs/reference/config.md), the two keys and how one is set, and
   [ADR 0020](../../docs/decisions/0020-configure-by-environment-variable.md), why by
   environment variable.

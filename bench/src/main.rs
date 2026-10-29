@@ -36,11 +36,18 @@ use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const SCHEMA: u32 = 0;
-/// Spins of the conductor's loop between two loads of the producer position: about a
-/// millisecond on the bench host, the driver's cadence (ADR 0022;
-/// `cavalry_driver::spec::PRODUCER_POSITION_INTERVAL`), counted rather than timed
-/// because a clock read on every spin costs the other two threads at p99.99.
-const PRODUCER_POSITION_SPINS: u32 = 10_000;
+/// Spins of the conductor's loop between two reads of the clock, which decide when the
+/// producer position is loaded: once per millisecond, the driver's cadence (ADR 0022;
+/// [`PRODUCER_POSITION_INTERVAL_NS`]). The cadence was a count of 10,000 spins, about a
+/// millisecond on the bench host, because a clock read on every spin cost the other two
+/// threads at p99.99; on kip the same count was about half a millisecond, which put the
+/// loads at the gate's percentile of the exclusive row (card 161), so the clock decides,
+/// read once every this many spins, a 256th of that cost.
+const CADENCE_SPINS: u32 = 256;
+/// The driver's cadence for loading a publication's producer position, in nanoseconds
+/// (ADR 0022; `cavalry_driver::spec::PRODUCER_POSITION_INTERVAL`).
+const PRODUCER_POSITION_INTERVAL_NS: u64 =
+    cavalry_driver::spec::PRODUCER_POSITION_INTERVAL.as_nanos() as u64;
 
 const CORRELATION_ID: i64 = 7;
 const SESSION_ID: i32 = 1;
@@ -69,6 +76,110 @@ struct Options {
     /// How many times every benchmark runs; the reported run is the median by p99.99,
     /// and the result lists every run's.
     repeat: u32,
+    /// `--only`: run only the benchmarks with a row whose name contains this, for a
+    /// profile of one row; the result is written under the profile with `-only`
+    /// appended, so it is never compared as a full run. A value no row's name contains
+    /// is an error from `parse`, which lists the rows.
+    only: Option<String>,
+}
+
+/// One benchmark of a pass, with the rows it writes to the table and the result.
+/// `--only` is matched against the rows, since those are the names the table, the
+/// result and the baseline use, and one run of a benchmark writes all of its rows, so
+/// the benchmark runs when any of them is wanted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Benchmark {
+    /// Two readings of the clock back to back: the `timer` row.
+    Timer,
+    /// A publisher, a subscriber and a conductor over a real log buffer of this type:
+    /// the `claim_commit_<body>_<name>` and `one_way_<body>_<name>` rows, and the key
+    /// of the retries and the producer position loads in the result.
+    Log {
+        log_type: LogType,
+        name: &'static str,
+    },
+    /// The client path through a real driver, with the recorder on when `recorded`:
+    /// the same two rows under `name`, `client` or `recorded`.
+    Client { recorded: bool, name: &'static str },
+    /// A load and a store from two threads this many bytes apart (ADR 0011): the
+    /// `slot_padding_<spacing>_load` and `slot_padding_<spacing>_store` rows.
+    Slot { spacing: usize },
+    /// The recorder's block path (ADR 0025): the `record_block_<body>` row.
+    Record,
+}
+
+impl Benchmark {
+    /// Every benchmark of a full pass, in the order they run: the timer, both log
+    /// types, the client path with and without a recording on, the three slot
+    /// spacings, and last the recorder's block path, so its writes reach no other row.
+    const ALL: [Benchmark; 9] = [
+        Benchmark::Timer,
+        Benchmark::Log {
+            log_type: LogType::Exclusive,
+            name: "exclusive",
+        },
+        Benchmark::Log {
+            log_type: LogType::Concurrent,
+            name: "concurrent",
+        },
+        Benchmark::Client {
+            recorded: false,
+            name: "client",
+        },
+        Benchmark::Client {
+            recorded: true,
+            name: "recorded",
+        },
+        Benchmark::Slot { spacing: 0 },
+        Benchmark::Slot { spacing: 64 },
+        Benchmark::Slot { spacing: 128 },
+        Benchmark::Record,
+    ];
+
+    /// The rows this benchmark writes, named as the table and the result name them for
+    /// a body of `body` bytes, in the order `run_pass` has their summaries: the claim
+    /// row before the one-way row, the load row before the store row.
+    fn rows(self, body: usize) -> Vec<String> {
+        match self {
+            Benchmark::Timer => vec!["timer".into()],
+            Benchmark::Log { name, .. } | Benchmark::Client { name, .. } => vec![
+                format!("claim_commit_{body}_{name}"),
+                format!("one_way_{body}_{name}"),
+            ],
+            Benchmark::Slot { spacing } => vec![
+                format!("slot_padding_{spacing}_load"),
+                format!("slot_padding_{spacing}_store"),
+            ],
+            Benchmark::Record => vec![format!("record_block_{body}")],
+        }
+    }
+}
+
+impl Options {
+    /// Whether `--only` admits the row `name`: every row without it, else the rows
+    /// whose name contains it.
+    fn wanted(&self, name: &str) -> bool {
+        self.only.as_deref().is_none_or(|only| name.contains(only))
+    }
+
+    /// The benchmarks of a pass, in the order they run: all of [`Benchmark::ALL`]
+    /// without `--only`, else those with a row `--only` admits. Empty when `--only`
+    /// names no row, which `parse` refuses.
+    fn benchmarks(&self) -> Vec<Benchmark> {
+        Benchmark::ALL
+            .into_iter()
+            .filter(|benchmark| benchmark.rows(self.body).iter().any(|row| self.wanted(row)))
+            .collect()
+    }
+
+    /// Every row a full pass writes, in the order the benchmarks run: what `--only` is
+    /// matched against, and what the error lists when it matches none.
+    fn rows(&self) -> Vec<String> {
+        Benchmark::ALL
+            .into_iter()
+            .flat_map(|benchmark| benchmark.rows(self.body))
+            .collect()
+    }
 }
 
 const USAGE: &str = "\
@@ -90,6 +201,9 @@ Options:
                     bench host passes 8,10,12 (ADR 0016)
   --repeat N        run every benchmark N times, report each one's median run by p99.99,
                     and list every run's p99.99 in the result (default 1; CI passes 21)
+  --only NAME       run only the benchmarks whose name contains NAME, for a profile of
+                    one row; the result goes under the profile with -only appended, and
+                    a NAME that no row's name contains is an error listing the rows
   --help            this text
 
 Exit code 1 when a measured loop allocated, or a benchmark could not run.";
@@ -108,6 +222,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
         pin: None,
         housekeeping: None,
         repeat: 1,
+        only: None,
     };
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -148,6 +263,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .parse()
                     .map_err(|e| format!("--repeat: {e}"))?
             }
+            "--only" => options.only = Some(value("--only")?.clone()),
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown option {other}\n\n{USAGE}")),
         }
@@ -170,6 +286,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
         );
     }
     options.profile.push_str(&options.profile_suffix);
+    if let Some(only) = &options.only {
+        if options.benchmarks().is_empty() {
+            return Err(format!(
+                "--only {only}: no row's name contains it, so nothing would run. Pass one of these \
+                 rows, or a part of one: {}",
+                options.rows().join(", ")
+            ));
+        }
+        options.profile.push_str("-only");
+    }
     // Read here, before `main` pins this thread to the publisher's CPU, since the
     // allowed set a thread reads is its own.
     options.housekeeping = options.pin.map(housekeeping_cpu).transpose()?;
@@ -477,6 +603,10 @@ struct LogRun {
     one_way: Summary,
     retries: u64,
     allocations: usize,
+    /// How many times the harness's own conductor loaded the producer position during
+    /// the measured run, for the log rows: about one per millisecond of the run (ADR
+    /// 0022; card 161). The client rows run the driver's conductor, which is not counted.
+    producer_position_loads: Option<u64>,
 }
 
 /// A publisher, a subscriber and a conductor over a real log buffer and counters file
@@ -583,21 +713,26 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         let cpu = options.pin.map(|pin| pin[2]);
         thread::Builder::new()
             .name("conductor".into())
-            .spawn(move || -> Result<(), String> {
+            .spawn(move || -> Result<u64, String> {
                 pin_to(cpu)?;
                 let mut clean_position: i64 = 0;
                 let mut limit_now = window;
                 let trip_gain = window / 8;
-                // The producer position about once per millisecond, the driver's cadence
-                // (ADR 0022): the publisher stores to that line on every commit, and a
-                // load on every spin kept the line moving between the two caches, which
-                // was the publisher's p50 and its p99.99 band on the bench host. The
-                // cadence is counted in spins, not read from the clock: a clock read on
-                // every spin of this thread cost the publisher 100 ns and the subscriber
-                // 70 to 130 ns at p99.99 on the bench host, in every one of eight
-                // processes measured on 2026-10-13, for a reason not found; 10,000 spins
-                // of this loop are about a millisecond there.
+                // The producer position once per millisecond by the clock, the driver's
+                // cadence (ADR 0022): the publisher stores to that line on every commit,
+                // and a load on every spin kept the line moving between the two caches,
+                // which was the publisher's p50 and its p99.99 band on the bench host.
+                // The clock is read once every CADENCE_SPINS spins, not on every spin: a
+                // clock read on every spin of this thread cost the publisher 100 ns and
+                // the subscriber 70 to 130 ns at p99.99 on the bench host, in every one
+                // of eight processes measured on 2026-10-13, for a reason not found. A
+                // count of 10,000 spins stood in for the clock until card 161: about a
+                // millisecond on the bench host and about half of one on kip, where the
+                // loads then landed at the gate's percentile of the exclusive row. The
+                // loads are counted and reported, so each host's cadence is on record.
                 let mut spins: u32 = 0;
+                let mut last_load = tick();
+                let mut loads: u64 = 0;
                 while !done.load(Ordering::Acquire) {
                     let consumed = subscriber_position.load_acquire();
                     if consumed + window >= limit_now + trip_gain {
@@ -610,14 +745,19 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
                         limit.store_release(limit_now);
                     }
                     spins += 1;
-                    if spins >= PRODUCER_POSITION_SPINS {
-                        publisher_position
-                            .store_release(log.producer_position().map_err(|e| e.to_string())?);
+                    if spins >= CADENCE_SPINS {
                         spins = 0;
+                        let now = tick();
+                        if span_ns(last_load, now) >= PRODUCER_POSITION_INTERVAL_NS {
+                            publisher_position
+                                .store_release(log.producer_position().map_err(|e| e.to_string())?);
+                            last_load = now;
+                            loads += 1;
+                        }
                     }
                     std::hint::spin_loop();
                 }
-                Ok(())
+                Ok(loads)
             })
             .map_err(|e| e.to_string())?
     };
@@ -660,7 +800,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         .join()
         .map_err(|_| "the subscriber thread panicked".to_string())??;
     done.store(true, Ordering::Release);
-    conductor
+    let producer_position_loads = conductor
         .join()
         .map_err(|_| "the conductor thread panicked".to_string())??;
     Ok(LogRun {
@@ -668,6 +808,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         one_way: summarize(&one_way, elapsed),
         retries,
         allocations,
+        producer_position_loads: Some(producer_position_loads),
     })
 }
 
@@ -881,6 +1022,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         one_way: summarize(&one_way, elapsed),
         retries,
         allocations,
+        producer_position_loads: None,
     })
 }
 
@@ -1110,60 +1252,81 @@ fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, Str
 struct Pass {
     benchmarks: BTreeMap<String, Summary>,
     retries: BTreeMap<String, u64>,
+    producer_position_loads: BTreeMap<String, u64>,
     allocations: usize,
+    /// How many message rows ran, each of `--messages` messages, for the allocations
+    /// per message: the two log rows and the two client rows in a full pass, fewer
+    /// under `--only`.
+    message_rows: u64,
 }
 
-/// Every benchmark once: the timer, both log types, the client path with and without a
-/// recording on, the three slot spacings, and last the recorder's block path.
+impl Pass {
+    /// Records `summaries` under `benchmark`'s rows, in the order [`Benchmark::rows`]
+    /// names them, so a row is written under the name `--only` was matched against.
+    fn insert_rows(
+        &mut self,
+        benchmark: Benchmark,
+        body: usize,
+        summaries: impl IntoIterator<Item = Summary>,
+    ) {
+        for (row, summary) in benchmark.rows(body).into_iter().zip(summaries) {
+            self.benchmarks.insert(row, summary);
+        }
+    }
+
+    /// Records a message benchmark's run, a log or a client one: its two rows, its
+    /// retries and producer position loads under `name`, and its allocations.
+    fn insert_message_run(&mut self, benchmark: Benchmark, name: &str, body: usize, run: LogRun) {
+        self.insert_rows(benchmark, body, [run.claim_commit, run.one_way]);
+        self.retries.insert(name.into(), run.retries);
+        if let Some(loads) = run.producer_position_loads {
+            self.producer_position_loads.insert(name.into(), loads);
+        }
+        self.allocations += run.allocations;
+        self.message_rows += 1;
+    }
+}
+
+/// Every benchmark `--only` admits once, in [`Benchmark::ALL`]'s order: the timer, both
+/// log types, the client path with and without a recording on, the three slot
+/// spacings, and last the recorder's block path.
 fn run_pass(options: &Options) -> Result<Pass, String> {
     let mut pass = Pass {
         benchmarks: BTreeMap::new(),
         retries: BTreeMap::new(),
+        producer_position_loads: BTreeMap::new(),
         allocations: 0,
+        message_rows: 0,
     };
-    pass.benchmarks.insert("timer".into(), bench_timer(options));
-    for (log_type, name) in [
-        (LogType::Exclusive, "exclusive"),
-        (LogType::Concurrent, "concurrent"),
-    ] {
-        let run = bench_log(options, log_type)
-            .map_err(|message| format!("the {name} log benchmark failed: {message}"))?;
-        pass.benchmarks.insert(
-            format!("claim_commit_{}_{name}", options.body),
-            run.claim_commit,
-        );
-        pass.benchmarks
-            .insert(format!("one_way_{}_{name}", options.body), run.one_way);
-        pass.retries.insert(name.into(), run.retries);
-        pass.allocations += run.allocations;
+    for benchmark in options.benchmarks() {
+        match benchmark {
+            Benchmark::Timer => {
+                pass.insert_rows(benchmark, options.body, [bench_timer(options)]);
+            }
+            Benchmark::Log { log_type, name } => {
+                let run = bench_log(options, log_type)
+                    .map_err(|message| format!("the {name} log benchmark failed: {message}"))?;
+                pass.insert_message_run(benchmark, name, options.body, run);
+            }
+            Benchmark::Client { recorded, name } => {
+                let run = bench_client(options, recorded)
+                    .map_err(|message| format!("the {name} benchmark failed: {message}"))?;
+                pass.insert_message_run(benchmark, name, options.body, run);
+            }
+            Benchmark::Slot { spacing } => {
+                let (loads, stores) = bench_slot(options, spacing).map_err(|message| {
+                    format!("the slot_padding_{spacing} benchmark failed: {message}")
+                })?;
+                pass.insert_rows(benchmark, options.body, [loads, stores]);
+            }
+            Benchmark::Record => {
+                let record = bench_record(options)
+                    .map_err(|message| format!("the record benchmark failed: {message}"))?;
+                pass.insert_rows(benchmark, options.body, [record.record_block]);
+                pass.allocations += record.allocations;
+            }
+        }
     }
-    for (recorded, name) in [(false, "client"), (true, "recorded")] {
-        let client = bench_client(options, recorded)
-            .map_err(|message| format!("the {name} benchmark failed: {message}"))?;
-        pass.benchmarks.insert(
-            format!("claim_commit_{}_{name}", options.body),
-            client.claim_commit,
-        );
-        pass.benchmarks
-            .insert(format!("one_way_{}_{name}", options.body), client.one_way);
-        pass.retries.insert(name.into(), client.retries);
-        pass.allocations += client.allocations;
-    }
-    for spacing in [0usize, 64, 128] {
-        let (loads, stores) = bench_slot(options, spacing)
-            .map_err(|message| format!("the slot_padding_{spacing} benchmark failed: {message}"))?;
-        pass.benchmarks
-            .insert(format!("slot_padding_{spacing}_load"), loads);
-        pass.benchmarks
-            .insert(format!("slot_padding_{spacing}_store"), stores);
-    }
-    let record = bench_record(options)
-        .map_err(|message| format!("the record benchmark failed: {message}"))?;
-    pass.benchmarks.insert(
-        format!("record_block_{}", options.body),
-        record.record_block,
-    );
-    pass.allocations += record.allocations;
     Ok(pass)
 }
 
@@ -1219,7 +1382,9 @@ fn main() -> ExitCode {
     // the two middle runs is reported, never a mean of them.
     let mut passes: BTreeMap<String, Vec<Summary>> = BTreeMap::new();
     let mut retries: BTreeMap<String, u64> = BTreeMap::new();
+    let mut producer_position_loads: BTreeMap<String, u64> = BTreeMap::new();
     let mut allocations: usize = 0;
+    let mut message_rows: u64 = 0;
     for _ in 0..options.repeat {
         let pass = match run_pass(&options) {
             Ok(pass) => pass,
@@ -1235,7 +1400,12 @@ fn main() -> ExitCode {
             let worst = retries.entry(name).or_insert(0);
             *worst = (*worst).max(count);
         }
+        for (name, count) in pass.producer_position_loads {
+            let most = producer_position_loads.entry(name).or_insert(0);
+            *most = (*most).max(count);
+        }
         allocations += pass.allocations;
+        message_rows += pass.message_rows;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
     let mut runs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
@@ -1250,8 +1420,15 @@ fn main() -> ExitCode {
         benchmarks.insert(name, median);
     }
 
-    let messages_measured = 3 * options.messages * u64::from(options.repeat);
-    let allocations_per_message = allocations as f64 / messages_measured as f64;
+    // The message rows that ran, times their messages: four rows in a full pass, the
+    // two log rows and the two client rows; fewer under `--only`, and none when it
+    // admitted only the timer, slot or record rows, where the ratio has no denominator
+    // and is left out of the line and the result, while the count still decides the
+    // exit code. The recorder's block row adds its allocations to the count and no
+    // messages.
+    let messages_measured = message_rows * options.messages;
+    let allocations_per_message =
+        (messages_measured > 0).then(|| allocations as f64 / messages_measured as f64);
 
     println!();
     println!(
@@ -1275,8 +1452,25 @@ fn main() -> ExitCode {
         retries.get("client").copied().unwrap_or(0)
     );
     println!(
-        "  allocations per message: {allocations_per_message} ({allocations} in {messages_measured} messages)"
+        "  producer position loads by the harness's conductor, once per millisecond by the clock, the most of any run: {}",
+        if producer_position_loads.is_empty() {
+            "no log row ran".to_string()
+        } else {
+            producer_position_loads
+                .iter()
+                .map(|(name, loads)| format!("{name} {loads}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
     );
+    match allocations_per_message {
+        Some(ratio) => println!(
+            "  allocations per message: {ratio} ({allocations} in {messages_measured} messages)"
+        ),
+        None => println!(
+            "  allocations per message: no message row ran ({allocations} allocations in the measured loops)"
+        ),
+    }
 
     let mut out = String::new();
     let _ = writeln!(out, "{{");
@@ -1309,7 +1503,20 @@ fn main() -> ExitCode {
     );
     let _ = writeln!(
         out,
-        "  \"allocations_per_message\": {allocations_per_message},"
+        "  \"producer_position_loads\": {{{}}},",
+        producer_position_loads
+            .iter()
+            .map(|(name, loads)| format!("\"{name}\": {loads}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    // The count the exit code is decided on, beside the ratio: `bench-compare` judges
+    // the count when no message row ran and the ratio is `null` (card 161).
+    let _ = writeln!(out, "  \"allocations\": {allocations},");
+    let _ = writeln!(
+        out,
+        "  \"allocations_per_message\": {},",
+        allocations_per_message.map_or_else(|| "null".to_string(), |ratio| ratio.to_string())
     );
     let _ = writeln!(out, "  \"clock_step_ns\": {clock_step},");
     let _ = writeln!(out, "  \"benchmarks\": {{");
@@ -1424,5 +1631,88 @@ mod tests {
     #[test]
     fn an_empty_histogram_reads_one_tick() {
         assert_eq!(step_ticks(&counts(&[]), STEP_PAIRS), 1);
+    }
+
+    /// `parse` over `args` with a fixed profile and no `--pin`, so no CPU is read and
+    /// the environment's profile plays no part.
+    fn parsed(args: &[&str]) -> Result<Options, String> {
+        let mut all = vec!["--profile".to_string(), "p".to_string()];
+        all.extend(args.iter().map(ToString::to_string));
+        parse(&all)
+    }
+
+    /// `parse` over `args` that must parse.
+    fn options(args: &[&str]) -> Options {
+        match parsed(args) {
+            Ok(options) => options,
+            Err(error) => panic!("{args:?} did not parse: {error}"),
+        }
+    }
+
+    /// Without `--only`, every benchmark runs, in `Benchmark::ALL`'s order, and the
+    /// profile is the one given.
+    #[test]
+    fn without_only_every_benchmark_runs() {
+        let options = options(&[]);
+        assert_eq!(options.benchmarks(), Benchmark::ALL.to_vec());
+        assert_eq!(options.profile, "p");
+    }
+
+    /// `--only` with a full slot row name, as the table writes it, admits the pair
+    /// that writes the row and nothing else, and the result goes under `-only`. The
+    /// pair was admitted on its prefix alone, `slot_padding_64`, which the full name
+    /// does not contain, so `--only slot_padding_64_load` ran nothing.
+    #[test]
+    fn only_with_a_full_slot_row_name_admits_its_pair() {
+        for row in ["slot_padding_64_load", "slot_padding_64_store"] {
+            let options = options(&["--only", row]);
+            assert!(options.wanted(row));
+            assert_eq!(options.benchmarks(), vec![Benchmark::Slot { spacing: 64 }]);
+            assert_eq!(options.profile, "p-only");
+        }
+    }
+
+    /// `--only` admits a message benchmark on either of its rows, since one run writes
+    /// both, and a part of a name admits every benchmark with a row containing it.
+    #[test]
+    fn only_admits_a_benchmark_on_any_of_its_rows() {
+        let exclusive = Benchmark::Log {
+            log_type: LogType::Exclusive,
+            name: "exclusive",
+        };
+        for row in ["claim_commit_32_exclusive", "one_way_32_exclusive"] {
+            assert_eq!(options(&["--only", row]).benchmarks(), vec![exclusive]);
+        }
+        assert_eq!(
+            options(&["--only", "slot_padding"]).benchmarks(),
+            vec![
+                Benchmark::Slot { spacing: 0 },
+                Benchmark::Slot { spacing: 64 },
+                Benchmark::Slot { spacing: 128 },
+            ]
+        );
+        // The rows carry the body, so `--body` changes what a name must contain.
+        assert_eq!(
+            options(&["--only", "record_block_64", "--body", "64"]).benchmarks(),
+            vec![Benchmark::Record]
+        );
+    }
+
+    /// `--only` with a name no row contains is an error that lists every row of a full
+    /// pass, so the operator knows what to pass, in place of a run that wrote an empty
+    /// result and exited 0.
+    #[test]
+    fn only_with_no_matching_row_is_an_error_listing_the_rows() {
+        let Err(error) = parsed(&["--only", "slot_padding_96"]) else {
+            panic!("--only slot_padding_96 parsed, and no row's name contains it");
+        };
+        assert!(error.starts_with("--only slot_padding_96:"), "{error}");
+        // The timer, two rows each of the four message benchmarks and the three slot
+        // pairs, and the record row.
+        let rows = options(&[]).rows();
+        assert_eq!(rows.len(), 16);
+        for row in rows {
+            assert!(error.contains(&row), "{error} does not list {row}");
+        }
     }
 }

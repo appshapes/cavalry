@@ -93,6 +93,7 @@ jobs:
       # The README's ten-minute path, end to end, on both operating systems (CLAUDE.md,
       # gate 5; ADR 0007's acceptance test for the first slice).
       - run: just quickstart
+      - run: just replay-check
       # The harness on a shared runner is a report, not a gate (ADR 0016): the table is
       # in the log and the result is an artifact, with no comparison. The gate is the
       # bench job below.

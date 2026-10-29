@@ -115,6 +115,15 @@ pub enum ClientError {
         /// The bound: the driver's own on subscriptions.
         limit: usize,
     },
+    /// The driver accepted `start replay`, but this client's conductor already follows
+    /// as many replays as the driver allows at once, so it could not keep the new
+    /// one's end for its handle. The replay is stopped again, and nothing is played.
+    /// The conductor forgets a replay once it has ended or its handle is dropped, so
+    /// this names a client with that many replays live at once.
+    ReplaysFull {
+        /// The bound: the driver's own on replays.
+        limit: usize,
+    },
     /// An add or remove command went unanswered for the response timeout.
     ResponseTimeout {
         /// The command, by name.
@@ -149,8 +158,8 @@ pub enum ClientError {
 
 impl ClientError {
     /// The reason's name: `not-found`, `driver-gone`, `closed`, `refused`,
-    /// `subscriptions-full`, `response-timeout`, `command-ring`, `broadcast`, `counters`,
-    /// `protocol`, `log`, `driver` or `io`.
+    /// `subscriptions-full`, `replays-full`, `response-timeout`, `command-ring`,
+    /// `broadcast`, `counters`, `protocol`, `log`, `driver` or `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClientError::NotFound { .. } => "not-found",
@@ -158,6 +167,7 @@ impl ClientError {
             ClientError::Closed(_) => "closed",
             ClientError::Refused { .. } => "refused",
             ClientError::SubscriptionsFull { .. } => "subscriptions-full",
+            ClientError::ReplaysFull { .. } => "replays-full",
             ClientError::ResponseTimeout { .. } => "response-timeout",
             ClientError::CommandRing(_) => "command-ring",
             ClientError::Broadcast(_) => "broadcast",
@@ -230,6 +240,12 @@ impl fmt::Display for ClientError {
                 "command refused ({reason}): this client holds {limit} subscriptions, the \
                  driver's bound; the new one was removed again; close subscriptions this \
                  process no longer polls, or spread them across processes; see {DOC_SIZES}"
+            ),
+            ClientError::ReplaysFull { limit } => write!(
+                f,
+                "command refused ({reason}): this client follows {limit} replays at once, the \
+                 driver's bound; the new one was stopped again; wait for one of them to end, or \
+                 stop one this process no longer needs; see {DOC_SIZES}"
             ),
             ClientError::ResponseTimeout { command } => write!(
                 f,

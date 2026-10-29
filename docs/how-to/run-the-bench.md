@@ -45,7 +45,13 @@ shared runner is
    three: on an isolated core, one run's 0.01 percent tail of a few hundred nanoseconds
    lands anywhere in a band 50 percent wide, while the median of twenty-one runs holds
    within 3 percent, so the median is what the gate reads and the twenty-one are what
-   a reader checks.
+   a reader checks. `just bench --only claim_commit_32_exclusive` runs only the
+   benchmarks with a row whose name contains that, here the exclusive log benchmark
+   and both of its rows, for a profile of one row, and writes the result under the
+   profile with `-only` appended, so `just bench-compare` then prints `no baseline` for
+   it and never judges it as a full run; when no message row ran it judges the
+   allocations by their count, which the result carries as `allocations` beside the
+   ratio, and passes on 0. A name that no row contains is an error that lists the rows.
 
 2. Read the table. Every row is one benchmark with its count and its p50, p99, p99.99
    and max in nanoseconds, then its rate. No row is a mean: the data plane is judged at
@@ -65,8 +71,16 @@ shared runner is
    | `record_block_<body>` | The recorder's block path: one scan of a 1 MiB block of committed frames (`TermReader::block`) and its one positional write into a segment file under the bench directory (`RecordingWriter::write`), per block, under the counting allocator (ADR 0025). It runs last, so its writes reach no other row. Its change against the baseline is reported, not gated: it is not a row a message passes through (ADR 0017). The bench host's baseline for it was first recorded at 7f62673 (card 109). |
 
    The last column, present with `--repeat`, lists every run's p99.99 for the row. The
+   `producer position loads` line under the table counts the loads of the producer
+   position by the harness's own conductor in the run that loaded most, for the two
+   log rows only, since the client rows run the driver's conductor: about one per
+   millisecond of the run, the driver's cadence (ADR 0022), written to the result as
+   `producer_position_loads`, so each host's cadence is on record (card 161). The
    last line says how many allocations the measured loops made per message. It is 0
-   or the run has failed: the gate requires zero allocations per message.
+   or the run has failed: the gate requires zero allocations per message. When no
+   message row ran, under `--only`, the line says so in place of the ratio and the
+   result's `allocations_per_message` is `null`, the count is in the result as
+   `allocations`, and any allocation still fails the run.
 
    `just bench-unchecked` runs the same harness with the data-plane checks built out,
    under its own profile, `<profile>-unchecked`, and its own baseline: the difference
@@ -122,8 +136,8 @@ shared runner is
    profile's baseline (ADR 0016).
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
-   `python3 scripts/bench-compare.py --update`, which writes the newest result's
-   percentiles and its clock step into `bench/baseline.json` for that profile. Commit
+   `python3 scripts/bench-compare.py --update`, which writes the newest result's git,
+   date, percentiles and clock step into `bench/baseline.json` for that profile. Commit
    it with the histograms in the message. A bench host's baselines are set from its
    own CI run: download the run's artifact, `bench-results-bench-linux` from
    `bench (linux)` for `bench` or `bench-results-kip-linux` from `bench (kip)` for
