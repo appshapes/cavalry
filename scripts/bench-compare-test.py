@@ -28,9 +28,9 @@ def row(p99_99, runs=None):
 
 
 def result(step, **rows):
-    return {"schema": 0, "profile": "test-host", "git": "abc1234", "messages": 1000,
-            "repeat": 3, "allocations_per_message": 0, "clock_step_ns": step,
-            "benchmarks": rows}
+    return {"schema": 0, "profile": "test-host", "git": "abc1234", "date_unix": 1793229856,
+            "messages": 1000, "repeat": 3, "allocations_per_message": 0,
+            "clock_step_ns": step, "benchmarks": rows}
 
 
 def baseline(step=None, **rows):
@@ -178,6 +178,17 @@ class Update(unittest.TestCase):
         del res["clock_step_ns"]
         written = self.update(res)
         self.assertNotIn("clock_step_ns", written["profiles"]["test-host"])
+
+    def test_update_writes_the_date_from_the_results_date_unix(self):
+        """The harness writes `date_unix`; the baseline says when it was measured (card 158)."""
+        written = self.update(result(10, one_way_32_client=row(300)))
+        self.assertEqual(written["profiles"]["test-host"]["date"], "2026-10-28T23:24:16Z")
+
+    def test_update_writes_no_date_when_the_result_has_no_date_unix(self):
+        res = result(10, one_way_32_client=row(300))
+        del res["date_unix"]
+        written = self.update(res)
+        self.assertIsNone(written["profiles"]["test-host"]["date"])
 
     def test_the_step_update_wrote_is_the_floor_of_the_next_comparison(self):
         written = self.update(result(10, claim_commit_32_client=row(160)))

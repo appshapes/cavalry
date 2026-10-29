@@ -27,7 +27,7 @@ with their change marked "reported" (ADR 0017).
 
     bench-compare.py              compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>     compare that result file instead
-    bench-compare.py --update     write the newest result's percentiles into the baseline for its
+    bench-compare.py --update     write the newest result's percentiles, git and date into the baseline for its
                                   profile, which is how a baseline is set from a CI run's artifact
 
 A profile that has no baseline yet is reported and passes: the baseline for a runner is
@@ -40,6 +40,7 @@ Python 3.9 standard library only (ADR 0003).
 
 from __future__ import annotations
 
+import datetime
 import json
 import sys
 from pathlib import Path
@@ -151,11 +152,21 @@ def floor_step(result: dict, base) -> tuple:
     return min(now, then), f"clock step {min(now, then)} ns, the smaller of the result's {now} and the baseline's {then}"
 
 
+def recorded_at(result: dict) -> str | None:
+    """The result's date as the harness wrote it, `date_unix`, as a UTC date-time: the
+    baseline shows when its numbers were measured, which the git field alone does not,
+    since a tree is re-recorded after a host changes (card 158)."""
+    unix = result.get("date_unix")
+    if unix is None:
+        return None
+    return datetime.datetime.fromtimestamp(int(unix), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def update(result: dict, baseline: dict) -> int:
     profile = result["profile"]
     entry = {
         "git": result.get("git"),
-        "date": result.get("date"),
+        "date": recorded_at(result),
         "messages": result.get("messages"),
         "repeat": result.get("repeat"),
         **({STEP_FIELD: clock_step(result)} if clock_step(result) else {}),
