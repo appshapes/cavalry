@@ -117,8 +117,8 @@ the gate fails only on the dedicated bench host is
    two runs of the same commit; CI compares on the bench host only (ADR 0016).
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
-   `python3 scripts/bench-compare.py --update`, which writes the newest result's
-   percentiles and its clock step into `bench/baseline.json` for that profile. Commit
+   `python3 scripts/bench-compare.py --update`, which writes the newest result's git,
+   date, percentiles and clock step into `bench/baseline.json` for that profile. Commit
    it with the histograms in the message. The bench host's baseline is set from its own
    CI run: download the `bench-results-bench-linux` artifact of a green run and pass
    each of its two files, the `bench-linux` and the `bench-linux-unchecked` result, to

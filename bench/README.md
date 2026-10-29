@@ -47,7 +47,8 @@ nothing depends on it.
   like the other message rows; `record_block` times the recorder's own block path and is
   reported against its own, not gated (ADR 0025, ADR 0017). Both got their first
   baselines at 7f62673 (card 109), and the `bench` host's two, `bench-linux` and
-  `bench-linux-unchecked`, were re-recorded from master's run at 96fb91a on 2026-10-29,
+  `bench-linux-unchecked`, were re-recorded from master's run at 96fb91a, run on
+  2026-10-28 and merged on 2026-10-29,
   when the unchecked `_recorded` claim row had drifted to within a step of its
   baseline's slowest run on master itself; `kip`'s two stayed at 7f62673.
 
