@@ -611,5 +611,8 @@ user-visible change, added in the same commit as the change. The format follows
   printed and written to the result as `producer_position_loads`, so each host's
   cadence is on record. `cavalry-bench --only NAME` runs only the benchmarks with a row
   whose name contains NAME, for a profile of one row, under the profile with `-only`
-  appended; a NAME no row contains is an error that lists the rows (card 161;
+  appended; a NAME no row contains is an error that lists the rows. The result carries
+  the allocation count as `allocations` beside the ratio, which `bench-compare` judges
+  when no message row ran, and `bench-compare` picks the newest result by the time in
+  its name, not by name (card 161;
   [bench/README.md](bench/README.md)).

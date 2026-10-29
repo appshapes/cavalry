@@ -1452,15 +1452,16 @@ fn main() -> ExitCode {
         retries.get("client").copied().unwrap_or(0)
     );
     println!(
-        "  producer position loads by the harness's conductor, once per millisecond by the clock, the most of any run: exclusive {}, concurrent {}",
-        producer_position_loads
-            .get("exclusive")
-            .copied()
-            .unwrap_or(0),
-        producer_position_loads
-            .get("concurrent")
-            .copied()
-            .unwrap_or(0)
+        "  producer position loads by the harness's conductor, once per millisecond by the clock, the most of any run: {}",
+        if producer_position_loads.is_empty() {
+            "no log row ran".to_string()
+        } else {
+            producer_position_loads
+                .iter()
+                .map(|(name, loads)| format!("{name} {loads}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
     );
     match allocations_per_message {
         Some(ratio) => println!(
@@ -1502,16 +1503,16 @@ fn main() -> ExitCode {
     );
     let _ = writeln!(
         out,
-        "  \"producer_position_loads\": {{\"exclusive\": {}, \"concurrent\": {}}},",
+        "  \"producer_position_loads\": {{{}}},",
         producer_position_loads
-            .get("exclusive")
-            .copied()
-            .unwrap_or(0),
-        producer_position_loads
-            .get("concurrent")
-            .copied()
-            .unwrap_or(0)
+            .iter()
+            .map(|(name, loads)| format!("\"{name}\": {loads}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
+    // The count the exit code is decided on, beside the ratio: `bench-compare` judges
+    // the count when no message row ran and the ratio is `null` (card 161).
+    let _ = writeln!(out, "  \"allocations\": {allocations},");
     let _ = writeln!(
         out,
         "  \"allocations_per_message\": {},",

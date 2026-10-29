@@ -48,8 +48,9 @@ the gate fails only on the dedicated bench host is
    benchmarks with a row whose name contains that, here the exclusive log benchmark
    and both of its rows, for a profile of one row, and writes the result under the
    profile with `-only` appended, so `just bench-compare` then prints `no baseline` for
-   it and never judges it as a full run; a name that no row contains is an error that
-   lists the rows.
+   it and never judges it as a full run; when no message row ran it judges the
+   allocations by their count, which the result carries as `allocations` beside the
+   ratio, and passes on 0. A name that no row contains is an error that lists the rows.
 
 2. Read the table. Every row is one benchmark with its count and its p50, p99, p99.99
    and max in nanoseconds, then its rate. No row is a mean: the data plane is judged at
@@ -77,7 +78,8 @@ the gate fails only on the dedicated bench host is
    last line says how many allocations the measured loops made per message. It is 0
    or the run has failed: the gate requires zero allocations per message. When no
    message row ran, under `--only`, the line says so in place of the ratio and the
-   result's `allocations_per_message` is `null`; any allocation still fails the run.
+   result's `allocations_per_message` is `null`, the count is in the result as
+   `allocations`, and any allocation still fails the run.
 
    `just bench-unchecked` runs the same harness with the data-plane checks built out,
    under its own profile, `<profile>-unchecked`, and its own baseline: the difference
