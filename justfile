@@ -64,9 +64,14 @@ conformance:
     cargo test -p cavalry-shm --test broadcast_buffer_conformance
     cargo test -p cavalry-log --test conformance
 
-# Deterministic replay test: replay a recorded log twice and diff the state.
+# Deterministic replay test (CLAUDE.md, gate 1; ADR 0030): a driver on a directory of
+# its own records 100,000 hash-chained messages while a live subscriber prints them,
+# `cavalry replay` plays the recording twice from the start and once from an instant,
+# and the script fails unless the live lines and both replays hash the same and the
+# replay from the instant starts where the time index says. What CI runs on Linux and
+# macOS. docs/how-to/replay-a-recording.md is the page.
 replay-check:
-    @echo "not built yet: replay-check (CLAUDE.md gate 1)." && exit 1
+    bash scripts/replay-check.sh
 
 # The README's ten-minute path, timed, end to end (CLAUDE.md, gate 5): build the binary
 # and the example, start a driver on a directory of its own, run the example against it

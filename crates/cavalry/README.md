@@ -12,7 +12,8 @@ binary's `main`.
   program can run with no separate daemon and can pin the driver's threads with no
   second dependency. One shared driver per host, `cavalry run`, is the production shape
   and the ten-minute path's; `examples/quickstart.rs` is that path's program, and
-  `just quickstart` runs it end to end.
+  `just quickstart` runs it end to end; `examples/replay-check.rs` is the replay gate's
+  program, which `just replay-check` runs.
 - `cargo install cavalry` gives the `cavalry` binary: `run` starts a driver and stops
   it on Ctrl-C or SIGTERM, leaving the directory for `doctor`; `doctor` explains the
   driver from its counters and exits 0 when no check failed, listing every recording's

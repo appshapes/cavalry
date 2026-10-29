@@ -86,7 +86,10 @@ driver's: dropping the handle stops nothing, and `client.stop_replay(id)?`, or
 - `just doctor` after the replay reports no `replay-*` finding; the `replay.ended`
   counter grew by one.
 - Running the command twice prints the same lines: a replay of the same bytes is the
-  same stream (invariant 1).
+  same stream (invariant 1). `just replay-check` is that check as a gate: a recording
+  of 100,000 hash-chained messages, the live subscriber's lines and two replays' lines
+  hashed and compared, and a replay from an instant checked against the index
+  (`scripts/replay-check.sh`).
 
 ## When it does not work
 

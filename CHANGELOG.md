@@ -580,3 +580,9 @@ user-visible change, added in the same commit as the change. The format follows
   position through the time index; and `cavalry replay --recording <id> --from
   <position or instant> [--to ...] [--stream <id>] [--follow]`, which prints one line
   per message ([Replay a recording](docs/how-to/replay-a-recording.md); ADR 0030).
+- `just replay-check` is built, the gate CLAUDE.md names for invariant 1: a driver on a
+  directory of its own records 100,000 hash-chained messages while a live subscriber
+  prints them, `cavalry replay` plays the recording twice from the start and once from
+  an instant, and the three outputs must hash the same and the replay from the instant
+  start where the time index says; CI runs it on Linux and macOS. With it, the second
+  slice's third feature is done (ADR 0023, ADR 0030).
