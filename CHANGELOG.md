@@ -563,3 +563,10 @@ user-visible change, added in the same commit as the change. The format follows
   instead of allocating on the recorder thread; the bound is
   `cavalry_log::recorder::LOG_DIR_PATH_LIMIT`, the log crate's README and the `log.dir`
   key state it exactly, and the record how-to says what to do (card 108).
+- The bench host's two baselines, `bench-linux` and `bench-linux-unchecked`, are
+  re-recorded from master's run at 96fb91a (CI run 40787078643): the unchecked
+  `claim_commit_32_recorded` row's slowest run rises from 300 to 320 ns, where master
+  itself had read 300 to 310 against it, and eight rows tighten, `claim_commit_32_concurrent`
+  and `_exclusive` from 170 to 150 and the `one_way_32_concurrent` and `_exclusive` rows
+  from 300 to 230 and 210 unchecked, the gain card 144 made
+  ([Run the bench](docs/how-to/run-the-bench.md), step 4).
