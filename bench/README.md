@@ -16,8 +16,8 @@ nothing depends on it.
   all three terms, so no measured message first-touches a page, and every histogram's
   counts are written once before the loop, so no rare sample first-touches one either.
   `--pin P,S,C` binds the three threads to those CPUs on Linux, with the driver's
-  recorder and the client's conductor on the lowest CPU outside them in the client rows,
-  so each pinned CPU runs one thread, and `--repeat N` runs everything N times and
+  recorder and replayer and the client's conductor on the lowest CPU outside them in
+  the client rows, so each pinned CPU runs one thread, and `--repeat N` runs everything N times and
   reports each benchmark's median run by p99.99, every run's on record; the bench host
   runs it with both (ADR 0016).
 - Times every message with the time stamp counter, calibrated once against the
@@ -46,7 +46,10 @@ nothing depends on it.
   directory, from a housekeeping CPU under `--pin`, and are gated against their baseline
   like the other message rows; `record_block` times the recorder's own block path and is
   reported against its own, not gated (ADR 0025, ADR 0017). Both got their first
-  baselines at 7f62673 (card 109).
+  baselines at 7f62673 (card 109), and the `bench` host's two, `bench-linux` and
+  `bench-linux-unchecked`, were re-recorded from master's run at 96fb91a on 2026-10-29,
+  when the unchecked `_recorded` claim row had drifted to within a step of its
+  baseline's slowest run on master itself; `kip`'s two stayed at 7f62673.
 
 ## What it must never do
 

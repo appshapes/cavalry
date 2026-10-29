@@ -277,6 +277,25 @@ fn the_idle_strategy_is_recorded_in_its_counter() {
     }
 }
 
+/// A replayer that holds no replay is parked, for at most a second at a time, and
+/// `close` wakes it: a driver with nothing replaying closes in far less than that
+/// second. A `start replay` wakes it the same way, which the replay tests below show
+/// through their deadlines.
+#[test]
+fn closing_a_driver_wakes_its_parked_replayer() {
+    let dir = TestDir::new("parked-replayer");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
+    // The replayer reaches its park after the backoff's spins and yields, microseconds.
+    std::thread::sleep(Duration::from_millis(50));
+    let started = Instant::now();
+    driver.close().expect("closes");
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_millis(500),
+        "close took {took:?}: it waited for the replayer's park timeout instead of waking it"
+    );
+}
+
 /// `Driver::start_with_threads`'s hook runs once on each driver thread, on the thread it
 /// names, before that thread's loop (card 136): the bench pins the conductor from it. The
 /// conductor's hook is held until the test releases it, and while it is held the driver

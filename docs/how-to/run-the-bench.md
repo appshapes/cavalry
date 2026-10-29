@@ -37,8 +37,8 @@ the gate fails only on the dedicated bench host is
    and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier,
    `just bench --pin 8,10,12` binds the publisher, the subscriber and the driver's
-   conductor to those CPUs, on Linux only, with the driver's recorder and the client's
-   conductor on the lowest CPU outside them, so each pinned CPU runs one thread, and `just bench --repeat 21` runs every benchmark
+   conductor to those CPUs, on Linux only, with the driver's recorder and replayer and
+   the client's conductor on the lowest CPU outside them, so each pinned CPU runs one thread, and `just bench --repeat 21` runs every benchmark
    twenty-one times and reports each one's median run by p99.99, with every run's
    p99.99 in the last column and in the result file. The bench host runs it with all
    three: on an isolated core, one run's 0.01 percent tail of a few hundred nanoseconds
@@ -154,8 +154,8 @@ the gate fails only on the dedicated bench host is
   when the histogram is made, so that a rare sample never first-touches one inside the
   loop. A fault spread through a loop is a bug. `sched:sched_waking` to the pinned CPUs
   names no Cavalry thread as the wakee, apart from the driver's conductor waking from
-  idle on its own CPU: the driver's recorder and the client's conductor run on the
-  lowest CPU outside the pins, so nothing shares a pinned CPU with a measured thread
+  idle on its own CPU: the driver's recorder and replayer and the client's conductor
+  run on the lowest CPU outside the pins, so nothing shares a pinned CPU with a measured thread
   (`ps -L -o tid,psr,comm` during a run shows one Cavalry thread per pinned CPU).
 
   ```text
@@ -229,8 +229,8 @@ the gate fails only on the dedicated bench host is
   `histogram()` in `bench/src/main.rs` does. A wake-up of a Cavalry thread on a pinned
   CPU from another CPU: a thread shares that CPU with a measured one; `ps -L -o
   tid,psr,comm` during the run shows where each thread sits, and under `--pin` the
-  driver's recorder and the client's conductor belong on the lowest CPU outside the
-  pins. A p99.99 that a second host reads far above `bench`'s with the same p50 and
+  driver's recorder and replayer and the client's conductor belong on the lowest CPU
+  outside the pins. A p99.99 that a second host reads far above `bench`'s with the same p50 and
   none of the above is the host's own tail, and its profile's baseline is where it is
   held. The second bench host's 1.6 µs against `bench`'s 0.6 µs, with no fault and no
   wake-up in its loops, was the clock, the next bullet and
@@ -255,7 +255,7 @@ the gate fails only on the dedicated bench host is
   numbers are never written.
 - `--pin: no CPU outside P,S,C in the process's allowed set`: the harness was started
   from a shell or a cgroup whose allowed set lies inside the three pins, and the
-  driver's recorder and the client's conductor need one CPU outside them. `taskset -cp
+  driver's recorder and replayer and the client's conductor need one CPU outside them. `taskset -cp
   $$` prints the shell's allowed set. Run the harness from a shell that holds a
   housekeeping CPU too: `taskset -c 0-7 just bench --pin 8,10,12` runs it with CPUs 0 to
   7 in the set, and the pins themselves need not be in it, since a thread may bind

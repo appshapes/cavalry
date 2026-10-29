@@ -154,7 +154,7 @@ impl Driver {
             requests: replayer_requests,
             replies: replayer_replies,
         };
-        let conductor = conductor::Conductor::create(&dir, idle, link, replayer_link)?;
+        let mut conductor = conductor::Conductor::create(&dir, idle, link, replayer_link)?;
         conductor.record_recovery(&recovery)?;
         let replayer = replayer::Replayer::new(
             &log_dir,
@@ -177,17 +177,37 @@ impl Driver {
             let path = path.clone();
             move |source| DriverError::Io { what, path, source }
         };
+        // The replayer first: it parks while it holds no replay, and the conductor
+        // unparks it with every request, so the conductor holds its thread before its
+        // own loop starts (`conductor::Conductor::set_replayer_thread`).
         let flag = Arc::clone(&stop);
         let on_start = Arc::clone(&on_thread_start);
-        let conductor_handle = std::thread::Builder::new()
+        let replayer_handle = std::thread::Builder::new()
+            .name("cavalry-replayer".to_string())
+            .spawn(move || {
+                on_start(DriverThread::Replayer);
+                replayer.run(&flag)
+            })
+            .map_err(io("start the replayer thread", &log_dir))?;
+        conductor.set_replayer_thread(replayer_handle.thread().clone());
+        let flag = Arc::clone(&stop);
+        let on_start = Arc::clone(&on_thread_start);
+        let conductor_handle = match std::thread::Builder::new()
             .name("cavalry-conductor".to_string())
             .spawn(move || {
                 on_start(DriverThread::Conductor);
                 conductor.run(&flag)
-            })
-            .map_err(io("start the conductor thread", &dir))?;
+            }) {
+            Ok(handle) => handle,
+            Err(source) => {
+                stop.store(true, Ordering::Release);
+                replayer_handle.thread().unpark();
+                let _ = replayer_handle.join();
+                return Err(io("start the conductor thread", &dir)(source));
+            }
+        };
         let flag = Arc::clone(&stop);
-        let on_start = Arc::clone(&on_thread_start);
+        let on_start = on_thread_start;
         let recorder_handle = match std::thread::Builder::new()
             .name("cavalry-recorder".to_string())
             .spawn(move || {
@@ -197,24 +217,10 @@ impl Driver {
             Ok(handle) => handle,
             Err(source) => {
                 stop.store(true, Ordering::Release);
+                replayer_handle.thread().unpark();
                 let _ = conductor_handle.join();
+                let _ = replayer_handle.join();
                 return Err(io("start the recorder thread", &log_dir)(source));
-            }
-        };
-        let flag = Arc::clone(&stop);
-        let on_start = on_thread_start;
-        let replayer_handle = match std::thread::Builder::new()
-            .name("cavalry-replayer".to_string())
-            .spawn(move || {
-                on_start(DriverThread::Replayer);
-                replayer.run(&flag)
-            }) {
-            Ok(handle) => handle,
-            Err(source) => {
-                stop.store(true, Ordering::Release);
-                let _ = conductor_handle.join();
-                let _ = recorder_handle.join();
-                return Err(io("start the replayer thread", &log_dir)(source));
             }
         };
         Ok(Self {
@@ -239,8 +245,8 @@ impl Driver {
 
     /// Stops the threads and waits for them: the conductor stores −1 in the heartbeat
     /// on its way out, the recorder stops every live recording at what it has written,
-    /// and the replayer's replays die with it. The directory stays.
-    /// [`DriverError::Conductor`], [`DriverError::Recorder`] or
+    /// and the replayer, woken if it was parked with no replay, dies with its replays.
+    /// The directory stays. [`DriverError::Conductor`], [`DriverError::Recorder`] or
     /// [`DriverError::Replayer`] when a thread had panicked.
     pub fn close(mut self) -> Result<(), DriverError> {
         self.stop()
@@ -248,6 +254,11 @@ impl Driver {
 
     fn stop(&mut self) -> Result<(), DriverError> {
         self.stop.store(true, Ordering::Release);
+        // A replayer with no replay is parked until a request or this; it reads the
+        // flag as it wakes.
+        if let Some(handle) = &self.replayer {
+            handle.thread().unpark();
+        }
         let conductor = match self.conductor.take() {
             Some(handle) => handle.join().map_err(|_| DriverError::Conductor {
                 dir: self.dir.clone(),

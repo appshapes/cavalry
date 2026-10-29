@@ -6,16 +6,26 @@
 //! the replay's publication, sends the client's events and closes the publication when
 //! the replay ends. On each duty cycle the replayer reads its clock once, handles a
 //! bounded number of requests and visits every live replay: it reads one block of the
-//! recording from its segment file, bounded by the replay's end, the recording's extent,
-//! the term, the segment, the publication's limit and 1 MiB, writes its frames into the
-//! replay log through a [`TermWriter`], which checks each one and stops at the limit,
-//! and stores `replay.position` with a release store. A replay reads no byte the
+//! recording from its segment file, bounded by the recording's extent, the term, the
+//! segment, the publication's limit plus an MTU, the replay's end plus an MTU and
+//! 1 MiB, writes its frames into the replay log through a [`TermWriter`], which checks
+//! each one and stops at the lower of the limit and the end, so that a frame that
+//! begins below the end is played whole and the replay ends at the frame boundary after
+//! it, and stores `replay.position` with a release store. A block holds whole every
+//! frame a recorder could have written at its start, since each of its bounds is a
+//! frame boundary or an MTU past the limit or the end, so a frame whose length runs
+//! past the block, over the MTU or past the extent, is damage, `spec/frame.md`'s
+//! `length` reason, and ends the replay with reason 3 as a frame that fails any check
+//! does, rather than being read again for ever. A replay reads no byte the
 //! recorder has not synced, so what it plays is what a restart would find (invariant
 //! 1); a replay of a live recording waits for the synced position to move, and learns
 //! the recording's stop from its catalog slot, read again once per second and whenever
-//! a frame length of 0 is found below the extent. Nothing here allocates per block,
-//! locks or logs; the syscalls are the replayer's own reads and opens, and a segment
-//! file is opened on a path the replayer formats in place.
+//! a frame length of 0 is found below the extent. While it holds a replay the replayer
+//! idles with the conductor's idle strategy; while it holds none, and no reply, it
+//! parks until the conductor hands it a request and unparks it, or for a second, so a
+//! replayer with nothing to play wakes no CPU. Nothing here allocates per block, locks
+//! or logs; the syscalls are the replayer's own reads and opens, and a segment file is
+//! opened on a path the replayer formats in place.
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -23,6 +33,7 @@ use std::io::Write as _;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::layout::{Descriptor, FRAME_ALIGNMENT, SEGMENT_SUFFIX, State, locate};
@@ -47,6 +58,14 @@ pub(crate) const PENDING_REPLIES: usize = spec::MAX_REPLAYS + spec::REPLAYER_REQ
 /// The longest segment file name, with room to spare, so a roll formats the name on
 /// the stack (`cavalry_log::recorder`).
 const SEGMENT_NAME_CAPACITY: usize = 64;
+
+/// How long the replayer parks at a time while it holds no replay and no reply. The
+/// conductor unparks it with every request it offers and `Driver::close` when it
+/// stops, so this bounds a wake-up both missed; it is not a cadence. The backoff
+/// strategy's longest park is a millisecond, and a thread that woke that often on the
+/// housekeeping CPU the recorder runs on moved `claim_commit_32_recorded` at p99.99 on
+/// the bench host (ADR 0030, Evidence).
+const IDLE_PARK: Duration = Duration::from_secs(1);
 
 /// What a `start replay` command asked, carried to the replayer once.
 pub(crate) struct Start {
@@ -198,7 +217,8 @@ struct Replay {
     recording_id: i64,
     descriptor: Descriptor,
     /// Where the replay ends: the position plus the length, saturating, or the extent
-    /// at the start for a length of −1.
+    /// at the start for a length of −1. The first frame that would begin at or past it
+    /// ends the replay, so the position reached is the frame boundary at or after it.
     end: i64,
     extent: Extent,
     /// Where the replay starts, until the writer is attached.
@@ -267,15 +287,23 @@ impl Replayer {
         })
     }
 
-    /// The replayer's loop: duty cycles until `stop`. A replay dies with the driver;
+    /// The replayer's loop: duty cycles until `stop`, idling with the strategy while
+    /// a replay is live and parked while none is. A replay dies with the driver;
     /// nothing of it is on disk.
     pub(crate) fn run(mut self, stop: &AtomicBool) {
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
-            if self.duty_cycle(now) == 0 {
-                self.idler.idle();
-            } else {
+            if self.duty_cycle(now) != 0 {
                 self.idler.reset();
+            } else if self.replays.is_empty() && self.pending.is_empty() {
+                // Nothing can change until the conductor offers a request, and it
+                // unparks this thread when it does; an unpark that came before this
+                // park is a token the park consumes at once, so no request waits for
+                // the timeout. `Driver::close` unparks it too, after storing `stop`.
+                std::thread::park_timeout(IDLE_PARK);
+                self.idler.reset();
+            } else {
+                self.idler.idle();
             }
         }
     }
@@ -523,16 +551,23 @@ impl Replayer {
             return self.stop_at(index, ReplayStopReason::Failed, None);
         }
         let replay = &mut self.replays[index];
+        let end = replay.end;
         let term_length = i64::from(replay.descriptor.term_length());
         let term_end = position - position % term_length + term_length;
         let segment_end = replay.segment_base + segment_length;
         let mtu = i64::from(replay.descriptor.mtu_length());
+        // The end and the limit bound the read by an MTU past themselves, not at
+        // themselves: the writer stops at the first frame that would begin at or past
+        // the lower of the two, and a frame that begins below it is written whole, so
+        // the slice must hold that frame; a slice cut at the end inside a frame would
+        // write nothing and move nothing, for ever (spec, "start replay").
         let read_end = replay
-            .end
-            .min(replay.extent.value())
+            .extent
+            .value()
             .min(term_end)
             .min(segment_end)
             .min(limit.saturating_add(mtu))
+            .min(end.saturating_add(mtu))
             .min(position.saturating_add(spec::REPLAYER_BLOCK_LIMIT as i64));
         let length = usize::try_from(read_end.saturating_sub(position)).unwrap_or(0);
         if length == 0 {
@@ -552,8 +587,21 @@ impl Replayer {
         let Some(attached) = replay.attached.as_mut() else {
             return Step::Idle;
         };
-        match attached.writer.write(&self.buffer[..length], limit) {
-            Ok(0) => Step::Idle,
+        match attached
+            .writer
+            .write(&self.buffer[..length], limit.min(end))
+        {
+            // The slice begins at a frame boundary below the limit and the end, and
+            // ends at a frame boundary, the extent, the term's end or the segment's
+            // end, or at least an MTU past the lower of the limit and the end, or
+            // 1 MiB on: it holds whole every frame a recorder could have written at
+            // its start, so the writer wrote nothing only because the first frame's
+            // length runs past the bytes given, over the MTU or past the extent. That
+            // is `spec/frame.md`'s `length` reason, damage as any other failed check
+            // is, and reading the same bytes again would find it again for ever. A
+            // live recording's synced counter may be another's once the recording
+            // stopped, so its slot is read again first, as for a frame length of 0.
+            Ok(0) => self.reject(index, now, may_stop, true),
             Ok(_) => {
                 attached.position.store_release(attached.writer.position());
                 Step::Worked
@@ -563,19 +611,29 @@ impl Replayer {
                 // have stopped at this position and the synced counter be another's by
                 // now, so the slot is read again before the frame is called damage.
                 let zero = matches!(error, LogError::Frame(FrameError::Length { found: 0, .. }));
-                if zero
-                    && matches!(replay.extent, Extent::Live { .. })
-                    && self.refresh_extent(index, now, true)
-                {
-                    return Step::Worked;
-                }
-                if !may_stop {
-                    return Step::Idle;
-                }
-                self.rejected_frame.increment();
-                self.stop_at(index, ReplayStopReason::Failed, None)
+                self.reject(index, now, may_stop, zero)
             }
         }
+    }
+
+    /// Ends the replay at `index` with reason 3 for a frame that failed a check, adding
+    /// one to `log_buffer.rejected_frame`, when there is room for the reply; with none
+    /// the frame is read again next cycle. With `recheck`, a live recording's catalog
+    /// slot is read again first, and a recording that turned out stopped is no failure:
+    /// the replay goes on under its stop position next cycle, and a frame that runs
+    /// past that too is damage then.
+    fn reject(&mut self, index: usize, now: i64, may_stop: bool, recheck: bool) -> Step {
+        if recheck
+            && matches!(self.replays[index].extent, Extent::Live { .. })
+            && self.refresh_extent(index, now, true)
+        {
+            return Step::Worked;
+        }
+        if !may_stop {
+            return Step::Idle;
+        }
+        self.rejected_frame.increment();
+        self.stop_at(index, ReplayStopReason::Failed, None)
     }
 
     /// Reads a live recording's catalog slot again when `force` or when a second has
@@ -646,6 +704,12 @@ impl Replayer {
     #[cfg(test)]
     pub(crate) fn live_replays(&self) -> usize {
         self.replays.len()
+    }
+
+    /// How many replies wait for room in the reply queue.
+    #[cfg(test)]
+    pub(crate) fn pending_replies(&self) -> usize {
+        self.pending.len()
     }
 
     /// Offers the pending replies in order until the queue is full; returns how many went.

@@ -563,12 +563,21 @@ user-visible change, added in the same commit as the change. The format follows
   instead of allocating on the recorder thread; the bound is
   `cavalry_log::recorder::LOG_DIR_PATH_LIMIT`, the log crate's README and the `log.dir`
   key state it exactly, and the record how-to says what to do (card 108).
+- The bench host's two baselines, `bench-linux` and `bench-linux-unchecked`, are
+  re-recorded from master's run at 96fb91a (CI run 40787078643): the unchecked
+  `claim_commit_32_recorded` row's slowest run rises from 300 to 320 ns, where master
+  itself had read 300 to 310 against it, and eight rows tighten, `claim_commit_32_concurrent`
+  and `_exclusive` from 170 to 150 and the `one_way_32_concurrent` and `_exclusive` rows
+  from 300 to 230 and 210 unchecked, the gain card 144 made
+  ([Run the bench](docs/how-to/run-the-bench.md), step 4).
 - Replay: the client protocol is at version 2 with `start replay` and `stop replay`,
   `replay ready` and `replay stopped`, and error code 23, position out of range; the
   driver plays a recording from a position or its start, for a length, to its extent
   or following it live, into a replay publication a subscription on the replay stream
   reads as any stream, on a third driver thread, the replayer, that plays only what the
-  recorder has synced and no faster than the slowest subscriber; counters
+  recorder has synced and no faster than the slowest subscriber, plays whole frames, so
+  a length that ends inside a frame ends at that frame's end, and parks while it has
+  nothing to play; counters
   `replay.started`, `replay.stopped`, `replay.ended`, `replay.not_connected`,
   `replay.failed`, `replay.start_failed` and the gauge `replay.position`
   ([ADR 0030](docs/decisions/0030-replay-a-recording-into-a-subscription.md),

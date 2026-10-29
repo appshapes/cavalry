@@ -265,7 +265,8 @@ impl fmt::Display for LogError {
                 f,
                 "log buffer rejected ({reason}): a recorded frame's {field} is {found}, its position \
                  and recording say {expected}; the segment file is damaged or is another recording's, \
-                 and the replay ends at the frame before it; see \
+                 and the replay ends at the frame before it: restore the segment file from a backup, \
+                 and `cavalry doctor` names the recording; see \
                  docs/reference/durable-log.md#segment-files"
             ),
             LogError::TooLong { found, limit } => write!(

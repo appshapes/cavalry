@@ -34,15 +34,18 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   disk back-pressures the publisher and never loses a byte (ADR 0025). The log
   directory is opened under a lock at start and recovered (`spec/durable-log.md`, "The
   driver"); a second driver on it refuses to start.
-- Plays a recording back on a third thread, the replayer, with the same idle strategy:
+- Plays a recording back on a third thread, the replayer, which idles with the same
+  strategy while it holds a replay and parks until the conductor hands it a request
+  while it holds none, so a driver that replays nothing wakes no CPU for it:
   `start replay` names a recording, a position, a length and a replay stream id, the
   conductor creates the replay's publication, a log of the driver's own at the
   recording's start position so that a position in the replay is the position in the
   recording, and the replayer copies the recording's frames from its segment files into
   that log, each checked and each as recorded but for the replay's session and stream
-  ids, no faster than the slowest subscriber's position plus the window and never past
-  what the recorder has synced; a subscription on the replay stream reads it as any
-  stream, and `replay stopped` says where it ended and why (ADR 0030).
+  ids, whole frames only, so a length that ends inside a frame plays that frame and
+  ends at its end, no faster than the slowest subscriber's position plus the window
+  and never past what the recorder has synced; a subscription on the replay stream
+  reads it as any stream, and `replay stopped` says where it ended and why (ADR 0030).
 - Will run dedicated threads for the sender and the receiver, pinned when the operating
   system allows, when the UDP slice arrives: a receiver that detects a gap sends a NAK,
   the sender retransmits from its own term buffer, and status messages drive flow
