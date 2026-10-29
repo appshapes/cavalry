@@ -59,7 +59,7 @@ pages elsewhere mention Aeron at most once.
 | lapped | The state of a broadcast receiver whose cursor is a whole ring behind the tail intent: records were overwritten before it read them, and it is told so. | lapped | `docs/reference/broadcast-buffer.md` |
 | doctor | The `cavalry doctor` command: reads counters and host state and explains any latency or loss problem with a recommended action. | none (AeronStat shows counters; no diagnosis) | `docs/reference/cli.md` |
 | log (durable) | The on-disk, ordered, replayable record of a stream, written by the driver. | Archive recording | `docs/reference/durable-log.md` |
-| replay | Reading a durable log back into a subscription from a given position, at original or maximum speed. | Archive replay | `docs/reference/durable-log.md` |
+| replay | Reading a durable log back into a subscription from a given position, at maximum speed in this version, whole frames only: a frame that begins below the replay's end position is played to its end. | Archive replay | `docs/reference/client-protocol.md` |
 | cluster | A set of drivers running the same replicated state machine over Raft, fed by a durable log. | Aeron Cluster | `docs/reference/cluster.md` |
 | standby | A cluster member that follows the log without voting, ready to be promoted. Open core in Cavalry. | Cluster Standby (Premium) | `docs/reference/cluster.md` |
 | data plane | Any code a message passes through between claim on the publisher and the fragment handler on the subscriber, including the driver's sender and receiver threads. | none | `CLAUDE.md` |

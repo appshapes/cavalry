@@ -106,7 +106,7 @@ Then, by command:
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 | start replay | 24 | 8 | position | i64 | −1 for the recording's start position, else a multiple of 32 from the recording's start position to its extent |
-| start replay | 32 | 8 | length | i64 | −1 for everything up to the recording's extent when the replay starts; 0 or more bytes; 2^63 − 1 to follow a live recording until it stops |
+| start replay | 32 | 8 | length | i64 | −1 for everything up to the recording's extent when the replay starts; 0 or more bytes, a frame that begins within them played whole; 2^63 − 1 to follow a live recording until it stops |
 | start replay | 40 | 4 | replay stream id | i32 | any: the stream the replay's publication is on |
 | start replay | 44 | 4 + n + pad | replay channel | string | in this version exactly `cavalry:ipc`; any other channel is answered with error code 1 |
 | stop replay | 16 | 8 | replay session id | i64 | 0 or more: the replay session id that `replay ready` carried |
@@ -199,10 +199,14 @@ What the driver does with each, after the checks of "What the driver rejects":
   the position is code 12. Each of the three adds one to `replay.start_failed`. The
   replay's *end position* is the position plus the length: the extent when the replay
   starts for a length of −1, and 2^63 − 1 for a length of 2^63 − 1 or a sum past it.
-  The replay plays the recording's bytes from the position up to the earlier of its end
+  The replay plays the recording's frames from the position up to the earlier of its end
   position and the recording's stop position, so a length past a live recording's
   extent, 2^63 − 1 among them, plays bytes as they are synced and ends when the
-  recording stops; a length within the extent ends at the end position. The driver
+  recording stops; a length within the extent ends at the end position, and since
+  frames are played whole, a frame that begins before the end position is played to its
+  end and the replay ends at the first frame boundary at or after the end position, so
+  that the position `replay stopped` carries is a multiple of 32 as every position is
+  (Aeron's replay plays a fragment that begins within its length whole). The driver
   then creates the replay's *publication*: a log in `publications/<replay session
   id>.logbuffer` of the recording's term length, MTU length and initial term id, type 1
   (exclusive), with a new session id and the replay stream id, created at the replay's
@@ -212,8 +216,10 @@ What the driver does with each, after the checks of "What the driver rejects":
   keyed by the replay session id, the session id and the stream id as a publication's
   are, and `replay.position`, keyed by the replay session id; answers `replay ready`;
   and sends `available image` to every subscription whose stream id and channel match,
-  with the subscriber's position counter at the start position, now and whenever one is
-  added while the replay lives, so a late subscriber joins where the replay is. A log
+  now and whenever one is added while the replay lives, with the subscriber's position
+  counter at the publication's producer position as for any publication: the start
+  position for a subscription that was there first, and where the replay has reached
+  for one added later, which joins there and sees nothing before it. A log
   that cannot be created or sized is code 12, adding one to `driver.log_create_failed`;
   a counters file with no free record is code 10, adding one to `driver.registry_full`;
   either leaves nothing of the replay behind. The replay publication is the driver's:
@@ -238,8 +244,9 @@ reads the next block of the recording from its segment file, from the replay's p
 up to the nearest of its end position, the recording's extent, the end of the position's
 term, the end of the segment file, the publication's limit plus one MTU length and
 1048576 bytes on, and writes the block's frames into the replay log at their recorded
-term offsets, whole frames in order, each checked as `spec/frame.md` and
-`spec/durable-log.md`, "Segment files", say before it is written, and each as recorded
+term offsets, whole frames in order, each begun below the end position and the
+publication's limit, each checked as `spec/frame.md` and `spec/durable-log.md`,
+"Segment files", say before it is written, and each as recorded
 but for the session id and the stream id, which are the replay publication's: a padding
 frame is written as padding, a data frame's body before its header's first eight bytes,
 which go in with a release store as a commit's do, so that a subscriber's poll sees whole
@@ -254,8 +261,8 @@ the replayer reads the recording's catalog slot again once per second and whenev
 frame length of 0 is found below the extent, so that a recording that has stopped ends
 the replay at its stop position, reason 0, within a second.
 
-A replay ends by itself when its position reaches its end position or the recording's
-stop position: the driver stores the end of stream position on the replay log, as it
+A replay ends by itself when its position reaches or passes its end position, or
+reaches the recording's stop position: the driver stores the end of stream position on the replay log, as it
 does for a closed publication, and sends `replay stopped` with reason 0; the images go
 as a closed publication's do, once every subscriber has reached the end of stream
 position or the linger has passed, and then the log. `stop replay` ends a replay at the
