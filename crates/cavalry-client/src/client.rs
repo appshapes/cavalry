@@ -8,6 +8,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cavalry_proto::client_protocol::{Command, ErrorCode};
+use cavalry_shm::counters::generated::REPLAY_POSITION;
 use cavalry_shm::broadcast::BroadcastBuffer;
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, Producer};
@@ -17,11 +18,12 @@ use cavalry_shm::spsc;
 
 use crate::conductor::{
     COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_SUBSCRIPTIONS, NO_PENDING, REGISTRATION_QUEUE,
-    RESPONSE_QUEUE, RESPONSE_TIMEOUT, Shared, nanos, now_nanos,
+    REPLAY_QUEUE, RESPONSE_QUEUE, RESPONSE_TIMEOUT, ReplayRegistration, Shared, nanos, now_nanos,
 };
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
 use crate::recording::Recording;
+use crate::replay::{Replay, ReplayEnd};
 use crate::response::Response;
 use crate::subscription::{
     IMAGE_QUEUE, ImageEvent, RETIRE_QUEUE, Registration, Retired, Subscription,
@@ -45,6 +47,7 @@ pub struct Cavalry {
     counters: CountersReader,
     responses: spsc::Consumer<Response>,
     registrations: spsc::Producer<Registration>,
+    replay_registrations: spsc::Producer<ReplayRegistration>,
     conductor: Option<JoinHandle<()>>,
     scratch: Vec<u8>,
 }
@@ -124,6 +127,8 @@ impl Cavalry {
         let (response_producer, responses) = spsc::queue::<Response>(RESPONSE_QUEUE);
         let (registrations, registration_consumer) =
             spsc::queue::<Registration>(REGISTRATION_QUEUE);
+        let (replay_registrations, replay_registration_consumer) =
+            spsc::queue::<ReplayRegistration>(REPLAY_QUEUE);
         let conductor_ring = CommandRing::open(&dir, true)?;
         let counters_writer = CountersWriter::open(&dir)?;
         let conductor = Conductor::new(
@@ -135,6 +140,7 @@ impl Cavalry {
             Arc::clone(&shared),
             response_producer,
             registration_consumer,
+            replay_registration_consumer,
             client_id,
         );
         let handle = std::thread::Builder::new()
@@ -154,6 +160,7 @@ impl Cavalry {
             counters,
             responses,
             registrations,
+            replay_registrations,
             conductor: Some(handle),
             scratch,
         })
@@ -410,6 +417,135 @@ impl Cavalry {
             Response::Success { .. } => Ok(()),
             other => Err(ClientError::Driver {
                 what: format!("{other:?} in answer to stop recording"),
+            }),
+        }
+    }
+
+    /// Asks the driver to play recording `recording_id` from `position` for `length`
+    /// bytes into a publication on `replay_stream_id` and `channel`, which a
+    /// subscription on them reads as any stream, its image's positions the recording's
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0030). `position` is a multiple of 32
+    /// from the recording's start position to its extent, or [`NULL_POSITION`] for the
+    /// start position; `length` is a byte count, [`NULL_LENGTH`] for everything up to
+    /// the extent when the replay starts, or [`FOLLOW_LENGTH`] to follow a live
+    /// recording until it stops. Add the subscription first: a replay with no subscriber
+    /// does not move and ends after the replay connect timeout. Waits for `replay ready`
+    /// up to the response timeout and returns the [`Replay`], whose
+    /// [`position`](Replay::position) reads the replayer's counter and whose
+    /// [`ended`](Replay::ended) says how it ended once it has. The replay belongs to the
+    /// driver: dropping the handle stops nothing, and [`Cavalry::stop_replay`] from any
+    /// client stops it. A recording the catalog does not hold is
+    /// [`ClientError::Refused`] with error code 21, a position out of range code 23, a
+    /// length below −1 code 7, a channel other than `cavalry:ipc` code 1, a segment file
+    /// that cannot be opened or a log that cannot be created code 12, and a registry or
+    /// the counters file at capacity code 10.
+    ///
+    /// [`NULL_POSITION`]: cavalry_proto::client_protocol::NULL_POSITION
+    /// [`NULL_LENGTH`]: cavalry_proto::client_protocol::NULL_LENGTH
+    /// [`FOLLOW_LENGTH`]: cavalry_proto::client_protocol::FOLLOW_LENGTH
+    pub fn start_replay(
+        &mut self,
+        recording_id: i64,
+        position: i64,
+        length: i64,
+        replay_stream_id: i32,
+        channel: &str,
+    ) -> Result<Replay, ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        // The registration goes first, before the command: the conductor admits the
+        // queue before it handles an answer, so the `replay stopped` of a replay that
+        // ends at once finds its registration (`Conductor::events`).
+        let end = Arc::new(ReplayEnd::new());
+        let registration = ReplayRegistration {
+            replay_session_id: correlation_id,
+            end: Arc::clone(&end),
+        };
+        if self.replay_registrations.offer(registration).is_err() {
+            return Err(ClientError::Driver {
+                what: "the replay registration queue is full: start replays one at a time"
+                    .to_string(),
+            });
+        }
+        let command = Command::StartReplay {
+            client_id: self.client_id,
+            correlation_id,
+            recording_id,
+            position,
+            length,
+            replay_stream_id,
+            replay_channel: channel.as_bytes(),
+        };
+        match self.request(&command, correlation_id, "start replay")? {
+            Response::ReplayReady {
+                replay_session_id,
+                recording_id: ready_recording,
+                start_position,
+                session_id,
+                stream_id,
+                ..
+            } => {
+                if replay_session_id != correlation_id
+                    || ready_recording != recording_id
+                    || stream_id != replay_stream_id
+                {
+                    return Err(ClientError::Driver {
+                        what: format!(
+                            "replay ready for replay {replay_session_id}, recording \
+                             {ready_recording}, stream {stream_id}"
+                        ),
+                    });
+                }
+                let position = self.replay_position_counter(replay_session_id)?;
+                Ok(Replay::new(
+                    replay_session_id,
+                    recording_id,
+                    start_position,
+                    session_id,
+                    stream_id,
+                    channel.to_string(),
+                    position,
+                    end,
+                ))
+            }
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to start replay"),
+            }),
+        }
+    }
+
+    /// The `replay.position` counter of replay `replay_session_id`, found by its type
+    /// and key in the counters file, since `replay ready` carries no counter id
+    /// (`spec/client-protocol.md`, "Counters"); `None` when the replay has already ended
+    /// and the driver freed the counter, which a short replay does before its client
+    /// looks, and then `replay stopped` is on its way with the end position.
+    fn replay_position_counter(&self, replay_session_id: i64) -> Result<Option<CounterValue>, ClientError> {
+        let key = replay_session_id.to_le_bytes();
+        for id in 0..self.counters.capacity() {
+            if let Some(record) = self.counters.record(id)?
+                && record.type_id() == REPLAY_POSITION.0
+                && record.key().starts_with(&key)
+            {
+                return Ok(self.counters.value(id).ok());
+            }
+        }
+        Ok(None)
+    }
+
+    /// Stops replay `replay_session_id`, whichever client started it, at the position
+    /// reached; the driver answers once the replayer has written its last frame, then
+    /// sends `replay stopped` with reason 1 (`spec/client-protocol.md`, "Commands"). A
+    /// replay already ended is success with nothing done.
+    pub fn stop_replay(&mut self, replay_session_id: i64) -> Result<(), ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let command = Command::StopReplay {
+            client_id: self.client_id,
+            correlation_id,
+            replay_session_id,
+        };
+        match self.request(&command, correlation_id, "stop replay")? {
+            Response::Success { .. } => Ok(()),
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to stop replay"),
             }),
         }
     }

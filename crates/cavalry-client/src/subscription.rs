@@ -171,6 +171,15 @@ impl Image {
         self.reader.is_end_of_stream()
     }
 
+    /// The position of a frame the handler was given from this image, from its
+    /// header's term id and term offset (`spec/log-buffer.md`, "Positions"): for a
+    /// replay's image, the position in the recording (ADR 0030).
+    pub fn position_of(&self, header: &DataFrameHeader) -> i64 {
+        self.log
+            .positions()
+            .position(header.term_id(), header.term_offset() as u32)
+    }
+
     fn retire(self) -> Retired {
         Retired {
             _log: self.log,

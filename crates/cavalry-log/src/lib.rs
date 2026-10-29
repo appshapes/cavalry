@@ -3,5 +3,6 @@
 
 pub mod catalog;
 pub mod dir;
+pub mod index;
 pub mod layout;
 pub mod recorder;

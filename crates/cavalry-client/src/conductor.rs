@@ -23,6 +23,7 @@ use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
 use crate::error::Closed;
+use crate::replay::ReplayEnd;
 use crate::response::Response;
 use crate::subscription::{ImageEvent, Registration};
 
@@ -51,6 +52,22 @@ pub(crate) const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// How many registrations may wait for the conductor between two of its cycles.
 pub(crate) const REGISTRATION_QUEUE: usize = 64;
+
+/// How many replays one client follows for their `replay stopped`: the driver's own
+/// bound on replays (`spec/client-protocol.md`, "Sizes"; ADR 0030). A handle past it
+/// is still a replay, and `ended` never says so for it; the driver refuses first.
+pub(crate) const MAX_REPLAYS: usize = 64;
+
+/// How many replay registrations may wait for the conductor between two of its cycles.
+pub(crate) const REPLAY_QUEUE: usize = 16;
+
+/// What `start replay` registers with the conductor before it sends the command: where
+/// the conductor stores the replay's `replay stopped` when it arrives. The conductor
+/// forgets a registration whose handle is gone.
+pub(crate) struct ReplayRegistration {
+    pub(crate) replay_session_id: i64,
+    pub(crate) end: Arc<ReplayEnd>,
+}
 
 /// The scratch buffer every command is encoded into: the longest command is a channel
 /// of 4096 bytes and its header, and the ring's own limit is far above.
@@ -176,6 +193,8 @@ pub(crate) struct Conductor {
     responses: spsc::Producer<Response>,
     registrations: spsc::Consumer<Registration>,
     registry: Registry,
+    replay_registrations: spsc::Consumer<ReplayRegistration>,
+    replays: Vec<ReplayRegistration>,
     client_id: i64,
     scratch: Vec<u8>,
 }
@@ -191,6 +210,7 @@ impl Conductor {
         shared: Arc<Shared>,
         responses: spsc::Producer<Response>,
         registrations: spsc::Consumer<Registration>,
+        replay_registrations: spsc::Consumer<ReplayRegistration>,
         client_id: i64,
     ) -> Self {
         Self {
@@ -203,6 +223,8 @@ impl Conductor {
             responses,
             registrations,
             registry: Registry::with_capacity(MAX_SUBSCRIPTIONS),
+            replay_registrations,
+            replays: Vec::with_capacity(MAX_REPLAYS),
             client_id,
             scratch: vec![0u8; COMMAND_SCRATCH],
         }
@@ -246,11 +268,21 @@ impl Conductor {
         self.registry.sweep() + self.admit()
     }
 
-    /// Admits every registration queued, each through [`Registry::admit`].
+    /// Admits every registration queued, each through [`Registry::admit`], and every
+    /// replay registration, after forgetting those whose handle is gone; a replay past
+    /// the bound is dropped, and its handle never learns its end.
     fn admit(&mut self) -> usize {
         let mut work = 0;
         while let Some(registration) = self.registrations.poll() {
             self.registry.admit(registration);
+            work += 1;
+        }
+        while let Some(registration) = self.replay_registrations.poll() {
+            self.replays
+                .retain(|replay| Arc::strong_count(&replay.end) > 1);
+            if self.replays.len() < MAX_REPLAYS {
+                self.replays.push(registration);
+            }
             work += 1;
         }
         work
@@ -361,6 +393,19 @@ impl Conductor {
                             correlation_id,
                             subscriber_registration_id,
                         } => self.image_unavailable(correlation_id, subscriber_registration_id)?,
+                        Outcome::ReplayStopped {
+                            replay_session_id,
+                            position,
+                            reason,
+                        } => {
+                            if let Some(replay) = self
+                                .replays
+                                .iter()
+                                .find(|replay| replay.replay_session_id == replay_session_id)
+                            {
+                                replay.end.set(position, reason);
+                            }
+                        }
                     }
                 }
                 Ok(false) => break,
@@ -511,6 +556,12 @@ enum Outcome {
         correlation_id: i64,
         subscriber_registration_id: i64,
     },
+    /// `replay stopped`, for a replay this client may hold a handle on.
+    ReplayStopped {
+        replay_session_id: i64,
+        position: i64,
+        reason: i32,
+    },
 }
 
 /// The registration id a log file name carries: `publications/<id>.logbuffer`, as
@@ -529,11 +580,12 @@ fn log_id(log_file_name: &[u8]) -> Option<i64> {
 /// `too-short`, `type`, `string` or `length`, closes it with [`Closed::Corrupt`], since
 /// an event it cannot decode may be the one it needed (`spec/client-protocol.md`, "What
 /// the driver rejects"); `available image` and `unavailable image` are for the
-/// subscription they name, whatever is pending; `publication ready`, `exclusive
-/// publication ready`, `subscription ready`, `operation success`, `recording ready` and
-/// `error` with the pending correlation id are the answer; every other event, `recording
-/// stopped` among them, leaves the client open and is nothing to it. An `available image` whose log file name is not the page's shape
-/// is `corrupt`.
+/// subscription they name, whatever is pending, and `replay stopped` is for the replay
+/// handle it names; `publication ready`, `exclusive publication ready`, `subscription
+/// ready`, `operation success`, `recording ready`, `replay ready` and `error` with the
+/// pending correlation id are the answer; every other event, `recording stopped` among
+/// them, leaves the client open and is nothing to it. An `available image` whose log
+/// file name is not the page's shape is `corrupt`.
 fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<Outcome, Closed> {
     let event = Event::parse(type_id, message).map_err(|_| Closed::Corrupt)?;
     if let Event::ClientTimeout { client_id: id } = event
@@ -568,6 +620,17 @@ fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<O
             return Ok(Outcome::ImageUnavailable {
                 correlation_id,
                 subscriber_registration_id,
+            });
+        }
+        Event::ReplayStopped {
+            replay_session_id,
+            position,
+            reason,
+        } => {
+            return Ok(Outcome::ReplayStopped {
+                replay_session_id,
+                position,
+                reason,
             });
         }
         _ => {}
@@ -626,6 +689,21 @@ fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<O
             session_id,
             position_counter_id: recording_position_counter_id,
             synced_position_counter_id: recording_synced_position_counter_id,
+        }),
+        Event::ReplayReady {
+            correlation_id,
+            replay_session_id,
+            recording_id,
+            start_position,
+            session_id,
+            stream_id,
+        } if correlation_id == pending => Outcome::Answer(Response::ReplayReady {
+            correlation_id,
+            replay_session_id,
+            recording_id,
+            start_position,
+            session_id,
+            stream_id,
         }),
         Event::Error {
             offending_correlation_id,
