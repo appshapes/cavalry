@@ -46,7 +46,10 @@ order from the bottom of Cavalry's ranges (ADR 0025):
   `recording.synced_position` of a live one, the bytes a replay may read; `i64::MAX`,
   as Aeron's `Long.MAX_VALUE`, to follow a live recording until it stops. The replay
   ends at the earlier of its end position, the position plus the length, and the
-  recording's stop position, so a length past a live recording's extent follows it. A client that wants "between two instants" resolves both through the time
+  recording's stop position, so a length past a live recording's extent follows it; a
+  replay plays whole frames, so an end position inside a frame plays that frame whole
+  and the replay ends at the first frame boundary at or after it, Aeron's rule, and the
+  position `replay stopped` carries is a frame boundary. A client that wants "between two instants" resolves both through the time
   index, as `spec/durable-log.md` says, and sends positions; the driver never reads the
   time index for a replay.
 - **`stop replay`** (type id 260, `0x0104`): client id, correlation id, replay session
@@ -88,12 +91,17 @@ replay goes no faster: a replay with no subscriber does not move. The driver rem
 the log as it removes a closed publication's, after the end of stream position is
 reached or the linger (`spec/log-buffer.md`, "Closing").
 
-The disk work is a third driver thread, `cavalry-replayer`, with the conductor's idle
-strategy, fed and answered through bounded queues as the recorder is (ADR 0025): the
-conductor never touches the disk, and the recorder's writes never wait behind a
-replay's reads, since a recording back-pressures a live publisher (invariant 2) and a
-replay is paced by its subscriber. On each duty cycle the replayer visits every live
-replay: it reads the next block of the recording, up to 1 MiB and never past the
+The disk work is a third driver thread, `cavalry-replayer`, fed and answered through
+bounded queues as the recorder is (ADR 0025): the conductor never touches the disk,
+and the recorder's writes never wait behind a replay's reads, since a recording
+back-pressures a live publisher (invariant 2) and a replay is paced by its subscriber.
+While it holds a replay the replayer idles with the conductor's idle strategy; while
+it holds none it parks, for at most a second at a time, until the conductor hands it a
+request and unparks it: a replayer with nothing to play has nothing to poll but that
+queue, and a thread that woke once a millisecond on the housekeeping CPU the recorder
+runs on moved `claim_commit_32_recorded` at p99.99 on the bench host (Evidence). On
+each duty cycle the replayer visits every live replay: it reads the next block of the
+recording, up to 1 MiB and never past the first frame boundary at or after the
 replay's end position, from the segment file into the replay log's term at the
 recorded term offsets, frame by frame, with every header as recorded but for the
 session id and the stream id, which are the replay publication's, a padding frame
@@ -109,8 +117,9 @@ its reads by `recording.synced_position`, so what it plays is what a restart wou
 it, and stops the replay with reason 3 at the first that fails, counting
 `log_buffer.rejected_frame`.
 
-A replay ends by itself when its length is replayed or its end position is reached:
-the replayer stores the end of stream position on the replay log, as a closing
+A replay ends by itself when its length is replayed or its end position is reached or
+passed, at the frame boundary: the replayer stores the end of stream position on the
+replay log, as a closing
 publication does, the conductor sends `replay stopped` with reason 0, and the
 subscribers see `unavailable image` once they have reached it or the linger passes.
 `stop replay` ends it at the position reached, with reason 1 and `operation success` to
@@ -208,6 +217,15 @@ conformance vector of its own.
   a slow subscriber. `just replay-check`'s three equal hashes on both runners are the
   gate's commit's evidence, in its message, as step 2.1 of
   `docs/how-to/implement-a-feature.md` puts what the implementation proves.
+- The bench gate on the first head of the change that accepted this ADR (CI run
+  40850983644), with the replayer idling under the backoff strategy, waking once a
+  millisecond on the housekeeping CPU the recorder shares: `claim_commit_32_recorded`
+  read 320 ns at p99.99 (21 runs, 300 to 340) under the `bench-linux` profile and
+  330 ns (310 to 340) under `bench-linux-unchecked`, against master's last four runs at
+  309 to 310 and 300 to 310, while `claim_commit_32_client`, whose recorder idles, read
+  160 ns under both as master does; the unchecked gate failed at +10.0% over its
+  baseline's slowest run of 300 ns. The replayer parks instead; the gate's rows on the
+  head that merged are in the pull request's body.
 
 ## Consequences
 

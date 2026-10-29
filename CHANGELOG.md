@@ -568,7 +568,9 @@ user-visible change, added in the same commit as the change. The format follows
   driver plays a recording from a position or its start, for a length, to its extent
   or following it live, into a replay publication a subscription on the replay stream
   reads as any stream, on a third driver thread, the replayer, that plays only what the
-  recorder has synced and no faster than the slowest subscriber; counters
+  recorder has synced and no faster than the slowest subscriber, plays whole frames, so
+  a length that ends inside a frame ends at that frame's end, and parks while it has
+  nothing to play; counters
   `replay.started`, `replay.stopped`, `replay.ended`, `replay.not_connected`,
   `replay.failed`, `replay.start_failed` and the gauge `replay.position`
   ([ADR 0030](docs/decisions/0030-replay-a-recording-into-a-subscription.md),
