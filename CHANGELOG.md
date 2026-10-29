@@ -583,3 +583,21 @@ user-visible change, added in the same commit as the change. The format follows
   ([ADR 0030](docs/decisions/0030-replay-a-recording-into-a-subscription.md),
   [the client protocol](docs/reference/client-protocol.md)). The client API, the
   `cavalry replay` command and `just replay-check` follow.
+- `Cavalry::start_replay` and `stop_replay` with the `Replay` handle, whose `ended()`
+  says where and why a replay ended; `Image::position_of` and `Image::positions`, a
+  frame's position in the recording from its header, which a padding frame moves
+  without a handler seeing it; `cavalry::index::position_at` and `position_after`, an
+  instant to a position through the time index; and `cavalry replay --recording <id>
+  --from <position or instant> [--to ...] [--stream <id>] [--follow]`, which prints
+  one line per message, the position from the frame's header, and exits 1 naming the
+  positions it did not print when the replay's log went before it had read to the end
+  ([Replay a recording](docs/how-to/replay-a-recording.md); ADR 0030). The client
+  follows the end of every replay it started while the handle lives, as many as the
+  driver allows live at once; one more is `ClientError::ReplaysFull` and stopped again.
+- `just replay-check` is built, the gate CLAUDE.md names for invariant 1: a driver on a
+  directory of its own records 100,000 hash-chained messages, with a padding frame a
+  quarter of the way, while a live subscriber prints them, `cavalry replay` plays the
+  recording twice from the start and once from an instant, and the three outputs must
+  hash the same and the replay from the instant start where the time index says; CI
+  runs it on Linux and macOS. With it, the second slice's third feature is done
+  (ADR 0023, ADR 0030).

@@ -24,9 +24,13 @@ The durable log: recording and replay. Data plane.
   stopped recording, state 3, arrives with card 95's purge, with its counter and its
   caller in the driver; until then the catalog writer has no `delete`, so every
   transition it writes is one the driver counts.
-- Replays a log back into a subscription from a given position, at original or maximum
-  speed. `cavalry replay` answers "what did this service see between two instants" in
-  one command.
+- Resolves an instant to a position through a recording's time index for the driver's
+  replay (ADR 0030): `index::position_at` is where a replay from an instant starts, the
+  last entry at or before it, and `index::position_after` where one to an instant ends,
+  the first entry after it; any reader may read the index without a lock, and a torn or
+  out-of-order last entry is ignored as the page says. The driver's replayer plays the
+  recording back into a subscription from a position, at maximum speed, and `cavalry
+  replay` answers "what did this service see between two instants" in one command.
 - Carries the headline promise: replaying the same log produces the same state, byte for
   byte. `just replay-check` replays a recorded log twice and diffs the state.
 
