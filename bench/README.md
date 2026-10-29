@@ -83,7 +83,7 @@ second compares the newest result with the baseline for the profile and ends wit
   why the harness is in process, why HdrHistogram and one baseline per runner, and
   [ADR 0028](../docs/decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md),
   why the clock is the time stamp counter; [ADR 0016](../docs/decisions/0016-run-the-latency-gate-on-a-dedicated-host.md):
-  why the gate fails only on the dedicated bench host, and
+  why the gate fails only on the dedicated bench hosts, and
   [`docs/how-to/set-up-a-bench-host.md`](../docs/how-to/set-up-a-bench-host.md), how
   that host is built from `bench/host/`.
 - [`scripts/bench-compare.py`](../scripts/bench-compare.py), the gate's second half, and

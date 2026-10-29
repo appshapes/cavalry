@@ -41,7 +41,7 @@ shared runner is
    conductor to those CPUs, on Linux only, with the driver's recorder and replayer and
    the client's conductor on the lowest CPU outside them, so each pinned CPU runs one thread, and `just bench --repeat 21` runs every benchmark
    twenty-one times and reports each one's median run by p99.99, with every run's
-   p99.99 in the last column and in the result file. The bench host runs it with all
+   p99.99 in the last column and in the result file. The bench hosts run it with all
    three: on an isolated core, one run's 0.01 percent tail of a few hundred nanoseconds
    lands anywhere in a band 50 percent wide, while the median of twenty-one runs holds
    within 3 percent, so the median is what the gate reads and the twenty-one are what
