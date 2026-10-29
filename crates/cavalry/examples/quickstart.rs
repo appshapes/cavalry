@@ -1,8 +1,10 @@
 //! The ten-minute path's program (README, "The ten-minute path"; `just quickstart`): one
-//! process attaches to the driver running on this host, publishes 1,000 messages on a
-//! stream and reads them back through a subscription, each once and in order, then
-//! prints what it saw. `CAVALRY_DIR` names the driver's directory when it is not the
-//! default (`docs/reference/config.md`).
+//! process attaches to the driver running on this host, records the stream it is about
+//! to publish on, publishes 1,000 messages on it and reads them back through a
+//! subscription, each once and in order, stops the recording and prints what it saw and
+//! the recording's id, so that `cavalry replay` plays the messages back from the durable
+//! log (card 95, the slice's acceptance test). `CAVALRY_DIR` names the driver's
+//! directory when it is not the default (`docs/reference/config.md`).
 
 use std::process::ExitCode;
 use std::time::Instant;
@@ -32,6 +34,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut subscription = client.add_subscription("cavalry:ipc", STREAM_ID)?;
     let mut publication = client.add_publication("cavalry:ipc", STREAM_ID)?;
+    // Record the stream from here, position 0 of a publication that has published
+    // nothing yet: the driver's recorder writes every committed frame to the durable
+    // log under the log directory, and the recording outlives this process.
+    let recording = client.start_recording("cavalry:ipc", STREAM_ID)?;
 
     let mut sent: u64 = 0;
     let mut next: u64 = 0;
@@ -66,6 +72,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
          received once, in order, in {:.1} ms",
         publication.session_id(),
         started.elapsed().as_secs_f64() * 1e3
+    );
+    recording.stop(&mut client)?;
+    println!(
+        "quickstart: recording {} of stream {STREAM_ID} stopped; cavalry replay --recording {} \
+         --from 0 plays it back",
+        recording.recording_id(),
+        recording.recording_id()
     );
     publication.close()?;
     subscription.close()?;

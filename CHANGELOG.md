@@ -621,3 +621,9 @@ user-visible change, added in the same commit as the change. The format follows
   6,8,10) against the `kip-linux` and `kip-linux-unchecked` baselines, on every push and
   on pull requests from this repository, beside `bench (linux)`
   ([Set up a bench host](docs/how-to/set-up-a-bench-host.md), step 6).
+- The ten-minute path records and replays: the quickstart program starts a recording of
+  its stream before it publishes and stops it after, and `cavalry replay --recording 0
+  --from 0` plays the 1,000 messages back from the durable log as the path's fourth
+  command, which `just quickstart` checks on Linux and macOS: the second slice's
+  acceptance test (card 95, ADR 0023;
+  [the tutorial](docs/tutorials/publish-and-subscribe.md)).
