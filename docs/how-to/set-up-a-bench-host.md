@@ -115,13 +115,20 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    runs on `[self-hosted, bench-linux]` and pins to the CPUs from step 4; change the
    `--pin` list and the `check.sh` list together when the host's sets differ. Then add
    `bench (linux)` to the required checks of `master` in the repository's branch
-   protection, beside `gates (linux)` and `gates (macos)`.
+   protection, beside `gates (linux)` and `gates (macos)`. The second host has a job of
+   its own in the same file, `bench (kip)`, on `[self-hosted, kip-linux]` with its own
+   lists, `6,8,10`, and its own profiles, `kip-linux` and `kip-linux-unchecked`; it is
+   not among the required checks today.
 
-7. Record the baseline. The first run on the host reports every benchmark as
-   `no baseline` and passes. Download its `bench-results-bench-linux` artifact and
-   record it as [Run the bench](run-the-bench.md) describes, under the profiles
-   `bench-linux` and `bench-linux-unchecked`, in one commit whose message holds the
-   histograms.
+7. Record the baselines. The first run of the host's job reports every benchmark as
+   `no baseline` and passes. Download the run's artifact, `bench-results-bench-linux`
+   from `bench (linux)` on `bench` or `bench-results-kip-linux` from `bench (kip)` on
+   `kip`, and record its two files as [Run the bench](run-the-bench.md) describes in
+   its step 4, under the host's own profiles, `bench-linux` and `bench-linux-unchecked`
+   or `kip-linux` and `kip-linux-unchecked`, in one commit whose message holds the
+   histograms. The artifact is uploaded whether or not the run passed the gate, so
+   when the host has changed (Updating the host, below) the red run after the change
+   is the one to record from.
 
 ## How to verify it worked
 
@@ -129,15 +136,17 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 - `cat /proc/interrupts` on the host shows the isolated CPUs' `LOC` column in the
   hundreds while the housekeeping CPUs' is in the hundreds of thousands.
 - The organization's runner page shows the runner Idle after a reboot of the host.
-- A push to `master` runs `bench (linux)` on it, and the run's log opens with the
-  state `check.sh` printed, then the harness's line `pinned to CPUs 8,10,12`.
+- A push to `master` runs the host's job on it, `bench (linux)` on `bench` and
+  `bench (kip)` on `kip`, and the run's log opens with the state `check.sh` printed,
+  then the harness's line `pinned to CPUs 8,10,12` on `bench` or
+  `pinned to CPUs 6,8,10` on `kip`.
 
 ## A second host: the direct link and the clock
 
 The UDP rows need a sender and a receiver on two tuned hosts, and a one-way number
 across hosts is only as good as the clock offset between them. The second host is set
-up by the steps above with its own sets and its own runner label; then the two hosts
-are joined.
+up by the steps above with its own sets, its own runner label and its own job,
+`bench (kip)` (step 6); then the two hosts are joined.
 
 1. One straight patch cable from a wired port with hardware timestamps on each host,
    port to port, with nothing between them. `ethtool -T <port>` lists
@@ -210,8 +219,9 @@ build script.
 
 Packages and the kernel change only by hand, because a change underneath the baseline
 reads as a regression nobody committed. Apply updates, reboot, run `check.sh`, then
-re-record the baseline as step 7 says, in a commit whose message names what changed on
-the host.
+re-record the host's two baselines from its job's next run as step 7 says, under its
+own profiles and from its own artifact, in a commit whose message names what changed
+on the host.
 
 ## When it does not work
 

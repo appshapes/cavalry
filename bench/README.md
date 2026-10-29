@@ -51,8 +51,9 @@ nothing depends on it.
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
   for the profile, on the `claim_commit` and `one_way` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017). The two bench hosts' profiles have
-  baselines, `bench-linux` and `kip-linux` with their `-unchecked` twins: a shared
-  runner's run is a report. The `_recorded` rows repeat the client
+  baselines, `bench-linux` and `kip-linux` with their `-unchecked` twins, and CI runs
+  the gate on both hosts, as `bench (linux)` and `bench (kip)`: a shared runner's run
+  is a report. The `_recorded` rows repeat the client
   rows with the driver's recorder writing the stream to the durable log under the bench
   directory, from a housekeeping CPU under `--pin`, and are gated against their baseline
   like the other message rows; `record_block` times the recorder's own block path and is
@@ -94,7 +95,7 @@ second compares the newest result with the baseline for the profile and ends wit
   why the harness is in process, why HdrHistogram and one baseline per runner, and
   [ADR 0028](../docs/decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md),
   why the clock is the time stamp counter; [ADR 0016](../docs/decisions/0016-run-the-latency-gate-on-a-dedicated-host.md):
-  why the gate fails only on the dedicated bench host, and
+  why the gate fails only on the dedicated bench hosts, and
   [`docs/how-to/set-up-a-bench-host.md`](../docs/how-to/set-up-a-bench-host.md), how
   that host is built from `bench/host/`.
 - [`scripts/bench-compare.py`](../scripts/bench-compare.py), the gate's second half, and

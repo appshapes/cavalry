@@ -616,3 +616,8 @@ user-visible change, added in the same commit as the change. The format follows
   when no message row ran, and `bench-compare` picks the newest result by the time in
   its name, not by name (card 161;
   [bench/README.md](bench/README.md)).
+- CI runs the latency gate on the second bench host too: the `bench (kip)` job in
+  `.github/workflows/ci.yml` runs on `kip` (`[self-hosted, kip-linux]`, pinned to CPUs
+  6,8,10) against the `kip-linux` and `kip-linux-unchecked` baselines, on every push and
+  on pull requests from this repository, beside `bench (linux)`
+  ([Set up a bench host](docs/how-to/set-up-a-bench-host.md), step 6).
