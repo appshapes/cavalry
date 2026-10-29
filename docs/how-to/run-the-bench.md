@@ -4,7 +4,8 @@ A how-to page: one task, measuring the data plane's latency and checking it agai
 committed baseline, for a person at a laptop or for CI. The rules are in `CLAUDE.md`,
 invariant 2 and the gates table; why the harness measures what it measures is
 [ADR 0015](../decisions/0015-measure-in-process-with-per-runner-baselines.md), and why
-the gate fails only on the dedicated bench host is
+the gate fails only on the dedicated bench hosts, `bench` and `kip`, and never on a
+shared runner is
 [ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md).
 
 ## Prerequisites
@@ -12,9 +13,9 @@ the gate fails only on the dedicated bench host is
 - A release build toolchain: `cargo` and `just`, as for every gate.
 - An idle machine with at least three free cores. The harness runs a publisher, a
   subscriber and a conductor thread, each spinning; a browser or a build in the
-  background moves p99.99 by more than the 5 percent the gate allows. The number that
-  gates a commit comes from the bench host, whose three cores are isolated for this
-  ([Set up a bench host](set-up-a-bench-host.md)).
+  background moves p99.99 by more than the 5 percent the gate allows. The numbers that
+  gate a commit come from the two bench hosts, `bench` and `kip`, each with three cores
+  isolated for this ([Set up a bench host](set-up-a-bench-host.md)).
 - Python 3 for `just bench-compare`.
 
 ## Steps
@@ -33,8 +34,8 @@ the gate fails only on the dedicated bench host is
    first touch of a page costs microseconds, and 1,500 of them in a 5,000,000-message
    run were the whole p99.99 on the bench host. It prints one table and writes one
    file, `bench/results/<profile>-<unix time>.json`. The profile is
-   `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `linux` or `macos`,
-   and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
+   `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `kip-linux`, `linux`
+   or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier,
    `just bench --pin 8,10,12` binds the publisher, the subscriber and the driver's
    conductor to those CPUs, on Linux only, with the driver's recorder and replayer and
@@ -87,8 +88,10 @@ the gate fails only on the dedicated bench host is
    commit fails when its median tail is slower than anything the baseline measured, by
    more than 5 percent and by more than one clock step. The harness measures its
    clock's step at start, prints it in its first line in nanoseconds and in the
-   counter's own ticks (`clock step 10 ns (37 ticks)` on the bench host, whose counter
-   moves by 37 ticks every 10 ns) and writes it into the result as `clock_step_ns`; a
+   counter's own ticks (`clock step 10 ns (37 ticks)` on `bench`, whose counter
+   moves by 37 ticks every 10 ns, and `clock step 1 ns (2 ticks)` on `kip`, where one
+   step is below 5 percent of every gated row and the 5 percent rule decides alone)
+   and writes it into the result as `clock_step_ns`; a
    row over 5 percent but within one step is printed `within a step` and passes
    ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). The
    baseline's entry carries the step its recording measured, and the floor is the
@@ -114,15 +117,22 @@ the gate fails only on the dedicated bench host is
    Max is shown but does not fail the gate. A profile with no baseline is reported and
    passes: a laptop has none unless you record one, and the shared CI runners have
    none on purpose, because their own noise moved p99.99 by 40 to 100 percent between
-   two runs of the same commit; CI compares on the bench host only (ADR 0016).
+   two runs of the same commit; CI compares on the two bench hosts only, `bench` in
+   the `bench (linux)` job and `kip` in the `bench (kip)` job, each against its own
+   profile's baseline (ADR 0016).
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
    `python3 scripts/bench-compare.py --update`, which writes the newest result's
    percentiles and its clock step into `bench/baseline.json` for that profile. Commit
-   it with the histograms in the message. The bench host's baseline is set from its own
-   CI run: download the `bench-results-bench-linux` artifact of a green run and pass
-   each of its two files, the `bench-linux` and the `bench-linux-unchecked` result, to
-   `--update`. A new row joins a baseline that already exists by adding its entry from
+   it with the histograms in the message. A bench host's baselines are set from its
+   own CI run: download the run's artifact, `bench-results-bench-linux` from
+   `bench (linux)` for `bench` or `bench-results-kip-linux` from `bench (kip)` for
+   `kip`, and pass each of its two files, the `bench-linux` and `bench-linux-unchecked`
+   results or the `kip-linux` and `kip-linux-unchecked` results, to `--update`. The
+   artifact is uploaded whether or not the run passed the gate, so a run that failed
+   after a change to the host is the one to record from
+   ([Set up a bench host](set-up-a-bench-host.md#updating-the-host)). A new row joins
+   a baseline that already exists by adding its entry from
    that run's result and leaving the other rows as they were recorded, in a commit that
    names the row and the run; `--update` rewrites the whole profile, which is for a host
    whose numbers moved, never for one new row.
@@ -179,10 +189,10 @@ the gate fails only on the dedicated bench host is
 - `reported` beside a `timer` or `slot_padding` row that moved: expected; those rows
   flip between two adjacent clock steps from run to run and never fail the gate.
 - `within a step` beside a gated row: the row is over 5 percent above the baseline's
-  slowest run but by no more than one step of the clock, which on the bench host is
+  slowest run but by no more than one step of the clock, which on `bench` is
   10 ns of a 160 ns row; the gate cannot tell that from an unchanged commit and passes
   it ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)).
-  Two steps fail.
+  Two steps fail. On `kip` the step is 1 ns, so the line never appears there.
 - `clock step unknown` in `bench-compare`'s first line: the result was written by a
   harness from before the step was measured, so the 5 percent rule alone applies,
   whatever step the baseline carries; the failure line says so in place of a step, and
