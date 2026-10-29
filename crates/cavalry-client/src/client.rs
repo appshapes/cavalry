@@ -17,8 +17,9 @@ use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
 use crate::conductor::{
-    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_SUBSCRIPTIONS, NO_PENDING, REGISTRATION_QUEUE,
-    REPLAY_QUEUE, RESPONSE_QUEUE, RESPONSE_TIMEOUT, ReplayRegistration, Shared, nanos, now_nanos,
+    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
+    REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE, RESPONSE_TIMEOUT, ReplayRegistration, Shared,
+    nanos, now_nanos,
 };
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
@@ -438,7 +439,13 @@ impl Cavalry {
     /// [`ClientError::Refused`] with error code 21, a position out of range code 23, a
     /// length below −1 code 7, a channel other than `cavalry:ipc` code 1, a segment file
     /// that cannot be opened or a log that cannot be created code 12, and a registry or
-    /// the counters file at capacity code 10.
+    /// the counters file at capacity code 10. The client follows the end of every
+    /// replay it started while the handle lives and the replay has not ended, as many
+    /// as the driver allows at once; a client that holds the driver's bound of live
+    /// replays and starts another is [`ClientError::ReplaysFull`], and the new one is
+    /// stopped again. A frame's position in the recording is
+    /// [`crate::Image::position_of`] of its header, or the same arithmetic from
+    /// [`crate::Image::positions`] in the handler.
     ///
     /// [`NULL_POSITION`]: cavalry_proto::client_protocol::NULL_POSITION
     /// [`NULL_LENGTH`]: cavalry_proto::client_protocol::NULL_LENGTH
@@ -494,6 +501,13 @@ impl Cavalry {
                              {ready_recording}, stream {stream_id}"
                         ),
                     });
+                }
+                // The conductor admits or refuses every queued registration before it
+                // hands over an answer, and marks a refused one (`ReplayRegistry::admit`):
+                // a replay nobody would tell of its end is stopped again, and refused.
+                if end.refused() {
+                    let _ = self.stop_replay(replay_session_id);
+                    return Err(ClientError::ReplaysFull { limit: MAX_REPLAYS });
                 }
                 let position = self.replay_position_counter(replay_session_id)?;
                 Ok(Replay::new(

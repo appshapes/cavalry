@@ -14,7 +14,7 @@ use cavalry_proto::client_protocol::Command;
 use cavalry_proto::frame::DataFrameHeader;
 use cavalry_shm::command_ring::Producer;
 use cavalry_shm::counters::Counter;
-use cavalry_shm::log::{LogBuffers, LogError, TermReader};
+use cavalry_shm::log::{LogBuffers, LogError, Positions, TermReader};
 use cavalry_shm::spsc;
 
 use crate::conductor::{Shared, now_nanos};
@@ -173,11 +173,26 @@ impl Image {
 
     /// The position of a frame the handler was given from this image, from its
     /// header's term id and term offset (`spec/log-buffer.md`, "Positions"): for a
-    /// replay's image, the position in the recording (ADR 0030).
+    /// replay's image, the position in the recording (ADR 0030). A frame's position is
+    /// not the sum of the aligned lengths delivered before it: a padding frame, which
+    /// fills the end of a term or covers an aborted claim, moves the position and is
+    /// handed to no handler. The handler holds no borrow of the image while the
+    /// subscription polls; [`Image::positions`] is the same arithmetic as a value it
+    /// can hold.
     pub fn position_of(&self, header: &DataFrameHeader) -> i64 {
-        self.log
-            .positions()
+        self.positions()
             .position(header.term_id(), header.term_offset() as u32)
+    }
+
+    /// The position arithmetic of this image's log, the initial term id and the term
+    /// length, as a copyable value: a fragment handler, which holds no borrow of the
+    /// image, names the position of the frame it was given as
+    /// `positions.position(header.term_id(), header.term_offset() as u32)`, which is
+    /// [`Image::position_of`] of that header. The images a poll reads from are those
+    /// [`Subscription::images`] lists before it; a poll with a fragment limit of 0
+    /// applies the images the driver announced and reads no frame.
+    pub fn positions(&self) -> Positions {
+        self.log.positions()
     }
 
     fn retire(self) -> Retired {

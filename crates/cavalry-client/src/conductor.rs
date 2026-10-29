@@ -53,17 +53,22 @@ pub(crate) const MAX_SUBSCRIPTIONS: usize = 1024;
 /// How many registrations may wait for the conductor between two of its cycles.
 pub(crate) const REGISTRATION_QUEUE: usize = 64;
 
-/// How many replays one client follows for their `replay stopped`: the driver's own
-/// bound on replays (`spec/client-protocol.md`, "Sizes"; ADR 0030). A handle past it
-/// is still a replay, and `ended` never says so for it; the driver refuses first.
+/// How many replays one client follows for their `replay stopped` at once: the
+/// driver's own bound on replays, starting or live (`spec/client-protocol.md`, "Sizes";
+/// ADR 0030). [`ReplayRegistry`] forgets a replay once its end is stored or its handle
+/// is gone, so what it holds is bounded by what the driver holds, and its capacity is
+/// one more than this for the command in flight. Full even so, a registration is
+/// refused, never dropped in silence: `start_replay` stops the replay and returns
+/// [`crate::ClientError::ReplaysFull`].
 pub(crate) const MAX_REPLAYS: usize = 64;
 
 /// How many replay registrations may wait for the conductor between two of its cycles.
+/// One command is in flight per client, so one waits at most; the rest is room.
 pub(crate) const REPLAY_QUEUE: usize = 16;
 
 /// What `start replay` registers with the conductor before it sends the command: where
 /// the conductor stores the replay's `replay stopped` when it arrives. The conductor
-/// forgets a registration whose handle is gone.
+/// forgets a registration once the end is stored or the handle is gone.
 pub(crate) struct ReplayRegistration {
     pub(crate) replay_session_id: i64,
     pub(crate) end: Arc<ReplayEnd>,
@@ -194,7 +199,7 @@ pub(crate) struct Conductor {
     registrations: spsc::Consumer<Registration>,
     registry: Registry,
     replay_registrations: spsc::Consumer<ReplayRegistration>,
-    replays: Vec<ReplayRegistration>,
+    replays: ReplayRegistry,
     client_id: i64,
     scratch: Vec<u8>,
 }
@@ -224,7 +229,7 @@ impl Conductor {
             registrations,
             registry: Registry::with_capacity(MAX_SUBSCRIPTIONS),
             replay_registrations,
-            replays: Vec::with_capacity(MAX_REPLAYS),
+            replays: ReplayRegistry::with_capacity(MAX_REPLAYS + 1),
             client_id,
             scratch: vec![0u8; COMMAND_SCRATCH],
         }
@@ -261,16 +266,15 @@ impl Conductor {
     }
 
     /// Drops the mappings the subscriptions retired and forgets a registration whose
-    /// subscription is gone, then admits the subscriptions the user's thread added: the
-    /// sweep first, so that a subscription dropped before another was added leaves its
-    /// place to it.
+    /// subscription is gone, and a replay whose end is stored or whose handle is gone,
+    /// then admits the subscriptions and replays the user's thread added: the sweeps
+    /// first, so that one dropped before another was added leaves its place to it.
     fn registrations(&mut self) -> usize {
-        self.registry.sweep() + self.admit()
+        self.registry.sweep() + self.replays.sweep() + self.admit()
     }
 
     /// Admits every registration queued, each through [`Registry::admit`], and every
-    /// replay registration, after forgetting those whose handle is gone; a replay past
-    /// the bound is dropped, and its handle never learns its end.
+    /// replay registration, each through [`ReplayRegistry::admit`].
     fn admit(&mut self) -> usize {
         let mut work = 0;
         while let Some(registration) = self.registrations.poll() {
@@ -278,11 +282,7 @@ impl Conductor {
             work += 1;
         }
         while let Some(registration) = self.replay_registrations.poll() {
-            self.replays
-                .retain(|replay| Arc::strong_count(&replay.end) > 1);
-            if self.replays.len() < MAX_REPLAYS {
-                self.replays.push(registration);
-            }
+            self.replays.admit(registration);
             work += 1;
         }
         work
@@ -398,12 +398,8 @@ impl Conductor {
                             position,
                             reason,
                         } => {
-                            if let Some(replay) = self
-                                .replays
-                                .iter()
-                                .find(|replay| replay.replay_session_id == replay_session_id)
-                            {
-                                replay.end.set(position, reason);
+                            if let Some(end) = self.replays.end(replay_session_id) {
+                                end.set(position, reason);
                             }
                         }
                     }
@@ -532,6 +528,74 @@ impl Registry {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.subscriptions.len()
+    }
+}
+
+/// The replays one client follows for their `replay stopped`, by replay session id:
+/// bounded, and never full in silence.
+///
+/// A registration is forgotten once its end is stored or its handle is gone, so the
+/// list holds replays live at the driver, or whose `replay stopped` this conductor has
+/// not read yet, each with a handle waiting for the end. The driver accepts `start
+/// replay` only with a free place among its [`MAX_REPLAYS`], and it sends `replay
+/// stopped` as it frees a place, so by the time this conductor reads a `replay ready`
+/// it has read the `replay stopped` of every replay that made room for it, and at
+/// most [`MAX_REPLAYS`] of its registrations have no end stored. The capacity is one
+/// more than that: the registration of the command in flight is queued before the
+/// command is sent and may be admitted before that `replay stopped` is read, and one
+/// command is in flight per client. Full even so, [`ReplayRegistry::admit`] refuses.
+pub(crate) struct ReplayRegistry {
+    replays: Vec<ReplayRegistration>,
+    capacity: usize,
+}
+
+impl ReplayRegistry {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            replays: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Admits `registration`, sweeping first when the registry is full. Still full,
+    /// the registration's end is marked refused and the registration dropped here, and
+    /// the call returns `false`: `start_replay`, which looks after the answer, finds
+    /// the mark, stops the replay and returns [`crate::ClientError::ReplaysFull`]. A
+    /// replay is refused, never left with a handle that never learns its end.
+    pub(crate) fn admit(&mut self, registration: ReplayRegistration) -> bool {
+        if self.replays.len() >= self.capacity {
+            self.sweep();
+        }
+        if self.replays.len() >= self.capacity {
+            registration.end.refuse();
+            drop(registration);
+            return false;
+        }
+        self.replays.push(registration);
+        true
+    }
+
+    /// Forgets a registration whose end is stored, which its handle has read or will
+    /// read from the shared end, or whose handle is gone, which the `Arc` count says.
+    /// Returns how many were forgotten.
+    pub(crate) fn sweep(&mut self) -> usize {
+        let before = self.replays.len();
+        self.replays
+            .retain(|replay| Arc::strong_count(&replay.end) > 1 && !replay.end.is_set());
+        before - self.replays.len()
+    }
+
+    /// The end shared with the handle of replay `replay_session_id`.
+    pub(crate) fn end(&self, replay_session_id: i64) -> Option<&ReplayEnd> {
+        self.replays
+            .iter()
+            .find(|replay| replay.replay_session_id == replay_session_id)
+            .map(|replay| &*replay.end)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.replays.len()
     }
 }
 
@@ -720,12 +784,80 @@ fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<O
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use cavalry_shm::spsc;
 
-    use super::{MAX_SUBSCRIPTIONS, NO_PENDING, Outcome, Registry, event, log_id};
+    use super::{
+        MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome, Registry, ReplayRegistration,
+        ReplayRegistry, event, log_id,
+    };
     use crate::error::Closed;
+    use crate::replay::ReplayEnd;
     use crate::response::Response;
     use crate::subscription::{ImageEvent, Registration, Retired};
+
+    /// A replay registration and the handle's half of its end.
+    fn replay(replay_session_id: i64) -> (ReplayRegistration, Arc<ReplayEnd>) {
+        let end = Arc::new(ReplayEnd::new());
+        (
+            ReplayRegistration {
+                replay_session_id,
+                end: Arc::clone(&end),
+            },
+            end,
+        )
+    }
+
+    /// The full case first (CLAUDE.md, gate 3): the registry at its capacity with every
+    /// replay live and every handle held refuses the next and marks it, and an end
+    /// stored or a handle dropped frees a place at the next admission, so that a client
+    /// that keeps the handles of ended replays is never refused.
+    #[test]
+    fn a_full_replay_registry_sweeps_then_refuses_and_an_end_frees_a_place() {
+        let capacity = MAX_REPLAYS + 1;
+        let mut registry = ReplayRegistry::with_capacity(capacity);
+        let mut held = Vec::with_capacity(capacity);
+        for id in 0..capacity as i64 {
+            let (registration, end) = replay(id);
+            assert!(registry.admit(registration));
+            held.push(end);
+        }
+        assert_eq!(registry.len(), capacity);
+
+        // Full, every replay live and every handle held: the next is refused and
+        // marked, which `start_replay` turns into `replays-full`.
+        let over = capacity as i64;
+        let (refused, end) = replay(over);
+        assert!(!registry.admit(refused));
+        assert!(end.refused());
+        assert!(registry.end(over).is_none());
+        assert_eq!(registry.len(), capacity);
+
+        // One replay ended, its handle kept: the admission sweeps it and the new one
+        // takes its place, admitted and not marked.
+        registry.end(0).expect("registered").set(640, 0);
+        let (admitted, end) = replay(over + 1);
+        assert!(registry.admit(admitted));
+        assert!(!end.refused());
+        assert!(registry.end(0).is_none());
+        assert!(registry.end(over + 1).is_some());
+        assert_eq!(registry.len(), capacity);
+
+        // One handle dropped: the same.
+        drop(held.swap_remove(1));
+        let (admitted, end) = replay(over + 2);
+        assert!(registry.admit(admitted));
+        assert!(!end.refused());
+        assert!(registry.end(1).is_none());
+        assert_eq!(registry.len(), capacity);
+
+        // The cycle's sweep forgets an ended replay without waiting for an admission.
+        registry.end(2).expect("registered").set(64, 1);
+        assert_eq!(registry.sweep(), 1);
+        assert!(registry.end(2).is_none());
+        assert_eq!(registry.sweep(), 0);
+    }
 
     /// A registration and the subscription's halves of its two queues.
     fn registration(

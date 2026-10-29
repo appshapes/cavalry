@@ -6,7 +6,7 @@
 //! client's conductor keeps for it.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 
 use cavalry_proto::client_protocol::ReplayStopReason;
 use cavalry_shm::counters::CounterValue;
@@ -15,9 +15,13 @@ use crate::{Cavalry, ClientError};
 
 /// How a replay ended, as `replay stopped` said it: shared between the conductor, which
 /// stores it once, and the handle, which reads it. A position of −1 means not ended.
+/// The conductor marks it refused instead when its registry could not admit the
+/// registration ([`crate::conductor::ReplayRegistry`]), which `start_replay` reads
+/// before it hands the handle over.
 pub(crate) struct ReplayEnd {
     position: AtomicI64,
     reason: AtomicI32,
+    refused: AtomicBool,
 }
 
 impl ReplayEnd {
@@ -25,6 +29,7 @@ impl ReplayEnd {
         Self {
             position: AtomicI64::new(-1),
             reason: AtomicI32::new(-1),
+            refused: AtomicBool::new(false),
         }
     }
 
@@ -33,6 +38,22 @@ impl ReplayEnd {
     pub(crate) fn set(&self, position: i64, reason: i32) {
         self.reason.store(reason, Ordering::Relaxed);
         self.position.store(position, Ordering::Release);
+    }
+
+    /// Whether the end has been stored: the registry forgets the registration then.
+    pub(crate) fn is_set(&self) -> bool {
+        self.position.load(Ordering::Acquire) >= 0
+    }
+
+    /// The conductor's mark that its registry was full and the registration dropped:
+    /// nobody will store this end.
+    pub(crate) fn refuse(&self) {
+        self.refused.store(true, Ordering::Release);
+    }
+
+    /// Whether the registration was refused.
+    pub(crate) fn refused(&self) -> bool {
+        self.refused.load(Ordering::Acquire)
     }
 
     fn get(&self) -> Option<(i64, i32)> {
@@ -48,7 +69,12 @@ impl ReplayEnd {
 /// started, the session and stream of its publication, and its position as the
 /// replayer stores it (`spec/client-protocol.md`, "Events", `replay ready`). The
 /// replay's frames are read through a [`crate::Subscription`] on the replay stream,
-/// which sees the replay's publication as an image whose positions are the recording's.
+/// which sees the replay's publication as an image whose positions are the recording's:
+/// the image with [`session_id`](Replay::session_id), and
+/// [`crate::Image::positions`] names each frame's position in the recording from its
+/// header. The client follows the end of every replay it started while the handle
+/// lives, as many as the driver allows at once: [`Cavalry::start_replay`] says what
+/// happens past that.
 pub struct Replay {
     replay_session_id: i64,
     recording_id: i64,

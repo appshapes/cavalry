@@ -32,7 +32,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   where and why it ended once `replay stopped` has arrived; `Cavalry::stop_replay(id)`,
   or `Replay::stop(&mut client)`, ends it from any client, and dropping the handle stops
   nothing (ADR 0030). `Image::position_of(&header)` is a frame's position in the
-  recording.
+  recording, and `Image::positions()` the same arithmetic as a value a handler holds; a
+  padding frame moves the position and is handed to no handler. The client follows the
+  end of every replay it started while the handle lives, as many as the driver allows
+  live at once; one more is refused with `replays-full` and stopped again.
 
 In Aeron, this is the client, with `tryClaim` and `commit`
 ([glossary](../../docs/glossary.md)).

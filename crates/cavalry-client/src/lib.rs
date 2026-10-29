@@ -14,7 +14,7 @@ pub use cavalry_proto::client_protocol::{
     FOLLOW_LENGTH, NULL_LENGTH, NULL_POSITION, ReplayStopReason,
 };
 pub use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
-pub use cavalry_shm::log::BufferClaim;
+pub use cavalry_shm::log::{BufferClaim, Positions};
 pub use client::{Cavalry, DIR_ENV};
 pub use error::{ClientError, Closed};
 pub use publication::{Offer, Publication};

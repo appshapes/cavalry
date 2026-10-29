@@ -1,17 +1,19 @@
-//! Replay through the client API against a real driver in this process: a recording
-//! made and stopped, then played into a subscription whose image's positions are the
-//! recording's; the handle's position and end; a replay following a live recording; a
-//! stop from the client; dropping the handle stopping nothing; and every error code
-//! (`spec/client-protocol.md`, "Commands"; ADR 0030). The full case comes first.
+//! Replay through the client API against a real driver in this process: the client
+//! with the driver's bound of replays, their handles kept, starting one more; a
+//! recording made and stopped, then played into a subscription whose image's positions
+//! are the recording's; a frame's position from its header across a padding frame; the
+//! handle's position and end; a replay following a live recording; a stop from the
+//! client; dropping the handle stopping nothing; and every error code
+//! (`spec/client-protocol.md`, "Commands"; ADR 0030). The full cases come first.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cavalry_client::{
-    Cavalry, ClientError, FOLLOW_LENGTH, Flags, NULL_LENGTH, NULL_POSITION, Replay,
+    Cavalry, ClientError, FOLLOW_LENGTH, NULL_LENGTH, NULL_POSITION, Offer, Positions, Replay,
     ReplayStopReason, Subscription,
 };
-use cavalry_driver::Driver;
+use cavalry_driver::{Driver, spec};
 use cavalry_proto::client_protocol::ErrorCode;
 
 /// A directory of its own per test, removed when the guard drops.
@@ -95,33 +97,55 @@ fn recorded(dir: &TestDir, count: u8) -> (Driver, Cavalry, i64) {
 type Drained = (Vec<(i64, Vec<u8>)>, i64, Option<ReplayStopReason>);
 
 /// Polls `subscription` until `replay` has ended and its image was read to the end;
-/// returns every frame's position and body in order.
+/// returns every frame's position and body in order, the position from the frame's
+/// header and the image's positions, as a handler names it, and checked against
+/// `Image::position_of` of the same header.
 fn drain(subscription: &mut Subscription, replay: &Replay) -> Drained {
     let mut frames = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
+    // The replay's image joins at a poll: a fragment limit of 0 applies the images the
+    // driver announced and reads no frame, so its positions are known before the first.
+    let mut positions: Option<Positions> = None;
     loop {
+        if positions.is_none() {
+            subscription.poll(|_, _| {}, 0).expect("the poll applies");
+            positions = subscription
+                .images()
+                .iter()
+                .find(|image| image.session_id() == replay.session_id())
+                .map(|image| image.positions());
+        }
         let mut batch = Vec::new();
-        let delivered = subscription
-            .poll(
-                |body, header| batch.push((header.term_offset(), header.term_id(), body.to_vec())),
-                64,
-            )
-            .expect("the poll reads");
-        for (term_offset, term_id, body) in batch {
-            let image = subscription.images().first().expect("the image");
-            let header = cavalry_client::DataFrameHeader::new(
-                cavalry_client::FrameType::Data,
-                Flags::UNFRAGMENTED,
-                32 + body.len(),
-            )
-            .expect("a header")
-            .with_term_offset(term_offset)
-            .with_term_id(term_id);
-            frames.push((image.position_of(&header), body));
+        let delivered = match positions {
+            Some(positions) => subscription
+                .poll(
+                    |body, header| {
+                        let position =
+                            positions.position(header.term_id(), header.term_offset() as u32);
+                        batch.push((position, *header, body.to_vec()));
+                    },
+                    64,
+                )
+                .expect("the poll reads"),
+            None => 0,
+        };
+        for (position, header, body) in batch {
+            let image = subscription
+                .images()
+                .iter()
+                .find(|image| image.session_id() == replay.session_id())
+                .expect("the image that delivered the frame");
+            assert_eq!(
+                position,
+                image.position_of(&header),
+                "the handler's arithmetic is position_of's"
+            );
+            frames.push((position, body));
         }
         let read_to = subscription
             .images()
-            .first()
+            .iter()
+            .find(|image| image.session_id() == replay.session_id())
             .map_or(i64::MAX, |image| image.position());
         if let Some((end, reason)) = replay.ended()
             && (read_to >= end || subscription.images().is_empty())
@@ -133,6 +157,34 @@ fn drain(subscription: &mut Subscription, replay: &Replay) -> Drained {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+}
+
+/// The full case of the client's replay registry (invariant 3; CLAUDE.md, gate 3): the
+/// driver's bound of replays started and stopped with every handle kept, then one more,
+/// which the driver accepts, since its bound counts live replays, and which this client
+/// follows to its end too, since its registry forgets a replay once its end is stored.
+/// A registry that kept ended replays would drop the last registration, and its
+/// `ended` would never say so.
+#[test]
+fn a_client_with_the_drivers_bound_of_ended_replays_follows_one_more_to_its_end() {
+    let dir = TestDir::new("bound");
+    let (driver, mut client, _) = recorded(&dir, 4);
+    let mut handles = Vec::with_capacity(spec::MAX_REPLAYS + 1);
+    // No subscription: each replay waits at its start, and the stop finds it there.
+    for n in 0..=spec::MAX_REPLAYS {
+        let replay = client
+            .start_replay(0, NULL_POSITION, NULL_LENGTH, 2070, "cavalry:ipc")
+            .unwrap_or_else(|error| panic!("replay {n}: {error}"));
+        replay.stop(&mut client).expect("stops");
+        wait("replay stopped arrives for every replay", || {
+            replay.ended().is_some()
+        });
+        assert_eq!(replay.ended(), Some((0, Some(ReplayStopReason::Stopped))));
+        handles.push(replay);
+    }
+    assert_eq!(handles.len(), spec::MAX_REPLAYS + 1);
+    client.close().expect("closes");
+    driver.close().expect("closes");
 }
 
 /// The full case (invariant 1): a recording of 100 messages played from its start to
@@ -182,6 +234,81 @@ fn a_replay_plays_a_recording_into_a_subscription_at_the_recordings_positions() 
     replay
         .stop(&mut client)
         .expect("a stopped replay's stop succeeds");
+    client.close().expect("closes");
+    driver.close().expect("closes");
+}
+
+/// A recording with a padding frame between two data frames, which an aborted claim
+/// leaves (`spec/log-buffer.md`, "Claim, commit and abort") and the replayer plays as
+/// padding (`spec/client-protocol.md`, the replayer): the handler is not called for
+/// it, and the frame after it is at the recording's position past the padding, from
+/// its header, where a sum of the aligned lengths delivered would be one frame short
+/// (invariant 1).
+#[test]
+fn a_frames_position_comes_from_its_header_across_a_padding_frame() {
+    let dir = TestDir::new("padding");
+    let driver_dir = dir.path().join("driver");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut client = Cavalry::connect_to(&driver_dir).expect("connects");
+    let mut publication = client
+        .add_exclusive_publication("cavalry:ipc", 73)
+        .expect("a publication");
+    let recording = client
+        .start_recording("cavalry:ipc", 73)
+        .expect("a recording");
+    let mut after = 0;
+    wait("the first offer goes through", || {
+        publication
+            .offer(&[1u8; 32])
+            .map(|position| after = position)
+            .is_ok()
+    });
+    assert_eq!(after, 64);
+    // A claim aborted is a padding frame of its length, positions 64 to 128.
+    wait("the claim goes through", || {
+        match publication.try_claim(32) {
+            Ok(claim) => {
+                after = claim.abort();
+                true
+            }
+            Err(Offer::BackPressured | Offer::AdminAction | Offer::NotConnected) => false,
+            Err(other) => panic!("{other}"),
+        }
+    });
+    assert_eq!(after, 128);
+    wait("the second offer goes through", || {
+        publication
+            .offer(&[2u8; 32])
+            .map(|position| after = position)
+            .is_ok()
+    });
+    assert_eq!(after, 192);
+    wait("the recording is synced", || {
+        recording.synced_position() == after
+    });
+    client.stop_recording(0).expect("stops");
+    publication.close().expect("closes");
+
+    let mut subscription = client
+        .add_subscription("cavalry:ipc", 2076)
+        .expect("a subscription");
+    let replay = client
+        .start_replay(0, NULL_POSITION, NULL_LENGTH, 2076, "cavalry:ipc")
+        .expect("a replay");
+    let (frames, ended_at, reason) = drain(&mut subscription, &replay);
+    assert_eq!((ended_at, reason), (192, Some(ReplayStopReason::Ended)));
+    assert_eq!(frames.len(), 2, "the padding frame is handed to no handler");
+    assert_eq!(
+        frames
+            .iter()
+            .map(|(position, _)| *position)
+            .collect::<Vec<_>>(),
+        vec![0, 128],
+        "the second frame is past the padding, not at the sum of the lengths delivered"
+    );
+    assert_eq!(frames[0].1, vec![1u8; 32]);
+    assert_eq!(frames[1].1, vec![2u8; 32]);
     client.close().expect("closes");
     driver.close().expect("closes");
 }
