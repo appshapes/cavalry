@@ -49,9 +49,12 @@ not a sample of it.
 
 A bench host's baseline for a profile is recorded from every process the host has run
 at the baseline's tree, three at least. A tree is a commit and every later commit
-between which `git diff --stat -- crates/ bench/src Cargo.toml Cargo.lock
-bench/Cargo.toml` prints nothing, so a dependency bump, which rebuilds the harness and
-the data-plane crates from other code, ends a tree as a code change does; a run of
+between which `git diff --stat -- crates/ bench/src bench/host bench/Cargo.toml
+Cargo.toml Cargo.lock justfile` prints nothing: the crates and the harness, the
+manifests and the lockfile, since a dependency bump rebuilds them from other code, the
+`justfile`, whose recipes set the harness's build flags, and `bench/host`, whose
+`check.sh` admits the host state a process is recorded from; a change to any of them
+ends a tree as a code change does. A run of
 master's job at the tree is a process of it, and so is a run of a pull request whose
 head is at the tree, since a change that touches none of those paths can carry no
 regression the gate measures. A run of a pull request that changes the data plane
@@ -210,8 +213,9 @@ own run on `bench` brushes the gate, then they are re-recorded by this rule.
 We now maintain the `processes` field, `--join`, the procedure in the two how-to
 pages, and the CI jobs' unchecked steps that run after a failed comparison. The jobs
 build with the `stable` toolchain unpinned, so two processes of one tree days apart
-can be two compilers' binaries; the tree rule cannot see that, and a baseline whose
-band a compiler moved is a re-record under this rule, not a join.
+can be two compilers' binaries; the tree rule cannot see that, nor the CPUs a job pins,
+which live in `.github/workflows/ci.yml` and have not moved on either host; a baseline
+whose band a compiler or a pin moved is a re-record under this rule, not a join.
 
 Revisit: when a process joins the baseline more than once a week after the band's first
 week, so that the band keeps growing and several processes per job (the seventh

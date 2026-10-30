@@ -150,12 +150,13 @@ shared runner is
    recorded from every process the host has run at one tree, three at least
    ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
    A tree is a commit and every later commit between which
-   `git diff --stat <first> <later> -- crates/ bench/src Cargo.toml Cargo.lock
-   bench/Cargo.toml` prints nothing, so a dependency bump ends a tree as a code change
-   does; a run of master's job at the tree is a process of it, and so is a run of a
-   pull request whose head is at the tree. A push gives the first run, and `gh run rerun <run id>
-   --failed`, or "Re-run failed jobs" on the run's page, gives the next at the same
-   commit. Download each run's artifact, `bench-results-bench-linux` from
+   `git diff --stat <first> <later> -- crates/ bench/src bench/host bench/Cargo.toml
+   Cargo.toml Cargo.lock justfile` prints nothing, so a dependency bump, a change to
+   the recipes that build the harness or to the host check ends a tree as a code
+   change does; a run of master's job at the tree is a process of it, and so is a run
+   of a pull request whose head is at the tree. A push gives the first run, and
+   `gh run rerun <run id> --job <job id>`, or the job's re-run button on the run's
+   page, gives the next at the same commit whether the first passed or failed. Download each run's artifact, `bench-results-bench-linux` from
    `bench (linux)` for `bench` or `bench-results-kip-linux` from `bench (kip)` for
    `kip`; every attempt of a run keeps an artifact of that name. Pass one profile's
    files to one `--update`, the `bench-linux` results in one call and the

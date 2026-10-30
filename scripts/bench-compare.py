@@ -222,6 +222,12 @@ def update(results: list[dict], baseline: dict, join: bool = False) -> int:
     if len(results) == 2:
         sys.exit("bench-compare: two processes make no baseline; a bench host's baseline is every process "
                  "it has run at the tree, three at least, and a laptop's is one (ADR 0033).")
+    for r in results:
+        for name, row in r["benchmarks"].items():
+            runs = row.get("p99_99_ns_runs")
+            if runs is not None and r.get("repeat") and len(runs) != r["repeat"]:
+                sys.exit(f"bench-compare: {name} has {len(runs)} runs where the harness setting is {r['repeat']} "
+                         "per process; a row added by hand holds every process's runs or none (ADR 0033).")
     newest = results[-1]
     profile = newest["profile"]
     gits = []
@@ -268,6 +274,12 @@ def joined(results: list[dict], baseline: dict) -> list[dict]:
                  "record one with --update first (ADR 0033).")
     repeat = entry.get("repeat") or 1
     count = entry.get("processes") or 1
+    for name, row in entry["benchmarks"].items():
+        runs = row.get("p99_99_ns_runs")
+        if runs is not None and len(runs) != repeat * count:
+            sys.exit(f"bench-compare: --join cannot add to {name}: the entry holds {len(runs)} runs for {count} "
+                     f"process{'es' if count != 1 else ''} of {repeat}; a row added by hand holds every process's "
+                     "runs, or record the profile again with --update (ADR 0033).")
     gits = entry["git"] if isinstance(entry["git"], list) else [entry["git"]]
     earlier = []
     for i in range(count):

@@ -30,7 +30,7 @@ def row(p99_99, runs=None):
 
 def result(step, **rows):
     return {"schema": 0, "profile": "test-host", "git": "abc1234", "date_unix": 1793229856,
-            "messages": 1000, "repeat": 3, "allocations_per_message": 0, "allocations": 0,
+            "messages": 1000, "repeat": 1, "allocations_per_message": 0, "allocations": 0,
             "clock_step_ns": step, "benchmarks": rows}
 
 
@@ -211,7 +211,9 @@ class Update(unittest.TestCase):
         return json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
 
     def test_update_writes_the_step_and_the_runs(self):
-        written = self.update(result(10, one_way_32_client=row(300, runs=[290, 300, 310])))
+        res = result(10, one_way_32_client=row(300, runs=[290, 300, 310]))
+        res["repeat"] = 3
+        written = self.update(res)
         entry = written["profiles"]["test-host"]
         self.assertEqual(entry["clock_step_ns"], 10)
         self.assertEqual(entry["benchmarks"]["one_way_32_client"]["p99_99_ns_runs"], [290, 300, 310])
@@ -259,6 +261,7 @@ class Processes(Update):
         c = result(1, claim_commit_32_exclusive=row(102, runs=[96, 102, 123]))
         for i, r in enumerate((a, b, c)):
             r["date_unix"] += i * 3600
+            r["repeat"] = 3
         return a, b, c
 
     def test_three_processes_write_every_run_and_the_slowest_process_s_percentiles(self):
@@ -329,6 +332,7 @@ class Processes(Update):
         d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]))
         d["date_unix"] = c["date_unix"] + 3600
         d["git"] = "def5678"
+        d["repeat"] = 3
         from_all = self.update(a, b, c, d)
         with contextlib.redirect_stdout(io.StringIO()):
             bench_compare.update([a, b, c], {"schema": 0, "profiles": {}})
@@ -358,6 +362,25 @@ class Processes(Update):
                 bench_compare.update([d], baseline, join=True)
         self.assertIn("one repeat", str(refused.exception))
 
+    def test_a_row_whose_runs_are_not_every_process_s_is_refused(self):
+        """A row added by hand with fewer runs than the processes measured would be padded
+        with a run no process measured on the next join; both paths refuse it."""
+        a, b, c = self.processes()
+        c["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns_runs"] = [102, 123]
+        with self.assertRaises(SystemExit) as refused:
+            self.update(a, b, c)
+        self.assertIn("has 2 runs where the harness setting is 3", str(refused.exception))
+        a, b, c = self.processes()
+        self.update(a, b, c)
+        baseline = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        baseline["profiles"]["test-host"]["benchmarks"]["timer"] = row(20, runs=[20, 20])
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]), timer=row(20, runs=[20, 20, 20]))
+        d["repeat"] = 3
+        with self.assertRaises(SystemExit) as refused:
+            with contextlib.redirect_stdout(io.StringIO()):
+                bench_compare.update([d], baseline, join=True)
+        self.assertIn("--join cannot add to timer", str(refused.exception))
+
     def test_main_joins_a_file(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -365,6 +388,7 @@ class Processes(Update):
         self.update(a, b, c)
         d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]))
         d["date_unix"] = c["date_unix"] + 3600
+        d["repeat"] = 3
         path = Path(directory.name) / "test-host-4.json"
         path.write_text(json.dumps(d), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
