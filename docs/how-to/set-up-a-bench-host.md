@@ -121,14 +121,19 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    not among the required checks today.
 
 7. Record the baselines. The first run of the host's job reports every benchmark as
-   `no baseline` and passes. Download the run's artifact, `bench-results-bench-linux`
-   from `bench (linux)` on `bench` or `bench-results-kip-linux` from `bench (kip)` on
-   `kip`, and record its two files as [Run the bench](run-the-bench.md) describes in
-   its step 4, under the host's own profiles, `bench-linux` and `bench-linux-unchecked`
-   or `kip-linux` and `kip-linux-unchecked`, in one commit whose message holds the
-   histograms. The artifact is uploaded whether or not the run passed the gate, so
-   when the host has changed (Updating the host, below) the red run after the change
-   is the one to record from.
+   `no baseline` and passes. A host's baselines are recorded from three processes, the
+   first three runs of its job at one tree
+   ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-three-processes.md)):
+   re-run the job twice, with `gh run rerun <run id> --job <job id>` or the job's
+   re-run button on the run's page, and download each attempt's artifact,
+   `bench-results-bench-linux` from `bench (linux)` on `bench` or
+   `bench-results-kip-linux` from `bench (kip)` on `kip`. Record each profile's three
+   files as [Run the bench](run-the-bench.md) describes in its step 4, under the
+   host's own profiles, `bench-linux` and `bench-linux-unchecked` or `kip-linux` and
+   `kip-linux-unchecked`, in one commit whose message holds the histograms. The
+   artifact is uploaded whether or not the run passed the gate, so when the host has
+   changed (Updating the host, below) the red runs after the change are the ones to
+   record from.
 
 ## How to verify it worked
 
@@ -219,9 +224,9 @@ build script.
 
 Packages and the kernel change only by hand, because a change underneath the baseline
 reads as a regression nobody committed. Apply updates, reboot, run `check.sh`, then
-re-record the host's two baselines from its job's next run as step 7 says, under its
-own profiles and from its own artifact, in a commit whose message names what changed
-on the host.
+re-record the host's two baselines from its job's next three runs at one tree, as
+step 7 says, under its own profiles and from its own artifacts, in a commit whose
+message names what changed on the host.
 
 ## When it does not work
 

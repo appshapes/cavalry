@@ -101,7 +101,13 @@ shared runner is
    clock above it, is a regression and the recipe exits 1; when the baseline was
    recorded with `--repeat`, the baseline's slowest run is the number compared, so a
    commit fails when its median tail is slower than anything the baseline measured, by
-   more than 5 percent and by more than one clock step. The harness measures its
+   more than 5 percent and by more than one clock step. A bench host's baseline holds
+   the runs of three processes, the first three runs of master's job on that host at
+   one tree, so "anything the baseline measured" spans processes as well as runs: on
+   kip a row's median moves by up to a third from one process of the same tree to the
+   next, and the first line then says `baseline from 3 processes`
+   ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-three-processes.md)).
+   The harness measures its
    clock's step at start, prints it in its first line in nanoseconds and in the
    counter's own ticks (`clock step 10 ns (37 ticks)` on `bench`, whose counter
    moves by 37 ticks every 10 ns, and `clock step 1 ns (2 ticks)` on `kip`, where one
@@ -138,19 +144,36 @@ shared runner is
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
    `python3 scripts/bench-compare.py --update`, which writes the newest result's git,
-   date, percentiles and clock step into `bench/baseline.json` for that profile. Commit
-   it with the histograms in the message. A bench host's baselines are set from its
-   own CI run: download the run's artifact, `bench-results-bench-linux` from
-   `bench (linux)` for `bench` or `bench-results-kip-linux` from `bench (kip)` for
-   `kip`, and pass each of its two files, the `bench-linux` and `bench-linux-unchecked`
-   results or the `kip-linux` and `kip-linux-unchecked` results, to `--update`. The
-   artifact is uploaded whether or not the run passed the gate, so a run that failed
-   after a change to the host is the one to record from
-   ([Set up a bench host](set-up-a-bench-host.md#updating-the-host)). A new row joins
-   a baseline that already exists by adding its entry from
-   that run's result and leaving the other rows as they were recorded, in a commit that
-   names the row and the run; `--update` rewrites the whole profile, which is for a host
-   whose numbers moved, never for one new row.
+   date, percentiles and clock step into `bench/baseline.json` for that profile, as one
+   process. Commit it with the histograms in the message. A bench host's baselines are
+   recorded from three processes, the first three runs of master's job on that host at
+   one tree
+   ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-three-processes.md)): a
+   push gives the first run, and `gh run rerun <run id> --failed`, or "Re-run failed
+   jobs" on the run's page, gives the next at the same commit; a run at a later commit
+   counts when `git diff --stat <first> <later> -- crates/ bench/src` prints nothing.
+   Download each run's artifact, `bench-results-bench-linux` from `bench (linux)` for
+   `bench` or `bench-results-kip-linux` from `bench (kip)` for `kip`; every attempt of
+   a run keeps an artifact of that name. Pass one profile's three files to one
+   `--update`, the three `bench-linux` results in one call and the three
+   `bench-linux-unchecked` results in another, or the `kip-linux` and
+   `kip-linux-unchecked` results for `kip`; it refuses files of two profiles or of two
+   harness settings. The entry then holds each percentile from the slowest process,
+   the three processes' runs in order in `p99_99_ns_runs`, each `repeat` long, and
+   `processes: 3`. Take the first three runs that reached the profile, never a choice
+   among them: a run that failed the gate is one of the three, and the artifact is
+   uploaded whether or not the run passed, so a run that failed after a change to the
+   host is one to record from
+   ([Set up a bench host](set-up-a-bench-host.md#updating-the-host)). A baseline is
+   re-recorded when master's own run fails or brushes the gate with no data-plane
+   change behind it, from master's runs and never a pull request's, which would be the
+   gate loosened to pass a benchmark; the commit lists every gated row's slowest run
+   before and after and names the cause of every row that loosens by more than 5
+   percent, or the card that will find it. A new row joins a baseline that already
+   exists by adding its entry from the first three master runs that have it and
+   leaving the other rows as they were recorded, in a commit that names the row and
+   the runs; `--update` rewrites the whole profile, which is for a host whose numbers
+   moved, never for one new row.
 
 ## How to verify it worked
 
