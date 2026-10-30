@@ -316,6 +316,19 @@ class Processes(Update):
             self.update(a, b, c)
         self.assertIn("same rows", str(refused.exception))
 
+    def test_two_or_four_processes_are_refused(self):
+        """Three is fixed, not a minimum (ADR 0033): a fourth process loosens the slowest
+        run by collection, and two is a baseline half recorded. Nothing is written."""
+        a, b, c = self.processes()
+        d = self.processes()[0]
+        d["date_unix"] += 4 * 3600
+        for given in ((a, b), (a, b, c, d)):
+            with self.assertRaises(SystemExit) as refused:
+                self.update(*given)
+            self.assertIn(f"these are {len(given)}", str(refused.exception))
+            self.assertIn("Three is fixed, not a minimum", str(refused.exception))
+            self.assertFalse(bench_compare.BASELINE.exists())
+
     def test_main_updates_from_several_files_and_compares_one(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

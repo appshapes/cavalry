@@ -158,7 +158,9 @@ shared runner is
    `--update`, the three `bench-linux` results in one call and the three
    `bench-linux-unchecked` results in another, or the `kip-linux` and
    `kip-linux-unchecked` results for `kip`; it refuses files of two profiles or of two
-   harness settings. The entry then holds each percentile from the slowest process,
+   harness settings, and any count of files but one or three: three is fixed, not a
+   minimum, since every process brings its own rarest slow run and a fourth would
+   loosen the slowest run by collection. The entry then holds each percentile from the slowest process,
    the three processes' runs in order in `p99_99_ns_runs`, each `repeat` long, and
    `processes: 3`. Take the first three runs that reached the profile, never a choice
    among them: a run that failed the gate is one of the three, and the artifact is

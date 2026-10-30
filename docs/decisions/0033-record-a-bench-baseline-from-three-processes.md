@@ -150,9 +150,10 @@ while the unchecked claim rows moved a tenth the other way, also card 169's; and
 most 403 and whose medians, 388 to 392, are below the 395 before. Six rows tighten,
 the unchecked claim rows by a tenth.
 
-Judged against the new baselines, every process of the day that was not recorded
-passes, the two that failed the old baseline among them: the checked profile's fourth
-and fifth attempts (2026-10-30), concurrent 162 (159 to 167) and 162 (150 to 164)
+Judged against the new baselines, every process measured on the two days before they
+were recorded, and not recorded in them, passes, the two that failed the old baseline
+among them: the checked profile's fourth and fifth attempts (2026-10-30), concurrent
+162 (159 to 167) and 162 (150 to 164)
 against 166, exclusive 134 (128 to 162) and 148 (142 to 159) against 160, `bench-compare:
 ok` on both, where both had failed the concurrent row at +5.2 percent against 154; and
 pull request 68's run 40958773217 at the same data plane (64c8aec), checked concurrent
@@ -163,6 +164,25 @@ unchecked profile, the same pull request's run, concurrent 147, exclusive 106,
 recorded 243 (237 to 258) against 257, and the two master processes of the
 one-millisecond cadence, a4d7e5d and 0e97c37, recorded 243 and 241 against 257, all
 `bench-compare: ok`.
+
+The first process judged against the new baselines after they were recorded does not
+pass: the `bench (kip)` run of the pull request that records them, 41016312787, on
+2026-10-30 at 06:50, at the merge of the change with master (5b6eab7), with no crate
+code changed. The checked profile passed, `claim_commit_32_client` 184 (182 to 192)
+against 190; the unchecked profile failed on `claim_commit_32_client`, median 189 (180
+to 198) against the slowest run of 176, +7.4 percent, with `check.sh` ok, 0
+allocations, clock step 1 ns and every other row within its baseline. That row is one
+the re-record tightened, from 202 to 176: the three recorded processes read it at 169
+(164 to 172), 171 (166 to 174) and 175 (173 to 176), and the one process of 7f62673 at
+187 (182 to 202), so the fourth process's twenty-one runs all lie above the slowest of
+the sixty-three recorded and inside the band of the one process they replaced, which
+would have passed it. The three bands overlapped on this row among the three
+processes and not with the fourth: four medians from 169 to 189 where no one
+process's band is wider than 18 ns, which is the Revisit clause below on the
+baseline's first day. What the decision does about that run is not decided in this
+revision of the ADR: a rerun until green is the first alternative, lost; a re-record
+from a pull request's run is what the Decision forbids; and the Decision does not yet
+say what else. It has to before this ADR is accepted.
 
 What the three-process baseline cannot tell: a process of the one-millisecond cadence
 in ADR 0032's high mode, exclusive 156 and concurrent 168 at 0e97c37, also passes
@@ -180,7 +200,8 @@ its first step.
 Easier: master's runs on kip stay green on an unchanged tree, and a red `bench (kip)`
 is a change again. A baseline says what its host measured in three processes, and the
 comparison's first line says so. Recording one takes three runs of the job instead of
-one, two of them reruns, and `--update` refuses to mix profiles or harness settings.
+one, two of them reruns, and `--update` refuses to mix profiles or harness settings,
+or to record two processes or four.
 
 Harder: the gate on kip's exclusive row holds the line at 160 ns against medians of 102
 to 148, so a regression on that row has to move its median past 168 to fail there; the
@@ -207,5 +228,7 @@ tighten again; when the gate's compared statistic changes.
 - `scripts/bench-compare.py` (`update`), `scripts/bench-compare-test.py` (`Processes`),
   `bench/baseline.json`, `.github/workflows/ci.yml`; `docs/how-to/run-the-bench.md`,
   steps 3 and 4; `docs/how-to/set-up-a-bench-host.md`, step 7.
-- CI run 40961831660 (master at 4a09b6e, attempts 1 to 5), run 40958773217 (pull
-  request 68).
+- CI run 40961831660 (master at 4a09b6e, attempts 1 to 6), run 40958773217 (pull
+  request 68), run 41016312787 (the `bench (kip)` job of the pull request that
+  records the baselines, at 5b6eab7: the first process judged against them, red on
+  the unchecked `claim_commit_32_client` row).

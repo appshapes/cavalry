@@ -22,9 +22,11 @@ reads the baseline's band is the 5 percent rule on the rows the host can measure
 says so on the row it cannot, instead of failing an unchanged commit (ADR 0016). A
 bench host's baseline is recorded from three processes, the first three runs of master's
 job on that host at one tree, and the slowest run is the slowest over all of them: on
-kip a row's median moves by up to a fifth between two processes of one tree, and a
+kip a row's median moves by up to a third between two processes of one tree, and a
 baseline from one process at the bottom of that band failed master's own next run with
-no change behind it (ADR 0033). Only
+no change behind it (ADR 0033). Three is fixed, not a minimum, since every process
+brings its own rarest slow run and a fourth loosens the slowest run by collection, so
+`--update` takes one result file or three and refuses any other count. Only
 the rows a message passes through, claim_commit_* and one_way_*, can fail the gate; the
 timer and slot_padding_* rows hold no Cavalry code, they probe the host and the clock at
 30 to 60 ns, where one 10 ns step of the clock is 15 to 33 percent, and they are printed
@@ -33,9 +35,10 @@ with their change marked "reported" (ADR 0017).
     bench-compare.py                        compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>               compare that result file instead
     bench-compare.py --update [<result>...] write the baseline for the results' profile: from the newest
-                                            result alone, or from each result file given, one process
-                                            each, which is how a bench host's baseline is set from the
-                                            artifacts of three of its CI runs (ADR 0033)
+                                            result alone, one process, or from three result files, one
+                                            process each, which is how a bench host's baseline is set
+                                            from the artifacts of the first three runs of master's job
+                                            (ADR 0033); two files, or four, are refused
 
 A profile that has no baseline yet is reported and passes: the baseline for a runner is
 set from that runner's own first run (ADR 0015), and a laptop has none unless someone
@@ -194,12 +197,17 @@ def recorded_at(result: dict) -> str | None:
 def update(results: list[dict], baseline: dict) -> int:
     """Write the baseline entry for the results' profile. One result is one process of the
     harness; a bench host's baseline is recorded from three, the first three runs of
-    master's job at one tree (ADR 0033). The entry carries each percentile from the slowest
+    master's job at one tree, and three is fixed, not a minimum, so any count but one or
+    three is refused (ADR 0033). The entry carries each percentile from the slowest
     process, every process's runs in order in `p99_99_ns_runs`, each `repeat` long, so the
     slowest run the gate compares with is the slowest over all of them, and `processes`.
     The results must be of one profile and one harness setting, the same messages, repeat
     and clock step, with the same rows; `git` is the one commit, or the list when the
     processes ran at several, and `date` is the newest process's."""
+    if len(results) not in (1, 3):
+        sys.exit(f"bench-compare: --update takes one result, a laptop's one process, or three, the first "
+                 f"three runs of master's job on a bench host at one tree; these are {len(results)}. Three "
+                 "is fixed, not a minimum: a fourth process loosens the slowest run by collection (ADR 0033).")
     results = sorted(results, key=lambda r: r.get("date_unix") or 0)
     for field in ("profile", "messages", "repeat", STEP_FIELD):
         values = sorted({json.dumps(r.get(field)) for r in results})

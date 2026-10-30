@@ -639,7 +639,8 @@ user-visible change, added in the same commit as the change. The format follows
 - A bench host's baseline is recorded from three processes, the first three runs of
   master's job on that host at one tree, and the gate compares a row's median with the
   slowest run over all of them: `scripts/bench-compare.py --update` takes the three
-  result files and writes `processes: 3`, and the comparison's first line says so.
+  result files, or a laptop's one and no other count, and writes `processes: 3`, and
+  the comparison's first line says so.
   `kip`'s two baselines are re-recorded that way from master at 4a09b6e, where master's
   own runs had failed against one process's band: the exclusive claim row's slowest run
   moves from 132 to 160 ns and the concurrent row's from 154 to 166 (card 168 owns the
