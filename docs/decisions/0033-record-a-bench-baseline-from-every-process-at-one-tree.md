@@ -73,7 +73,11 @@ from N processes`. On the baseline's tree nothing the gate exists to catch has c
 so a process of that tree that reads a row above the baseline is the host's own band,
 and it joins the baseline: `scripts/bench-compare.py --join <result>` adds the process
 to the entry, in a commit whose message carries the run and the row, by the procedure
-in `docs/how-to/run-the-bench.md`, step 4. A process of another tree never joins. The
+in `docs/how-to/run-the-bench.md`, step 4. A process of another tree never joins, and
+nor does a process whose row moved as a whole: when a row's p50 and p99 moved with its
+p99.99 and its rate fell against every other process at the tree, the host was
+disturbed during the run, as the troubleshooting list of that page reads it; the run is
+rerun, and the record names the disturbance where it is known. The
 host's one deliberate change, an update of its packages or kernel, is the re-record of
 `docs/how-to/set-up-a-bench-host.md`, "Updating the host", as before.
 
@@ -179,6 +183,17 @@ checked `bench-compare: ok`, unchecked red on `claim_commit_32_client`, 189 agai
 the same three: `bench-compare: ok` on both profiles, unchecked `claim_commit_32_client`
 171 (168 to 185) against 176 and checked 175 (167 to 180) against 190; it joined too,
 and moved no slowest run.
+
+A disturbed process, the kind that joins nothing, in the seven the bench host had run
+at this tree by 08:10Z on 2026-10-30: pull request 70's run 41024226264, unchecked
+`claim_commit_32_concurrent` 170 (160 to 190) against 150, +13.3 percent, with p50 90
+against 79 to 80, p99 120 against 90 to 100 and the row's rate 8.17 million claims a
+second against 9.35 to 9.45 million in the other six, the conductor's loads 318 against
+278 to 279, and `one_way_32_concurrent` 240 against 210 to 220 at the same rate; the
+checked profile of the same job and every other row read as the other six did. The
+host's journal holds one event in the window, `sysstat-collect.service` at 08:10:08Z,
+85 seconds into that bench; whether it is the cause, and the host's timers, are card
+170's.
 
 What the baseline cannot tell: a process of the one-millisecond cadence in ADR 0032's
 high mode, exclusive 156 and concurrent 168 at 0e97c37, also passes against 162 and

@@ -176,7 +176,10 @@ shared runner is
    appends its runs to the entry and raises the slowest run where it read higher, in a
    commit whose message names the run and the row. A run at another tree never joins:
    a pull request that changes the tree's paths is judged, and a red there is a
-   change. A baseline is re-recorded at a new tree when master's own run fails or
+   change. Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
+   with its p99.99 and its rate fell against the other processes at the tree, the
+   host was disturbed during the run (the troubleshooting list below); re-run the job
+   and name the disturbance where the host's journal shows it. A baseline is re-recorded at a new tree when master's own run fails or
    brushes the gate there with no data-plane change behind it, from the tree's first
    three processes and every one after them; the commit lists every gated row's
    slowest run before and after and names the cause of every row that loosens by more
