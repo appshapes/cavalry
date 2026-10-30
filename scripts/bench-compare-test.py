@@ -2,8 +2,9 @@
 """Tests of bench-compare.py's rule on made-up results and baselines: a gated row fails only
 beyond 5 percent and beyond one step of the harness's clock, the smaller of the result's
 step and the baseline's (ADR 0029); the probe rows are reported; `--update` writes the step
-into the baseline and the next comparison reads it back. Standard library only;
-`just test-scripts` runs it.
+into the baseline and the next comparison reads it back; a bench host's baseline from
+every process at one tree holds every process's runs, a later process of the tree joins
+it with `--join`, and the gate compares with the slowest over all of them (ADR 0033). Standard library only; `just test-scripts` runs it.
 
     python3 scripts/bench-compare-test.py
 """
@@ -29,7 +30,7 @@ def row(p99_99, runs=None):
 
 def result(step, **rows):
     return {"schema": 0, "profile": "test-host", "git": "abc1234", "date_unix": 1793229856,
-            "messages": 1000, "repeat": 3, "allocations_per_message": 0, "allocations": 0,
+            "messages": 1000, "repeat": 1, "allocations_per_message": 0, "allocations": 0,
             "clock_step_ns": step, "benchmarks": rows}
 
 
@@ -202,14 +203,17 @@ class Update(unittest.TestCase):
         patched.start()
         self.addCleanup(patched.stop)
 
-    def update(self, res):
-        """Run `--update` on an empty baseline and return what it wrote to the file."""
+    def update(self, *results):
+        """Run `--update` on an empty baseline, one result per process, and return what it
+        wrote to the file."""
         with contextlib.redirect_stdout(io.StringIO()):
-            bench_compare.update(res, {"schema": 0, "profiles": {}})
+            bench_compare.update(list(results), {"schema": 0, "profiles": {}})
         return json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
 
     def test_update_writes_the_step_and_the_runs(self):
-        written = self.update(result(10, one_way_32_client=row(300, runs=[290, 300, 310])))
+        res = result(10, one_way_32_client=row(300, runs=[290, 300, 310]))
+        res["repeat"] = 3
+        written = self.update(res)
         entry = written["profiles"]["test-host"]
         self.assertEqual(entry["clock_step_ns"], 10)
         self.assertEqual(entry["benchmarks"]["one_way_32_client"]["p99_99_ns_runs"], [290, 300, 310])
@@ -236,6 +240,181 @@ class Update(unittest.TestCase):
         code, out = run(result(20, claim_commit_32_client=row(175)), written)
         self.assertEqual(code, 1, out)
         self.assertIn("the smaller of the result's 20 and the baseline's 10", out)
+
+    def test_one_result_is_one_process_and_the_comparison_does_not_say_so(self):
+        written = self.update(result(10, one_way_32_client=row(300)))
+        self.assertEqual(written["profiles"]["test-host"]["processes"], 1)
+        code, out = run(result(10, one_way_32_client=row(300)), written)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("processes", out)
+
+
+class Processes(Update):
+    """A bench host's baseline is recorded from every process it has run at one tree,
+    three at least, and the slowest run the gate compares with is the slowest over all of
+    them (ADR 0033). The numbers are kip's exclusive claim row on master at 4a09b6e, the
+    first three runs of `bench (kip)` and a fourth that joins."""
+
+    def processes(self):
+        a = result(1, claim_commit_32_exclusive=row(124, runs=[122, 124, 154]))
+        b = result(1, claim_commit_32_exclusive=row(106, runs=[102, 106, 160]))
+        c = result(1, claim_commit_32_exclusive=row(102, runs=[96, 102, 123]))
+        for i, r in enumerate((a, b, c)):
+            r["date_unix"] += i * 3600
+            r["repeat"] = 3
+        return a, b, c
+
+    def test_three_processes_write_every_run_and_the_slowest_process_s_percentiles(self):
+        written = self.update(*self.processes())
+        entry = written["profiles"]["test-host"]
+        self.assertEqual(entry["processes"], 3)
+        self.assertEqual(entry["git"], "abc1234")
+        self.assertEqual(entry["date"], "2026-10-29T01:24:16Z")  # the newest process's
+        exclusive = entry["benchmarks"]["claim_commit_32_exclusive"]
+        self.assertEqual(exclusive["p99_99_ns_runs"], [122, 124, 154, 102, 106, 160, 96, 102, 123])
+        self.assertEqual(exclusive["p99_99_ns"], 124)
+
+    def test_the_gate_compares_with_the_slowest_run_over_every_process(self):
+        written = self.update(*self.processes())
+        # 130 is over any one process's median and over the third process's slowest run,
+        # 123, and within the slowest run the three measured, 160.
+        code, out = run(result(1, claim_commit_32_exclusive=row(130, runs=[119, 130, 152])), written)
+        self.assertEqual(code, 0, out)
+        self.assertIn("baseline from 3 processes", out)
+        self.assertIn("-18.8%", out)
+        code, out = run(result(1, claim_commit_32_exclusive=row(170)), written)
+        self.assertEqual(code, 1, out)
+        self.assertIn("+6.2% REGRESSION", out)
+
+    def test_the_second_process_is_sorted_by_date_not_by_the_order_given(self):
+        a, b, c = self.processes()
+        written = self.update(c, a, b)
+        runs = written["profiles"]["test-host"]["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns_runs"]
+        self.assertEqual(runs, [122, 124, 154, 102, 106, 160, 96, 102, 123])
+
+    def test_processes_at_two_commits_list_both(self):
+        a, b, c = self.processes()
+        c["git"] = "def5678"
+        written = self.update(a, b, c)
+        self.assertEqual(written["profiles"]["test-host"]["git"], ["abc1234", "def5678"])
+
+    def test_two_processes_are_refused(self):
+        a, b, c = self.processes()
+        with self.assertRaises(SystemExit) as refused:
+            self.update(a, b)
+        self.assertIn("two processes make no baseline", str(refused.exception))
+
+    def test_two_profiles_are_refused(self):
+        a, b, c = self.processes()
+        b["profile"] = "other-host"
+        with self.assertRaises(SystemExit) as refused:
+            self.update(a, b, c)
+        self.assertIn("one profile", str(refused.exception))
+
+    def test_two_harness_settings_are_refused(self):
+        for field, value in (("clock_step_ns", 10), ("repeat", 21), ("messages", 5000000)):
+            a, b, c = self.processes()
+            c[field] = value
+            with self.assertRaises(SystemExit) as refused:
+                self.update(a, b, c)
+            self.assertIn(f"one {field}", str(refused.exception))
+
+    def test_different_rows_are_refused(self):
+        a, b, c = self.processes()
+        c["benchmarks"]["timer"] = row(20)
+        with self.assertRaises(SystemExit) as refused:
+            self.update(a, b, c)
+        self.assertIn("same rows", str(refused.exception))
+
+    def test_join_adds_a_process_to_the_entry_as_update_over_all_of_them_would(self):
+        """A process of the baseline's tree that read a row above it joins (ADR 0033)."""
+        a, b, c = self.processes()
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]))
+        d["date_unix"] = c["date_unix"] + 3600
+        d["git"] = "def5678"
+        d["repeat"] = 3
+        from_all = self.update(a, b, c, d)
+        with contextlib.redirect_stdout(io.StringIO()):
+            bench_compare.update([a, b, c], {"schema": 0, "profiles": {}})
+            baseline = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+            bench_compare.update([d], baseline, join=True)
+        joined = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(joined, from_all)
+        entry = joined["profiles"]["test-host"]
+        self.assertEqual(entry["processes"], 4)
+        self.assertEqual(entry["git"], ["abc1234", "def5678"])
+        self.assertEqual(entry["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns_runs"],
+                         [122, 124, 154, 102, 106, 160, 96, 102, 123, 128, 134, 162])
+        self.assertEqual(entry["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns"], 134)
+
+    def test_join_refuses_a_profile_with_no_baseline_and_another_harness_setting(self):
+        a, b, c = self.processes()
+        with self.assertRaises(SystemExit) as refused:
+            with contextlib.redirect_stdout(io.StringIO()):
+                bench_compare.update([a], {"schema": 0, "profiles": {}}, join=True)
+        self.assertIn("--update first", str(refused.exception))
+        self.update(a, b, c)
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]))
+        d["repeat"] = 21
+        baseline = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        with self.assertRaises(SystemExit) as refused:
+            with contextlib.redirect_stdout(io.StringIO()):
+                bench_compare.update([d], baseline, join=True)
+        self.assertIn("one repeat", str(refused.exception))
+
+    def test_a_row_whose_runs_are_not_every_process_s_is_refused(self):
+        """A row added by hand with fewer runs than the processes measured would be padded
+        with a run no process measured on the next join; both paths refuse it."""
+        a, b, c = self.processes()
+        c["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns_runs"] = [102, 123]
+        with self.assertRaises(SystemExit) as refused:
+            self.update(a, b, c)
+        self.assertIn("has 2 runs where the harness setting is 3", str(refused.exception))
+        a, b, c = self.processes()
+        self.update(a, b, c)
+        baseline = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        baseline["profiles"]["test-host"]["benchmarks"]["timer"] = row(20, runs=[20, 20])
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]), timer=row(20, runs=[20, 20, 20]))
+        d["repeat"] = 3
+        with self.assertRaises(SystemExit) as refused:
+            with contextlib.redirect_stdout(io.StringIO()):
+                bench_compare.update([d], baseline, join=True)
+        self.assertIn("--join cannot add to timer", str(refused.exception))
+
+    def test_main_joins_a_file(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        a, b, c = self.processes()
+        self.update(a, b, c)
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]))
+        d["date_unix"] = c["date_unix"] + 3600
+        d["repeat"] = 3
+        path = Path(directory.name) / "test-host-4.json"
+        path.write_text(json.dumps(d), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(bench_compare.main(["bench-compare.py", "--join", str(path)]), 0)
+        written = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(written["profiles"]["test-host"]["processes"], 4)
+        for argv in (["bench-compare.py", "--join"], ["bench-compare.py", "--join", "--update", str(path)]):
+            with self.assertRaises(SystemExit) as refused:
+                bench_compare.main(argv)
+            self.assertIn("usage", str(refused.exception))
+
+    def test_main_updates_from_several_files_and_compares_one(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        paths = []
+        for i, r in enumerate(self.processes()):
+            path = Path(directory.name) / f"test-host-{i}.json"
+            path.write_text(json.dumps(r), encoding="utf-8")
+            paths.append(str(path))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(bench_compare.main(["bench-compare.py", "--update", *paths]), 0)
+        written = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(written["profiles"]["test-host"]["processes"], 3)
+        with self.assertRaises(SystemExit) as refused:
+            bench_compare.main(["bench-compare.py", *paths])
+        self.assertIn("usage", str(refused.exception))
 
 
 if __name__ == "__main__":

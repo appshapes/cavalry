@@ -134,15 +134,24 @@ jobs:
       # Twenty-one runs per benchmark: the gate reads each one's median p99.99, and the
       # result keeps all twenty-one (ADR 0016).
       - run: just bench --messages 5000000 --repeat 21 --pin 8,10,12
+        id: bench
         env:
           CAVALRY_BENCH_PROFILE: bench-linux
       - run: just bench-compare
       # The same run with the checks built out, so that ADR 0010's cost is measured on
       # every commit; its profile is bench-linux-unchecked, with a baseline of its own.
+      # It runs when the checked comparison failed too, so that every run yields both
+      # profiles' results, since a baseline is every process of the job at one tree
+      # (ADR 0033); it does not run after a failed check.sh or a failed checked bench,
+      # whose host or harness is not one to record from. Its comparison runs only when
+      # it wrote a result, or `bench-compare` would judge the checked result twice.
       - run: just bench-unchecked --messages 5000000 --repeat 21 --pin 8,10,12
+        id: unchecked
+        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
         env:
           CAVALRY_BENCH_PROFILE: bench-linux
       - run: just bench-compare
+        if: ${{ !cancelled() && steps.unchecked.outcome == 'success' }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -168,13 +177,18 @@ jobs:
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - run: bench/host/check.sh 6,8,10
       - run: just bench --messages 5000000 --repeat 21 --pin 6,8,10
+        id: bench
         env:
           CAVALRY_BENCH_PROFILE: kip-linux
       - run: just bench-compare
+      # Both profiles on every run whose checked bench ran, as above (ADR 0033).
       - run: just bench-unchecked --messages 5000000 --repeat 21 --pin 6,8,10
+        id: unchecked
+        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
         env:
           CAVALRY_BENCH_PROFILE: kip-linux
       - run: just bench-compare
+        if: ${{ !cancelled() && steps.unchecked.outcome == 'success' }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
