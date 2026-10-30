@@ -1,6 +1,6 @@
 # 0033. Record a bench host's baseline from every process it has run at one tree
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-30
 - **Invariants affected:** 2, 6
 - **Supersedes:** the re-record bound in ADR 0032's Decision, "not from a run whose
@@ -189,7 +189,13 @@ at one, and the exclusive row's band on kip is card 168's.
 Acceptance: this ADR is accepted when `bench (kip)` has passed three consecutive runs at
 this tree, on master or on pull request 69, with no process joining the baseline, which
 is the evidence that the baseline holds the host's band; until then it is Proposed and
-the re-record stands as its first step.
+the re-record stands as its first step. Accepted on 2026-10-30 on that evidence: the
+runs 41019808608 (pull request 69 at d6cd88a, merge 1f98dee), 41022744449 (b69bc93,
+merge 1caa44e) and 41023361265 (master at 1d9e891, the squash commit), each
+`bench-compare: ok` on both profiles against the baselines of eight and five processes,
+no row over and no process joined. The unchecked `claim_commit_32_client` row read 199
+(190 to 207) against 198 in the second, +0.5 percent, at the band's edge: a later
+process above it joins by the rule.
 
 ## Consequences
 
