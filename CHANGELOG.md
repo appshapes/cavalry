@@ -636,15 +636,15 @@ user-visible change, added in the same commit as the change. The format follows
   constant; `publication.position` is at most two milliseconds behind the publisher;
   neither bench host's baseline moves
   ([ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md)).
-- A bench host's baseline is recorded from three processes, the first three runs of
-  master's job on that host at one tree, and the gate compares a row's median with the
-  slowest run over all of them: `scripts/bench-compare.py --update` takes the three
-  result files, or a laptop's one and no other count, and writes `processes: 3`, and
-  the comparison's first line says so.
-  `kip`'s two baselines are re-recorded that way from master at 4a09b6e, where master's
-  own runs had failed against one process's band: the exclusive claim row's slowest run
-  moves from 132 to 160 ns and the concurrent row's from 154 to 166 (card 168 owns the
-  spread), the unchecked `_recorded` row's from 234 to 257 (card 169), and six rows
-  tighten. Both bench jobs run the unchecked profile after a failed checked comparison,
-  so every run yields both profiles' results
-  ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-three-processes.md)).
+- A bench host's baseline is recorded from every process the host has run at the
+  baseline's tree, three at least, and the gate compares a row's median with the
+  slowest run over all of them: `scripts/bench-compare.py --update` takes the result
+  files and writes `processes: N`, `--join` adds a later process of the tree that read
+  a row above the baseline, and the comparison's first line says how many. `kip`'s two
+  baselines are re-recorded that way at the tree of 4a09b6e, eight and five processes,
+  where master's own runs had failed against one process's band: the exclusive claim
+  row's slowest run moves from 132 to 162 ns and the concurrent row's from 154 to 169
+  (card 168 owns the spread), the unchecked `_recorded` row's from 234 to 257 (card
+  169), and four rows tighten. Both bench jobs run the unchecked profile after a failed
+  checked comparison, so every run yields both profiles' results
+  ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).

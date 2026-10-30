@@ -20,13 +20,13 @@ slowest run of the baseline: on the bench host one row's p99.99 moves by a fifth
 two processes of the same binary while the others hold within 2 percent, and a rule that
 reads the baseline's band is the 5 percent rule on the rows the host can measure and
 says so on the row it cannot, instead of failing an unchanged commit (ADR 0016). A
-bench host's baseline is recorded from three processes, the first three runs of master's
-job on that host at one tree, and the slowest run is the slowest over all of them: on
-kip a row's median moves by up to a third between two processes of one tree, and a
-baseline from one process at the bottom of that band failed master's own next run with
-no change behind it (ADR 0033). Three is fixed, not a minimum, since every process
-brings its own rarest slow run and a fourth loosens the slowest run by collection, so
-`--update` takes one result file or three and refuses any other count. Only
+bench host's baseline is recorded from every process the host has run at the baseline's
+tree, three at least, and the slowest run is the slowest over all of them; a later
+process of the same tree that reads a row above it is the host's own band and joins the
+baseline with `--join`: on kip a row's median moves by a tenth, and by half on the
+exclusive claim row, between two processes of one tree, and a baseline from one process
+at the bottom of that band failed master's own next run with no change behind it (ADR
+0033). Only
 the rows a message passes through, claim_commit_* and one_way_*, can fail the gate; the
 timer and slot_padding_* rows hold no Cavalry code, they probe the host and the clock at
 30 to 60 ns, where one 10 ns step of the clock is 15 to 33 percent, and they are printed
@@ -35,10 +35,12 @@ with their change marked "reported" (ADR 0017).
     bench-compare.py                        compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>               compare that result file instead
     bench-compare.py --update [<result>...] write the baseline for the results' profile: from the newest
-                                            result alone, one process, or from three result files, one
-                                            process each, which is how a bench host's baseline is set
-                                            from the artifacts of the first three runs of master's job
-                                            (ADR 0033); two files, or four, are refused
+                                            result alone, or from each result file given, one process
+                                            each, which is how a bench host's baseline is set from the
+                                            artifacts of its CI runs at one tree (ADR 0033)
+    bench-compare.py --join <result>...     add these processes of the same tree to the profile's baseline,
+                                            which is how a run that read a row above the baseline on the
+                                            baseline's own tree joins it (ADR 0033)
 
 A profile that has no baseline yet is reported and passes: the baseline for a runner is
 set from that runner's own first run (ADR 0015), and a laptop has none unless someone
@@ -194,20 +196,20 @@ def recorded_at(result: dict) -> str | None:
     return datetime.datetime.fromtimestamp(int(unix), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def update(results: list[dict], baseline: dict) -> int:
+def update(results: list[dict], baseline: dict, join: bool = False) -> int:
     """Write the baseline entry for the results' profile. One result is one process of the
-    harness; a bench host's baseline is recorded from three, the first three runs of
-    master's job at one tree, and three is fixed, not a minimum, so any count but one or
-    three is refused (ADR 0033). The entry carries each percentile from the slowest
-    process, every process's runs in order in `p99_99_ns_runs`, each `repeat` long, so the
-    slowest run the gate compares with is the slowest over all of them, and `processes`.
+    harness; a bench host's baseline is recorded from every process it has run at one
+    tree, three at least, never two (ADR 0033). The entry carries, for each percentile, the
+    largest value over the processes, so p50 can be one process's and p99 another's; every
+    process's runs in order in `p99_99_ns_runs`, each `repeat` long, so the slowest run the
+    gate compares with is the slowest over all of them; and `processes`.
     The results must be of one profile and one harness setting, the same messages, repeat
     and clock step, with the same rows; `git` is the one commit, or the list when the
-    processes ran at several, and `date` is the newest process's."""
-    if len(results) not in (1, 3):
-        sys.exit(f"bench-compare: --update takes one result, a laptop's one process, or three, the first "
-                 f"three runs of master's job on a bench host at one tree; these are {len(results)}. Three "
-                 "is fixed, not a minimum: a fourth process loosens the slowest run by collection (ADR 0033).")
+    processes ran at several, and `date` is the newest process's. With `join`, the
+    results are added to the entry the profile already has, which must be of the same
+    harness setting and rows: the entry's processes come first, as they were written."""
+    if join:
+        results = joined(results, baseline)
     results = sorted(results, key=lambda r: r.get("date_unix") or 0)
     for field in ("profile", "messages", "repeat", STEP_FIELD):
         values = sorted({json.dumps(r.get(field)) for r in results})
@@ -217,6 +219,9 @@ def update(results: list[dict], baseline: dict) -> int:
     if len({tuple(sorted(r["benchmarks"])) for r in results}) > 1:
         sys.exit("bench-compare: --update takes results with the same rows; these differ. "
                  "Record every process with the same harness.")
+    if len(results) == 2:
+        sys.exit("bench-compare: two processes make no baseline; a bench host's baseline is every process "
+                 "it has run at the tree, three at least, and a laptop's is one (ADR 0033).")
     newest = results[-1]
     profile = newest["profile"]
     gits = []
@@ -249,12 +254,45 @@ def update(results: list[dict], baseline: dict) -> int:
     return 0
 
 
+def joined(results: list[dict], baseline: dict) -> list[dict]:
+    """The processes already in the results' profile's entry, as result-shaped dicts in the
+    order they were written, followed by the new results, for `--join`. The entry holds
+    every process's runs in order, each `repeat` long, and each percentile from the slowest
+    process; a process read back from it carries the entry's percentiles, which the
+    maximum over processes leaves unchanged, and its own runs. A process has no date of
+    its own in the entry, so the earlier processes sort before every new result."""
+    profile = results[0]["profile"]
+    entry = baseline.get("profiles", {}).get(profile)
+    if entry is None:
+        sys.exit(f"bench-compare: --join needs a baseline for profile {profile!r} to add to; "
+                 "record one with --update first (ADR 0033).")
+    repeat = entry.get("repeat") or 1
+    count = entry.get("processes") or 1
+    gits = entry["git"] if isinstance(entry["git"], list) else [entry["git"]]
+    earlier = []
+    for i in range(count):
+        earlier.append({
+            "profile": profile, "git": gits[min(i, len(gits) - 1)], "date_unix": -count + i,
+            "messages": entry.get("messages"), "repeat": entry.get("repeat"),
+            **({STEP_FIELD: entry[STEP_FIELD]} if STEP_FIELD in entry else {}),
+            "benchmarks": {
+                name: {**{k: row[k] for k in SHOWN if k in row},
+                       "p99_99_ns_runs": (row.get("p99_99_ns_runs") or [row[GATED]] * repeat)[i * repeat:(i + 1) * repeat]}
+                for name, row in entry["benchmarks"].items()
+            },
+        })
+    return earlier + results
+
+
 def main(argv: list[str]) -> int:
     args = [a for a in argv[1:] if not a.startswith("--")]
     flags = {a for a in argv[1:] if a.startswith("--")}
     updating = "--update" in flags
-    if flags - {"--update"} or (len(args) > 1 and not updating):
-        sys.exit("usage: bench-compare.py [result.json]\n       bench-compare.py --update [result.json ...]")
+    joining = "--join" in flags
+    if flags - {"--update", "--join"} or (updating and joining) or (len(args) > 1 and not updating and not joining) \
+            or (joining and not args):
+        sys.exit("usage: bench-compare.py [result.json]\n       bench-compare.py --update [result.json ...]\n"
+                 "       bench-compare.py --join result.json [result.json ...]")
     paths = [Path(a) for a in args] or [newest_result()]
     results = [load(path) for path in paths]
     baseline = load(BASELINE) if BASELINE.exists() else {"schema": 0, "profiles": {}}
@@ -262,7 +300,9 @@ def main(argv: list[str]) -> int:
         if result.get("schema") != 0:
             sys.exit(f"bench-compare: {path} has schema {result.get('schema')!r}; this script knows 0")
         print(f"bench-compare: {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}")
-    return update(results, baseline) if updating else compare(results[0], baseline)
+    if updating or joining:
+        return update(results, baseline, join=joining)
+    return compare(results[0], baseline)
 
 
 if __name__ == "__main__":

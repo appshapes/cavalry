@@ -2,9 +2,9 @@
 """Tests of bench-compare.py's rule on made-up results and baselines: a gated row fails only
 beyond 5 percent and beyond one step of the harness's clock, the smaller of the result's
 step and the baseline's (ADR 0029); the probe rows are reported; `--update` writes the step
-into the baseline and the next comparison reads it back; a baseline from three processes
-holds every process's runs and the gate compares with the slowest over all of them (ADR
-0033). Standard library only; `just test-scripts` runs it.
+into the baseline and the next comparison reads it back; a bench host's baseline from
+every process at one tree holds every process's runs, a later process of the tree joins
+it with `--join`, and the gate compares with the slowest over all of them (ADR 0033). Standard library only; `just test-scripts` runs it.
 
     python3 scripts/bench-compare-test.py
 """
@@ -248,9 +248,10 @@ class Update(unittest.TestCase):
 
 
 class Processes(Update):
-    """A bench host's baseline is recorded from three processes, and the slowest run the
-    gate compares with is the slowest over all of them (ADR 0033). The numbers are kip's
-    exclusive claim row on master at 4a09b6e, three runs of `bench (kip)`."""
+    """A bench host's baseline is recorded from every process it has run at one tree,
+    three at least, and the slowest run the gate compares with is the slowest over all of
+    them (ADR 0033). The numbers are kip's exclusive claim row on master at 4a09b6e, the
+    first three runs of `bench (kip)` and a fourth that joins."""
 
     def processes(self):
         a = result(1, claim_commit_32_exclusive=row(124, runs=[122, 124, 154]))
@@ -294,6 +295,12 @@ class Processes(Update):
         written = self.update(a, b, c)
         self.assertEqual(written["profiles"]["test-host"]["git"], ["abc1234", "def5678"])
 
+    def test_two_processes_are_refused(self):
+        a, b, c = self.processes()
+        with self.assertRaises(SystemExit) as refused:
+            self.update(a, b)
+        self.assertIn("two processes make no baseline", str(refused.exception))
+
     def test_two_profiles_are_refused(self):
         a, b, c = self.processes()
         b["profile"] = "other-host"
@@ -316,18 +323,58 @@ class Processes(Update):
             self.update(a, b, c)
         self.assertIn("same rows", str(refused.exception))
 
-    def test_two_or_four_processes_are_refused(self):
-        """Three is fixed, not a minimum (ADR 0033): a fourth process loosens the slowest
-        run by collection, and two is a baseline half recorded. Nothing is written."""
+    def test_join_adds_a_process_to_the_entry_as_update_over_all_of_them_would(self):
+        """A process of the baseline's tree that read a row above it joins (ADR 0033)."""
         a, b, c = self.processes()
-        d = self.processes()[0]
-        d["date_unix"] += 4 * 3600
-        for given in ((a, b), (a, b, c, d)):
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]))
+        d["date_unix"] = c["date_unix"] + 3600
+        d["git"] = "def5678"
+        from_all = self.update(a, b, c, d)
+        with contextlib.redirect_stdout(io.StringIO()):
+            bench_compare.update([a, b, c], {"schema": 0, "profiles": {}})
+            baseline = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+            bench_compare.update([d], baseline, join=True)
+        joined = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(joined, from_all)
+        entry = joined["profiles"]["test-host"]
+        self.assertEqual(entry["processes"], 4)
+        self.assertEqual(entry["git"], ["abc1234", "def5678"])
+        self.assertEqual(entry["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns_runs"],
+                         [122, 124, 154, 102, 106, 160, 96, 102, 123, 128, 134, 162])
+        self.assertEqual(entry["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns"], 134)
+
+    def test_join_refuses_a_profile_with_no_baseline_and_another_harness_setting(self):
+        a, b, c = self.processes()
+        with self.assertRaises(SystemExit) as refused:
+            with contextlib.redirect_stdout(io.StringIO()):
+                bench_compare.update([a], {"schema": 0, "profiles": {}}, join=True)
+        self.assertIn("--update first", str(refused.exception))
+        self.update(a, b, c)
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]))
+        d["repeat"] = 21
+        baseline = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        with self.assertRaises(SystemExit) as refused:
+            with contextlib.redirect_stdout(io.StringIO()):
+                bench_compare.update([d], baseline, join=True)
+        self.assertIn("one repeat", str(refused.exception))
+
+    def test_main_joins_a_file(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        a, b, c = self.processes()
+        self.update(a, b, c)
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]))
+        d["date_unix"] = c["date_unix"] + 3600
+        path = Path(directory.name) / "test-host-4.json"
+        path.write_text(json.dumps(d), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(bench_compare.main(["bench-compare.py", "--join", str(path)]), 0)
+        written = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        self.assertEqual(written["profiles"]["test-host"]["processes"], 4)
+        for argv in (["bench-compare.py", "--join"], ["bench-compare.py", "--join", "--update", str(path)]):
             with self.assertRaises(SystemExit) as refused:
-                self.update(*given)
-            self.assertIn(f"these are {len(given)}", str(refused.exception))
-            self.assertIn("Three is fixed, not a minimum", str(refused.exception))
-            self.assertFalse(bench_compare.BASELINE.exists())
+                bench_compare.main(argv)
+            self.assertIn("usage", str(refused.exception))
 
     def test_main_updates_from_several_files_and_compares_one(self):
         directory = tempfile.TemporaryDirectory()

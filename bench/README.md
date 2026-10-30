@@ -62,12 +62,13 @@ nothing depends on it.
   2026-10-28 and merged on 2026-10-29,
   when the unchecked `_recorded` claim row had drifted to within a step of its
   baseline's slowest run on master itself. `kip`'s two were re-recorded on 2026-10-30
-  from three processes each, the first three runs of master's `bench (kip)` job at
-  4a09b6e, when master's own runs had failed the concurrent claim row and the
-  unchecked `_recorded` row against the band of the one process recorded at 7f62673:
-  a bench host's baseline holds three processes' runs, `processes: 3` in its entry,
-  and the gate compares with the slowest run over all of them
-  ([ADR 0033](../docs/decisions/0033-record-a-bench-baseline-from-three-processes.md)).
+  from every process the host had run at the tree of 4a09b6e, eight and five, when
+  master's own runs had failed the concurrent claim row and the unchecked `_recorded`
+  row against the band of the one process recorded at 7f62673: a bench host's
+  baseline holds every such process's runs, `processes: N` in its entry, a later
+  process of the tree that reads above it joins it with `--join`, and the gate
+  compares with the slowest run over all of them
+  ([ADR 0033](../docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
 
 ## What it must never do
 
