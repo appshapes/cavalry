@@ -648,3 +648,9 @@ user-visible change, added in the same commit as the change. The format follows
   169), and four rows tighten. Both bench jobs run the unchecked profile after a failed
   checked comparison, so every run yields both profiles' results
   ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
+- ADR 0033 is Accepted on three consecutive green `bench (kip)` runs at the tree of
+  4a09b6e with no process joining, and its text says what a joining process is not: a
+  run whose row moved as a whole, p50 and p99 with p99.99 and the rate down against the
+  tree's other processes, is a disturbed host, joins no baseline and is re-run; the
+  bench how-to's troubleshooting list reads it that way
+  ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
