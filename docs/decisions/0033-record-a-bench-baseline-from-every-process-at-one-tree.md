@@ -1,6 +1,6 @@
 # 0033. Record a bench host's baseline from every process it has run at one tree
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-30
 - **Invariants affected:** 2, 6
 - **Supersedes:** the re-record bound in ADR 0032's Decision, "not from a run whose
@@ -73,7 +73,11 @@ from N processes`. On the baseline's tree nothing the gate exists to catch has c
 so a process of that tree that reads a row above the baseline is the host's own band,
 and it joins the baseline: `scripts/bench-compare.py --join <result>` adds the process
 to the entry, in a commit whose message carries the run and the row, by the procedure
-in `docs/how-to/run-the-bench.md`, step 4. A process of another tree never joins. The
+in `docs/how-to/run-the-bench.md`, step 4. A process of another tree never joins, and
+nor does a process whose row moved as a whole: when a row's p50 and p99 moved with its
+p99.99 and its rate fell against every other process at the tree, the host was
+disturbed during the run, as the troubleshooting list of that page reads it; the run is
+rerun, and the record names the disturbance where it is known. The
 host's one deliberate change, an update of its packages or kernel, is the re-record of
 `docs/how-to/set-up-a-bench-host.md`, "Updating the host", as before.
 
@@ -180,6 +184,17 @@ the same three: `bench-compare: ok` on both profiles, unchecked `claim_commit_32
 171 (168 to 185) against 176 and checked 175 (167 to 180) against 190; it joined too,
 and moved no slowest run.
 
+A disturbed process, the kind that joins nothing, in the seven the bench host had run
+at this tree by 08:10Z on 2026-10-30: pull request 70's run 41024226264, unchecked
+`claim_commit_32_concurrent` 170 (160 to 190) against 150, +13.3 percent, with p50 90
+against 79 to 80, p99 120 against 90 to 100 and the row's rate 8.17 million claims a
+second against 9.35 to 9.45 million in the other six, the conductor's loads 318 against
+278 to 279, and `one_way_32_concurrent` 240 against 210 to 220 at the same rate; the
+checked profile of the same job and every other row read as the other six did. The
+host's journal holds one event in the window, `sysstat-collect.service` at 08:10:08Z,
+85 seconds into that bench; whether it is the cause, and the host's timers, are card
+170's.
+
 What the baseline cannot tell: a process of the one-millisecond cadence in ADR 0032's
 high mode, exclusive 156 and concurrent 168 at 0e97c37, also passes against 162 and
 169. The cadence's record is the `producer_position_loads` count the harness writes in
@@ -189,7 +204,13 @@ at one, and the exclusive row's band on kip is card 168's.
 Acceptance: this ADR is accepted when `bench (kip)` has passed three consecutive runs at
 this tree, on master or on pull request 69, with no process joining the baseline, which
 is the evidence that the baseline holds the host's band; until then it is Proposed and
-the re-record stands as its first step.
+the re-record stands as its first step. Accepted on 2026-10-30 on that evidence: the
+runs 41019808608 (pull request 69 at d6cd88a, merge 1f98dee), 41022744449 (b69bc93,
+merge 1caa44e) and 41023361265 (master at 1d9e891, the squash commit), each
+`bench-compare: ok` on both profiles against the baselines of eight and five processes,
+no row over and no process joined. The unchecked `claim_commit_32_client` row read 199
+(190 to 207) against 198 in the second, +0.5 percent, at the band's edge: a later
+process above it joins by the rule.
 
 ## Consequences
 
