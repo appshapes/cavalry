@@ -258,10 +258,22 @@ shared runner is
 - `REGRESSION` on a p99.99: measure again on an idle machine before you believe either
   number; if it holds, the change under a data-plane crate is slower at the tail and
   does not merge until it is not, or the baseline is raised in a commit whose message
-  says why. Both histograms go in the commit message either way. On the bench host,
-  every row of the same commit repeated within 1 percent at p99.99 over three runs, so
-  a regression there is not noise; check the host first with `bench/host/check.sh`,
-  which the job also runs.
+  says why. Both histograms go in the commit message either way. On a bench host a
+  row's p99.99 moves between processes of one tree, by a tenth on kip's claim rows and
+  by one 10 ns step on `bench`'s, which is what the baseline's band of every process at
+  the tree holds (step 4); a regression there is a change, or one of the next two
+  bullets. Check the host first with `bench/host/check.sh`, which the job also runs.
+- `REGRESSION` on a row whose p50 and p99 moved with its p99.99, and whose rate fell
+  against the host's other processes at the tree: the host was disturbed during that
+  row, not the band and not a change. A band moves the tail alone; on `bench` on
+  2026-10-30 the unchecked `claim_commit_32_concurrent` row read p50 90, p99 120 and
+  p99.99 170 at 8.17 million claims a second in one process, where the six other
+  processes of the same tree read 80, 90 to 100 and 150 at 9.35 to 9.45 million, and
+  the next run read 80, 100 and 150 again. Re-run the job, `gh run rerun <run id>
+  --job <job id>`, read the host's journal for the bench's window
+  (`journalctl --since <start> --until <end>` on the host) and name what it shows in
+  the re-run's record; such a process joins no baseline
+  ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
 - `REGRESSION` after a change to `bench/` only, with no data-plane crate changed: the
   tail moved with the harness, not with the log. What a spinning harness thread does on
   every spin reaches the other two threads: a clock read on every spin of the conductor
