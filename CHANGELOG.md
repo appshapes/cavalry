@@ -758,3 +758,11 @@ user-visible change, added in the same commit as the change. The format follows
   with error 11 until the change that implements them lands
   ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md);
   card 95).
+- ADR 0034 is Accepted: `grip` is the latency gate's second host and `kip` the soak
+  host. `bench (grip)` is a required check of `master`, `bench (kip)` is gone from CI
+  after three green pushes with grip's baselines in place, and `kip`'s baselines stay
+  in `bench/baseline.json` as the record of its run as the second host. The three
+  hosts' exclusive claim row, from their baselines: grip holds its median within 3 ns
+  across processes, bench within one 10 ns step, kip wanders by 46 ns
+  ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); cards
+  159 and 168).

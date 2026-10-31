@@ -1,11 +1,11 @@
 # 0034. Run the latency gate's second host on grip and the soak host on kip
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-31
 - **Invariants affected:** 2, 3, 6
 - **Supersedes:** none. Settles the "second host" of ADR 0016's Revisit: the second
-  gate host is `grip`; `kip`'s run as the second host, 2026-10-29 to the day
-  `bench (kip)` is removed, stands as the record it is.
+  gate host is `grip`; `kip`'s run as the second host, 2026-10-29 to 2026-10-31, the
+  day `bench (kip)` was removed, stands as the record it is.
 
 ## Context
 
@@ -93,6 +93,25 @@ isolated CPUs' `LOC` interrupt count read 253 to 263 against 8,826 to 166,739 on
 housekeeping CPUs. The baselines and `bench (grip)`'s first processes are this
 decision's acceptance evidence and go in the commit that accepts it.
 
+Acceptance, 2026-10-31 *(acceptance)*: `grip`'s baselines, `grip-linux` and
+`grip-linux-unchecked`, were recorded at 0782ec5 from four of its job's processes
+(master run 41196273792, attempts 3 to 5, and the baselines pull request's own run,
+joined when it read the checked client claim row above the three's band) and merged as
+c8b8015; master's `bench (grip)` was then green on three pushes in a row, c8b8015 (run
+41202271712), e5943f9 (41203122340) and 068647d (41204043241). The three hosts' checked
+`claim_commit_32_exclusive` row, from their baselines, the per-process medians of
+p99.99 in ns: `grip` 77, 77, 75 and 74 over four processes (runs 73 to 92); `bench`
+150, 150 and 150 over three (runs 120 to 180, one 10 ns step); `kip` 124, 106, 102,
+134, 148, 107, 123 and 105 over eight (runs 96 to 162). The concurrent row: `grip` 79
+to 81, `bench` 140 to 150, `kip` 154 to 166. `grip` holds a row's median within 3 ns
+from one process to the next, `bench` within one step, and `kip`'s exclusive row
+wanders by 46 ns, the band card 168 asks about, which is now a question about the soak
+host. The accepting change removes `bench (kip)` from `ci.yml`; the two steps outside
+the repository, adding `bench (grip)` to the required checks of `master` and un-tuning
+`kip` by the set-up script's own undo marks, follow its merge by hand, and card 159
+records them; `kip`'s baselines stay in `bench/baseline.json` as the record of its run
+as the second host, compared by nothing.
+
 ## Consequences
 
 Easier: both gate hosts hold a row's median within a few steps from one process to the
@@ -123,7 +142,8 @@ the stock probe's, which would say the tuning, not the part, set the band.
 
 ## References
 
-- `.github/workflows/ci.yml`, the `bench-grip` and `bench-kip` jobs;
+- `.github/workflows/ci.yml`, the `bench-grip` job; `bench-kip`, the job this acceptance
+  removed;
   `bench/host/setup-ubuntu.sh`, `bench/host/check.sh`
 - `docs/how-to/set-up-a-bench-host.md`, "Further hosts"; `docs/how-to/run-the-bench.md`
 - ADR 0016 (the dedicated host), ADR 0033 (the baseline from every process at one

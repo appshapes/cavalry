@@ -33,14 +33,15 @@ first one. Why the loop is built this way is in ADR 0004
      branch and pushes, then adds the `review` label itself, because a push by the
      agent starts no review on its own; the label starts one, up to three times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
-     pull request merges as one squash commit when `gates (linux)`, `gates (macos)`
-     and `bench (linux)` pass. The issue closes.
+     pull request merges as one squash commit when `gates (linux)`, `gates (macos)`,
+     `bench (linux)` and `bench (grip)` pass. The issue closes.
 
    The two `gates` jobs run `just lint`, `just test`, `just conformance`, `just loom`,
-   `just miri`, `just docs` and `just lint-docs`; `bench (linux)` runs `just bench`
-   and `just bench-compare` on the bench host. The pull request body still carries
-   what CI does not check: the bench figures, from the host's job, for a change under
-   a data-plane crate, and the `just fuzz` result after a parser change.
+   `just miri`, `just docs` and `just lint-docs`; `bench (linux)` and `bench (grip)`
+   run `just bench` and `just bench-compare` on the two gate hosts, `bench` and `grip`.
+   The pull request body still carries what CI does not check: the bench figures, from
+   the hosts' jobs, for a change under a data-plane crate, and the `just fuzz` result
+   after a parser change.
 
 ## How to verify it worked
 
