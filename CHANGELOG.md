@@ -701,6 +701,15 @@ user-visible change, added in the same commit as the change. The format follows
   The replayer opens no file for a replay with nothing to play
   ([ADR 0035](docs/decisions/0035-end-a-replay-with-nothing-to-play-at-once.md); card
   165, found by `just quickstart` on 2026-10-29).
+- `bench/host/setup-ubuntu.sh` installs `cavalry-bench-irqs.service`, which binds every
+  device interrupt a driver bound itself to the housekeeping CPUs once the network is
+  up, and `bench/host/check.sh` lists those interrupts and fails when one names an
+  isolated CPU. On `grip`, Intel's Wi-Fi driver had given each receive queue one CPU,
+  the isolated ones included, so the runner's own traffic during a job interrupted the
+  publisher's and the subscriber's CPUs and one one_way run in about twenty read 17 to
+  64 µs at p99.99; bench's and kip's isolated CPUs took no such interrupts. Applied on
+  all three hosts on 2026-10-31 (card 159; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
+  "Updating the host").
 - A replay of a live recording ends on the recorder's word: when the recorder reports
   the stop, the conductor hands the replayer the stop position and the replay ends
   there with reason 0 in the replayer's next cycle, where it read the catalog once a

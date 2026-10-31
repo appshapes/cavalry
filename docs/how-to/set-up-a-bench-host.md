@@ -92,8 +92,13 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    unattended upgrades off; and the twelve timers a stock Ubuntu Server starts jobs
    from masked, `sysstat-collect` every ten minutes among them, which on 2026-10-30
    fired 85 seconds into a bench and moved its unchecked concurrent claim rows by a
-   tenth (card 170); `logrotate` and `fstrim` stay. Every file it writes names it, and
-   its header says how to undo each one. The kernel command line applies at the reboot. On Intel the deep
+   tenth (card 170); `logrotate` and `fstrim` stay; and a boot-time service that binds
+   every device interrupt a driver bound itself to the housekeeping CPUs, since the
+   kernel line's `irqaffinity` does not reach those: Intel's Wi-Fi driver gives each
+   receive queue one CPU, the isolated ones included, and on `grip` the runner's own
+   traffic during a job fired them there, 600 to 900 times a bench, which read as one
+   one_way run in about twenty at 17 to 64 µs (card 159). Every file it writes names
+   it, and its header says how to undo each one. The kernel command line applies at the reboot. On Intel the deep
    sleep states go through `intel_idle.max_cstate=1`, because the idle driver there
    does not read `processor.max_cstate`, and turbo through intel_pstate's `no_turbo`,
    because there is no `cpufreq/boost` file; the script sets both on every host, and
@@ -110,11 +115,12 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    The three CPUs are the ones the bench job pins the publisher, the subscriber and the
    conductor to: one per core, inside the isolated set, with the SMT siblings offline.
    The script prints the host's state, including the turbo switch and the idle states
-   the pinned CPUs may enter and how many timers are active, and ends with
-   `check.sh: ok`; it fails when turbo is on or an idle state deeper than C1 is
-   enabled, the two settings a host loses when the service or the kernel line did not
-   apply, and when one of the timers the set-up script masks is active, which a host
-   that runs an older version of the script does. The bench job runs the same check first,
+   the pinned CPUs may enter, how many timers are active and which interrupts a driver
+   bound itself and where, and ends with `check.sh: ok`; it fails when turbo is on or
+   an idle state deeper than C1 is enabled, the two settings a host loses when the
+   service or the kernel line did not apply, when one of the timers the set-up script
+   masks is active, and when a driver-bound interrupt names an isolated CPU, the two
+   findings of a host that runs an older version of the script. The bench job runs the same check first,
    so a host that lost its tuning fails the job before it produces a number.
 
 5. Give the runner a toolchain. The bench job installs a stable toolchain and `just` on
@@ -281,6 +287,13 @@ baselines are re-recorded from the job's next three runs after it in either case
 - `check.sh` reports `CPU N can enter an idle state with a N µs exit latency`: the
   kernel line lacks `intel_idle.max_cstate=1` or `processor.max_cstate=1`, or did not
   apply; `cat /proc/cmdline` on the host, then `sudo update-grub` and reboot.
+- `check.sh` reports `irq N (name) is bound to isolated CPU`: `cavalry-bench-irqs.service`
+  did not run after the device came up, or the host runs a version of the script from
+  before it. `systemctl status cavalry-bench-irqs.service` on the host says which;
+  `sudo /usr/local/sbin/cavalry-bench-irqs` moves the interrupts now, and the service
+  does at every boot once the network is up. `cat /proc/interrupts` shows where each
+  interrupt has fired since boot, so a vector that moved after firing on an isolated
+  CPU still shows a count there; the affinity, not the count, is what the check reads.
 - `check.sh` reports `timers active that setup-ubuntu.sh masks`: the host runs a version
   of the script from before its timers step, or a package upgrade re-enabled a timer
   that had been disabled rather than masked. Copy `bench/host/` to the host and run the
