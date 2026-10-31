@@ -4,8 +4,8 @@
 - **Date:** 2026-10-31
 - **Invariants affected:** 2, 3, 6
 - **Supersedes:** none. Settles the "second host" of ADR 0016's Revisit: the second
-  gate host is `grip`; `kip`'s run as the second host, 2026-10-29 to the day
-  `bench (kip)` is removed, stands as the record it is.
+  gate host is `grip`; `kip`'s run as the second host, 2026-10-29 to 2026-10-31, the
+  day `bench (kip)` was removed, stands as the record it is.
 
 ## Context
 
@@ -106,10 +106,11 @@ p99.99 in ns: `grip` 77, 77, 75 and 74 over four processes (runs 73 to 92); `ben
 to 81, `bench` 140 to 150, `kip` 154 to 166. `grip` holds a row's median within 3 ns
 from one process to the next, `bench` within one step, and `kip`'s exclusive row
 wanders by 46 ns, the band card 168 asks about, which is now a question about the soak
-host. This change removes `bench (kip)` from `ci.yml`, adds `bench (grip)` to the
-required checks of `master`, and un-tunes `kip` by the set-up script's own undo marks;
-`kip`'s baselines stay in `bench/baseline.json` as the record of its run as the second
-host, compared by nothing.
+host. The accepting change removes `bench (kip)` from `ci.yml`; the two steps outside
+the repository, adding `bench (grip)` to the required checks of `master` and un-tuning
+`kip` by the set-up script's own undo marks, follow its merge by hand, and card 159
+records them; `kip`'s baselines stay in `bench/baseline.json` as the record of its run
+as the second host, compared by nothing.
 
 ## Consequences
 
