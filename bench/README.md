@@ -61,7 +61,9 @@ nothing depends on it.
   `bench-linux-unchecked`, were re-recorded from master's run at 96fb91a, run on
   2026-10-28 and merged on 2026-10-29,
   when the unchecked `_recorded` claim row had drifted to within a step of its
-  baseline's slowest run on master itself. `kip`'s two were re-recorded on 2026-10-30
+  baseline's slowest run on master itself, and again on 2026-10-31 from every process
+  the host had run at the tree of 4a09b6e, twelve, leaving out the one process a timer
+  on the host disturbed (card 170). `kip`'s two were re-recorded on 2026-10-30
   from every process the host had run at the tree of 4a09b6e, eight and five, when
   master's own runs had failed the concurrent claim row and the unchecked `_recorded`
   row against the band of the one process recorded at 7f62673: a bench host's
