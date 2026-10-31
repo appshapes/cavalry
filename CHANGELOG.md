@@ -823,3 +823,6 @@ user-visible change, added in the same commit as the change. The format follows
   bypass and encryption wait for later slices. The cross-host rows need the cable and
   the clock link moved to `grip`, by hand, before the fourth feature starts
   ([ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md); card 183).
+- ADR 0039 Accepted: Rjae accepted the third slice as proposed on 2026-10-31; card 179,
+  the UDP transport's specification, is the next feature
+  ([ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md); card 183).
