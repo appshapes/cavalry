@@ -680,3 +680,17 @@ user-visible change, added in the same commit as the change. The format follows
   can be right, so retention is the operator's command or script and never a schedule
   the user did not set
   ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md)).
+- The latency gate's second host is `grip`, a Dell with an Intel Core i7-10700 tuned on
+  CPUs 4 to 7, as the `bench (grip)` job in `.github/workflows/ci.yml`
+  (`[self-hosted, grip-linux]`, pinned to CPUs 4,5,6, profiles `grip-linux` and
+  `grip-linux-unchecked`), and `kip` becomes the soak host (card 159): pinned at
+  stock, grip's exclusive claim row held its p99.99 median within 2 ns over three
+  processes where kip's moved 46 ns over eight
+  ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md),
+  Proposed; `bench (kip)` runs beside grip's job until grip's has been green over a
+  handful of pushes). `bench/host/setup-ubuntu.sh` now stops and masks the twelve
+  timers a stock Ubuntu Server starts jobs from, `sysstat-collect` every ten minutes
+  among them, and `bench/host/check.sh` prints how many timers are active and fails
+  when one of the twelve is; applied on `grip` at its set-up and on `bench` on
+  2026-10-31 (card 170; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
+  "Updating the host").
