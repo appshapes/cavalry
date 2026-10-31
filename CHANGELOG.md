@@ -803,7 +803,8 @@ user-visible change, added in the same commit as the change. The format follows
   card 95).
 - A soak host: `scripts/soak.sh` runs a driver recording a steady stream for days,
   samples `cavalry doctor` and the counters file every minute, rotates the recording
-  every hour and purges and deletes by the rotation, stopping cleanly on SIGTERM; the
+  every hour and purges and deletes by the rotation, stopping cleanly on SIGTERM and
+  exiting 1 when the program or the driver ended the run on its own; the
   stream comes from `crates/cavalry/examples/soak.rs`, which publishes at a fixed rate
   and reads every message back once and in order. `docs/how-to/set-up-a-soak-host.md`
   sets the host up, `kip`, with a volume for the log directory and a systemd service

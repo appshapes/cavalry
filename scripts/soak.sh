@@ -15,7 +15,9 @@
 #
 # SIGTERM or SIGINT stops it cleanly: the stop file tells the program to finish reading
 # what it sent and close, the recording is stopped, the driver gets SIGTERM, and the
-# samples and recordings stay where they are. Every line it prints goes to
+# samples and recordings stay where they are. It exits 0 after a stop that was asked
+# for, and 1 when the program or the driver ended the run on its own, so that the
+# service shows `failed` for a week that ended early. Every line it prints goes to
 # $SOAK_DIR/soak.log through the service, or to the terminal by hand.
 #
 # Settings, by environment variable, each with its default:
@@ -62,7 +64,11 @@ driver_pid=""
 soak_pid=""
 current=""
 stopping=0
+# Stops the program, the recording and the driver in that order and exits with the code
+# given: 0, the default and the trap's, for a stop that was asked for; 1 for one the
+# program or the driver forced by exiting on its own.
 stop_all() {
+    local code=${1:-0}
     [ "$stopping" = 1 ] && return
     stopping=1
     say "stopping"
@@ -78,7 +84,7 @@ stop_all() {
         wait "$driver_pid"; say "driver exited $?"
     fi
     say "stopped; the recordings are under $log_dir and the samples under $samples"
-    exit 0
+    exit "$code"
 }
 trap stop_all TERM INT
 
@@ -132,7 +138,7 @@ for _ in $(seq 1 100); do
     "$cavalry" doctor --dir "$CAVALRY_DIR" >/dev/null 2>&1 && break
     sleep 0.1
 done
-"$cavalry" doctor --dir "$CAVALRY_DIR" >/dev/null 2>&1 || { say "the driver did not come up"; stop_all; }
+"$cavalry" doctor --dir "$CAVALRY_DIR" >/dev/null 2>&1 || { say "the driver did not come up"; stop_all 1; }
 "$soak" --stream "$STREAM_ID" --rate "$RATE" --body "$BODY" --report "$SAMPLE_SECONDS" --stop-file "$stop_file" &
 soak_pid=$!
 sleep 1
@@ -145,11 +151,11 @@ while :; do
     sleep 1
     if ! kill -0 "$soak_pid" 2>/dev/null; then
         wait "$soak_pid"; say "the soak program exited $? on its own; stopping"
-        soak_pid=""; stop_all
+        soak_pid=""; stop_all 1
     fi
     if ! kill -0 "$driver_pid" 2>/dev/null; then
         wait "$driver_pid"; say "the driver exited $? on its own; stopping"
-        driver_pid=""; stop_all
+        driver_pid=""; stop_all 1
     fi
     now=$(date +%s)
     if [ $((now - last_sample)) -ge "$SAMPLE_SECONDS" ]; then sample; last_sample=$now; fi

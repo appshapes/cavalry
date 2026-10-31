@@ -17,7 +17,13 @@ retention commands the soak runs do is
   retention and the soak keeps a day of it, so 100 GB is enough; `kip` has 3.6 TB.
   Nothing on the host is tuned: no isolated CPUs, no fixed clock, a stock kernel line,
   a stock governor and swap. A soak host is any machine, and a tuned one would hide
-  what the stock one shows.
+  what the stock one shows. `kip` arrives tuned, as the gate's second host until
+  [ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md), so
+  un-tune it first, by hand, as the ADR's Consequences say: delete the files
+  `bench/host/setup-ubuntu.sh` names, `systemctl unmask` the timers it masked, run
+  `update-grub`, reboot, and remove its runner. The script's header and each of its
+  steps carry an `Undo:` line naming the file or the timer. The `host-governor`
+  finding that step 5 expects appears only once the governor is stock again.
 - Ubuntu Server 24.04 LTS or later, with one administrative user, key-only SSH and
   passwordless `sudo` for that user, as the bench hosts have
   ([Set up a bench host](set-up-a-bench-host.md)), so that a session can maintain the
@@ -83,6 +89,7 @@ retention commands the soak runs do is
    Environment=SOAK_DIR=/srv/cavalry-soak CAVALRY_DIR=/dev/shm/cavalry-soak
    ExecStart=/usr/bin/env bash scripts/soak.sh
    KillSignal=SIGTERM
+   KillMode=mixed
    TimeoutStopSec=60
    StandardOutput=append:/srv/cavalry-soak/soak.log
    StandardError=append:/srv/cavalry-soak/soak.log
@@ -96,7 +103,15 @@ retention commands the soak runs do is
    ```
 
    `Restart=no` is deliberate: a soak that stops on its own has found something, and
-   the log says what; a restart would hide it. The script's settings, the stream, the
+   the log says what; a restart would hide it. The script exits 1 when the program or
+   the driver ended the run, so `systemctl status cavalry-soak.service` then shows
+   `failed`, and `inactive` only after a stop you asked for. `KillMode=mixed` is
+   deliberate too: systemd's default, `control-group`, sends the stop's SIGTERM to
+   every process in the unit at once, so the program and the driver would die before
+   the script could stop them in order, and the log would read as a finding;
+   `mixed` sends it to the script alone, which stops the program, the recording and
+   the driver in turn, and systemd sends SIGKILL to whatever is left only after the
+   script has exited or `TimeoutStopSec` has passed. The script's settings, the stream, the
    rate, the body, the sample and rotation intervals and how many rotations are kept,
    are environment variables with defaults in its header; set them in the unit's
    `Environment=` line to change them.
@@ -147,8 +162,10 @@ retention commands the soak runs do is
   `cat /srv/cavalry-soak/recordings.txt` lists each recording with its start and
   state; after a day the oldest reads `deleted` and its files are gone from
   `/srv/cavalry-soak/log`.
-- `df -h /srv/cavalry-soak` holds within a day's recordings, about 55 GB at the
-  defaults, from the second day on.
+- `df -h /srv/cavalry-soak` holds at about 30 GB at the defaults from the second day
+  on. A day of recordings would be 55 GB; the purge of each stopped recording's first
+  half leaves about 1.15 GB of each of the 24 kept, plus the live hour's. A reading
+  near 55 GB says the purges were refused, and the log says with which error.
 - The program's lines keep `behind 0` and `back-pressured 0` at the default rate; the
   samples' doctor reports keep exiting 0 with `host-governor` as their one finding.
 
