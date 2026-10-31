@@ -620,7 +620,13 @@ pages, 91 UDP vectors, 61 log buffer vectors and 102 client protocol vectors, th
 `udp` and `channel` modules of `cavalry-proto` with their no-panic tests and fuzz
 targets, log buffer version 1 and the image writer in `cavalry-shm` with its loom model,
 the driver's channel check and 16384-counter file, and the client's reading of the new
-events.
+events. One point of "The crates" above was accepted differently: the driver refuses a
+`cavalry:udp` channel that parses with error code 11, generic error, counted in
+`client_protocol.errors` alone as a well-formed command's refusal is, with a message
+naming cards 180 and 181, and not with code 1, since a well-formed channel of version 4
+is not code 1's invalid channel (`spec/client-protocol.md`, "Error codes"); a channel
+that fails a check of `spec/udp.md`, "What a reader rejects", is code 1 with the reason,
+as the Decision says.
 
 ## Consequences
 

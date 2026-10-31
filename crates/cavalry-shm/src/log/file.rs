@@ -159,8 +159,9 @@ impl Mapped {
         unsafe { core::slice::from_raw_parts(self.base.add(start), length as usize) }
     }
 
-    /// The body of the frame the caller has just claimed at `term_offset` with
-    /// `frame_length`, to write into until it commits.
+    /// The body of the frame at `term_offset` with `frame_length`, to write into until
+    /// it is published: the frame a publisher has just claimed, or the one the receiver
+    /// found unwritten in an image (`ImageWriter::insert`).
     #[allow(clippy::mut_from_ref)]
     fn body_mut(&self, partition: usize, term_offset: u32, frame_length: u32) -> &mut [u8] {
         debug_assert!(self.writable);
@@ -168,13 +169,23 @@ impl Mapped {
             partition * self.term_length() as usize + term_offset as usize + FRAME_HEADER_LENGTH;
         let length = (frame_length - FRAME_HEADER) as usize;
         debug_assert!(term_offset + aligned_length(frame_length) <= self.term_length());
-        // SAFETY: the publisher reserved the aligned frame length at `term_offset` with
-        // the tail's fetch-and-add, or owns the tail (type 1), so no other publisher
-        // writes these bytes; readers read a body only after acquiring a positive length,
-        // which the claim's commit releases after the writes through this slice; the
-        // slice lives as long as the `BufferClaim`, which publishes or aborts the frame
-        // when it ends. The driver's unblock rewrites an abandoned claim only after the
-        // unblock timeout, a bound in time. The mapping is writable (asserted above).
+        // SAFETY: the caller is the only writer of these bytes until it publishes the
+        // frame, by one of two invariants. In a publication's log (types 0 and 1), the
+        // publisher reserved the aligned frame length at `term_offset` with the tail's
+        // fetch-and-add, or owns the tail (type 1), so no other publisher writes them;
+        // the slice lives as long as the `BufferClaim`, which publishes or aborts the
+        // frame when it ends, and the driver's unblock rewrites an abandoned claim only
+        // after the unblock timeout, a bound in time. In an image (type 2),
+        // `ImageWriter::insert` loaded a frame word of 0 at `term_offset` with acquire
+        // before any write, the invariant `cells::FrameCells::insert_rest` names: the
+        // driver's receiver is the sole writer of an image's terms, writes a frame once,
+        // and cleans a term only below every subscriber's position, so a word of 0 means
+        // nobody is writing or reading these bytes (`spec/udp.md`, "The receiver", step
+        // 2; the loom model `a_reader_acquires_the_frame_the_receiver_inserted`). In
+        // both, readers read a body only after acquiring a positive length, which the
+        // claim's commit or the insert's last store releases after the writes through
+        // this slice (`spec/log-buffer.md`, "Reading"). The mapping is writable (asserted
+        // above).
         unsafe { core::slice::from_raw_parts_mut(self.base.cast_mut().add(start), length) }
     }
 
