@@ -89,6 +89,17 @@ reports it running with a new pid.
   so it takes a whole core from the clients. Set `CAVALRY_CONDUCTOR_IDLE_STRATEGY` to
   `backoff`, or isolate a core and pin the driver there. The same check notes isolated
   CPUs a backoff conductor is not using.
+- **`WARN udp-publication-not-connected`.** A `cavalry:udp` publication whose setup
+  frames no receiver has answered: its sender limit is 0, and the publisher reads not
+  connected. Check that a subscription on the stream exists on the endpoint's host,
+  that its driver receives on that port, and that both drivers run the same version
+  ([the sender](../reference/udp.md#the-sender)).
+- **`WARN udp-socket-buffers`.** A send endpoint's socket holds a send buffer below a
+  burst, sixteen datagrams of the MTU, or a receive buffer below the 131072 bytes
+  asked: the host capped it. Raise `net.core.wmem_max` or `net.core.rmem_max` with
+  `sysctl` on Linux and add the publication again ([values](../reference/udp.md#values)).
+  `note udp-endpoint` lists every send endpoint with its status, its publications and
+  its two buffers.
 - **The directory vanished under a running driver.** `doctor` reports `FAIL
   driver-directory ... no driver directory` while the driver and its clients run on,
   since their mappings outlive the unlink, and a new client is refused with `no driver
