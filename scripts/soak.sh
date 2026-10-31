@@ -59,6 +59,9 @@ record() { "$cavalry" record --dir "$CAVALRY_DIR" --log-dir "$log_dir" "$@"; }
 mkdir -p "$log_dir" "$samples" || exit 1
 rm -f "$stop_file"
 touch "$state"
+# A recording a previous run left `live` was stopped by the driver's recovery at this
+# run's start (or by that run's stop), so the rotation's delete must reach it.
+awk '$3 == "live" { $3 = "stopped" } { print }' "$state" > "$state.new" && mv "$state.new" "$state"
 
 driver_pid=""
 soak_pid=""

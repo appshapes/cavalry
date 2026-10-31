@@ -807,6 +807,9 @@ user-visible change, added in the same commit as the change. The format follows
   exiting 1 when the program or the driver ended the run on its own; the
   stream comes from `crates/cavalry/examples/soak.rs`, which publishes at a fixed rate
   and reads every message back once and in order. `docs/how-to/set-up-a-soak-host.md`
-  sets the host up, `kip`, with a volume for the log directory and a systemd service
+  sets the host up, `kip`, with a volume for the log directory and a systemd service,
+  and says why the user must linger: logind removes a user's shared memory, the
+  driver's files among them, when the user's last session ends, which the driver's
+  how-to now names under "When it does not work"
   ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); card
   159).

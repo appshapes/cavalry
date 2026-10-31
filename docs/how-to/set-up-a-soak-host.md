@@ -73,10 +73,17 @@ retention commands the soak runs do is
    writes `cavalry doctor`'s report and a copy of the counters file under `samples/`,
    and every hour it stops the recording, starts a new one, purges the segments of the
    one it stopped before the middle of its hour and deletes every recording older than
-   a day, so that retention runs on a host whose disk would otherwise fill:
+   a day, so that retention runs on a host whose disk would otherwise fill. First let
+   the user's processes outlive the user's logins: the service runs as the
+   administrative user, a service's processes are not a session, and when that user's
+   last SSH session ends logind removes every POSIX shared-memory object the user
+   owns, the driver's files under `/dev/shm` among them (`RemoveIPC=yes`, its default),
+   unless the user lingers:
 
    ```sh
    # ignore: run on the soak host, not in this repository
+   sudo loginctl enable-linger "$USER"
+   loginctl show-user "$USER" -p Linger    # Linger=yes
    sudo tee /etc/systemd/system/cavalry-soak.service >/dev/null <<UNIT
    [Unit]
    Description=Cavalry soak: a driver recording a steady stream for days
@@ -173,6 +180,16 @@ retention commands the soak runs do is
 
 - The service exits at once with `no binaries at target/release`: step 2 was not run
   from the clone the unit's `WorkingDirectory` names.
+- The samples turn to `FAIL driver-directory ... no driver directory at
+  /dev/shm/cavalry-soak` and `soak.sh: no counters file to copy` while the program's
+  lines go on: the driver's directory was removed under a running driver, which keeps
+  working on its mappings but which no new client can reach, so the next rotation's
+  `cavalry record` is refused with `no driver at /dev/shm/cavalry-soak`. On the first
+  run on `kip` this happened two minutes in, when the operator's SSH session ended and
+  logind removed the user's shared memory (`RemoveIPC=yes`), because step 3's
+  `loginctl enable-linger` had not been run. Enable lingering, then stop and start the
+  service: the stop is clean, the recording's stop is refused for want of the
+  directory, and the restart's recovery rebuilds that recording's stop from its files.
 - `soak.sh: the driver did not come up`: `/dev/shm/cavalry-soak` is held by a driver
   from an earlier run, or `doctor` fails on it; run `target/release/cavalry doctor --dir
   /dev/shm/cavalry-soak` by hand and read the finding.
