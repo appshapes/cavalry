@@ -4,7 +4,7 @@ A how-to page: one task, measuring the data plane's latency and checking it agai
 committed baseline, for a person at a laptop or for CI. The rules are in `CLAUDE.md`,
 invariant 2 and the gates table; why the harness measures what it measures is
 [ADR 0015](../decisions/0015-measure-in-process-with-per-runner-baselines.md), and why
-the gate fails only on the dedicated bench hosts, `bench` and `kip`, and never on a
+the gate fails only on the dedicated bench hosts, `bench` and `grip`, and never on a
 shared runner is
 [ADR 0016](../decisions/0016-run-the-latency-gate-on-a-dedicated-host.md).
 
@@ -14,8 +14,8 @@ shared runner is
 - An idle machine with at least three free cores. The harness runs a publisher, a
   subscriber and a conductor thread, each spinning; a browser or a build in the
   background moves p99.99 by more than the 5 percent the gate allows. The numbers that
-  gate a commit come from the two bench hosts, `bench` and `kip`, each with three cores
-  isolated for this ([Set up a bench host](set-up-a-bench-host.md)).
+  gate a commit come from the two bench hosts, `bench` and `grip`, each with three
+  cores isolated for this ([Set up a bench host](set-up-a-bench-host.md)).
 - Python 3 for `just bench-compare`.
 
 ## Steps
@@ -34,8 +34,8 @@ shared runner is
    first touch of a page costs microseconds, and 1,500 of them in a 5,000,000-message
    run were the whole p99.99 on the bench host. It prints one table and writes one
    file, `bench/results/<profile>-<unix time>.json`. The profile is
-   `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `kip-linux`, `linux`
-   or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
+   `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `grip-linux`,
+   `kip-linux`, `linux` or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier,
    `just bench --pin 8,10,12` binds the publisher, the subscriber and the driver's
    conductor to those CPUs, on Linux only, with the driver's recorder and replayer and
@@ -139,9 +139,11 @@ shared runner is
    Max is shown but does not fail the gate. A profile with no baseline is reported and
    passes: a laptop has none unless you record one, and the shared CI runners have
    none on purpose, because their own noise moved p99.99 by 40 to 100 percent between
-   two runs of the same commit; CI compares on the two bench hosts only, `bench` in
-   the `bench (linux)` job and `kip` in the `bench (kip)` job, each against its own
-   profile's baseline (ADR 0016).
+   two runs of the same commit; CI compares on the bench hosts only, `bench` in the
+   `bench (linux)` job and `grip` in the `bench (grip)` job, and `kip` in the
+   `bench (kip)` job until that host leaves the gate
+   ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)), each
+   against its own profile's baseline (ADR 0016).
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
    `python3 scripts/bench-compare.py --update`, which writes the newest result's git,
@@ -157,11 +159,12 @@ shared runner is
    of a pull request whose head is at the tree. A push gives the first run, and
    `gh run rerun <run id> --job <job id>`, or the job's re-run button on the run's
    page, gives the next at the same commit whether the first passed or failed. Download each run's artifact, `bench-results-bench-linux` from
-   `bench (linux)` for `bench` or `bench-results-kip-linux` from `bench (kip)` for
-   `kip`; every attempt of a run keeps an artifact of that name. Pass one profile's
+   `bench (linux)` for `bench`, `bench-results-grip-linux` from `bench (grip)` for
+   `grip` or `bench-results-kip-linux` from `bench (kip)` for `kip`; every attempt of a
+   run keeps an artifact of that name. Pass one profile's
    files to one `--update`, the `bench-linux` results in one call and the
-   `bench-linux-unchecked` results in another, or the `kip-linux` and
-   `kip-linux-unchecked` results for `kip`; it refuses files of two profiles or of two
+   `bench-linux-unchecked` results in another, or the `grip-linux` and
+   `grip-linux-unchecked` results for `grip`; it refuses files of two profiles or of two
    harness settings, and two processes. The entry then holds, for each percentile, the
    largest value over the processes, the processes' runs in order in `p99_99_ns_runs`,
    each `repeat` long, and `processes: N`. Take every run that reached the profile, never a choice

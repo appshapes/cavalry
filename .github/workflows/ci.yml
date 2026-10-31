@@ -13,8 +13,9 @@
 # The three cavalry-shm gates of CLAUDE.md's gate 1, `just conformance`, `just loom`
 # and `just miri`, run in the gates jobs too (GitHub issue 9), so the reviewer's rule
 # of ADR 0005, CI green on the head under review, covers them.
-# The latency gate runs on the two dedicated bench hosts, bench and kip, self-hosted
-# runners, because a shared runner cannot tell a regression from its own noise (ADR 0016).
+# The latency gate runs on the two dedicated bench hosts, bench and grip, self-hosted
+# runners, because a shared runner cannot tell a regression from its own noise (ADR 0016);
+# `bench (kip)` runs beside them until the change that accepts ADR 0034 removes it.
 #
 # The job names are stable on purpose: "gates (linux)", "gates (macos)" and
 # "bench (linux)" are the checks branch protection on master requires, so renaming a
@@ -159,11 +160,12 @@ jobs:
           path: bench/results/
           if-no-files-found: ignore
 
-  # The same gate on the second bench host, kip (docs/how-to/set-up-a-bench-host.md, "A
-  # second host"), against its own baselines, kip-linux and kip-linux-unchecked: a
-  # data-plane change meets the gate on both hosts. Its clock steps by 1 ns, so the
-  # 5 percent rule alone decides there (ADR 0029). The same guard as above keeps a
-  # stranger's code off the host.
+  # The same gate on the host kip, against its own baselines, kip-linux and
+  # kip-linux-unchecked. Kip leaves the gate for the soak host's role (ADR 0034, card
+  # 159): this job runs beside grip's below until `bench (grip)` has been green over a
+  # handful of pushes to master, then it is removed and grip's job takes its place. Its
+  # clock steps by 1 ns, so the 5 percent rule alone decides there (ADR 0029). The same
+  # guard as above keeps a stranger's code off the host.
   bench-kip:
     name: bench (kip)
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -193,5 +195,43 @@ jobs:
         if: always()
         with:
           name: bench-results-kip-linux
+          path: bench/results/
+          if-no-files-found: ignore
+
+  # The same gate on the second bench host, grip (docs/how-to/set-up-a-bench-host.md,
+  # "Further hosts"; ADR 0034), against its own baselines, grip-linux and
+  # grip-linux-unchecked: a data-plane change meets the gate on both hosts. Its first
+  # runs report `no baseline` and pass until the baselines are recorded from three of
+  # them at one tree (ADR 0033). The same guard as above keeps a stranger's code off
+  # the host.
+  bench-grip:
+    name: bench (grip)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, grip-linux]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - run: bench/host/check.sh 4,5,6
+      - run: just bench --messages 5000000 --repeat 21 --pin 4,5,6
+        id: bench
+        env:
+          CAVALRY_BENCH_PROFILE: grip-linux
+      - run: just bench-compare
+      # Both profiles on every run whose checked bench ran, as above (ADR 0033).
+      - run: just bench-unchecked --messages 5000000 --repeat 21 --pin 4,5,6
+        id: unchecked
+        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
+        env:
+          CAVALRY_BENCH_PROFILE: grip-linux
+      - run: just bench-compare
+        if: ${{ !cancelled() && steps.unchecked.outcome == 'success' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: bench-results-grip-linux
           path: bench/results/
           if-no-files-found: ignore

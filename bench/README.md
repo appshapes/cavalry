@@ -49,10 +49,13 @@ nothing depends on it.
   `scripts/bench-compare.py` fails a p99.99 regression over 5 percent and over one clock
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
   for the profile, on the `claim_commit` and `one_way` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
-  probes and are reported, never failed (ADR 0017). The two bench hosts' profiles have
-  baselines, `bench-linux` and `kip-linux` with their `-unchecked` twins, and CI runs
-  the gate on both hosts, as `bench (linux)` and `bench (kip)`: a shared runner's run
-  is a report. The `_recorded` rows repeat the client
+  probes and are reported, never failed (ADR 0017). The bench hosts' profiles have
+  baselines, `bench-linux` and `kip-linux` with their `-unchecked` twins, and
+  `grip-linux`'s pair once its job's first three processes are recorded, and CI runs
+  the gate on each host, as `bench (linux)`, `bench (grip)` and, until grip's job has
+  been green over a handful of pushes, `bench (kip)`
+  ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)): a
+  shared runner's run is a report. The `_recorded` rows repeat the client
   rows with the driver's recorder writing the stream to the durable log under the bench
   directory, from a housekeeping CPU under `--pin`, and are gated against their baseline
   like the other message rows; `record_block` times the recorder's own block path and is

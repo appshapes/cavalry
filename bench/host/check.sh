@@ -9,8 +9,9 @@
 #                                    tickless, SMT is off, the governor is performance,
 #                                    turbo is off (cpufreq boost, or intel_pstate's
 #                                    no_turbo), no idle state deeper than C1 is enabled
-#                                    on those CPUs, transparent huge pages are off and
-#                                    swap is off
+#                                    on those CPUs, transparent huge pages are off,
+#                                    swap is off and none of the timers setup-ubuntu.sh
+#                                    masks is active
 set -euo pipefail
 
 cpu=/sys/devices/system/cpu
@@ -33,6 +34,17 @@ esac
 thp=$(read_or /sys/kernel/mm/transparent_hugepage/enabled unknown | sed -E 's/.*\[([a-z]+)\].*/\1/')
 swap=$(swapon --show --noheadings 2>/dev/null | wc -l | tr -d ' ')
 online=$(read_or $cpu/online unknown)
+# The timers setup-ubuntu.sh (step 7) masks, the same list: one that is active on a tuned
+# host is a job that will run on it during a bench (card 170).
+masked_timers="sysstat-collect sysstat-rotate sysstat-summary fwupd-refresh \
+    update-notifier-download update-notifier-motd motd-news man-db dpkg-db-backup \
+    systemd-tmpfiles-clean e2scrub_all xfs_scrub_all"
+active_timers=""
+for timer in $masked_timers; do
+    [ "$(systemctl is-active "$timer.timer" 2>/dev/null)" = active ] && active_timers="$active_timers $timer"
+done
+active_timers=${active_timers# }
+timers_total=$(systemctl list-timers --no-legend 2>/dev/null | grep -c . || true)
 
 # The idle states a CPU may enter, "name(exit latency in µs)" for each enabled one, and
 # the deepest enabled exit latency. C1 exits in a microsecond or two; C2 and deeper in
@@ -66,6 +78,7 @@ echo "  turbo:          $turbo (cpufreq boost $boost, intel_pstate no_turbo $no_
 echo "  idle states:    $(idle_states "$first")on CPU $first"
 echo "  huge pages:     $thp"
 echo "  swap devices:   $swap"
+echo "  timers:         $timers_total active${active_timers:+, of the masked set: $active_timers}"
 echo "  cmdline:        $(cat /proc/cmdline)"
 
 [ $# -ge 1 ] || exit 0
@@ -96,8 +109,9 @@ case "$smt" in off|forceoff|notsupported|notimplemented) ;; *) fail "SMT is $smt
 [ "$turbo" != on ] || fail "turbo is on (cpufreq boost $boost, intel_pstate no_turbo $no_turbo); cavalry-bench-host.service did not run"
 [ "$thp" = never ] || fail "transparent huge pages are $thp, not never"
 [ "$swap" = 0 ] || fail "$swap swap devices are active"
+[ -z "$active_timers" ] || fail "timers active that setup-ubuntu.sh masks: $active_timers; run it again (docs/how-to/set-up-a-bench-host.md, Updating the host)"
 if [ "$failures" -gt 0 ]; then
-    echo "check.sh: $failures finding(s); run bench/host/setup-ubuntu.sh as root and reboot (docs/how-to/set-up-a-bench-host.md)" >&2
+    echo "check.sh: $failures finding(s); run bench/host/setup-ubuntu.sh as root, and reboot when the kernel line is among them (docs/how-to/set-up-a-bench-host.md)" >&2
     exit 1
 fi
 echo "check.sh: ok, CPUs $1 are isolated and tickless on a tuned host"
