@@ -187,7 +187,7 @@ jobs:
         id: draft1
         if: steps.window.outputs.count > 0 && inputs.draft_run == ''
         continue-on-error: true   # the file it wrote (or did not) is judged by the lint and the verdict step; the action also fails a step whose agent exceeded --max-turns after writing
-        uses: anthropics/claude-code-action@aa8a7738e48bf30a40ee499ce818bef081c5ab5e # v1.0.257
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -249,7 +249,7 @@ jobs:
         id: review1
         if: steps.window.outputs.count > 0 && inputs.draft_run == ''
         continue-on-error: true   # as the drafter's
-        uses: anthropics/claude-code-action@aa8a7738e48bf30a40ee499ce818bef081c5ab5e # v1.0.257
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -315,7 +315,7 @@ jobs:
         id: draft2
         if: steps.window.outputs.count > 0 && inputs.draft_run == '' && (steps.lint1.outcome != 'success' || steps.verdict1.outputs.verdict != 'APPROVED')
         continue-on-error: true   # as the drafter's
-        uses: anthropics/claude-code-action@aa8a7738e48bf30a40ee499ce818bef081c5ab5e # v1.0.257
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -373,7 +373,7 @@ jobs:
         id: review2
         if: steps.draft2.outcome == 'success'
         continue-on-error: true   # as the drafter's
-        uses: anthropics/claude-code-action@aa8a7738e48bf30a40ee499ce818bef081c5ab5e # v1.0.257
+        uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
         with:
           allowed_bots: "claude,github-actions"
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -477,7 +477,7 @@ jobs:
       # scripts/release-notes.py too. `to` is the sender's own address and every reader is `bcc`.
       - name: Send to the recipients
         if: steps.window.outputs.count > 0 && env.AUDIENCE == 'recipients' && steps.recipients.outputs.count > 0
-        uses: dawidd6/action-send-mail@67ce3558d613188179559c61d3565140cf389968 # v22
+        uses: dawidd6/action-send-mail@47af4a10b540781705f283a2cf1a9650713ac795 # v23
         with:
           server_address: ${{ vars.SMTP_SERVER }}
           server_port: ${{ vars.SMTP_PORT }}
@@ -494,7 +494,7 @@ jobs:
 
       - name: Send the preview
         if: steps.window.outputs.count > 0 && env.AUDIENCE == 'preview' && steps.mail.outputs.configured == 'true'
-        uses: dawidd6/action-send-mail@67ce3558d613188179559c61d3565140cf389968 # v22
+        uses: dawidd6/action-send-mail@47af4a10b540781705f283a2cf1a9650713ac795 # v23
         with:
           server_address: ${{ vars.SMTP_SERVER }}
           server_port: ${{ vars.SMTP_PORT }}
