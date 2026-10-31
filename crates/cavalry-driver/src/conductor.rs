@@ -1958,11 +1958,13 @@ impl Conductor {
         }
     }
 
-    /// `start replay` (`spec/client-protocol.md`, "Commands"): the channel, the length
-    /// and the registry are checked here; the recording's slot, the position and the
-    /// segment file are the replayer's, whose reply creates the publication
-    /// (`on_replay_ready`) or answers with code 21, 23 or 12 (`on_replay_start_failed`).
-    /// The replay session id is the command's correlation id.
+    /// `start replay` (`spec/client-protocol.md`, "Commands"): the channel, the length,
+    /// a retention command on the recording (code 24, counted in `replay.start_failed`
+    /// as the replayer's three refusals are) and the registry are checked here; the
+    /// recording's slot, the position and the segment file are the replayer's, whose
+    /// reply creates the publication (`on_replay_ready`) or answers with code 21, 23
+    /// or 12 (`on_replay_start_failed`). The replay session id is the command's
+    /// correlation id.
     fn start_replay(
         &mut self,
         correlation_id: i64,
@@ -2001,6 +2003,9 @@ impl Conductor {
             .iter()
             .any(|entry| entry.command.recording_id() == recording_id)
         {
+            // The fourth of the spec's four refusals that count in `replay.start_failed`;
+            // the other three come back from the replayer (`on_replay_start_failed`).
+            self.statics.replay_start_failed.increment();
             self.send_error(
                 correlation_id,
                 ErrorCode::RecordingBusy,
@@ -2398,7 +2403,8 @@ impl Conductor {
     }
 
     /// The replayer could not take the replay: the entry fails and the client gets
-    /// code 21, 23 or 12, each counted in `replay.start_failed`.
+    /// code 21, 23 or 12, each counted in `replay.start_failed`, as the conductor's own
+    /// code 24 is in `start_replay`.
     fn on_replay_start_failed(&mut self, replay_session_id: i64, failure: replayer::StartFailure) {
         if let Some(index) = self.replays.iter().position(|replay| {
             replay.replay_session_id == replay_session_id && replay.state == ReplayState::Starting
@@ -5663,7 +5669,8 @@ mod replay {
     /// 24 for a live recording, for one a replay reads, and for one under a command;
     /// 23 for a position unaligned, above the stop, inside a frame, not a segment base
     /// and at the retained position; 10 at the registry's bound; `start replay` on a
-    /// recording under a command is 24 too.
+    /// recording under a command is 24 too, counted in `replay.start_failed` with the
+    /// replayer's three refusals (invariant 4).
     #[test]
     fn retention_errors_get_the_spec_codes() {
         let (mut h, mut appender) = recorded("retention-errors");
@@ -5745,7 +5752,9 @@ mod replay {
         }
 
         // Two commands on one recording in one cycle: the second is 24, and so is a
-        // replay started while the first is in progress.
+        // replay started while the first is in progress, which counts as the replayer's
+        // refusals do.
+        let start_failed_before = h.counter(REPLAY_START_FAILED);
         h.conductor.retention(
             50,
             replayer::Retention::Truncate {
@@ -5770,6 +5779,11 @@ mod replay {
             .collect();
         assert!(refused.contains(&(51, 24)), "{refused:?}");
         assert!(refused.contains(&(52, 24)), "{refused:?}");
+        assert_eq!(
+            h.counter(REPLAY_START_FAILED),
+            start_failed_before + 1,
+            "the code 24 replay counts in replay.start_failed"
+        );
         wait_answer(&mut h, 50).expect("the first command completes");
 
         // The registry's bound: 64 entries in progress refuse the 65th with code 10.
@@ -5920,6 +5934,41 @@ mod replay {
             "rebuilt from the files"
         );
         assert!(h.conductor.commands.is_empty());
+        drop(appender);
+    }
+
+    /// A slot the parser refuses (`spec/client-protocol.md`, "truncate recording": a
+    /// state other than 1 is code 21; invariants 4 and 6): state 2 written over the
+    /// stopped recording's slot, as recovery writes it for damage, and the delete an
+    /// operator sends after `cavalry doctor`'s `recording-invalid` finding is code 21
+    /// naming the slot and the docs anchor, not code 12 for a file; nothing is written
+    /// and `recording.retention_failed` does not move.
+    #[test]
+    fn a_slot_in_state_2_is_code_21_and_not_a_file_refused() {
+        let (mut h, mut appender) = recorded("retention-invalid-slot");
+        offer(&mut h, &mut appender, 0, 100);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        OpenOptions::new()
+            .write(true)
+            .open(h.log_dir.join(cavalry_log::layout::CATALOG_FILE_NAME))
+            .expect("the catalog opens")
+            .write_all_at(
+                &(cavalry_log::layout::State::Invalid as i32).to_le_bytes(),
+                cavalry_log::layout::CatalogHeader::slot_offset(0),
+            )
+            .expect("state 2 is written");
+        h.conductor
+            .retention(20, replayer::Retention::Delete { recording_id: 0 });
+        let (code, message) = wait_answer(&mut h, 20).expect_err("an invalid slot");
+        assert_eq!(code, 21, "{message}");
+        assert!(message.contains("its slot cannot be read"), "{message}");
+        assert!(message.contains(ERRORS_DOC), "{message}");
+        assert_eq!(h.counter(RECORDING_RETENTION_FAILED), 0);
+        assert_eq!(h.counter(RECORDING_DELETED), 0);
+        assert!(h.conductor.commands.is_empty());
+        assert!(segment(&h, 0, 0).exists(), "nothing was written or removed");
         drop(appender);
     }
 }
