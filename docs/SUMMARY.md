@@ -72,3 +72,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0031. Truncate, purge and delete a stopped recording with Aeron Archive's commands](decisions/0031-truncate-purge-and-delete-a-stopped-recording.md)
 - [0032. Load a publication's producer position at most once every two milliseconds](decisions/0032-load-the-producer-position-every-two-milliseconds.md)
 - [0033. Record a bench host's baseline from every process it has run at one tree](decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)
+- [0035. End a replay with nothing to play at once, without a segment file](decisions/0035-end-a-replay-with-nothing-to-play-at-once.md)
