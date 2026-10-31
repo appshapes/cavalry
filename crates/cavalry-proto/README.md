@@ -8,11 +8,17 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   using `zerocopy` derives (ADR 0009), so a frame is read and written in place with no
   copy and no allocation.
 - Parses and builds the frames that carry data fragments (the wire-sized pieces of a
-  message larger than the MTU), NAKs (a receiver's report of a gap) and status messages
-  (a receiver's position and window, which drive flow control), and negotiates the
-  protocol version between peers so that mixed versions run during an upgrade. Today
-  that is the data frame header, `spec/frame.md`; the other frames arrive with their
-  pages of `spec/`.
+  message larger than the MTU), `spec/frame.md`, and the UDP transport's control frames,
+  `spec/udp.md`: the setup frame, the status message (a receiver's position and window,
+  which drive flow control), the NAK (a receiver's report of a gap), the RTT measurement
+  and the heartbeat, in `udp`, with the spec's checks in the spec's order, a datagram
+  walker that checks a packet of data frames whole before any is read, and the
+  arithmetic of the sender's and the receiver's rules. Every frame carries a version
+  byte, and a reader drops a frame of a version or type it does not know, so that mixed
+  versions run during an upgrade.
+- Parses a channel, `cavalry:ipc` or `cavalry:udp?endpoint=<host>:<port>` with its
+  `interface` option, in `channel`, borrowing from the string, with each refusal named
+  and every refusal error code 1; resolving the host is the driver's.
 - Is the one place bytes are shuffled by hand. Every other crate uses its types. A
   reader that holds only a frame's header, as the log buffer's does, passes the bytes
   left in its term to `parse_within`, and the same four checks run against them.
@@ -99,3 +105,8 @@ frame rejected (version): version 1, this reader knows 0; the writer runs anothe
   which `tests/client_protocol_conformance.rs` runs; `tests/client_protocol_no_panic.rs`
   and `fuzz/fuzz_targets/client_protocol.rs`, which feed the decoder bytes it must
   never panic on, on every commit and under `just fuzz`.
+- [`spec/udp.md`](../../spec/udp.md), the UDP transport's frames, datagram, channel URI
+  and rules `udp` and `channel` implement, and [ADR 0040](../../docs/decisions/0040-adopt-aerons-transport-frames-as-the-udp-transport.md),
+  why they are Aeron's; [`spec/vectors/udp.json`](../../spec/vectors/udp.json), which
+  `tests/udp_conformance.rs` runs; `tests/udp_no_panic.rs`, `tests/channel_no_panic.rs`
+  and the `udp` and `channel` fuzz targets.

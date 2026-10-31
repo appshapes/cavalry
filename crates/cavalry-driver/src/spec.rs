@@ -44,8 +44,10 @@ pub const PUBLICATION_LINGER: Duration = Duration::from_secs(5);
 /// How long a freed counter's record stays reclaimed before it is allocated again.
 pub const COUNTER_REUSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The counters file's capacity, in counters.
-pub const COUNTERS_CAPACITY: u32 = 8192;
+/// The counters file's capacity, in counters: sized so that the registries fill before
+/// it does, 14,354 at most in client protocol version 4 (`spec/client-protocol.md`,
+/// "Sizes"; ADR 0040).
+pub const COUNTERS_CAPACITY: u32 = 16384;
 
 /// The command ring's capacity, in bytes.
 pub const COMMAND_RING_CAPACITY: u32 = 1024 * 1024;

@@ -27,8 +27,8 @@
 #   STREAM_ID         1001
 #   RATE              10000               messages per second
 #   BODY              32                  bytes per message
-#   SAMPLE_SECONDS    60                  each sample copies the 3 MiB counters file, so
-#                                         samples/ grows about 4.5 GB a day at 60 and is
+#   SAMPLE_SECONDS    60                  each sample copies the 6 MiB counters file, so
+#                                         samples/ grows about 9 GB a day at 60 and is
 #                                         never pruned: remove it when the week is read
 #   ROTATE_SECONDS    3600
 #   KEEP_RECORDINGS   24                  rotations kept before a recording is deleted

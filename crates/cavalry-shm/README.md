@@ -17,6 +17,13 @@ the two crates where `unsafe` is permitted.
   ([ADR 0030](../../docs/decisions/0030-replay-a-recording-into-a-subscription.md)),
   and the driver's duties, the limit, cleaning, unblocking and end of stream, are
   methods on the log ([`spec/log-buffer.md`](../../spec/log-buffer.md)).
+- Writes an image, a log of type 2, for the driver's receiver: `ImageWriter::insert`
+  puts a frame from the wire at its term offset, the first eight bytes last with a
+  release store and only where the frame length is 0, so a duplicate changes nothing and
+  a subscriber's reader stops at a gap until it is filled
+  ([`spec/log-buffer.md`](../../spec/log-buffer.md), version 1, "The receiver"; ADR
+  0040). An image lives under `images/`, and a reader of version 1 reads a version 0 log
+  as one whose receiver window length is 0.
 - Pre-touches every mapping it makes: in `create` and `open`, every page of a log buffer,
   the counters file, the command ring and the broadcast buffer is made resident before
   the mapping is handed out, with Linux's populate advice where the kernel has it and one

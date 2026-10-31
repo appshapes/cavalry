@@ -27,9 +27,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cavalry_log::dir::Recovery;
 
+use cavalry_proto::channel::{Channel, ChannelError};
 use cavalry_proto::client_protocol::{
-    Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NULL_LENGTH, ProtocolError,
-    ReplayStopReason,
+    Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NO_CHANNEL_STATUS, NULL_LENGTH,
+    ProtocolError, ReplayStopReason,
 };
 use cavalry_proto::frame::FRAME_ALIGNMENT;
 use cavalry_shm::broadcast::{BroadcastBuffer, Transmitter};
@@ -822,13 +823,7 @@ impl Conductor {
         exclusive: bool,
         now: i64,
     ) {
-        if channel != IPC_CHANNEL {
-            self.statics.rejected_command.increment();
-            self.send_error(
-                correlation_id,
-                ErrorCode::InvalidChannel,
-                &format!("the channel must be cavalry:ipc in this version; see {ERRORS_DOC}"),
-            );
+        if !self.check_channel(correlation_id, channel, "the channel") {
             return;
         }
         if self.registration_count >= spec::MAX_PUBLICATIONS {
@@ -864,6 +859,7 @@ impl Conductor {
                 session_id,
                 stream_id,
                 publication_limit_counter_id: limit_id,
+                channel_status_indicator_id: NO_CHANNEL_STATUS,
                 log_file_name: log_file_name.as_bytes(),
             };
             self.send(&ready);
@@ -970,6 +966,7 @@ impl Conductor {
             session_id,
             stream_id,
             publication_limit_counter_id: counter_id(&publication.limit),
+            channel_status_indicator_id: NO_CHANNEL_STATUS,
             log_file_name: publication.log_file_name.as_bytes(),
         };
         let exclusive_ready = Event::ExclusivePublicationReady {
@@ -978,6 +975,7 @@ impl Conductor {
             session_id,
             stream_id,
             publication_limit_counter_id: counter_id(&publication.limit),
+            channel_status_indicator_id: NO_CHANNEL_STATUS,
             log_file_name: publication.log_file_name.as_bytes(),
         };
         self.send(if exclusive { &exclusive_ready } else { &ready });
@@ -1125,13 +1123,7 @@ impl Conductor {
         stream_id: i32,
         channel: &[u8],
     ) {
-        if channel != IPC_CHANNEL {
-            self.statics.rejected_command.increment();
-            self.send_error(
-                correlation_id,
-                ErrorCode::InvalidChannel,
-                &format!("the channel must be cavalry:ipc in this version; see {ERRORS_DOC}"),
-            );
+        if !self.check_channel(correlation_id, channel, "the channel") {
             return;
         }
         if self.subscriptions.len() >= spec::MAX_SUBSCRIPTIONS {
@@ -1143,7 +1135,10 @@ impl Conductor {
             client_id,
             stream_id,
         });
-        self.send(&Event::SubscriptionReady { correlation_id });
+        self.send(&Event::SubscriptionReady {
+            correlation_id,
+            channel_status_indicator_id: NO_CHANNEL_STATUS,
+        });
         let matching: Vec<usize> = self
             .publications
             .iter()
@@ -1490,14 +1485,48 @@ impl Conductor {
     /// registry or the recorder's queue full is code 10. The recording starts at the
     /// producer position loaded afresh, the limit respects it from now on, and the
     /// recorder is asked for the catalog slot; `recording ready` follows its reply.
+    /// The channel check every command that carries one runs first (`spec/udp.md`,
+    /// "What a reader rejects"; ADR 0040): `cavalry:ipc` passes; a `cavalry:udp` channel
+    /// that parses is refused with code 11 and a message naming the change that brings
+    /// it, since this driver has no sender or receiver yet (card 180), and the refusal
+    /// counts in `client_protocol.errors` alone, as a well-formed command's does; a
+    /// channel that fails the grammar, names a parameter this version does not, has a
+    /// bad endpoint or a multicast address is code 1 with the reason, counted in
+    /// `client_protocol.rejected_command`. Returns whether the command goes on.
+    fn check_channel(&mut self, correlation_id: i64, channel: &[u8], what: &str) -> bool {
+        match Channel::parse(channel) {
+            Ok(Channel::Ipc) => true,
+            Ok(Channel::Udp(_)) => {
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::GenericError,
+                    &format!(
+                        "{what} names cavalry:udp, which this driver does not send or receive \
+                         yet: the transport is specified (ADR 0040) and the sender and the \
+                         receiver follow (cards 180 and 181); use cavalry:ipc, or upgrade the \
+                         driver to a release that sends over UDP; see {ERRORS_DOC}"
+                    ),
+                );
+                false
+            }
+            Err(error) => {
+                self.statics.rejected_command.increment();
+                let message = if let ChannelError::Key { .. } = error {
+                    format!(
+                        "{what}: {error}; the parameter is `{}`; see {ERRORS_DOC}",
+                        String::from_utf8_lossy(error.key(channel))
+                    )
+                } else {
+                    format!("{what}: {error}; see {ERRORS_DOC}")
+                };
+                self.send_error(correlation_id, ErrorCode::InvalidChannel, &message);
+                false
+            }
+        }
+    }
+
     fn start_recording(&mut self, correlation_id: i64, stream_id: i32, channel: &[u8], now: i64) {
-        if channel != IPC_CHANNEL {
-            self.statics.rejected_command.increment();
-            self.send_error(
-                correlation_id,
-                ErrorCode::InvalidChannel,
-                &format!("the channel must be cavalry:ipc in this version; see {ERRORS_DOC}"),
-            );
+        if !self.check_channel(correlation_id, channel, "the channel") {
             return;
         }
         let mut live = false;
@@ -1974,15 +2003,7 @@ impl Conductor {
         replay_stream_id: i32,
         channel: &[u8],
     ) {
-        if channel != IPC_CHANNEL {
-            self.statics.rejected_command.increment();
-            self.send_error(
-                correlation_id,
-                ErrorCode::InvalidChannel,
-                &format!(
-                    "the replay channel must be cavalry:ipc in this version; see {ERRORS_DOC}"
-                ),
-            );
+        if !self.check_channel(correlation_id, channel, "the replay channel") {
             return;
         }
         if length < NULL_LENGTH {

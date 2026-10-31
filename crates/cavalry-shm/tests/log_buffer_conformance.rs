@@ -100,6 +100,15 @@ fn header_vector(name: &str, vector: &Value) {
         int(expected, "publication_window_length"),
         "{name}: publication_window_length"
     );
+    let receiver_window = expected
+        .get("receiver_window_length")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    assert_eq!(
+        i64::from(parsed.receiver_window_length()),
+        receiver_window,
+        "{name}: receiver_window_length"
+    );
     assert_eq!(
         i64::from(parsed.session_id()),
         int(expected, "session_id"),
@@ -118,16 +127,29 @@ fn header_vector(name: &str, vector: &Value) {
     assert_eq!(parsed.file_length(), file_length, "{name}: file_length");
 
     let log_type = LogType::try_from(i32_of(expected, "type")).expect("a valid vector's type");
-    let built = HeaderFields::new(
-        log_type,
-        int(expected, "correlation_id"),
-        i32_of(expected, "initial_term_id"),
-        u32_of(expected, "term_length"),
-        u32_of(expected, "mtu_length"),
-        u32_of(expected, "publication_window_length"),
-        i32_of(expected, "session_id"),
-        i32_of(expected, "stream_id"),
-    )
+    let built = if log_type.is_image() {
+        HeaderFields::new_image(
+            int(expected, "correlation_id"),
+            i32_of(expected, "initial_term_id"),
+            u32_of(expected, "term_length"),
+            u32_of(expected, "mtu_length"),
+            u32::try_from(receiver_window).expect("a valid image's window fits u32"),
+            i32_of(expected, "session_id"),
+            i32_of(expected, "stream_id"),
+        )
+    } else {
+        HeaderFields::new(
+            log_type,
+            int(expected, "correlation_id"),
+            i32_of(expected, "initial_term_id"),
+            u32_of(expected, "term_length"),
+            u32_of(expected, "mtu_length"),
+            u32_of(expected, "publication_window_length"),
+            i32_of(expected, "session_id"),
+            i32_of(expected, "stream_id"),
+        )
+    }
+    .and_then(|fields| fields.with_version(i32_of(expected, "version")))
     .unwrap_or_else(|error| panic!("{name}: the fields do not build: {error}"));
     assert_eq!(
         built, parsed,
@@ -371,7 +393,7 @@ fn claim_header_vector(name: &str, vector: &Value) {
 #[test]
 fn every_vector_in_spec_vectors_log_buffer_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("log-buffer.json parses");
-    assert_eq!(doc["version"], 0, "the vectors are for version 0");
+    assert_eq!(doc["version"], 1, "the vectors are for version 1");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
         vectors.len() >= 51,

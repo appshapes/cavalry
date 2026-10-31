@@ -29,10 +29,10 @@ pub mod layout;
 
 #[cfg(not(loom))]
 pub use file::{
-    Block, BufferClaim, ClaimError, LogBuffers, Poll, TermAppender, TermReader, TermWriter,
-    UnblockOutcome,
+    Block, BufferClaim, ClaimError, ImageWriter, LogBuffers, Poll, TermAppender, TermReader,
+    TermWriter, UnblockOutcome,
 };
-pub use layout::{ClaimRefused, HeaderFields, LogType, Positions, Tail};
+pub use layout::{ClaimRefused, HeaderFields, LogDirectory, LogType, Positions, Tail};
 
 /// Why a log, a position, a tail or a frame was refused. The first eleven variants are
 /// the spec's reader checks in the order they run; `Position`, `Tail` and `Frame` are
@@ -54,12 +54,12 @@ pub enum LogError {
         /// The eight bytes found.
         found: [u8; 8],
     },
-    /// The version is not [`layout::VERSION`].
+    /// The version is not [`layout::MIN_VERSION`] to [`layout::VERSION`].
     Version {
         /// The version found.
         found: i32,
     },
-    /// The type is not 0 or 1.
+    /// The type is not 0, 1 or 2.
     Type {
         /// The type found.
         found: i32,
@@ -79,6 +79,14 @@ pub enum LogError {
     /// The publication window length is not 1 to term length ÷ 2.
     Window {
         /// The window found, or asked for.
+        found: i64,
+        /// The term length it was checked against.
+        term_length: u32,
+    },
+    /// An image's receiver window length is not 1 to term length ÷ 2, or a
+    /// publication's is not 0 (`spec/log-buffer.md`, version 1). Reported as `window`.
+    ReceiverWindow {
+        /// The receiver window found, or asked for.
         found: i64,
         /// The term length it was checked against.
         term_length: u32,
@@ -154,7 +162,7 @@ impl LogError {
             LogError::Type { .. } => "type",
             LogError::TermLength { .. } => "term-length",
             LogError::Mtu { .. } => "mtu",
-            LogError::Window { .. } => "window",
+            LogError::Window { .. } | LogError::ReceiverWindow { .. } => "window",
             LogError::FrameHeader => "frame-header",
             LogError::Length { .. } => "length",
             LogError::Changed => "changed",
@@ -191,8 +199,9 @@ impl fmt::Display for LogError {
             ),
             LogError::Version { found } => write!(
                 f,
-                "log buffer rejected ({reason}): version {found}, this reader knows {}; the driver runs \
-                 another Cavalry version, upgrade the older side; see {DOC_REJECTS}",
+                "log buffer rejected ({reason}): version {found}, this reader knows {} to {}; the driver \
+                 runs another Cavalry version, upgrade the older side; see {DOC_REJECTS}",
+                layout::MIN_VERSION,
                 layout::VERSION
             ),
             LogError::Type { found } => write!(
@@ -218,6 +227,13 @@ impl fmt::Display for LogError {
                 f,
                 "log buffer rejected ({reason}): publication window length {found} is not 1 to {}; the \
                  file is corrupt, or the window asked for is wrong; see {DOC_REJECTS}",
+                term_length / 2
+            ),
+            LogError::ReceiverWindow { found, term_length } => write!(
+                f,
+                "log buffer rejected ({reason}): receiver window length {found} is not 1 to {} for an \
+                 image, or not 0 for a publication; the file is corrupt, or the window asked for is \
+                 wrong; see {DOC_REJECTS}",
                 term_length / 2
             ),
             LogError::FrameHeader => write!(

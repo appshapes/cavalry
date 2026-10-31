@@ -1,6 +1,6 @@
 {
  "spec": "spec/client-protocol.md",
- "version": 3,
+ "version": 4,
  "generated_by": "spec/vectors/client-protocol.py",
  "vectors": [
   {
@@ -443,13 +443,14 @@
    "name": "publication-ready",
    "region": "event",
    "type": 3843,
-   "bytes": "070000000000000007000000000000002efd69b6e90300000d000000180000007075626c69636174696f6e732f372e6c6f67627566666572",
+   "bytes": "070000000000000007000000000000002efd69b6e90300000d000000ffffffff180000007075626c69636174696f6e732f372e6c6f67627566666572",
    "fields": {
     "correlation_id": 7,
     "registration_id": 7,
     "session_id": -1234567890,
     "stream_id": 1001,
     "publication_limit_counter_id": 13,
+    "channel_status_indicator_id": -1,
     "log_file_name": "publications/7.logbuffer",
     "name": "publication_ready"
    }
@@ -458,14 +459,31 @@
    "name": "publication-ready-joined",
    "region": "event",
    "type": 3843,
-   "bytes": "090000000000000007000000000000002efd69b6e90300000d000000180000007075626c69636174696f6e732f372e6c6f67627566666572",
+   "bytes": "090000000000000007000000000000002efd69b6e90300000d000000ffffffff180000007075626c69636174696f6e732f372e6c6f67627566666572",
    "fields": {
     "correlation_id": 9,
     "registration_id": 7,
     "session_id": -1234567890,
     "stream_id": 1001,
     "publication_limit_counter_id": 13,
+    "channel_status_indicator_id": -1,
     "log_file_name": "publications/7.logbuffer",
+    "name": "publication_ready"
+   }
+  },
+  {
+   "name": "publication-ready-udp",
+   "region": "event",
+   "type": 3843,
+   "bytes": "150000000000000015000000000000004d000000e90300002800000029000000190000007075626c69636174696f6e732f32312e6c6f67627566666572000000",
+   "fields": {
+    "correlation_id": 21,
+    "registration_id": 21,
+    "session_id": 77,
+    "stream_id": 1001,
+    "publication_limit_counter_id": 40,
+    "channel_status_indicator_id": 41,
+    "log_file_name": "publications/21.logbuffer",
     "name": "publication_ready"
    }
   },
@@ -473,13 +491,14 @@
    "name": "exclusive-publication-ready",
    "region": "event",
    "type": 3846,
-   "bytes": "0200000000000000020000000000000063000000e90300000f000000180000007075626c69636174696f6e732f322e6c6f67627566666572",
+   "bytes": "0200000000000000020000000000000063000000e90300000f000000ffffffff180000007075626c69636174696f6e732f322e6c6f67627566666572",
    "fields": {
     "correlation_id": 2,
     "registration_id": 2,
     "session_id": 99,
     "stream_id": 1001,
     "publication_limit_counter_id": 15,
+    "channel_status_indicator_id": -1,
     "log_file_name": "publications/2.logbuffer",
     "name": "exclusive_publication_ready"
    }
@@ -511,10 +530,62 @@
    "name": "subscription-ready",
    "region": "event",
    "type": 3847,
-   "bytes": "0600000000000000",
+   "bytes": "0600000000000000ffffffff",
    "fields": {
     "correlation_id": 6,
+    "channel_status_indicator_id": -1,
     "name": "subscription_ready"
+   }
+  },
+  {
+   "name": "subscription-ready-udp",
+   "region": "event",
+   "type": 3847,
+   "bytes": "16000000000000002a000000",
+   "fields": {
+    "correlation_id": 22,
+    "channel_status_indicator_id": 42,
+    "name": "subscription_ready"
+   }
+  },
+  {
+   "name": "available-image-udp",
+   "region": "event",
+   "type": 3842,
+   "bytes": "17000000000000004d000000e903000016000000000000002b00000013000000696d616765732f32332e6c6f67627566666572000e00000031302e302e302e313a34303132330000",
+   "fields": {
+    "correlation_id": 23,
+    "session_id": 77,
+    "stream_id": 1001,
+    "subscriber_registration_id": 22,
+    "subscriber_position_counter_id": 43,
+    "log_file_name": "images/23.logbuffer",
+    "source_identity": "10.0.0.1:40123",
+    "name": "available_image"
+   }
+  },
+  {
+   "name": "error-channel-endpoint",
+   "region": "event",
+   "type": 3841,
+   "bytes": "1600000000000000040000005800000074686520656e64706f696e742031302e302e302e323a343031323320636f756c64206e6f7420626520626f756e643a206164647265737320696e2075736520287564702e6d642c20546865206368616e6e656c2055524929",
+   "fields": {
+    "offending_correlation_id": 22,
+    "error_code": 4,
+    "error_message": "the endpoint 10.0.0.2:40123 could not be bound: address in use (udp.md, The channel URI)",
+    "name": "error"
+   }
+  },
+  {
+   "name": "error-unknown-host",
+   "region": "event",
+   "type": 3841,
+   "bytes": "1600000000000000090000003d00000074686520686f737420677269702d6c696e6b20646f6573206e6f74207265736f6c766520287564702e6d642c20546865206368616e6e656c2055524929000000",
+   "fields": {
+    "offending_correlation_id": 22,
+    "error_code": 9,
+    "error_message": "the host grip-link does not resolve (udp.md, The channel URI)",
+    "name": "error"
    }
   },
   {

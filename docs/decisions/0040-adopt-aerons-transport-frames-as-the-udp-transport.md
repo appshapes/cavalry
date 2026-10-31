@@ -1,6 +1,6 @@
 # 0040. Adopt Aeron's control frames and rules as the UDP transport, version 0, with log buffer version 1 and client protocol version 4
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-31
 - **Invariants affected:** 1, 2, 3, 4, 5, 6
 - **Supersedes:** none; amends `spec/log-buffer.md` to version 1 and
@@ -596,6 +596,37 @@ direct link between `bench` and `grip` measured on 2026-10-31 (card 182: 0.12 to
 round trip, no loss in 200 pings, MTU 1500, hardware timestamps on both ports), which is
 what the MTU default and the cross-host rows will run over. The vectors' counts and the
 no-panic and `loom` runs are the accepting change's to record.
+
+Acceptance, 2026-10-31 *(acceptance)*: Rjae accepted the decision as proposed on
+2026-10-31, answering the recorded decision d-20261031-7e57a0 through the team's Slack
+gateway while pull request 90 was in review. The five reviews' eleven blockers,
+applied on the pull request, are folded into `spec/udp.md` and `spec/client-protocol.md`
+as they stand here: the receiver asks a sender for a setup frame with a status message
+carrying the send-setup flag when data or a heartbeat arrives for a session with no
+record, and the sender's heartbeats begin with its first status message; an image has a
+registration id of its own from the correlation id counter; the receiver keeps a bounded
+table of session records in four states, pending, in progress, with an image and on
+cool-down, so that a second setup or a late retransmit creates no second image; the
+departure from ADR 0039 on the socket buffer lengths is named; an image ends when its
+last subscription goes and an endpoint closes when nothing holds it, with the endpoint's
+states a third state machine; Aeron's cool-down and liveness are stated as its source
+has them, and no failure on a live socket errors an endpoint, as in Aeron, with
+`receiver.receive_failed` for a refused receive; and the reviews' notes are
+applied on the spec page, where `receiver.dropped_frames` is split by reason into five
+counters and the image's states are named with `image.unsubscribed`, so that the page's
+static counters are 44 and the sum 14,354, against this ADR's 39 and 14,349, both under
+16384. The change that accepts this ADR carries the three
+pages, 96 UDP vectors, 61 log buffer vectors and 102 client protocol vectors, the
+`udp` and `channel` modules of `cavalry-proto` with their no-panic tests and fuzz
+targets, log buffer version 1 and the image writer in `cavalry-shm` with its loom model,
+the driver's channel check and 16384-counter file, and the client's reading of the new
+events. One point of "The crates" above was accepted differently: the driver refuses a
+`cavalry:udp` channel that parses with error code 11, generic error, counted in
+`client_protocol.errors` alone as a well-formed command's refusal is, with a message
+naming cards 180 and 181, and not with code 1, since a well-formed channel of version 4
+is not code 1's invalid channel (`spec/client-protocol.md`, "Error codes"); a channel
+that fails a check of `spec/udp.md`, "What a reader rejects", is code 1 with the reason,
+as the Decision says.
 
 ## Consequences
 

@@ -159,9 +159,10 @@ fn event_fields(event: &Event<'_>) -> Value {
             session_id,
             stream_id,
             publication_limit_counter_id,
+            channel_status_indicator_id,
             log_file_name,
         } => {
-            json!({"name": "publication_ready", "correlation_id": correlation_id, "registration_id": registration_id, "session_id": session_id, "stream_id": stream_id, "publication_limit_counter_id": publication_limit_counter_id, "log_file_name": text(log_file_name)})
+            json!({"name": "publication_ready", "correlation_id": correlation_id, "registration_id": registration_id, "session_id": session_id, "stream_id": stream_id, "publication_limit_counter_id": publication_limit_counter_id, "channel_status_indicator_id": channel_status_indicator_id, "log_file_name": text(log_file_name)})
         }
         Event::OperationSuccess { correlation_id } => {
             json!({"name": "operation_success", "correlation_id": correlation_id})
@@ -180,12 +181,16 @@ fn event_fields(event: &Event<'_>) -> Value {
             session_id,
             stream_id,
             publication_limit_counter_id,
+            channel_status_indicator_id,
             log_file_name,
         } => {
-            json!({"name": "exclusive_publication_ready", "correlation_id": correlation_id, "registration_id": registration_id, "session_id": session_id, "stream_id": stream_id, "publication_limit_counter_id": publication_limit_counter_id, "log_file_name": text(log_file_name)})
+            json!({"name": "exclusive_publication_ready", "correlation_id": correlation_id, "registration_id": registration_id, "session_id": session_id, "stream_id": stream_id, "publication_limit_counter_id": publication_limit_counter_id, "channel_status_indicator_id": channel_status_indicator_id, "log_file_name": text(log_file_name)})
         }
-        Event::SubscriptionReady { correlation_id } => {
-            json!({"name": "subscription_ready", "correlation_id": correlation_id})
+        Event::SubscriptionReady {
+            correlation_id,
+            channel_status_indicator_id,
+        } => {
+            json!({"name": "subscription_ready", "correlation_id": correlation_id, "channel_status_indicator_id": channel_status_indicator_id})
         }
         Event::ClientTimeout { client_id } => {
             json!({"name": "client_timeout", "client_id": client_id})
@@ -228,7 +233,7 @@ fn event_fields(event: &Event<'_>) -> Value {
 #[test]
 fn every_vector_in_spec_vectors_client_protocol_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("client-protocol.json parses");
-    assert_eq!(doc["version"], 3, "the vectors are for version 3");
+    assert_eq!(doc["version"], 4, "the vectors are for version 4");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
         vectors.len() >= 80,

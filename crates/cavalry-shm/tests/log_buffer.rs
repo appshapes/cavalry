@@ -15,7 +15,7 @@ use cavalry_shm::log::layout::{
     file_name,
 };
 use cavalry_shm::log::{
-    ClaimError, HeaderFields, LogBuffers, LogError, LogType, Tail, UnblockOutcome,
+    ClaimError, HeaderFields, LogBuffers, LogDirectory, LogError, LogType, Tail, UnblockOutcome,
 };
 
 struct Dir(PathBuf);
@@ -842,9 +842,9 @@ fn a_reader_rejects_a_bad_file_by_name() {
     for (name, patch) in [
         (
             "version",
-            Box::new(|h: &mut [u8]| h[8] = 1) as Box<dyn Fn(&mut [u8])>,
+            Box::new(|h: &mut [u8]| h[8] = 2) as Box<dyn Fn(&mut [u8])>,
         ),
-        ("type", Box::new(|h: &mut [u8]| h[12] = 2)),
+        ("type", Box::new(|h: &mut [u8]| h[12] = 3)),
         (
             "term-length",
             Box::new(|h: &mut [u8]| h[28..32].copy_from_slice(&100_000i32.to_le_bytes())),
@@ -1389,4 +1389,192 @@ fn a_replay_writer_needs_an_exclusive_writable_log() {
     let read_only = LogBuffers::open(dir.path(), 77, false).unwrap();
     let error = read_only.writer(1, 1001).unwrap_err();
     assert_eq!(error.reason(), "io", "{error}");
+}
+
+// ---- images: `spec/log-buffer.md`, version 1; `spec/udp.md`, "The receiver" (ADR 0040) ----
+
+fn image_fields() -> HeaderFields {
+    HeaderFields::new_image(CORRELATION, -5, T, MTU, T / 4, 7, 1001).unwrap()
+}
+
+/// One data frame's bytes as a checked datagram yields them: header, body, padding.
+fn wire_frame(term_offset: i32, term_id: i32, body: &[u8]) -> Vec<u8> {
+    let frame_length = 32 + body.len();
+    let aligned = (frame_length + 31) & !31;
+    let mut bytes = vec![0u8; aligned];
+    DataFrameHeader::new(FrameType::Data, Flags::UNFRAGMENTED, frame_length)
+        .unwrap()
+        .with_term_offset(term_offset)
+        .with_session_id(7)
+        .with_stream_id(1001)
+        .with_term_id(term_id)
+        .write(&mut bytes)
+        .unwrap();
+    bytes[32..frame_length].copy_from_slice(body);
+    bytes
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_image_is_created_under_images_and_read_back_as_one() {
+    let dir = Dir::new("image-create");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    assert!(dir.path().join("images").join("42.logbuffer").is_file());
+    assert_eq!(log.header().log_type(), LogType::Image);
+    assert_eq!(log.header().receiver_window_length(), T / 4);
+    assert_eq!(log.header().version(), 1);
+    drop(log);
+    let opened = LogBuffers::open_image(dir.path(), CORRELATION, false).unwrap();
+    assert_eq!(opened.header(), image_fields());
+    let named =
+        LogBuffers::open_named(dir.path(), LogDirectory::Images, CORRELATION, false).unwrap();
+    assert_eq!(named.header(), image_fields());
+    assert_eq!(
+        cavalry_shm::log::layout::parse_file_name(b"images/42.logbuffer"),
+        Some((LogDirectory::Images, 42))
+    );
+    assert_eq!(
+        cavalry_shm::log::layout::parse_file_name(b"publications/7.logbuffer"),
+        Some((LogDirectory::Publications, 7))
+    );
+    assert_eq!(
+        cavalry_shm::log::layout::parse_file_name(b"../42.logbuffer"),
+        None
+    );
+    assert_eq!(
+        cavalry_shm::log::layout::parse_file_name(b"images/../7.logbuffer"),
+        None
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_image_refuses_a_publisher_and_a_publication_refuses_the_image_writer() {
+    let dir = Dir::new("image-refuses");
+    let image = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    assert_eq!(image.appender().unwrap_err().reason(), "type");
+    let publication = LogBuffers::create(dir.path(), &fields(LogType::Exclusive)).unwrap();
+    assert_eq!(publication.image_writer().unwrap_err().reason(), "type");
+    assert_eq!(
+        HeaderFields::new_image(CORRELATION, -5, T, MTU, 0, 7, 1001)
+            .unwrap_err()
+            .reason(),
+        "window"
+    );
+    assert_eq!(
+        HeaderFields::new_image(CORRELATION, -5, T, MTU, T / 2 + 32, 7, 1001)
+            .unwrap_err()
+            .reason(),
+        "window"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_reader_stops_at_the_gap_until_the_receiver_fills_it() {
+    let dir = Dir::new("image-gap");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    let mut reader = log.reader(0).unwrap();
+
+    // Frames at 0 and 128 arrive; the one at 64 is lost on the wire.
+    assert!(writer.insert(-5, 0, &wire_frame(0, -5, b"first")).unwrap());
+    assert!(
+        writer
+            .insert(-5, 128, &wire_frame(128, -5, b"third"))
+            .unwrap()
+    );
+    assert_eq!(drain(&mut reader), vec![b"first".to_vec()]);
+    assert_eq!(reader.position(), 64, "the reader stops at the gap");
+
+    // The retransmit fills the gap; the reader goes on past it.
+    assert!(
+        writer
+            .insert(-5, 64, &wire_frame(64, -5, b"second"))
+            .unwrap()
+    );
+    assert_eq!(
+        drain(&mut reader),
+        vec![b"second".to_vec(), b"third".to_vec()]
+    );
+    assert_eq!(reader.position(), 192);
+
+    // A duplicate changes nothing and says so.
+    assert!(
+        !writer
+            .insert(-5, 64, &wire_frame(64, -5, b"xxxxxx"))
+            .unwrap()
+    );
+    let mut again = log.reader(64).unwrap();
+    assert_eq!(
+        drain(&mut again),
+        vec![b"second".to_vec(), b"third".to_vec()]
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_image_insert_refuses_a_frame_outside_the_term_or_unaligned() {
+    let dir = Dir::new("image-bounds");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    assert_eq!(
+        writer
+            .insert(-5, 48, &wire_frame(48, -5, b"x"))
+            .unwrap_err()
+            .reason(),
+        "position"
+    );
+    assert_eq!(
+        writer
+            .insert(
+                -5,
+                T - 32,
+                &wire_frame((T - 32) as i32, -5, b"too long for the end")
+            )
+            .unwrap_err()
+            .reason(),
+        "position"
+    );
+    assert_eq!(
+        writer.insert(-5, 0, &[0u8; 16]).unwrap_err().reason(),
+        "frame"
+    );
+    let mut bad = wire_frame(0, -5, b"v");
+    bad[4] = 1;
+    assert_eq!(writer.insert(-5, 0, &bad).unwrap_err().reason(), "frame");
+    // A header that names another term or offset than the insert does: nothing lands.
+    assert_eq!(
+        writer
+            .insert(-4, 0, &wire_frame(0, -5, b"w"))
+            .unwrap_err()
+            .reason(),
+        "frame"
+    );
+    assert_eq!(
+        writer
+            .insert(-5, 64, &wire_frame(0, -5, b"w"))
+            .unwrap_err()
+            .reason(),
+        "frame"
+    );
+    let mut reader = log.reader(0).unwrap();
+    assert!(drain(&mut reader).is_empty(), "nothing was written");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_image_in_a_later_term_lands_in_its_partition() {
+    let dir = Dir::new("image-partition");
+    let position = 2 * i64::from(T) + 1024;
+    let log = LogBuffers::create_at(dir.path(), &image_fields(), position).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    let mut reader = log.reader(position).unwrap();
+    assert!(
+        writer
+            .insert(-3, 1024, &wire_frame(1024, -3, b"third term"))
+            .unwrap()
+    );
+    assert_eq!(drain(&mut reader), vec![b"third term".to_vec()]);
+    assert_eq!(reader.position(), position + 64);
 }

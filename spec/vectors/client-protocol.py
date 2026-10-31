@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/client-protocol.json: the test vectors for spec/client-protocol.md,
-version 3.
+version 4.
 
 This script is the spec's reference encoder, independent of the Rust code: it packs
 each command's and event's fields with the standard library and nothing else, so an
@@ -79,6 +79,7 @@ EVENTS = {
     ON_PUBLICATION_READY: ("publication_ready", (("correlation_id", "q"), ("registration_id", "q"),
                                                  ("session_id", "i"), ("stream_id", "i"),
                                                  ("publication_limit_counter_id", "i"),
+                                                 ("channel_status_indicator_id", "i"),
                                                  ("log_file_name", "s"))),
     ON_OPERATION_SUCCESS: ("operation_success", (("correlation_id", "q"),)),
     ON_UNAVAILABLE_IMAGE: ("unavailable_image", (("correlation_id", "q"),
@@ -88,8 +89,10 @@ EVENTS = {
                                      (("correlation_id", "q"), ("registration_id", "q"),
                                       ("session_id", "i"), ("stream_id", "i"),
                                       ("publication_limit_counter_id", "i"),
+                                      ("channel_status_indicator_id", "i"),
                                       ("log_file_name", "s"))),
-    ON_SUBSCRIPTION_READY: ("subscription_ready", (("correlation_id", "q"),)),
+    ON_SUBSCRIPTION_READY: ("subscription_ready", (("correlation_id", "q"),
+                                                   ("channel_status_indicator_id", "i"))),
     ON_CLIENT_TIMEOUT: ("client_timeout", (("client_id", "q"),)),
     ON_RECORDING_READY: ("recording_ready", (("correlation_id", "q"), ("recording_id", "q"),
                                              ("session_id", "i"),
@@ -214,17 +217,30 @@ VECTORS = [
           log_file_name=LOG, source_identity=IPC),
     event(ON_PUBLICATION_READY, "publication-ready", correlation_id=7, registration_id=7,
           session_id=-1234567890, stream_id=1001, publication_limit_counter_id=13,
-          log_file_name=LOG),
+          channel_status_indicator_id=-1, log_file_name=LOG),
     event(ON_PUBLICATION_READY, "publication-ready-joined", correlation_id=9, registration_id=7,
           session_id=-1234567890, stream_id=1001, publication_limit_counter_id=13,
-          log_file_name=LOG),
+          channel_status_indicator_id=-1, log_file_name=LOG),
+    event(ON_PUBLICATION_READY, "publication-ready-udp", correlation_id=21, registration_id=21,
+          session_id=77, stream_id=1001, publication_limit_counter_id=40,
+          channel_status_indicator_id=41, log_file_name="publications/21.logbuffer"),
     event(ON_EXCLUSIVE_PUBLICATION_READY, "exclusive-publication-ready", correlation_id=2,
           registration_id=2, session_id=99, stream_id=1001, publication_limit_counter_id=15,
-          log_file_name="publications/2.logbuffer"),
+          channel_status_indicator_id=-1, log_file_name="publications/2.logbuffer"),
     event(ON_OPERATION_SUCCESS, "operation-success", correlation_id=3),
     event(ON_UNAVAILABLE_IMAGE, "unavailable-image", correlation_id=7,
           subscriber_registration_id=6, stream_id=1001, channel=IPC),
-    event(ON_SUBSCRIPTION_READY, "subscription-ready", correlation_id=6),
+    event(ON_SUBSCRIPTION_READY, "subscription-ready", correlation_id=6,
+          channel_status_indicator_id=-1),
+    event(ON_SUBSCRIPTION_READY, "subscription-ready-udp", correlation_id=22,
+          channel_status_indicator_id=42),
+    event(ON_AVAILABLE_IMAGE, "available-image-udp", correlation_id=23, session_id=77,
+          stream_id=1001, subscriber_registration_id=22, subscriber_position_counter_id=43,
+          log_file_name="images/23.logbuffer", source_identity="10.0.0.1:40123"),
+    event(ON_ERROR, "error-channel-endpoint", offending_correlation_id=22, error_code=4,
+          error_message="the endpoint 10.0.0.2:40123 could not be bound: address in use (udp.md, The channel URI)"),
+    event(ON_ERROR, "error-unknown-host", offending_correlation_id=22, error_code=9,
+          error_message="the host grip-link does not resolve (udp.md, The channel URI)"),
     event(ON_CLIENT_TIMEOUT, "client-timeout", client_id=5),
     event(ON_RECORDING_READY, "recording-ready", correlation_id=11, recording_id=0,
           session_id=-1234567890, recording_position_counter_id=16,
@@ -354,7 +370,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 3,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 4,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")

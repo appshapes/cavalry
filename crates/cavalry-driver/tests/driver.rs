@@ -180,7 +180,9 @@ impl Client {
             channel: IPC_CHANNEL,
         });
         self.wait(Duration::from_secs(5), |event| match *event {
-            Event::SubscriptionReady { correlation_id: id } if id == correlation_id => Some(id),
+            Event::SubscriptionReady {
+                correlation_id: id, ..
+            } if id == correlation_id => Some(id),
             _ => None,
         })
     }
@@ -379,7 +381,9 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
     // Released, the loop begins and the command is answered.
     release.store(true, Ordering::Release);
     client.wait(Duration::from_secs(5), |event| match *event {
-        Event::SubscriptionReady { correlation_id: id } if id == correlation_id => Some(()),
+        Event::SubscriptionReady {
+            correlation_id: id, ..
+        } if id == correlation_id => Some(()),
         _ => None,
     });
     driver.close().expect("closes");
@@ -551,7 +555,21 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
         stream_id: 7,
         channel: b"cavalry:udp?endpoint=localhost:40123",
     });
-    assert_eq!(client.wait_error(bad_channel).0, 1);
+    // A cavalry:udp channel parses in version 4 and is refused with code 11 until the
+    // sender lands (card 180); a channel that fails the grammar is code 1 (ADR 0040).
+    let (code, message) = client.wait_error(bad_channel);
+    assert_eq!(code, 11, "{message}");
+    assert!(message.contains("card"), "{message}");
+    let bad_grammar = client.correlation_id();
+    client.send(&Command::AddPublication {
+        client_id: client.id,
+        correlation_id: bad_grammar,
+        stream_id: 7,
+        channel: b"cavalry:udp?endpoint=localhost:40123|mtu=1408",
+    });
+    let (code, message) = client.wait_error(bad_grammar);
+    assert_eq!(code, 1, "{message}");
+    assert!(message.contains("`mtu`"), "{message}");
 
     // A message longer than its fields: code 7.
     let too_long = client.correlation_id();
@@ -609,7 +627,10 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 7);
-    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 6);
+    // One more error than rejected commands less the two decoding refusals: the
+    // cavalry:udp channel is a well-formed command answered with code 11 and counted
+    // in errors alone (ADR 0040), as the retention refusals were before card 95.
+    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 7);
     driver.close().expect("closes");
 }
 
@@ -970,7 +991,9 @@ fn the_client_registry_is_bounded_and_says_so() {
             channel: IPC_CHANNEL,
         });
         client.wait(Duration::from_secs(5), |event| match *event {
-            Event::SubscriptionReady { correlation_id: id } if id == correlation_id => Some(()),
+            Event::SubscriptionReady {
+                correlation_id: id, ..
+            } if id == correlation_id => Some(()),
             _ => None,
         });
     }
@@ -1251,7 +1274,7 @@ fn recording_commands_get_the_spec_error_codes() {
         channel: b"cavalry:udp?endpoint=localhost:40123",
     });
     let (code, message) = client.wait_error(other_channel);
-    assert_eq!(code, 1, "{message}");
+    assert_eq!(code, 11, "{message}");
 
     let no_publication = client.correlation_id();
     client.send(&Command::StartRecording {

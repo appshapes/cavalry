@@ -132,6 +132,10 @@ fn a_recording_follows_the_publisher_and_stops_on_request() {
     );
     refused(
         client.start_recording("cavalry:udp?endpoint=localhost:40123", 71),
+        ErrorCode::GenericError,
+    );
+    refused(
+        client.start_recording("cavalry:udp?endpoint=localhost", 71),
         ErrorCode::InvalidChannel,
     );
     // A new recording of the same publication takes the next slot.
