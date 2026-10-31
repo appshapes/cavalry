@@ -65,9 +65,7 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Options, String> {
     };
     let mut args = args.peekable();
     while let Some(name) = args.next() {
-        let value = args
-            .next()
-            .ok_or_else(|| format!("{name} needs a value"))?;
+        let value = args.next().ok_or_else(|| format!("{name} needs a value"))?;
         let number = |what: &str| -> Result<u64, String> {
             value
                 .parse::<u64>()
@@ -81,7 +79,8 @@ fn parse(args: impl Iterator<Item = String>) -> Result<Options, String> {
             }
             "--rate" => options.rate = number("messages per second")?,
             "--body" => {
-                options.body = usize::try_from(number("a byte count")?).map_err(|e| e.to_string())?;
+                options.body =
+                    usize::try_from(number("a byte count")?).map_err(|e| e.to_string())?;
                 if options.body < 8 {
                     return Err("--body must be at least 8".to_string());
                 }
@@ -115,7 +114,10 @@ fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
         options
             .stop_file
             .as_ref()
-            .map_or(String::new(), |p| format!(", until {} appears", p.display()))
+            .map_or(String::new(), |p| format!(
+                ", until {} appears",
+                p.display()
+            ))
     );
 
     let mut sent: u64 = 0;

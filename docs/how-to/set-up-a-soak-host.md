@@ -121,7 +121,8 @@ retention commands the soak runs do is
    `cavalry doctor --dir /dev/shm/cavalry-soak --log-dir /srv/cavalry-soak/log` printed
    at that minute, ending in `exit <code>`: the `recording` line with the recording's
    position and synced position, the counters file's fill, and every finding; a soak
-   that is doing what it should prints no `warn` and exits 0. The `counters-<time>`
+   that is doing what it should prints one `WARN`, `host-governor`, since the stock
+   governor is what a soak host keeps on purpose, and exits 0. The `counters-<time>`
    file is the counters file's bytes at that minute, for a reader of the counters
    layout (`docs/reference/counters-file.md`) when a counter's course over the week is
    wanted, which the week's close-out reads.
@@ -149,7 +150,7 @@ retention commands the soak runs do is
 - `df -h /srv/cavalry-soak` holds within a day's recordings, about 55 GB at the
   defaults, from the second day on.
 - The program's lines keep `behind 0` and `back-pressured 0` at the default rate; the
-  samples' doctor reports keep exiting 0.
+  samples' doctor reports keep exiting 0 with `host-governor` as their one finding.
 
 ## When it does not work
 
