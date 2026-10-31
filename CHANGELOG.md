@@ -813,6 +813,16 @@ user-visible change, added in the same commit as the change. The format follows
   how-to now names under "When it does not work"
   ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); card
   159).
+- ADR 0039, Proposed: the third slice is publish/subscribe over UDP unicast between two
+  hosts on the same API as IPC, in four features (cards 179 to 182): the transport
+  specified first, Aeron's control frames, log buffer version 1 and client protocol
+  version 4 under an ADR a person accepts; the sender thread; the receiver thread and
+  the image, with the fault-injection gate for loss, reordering and duplication; then
+  the UDP rows on the two bench hosts, a cross-host round trip in the gate, and the
+  ten-minute path publishing over UDP. Multicast, the min and tagged strategies, kernel
+  bypass and encryption wait for later slices. The cross-host rows need the cable and
+  the clock link moved to `grip`, by hand, before the fourth feature starts
+  ([ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md); card 183).
 - The review loop's fixer commits each blocker as that blocker's test passes and pushes
   as it goes, so a run that ends early leaves what it finished on the pull request; its
   comment says which gates ran on the head it left, and the four gates still run on the
