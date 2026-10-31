@@ -678,7 +678,7 @@ id = 60
 name = "sender.position"
 kind = "gauge"
 scope = "instance"
-doc = "The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key and label as publication.position."
+doc = "The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint."
 doctor = "A sender.position that does not move while publication.position does is a publication whose receiver window is full (sender.limit) or whose endpoint cannot send (sender.send_failed, sender.short_sends)."
 
 [[counter]]
@@ -686,7 +686,7 @@ id = 61
 name = "sender.limit"
 kind = "gauge"
 scope = "instance"
-doc = "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as publication.position."
+doc = "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position."
 doctor = "A sender.limit that stays at 0 is a publication no receiver has answered: see sender.setups_sent; one that stops rising while sender.position reaches it is a receiver whose subscriber is slow."
 
 [[counter]]

@@ -185,10 +185,10 @@ pub const SENDER_STATUS_MESSAGES_REJECTED: CounterId = CounterId(58);
 /// `sender.rtt_replies_sent`, a static counter: RTT measurements with the reply flag answered: the same frame without the flag, the echo timestamp and the receiver id unchanged (spec/udp.md, The sender).
 pub const SENDER_RTT_REPLIES_SENT: CounterId = CounterId(59);
 
-/// `sender.position`, a instance gauge: The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key and label as publication.position.
+/// `sender.position`, a instance gauge: The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint.
 pub const SENDER_POSITION: CounterId = CounterId(60);
 
-/// `sender.limit`, a instance gauge: The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as publication.position.
+/// `sender.limit`, a instance gauge: The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.
 pub const SENDER_LIMIT: CounterId = CounterId(61);
 
 /// `publication.connected`, a static counter: cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the sender position plus the publication window from here (spec/udp.md, The sender).
@@ -708,7 +708,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.position",
         kind: Kind::Gauge,
         scope: Scope::Instance,
-        doc: "The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key and label as publication.position.",
+        doc: "The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint.",
         doctor: "A sender.position that does not move while publication.position does is a publication whose receiver window is full (sender.limit) or whose endpoint cannot send (sender.send_failed, sender.short_sends).",
     },
     CounterDef {
@@ -716,7 +716,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.limit",
         kind: Kind::Gauge,
         scope: Scope::Instance,
-        doc: "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as publication.position.",
+        doc: "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.",
         doctor: "A sender.limit that stays at 0 is a publication no receiver has answered: see sender.setups_sent; one that stops rising while sender.position reaches it is a receiver whose subscriber is slow.",
     },
     CounterDef {

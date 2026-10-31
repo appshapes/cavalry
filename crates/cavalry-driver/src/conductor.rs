@@ -1351,15 +1351,23 @@ impl Conductor {
             }
         };
         let key = position_key(correlation_id, session_id, stream_id);
-        let label = |name: &str| format!("{name} {correlation_id} {session_id} {stream_id}");
+        // The sender's two labels end in the endpoint's registration id, so that `doctor`
+        // names a publication's endpoint from the counters file alone.
+        let label = |name: &str, endpoint: bool| {
+            if endpoint {
+                format!("{name} {correlation_id} {session_id} {stream_id} {endpoint_id}")
+            } else {
+                format!("{name} {correlation_id} {session_id} {stream_id}")
+            }
+        };
         let mut allocated: Vec<Counter> = Vec::with_capacity(4);
-        for (id, name) in [
-            (PUBLICATION_POSITION, "publication.position"),
-            (PUBLICATION_LIMIT, "publication.limit"),
-            (SENDER_POSITION, "sender.position"),
-            (SENDER_LIMIT, "sender.limit"),
+        for (id, name, endpoint) in [
+            (PUBLICATION_POSITION, "publication.position", false),
+            (PUBLICATION_LIMIT, "publication.limit", false),
+            (SENDER_POSITION, "sender.position", true),
+            (SENDER_LIMIT, "sender.limit", true),
         ] {
-            match self.counters.allocate(id, &key, &label(name)) {
+            match self.counters.allocate(id, &key, &label(name, endpoint)) {
                 Ok(counter) => allocated.push(counter),
                 Err(error) => {
                     for counter in allocated {
