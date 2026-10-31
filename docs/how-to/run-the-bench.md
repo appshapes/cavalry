@@ -38,8 +38,8 @@ shared runner is
    or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier,
    `just bench --pin 8,10,12` binds the publisher, the subscriber and the driver's
-   conductor to those CPUs, on Linux only, with the driver's recorder and replayer and
-   the client's conductor on the lowest CPU outside them, so each pinned CPU runs one thread, and `just bench --repeat 21` runs every benchmark
+   conductor to those CPUs, on Linux only, with the driver's recorder, replayer and
+   sender and the client's conductor on the lowest CPU outside them, so each pinned CPU runs one thread, and `just bench --repeat 21` runs every benchmark
    twenty-one times and reports each one's median run by p99.99, with every run's
    p99.99 in the last column and in the result file. The bench hosts run it with all
    three: on an isolated core, one run's 0.01 percent tail of a few hundred nanoseconds

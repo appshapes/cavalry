@@ -19,6 +19,14 @@ cavalry-proto = { path = "../cavalry-proto" }
 # The durable log the recorder thread writes: the log directory under its lock, the
 # recovery pass, and the recording writer (ADR 0025). A workspace member.
 cavalry-log = { path = "../cavalry-log" }
+# The socket calls `std` lacks, on a `std::net::UdpSocket`'s descriptor (ADR 0041):
+# `sendmmsg` per burst on Linux and `sendmsg` per datagram elsewhere, `recvmmsg` and
+# `recvmsg` for the control frames an endpoint receives, and the socket buffer lengths
+# read back into the endpoint's counters. `socket` carries the module and the options,
+# `uio` the message calls and their preallocated headers, `net` the address types the
+# receiver (card 181) reads a datagram's source from; none allocates per call. It
+# carries the `unsafe` the calls need, so this crate carries none.
+nix = { version = "0.31", default-features = false, features = ["socket", "uio", "net"] }
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]
@@ -29,4 +37,4 @@ workspace = true
 # workspace crates need no entry.
 [package.metadata.cavalry]
 data_plane = true
-allowed-dependencies = []
+allowed-dependencies = ["nix"]

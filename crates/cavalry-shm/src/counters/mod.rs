@@ -27,9 +27,10 @@
 //!     let dir = std::env::temp_dir().join(format!("cavalry-shm-counters-{}", std::process::id()));
 //!     std::fs::create_dir_all(&dir)?;
 //!
-//!     // The driver creates the file once, with room for 64 counters. Every static counter
-//!     // in counters.toml is allocated with it, in the record whose index is its id.
-//!     let mut driver = CountersFile::create(&dir, 64)?;
+//!     // The driver creates the file once, with room for 128 counters. Every static counter
+//!     // in counters.toml is allocated with it, in the record whose index is its id, so the
+//!     // capacity is above the largest static id.
+//!     let mut driver = CountersFile::create(&dir, 128)?;
 //!     let statics = COUNTERS.iter().filter(|def| def.scope == Scope::Static).count() as i64;
 //!
 //!     // An instance counter: one per publication, image or whatever it counts. The type id
@@ -46,10 +47,10 @@
 //!
 //!     // The capacity is fixed at creation. When every record is in use, an allocation fails
 //!     // with `full`, counters.allocation_failed moves, and whatever needed it is refused.
-//!     for n in (statics + 1)..64 {
+//!     for n in (statics + 1)..128 {
 //!         driver.allocate(CounterId(7), &[], &format!("image.gaps {n}"))?;
 //!     }
-//!     let full = driver.allocate(CounterId(7), &[], "image.gaps 64").unwrap_err();
+//!     let full = driver.allocate(CounterId(7), &[], "image.gaps 128").unwrap_err();
 //!     assert_eq!(full.reason(), "full");
 //!     assert_eq!(reader.read(COUNTERS_ALLOCATION_FAILED.record())?, 1);
 //!

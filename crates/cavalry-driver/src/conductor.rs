@@ -21,13 +21,14 @@
 //! publication's limit paces the replayer as it paces a publisher (ADR 0030).
 
 use std::collections::VecDeque;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cavalry_log::dir::Recovery;
 
-use cavalry_proto::channel::{Channel, ChannelError};
+use cavalry_proto::channel::{Channel, ChannelError, UdpChannel};
 use cavalry_proto::client_protocol::{
     Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NO_CHANNEL_STATUS, NULL_LENGTH,
     ProtocolError, ReplayStopReason,
@@ -38,17 +39,19 @@ use cavalry_shm::command_ring::{
     CommandRing, CommandRingError, Consumer, UnblockOutcome as RingUnblock,
 };
 use cavalry_shm::counters::generated::{
-    CLIENT_PROTOCOL_ERRORS, CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT,
-    COMMAND_RING_REJECTED_RECORD, COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED,
-    CONDUCTOR_IDLE_STRATEGY, DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL,
-    LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT,
-    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
-    RECORDING_CATALOG_TRUNCATED, RECORDING_DELETED, RECORDING_FILES_REMOVED,
-    RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED,
-    RECORDING_RETENTION_FAILED, RECORDING_SEGMENTS_PURGED, RECORDING_SLOT_DROPPED,
-    RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_SYNCED_POSITION,
-    RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_POSITION,
-    REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED, SUBSCRIPTION_POSITION,
+    CHANNEL_CLOSED, CHANNEL_IMAGES, CHANNEL_OPENED, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
+    CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CLIENT_PROTOCOL_ERRORS,
+    CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT, COMMAND_RING_REJECTED_RECORD,
+    COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED, CONDUCTOR_IDLE_STRATEGY,
+    DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_POSITION,
+    LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT, PUBLICATION_POSITION, PUBLICATION_UNBLOCKED,
+    RECORDING_BYTES, RECORDING_CATALOG_FULL, RECORDING_CATALOG_TRUNCATED, RECORDING_DELETED,
+    RECORDING_FILES_REMOVED, RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION,
+    RECORDING_RECOVERED, RECORDING_RETENTION_FAILED, RECORDING_SEGMENTS_PURGED,
+    RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED,
+    RECORDING_SYNCED_POSITION, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
+    REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
+    SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
@@ -59,6 +62,8 @@ use crate::error::DriverError;
 use crate::idle::{IdleStrategy, Idler};
 use crate::recorder::{Reply, Request, Start, StartFailure};
 use crate::replayer;
+use crate::sender;
+use crate::socket::SendSocket;
 use crate::spec;
 
 /// The docs anchor an error event's message names.
@@ -76,6 +81,11 @@ const DEFERRED_CAPACITY: usize = 2 * spec::MAX_RECORDINGS;
 /// registered replay, since a stop is sent only for a recording a registered replay
 /// plays and a recording stops once.
 const REPLAYER_DEFERRED_CAPACITY: usize = 3 * spec::MAX_REPLAYS;
+
+/// The sender's deferred requests' bound: one close per publication and one remove per
+/// endpoint, since an add that finds no room in the sender's queue is refused with code
+/// 10 and never deferred (ADR 0041).
+const SENDER_DEFERRED_CAPACITY: usize = spec::MAX_PUBLICATIONS + spec::MAX_SEND_ENDPOINTS;
 
 /// A frame's alignment as the positions count.
 const FRAME_ALIGN: i64 = FRAME_ALIGNMENT as i64;
@@ -180,6 +190,64 @@ struct Publication {
     /// The end of stream position and when it was stored.
     closing: Option<(i64, i64)>,
     log_file_name: String,
+    /// What a `cavalry:udp` publication carries beside: its endpoint and what the
+    /// sender has told the conductor (ADR 0041); `None` for `cavalry:ipc`.
+    udp: Option<UdpPublication>,
+}
+
+/// A `cavalry:udp` publication as the conductor sees it: the sender puts its log on the
+/// wire, and the conductor keeps its limit from the sender position, the consumer
+/// position over UDP, and its connected flag from the sender's replies
+/// (`spec/udp.md`, "The sender"; ADR 0041).
+struct UdpPublication {
+    /// The send endpoint's registration id.
+    endpoint_id: i64,
+    /// The sender's `sender.position` counter, loaded on the duty cycle.
+    sender_position: Counter,
+    /// The log's term length: the log is cleaned a term behind the sender position.
+    term_length: i64,
+    /// A status message arrived within the connection timeout, as the sender last said.
+    connected: bool,
+    /// The close was handed to the sender.
+    close_sent: bool,
+    /// The sender's linger ended and it dropped the publication.
+    sender_closed: bool,
+}
+
+/// Where one send endpoint is in its life (`spec/udp.md`, "The receiver", the
+/// endpoints): opened as the first `add publication` on its resolved channel is
+/// handled, closed when its last publication's linger ends; every transition adds one
+/// to a counter, and `counters.toml` lists them.
+// state machine: channel
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelState {
+    /// The registry slot is taken and the socket not yet open: a moment a client never
+    /// observes.
+    Initializing,
+    /// The socket is open and with the sender; `channel.status` reads 1.
+    Active,
+    /// The last publication's linger ended: the socket is closing with the sender, and
+    /// the counters are freed once it has; `channel.status` reads 2.
+    Closing,
+    /// Reserved for a later version that re-resolves names; never entered here.
+    #[allow(dead_code)]
+    Errored,
+}
+
+/// One send endpoint the conductor opened: the resolved channel, the socket's owner's
+/// state, its five counters and how many publications send on it.
+struct SendEndpoint {
+    /// The correlation id of the `add publication` that opened it: keys `channel.status`.
+    registration_id: i64,
+    endpoint: SocketAddr,
+    interface: Option<SocketAddr>,
+    state: ChannelState,
+    status: Counter,
+    socket_rcvbuf: Counter,
+    socket_sndbuf: Counter,
+    images: Counter,
+    publications: Counter,
+    publication_count: usize,
 }
 
 /// One subscription: a client's interest in a stream.
@@ -234,6 +302,15 @@ pub(crate) struct ReplayerLink {
     pub requests: spsc::Producer<replayer::Request>,
     /// The replayer's answers.
     pub replies: spsc::Consumer<replayer::Reply>,
+}
+
+/// The driver's one sender, seen from the conductor: the queues to and from it (ADR
+/// 0041).
+pub(crate) struct SenderLink {
+    /// Endpoints and publications to the sender, and closes.
+    pub requests: spsc::Producer<sender::Request>,
+    /// The sender's answers: connected, disconnected, closed.
+    pub replies: spsc::Consumer<sender::Reply>,
 }
 
 /// Where one replay is in its life, as the conductor sees it, from the command to the
@@ -351,6 +428,8 @@ struct Statics {
     replay_not_connected: Counter,
     replay_failed: Counter,
     replay_start_failed: Counter,
+    channel_opened: Counter,
+    channel_closed: Counter,
 }
 
 impl Statics {
@@ -382,6 +461,8 @@ impl Statics {
             replay_not_connected: get(REPLAY_NOT_CONNECTED)?,
             replay_failed: get(REPLAY_FAILED)?,
             replay_start_failed: get(REPLAY_START_FAILED)?,
+            channel_opened: get(CHANNEL_OPENED)?,
+            channel_closed: get(CHANNEL_CLOSED)?,
         })
     }
 }
@@ -450,6 +531,19 @@ pub(crate) struct Conductor {
     /// registered, at most [`spec::MAX_RECORDINGS`], so it never holds more than two per
     /// recording, its capacity.
     deferred: VecDeque<Request>,
+    /// The sender's queues (ADR 0041).
+    sender: SenderLink,
+    /// The sender's closes and endpoint removes its request queue had no room for, kept
+    /// and bounded as `deferred` is, at [`SENDER_DEFERRED_CAPACITY`]; while it holds
+    /// any, `add publication` on a `cavalry:udp` channel is code 10.
+    sender_deferred: VecDeque<sender::Request>,
+    /// The send endpoints registry (`spec/client-protocol.md`, "Sizes").
+    send_endpoints: Vec<SendEndpoint>,
+    /// The sender's thread, once the driver has spawned it: unparked with every request
+    /// offered, since a sender that holds no endpoint and no publication parks until one
+    /// arrives (`sender::Sender::run`). `None` in the tests that drive the duty cycles by
+    /// hand.
+    sender_thread: Option<std::thread::Thread>,
     /// Registrations across every publication: the publications registry's fill.
     registration_count: usize,
     next_session_id: i32,
@@ -476,6 +570,7 @@ impl Conductor {
         idle: IdleStrategy,
         recorder: RecorderLink,
         replayer: ReplayerLink,
+        sender: SenderLink,
     ) -> Result<Self, DriverError> {
         let counters = CountersFile::create(dir, spec::COUNTERS_CAPACITY)?;
         let statics = Statics::new(&counters)?;
@@ -513,6 +608,10 @@ impl Conductor {
             replayer_deferred: VecDeque::with_capacity(REPLAYER_DEFERRED_CAPACITY),
             term_length: spec::IPC_TERM_LENGTH,
             deferred: VecDeque::with_capacity(DEFERRED_CAPACITY),
+            sender,
+            sender_deferred: VecDeque::with_capacity(SENDER_DEFERRED_CAPACITY),
+            send_endpoints: Vec::with_capacity(spec::MAX_SEND_ENDPOINTS),
+            sender_thread: None,
             registration_count: 0,
             next_session_id: i32::from_le_bytes(
                 (now >> 8).to_le_bytes()[..4].try_into().unwrap_or([0; 4]),
@@ -545,6 +644,20 @@ impl Conductor {
     /// message.
     fn wake_replayer(&self) {
         if let Some(thread) = &self.replayer_thread {
+            thread.unpark();
+        }
+    }
+
+    /// Keeps the sender's thread, so that a request offered to a sender parked with
+    /// nothing to send wakes it (ADR 0041).
+    pub(crate) fn set_sender_thread(&mut self, thread: std::thread::Thread) {
+        self.sender_thread = Some(thread);
+    }
+
+    /// Unparks the sender after a request went into its queue, as [`Self::wake_replayer`]
+    /// does for the replayer: on the command path, never per message.
+    fn wake_sender(&self) {
+        if let Some(thread) = &self.sender_thread {
             thread.unpark();
         }
     }
@@ -597,6 +710,8 @@ impl Conductor {
         work += self.flush_deferred();
         work += self.take_replayer_replies(now);
         work += self.flush_replayer_deferred();
+        work += self.take_sender_replies(now);
+        work += self.flush_sender_deferred();
         work += self.flush_commands();
         work += self.keep_replays(now);
         work += self.keep_publications(now);
@@ -823,7 +938,11 @@ impl Conductor {
         exclusive: bool,
         now: i64,
     ) {
-        if !self.check_channel(correlation_id, channel, "the channel") {
+        let Some(channel) = self.check_channel(correlation_id, channel, "the channel", true) else {
+            return;
+        };
+        if let Channel::Udp(udp) = channel {
+            self.add_udp_publication(client_id, correlation_id, stream_id, udp, exclusive, now);
             return;
         }
         if self.registration_count >= spec::MAX_PUBLICATIONS {
@@ -841,6 +960,7 @@ impl Conductor {
                 !publication.exclusive
                     && publication.stream_id == stream_id
                     && publication.closing.is_none()
+                    && publication.udp.is_none()
             })
         };
         if let Some(index) = live {
@@ -958,6 +1078,7 @@ impl Conductor {
             stalled: None,
             closing: None,
             log_file_name,
+            udp: None,
         };
         self.registration_count += 1;
         let ready = Event::PublicationReady {
@@ -989,6 +1110,526 @@ impl Conductor {
             .collect();
         for subscription_id in matching {
             self.add_image(publication_index, subscription_id);
+        }
+    }
+
+    /// `add publication` on a `cavalry:udp` channel (`spec/client-protocol.md`,
+    /// "Commands"; `spec/udp.md`, "The channel URI" and "The sender"; ADR 0041): the host
+    /// is resolved once, here on the control plane, code 9 when it does not; a shared
+    /// publication on the same stream and resolved channel joins the first; otherwise the
+    /// first publication on the resolved channel opens its send endpoint, one socket,
+    /// bound, connected and non-blocking, code 4 when the operating system refuses, with
+    /// the five counters of `channel.*` and `channel.opened`; the log has the UDP sizes
+    /// of "Values"; `publication.position`, `publication.limit`, `sender.position` and
+    /// `sender.limit` are allocated; the endpoint's socket, when new, and the publication
+    /// with a reader on its log go to the sender; and `publication ready` names the
+    /// endpoint's `channel.status` counter as the channel status indicator id. The
+    /// publication is connected by the first status message and not before, so no image
+    /// is made and the limit stays at the sender position until the sender says so. A
+    /// registry at capacity, a counters file with no free record, or a sender's queue
+    /// with no room is code 10, with nothing registered.
+    fn add_udp_publication(
+        &mut self,
+        client_id: i64,
+        correlation_id: i64,
+        stream_id: i32,
+        channel: UdpChannel<'_>,
+        exclusive: bool,
+        now: i64,
+    ) {
+        if self.registration_count >= spec::MAX_PUBLICATIONS {
+            self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
+            return;
+        }
+        let host = channel.endpoint().host();
+        let endpoint = match resolve(host, channel.endpoint_port()) {
+            Ok(address) => address,
+            Err(reason) => {
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::UnknownHost,
+                    &format!(
+                        "the channel's endpoint host `{host}` does not resolve: {reason}; check \
+                         the name, or use an address; see {ERRORS_DOC}"
+                    ),
+                );
+                return;
+            }
+        };
+        let interface = match channel.interface() {
+            None => None,
+            Some(address) => match resolve(address.host(), address.port().unwrap_or(0)) {
+                Ok(resolved) => Some(resolved),
+                Err(reason) => {
+                    self.send_error(
+                        correlation_id,
+                        ErrorCode::UnknownHost,
+                        &format!(
+                            "the channel's interface `{}` does not resolve: {reason}; check \
+                             the name, or use an address; see {ERRORS_DOC}",
+                            address.host()
+                        ),
+                    );
+                    return;
+                }
+            },
+        };
+        let registration = Registration {
+            client_id,
+            correlation_id,
+        };
+        let open = self.send_endpoints.iter().position(|entry| {
+            entry.endpoint == endpoint
+                && entry.interface == interface
+                && entry.state == ChannelState::Active
+        });
+        // A shared publication on the same stream and resolved channel joins the first.
+        if !exclusive && let Some(endpoint_index) = open {
+            let endpoint_id = self.send_endpoints[endpoint_index].registration_id;
+            let live = self.publications.iter().position(|publication| {
+                !publication.exclusive
+                    && publication.stream_id == stream_id
+                    && publication.closing.is_none()
+                    && publication
+                        .udp
+                        .as_ref()
+                        .is_some_and(|udp| udp.endpoint_id == endpoint_id)
+            });
+            if let Some(index) = live {
+                let publication = &mut self.publications[index];
+                publication.registrations.push(registration);
+                self.registration_count += 1;
+                let (registration_id, session_id, limit_id) = (
+                    publication.registration_id,
+                    publication.session_id,
+                    counter_id(&publication.limit),
+                );
+                let log_file_name = publication.log_file_name.clone();
+                let status_id = counter_id(&self.send_endpoints[endpoint_index].status);
+                let ready = Event::PublicationReady {
+                    correlation_id,
+                    registration_id,
+                    session_id,
+                    stream_id,
+                    publication_limit_counter_id: limit_id,
+                    channel_status_indicator_id: status_id,
+                    log_file_name: log_file_name.as_bytes(),
+                };
+                self.send(&ready);
+                return;
+            }
+        }
+        // Room in the sender's queue for an endpoint and a publication, else code 10.
+        if !self.sender_deferred.is_empty()
+            || self.sender.requests.capacity() - self.sender.requests.len() < 2
+        {
+            self.sender_queue_full(correlation_id);
+            return;
+        }
+        // The endpoint: the open one on the resolved channel, or a new one.
+        let (endpoint_index, socket) = match open {
+            Some(index) => (index, None),
+            None => {
+                if self.send_endpoints.len() >= spec::MAX_SEND_ENDPOINTS {
+                    self.registry_full(correlation_id, "send endpoints", spec::MAX_SEND_ENDPOINTS);
+                    return;
+                }
+                let socket = match SendSocket::open(endpoint, interface) {
+                    Ok(socket) => socket,
+                    Err(error) => {
+                        self.send_error(
+                            correlation_id,
+                            ErrorCode::ChannelEndpointError,
+                            &format!(
+                                "the channel's endpoint {endpoint}{}: the socket could not be \
+                                 opened, bound or connected: {error}; check that the interface \
+                                 is this host's and its port is free; see {ERRORS_DOC}",
+                                interface.map_or(String::new(), |i| format!(" from interface {i}"))
+                            ),
+                        );
+                        return;
+                    }
+                };
+                let resolved = match interface {
+                    Some(interface) => {
+                        format!("cavalry:udp?endpoint={endpoint}|interface={interface}")
+                    }
+                    None => format!("cavalry:udp?endpoint={endpoint}"),
+                };
+                let key = correlation_id.to_le_bytes();
+                let label = |name: &str| format!("{name} {resolved}");
+                let mut allocated: Vec<Counter> = Vec::with_capacity(5);
+                for (id, name) in [
+                    (CHANNEL_STATUS, "channel.status"),
+                    (CHANNEL_SOCKET_RCVBUF, "channel.socket_rcvbuf"),
+                    (CHANNEL_SOCKET_SNDBUF, "channel.socket_sndbuf"),
+                    (CHANNEL_IMAGES, "channel.images"),
+                    (CHANNEL_PUBLICATIONS, "channel.publications"),
+                ] {
+                    match self.counters.allocate(id, &key, &label(name)) {
+                        Ok(counter) => allocated.push(counter),
+                        Err(error) => {
+                            let reuse =
+                                now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+                            for counter in allocated {
+                                let _ = self.counters.free(counter.id(), reuse);
+                            }
+                            self.counters_full(correlation_id, &error);
+                            return;
+                        }
+                    }
+                }
+                let mut counters = allocated.into_iter();
+                let (
+                    Some(status),
+                    Some(socket_rcvbuf),
+                    Some(socket_sndbuf),
+                    Some(images),
+                    Some(publications),
+                ) = (
+                    counters.next(),
+                    counters.next(),
+                    counters.next(),
+                    counters.next(),
+                    counters.next(),
+                )
+                else {
+                    return;
+                };
+                let (rcvbuf, sndbuf) = socket.buffer_lengths();
+                status.set(0);
+                socket_rcvbuf.set(rcvbuf);
+                socket_sndbuf.set(sndbuf);
+                images.set(0);
+                publications.set(0);
+                self.send_endpoints.push(SendEndpoint {
+                    registration_id: correlation_id,
+                    endpoint,
+                    interface,
+                    state: ChannelState::Initializing,
+                    status,
+                    socket_rcvbuf,
+                    socket_sndbuf,
+                    images,
+                    publications,
+                    publication_count: 0,
+                });
+                (self.send_endpoints.len() - 1, Some(socket))
+            }
+        };
+        let endpoint_id = self.send_endpoints[endpoint_index].registration_id;
+        // The log, with the UDP sizes, and the four counters.
+        let session_id = self.advance_session_id(stream_id);
+        let initial_term_id =
+            i32::from_le_bytes((now >> 16).to_le_bytes()[..4].try_into().unwrap_or([0; 4]));
+        let log_type = if exclusive {
+            LogType::Exclusive
+        } else {
+            LogType::Concurrent
+        };
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        // The spec's UDP term, or the smaller one a test at a registry's capacity set,
+        // since every log is made resident when it is created (ADR 0027).
+        let term_length = self.term_length.min(spec::UDP_TERM_LENGTH);
+        let fields = HeaderFields::new(
+            log_type,
+            correlation_id,
+            initial_term_id,
+            term_length,
+            spec::UDP_MTU_LENGTH,
+            term_length / 2,
+            session_id,
+            stream_id,
+        );
+        let log = match fields.and_then(|fields| LogBuffers::create(&self.dir, &fields)) {
+            Ok(log) => log,
+            Err(error) => {
+                self.statics.log_create_failed.increment();
+                self.abandon_send_endpoint(endpoint_index, socket.is_some(), reuse);
+                self.send_error(correlation_id, ErrorCode::StorageSpace, &format!("{error}"));
+                return;
+            }
+        };
+        let key = position_key(correlation_id, session_id, stream_id);
+        let label = |name: &str| format!("{name} {correlation_id} {session_id} {stream_id}");
+        let mut allocated: Vec<Counter> = Vec::with_capacity(4);
+        for (id, name) in [
+            (PUBLICATION_POSITION, "publication.position"),
+            (PUBLICATION_LIMIT, "publication.limit"),
+            (SENDER_POSITION, "sender.position"),
+            (SENDER_LIMIT, "sender.limit"),
+        ] {
+            match self.counters.allocate(id, &key, &label(name)) {
+                Ok(counter) => allocated.push(counter),
+                Err(error) => {
+                    for counter in allocated {
+                        let _ = self.counters.free(counter.id(), reuse);
+                    }
+                    drop(log);
+                    remove_log(&self.dir, correlation_id);
+                    self.abandon_send_endpoint(endpoint_index, socket.is_some(), reuse);
+                    self.counters_full(correlation_id, &error);
+                    return;
+                }
+            }
+        }
+        let mut counters = allocated.into_iter();
+        let (Some(position), Some(limit), Some(sender_position), Some(sender_limit)) = (
+            counters.next(),
+            counters.next(),
+            counters.next(),
+            counters.next(),
+        ) else {
+            return;
+        };
+        let reader = match log.reader(0) {
+            Ok(reader) => reader,
+            Err(error) => {
+                for counter in [&position, &limit, &sender_position, &sender_limit] {
+                    let _ = self.counters.free(counter.id(), reuse);
+                }
+                drop(log);
+                remove_log(&self.dir, correlation_id);
+                self.abandon_send_endpoint(endpoint_index, socket.is_some(), reuse);
+                self.statics.log_create_failed.increment();
+                self.send_error(correlation_id, ErrorCode::StorageSpace, &format!("{error}"));
+                return;
+            }
+        };
+        position.store_release(0);
+        limit.store_release(0);
+        let log_file_name = log_layout::file_name(correlation_id)
+            .to_string_lossy()
+            .into_owned();
+        let publication = Publication {
+            registration_id: correlation_id,
+            session_id,
+            stream_id,
+            exclusive,
+            replay: false,
+            log,
+            position,
+            limit,
+            registrations: vec![registration],
+            consumer_position: 0,
+            clean_position: 0,
+            last_limit: 0,
+            producer: 0,
+            producer_loaded_at: now,
+            stalled: None,
+            closing: None,
+            log_file_name,
+            udp: Some(UdpPublication {
+                endpoint_id,
+                sender_position: sender_position.clone(),
+                term_length: i64::from(term_length),
+                connected: false,
+                close_sent: false,
+                sender_closed: false,
+            }),
+        };
+        // To the sender: the endpoint first when it is new, then the publication; the
+        // room was checked above, so neither offer fails.
+        if let Some(socket) = socket {
+            if self
+                .sender
+                .requests
+                .offer(sender::Request::AddEndpoint {
+                    registration_id: endpoint_id,
+                    socket,
+                })
+                .is_err()
+            {
+                self.statics.registry_full.increment();
+            }
+            let entry = &mut self.send_endpoints[endpoint_index];
+            entry.state = ChannelState::Active;
+            entry.status.set(1);
+            self.statics.channel_opened.increment();
+        }
+        let add = sender::AddPublication {
+            registration_id: correlation_id,
+            endpoint_id,
+            session_id,
+            stream_id,
+            initial_term_id,
+            term_length,
+            mtu_length: spec::UDP_MTU_LENGTH,
+            reader,
+            position: sender_position,
+            limit: sender_limit,
+        };
+        if self
+            .sender
+            .requests
+            .offer(sender::Request::AddPublication(add))
+            .is_err()
+        {
+            self.statics.registry_full.increment();
+        }
+        self.wake_sender();
+        let entry = &mut self.send_endpoints[endpoint_index];
+        entry.publication_count += 1;
+        entry
+            .publications
+            .set(i64::try_from(entry.publication_count).unwrap_or(i64::MAX));
+        let status_id = counter_id(&entry.status);
+        self.registration_count += 1;
+        let ready = Event::PublicationReady {
+            correlation_id,
+            registration_id: correlation_id,
+            session_id,
+            stream_id,
+            publication_limit_counter_id: counter_id(&publication.limit),
+            channel_status_indicator_id: status_id,
+            log_file_name: publication.log_file_name.as_bytes(),
+        };
+        let exclusive_ready = Event::ExclusivePublicationReady {
+            correlation_id,
+            registration_id: correlation_id,
+            session_id,
+            stream_id,
+            publication_limit_counter_id: counter_id(&publication.limit),
+            channel_status_indicator_id: status_id,
+            log_file_name: publication.log_file_name.as_bytes(),
+        };
+        self.send(if exclusive { &exclusive_ready } else { &ready });
+        self.publications.push(publication);
+    }
+
+    /// Undoes a send endpoint opened for an `add publication` that failed after it: the
+    /// socket is dropped with the caller's handle, the five counters are freed and the
+    /// registry slot returned; nothing counts, since a client never observed it.
+    fn abandon_send_endpoint(&mut self, index: usize, new: bool, reuse: i64) {
+        if !new || index >= self.send_endpoints.len() {
+            return;
+        }
+        let entry = self.send_endpoints.swap_remove(index);
+        for counter in [
+            entry.status,
+            entry.socket_rcvbuf,
+            entry.socket_sndbuf,
+            entry.images,
+            entry.publications,
+        ] {
+            let _ = self.counters.free(counter.id(), reuse);
+        }
+    }
+
+    /// Answers `add publication` with error code 10 when the sender's request queue has
+    /// no room for an endpoint and a publication, or requests are still waiting for it.
+    fn sender_queue_full(&mut self, correlation_id: i64) {
+        self.statics.registry_full.increment();
+        self.send_error(
+            correlation_id,
+            ErrorCode::ResourceTemporarilyUnavailable,
+            &format!(
+                "the sender's request queue holds {} and is full; try again once the sender \
+                 has caught up; see {ERRORS_DOC}",
+                spec::SENDER_QUEUE_CAPACITY
+            ),
+        );
+    }
+
+    /// Offers a request to the sender, or keeps it for the next cycle when the queue is
+    /// full or earlier requests are still waiting, so that the sender sees them in order.
+    /// Only closes and endpoint removes come here, bounded by
+    /// [`SENDER_DEFERRED_CAPACITY`]; an add that finds no room is refused instead.
+    fn sender_request(&mut self, request: sender::Request) {
+        let request = if self.sender_deferred.is_empty() {
+            match self.sender.requests.offer(request) {
+                Ok(()) => {
+                    self.wake_sender();
+                    return;
+                }
+                Err(request) => request,
+            }
+        } else {
+            request
+        };
+        debug_assert!(
+            self.sender_deferred.len() < SENDER_DEFERRED_CAPACITY,
+            "the sender's deferred requests passed one close per publication and one remove per endpoint"
+        );
+        self.sender_deferred.push_back(request);
+    }
+
+    /// Offers the sender's deferred requests in order until the queue is full again.
+    fn flush_sender_deferred(&mut self) -> usize {
+        let mut sent = 0;
+        while let Some(request) = self.sender_deferred.pop_front() {
+            match self.sender.requests.offer(request) {
+                Ok(()) => sent += 1,
+                Err(request) => {
+                    self.sender_deferred.push_front(request);
+                    break;
+                }
+            }
+        }
+        if sent > 0 {
+            self.wake_sender();
+        }
+        sent
+    }
+
+    /// Takes every reply the sender has queued and acts on it: the connected flag the
+    /// publisher reads, the close the conductor finishes, the endpoint's counters freed.
+    fn take_sender_replies(&mut self, now: i64) -> usize {
+        let mut taken = 0;
+        while let Some(reply) = self.sender.replies.poll() {
+            match reply {
+                sender::Reply::Connected { registration_id } => {
+                    self.set_udp_connected(registration_id, true);
+                }
+                sender::Reply::Disconnected { registration_id } => {
+                    self.set_udp_connected(registration_id, false);
+                }
+                sender::Reply::Closed { registration_id } => {
+                    if let Some(publication) = self
+                        .publications
+                        .iter_mut()
+                        .find(|publication| publication.registration_id == registration_id)
+                        && let Some(udp) = &mut publication.udp
+                    {
+                        udp.sender_closed = true;
+                    }
+                }
+                sender::Reply::EndpointClosed { registration_id } => {
+                    if let Some(index) = self
+                        .send_endpoints
+                        .iter()
+                        .position(|endpoint| endpoint.registration_id == registration_id)
+                    {
+                        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+                        let entry = self.send_endpoints.swap_remove(index);
+                        for counter in [
+                            entry.status,
+                            entry.socket_rcvbuf,
+                            entry.socket_sndbuf,
+                            entry.images,
+                            entry.publications,
+                        ] {
+                            let _ = self.counters.free(counter.id(), reuse);
+                        }
+                    }
+                }
+            }
+            taken += 1;
+        }
+        taken
+    }
+
+    /// What the sender said about a `cavalry:udp` publication's receiver, kept for the
+    /// limit and stored in the log's connected flag for the publisher.
+    fn set_udp_connected(&mut self, registration_id: i64, connected: bool) {
+        if let Some(publication) = self
+            .publications
+            .iter_mut()
+            .find(|publication| publication.registration_id == registration_id)
+            && let Some(udp) = &mut publication.udp
+        {
+            udp.connected = connected;
+            let _ = publication.log.set_connected(connected);
         }
     }
 
@@ -1106,6 +1747,7 @@ impl Conductor {
         self.registration_count = self
             .registration_count
             .saturating_sub(before - publication.registrations.len());
+        let mut close = None;
         if publication.registrations.is_empty() && publication.closing.is_none() {
             let end = publication
                 .log
@@ -1113,6 +1755,20 @@ impl Conductor {
                 .unwrap_or(publication.consumer_position);
             let _ = publication.log.set_end_of_stream_position(end);
             publication.closing = Some((end, now));
+            if let Some(udp) = &mut publication.udp
+                && !udp.close_sent
+            {
+                udp.close_sent = true;
+                close = Some((publication.registration_id, end));
+            }
+        }
+        // Over UDP the sender lingers the publication: what is left goes, heartbeats
+        // carry EOS, NAKs are answered, and its reply ends the close (ADR 0041).
+        if let Some((registration_id, end_of_stream_position)) = close {
+            self.sender_request(sender::Request::Close {
+                registration_id,
+                end_of_stream_position,
+            });
         }
     }
 
@@ -1123,7 +1779,10 @@ impl Conductor {
         stream_id: i32,
         channel: &[u8],
     ) {
-        if !self.check_channel(correlation_id, channel, "the channel") {
+        if self
+            .check_channel(correlation_id, channel, "the channel", false)
+            .is_none()
+        {
             return;
         }
         if self.subscriptions.len() >= spec::MAX_SUBSCRIPTIONS {
@@ -1144,7 +1803,9 @@ impl Conductor {
             .iter()
             .enumerate()
             .filter(|(_, publication)| {
-                publication.stream_id == stream_id && publication.closing.is_none()
+                publication.stream_id == stream_id
+                    && publication.closing.is_none()
+                    && publication.udp.is_none()
             })
             .map(|(index, _)| index)
             .collect();
@@ -1191,6 +1852,9 @@ impl Conductor {
         self.images
             .reserve(spec::MAX_IMAGES.saturating_sub(self.images.len()));
         for publication in &mut self.publications {
+            if publication.udp.is_some() {
+                continue;
+            }
             let id = publication.registration_id;
             let connected = self.images.iter().any(|image| image.publication_id == id)
                 || self
@@ -1340,6 +2004,16 @@ impl Conductor {
                         publication.registrations.clear();
                         self.registration_count =
                             self.registration_count.saturating_sub(registrations);
+                        let registration_id = publication.registration_id;
+                        if let Some(udp) = &mut publication.udp
+                            && !udp.close_sent
+                        {
+                            udp.close_sent = true;
+                            self.sender_request(sender::Request::Close {
+                                registration_id,
+                                end_of_stream_position: end,
+                            });
+                        }
                     }
                     return true;
                 }
@@ -1363,16 +2037,36 @@ impl Conductor {
         // recorder when it is slower (`spec/log-buffer.md`, "The driver"); with neither,
         // the largest position any subscriber reached, so that the publisher is told not
         // connected.
-        let floor = match (min_subscriber, recording_floor) {
-            (Some(subscriber), Some(recorder)) => Some(subscriber.min(recorder)),
-            (subscriber, recorder) => subscriber.or(recorder),
+        let (connected, consumer, clean_to) = match &publication.udp {
+            // Over UDP the sender position is the consumer position: the limit runs a
+            // window ahead of it while a receiver answers, and the log is cleaned a term
+            // behind it, Aeron's rule, so that the resend window stays (`spec/udp.md`,
+            // "The sender"; ADR 0041).
+            Some(udp) => {
+                let sender_position = udp.sender_position.load_acquire();
+                if sender_position > publication.consumer_position {
+                    publication.consumer_position = sender_position;
+                    moved = true;
+                }
+                (
+                    udp.connected,
+                    sender_position,
+                    sender_position.saturating_sub(udp.term_length),
+                )
+            }
+            None => {
+                let floor = match (min_subscriber, recording_floor) {
+                    (Some(subscriber), Some(recorder)) => Some(subscriber.min(recorder)),
+                    (subscriber, recorder) => subscriber.or(recorder),
+                };
+                let consumer = floor.unwrap_or(publication.consumer_position);
+                (floor.is_some(), consumer, consumer)
+            }
         };
-        let connected = floor.is_some();
-        let consumer = floor.unwrap_or(publication.consumer_position);
         // Cleaning behind the slowest subscriber, one term at a time; a clean that does
         // not advance is not work.
-        if publication.clean_position < consumer
-            && let Ok(cleaned) = publication.log.clean(publication.clean_position, consumer)
+        if publication.clean_position < clean_to
+            && let Ok(cleaned) = publication.log.clean(publication.clean_position, clean_to)
             && cleaned > publication.clean_position
         {
             publication.clean_position = cleaned;
@@ -1394,7 +2088,7 @@ impl Conductor {
         let step = window / 8;
         let raise = candidate > publication.last_limit
             && (candidate - publication.last_limit >= step || !connected)
-            && publication.clean_position >= consumer;
+            && publication.clean_position >= clean_to;
         let lower = candidate < publication.last_limit && !connected;
         if raise || lower {
             publication.limit.store_release(candidate);
@@ -1431,6 +2125,11 @@ impl Conductor {
         let Some((end, since)) = self.publications[index].closing else {
             return false;
         };
+        if let Some(udp) = &self.publications[index].udp
+            && !udp.sender_closed
+        {
+            return false;
+        }
         let publication_id = self.publications[index].registration_id;
         // A recorded publication's log stays until its recording has stopped: the
         // recorder reaches the end of stream, at most a window away, and the catalog
@@ -1476,7 +2175,37 @@ impl Conductor {
         let _ = self.counters.free(publication.limit.id(), reuse);
         drop(publication.log);
         remove_log(&self.dir, publication_id);
+        if let Some(udp) = publication.udp {
+            self.release_send_endpoint(udp.endpoint_id, reuse);
+        }
         true
+    }
+
+    /// One fewer publication on the endpoint; the last one's close closes the endpoint:
+    /// `channel.status` 2, `channel.closed`, the socket to drop with the sender, and the
+    /// counters freed when it has (`spec/udp.md`, "The receiver", the endpoints).
+    fn release_send_endpoint(&mut self, endpoint_id: i64, _reuse: i64) {
+        let Some(index) = self
+            .send_endpoints
+            .iter()
+            .position(|endpoint| endpoint.registration_id == endpoint_id)
+        else {
+            return;
+        };
+        let endpoint = &mut self.send_endpoints[index];
+        endpoint.publication_count = endpoint.publication_count.saturating_sub(1);
+        endpoint
+            .publications
+            .set(i64::try_from(endpoint.publication_count).unwrap_or(i64::MAX));
+        if endpoint.publication_count > 0 || endpoint.state != ChannelState::Active {
+            return;
+        }
+        endpoint.state = ChannelState::Closing;
+        endpoint.status.set(2);
+        self.statics.channel_closed.increment();
+        self.sender_request(sender::Request::RemoveEndpoint {
+            registration_id: endpoint_id,
+        });
     }
 
     /// `start recording` (`spec/client-protocol.md`, "Commands"): of the live
@@ -1487,27 +2216,36 @@ impl Conductor {
     /// recorder is asked for the catalog slot; `recording ready` follows its reply.
     /// The channel check every command that carries one runs first (`spec/udp.md`,
     /// "What a reader rejects"; ADR 0040): `cavalry:ipc` passes; a `cavalry:udp` channel
-    /// that parses is refused with code 11 and a message naming the change that brings
-    /// it, since this driver has no sender or receiver yet (card 180), and the refusal
-    /// counts in `client_protocol.errors` alone, as a well-formed command's does; a
-    /// channel that fails the grammar, names a parameter this version does not, has a
-    /// bad endpoint or a multicast address is code 1 with the reason, counted in
-    /// `client_protocol.rejected_command`. Returns whether the command goes on.
-    fn check_channel(&mut self, correlation_id: i64, channel: &[u8], what: &str) -> bool {
+    /// that parses passes where `udp` says the command takes one, `add publication` and
+    /// `add exclusive publication` in this version (ADR 0041), and is refused elsewhere
+    /// with code 11 and a message naming the change that brings it, since this driver
+    /// has no receiver yet (card 181), the refusal counted in `client_protocol.errors`
+    /// alone, as a well-formed command's is; a channel that fails the grammar, names a
+    /// parameter this version does not, has a bad endpoint or a multicast address is
+    /// code 1 with the reason, counted in `client_protocol.rejected_command`. Returns
+    /// the channel when the command goes on.
+    fn check_channel<'a>(
+        &mut self,
+        correlation_id: i64,
+        channel: &'a [u8],
+        what: &str,
+        udp: bool,
+    ) -> Option<Channel<'a>> {
         match Channel::parse(channel) {
-            Ok(Channel::Ipc) => true,
+            Ok(Channel::Ipc) => Some(Channel::Ipc),
+            Ok(Channel::Udp(parsed)) if udp => Some(Channel::Udp(parsed)),
             Ok(Channel::Udp(_)) => {
                 self.send_error(
                     correlation_id,
                     ErrorCode::GenericError,
                     &format!(
-                        "{what} names cavalry:udp, which this driver does not send or receive \
-                         yet: the transport is specified (ADR 0040) and the sender and the \
-                         receiver follow (cards 180 and 181); use cavalry:ipc, or upgrade the \
-                         driver to a release that sends over UDP; see {ERRORS_DOC}"
+                        "{what} names cavalry:udp, which this driver sends on but does not \
+                         receive, record or replay yet: the receiver follows (card 181); use \
+                         cavalry:ipc, or upgrade the driver to a release that receives over \
+                         UDP; see {ERRORS_DOC}"
                     ),
                 );
-                false
+                None
             }
             Err(error) => {
                 self.statics.rejected_command.increment();
@@ -1520,20 +2258,26 @@ impl Conductor {
                     format!("{what}: {error}; see {ERRORS_DOC}")
                 };
                 self.send_error(correlation_id, ErrorCode::InvalidChannel, &message);
-                false
+                None
             }
         }
     }
 
     fn start_recording(&mut self, correlation_id: i64, stream_id: i32, channel: &[u8], now: i64) {
-        if !self.check_channel(correlation_id, channel, "the channel") {
+        if self
+            .check_channel(correlation_id, channel, "the channel", false)
+            .is_none()
+        {
             return;
         }
         let mut live = false;
         let mut lowest: Option<usize> = None;
         let mut chosen: Option<usize> = None;
         for (index, publication) in self.publications.iter().enumerate() {
-            if publication.stream_id != stream_id || publication.closing.is_some() {
+            if publication.stream_id != stream_id
+                || publication.closing.is_some()
+                || publication.udp.is_some()
+            {
                 continue;
             }
             live = true;
@@ -1982,6 +2726,7 @@ impl Conductor {
             .publications
             .iter_mut()
             .find(|publication| publication.registration_id == publication_id)
+            && publication.udp.is_none()
         {
             let _ = publication.log.set_connected(connected);
         }
@@ -2003,7 +2748,10 @@ impl Conductor {
         replay_stream_id: i32,
         channel: &[u8],
     ) {
-        if !self.check_channel(correlation_id, channel, "the replay channel") {
+        if self
+            .check_channel(correlation_id, channel, "the replay channel", false)
+            .is_none()
+        {
             return;
         }
         if length < NULL_LENGTH {
@@ -2369,6 +3117,7 @@ impl Conductor {
             stalled: None,
             closing: None,
             log_file_name,
+            udp: None,
         });
         let publication_index = self.publications.len() - 1;
         {
@@ -3113,6 +3862,18 @@ fn correlation_id_of(message: &[u8]) -> i64 {
 }
 
 /// The key of a position counter: correlation id, session id, stream id, little-endian.
+/// Resolves `host` and `port` once, on the control plane, to the first address the
+/// system gives (`spec/udp.md`, "The channel URI"); the system's reason when it gives
+/// none, for error code 9.
+fn resolve(host: &str, port: u16) -> Result<SocketAddr, String> {
+    match (host, port).to_socket_addrs() {
+        Ok(mut addresses) => addresses
+            .next()
+            .ok_or_else(|| "the name resolves to no address".to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn position_key(correlation_id: i64, session_id: i32, stream_id: i32) -> [u8; 16] {
     let mut key = [0u8; 16];
     key[..8].copy_from_slice(&correlation_id.to_le_bytes());
@@ -3174,9 +3935,17 @@ mod tests {
         let (requests, _replayer_requests) = spsc::queue::<replayer::Request>(4);
         let (_replayer_replies, replies) = spsc::queue::<replayer::Reply>(4);
         let replayer_link = ReplayerLink { requests, replies };
-        let mut conductor =
-            Conductor::create(dir.path(), IdleStrategy::Backoff, link, replayer_link)
-                .expect("the conductor is created");
+        let (requests, _sender_requests) = spsc::queue::<sender::Request>(4);
+        let (_sender_replies, replies) = spsc::queue::<sender::Reply>(4);
+        let sender_link = SenderLink { requests, replies };
+        let mut conductor = Conductor::create(
+            dir.path(),
+            IdleStrategy::Backoff,
+            link,
+            replayer_link,
+            sender_link,
+        )
+        .expect("the conductor is created");
         let t0 = now_nanos();
         let interval = spec::nanos(spec::PRODUCER_POSITION_INTERVAL);
 
@@ -3267,6 +4036,8 @@ mod recording {
         pub(super) conductor: Conductor,
         pub(super) recorder: Recorder,
         pub(super) replayer: Replayer,
+        /// The sender, driven by hand as the recorder and the replayer are.
+        pub(super) sender: sender::Sender,
         /// A client's view of the events, attached before the first command.
         pub(super) receiver: Receiver,
         pub(super) now: i64,
@@ -3296,9 +4067,22 @@ mod recording {
                 requests: replayer_requests,
                 replies: replayer_replies,
             };
-            let conductor =
-                Conductor::create(dir.path(), IdleStrategy::Backoff, link, replayer_link)
-                    .expect("the conductor is created");
+            let (sender_requests, sender_request_consumer) =
+                spsc::queue::<sender::Request>(spec::SENDER_QUEUE_CAPACITY);
+            let (sender_reply_producer, sender_replies) =
+                spsc::queue::<sender::Reply>(spec::SENDER_QUEUE_CAPACITY);
+            let sender_link = SenderLink {
+                requests: sender_requests,
+                replies: sender_replies,
+            };
+            let conductor = Conductor::create(
+                dir.path(),
+                IdleStrategy::Backoff,
+                link,
+                replayer_link,
+                sender_link,
+            )
+            .expect("the conductor is created");
             let receiver = BroadcastBuffer::open(dir.path(), false)
                 .expect("the buffer opens")
                 .receiver()
@@ -3325,12 +4109,19 @@ mod recording {
                     .expect("a counter"),
                 IdleStrategy::Backoff,
             );
+            let sender = sender::Sender::new(
+                sender_request_consumer,
+                sender_reply_producer,
+                sender::Statics::new(|id| conductor.counter(id)).expect("the sender's counters"),
+                IdleStrategy::Backoff,
+            );
             Harness {
                 dir,
                 log_dir,
                 conductor,
                 recorder,
                 replayer,
+                sender,
                 receiver,
                 now,
             }
@@ -3373,6 +4164,421 @@ mod recording {
             {}
             found
         }
+    }
+
+    // ---- cavalry:udp publications: the conductor's side of the sender (ADR 0041) ------
+
+    use std::time::Instant;
+
+    use cavalry_proto::udp::{
+        ControlFrame, STATUS_MESSAGE_END_OF_STREAM, SetupFrame, StatusMessage, parse as parse_udp,
+    };
+    use cavalry_shm::counters::generated::{
+        PUBLICATION_CONNECTED, SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
+    };
+
+    /// A receiver by hand: a socket of its own that reads what the sender puts on the
+    /// wire and answers as `spec/udp.md`, "The receiver" says a receiver answers.
+    struct TestReceiver {
+        socket: std::net::UdpSocket,
+        buffer: Vec<u8>,
+        peer: Option<std::net::SocketAddr>,
+    }
+
+    impl TestReceiver {
+        fn bind() -> Self {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+            socket
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("a read timeout");
+            Self {
+                socket,
+                buffer: vec![0u8; 2048],
+                peer: None,
+            }
+        }
+
+        fn channel(&self) -> Vec<u8> {
+            format!(
+                "cavalry:udp?endpoint={}",
+                self.socket.local_addr().expect("bound")
+            )
+            .into_bytes()
+        }
+
+        /// The next datagram as a control frame, or `None` at the read timeout.
+        fn next_control(&mut self) -> Option<ControlFrame> {
+            let (length, from) = self.socket.recv_from(&mut self.buffer).ok()?;
+            self.peer = Some(from);
+            parse_udp(&self.buffer[..length], spec::UDP_TERM_LENGTH).ok()
+        }
+
+        fn send_status_message(&self, message: &StatusMessage) {
+            let bytes = message.to_bytes();
+            self.socket
+                .send_to(
+                    &bytes[..message.frame_length()],
+                    self.peer.expect("a setup frame arrived first"),
+                )
+                .expect("the status message is sent");
+        }
+    }
+
+    /// Adds a publication on the receiver's channel, takes its setup frame, answers
+    /// with a status message of `window` bytes, and cycles both threads until the
+    /// conductor has the sender's connected reply. Returns the setup frame.
+    fn connect_udp(
+        h: &mut Harness,
+        receiver: &mut TestReceiver,
+        correlation_id: i64,
+        stream_id: i32,
+        window: i32,
+    ) -> SetupFrame {
+        let now = h.now;
+        h.conductor.add_publication(
+            1,
+            correlation_id,
+            stream_id,
+            &receiver.channel(),
+            false,
+            now,
+        );
+        assert_eq!(h.last_error(correlation_id), None);
+        h.sender.duty_cycle(now);
+        let setup = match receiver.next_control() {
+            Some(ControlFrame::Setup(setup)) => setup,
+            other => panic!("expected a setup frame, got {other:?}"),
+        };
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: window,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = now_nanos();
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            let connected = h
+                .conductor
+                .publications
+                .iter()
+                .find(|publication| publication.registration_id == correlation_id)
+                .and_then(|publication| publication.udp.as_ref())
+                .is_some_and(|udp| udp.connected);
+            if connected {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the status message did not connect"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        setup
+    }
+
+    /// `add publication` on a `cavalry:udp` channel opens the endpoint with its five
+    /// counters, names `channel.status` in the event, hands the sender the socket and
+    /// the publication, and the publication is connected by the first status message
+    /// and not before: the limit stays at the sender position until the sender says so.
+    #[test]
+    fn a_udp_publication_opens_its_endpoint_and_is_connected_by_a_status_message() {
+        let mut h = Harness::new("udp-publication");
+        let mut receiver = TestReceiver::bind();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, &receiver.channel(), false, now);
+        // The one event: publication ready, naming the endpoint's status counter.
+        let mut ready = None;
+        let mut error = None;
+        while h
+            .receiver
+            .receive(|type_id, message| match Event::parse(type_id, message) {
+                Ok(Event::PublicationReady {
+                    correlation_id: 2,
+                    channel_status_indicator_id,
+                    ..
+                }) => ready = Some(channel_status_indicator_id),
+                Ok(Event::Error {
+                    error_code,
+                    error_message,
+                    ..
+                }) => {
+                    error = Some((
+                        error_code,
+                        String::from_utf8_lossy(error_message).into_owned(),
+                    ))
+                }
+                _ => {}
+            })
+            .expect("the receiver reads")
+        {}
+        assert_eq!(error, None);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Active);
+        assert_eq!(h.conductor.send_endpoints[0].status.get(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].publications.get(), 1);
+        assert!(h.conductor.send_endpoints[0].socket_rcvbuf.get() > 0);
+        assert!(h.conductor.send_endpoints[0].socket_sndbuf.get() > 0);
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+        let status_id = counter_id(&h.conductor.send_endpoints[0].status);
+        assert_eq!(
+            ready,
+            Some(status_id),
+            "the event names the endpoint's status"
+        );
+        {
+            let publication = &h.conductor.publications[0];
+            assert!(publication.udp.is_some());
+            assert_eq!(
+                publication.limit.get(),
+                0,
+                "not connected before a status message"
+            );
+            assert!(!publication.log.is_connected());
+            assert_eq!(
+                publication.log.header().term_length(),
+                spec::UDP_TERM_LENGTH
+            );
+            assert_eq!(publication.log.header().mtu_length(), spec::UDP_MTU_LENGTH);
+        }
+
+        // The sender's first cycle takes the endpoint and the publication and sends the
+        // setup frame; no status message, no heartbeat.
+        h.sender.duty_cycle(now);
+        let setup = match receiver.next_control() {
+            Some(ControlFrame::Setup(setup)) => setup,
+            other => panic!("expected a setup frame, got {other:?}"),
+        };
+        assert_eq!(
+            (setup.stream_id, setup.term_offset, setup.mtu_length),
+            (7, 0, spec::UDP_MTU_LENGTH as i32)
+        );
+        assert_eq!(setup.term_length, spec::UDP_TERM_LENGTH as i32);
+        assert_eq!(h.counter(SENDER_SETUPS_SENT), 1);
+        h.sender
+            .duty_cycle(now + spec::nanos(Duration::from_millis(50)));
+        assert_eq!(h.counter(SENDER_SETUPS_SENT), 1, "one per setup interval");
+
+        // A status message without the send-setup flag connects it: the sender limit
+        // is the window, the conductor raises the publisher's limit by the publication
+        // window, and the log says connected.
+        receiver.send_status_message(&StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .is_some_and(|udp| udp.connected)
+        {
+            let now = now_nanos();
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(
+                Instant::now() < deadline,
+                "the status message did not connect"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 1);
+        assert_eq!(h.counter(SENDER_STATUS_MESSAGES_RECEIVED), 1);
+        assert_eq!(h.sender.positions_of(2), Some((0, 131072)));
+        let publication = &h.conductor.publications[0];
+        assert!(publication.log.is_connected());
+        assert_eq!(
+            publication.limit.get(),
+            i64::from(publication.log.header().publication_window_length()),
+            "the publisher's limit: the sender position plus the publication window"
+        );
+    }
+
+    /// Two channels are the same channel when their resolved endpoint and interface
+    /// are the same: a second stream shares the endpoint, the same stream joins the
+    /// first publication, and an exclusive one never joins.
+    #[test]
+    fn publications_on_one_resolved_channel_share_its_endpoint_and_a_shared_stream_joins() {
+        let mut h = Harness::new("udp-shared-endpoint");
+        let receiver = TestReceiver::bind();
+        let channel = receiver.channel();
+        let now = h.now;
+        h.conductor.add_publication(1, 2, 7, &channel, false, now);
+        h.conductor.add_publication(1, 3, 8, &channel, false, now);
+        h.conductor.add_publication(1, 4, 7, &channel, false, now);
+        h.conductor.add_publication(1, 5, 7, &channel, true, now);
+        for correlation_id in 2..=5 {
+            assert_eq!(h.last_error(correlation_id), None);
+        }
+        assert_eq!(h.conductor.send_endpoints.len(), 1, "one endpoint");
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+        assert_eq!(
+            h.conductor.publications.len(),
+            3,
+            "two shared streams and an exclusive"
+        );
+        assert_eq!(
+            h.conductor.publications[0].registrations.len(),
+            2,
+            "4 joined 2"
+        );
+        assert_eq!(h.conductor.send_endpoints[0].publication_count, 3);
+        assert_eq!(h.conductor.send_endpoints[0].publications.get(), 3);
+        assert_eq!(h.conductor.registration_count, 4);
+    }
+
+    /// The refusals: a host that does not resolve is code 9, an interface that is not
+    /// this host's is code 4 with nothing registered, and the commands that take no
+    /// `cavalry:udp` channel yet refuse it with code 11 naming card 181.
+    #[test]
+    fn a_udp_channel_is_refused_with_the_spec_error_codes_and_nothing_registered() {
+        let mut h = Harness::new("udp-refusals");
+        let now = h.now;
+        h.conductor.add_publication(
+            1,
+            2,
+            7,
+            b"cavalry:udp?endpoint=no-such-host.invalid:40123",
+            false,
+            now,
+        );
+        let (code, message) = h.last_error(2).expect("an error");
+        assert_eq!(code, 9, "{message}");
+        assert!(message.contains("no-such-host.invalid"), "{message}");
+        h.conductor.add_publication(
+            1,
+            3,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|interface=203.0.113.9",
+            false,
+            now,
+        );
+        let (code, message) = h.last_error(3).expect("an error");
+        assert_eq!(code, 4, "{message}");
+        assert!(message.contains("203.0.113.9"), "{message}");
+        assert!(h.conductor.send_endpoints.is_empty());
+        assert!(h.conductor.publications.is_empty());
+        assert_eq!(h.counter(CHANNEL_OPENED), 0);
+        h.conductor
+            .add_subscription(1, 4, 7, b"cavalry:udp?endpoint=127.0.0.1:40123");
+        let (code, message) = h.last_error(4).expect("an error");
+        assert_eq!(code, 11, "{message}");
+        assert!(message.contains("card 181"), "{message}");
+        h.conductor
+            .start_recording(5, 7, b"cavalry:udp?endpoint=127.0.0.1:40123", now);
+        assert_eq!(h.last_error(5).map(|error| error.0), Some(11));
+    }
+
+    /// The send endpoints registry holds 64: the 65th resolved channel is code 10
+    /// naming it, and a closed endpoint's slot is returned.
+    #[test]
+    fn the_send_endpoints_registry_fills_at_its_capacity() {
+        let mut h = Harness::new("udp-endpoints-capacity");
+        // Every log is made resident at creation: the smallest term for 64 of them.
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let now = h.now;
+        for i in 0..spec::MAX_SEND_ENDPOINTS {
+            let correlation_id = 10 + i as i64;
+            let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", 40_100 + i);
+            h.conductor
+                .add_publication(1, correlation_id, 7, channel.as_bytes(), false, now);
+            assert_eq!(h.last_error(correlation_id), None, "endpoint {i}");
+        }
+        assert_eq!(h.conductor.send_endpoints.len(), spec::MAX_SEND_ENDPOINTS);
+        h.conductor.add_publication(
+            1,
+            999,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40999",
+            false,
+            now,
+        );
+        let (code, message) = h.last_error(999).expect("an error");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("send endpoints"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
+        assert_eq!(h.conductor.publications.len(), spec::MAX_SEND_ENDPOINTS);
+    }
+
+    /// A closed publication lingers with the sender: the conductor keeps its log until
+    /// the sender's reply, the heartbeats carry EOS once the sender position reached the
+    /// end, a status message with the end-of-stream flag ends the linger, and the last
+    /// publication's close closes the endpoint and frees its counters.
+    #[test]
+    fn a_closed_udp_publication_lingers_with_the_sender_and_its_endpoint_closes_after_it() {
+        let mut h = Harness::new("udp-close");
+        let mut receiver = TestReceiver::bind();
+        let setup = connect_udp(&mut h, &mut receiver, 2, 7, 131072);
+        let log = h.dir.path().join("publications/2.logbuffer");
+        assert!(log.is_file());
+        let now = now_nanos();
+        h.conductor.remove_publication(1, 20, 2, now);
+        assert!(h.conductor.publications[0].closing.is_some());
+        h.conductor
+            .duty_cycle(now + spec::nanos(spec::PUBLICATION_LINGER) * 2);
+        assert_eq!(
+            h.conductor.publications.len(),
+            1,
+            "the sender has not closed it"
+        );
+        assert!(log.is_file());
+
+        // The sender took the close; a heartbeat after the interval carries EOS, since
+        // the sender position is at the end of stream position. A heartbeat without it
+        // may be waiting from the connect, when that took longer than the interval.
+        h.sender
+            .duty_cycle(now + spec::nanos(Duration::from_millis(200)));
+        let heartbeat = loop {
+            match receiver.next_control() {
+                Some(ControlFrame::Heartbeat(heartbeat)) if heartbeat.is_end_of_stream() => {
+                    break heartbeat;
+                }
+                Some(ControlFrame::Heartbeat(_) | ControlFrame::Setup(_)) => {
+                    h.sender
+                        .duty_cycle(now_nanos() + spec::nanos(Duration::from_millis(200)));
+                }
+                other => panic!("expected a heartbeat with EOS, got {other:?}"),
+            }
+        };
+        assert_eq!(heartbeat.session_id, setup.session_id);
+
+        // The receiver acknowledges with the end-of-stream flag: the sender replies
+        // closed, the conductor removes the log and closes the endpoint, the sender
+        // drops the socket, and the conductor frees the endpoint's counters.
+        receiver.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !h.conductor.send_endpoints.is_empty() {
+            let now = now_nanos();
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the endpoint did not close");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(h.conductor.publications.is_empty());
+        assert!(!log.exists(), "the log is removed");
+        assert_eq!(h.counter(CHANNEL_CLOSED), 1);
+        assert_eq!(h.sender.positions_of(2), None, "the sender dropped it");
     }
 
     /// Every frame of the recording in order, from its segment files, folded into one

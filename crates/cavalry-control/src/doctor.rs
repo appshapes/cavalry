@@ -1411,7 +1411,7 @@ mod tests {
     #[test]
     fn a_closed_and_a_stopped_driver_are_told_apart() {
         let dir = TestDir::new("stopped");
-        let counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
 
@@ -1612,7 +1612,7 @@ mod tests {
     #[test]
     fn recordings_are_listed_and_a_recorder_a_window_behind_warns() {
         let dir = TestDir::new("recordings");
-        let mut counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let mut key = [0u8; 16];
@@ -1671,7 +1671,7 @@ mod tests {
     fn failed_writes_and_invalid_slots_are_findings_that_name_the_slots() {
         use std::os::unix::fs::FileExt;
         let dir = TestDir::new("recording-failures");
-        let counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         counters
@@ -1750,7 +1750,7 @@ mod tests {
     #[test]
     fn a_counter_above_zero_brings_its_doctor_text() {
         let dir = TestDir::new("counter");
-        let counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         counters
@@ -1785,7 +1785,7 @@ mod tests {
             .map(|def| def.id.record())
             .max()
             .expect("a static counter");
-        let _counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         {
@@ -1861,7 +1861,7 @@ mod tests {
     #[test]
     fn the_command_ring_fill_warns_at_half() {
         let dir = TestDir::new("fill");
-        let _counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let opened = CommandRing::open(&dir.0, true).expect("opens");
@@ -1892,15 +1892,15 @@ mod tests {
     #[test]
     fn the_counters_file_warns_at_nine_tenths() {
         let dir = TestDir::new("nine-tenths");
-        let mut counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let statics = COUNTERS
             .iter()
             .filter(|def| def.scope == Scope::Static)
             .count();
-        // Up to 57 of 64 allocated is under nine tenths; 58 is over.
-        for _ in statics..57 {
+        // Up to 115 of 128 allocated is under nine tenths; 116 is over.
+        for _ in statics..115 {
             counters
                 .allocate(CLIENT_TIMED_OUT, &[], "filler")
                 .expect("room");
@@ -1916,14 +1916,14 @@ mod tests {
         let report = examine(&dir.0);
         let found = finding(&report, "counters-file");
         assert_eq!(found.level, Level::Warn);
-        assert!(found.message.contains("58 of 64"), "{}", found.message);
+        assert!(found.message.contains("116 of 128"), "{}", found.message);
         assert!(report.ok());
     }
 
     #[test]
     fn failures_come_first_in_the_report() {
         let dir = TestDir::new("order");
-        let counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         counters
@@ -1953,7 +1953,7 @@ mod tests {
     #[test]
     fn a_ring_not_yet_ready_warns_and_a_wrong_one_fails() {
         let dir = TestDir::new("ring-state");
-        let _counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 128).expect("counters");
         // A zero-filled ring of a plausible length: a creator at work.
         std::fs::write(dir.0.join("command-ring"), vec![0u8; 4096 + 768]).expect("written");
         let report = examine(&dir.0);
@@ -1976,7 +1976,7 @@ mod tests {
     #[test]
     fn a_counters_file_not_yet_ready_warns() {
         let dir = TestDir::new("counters-not-ready");
-        let _counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let _counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         // A zero magic in a file of the right length: a creator at work.
@@ -2116,7 +2116,7 @@ mod tests {
     #[test]
     fn the_idle_strategy_is_judged_against_the_isolated_cpus() {
         let dir = TestDir::new("idle");
-        let counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let strategy = counters
@@ -2183,13 +2183,13 @@ mod tests {
     #[test]
     fn a_full_counters_file_fails() {
         let dir = TestDir::new("full");
-        let mut counters = CountersFile::create(&dir.0, 64).expect("counters");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
         let ring = CommandRing::create(&dir.0, 4096).expect("ring");
         let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
         let mut n = 0;
         while counters.allocate(CLIENT_TIMED_OUT, &[], "filler").is_ok() {
             n += 1;
-            assert!(n < 64);
+            assert!(n < 128);
         }
         let report = examine(&dir.0);
         let found = finding(&report, "counters-file");

@@ -133,6 +133,32 @@ pub(crate) const RECORDER_BLOCK_LIMIT: usize = 1024 * 1024;
 /// recordings.
 pub(crate) const RECORDER_REQUESTS_PER_CYCLE: usize = 16;
 
+/// How many send endpoints the driver holds: every resolved `cavalry:udp` channel a
+/// publication sends on; the one definition is `cavalry_proto`'s (`spec/udp.md`,
+/// "Values"; ADR 0040).
+pub const MAX_SEND_ENDPOINTS: usize = cavalry_proto::udp::MAX_SEND_ENDPOINTS;
+
+/// The term length of a `cavalry:udp` publication's log, in bytes (`spec/udp.md`,
+/// "Values").
+pub const UDP_TERM_LENGTH: u32 = cavalry_proto::udp::UDP_TERM_LENGTH;
+
+/// The MTU length of a `cavalry:udp` publication: the longest datagram (`spec/udp.md`,
+/// "Values").
+pub const UDP_MTU_LENGTH: u32 = cavalry_proto::udp::MTU_LENGTH_DEFAULT;
+
+/// The publication window of a `cavalry:udp` publication: term length ÷ 2.
+pub const UDP_PUBLICATION_WINDOW: u32 = UDP_TERM_LENGTH / 2;
+
+/// The capacity of each queue between the conductor and the sender, in requests or
+/// replies: two per publication and two per endpoint, an add and a remove each; an add
+/// that finds the request queue full is answered with error code 10, and the sender
+/// keeps a reply the reply queue has no room for until it has (ADR 0041).
+pub(crate) const SENDER_QUEUE_CAPACITY: usize = 2 * (MAX_PUBLICATIONS + MAX_SEND_ENDPOINTS);
+
+/// How many requests the sender handles per duty cycle before it turns to the
+/// endpoints and the publications.
+pub(crate) const SENDER_REQUESTS_PER_CYCLE: usize = 16;
+
 /// A duration as the nanoseconds the driver's clock counts in.
 pub(crate) const fn nanos(duration: Duration) -> i64 {
     let nanos = duration.as_nanos();
