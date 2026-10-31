@@ -8,7 +8,11 @@ The durable log: recording and replay. Data plane.
 - Holds the log directory for the driver: `dir::LogDir` opens it under an exclusive
   advisory lock on the catalog, so two drivers never write one directory, and runs the
   recovery pass of the spec before any recording is added, reporting every action for
-  the driver to count (ADR 0025).
+  the driver to count (ADR 0025). The pass runs whole only there; the repair of one
+  slot after a retention command's file work failed is the same rules in two halves,
+  `dir::repair_files` on the thread that has the files and `LogDir::apply_repair`, the
+  one catalog write they end in, on the thread that owns the catalog, each reporting
+  what it did (ADR 0031).
 - Writes a recording for the driver: `LogDir::start` takes the catalog slot and
   creates the time index and the first segment file; `recorder::RecordingWriter` writes
   each block of committed frames with one positional write, appends an index entry at

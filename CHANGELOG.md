@@ -771,9 +771,10 @@ user-visible change, added in the same commit as the change. The format follows
   segments` moves the retained position and removes the segment files before it, one
   per duty cycle, and `purge recording` removes every file and marks the slot deleted;
   each counts in its counter. A recording that is live, read by a replay or under
-  another command is refused with error 24, a position outside its rule with 23, and a
-  file the driver cannot read, cut or remove with 12, after which the slot is repaired
-  from its files; a `start replay` of a recording under a command is error 24. Recovery
+  another command is refused with error 24, a slot that is not a valid recording with
+  21, a position outside its rule with 23, and a file the driver cannot read, cut or
+  remove with 12, after which the slot is repaired from its files; a `start replay` of
+  a recording under a command is error 24, counted in `replay.start_failed`. Recovery
   rebuilds a retained group torn by a crash from the files and removes a segment file
   before the retained position, counted in `recording.recovered` and
   `recording.files_removed`. `cavalry doctor --log-dir` gains `log-directory-space`,

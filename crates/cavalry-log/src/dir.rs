@@ -202,24 +202,11 @@ impl LogDir {
         &self.catalog
     }
 
-    /// Runs the recovery pass for one recording's slot, as the driver does after a
-    /// retention command's file work failed, so that the slot and the files agree before
-    /// the refusal is answered (ADR 0031): the same rules as at start-up, counted the
-    /// same way. A recording id past the last slot is `unknown`.
-    pub fn repair(&mut self, recording_id: i64) -> Result<Recovery, DirError> {
-        let mut recovery = Recovery::default();
-        let slot = match u64::try_from(recording_id) {
-            Ok(slot) if slot < self.catalog.slots() => slot,
-            _ => return Err(CatalogError::Unknown { recording_id }.into()),
-        };
-        let dir = self.dir.clone();
-        recover_slot(&dir, &mut self.catalog, slot, &mut recovery)?;
-        Ok(recovery)
-    }
-
     /// The catalog side of a slot's repair, the write [`repair_files`] returned, on the
     /// thread that owns the catalog: one slot, synced, counted as the transition it is
-    /// (ADR 0031). A recording id past the last slot is `unknown`.
+    /// (ADR 0031). A recording id past the last slot is `unknown`. The two halves are
+    /// the whole of a repair: the recovery pass runs whole only at start-up, in
+    /// [`LogDir::open`], never on the thread that writes the live recordings.
     pub fn apply_repair(
         &mut self,
         recording_id: i64,

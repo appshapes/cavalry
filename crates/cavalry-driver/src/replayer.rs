@@ -210,7 +210,8 @@ impl Retention {
 
 /// Why a retention command's checks failed, for the error event's code (ADR 0031).
 pub(crate) enum CheckFailure {
-    /// The catalog does not hold the recording as a valid recording: code 21.
+    /// The catalog does not hold the recording as a valid recording, or its slot
+    /// cannot be read, state 2 among the reasons: code 21.
     UnknownRecording {
         /// The id asked for.
         recording_id: i64,
@@ -238,7 +239,7 @@ pub(crate) enum CheckFailure {
         /// The position asked for.
         position: i64,
     },
-    /// A segment file could not be opened or read, or the catalog read: code 12.
+    /// The operating system refused a segment file, or the catalog's file: code 12.
     Files(String),
 }
 
@@ -1018,9 +1019,22 @@ impl Replayer {
                 }));
                 return;
             }
-            Err(error) => {
+            Err(error @ CatalogError::Io { .. }) => {
+                // The operating system refused the catalog's file: code 12, as a segment
+                // file it refuses.
                 self.pending
                     .push_back(fail(CheckFailure::Files(format!("{error}"))));
+                return;
+            }
+            Err(error) => {
+                // A slot the parser refuses, state 2 among them, since the parser answers
+                // a state of 2 before any descriptor exists: not a valid recording, code
+                // 21 with the reason, as `start` answers the same read
+                // (`spec/client-protocol.md`, "truncate recording").
+                self.pending.push_back(fail(CheckFailure::UnknownRecording {
+                    recording_id,
+                    why: format!("its slot cannot be read: {error}"),
+                }));
                 return;
             }
         };
