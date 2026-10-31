@@ -12,9 +12,12 @@ retention commands the soak runs do is
 
 ## Prerequisites
 
-- A Linux machine with a drive that has room for days of recordings. At the defaults,
-  10,000 messages a second of 32 bytes, the stream is about 2.3 GB an hour before
-  retention and the soak keeps a day of it, so 100 GB is enough; `kip` has 3.6 TB.
+- A Linux machine with a drive that has room for days of recordings and samples. At
+  the defaults, 10,000 messages a second of 32 bytes, the stream is about 2.3 GB an
+  hour before retention; the soak keeps a day of it, purged to about 30 GB, and the
+  samples add about 4.5 GB a day, since each minute's copy of the counters file is
+  3 MiB and nothing removes them. A week is about 62 GB, so 100 GB is enough for a
+  week, and each further week needs 32 GB more; `kip` has 3.6 TB.
   Nothing on the host is tuned: no isolated CPUs, no fixed clock, a stock kernel line,
   a stock governor and swap. A soak host is any machine, and a tuned one would hide
   what the stock one shows. `kip` arrives tuned, as the gate's second host until
@@ -30,6 +33,11 @@ retention commands the soak runs do is
   host.
 - The Rust toolchain for that user, `rustup` with the stable channel, and a clone of
   this repository under the user's home.
+- The soak's stream, 1001 at the default, on the soak's driver is the soak's alone.
+  The program counts what it receives across the subscription, not per publisher, so
+  a second publisher on that stream, a replay onto it among them, ends the run as a
+  message out of order. Anything else you run on the host takes another stream id or
+  another driver directory.
 
 ## Steps
 
@@ -169,10 +177,17 @@ retention commands the soak runs do is
   `cat /srv/cavalry-soak/recordings.txt` lists each recording with its start and
   state; after a day the oldest reads `deleted` and its files are gone from
   `/srv/cavalry-soak/log`.
-- `df -h /srv/cavalry-soak` holds at about 30 GB at the defaults from the second day
-  on. A day of recordings would be 55 GB; the purge of each stopped recording's first
-  half leaves about 1.15 GB of each of the 24 kept, plus the live hour's. A reading
-  near 55 GB says the purges were refused, and the log says with which error.
+- `du -sh /srv/cavalry-soak/log /srv/cavalry-soak/samples` shows the volume's two
+  parts. The recordings under `log` hold at about 30 GB at the defaults from the
+  second day on: a day of recordings would be 55 GB, and the purge of each stopped
+  recording's first half leaves about 1.15 GB of each of the 24 kept, plus the live
+  hour's. The samples grow by about 4.5 GB a day and are never removed: each minute's
+  copy of the counters file is 3 MiB, the whole file at the driver's capacity of 8,192
+  counters (`docs/reference/counters-file.md`), 1,440 copies a day, and the doctor
+  reports beside them are a few KB each. So `df -h /srv/cavalry-soak` reads about
+  39 GB on the second day and about 62 GB at the end of a week. A `log` near 55 GB,
+  which is a `df` about 25 GB above that line, says the purges were refused, and
+  `soak.log` says with which error.
 - The program's lines keep `behind 0` and `back-pressured 0` at the default rate; the
   samples' doctor reports keep exiting 0 with `host-governor` as their one finding.
 
@@ -199,6 +214,9 @@ retention commands the soak runs do is
 - The program exits with `message <n> arrived when <m> was next`: a message out of
   order or twice, which never happens (invariant 1); the log, the samples and the
   recording at that minute are the evidence, and the next step is a card with them.
+  `a <n>-byte message arrived when <m> was next ... not this program's` is a message
+  from another publisher on the stream, which the prerequisites rule out; find that
+  publisher before reading anything else into the run.
 - A `warn` in a sample's doctor report, such as `log-directory-space` or
   `recording-over-half`, names the retention command to send and the docs anchor; the
   soak's rotation should have sent it already, and the log says whether the purge or

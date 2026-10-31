@@ -6,8 +6,9 @@
 //! not this program's: `scripts/soak.sh` starts, rotates, purges and deletes recordings
 //! with `cavalry record` around it, so a rotation never touches the publisher. The
 //! program stops when the stop file appears, closing its publication, its subscription
-//! and its client, or at once with exit 1 on the first message out of order or a fault
-//! on the image (invariant 1: a fault is reported, never read past). `CAVALRY_DIR` names
+//! and its client, or at once with exit 1 on the first message out of order, a message
+//! too short to be its own (another publisher on the stream) or a fault on the image
+//! (invariant 1: a fault is reported, never read past). `CAVALRY_DIR` names
 //! the driver's directory when it is not the default (`docs/reference/config.md`).
 //!
 //!     soak [--stream <id>] [--rate <messages per second>] [--body <bytes>]
@@ -156,7 +157,18 @@ fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
         }
         let read = subscription.poll(
             |body, _header| {
-                let value = u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
+                let Some(first) = body.first_chunk::<8>() else {
+                    // A message under eight bytes is not this program's: another
+                    // publisher is on the stream. Reported, not read past (invariant 1).
+                    eprintln!(
+                        "soak: {} a {}-byte message arrived when {received} was next, after \
+                         {sent} sent: not this program's; stopping",
+                        utc_now(),
+                        body.len()
+                    );
+                    std::process::exit(1);
+                };
+                let value = u64::from_le_bytes(*first);
                 if value != received {
                     // Invariant 1: a message out of order or twice is reported, and the
                     // run ends here so the record keeps the position.

@@ -7,7 +7,7 @@
 # recording of the stream; then, until it is told to stop:
 #
 #   - every SAMPLE_SECONDS it writes `cavalry doctor`'s report and a copy of the
-#     counters file under $SOAK_DIR/samples, named by the time;
+#     counters file under $SOAK_DIR/samples, named by the time; nothing prunes them;
 #   - every ROTATE_SECONDS it stops the recording and starts a new one, purges the
 #     segments of the one it stopped before the middle of its hour, and deletes every
 #     recording older than KEEP_RECORDINGS rotations, so retention runs on a host whose
@@ -27,7 +27,9 @@
 #   STREAM_ID         1001
 #   RATE              10000               messages per second
 #   BODY              32                  bytes per message
-#   SAMPLE_SECONDS    60
+#   SAMPLE_SECONDS    60                  each sample copies the 3 MiB counters file, so
+#                                         samples/ grows about 4.5 GB a day at 60 and is
+#                                         never pruned: remove it when the week is read
 #   ROTATE_SECONDS    3600
 #   KEEP_RECORDINGS   24                  rotations kept before a recording is deleted
 set -uo pipefail
@@ -109,7 +111,12 @@ rotate() {
     local previous=$current now
     now=$(date +%s)
     if [ -n "$previous" ]; then
-        record --stop "$previous" && mark "$previous" stopped && say "recording $previous stopped"
+        if record --stop "$previous"; then
+            mark "$previous" stopped; say "recording $previous stopped"
+            # Nothing is current now: a start refused below must not make the next
+            # rotation stop and purge this one again.
+            current=""
+        fi
     fi
     start_recording || say "no recording until the next rotation"
     if [ -n "$previous" ]; then
