@@ -710,6 +710,20 @@ user-visible change, added in the same commit as the change. The format follows
   64 µs at p99.99; bench's and kip's isolated CPUs took no such interrupts. Applied on
   all three hosts on 2026-10-31 (card 159; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
   "Updating the host").
+- `grip`'s first baselines, `grip-linux` and `grip-linux-unchecked`, recorded from
+  master's three processes at 0782ec5 (run 41196273792, attempts 3 to 5), the host's
+  first with its Wi-Fi interrupts off the isolated CPUs, and joined by a fourth, this
+  change's own run, which read the checked client claim row at 133 ns against the
+  three's slowest 118 (ADR 0033): the exclusive claim row's slowest run 92 ns at p99.99
+  over runs of 73 to 92, the client row's 138, the one_way rows 423 to 720. The
+  `bench` host's two re-recorded from the same three runs after the two host changes
+  of the day ended its tree (ADR 0033): twelve rows move by a step or less and four
+  tighten by more than one, the checked concurrent claim row 169 to 150 ns, the checked
+  recorded claim row 339 to 310, the unchecked recorded claim row 350 to 330 and the
+  unchecked `one_way_32_client` row 340 to 290, as the twelve-process band gives way to
+  three
+  ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); cards
+  159 and 170).
 - A replay of a live recording ends on the recorder's word: when the recorder reports
   the stop, the conductor hands the replayer the stop position and the replay ends
   there with reason 0 in the replayer's next cycle, where it read the catalog once a
