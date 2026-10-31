@@ -1,0 +1,1064 @@
+{
+  "spec": "spec/udp.md",
+  "version": 0,
+  "generated_by": "spec/vectors/udp.py; do not edit by hand",
+  "vectors": [
+    {
+      "name": "setup-first",
+      "kind": "frame",
+      "frame": "setup",
+      "term_length": 65536,
+      "bytes": "28000000000005000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "fields": {
+        "frame_length": 40,
+        "version": 0,
+        "flags": 0,
+        "type": 5,
+        "term_offset": 0,
+        "session_id": 7,
+        "stream_id": 1001,
+        "initial_term_id": -5,
+        "active_term_id": -5,
+        "term_length": 65536,
+        "mtu_length": 1408,
+        "ttl": 0
+      }
+    },
+    {
+      "name": "setup-mid-stream",
+      "kind": "frame",
+      "frame": "setup",
+      "term_length": 1073741824,
+      "bytes": "280000000000050000800000fffffffffffffffffbfffffffdffffff00000040e0ff000000000000",
+      "fields": {
+        "frame_length": 40,
+        "version": 0,
+        "flags": 0,
+        "type": 5,
+        "term_offset": 32768,
+        "session_id": -1,
+        "stream_id": -1,
+        "initial_term_id": -5,
+        "active_term_id": -3,
+        "term_length": 1073741824,
+        "mtu_length": 65504,
+        "ttl": 0
+      }
+    },
+    {
+      "name": "setup-reserved-flags-ignored",
+      "kind": "frame",
+      "frame": "setup",
+      "term_length": 65536,
+      "bytes": "2800000000c005000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "fields": {
+        "frame_length": 40,
+        "version": 0,
+        "flags": 192,
+        "type": 5,
+        "term_offset": 0,
+        "session_id": 7,
+        "stream_id": 1001,
+        "initial_term_id": -5,
+        "active_term_id": -5,
+        "term_length": 65536,
+        "mtu_length": 1408,
+        "ttl": 0
+      }
+    },
+    {
+      "name": "status-message",
+      "kind": "frame",
+      "frame": "status-message",
+      "term_length": 65536,
+      "bytes": "240000000000030007000000e9030000fcffffff00100000000002008877665544332211",
+      "fields": {
+        "frame_length": 36,
+        "version": 0,
+        "flags": 0,
+        "type": 3,
+        "session_id": 7,
+        "stream_id": 1001,
+        "consumption_term_id": -4,
+        "consumption_term_offset": 4096,
+        "receiver_window_length": 131072,
+        "receiver_id": 1234605616436508552
+      }
+    },
+    {
+      "name": "status-message-group-tag",
+      "kind": "frame",
+      "frame": "status-message",
+      "term_length": 65536,
+      "bytes": "2c0000000000030007000000e9030000fbffffff00000000000002008877665544332211ffffffffffffffff",
+      "fields": {
+        "frame_length": 44,
+        "version": 0,
+        "flags": 0,
+        "type": 3,
+        "session_id": 7,
+        "stream_id": 1001,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 131072,
+        "receiver_id": 1234605616436508552,
+        "group_tag": -1
+      }
+    },
+    {
+      "name": "status-message-send-setup",
+      "kind": "frame",
+      "frame": "status-message",
+      "term_length": 65536,
+      "bytes": "240000000080030007000000e9030000fbffffff00000000000000008877665544332211",
+      "fields": {
+        "frame_length": 36,
+        "version": 0,
+        "flags": 128,
+        "type": 3,
+        "session_id": 7,
+        "stream_id": 1001,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 0,
+        "receiver_id": 1234605616436508552
+      }
+    },
+    {
+      "name": "status-message-elicit-setup",
+      "kind": "frame",
+      "frame": "status-message",
+      "term_length": 65536,
+      "bytes": "240000000080030007000000e90300000000000000000000000000008877665544332211",
+      "fields": {
+        "frame_length": 36,
+        "version": 0,
+        "flags": 128,
+        "type": 3,
+        "session_id": 7,
+        "stream_id": 1001,
+        "consumption_term_id": 0,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 0,
+        "receiver_id": 1234605616436508552
+      }
+    },
+    {
+      "name": "status-message-eos",
+      "kind": "frame",
+      "frame": "status-message",
+      "term_length": 65536,
+      "bytes": "240000000040030007000000e9030000fbffffffe0ff0000000002008877665544332211",
+      "fields": {
+        "frame_length": 36,
+        "version": 0,
+        "flags": 64,
+        "type": 3,
+        "session_id": 7,
+        "stream_id": 1001,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 65504,
+        "receiver_window_length": 131072,
+        "receiver_id": 1234605616436508552
+      }
+    },
+    {
+      "name": "status-message-window-zero",
+      "kind": "frame",
+      "frame": "status-message",
+      "term_length": 65536,
+      "bytes": "240000000000030007000000e9030000fbffffff00000000000000008877665544332211",
+      "fields": {
+        "frame_length": 36,
+        "version": 0,
+        "flags": 0,
+        "type": 3,
+        "session_id": 7,
+        "stream_id": 1001,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 0,
+        "receiver_id": 1234605616436508552
+      }
+    },
+    {
+      "name": "nak",
+      "kind": "frame",
+      "frame": "nak",
+      "term_length": 65536,
+      "bytes": "1c0000000000020007000000e9030000fbffffff0004000040000000",
+      "fields": {
+        "frame_length": 28,
+        "version": 0,
+        "flags": 0,
+        "type": 2,
+        "session_id": 7,
+        "stream_id": 1001,
+        "term_id": -5,
+        "term_offset": 1024,
+        "length": 64
+      }
+    },
+    {
+      "name": "nak-whole-term-tail",
+      "kind": "frame",
+      "frame": "nak",
+      "term_length": 65536,
+      "bytes": "1c0000000000020007000000e9030000fbffffff0000000000000100",
+      "fields": {
+        "frame_length": 28,
+        "version": 0,
+        "flags": 0,
+        "type": 2,
+        "session_id": 7,
+        "stream_id": 1001,
+        "term_id": -5,
+        "term_offset": 0,
+        "length": 65536
+      }
+    },
+    {
+      "name": "rtt-measurement-probe",
+      "kind": "frame",
+      "frame": "rtt-measurement",
+      "term_length": 65536,
+      "bytes": "280000000080060007000000e903000000002a36fe9c971700000000000000008877665544332211",
+      "fields": {
+        "frame_length": 40,
+        "version": 0,
+        "flags": 128,
+        "type": 6,
+        "session_id": 7,
+        "stream_id": 1001,
+        "echo_timestamp": 1700000000000000000,
+        "reception_delta": 0,
+        "receiver_id": 1234605616436508552
+      }
+    },
+    {
+      "name": "rtt-measurement-answer",
+      "kind": "frame",
+      "frame": "rtt-measurement",
+      "term_length": 65536,
+      "bytes": "280000000000060007000000e903000000002a36fe9c971700000000000000000000000000000000",
+      "fields": {
+        "frame_length": 40,
+        "version": 0,
+        "flags": 0,
+        "type": 6,
+        "session_id": 7,
+        "stream_id": 1001,
+        "echo_timestamp": 1700000000000000000,
+        "reception_delta": 0,
+        "receiver_id": 0
+      }
+    },
+    {
+      "name": "heartbeat",
+      "kind": "frame",
+      "frame": "heartbeat",
+      "term_length": 65536,
+      "bytes": "0000000000c001000008000007000000e9030000feffffff0000000000000000",
+      "fields": {
+        "frame_length": 0,
+        "version": 0,
+        "flags": 192,
+        "type": 1,
+        "term_offset": 2048,
+        "session_id": 7,
+        "stream_id": 1001,
+        "term_id": -2,
+        "reserved_value": 0
+      }
+    },
+    {
+      "name": "heartbeat-eos",
+      "kind": "frame",
+      "frame": "heartbeat",
+      "term_length": 65536,
+      "bytes": "0000000000e00100e0ff000007000000e9030000feffffff0000000000000000",
+      "fields": {
+        "frame_length": 0,
+        "version": 0,
+        "flags": 224,
+        "type": 1,
+        "term_offset": 65504,
+        "session_id": 7,
+        "stream_id": 1001,
+        "term_id": -2,
+        "reserved_value": 0
+      }
+    },
+    {
+      "name": "too-short-eight-bytes",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000005",
+      "error": "too-short"
+    },
+    {
+      "name": "too-short-setup",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000005000000000007000000e9030000fbfffffffbffffff0000010080050000000000",
+      "error": "too-short"
+    },
+    {
+      "name": "too-short-status-message",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "240000000000030007000000e9030000fbffffff000000000000020088776655443322",
+      "error": "too-short"
+    },
+    {
+      "name": "too-short-nak",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "1c0000000000020007000000e9030000fbffffff00040000400000",
+      "error": "too-short"
+    },
+    {
+      "name": "version-1",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000010005000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "version"
+    },
+    {
+      "name": "version-negative",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "24000000ff00030007000000e9030000fbffffff00000000000002008877665544332211",
+      "error": "version"
+    },
+    {
+      "name": "type-error-frame",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000004000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "type"
+    },
+    {
+      "name": "type-resolution",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000007000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "type"
+    },
+    {
+      "name": "type-twelve",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "2800000000000c000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "type"
+    },
+    {
+      "name": "length-setup-36",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "24000000000005000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "length"
+    },
+    {
+      "name": "length-status-message-40",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "280000000000030007000000e9030000fbffffff0000000000000200887766554433221100000000",
+      "error": "length"
+    },
+    {
+      "name": "length-nak-32",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "200000000000020007000000e9030000fbffffff000400004000000000000000",
+      "error": "length"
+    },
+    {
+      "name": "length-heartbeat-not-32",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "0000000000c001000008000007000000e9030000feffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "length"
+    },
+    {
+      "name": "term-length-not-power-of-two",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000005000000000007000000e9030000fbfffffffbffffffa08601008005000000000000",
+      "error": "term-length"
+    },
+    {
+      "name": "term-length-too-small",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000005000000000007000000e9030000fbfffffffbffffff008000008005000000000000",
+      "error": "term-length"
+    },
+    {
+      "name": "mtu-not-aligned",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000005000000000007000000e9030000fbfffffffbffffff000001007805000000000000",
+      "error": "mtu"
+    },
+    {
+      "name": "mtu-too-large",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000005000000000007000000e9030000fbfffffffbffffff000001000000010000000000",
+      "error": "mtu"
+    },
+    {
+      "name": "term-offset-not-aligned",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000005003000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "term-offset"
+    },
+    {
+      "name": "term-offset-at-term-length",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000000005000000010007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "term-offset"
+    },
+    {
+      "name": "term-offset-negative-nak",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "1c0000000000020007000000e9030000fbffffffe0ffffff40000000",
+      "error": "term-offset"
+    },
+    {
+      "name": "term-offset-status-message",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "240000000000030007000000e9030000fbffffff00000100000002008877665544332211",
+      "error": "term-offset"
+    },
+    {
+      "name": "window-negative",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "240000000000030007000000e9030000fbffffff00000000ffffffff8877665544332211",
+      "error": "window"
+    },
+    {
+      "name": "nak-length-zero",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "1c0000000000020007000000e9030000fbffffff0004000000000000",
+      "error": "nak-length"
+    },
+    {
+      "name": "nak-length-not-aligned",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "1c0000000000020007000000e9030000fbffffff0004000030000000",
+      "error": "nak-length"
+    },
+    {
+      "name": "nak-length-past-term",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "1c0000000000020007000000e9030000fbffffffe0ff000040000000",
+      "error": "nak-length"
+    },
+    {
+      "name": "version-before-type",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "28000000010004000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "version"
+    },
+    {
+      "name": "type-before-length",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "24000000000004000000000007000000e9030000fbfffffffbffffff000001008005000000000000",
+      "error": "type"
+    },
+    {
+      "name": "length-before-term-length",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "24000000000005000000000007000000e9030000fbfffffffbffffff640000008005000000000000",
+      "error": "length"
+    },
+    {
+      "name": "datagram-two-frames",
+      "kind": "datagram",
+      "term_length": 65536,
+      "bytes": "2800000000c001000000000007000000e9030000fbffffff0000000000000000636176616c7279210000000000000000000000000000000000000000000000004800000000c001004000000007000000e9030000fbffffff000000000000000042424242424242424242424242424242424242424242424242424242424242424242424242424242000000000000000000000000000000000000000000000000",
+      "frames": [
+        {
+          "term_offset": 0,
+          "frame_length": 40
+        },
+        {
+          "term_offset": 64,
+          "frame_length": 72
+        }
+      ]
+    },
+    {
+      "name": "datagram-padding",
+      "kind": "datagram",
+      "term_length": 65536,
+      "bytes": "4000000000000000c0ff000007000000e9030000fbffffff00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "frames": [
+        {
+          "term_offset": 65472,
+          "frame_length": 64
+        }
+      ]
+    },
+    {
+      "name": "datagram-one-frame-fragment",
+      "kind": "datagram",
+      "term_length": 65536,
+      "bytes": "84000000008001000004000007000000e9030000fbffffff00000000000000000101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010100000000000000000000000000000000000000000000000000000000",
+      "frames": [
+        {
+          "term_offset": 1024,
+          "frame_length": 132
+        }
+      ]
+    },
+    {
+      "name": "datagram-not-aligned",
+      "kind": "datagram",
+      "term_length": 65536,
+      "bytes": "2800000000c001000000000007000000e9030000fbffffff0000000000000000636176616c727921",
+      "error": "length"
+    },
+    {
+      "name": "datagram-frame-version",
+      "kind": "datagram",
+      "term_length": 65536,
+      "bytes": "2800000001c001000000000007000000e9030000fbffffff0000000000000000636176616c727921000000000000000000000000000000000000000000000000",
+      "error": "datagram"
+    },
+    {
+      "name": "datagram-frame-type",
+      "kind": "datagram",
+      "term_length": 65536,
+      "bytes": "2800000000c002000000000007000000e9030000fbffffff0000000000000000636176616c727921000000000000000000000000000000000000000000000000",
+      "error": "datagram"
+    },
+    {
+      "name": "datagram-term-offset-not-running",
+      "kind": "datagram",
+      "term_length": 65536,
+      "bytes": "2800000000c001000000000007000000e9030000fbffffff0000000000000000636176616c7279210000000000000000000000000000000000000000000000002100000000c001008000000007000000e9030000fbffffff00000000000000007800000000000000000000000000000000000000000000000000000000000000",
+      "error": "datagram"
+    },
+    {
+      "name": "datagram-past-term-end",
+      "kind": "datagram",
+      "term_length": 65536,
+      "bytes": "4800000000c00100e0ff000007000000e9030000fbffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "datagram"
+    },
+    {
+      "name": "channel-ipv4",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null
+      }
+    },
+    {
+      "name": "channel-name",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=grip-link:40123",
+      "fields": {
+        "endpoint_host": "grip-link",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null
+      }
+    },
+    {
+      "name": "channel-ipv6",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=[fd00::2]:40123",
+      "fields": {
+        "endpoint_host": "fd00::2",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null
+      }
+    },
+    {
+      "name": "channel-interface",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|interface=10.0.0.1",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": "10.0.0.1",
+        "interface_port": null
+      }
+    },
+    {
+      "name": "channel-interface-port",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|interface=10.0.0.1:5000",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": "10.0.0.1",
+        "interface_port": 5000
+      }
+    },
+    {
+      "name": "channel-parameters-in-any-order",
+      "kind": "channel",
+      "string": "cavalry:udp?interface=10.0.0.1|endpoint=10.0.0.2:1",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 1,
+        "interface_host": "10.0.0.1",
+        "interface_port": null
+      }
+    },
+    {
+      "name": "channel-no-scheme",
+      "kind": "channel",
+      "string": "udp?endpoint=10.0.0.2:40123",
+      "error": "grammar",
+      "code": 1
+    },
+    {
+      "name": "channel-unknown-media",
+      "kind": "channel",
+      "string": "cavalry:tcp?endpoint=10.0.0.2:40123",
+      "error": "grammar",
+      "code": 1
+    },
+    {
+      "name": "channel-no-parameters",
+      "kind": "channel",
+      "string": "cavalry:udp",
+      "error": "grammar",
+      "code": 1
+    },
+    {
+      "name": "channel-empty-value",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=",
+      "error": "grammar",
+      "code": 1
+    },
+    {
+      "name": "channel-no-equals",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint",
+      "error": "grammar",
+      "code": 1
+    },
+    {
+      "name": "channel-repeated-key",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:1|endpoint=10.0.0.2:2",
+      "error": "grammar",
+      "code": 1
+    },
+    {
+      "name": "channel-unknown-key",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|mtu=1408",
+      "error": "key",
+      "code": 1
+    },
+    {
+      "name": "channel-no-endpoint",
+      "kind": "channel",
+      "string": "cavalry:udp?interface=10.0.0.1",
+      "error": "endpoint",
+      "code": 1
+    },
+    {
+      "name": "channel-endpoint-no-port",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2",
+      "error": "endpoint",
+      "code": 1
+    },
+    {
+      "name": "channel-endpoint-port-zero",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:0",
+      "error": "endpoint",
+      "code": 1
+    },
+    {
+      "name": "channel-endpoint-port-too-large",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:70000",
+      "error": "endpoint",
+      "code": 1
+    },
+    {
+      "name": "channel-endpoint-ipv6-no-brackets",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=fd00::2:40123",
+      "error": "endpoint",
+      "code": 1
+    },
+    {
+      "name": "channel-multicast-ipv4",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=224.0.1.1:40123",
+      "error": "multicast",
+      "code": 1
+    },
+    {
+      "name": "channel-multicast-ipv6",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=[ff02::1]:40123",
+      "error": "multicast",
+      "code": 1
+    },
+    {
+      "name": "sender-limit-first-status-message",
+      "kind": "arithmetic",
+      "rule": "sender-limit",
+      "inputs": {
+        "sender_position": 0,
+        "sender_limit": 0,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 131072,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 0,
+        "accepted": true,
+        "sender_limit": 131072
+      }
+    },
+    {
+      "name": "sender-limit-rises",
+      "kind": "arithmetic",
+      "rule": "sender-limit",
+      "inputs": {
+        "sender_position": 8192,
+        "sender_limit": 131072,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 8192,
+        "receiver_window_length": 131072,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 8192,
+        "accepted": true,
+        "sender_limit": 139264
+      }
+    },
+    {
+      "name": "sender-limit-never-falls",
+      "kind": "arithmetic",
+      "rule": "sender-limit",
+      "inputs": {
+        "sender_position": 8192,
+        "sender_limit": 139264,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 4096,
+        "receiver_window_length": 65536,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 4096,
+        "accepted": true,
+        "sender_limit": 139264
+      }
+    },
+    {
+      "name": "sender-limit-below-window-rejected",
+      "kind": "arithmetic",
+      "rule": "sender-limit",
+      "inputs": {
+        "sender_position": 200000,
+        "sender_limit": 200000,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 131072,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 0,
+        "accepted": false,
+        "sender_limit": 200000
+      }
+    },
+    {
+      "name": "sender-limit-above-window-rejected",
+      "kind": "arithmetic",
+      "rule": "sender-limit",
+      "inputs": {
+        "sender_position": 0,
+        "sender_limit": 0,
+        "consumption_term_id": -3,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 131072,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 131072,
+        "accepted": false,
+        "sender_limit": 0
+      }
+    },
+    {
+      "name": "sender-limit-at-window-edge",
+      "kind": "arithmetic",
+      "rule": "sender-limit",
+      "inputs": {
+        "sender_position": 32768,
+        "sender_limit": 32768,
+        "consumption_term_id": -5,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 131072,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 0,
+        "accepted": true,
+        "sender_limit": 131072
+      }
+    },
+    {
+      "name": "sender-limit-term-id-wraps",
+      "kind": "arithmetic",
+      "rule": "sender-limit",
+      "inputs": {
+        "sender_position": 0,
+        "sender_limit": 0,
+        "consumption_term_id": -2147483648,
+        "consumption_term_offset": 0,
+        "receiver_window_length": 131072,
+        "initial_term_id": 2147483647,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 65536,
+        "accepted": true,
+        "sender_limit": 196608
+      }
+    },
+    {
+      "name": "retransmit-in-window",
+      "kind": "arithmetic",
+      "rule": "retransmit-window",
+      "inputs": {
+        "sender_position": 65536,
+        "term_id": -5,
+        "term_offset": 32768,
+        "length": 64,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "resend_position": 32768,
+        "bottom": 24576,
+        "in_window": true
+      }
+    },
+    {
+      "name": "retransmit-at-sender-position",
+      "kind": "arithmetic",
+      "rule": "retransmit-window",
+      "inputs": {
+        "sender_position": 65536,
+        "term_id": -4,
+        "term_offset": 0,
+        "length": 64,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "resend_position": 65536,
+        "bottom": 24576,
+        "in_window": false
+      }
+    },
+    {
+      "name": "retransmit-too-old",
+      "kind": "arithmetic",
+      "rule": "retransmit-window",
+      "inputs": {
+        "sender_position": 65536,
+        "term_id": -6,
+        "term_offset": 0,
+        "length": 64,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "resend_position": -65536,
+        "bottom": 24576,
+        "in_window": false
+      }
+    },
+    {
+      "name": "retransmit-bottom-edge",
+      "kind": "arithmetic",
+      "rule": "retransmit-window",
+      "inputs": {
+        "sender_position": 65536,
+        "term_id": -5,
+        "term_offset": 24576,
+        "length": 32,
+        "initial_term_id": -5,
+        "term_length": 65536
+      },
+      "fields": {
+        "resend_position": 24576,
+        "bottom": 24576,
+        "in_window": true
+      }
+    },
+    {
+      "name": "receiver-accepts-at-sm-position",
+      "kind": "arithmetic",
+      "rule": "receiver-bounds",
+      "inputs": {
+        "last_sm_position": 65536,
+        "packet_position": 65536,
+        "payload_length": 1408,
+        "term_length": 65536
+      },
+      "fields": {
+        "under_run": false,
+        "over_run": false,
+        "accepted": true
+      }
+    },
+    {
+      "name": "receiver-under-run",
+      "kind": "arithmetic",
+      "rule": "receiver-bounds",
+      "inputs": {
+        "last_sm_position": 65536,
+        "packet_position": 65504,
+        "payload_length": 32,
+        "term_length": 65536
+      },
+      "fields": {
+        "under_run": true,
+        "over_run": false,
+        "accepted": false
+      }
+    },
+    {
+      "name": "receiver-over-run",
+      "kind": "arithmetic",
+      "rule": "receiver-bounds",
+      "inputs": {
+        "last_sm_position": 65536,
+        "packet_position": 98272,
+        "payload_length": 64,
+        "term_length": 65536
+      },
+      "fields": {
+        "under_run": false,
+        "over_run": true,
+        "accepted": false
+      }
+    },
+    {
+      "name": "receiver-at-over-run-edge",
+      "kind": "arithmetic",
+      "rule": "receiver-bounds",
+      "inputs": {
+        "last_sm_position": 65536,
+        "packet_position": 98240,
+        "payload_length": 64,
+        "term_length": 65536
+      },
+      "fields": {
+        "under_run": false,
+        "over_run": false,
+        "accepted": true
+      }
+    },
+    {
+      "name": "threshold-default-window",
+      "kind": "arithmetic",
+      "rule": "status-message-threshold",
+      "inputs": {
+        "receiver_window_length": 131072
+      },
+      "fields": {
+        "threshold": 32768
+      }
+    },
+    {
+      "name": "threshold-small-term",
+      "kind": "arithmetic",
+      "rule": "status-message-threshold",
+      "inputs": {
+        "receiver_window_length": 32768
+      },
+      "fields": {
+        "threshold": 8192
+      }
+    },
+    {
+      "name": "image-start-first-term",
+      "kind": "arithmetic",
+      "rule": "image-start",
+      "inputs": {
+        "initial_term_id": -5,
+        "active_term_id": -5,
+        "term_offset": 0,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 0,
+        "receiver_window_length": 32768
+      }
+    },
+    {
+      "name": "image-start-mid-stream",
+      "kind": "arithmetic",
+      "rule": "image-start",
+      "inputs": {
+        "initial_term_id": -5,
+        "active_term_id": -2,
+        "term_offset": 4096,
+        "term_length": 65536
+      },
+      "fields": {
+        "position": 200704,
+        "receiver_window_length": 32768
+      }
+    },
+    {
+      "name": "image-start-large-term",
+      "kind": "arithmetic",
+      "rule": "image-start",
+      "inputs": {
+        "initial_term_id": -5,
+        "active_term_id": -4,
+        "term_offset": 32,
+        "term_length": 1073741824
+      },
+      "fields": {
+        "position": 1073741856,
+        "receiver_window_length": 131072
+      }
+    }
+  ]
+}

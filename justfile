@@ -51,13 +51,15 @@ bench-compare:
     python3 scripts/bench-compare.py
 
 # Wire-spec conformance: every implementation against every vector in spec/vectors/
-# (spec/README.md). Today the implementations are cavalry-proto's (the frame header
-# and the client protocol) and cavalry-shm's (the counters file, the log buffer, the command ring and the
-# broadcast buffer); every vector test also runs in `just test`. A client in clients/
-# joins here with its own runner.
+# (spec/README.md). Today the implementations are cavalry-proto's (the frame header,
+# the client protocol, and the UDP transport's frames, datagram and channel URI) and
+# cavalry-shm's (the counters file, the log buffer, the command ring and the broadcast
+# buffer); every vector test also runs in `just test`. A client in clients/ joins here
+# with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance
+    cargo test -p cavalry-proto --test udp_conformance
     cargo test -p cavalry-shm --test conformance
     cargo test -p cavalry-shm --test log_buffer_conformance
     cargo test -p cavalry-shm --test command_ring_conformance
@@ -174,6 +176,8 @@ loom:
 fuzz:
     cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz frame_header -- -max_total_time=60
     cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz client_protocol -- -max_total_time=60
+    cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz udp -- -max_total_time=60
+    cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz channel -- -max_total_time=60
 
 # Retire branches whose work is on master, locally and on origin: every branch whose
 # pull request merged, or the one named. GitHub deletes a merged pull request's branch

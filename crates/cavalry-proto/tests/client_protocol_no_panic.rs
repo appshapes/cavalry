@@ -127,6 +127,7 @@ fn valid_messages() -> Vec<(i32, Vec<u8>)> {
             session_id: -2,
             stream_id: 1001,
             publication_limit_counter_id: 13,
+            channel_status_indicator_id: -1,
             log_file_name: b"publications/7.logbuffer",
         },
         Event::ClientTimeout { client_id: 5 },

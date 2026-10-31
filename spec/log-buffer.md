@@ -1,4 +1,4 @@
-# Log buffer, version 0
+# Log buffer, version 1
 
 The log buffer is the shared-memory file that carries one publication's stream between
 processes on one host: three term buffers that publishers fill with frames and
@@ -8,12 +8,17 @@ Aeron, this is the log buffer, the `.logbuffer` file that `LogBufferDescriptor`
 describes (ADR 0013; `docs/glossary.md`). Every field below names its writer, its readers
 and the bound a reader checks (ADR 0010), and every field that one party writes and
 another reads in its hot loop has a 128-byte slot of its own (ADR 0011). The frames
-inside a term are `spec/frame.md`.
+inside a term are `spec/frame.md`. Version 1 adds a third type, the image, whose terms
+the driver's receiver fills from the wire (`spec/udp.md`, "The receiver"), and the
+receiver window length in the header (ADR 0040); every version 0 byte is unchanged, and
+a reader of version 1 reads a version 0 file as a version 1 file whose receiver window
+length is 0.
 
 ## File
 
 The file is named `publications/<correlation id>.logbuffer` in the driver's directory,
-where the correlation id is the decimal value of the header field below. It has four
+or `images/<correlation id>.logbuffer` for an image, where the correlation id is the
+decimal value of the header field below. It has four
 regions, in this order:
 
 | Region | Offset | Length | Holds |
@@ -40,14 +45,15 @@ treats a difference as `changed` (ADR 0010).
 | Offset | Size | Field | Type | Writer | Readers | Bound |
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 8 | magic | bytes | the creator, last, with a release store | everyone, first, with an acquire load | the bytes `43 56 4C 59 4C 4F 47 42` (`CVLYLOGB`) |
-| 8 | 4 | version | i32 | the creator | everyone | 0 |
-| 12 | 4 | type | i32 | the creator | everyone, `doctor` | 0, a concurrent publication, whose tail any number of publishers advance with fetch-and-add; 1, an exclusive publication, whose one publisher advances the tail with release stores |
-| 16 | 8 | correlation id | i64 | the creator | everyone | any; the publication's registration with the driver, and the file's name |
+| 8 | 4 | version | i32 | the creator | everyone | 0 or 1; a writer of this version writes 1 |
+| 12 | 4 | type | i32 | the creator | everyone, `doctor` | 0, a concurrent publication, whose tail any number of publishers advance with fetch-and-add; 1, an exclusive publication, whose one publisher advances the tail with release stores; 2, an image, whose terms the driver's receiver writes by term offset and whose tails nobody advances or reads |
+| 16 | 8 | correlation id | i64 | the creator | everyone | any; the publication's registration with the driver, or the image's own, and the file's name |
 | 24 | 4 | initial term id | i32 | the creator | everyone | any; term count 0 is this term id |
 | 28 | 4 | term length | i32 | the creator | everyone | a power of two from 65536 to 1073741824 |
 | 32 | 4 | MTU length | i32 | the creator | publishers | a multiple of 32 from 64 to 65504; the longest frame a message is split into |
-| 36 | 4 | publication window length | i32 | the creator | the driver | 1 to term length ÷ 2; how far the publisher may run ahead of the slowest subscriber |
-| 40 | 24 | reserved | bytes | the creator | nobody | written as 0, never read |
+| 36 | 4 | publication window length | i32 | the creator | the driver | 1 to term length ÷ 2; how far the publisher may run ahead of the slowest subscriber; in an image, written as term length ÷ 2 and read by nobody |
+| 40 | 4 | receiver window length | i32 | the creator | the receiver, `doctor` | in an image, 1 to term length ÷ 2: how far past the slowest subscriber's position the sender may send (`spec/udp.md`, "The receiver"); 0 in a publication's log, and in every version 0 file |
+| 44 | 20 | reserved | bytes | the creator | nobody | written as 0, never read |
 | 64 | 32 | default frame header | bytes | the creator | publishers, the driver | a data frame header (`spec/frame.md`) with frame length 0, version 0, flags `C0`, type 1, term offset 0, the publication's session id and stream id, term id equal to the initial term id, and reserved value 0 |
 | 96 | 32 | reserved | bytes | the creator | nobody | written as 0, never read |
 
@@ -178,9 +184,29 @@ in `counters.toml`) with a release store, so that the driver's acquire load of t
 position orders the subscriber's reads before any cleaning. A subscriber whose position
 is at or past the end of stream position has seen everything the publication wrote.
 
+## The receiver
+
+An image, type 2, is the log the driver's receiver rebuilds from a stream that arrives
+over UDP (`spec/udp.md`, "The receiver"; ADR 0040). The driver creates it at the position
+the sender's setup frame names, as a replay's log is created at a position, under
+`images/`, with the sender's term length, MTU length and initial term id and the
+image's own correlation id. The receiver writes each frame at its term offset: the
+bytes after the frame's first eight with plain stores, then the first eight with a
+release store, and only where the frame length there is 0, so that a frame that
+arrives twice is written once. Nobody claims in an image, the tail counters and the
+active term count keep their creation values and nobody reads them, and unblocking does
+not apply. A subscriber reads an image as "Reading" says and stops at the first frame
+length of 0, which is a gap the wire has not filled yet; the receiver's rebuild position
+and high-water mark are counters in the counters file, `image.rebuild_position` and
+`image.hwm_position`. The receiver cleans the image's terms as the driver cleans a
+publication's, from the clean position to the slowest subscriber's position less the
+term length, before the status message's position rises; it stores the end of stream
+position when the stream ends, and is connected is 1 while the image is live.
+
 ## The driver
 
-The driver creates the log, and on its duty cycle keeps it as below. A recorded
+The driver creates the log, and on its duty cycle keeps it as below; an image's duties
+are the receiver's, above. A recorded
 publication (`spec/client-protocol.md`, "Commands") has one more reader, the driver's
 recorder, whose position is `recording.position` (`counters.toml`); below, the *consumer
 position* is the minimum subscriber position, or, for a recorded publication, the lesser
@@ -259,11 +285,11 @@ fails, by the name in the first column.
 | `too-short` | The file is shorter than 4096 bytes, or fewer than 128 header bytes were given. |
 | `not-ready` | Magic is eight zero bytes: the creator has not finished. Wait and read again. |
 | `magic` | Magic is any other value than `CVLYLOGB`. |
-| `version` | Version is not 0. |
-| `type` | Type is not 0 or 1. |
+| `version` | Version is not 0 or 1. |
+| `type` | Type is not 0, 1 or 2. |
 | `term-length` | Term length is not a power of two from 65536 to 1073741824. |
 | `mtu` | MTU length is not a multiple of 32 from 64 to 65504. |
-| `window` | Publication window length is not 1 to term length ÷ 2. |
+| `window` | Publication window length is not 1 to term length ÷ 2; or, version 1, an image's receiver window length is not 1 to term length ÷ 2, or a publication's is not 0. |
 | `frame-header` | The default frame header is not a version 0 data frame header with frame length 0, flags `C0`, term offset 0, term id equal to the initial term id and reserved value 0. |
 | `length` | The file length is not 3 × term length + 4096. |
 | `changed` | The header read through the final mapping differs from the first read. |
@@ -283,7 +309,9 @@ files").
 encoder. Each vector has a `region`:
 
 - `header`: the first 128 bytes of the metadata page as `bytes`, the `file_length` the
-  reader sees, and the `fields` a conforming reader decodes or the `error` it reports.
+  reader sees, and the `fields` a conforming reader decodes or the `error` it reports;
+  version 0 headers and version 1 headers of every type, since a reader of version 1
+  reads both.
 - `tail`: eight `bytes`, a tail counter, with the `term_length`, and the `fields` term id
   and term offset.
 - `position`: an arithmetic vector with `inputs` and no bytes: initial term id and term

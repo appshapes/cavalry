@@ -1,6 +1,7 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 3
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 4
 //! (ADR 0019; the recording commands and events are ADR 0025, the replay commands and
-//! events ADR 0030, the retention commands ADR 0031).
+//! events ADR 0030, the retention commands ADR 0031, the `cavalry:udp` channel, the
+//! channel status indicator id and error codes 4 and 9 ADR 0040).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -42,7 +43,7 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 3;
+pub const VERSION: i32 = 4;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
@@ -50,8 +51,14 @@ pub const MAX_STRING_LENGTH: usize = 4096;
 /// The bytes every command begins with: the client id and the correlation id.
 pub const CORRELATED_LENGTH: usize = 16;
 
-/// The channel every publication and subscription of this version names.
+/// The IPC channel; a `cavalry:udp` channel is [`crate::channel::Channel`]'s to parse
+/// (`spec/udp.md`, "The channel URI").
 pub const IPC_CHANNEL: &[u8] = b"cavalry:ipc";
+
+/// The channel status indicator id of a `cavalry:ipc` publication or subscription,
+/// which has no endpoint: `publication ready` and `subscription ready` carry it
+/// (`spec/client-protocol.md`, "Events"; ADR 0040).
+pub const NO_CHANNEL_STATUS: i32 = -1;
 
 /// The position a `start replay` passes for the recording's start position: Aeron's
 /// `NULL_POSITION` (`spec/client-protocol.md`, "Commands"; ADR 0030).
@@ -206,7 +213,9 @@ impl TryFrom<i32> for EventType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum ErrorCode {
-    /// The channel is not `cavalry:ipc`.
+    /// The channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts:
+    /// its grammar, a parameter this version does not name, its endpoint or a multicast
+    /// address (`spec/udp.md`, "What a reader rejects").
     InvalidChannel = 1,
     /// Remove subscription named a registration the driver does not know, or another
     /// client's.
@@ -214,10 +223,15 @@ pub enum ErrorCode {
     /// Remove publication named a registration the driver does not know, or another
     /// client's.
     UnknownPublication = 3,
+    /// A `cavalry:udp` endpoint's socket could not be opened, bound or connected; the
+    /// message carries the operating system's reason and the endpoint (ADR 0040).
+    ChannelEndpointError = 4,
     /// The record's type is not a command of this version.
     UnknownCommandType = 6,
     /// The message failed a decoding check after its first 16 bytes were read.
     MalformedCommand = 7,
+    /// A `cavalry:udp` channel's host does not resolve (ADR 0040).
+    UnknownHost = 9,
     /// A registry is at capacity or the counters file has no free record.
     ResourceTemporarilyUnavailable = 10,
     /// Anything else; the message says what.
@@ -246,8 +260,10 @@ impl ErrorCode {
             1 => Some(ErrorCode::InvalidChannel),
             2 => Some(ErrorCode::UnknownSubscription),
             3 => Some(ErrorCode::UnknownPublication),
+            4 => Some(ErrorCode::ChannelEndpointError),
             6 => Some(ErrorCode::UnknownCommandType),
             7 => Some(ErrorCode::MalformedCommand),
+            9 => Some(ErrorCode::UnknownHost),
             10 => Some(ErrorCode::ResourceTemporarilyUnavailable),
             11 => Some(ErrorCode::GenericError),
             12 => Some(ErrorCode::StorageSpace),
@@ -401,7 +417,7 @@ pub enum Command<'a> {
         correlation_id: i64,
         /// The stream to publish on.
         stream_id: i32,
-        /// The channel, `cavalry:ipc` in this version.
+        /// The channel: `cavalry:ipc`, or a `cavalry:udp` channel (`spec/udp.md`).
         channel: &'a [u8],
     },
     /// Type 2.
@@ -421,7 +437,7 @@ pub enum Command<'a> {
         correlation_id: i64,
         /// The stream to publish on.
         stream_id: i32,
-        /// The channel, `cavalry:ipc` in this version.
+        /// The channel: `cavalry:ipc`, or a `cavalry:udp` channel (`spec/udp.md`).
         channel: &'a [u8],
     },
     /// Type 4.
@@ -432,7 +448,7 @@ pub enum Command<'a> {
         correlation_id: i64,
         /// The stream to subscribe to.
         stream_id: i32,
-        /// The channel, `cavalry:ipc` in this version.
+        /// The channel: `cavalry:ipc`, or a `cavalry:udp` channel (`spec/udp.md`).
         channel: &'a [u8],
     },
     /// Type 5.
@@ -466,7 +482,7 @@ pub enum Command<'a> {
         correlation_id: i64,
         /// The stream whose live publication is recorded.
         stream_id: i32,
-        /// The channel, `cavalry:ipc` in this version.
+        /// The channel: `cavalry:ipc`, or a `cavalry:udp` channel (`spec/udp.md`).
         channel: &'a [u8],
     },
     /// Type 258 (`0x0102`).
@@ -496,7 +512,7 @@ pub enum Command<'a> {
         length: i64,
         /// The stream the replay's publication is on.
         replay_stream_id: i32,
-        /// The replay publication's channel, `cavalry:ipc` in this version.
+        /// The replay publication's channel: `cavalry:ipc`, or a `cavalry:udp` channel.
         replay_channel: &'a [u8],
     },
     /// Type 260 (`0x0104`).
@@ -837,6 +853,9 @@ pub enum Event<'a> {
         stream_id: i32,
         /// The `publication.limit` counter the publisher loads.
         publication_limit_counter_id: i32,
+        /// The endpoint's `channel.status` counter, or [`NO_CHANNEL_STATUS`] for
+        /// `cavalry:ipc` (ADR 0040).
+        channel_status_indicator_id: i32,
         /// The log's path relative to the driver directory.
         log_file_name: &'a [u8],
     },
@@ -868,6 +887,9 @@ pub enum Event<'a> {
         stream_id: i32,
         /// The `publication.limit` counter the publisher loads.
         publication_limit_counter_id: i32,
+        /// The endpoint's `channel.status` counter, or [`NO_CHANNEL_STATUS`] for
+        /// `cavalry:ipc` (ADR 0040).
+        channel_status_indicator_id: i32,
         /// The log's path relative to the driver directory.
         log_file_name: &'a [u8],
     },
@@ -875,6 +897,9 @@ pub enum Event<'a> {
     SubscriptionReady {
         /// The add command's correlation id, the subscription's registration id.
         correlation_id: i64,
+        /// The endpoint's `channel.status` counter, or [`NO_CHANNEL_STATUS`] for
+        /// `cavalry:ipc` (ADR 0040).
+        channel_status_indicator_id: i32,
     },
     /// Type `0x0F0A`: a client was timed out.
     ClientTimeout {
@@ -975,6 +1000,7 @@ impl<'a> Event<'a> {
                 session_id: cursor.i32()?,
                 stream_id: cursor.i32()?,
                 publication_limit_counter_id: cursor.i32()?,
+                channel_status_indicator_id: cursor.i32()?,
                 log_file_name: cursor.string()?,
             },
             EventType::OperationSuccess => Event::OperationSuccess {
@@ -992,10 +1018,12 @@ impl<'a> Event<'a> {
                 session_id: cursor.i32()?,
                 stream_id: cursor.i32()?,
                 publication_limit_counter_id: cursor.i32()?,
+                channel_status_indicator_id: cursor.i32()?,
                 log_file_name: cursor.string()?,
             },
             EventType::SubscriptionReady => Event::SubscriptionReady {
                 correlation_id: cursor.i64()?,
+                channel_status_indicator_id: cursor.i32()?,
             },
             EventType::ClientTimeout => Event::ClientTimeout {
                 client_id: cursor.i64()?,
@@ -1086,6 +1114,7 @@ impl<'a> Event<'a> {
                 session_id,
                 stream_id,
                 publication_limit_counter_id,
+                channel_status_indicator_id,
                 log_file_name,
             }
             | Event::ExclusivePublicationReady {
@@ -1094,6 +1123,7 @@ impl<'a> Event<'a> {
                 session_id,
                 stream_id,
                 publication_limit_counter_id,
+                channel_status_indicator_id,
                 log_file_name,
             } => {
                 out.i64(correlation_id)?;
@@ -1101,10 +1131,17 @@ impl<'a> Event<'a> {
                 out.i32(session_id)?;
                 out.i32(stream_id)?;
                 out.i32(publication_limit_counter_id)?;
+                out.i32(channel_status_indicator_id)?;
                 out.string(log_file_name)
             }
-            Event::OperationSuccess { correlation_id }
-            | Event::SubscriptionReady { correlation_id } => out.i64(correlation_id),
+            Event::OperationSuccess { correlation_id } => out.i64(correlation_id),
+            Event::SubscriptionReady {
+                correlation_id,
+                channel_status_indicator_id,
+            } => {
+                out.i64(correlation_id)?;
+                out.i32(channel_status_indicator_id)
+            }
             Event::UnavailableImage {
                 correlation_id,
                 subscriber_registration_id,
@@ -1396,7 +1433,18 @@ mod tests {
             ErrorCode::from_code(10),
             Some(ErrorCode::ResourceTemporarilyUnavailable)
         );
-        assert_eq!(ErrorCode::from_code(4), None);
+        assert_eq!(
+            ErrorCode::from_code(4),
+            Some(ErrorCode::ChannelEndpointError),
+            "version 4 takes Aeron's code 4"
+        );
+        assert_eq!(
+            ErrorCode::from_code(5),
+            None,
+            "Aeron's unknown counter, reserved"
+        );
+        assert_eq!(ErrorCode::from_code(9), Some(ErrorCode::UnknownHost));
+        assert_eq!(ErrorCode::UnknownHost.code(), 9);
         assert_eq!(
             ErrorCode::from_code(19),
             None,

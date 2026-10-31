@@ -252,6 +252,20 @@ impl FrameCells {
         self.word.store(word, Ordering::Release);
     }
 
+    /// The receiver's insert into an image, the first half: header bytes 8 to 32 with
+    /// plain stores while the word is 0, before the body and before `publish` stores
+    /// the positive length with release (`spec/udp.md`, "The receiver", step 2; ADR
+    /// 0040). The caller checked that the word is 0 (`word`), which is what makes a
+    /// duplicate a no-op.
+    pub(crate) fn insert_rest(&self, rest: &[u8; FRAME_HEADER_LENGTH - 8]) {
+        // SAFETY: the word is 0, so a reader that loads it reads nothing of `rest`
+        // (spec, "Reading"); the driver's receiver is the only writer of an image's
+        // terms and writes this frame once, then publishes a positive length with
+        // release, which orders this write before any reader's acquire. The driver
+        // cleans a term only once every subscriber has passed it.
+        self.rest.with_mut(|p| unsafe { p.write(*rest) });
+    }
+
     /// The frame word with an acquire load; its low 32 bits are the frame length, 0 for
     /// never written or cleaned, negative for a claim in progress.
     pub(crate) fn word(&self) -> u64 {
@@ -460,6 +474,40 @@ mod loom_tests {
                 thread::yield_now();
             }
             publisher.join().unwrap();
+        });
+    }
+
+    /// The receiver inserts a frame into an image: the header's rest and then the
+    /// positive length with release, with no negative length first; a reader that
+    /// acquires the positive length sees every header byte, and reads none before
+    /// (`spec/udp.md`, "The receiver", step 2; ADR 0040).
+    #[test]
+    fn a_reader_acquires_the_frame_the_receiver_inserted() {
+        loom::model(|| {
+            let cells = Arc::new(FrameCells::zeroed());
+            let default = fields().default_frame_header();
+            let committed =
+                layout::committed_header(&layout::claim_header(&default, 64, 40, -5, 7));
+            let receiver = {
+                let cells = Arc::clone(&cells);
+                thread::spawn(move || {
+                    if layout::frame_word_length(cells.word()) == 0 {
+                        let mut rest = [0u8; FRAME_HEADER_LENGTH - 8];
+                        rest.copy_from_slice(&committed[8..]);
+                        cells.insert_rest(&rest);
+                        cells.publish(layout::frame_word(&committed));
+                    }
+                })
+            };
+            loop {
+                let word = cells.word();
+                if layout::frame_word_length(word) > 0 {
+                    assert_eq!(cells.header(word), committed);
+                    break;
+                }
+                thread::yield_now();
+            }
+            receiver.join().unwrap();
         });
     }
 

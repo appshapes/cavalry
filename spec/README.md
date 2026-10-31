@@ -35,8 +35,9 @@ Protocol).
 | --- | --- | --- |
 | `frame.md`, the data frame header | 0 | ADR 0008 |
 | `counters-file.md`, the counters file | 0 | ADR 0012 |
-| `log-buffer.md`, the log buffer | 0 | ADR 0013 |
+| `log-buffer.md`, the log buffer | 1 | ADR 0013, ADR 0040 |
 | `command-ring.md`, the command ring | 1 | ADR 0014, ADR 0018 |
 | `broadcast-buffer.md`, the broadcast buffer | 0 | ADR 0014 |
-| `client-protocol.md`, the client protocol | 3 | ADR 0019, ADR 0025, ADR 0030, ADR 0031 |
+| `client-protocol.md`, the client protocol | 4 | ADR 0019, ADR 0025, ADR 0030, ADR 0031, ADR 0040 |
 | `durable-log.md`, the durable log | 1 | ADR 0024, ADR 0031 |
+| `udp.md`, the UDP transport | 0 | ADR 0040 |

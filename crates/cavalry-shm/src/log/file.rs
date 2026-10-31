@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cavalry_proto::frame::{
-    DataFrameHeader, Flags, FrameType, HEADER_LENGTH as FRAME_HEADER_LENGTH,
+    DataFrameHeader, Flags, FrameError, FrameType, HEADER_LENGTH as FRAME_HEADER_LENGTH,
 };
 use memmap2::{Mmap, MmapMut, MmapOptions};
 
@@ -432,7 +432,32 @@ impl LogBuffers {
     /// `length`), then the header again through the final mapping, which must equal the
     /// first read (`changed`).
     pub fn open(dir: &Path, correlation_id: i64, writable: bool) -> Result<Self, LogError> {
-        let path = dir.join(layout::file_name(correlation_id));
+        Self::open_path(dir.join(layout::file_name(correlation_id)), writable)
+    }
+
+    /// [`LogBuffers::open`] for the image `correlation_id`, whose log is
+    /// `dir/images/<correlation id>.logbuffer` (ADR 0040).
+    pub fn open_image(dir: &Path, correlation_id: i64, writable: bool) -> Result<Self, LogError> {
+        Self::open_path(dir.join(layout::image_file_name(correlation_id)), writable)
+    }
+
+    /// [`LogBuffers::open`] for the log a `publication ready` or `available image`
+    /// event names: `log_type` and `correlation_id` from [`layout::parse_file_name`],
+    /// an image under `images/` and anything else under `publications/`.
+    pub fn open_named(
+        dir: &Path,
+        log_type: LogType,
+        correlation_id: i64,
+        writable: bool,
+    ) -> Result<Self, LogError> {
+        if log_type.is_image() {
+            Self::open_image(dir, correlation_id, writable)
+        } else {
+            Self::open(dir, correlation_id, writable)
+        }
+    }
+
+    fn open_path(path: std::path::PathBuf, writable: bool) -> Result<Self, LogError> {
         let mut file = OpenOptions::new().read(true).write(writable).open(&path)?;
         let file_length = file.metadata()?.len();
         if file_length < META_DATA_LENGTH as u64 {
@@ -648,9 +673,17 @@ impl LogBuffers {
             })
     }
 
-    /// A publisher's appender on this log, which must be writable.
+    /// A publisher's appender on this log, which must be writable and not an image:
+    /// [`LogError::Type`] on type 2, whose terms the receiver writes.
     pub fn appender(&self) -> Result<TermAppender, LogError> {
         TermAppender::new(Arc::clone(&self.mapped))
+    }
+
+    /// The driver's receiver's writer on this log, which must be writable and of type
+    /// 2, an image: [`LogError::Type`] otherwise (`spec/udp.md`, "The receiver"; ADR
+    /// 0040).
+    pub fn image_writer(&self) -> Result<ImageWriter, LogError> {
+        ImageWriter::new(Arc::clone(&self.mapped))
     }
 
     /// A subscriber's reader on this log, starting at `position`, a multiple of 32 from
@@ -718,9 +751,20 @@ pub struct TermAppender {
 impl TermAppender {
     fn new(mapped: Arc<Mapped>) -> Result<Self, LogError> {
         mapped.require_writable()?;
+        if mapped.fields.log_type().is_image() {
+            return Err(LogError::Type {
+                found: mapped.fields.log_type() as i32,
+            });
+        }
         let default_header = mapped.fields.default_frame_header();
         let exclusive = match mapped.fields.log_type() {
             LogType::Concurrent => None,
+            // Refused above; no claim ever lands in an image.
+            LogType::Image => {
+                return Err(LogError::Type {
+                    found: LogType::Image as i32,
+                });
+            }
             LogType::Exclusive => {
                 let (term_count, tail) = mapped.active()?;
                 Some(ExclusiveTail {
@@ -1384,6 +1428,100 @@ impl fmt::Debug for TermWriter {
         f.debug_struct("TermWriter")
             .field("correlation_id", &self.mapped.fields.correlation_id())
             .field("position", &self.position())
+            .finish()
+    }
+}
+
+/// The driver's receiver's handle on an image: inserts frames from the wire at their
+/// term offset (`spec/udp.md`, "The receiver", step 2; ADR 0040). One per image, on the
+/// receiver thread; the handle is `Send`, borrows nothing from the [`LogBuffers`] and
+/// keeps the mapping alive.
+pub struct ImageWriter {
+    mapped: Arc<Mapped>,
+}
+
+impl ImageWriter {
+    fn new(mapped: Arc<Mapped>) -> Result<Self, LogError> {
+        mapped.require_writable()?;
+        if !mapped.fields.log_type().is_image() {
+            return Err(LogError::Type {
+                found: mapped.fields.log_type() as i32,
+            });
+        }
+        Ok(Self { mapped })
+    }
+
+    /// The log's term length.
+    pub fn term_length(&self) -> u32 {
+        self.mapped.term_length()
+    }
+
+    /// The log's header fields.
+    pub fn header(&self) -> HeaderFields {
+        self.mapped.fields
+    }
+
+    /// Inserts one frame, `frame` being its bytes from its header to the end of its
+    /// alignment padding as a checked datagram yields them
+    /// (`cavalry_proto::udp::Datagram::frames`), at `term_offset` of the term
+    /// `term_id`: the bytes after the first eight with plain stores, then the first
+    /// eight with a release store, and only where the frame length there is 0, so that a
+    /// duplicate changes nothing. Returns whether the frame was written. The term offset
+    /// must be a multiple of 32 with the frame within the term, and `frame` at least a
+    /// header long with a frame length that fits it; otherwise [`LogError::Position`]
+    /// or [`LogError::Frame`], with nothing written. The caller keeps the receiver's
+    /// bounds (`cavalry_proto::udp::receiver_bounds`): this writer trusts that the term
+    /// is the stream's current one, as the datagram check trusted its term offset.
+    pub fn insert(
+        &mut self,
+        term_id: i32,
+        term_offset: u32,
+        frame: &[u8],
+    ) -> Result<bool, LogError> {
+        let term_length = self.mapped.term_length();
+        let Some(head) = frame.get(..FRAME_HEADER_LENGTH) else {
+            return Err(LogError::Frame(FrameError::TooShort { given: frame.len() }));
+        };
+        let header = DataFrameHeader::parse_within(head, frame.len())?;
+        let frame_length = header.frame_length() as u32;
+        let aligned = aligned_length(frame_length);
+        let end = u64::from(term_offset) + u64::from(aligned);
+        if !term_offset.is_multiple_of(FRAME_ALIGNMENT) || end > u64::from(term_length) {
+            let positions = self.mapped.positions;
+            return Err(LogError::Position {
+                found: positions.position(term_id, term_offset),
+                current: positions.position(term_id, 0),
+                limit: positions.position(term_id, term_length),
+            });
+        }
+        let position = self.mapped.positions.position(term_id, term_offset);
+        // The term count fits an i32: the position is below term length × 2^31.
+        let term_count = self.mapped.positions.term_count_of(position) as i32;
+        let partition = Positions::partition_of_count(term_count);
+        let cells = self.mapped.frame(partition, term_offset);
+        if layout::frame_word_length(cells.word()) != 0 {
+            return Ok(false);
+        }
+        let mut rest = [0u8; FRAME_HEADER_LENGTH - 8];
+        rest.copy_from_slice(&head[8..]);
+        cells.insert_rest(&rest);
+        if frame_length as usize > FRAME_HEADER_LENGTH {
+            let body_end = (frame_length as usize).min(frame.len());
+            self.mapped
+                .body_mut(partition, term_offset, frame_length)
+                .copy_from_slice(&frame[FRAME_HEADER_LENGTH..body_end]);
+        }
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&head[..8]);
+        cells.publish(u64::from_ne_bytes(word));
+        Ok(true)
+    }
+}
+
+impl fmt::Debug for ImageWriter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImageWriter")
+            .field("correlation_id", &self.mapped.fields.correlation_id())
             .finish()
     }
 }

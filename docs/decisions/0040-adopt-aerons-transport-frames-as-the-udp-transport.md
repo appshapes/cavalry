@@ -1,6 +1,6 @@
 # 0040. Adopt Aeron's control frames and rules as the UDP transport, version 0, with log buffer version 1 and client protocol version 4
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-31
 - **Invariants affected:** 1, 2, 3, 4, 5, 6
 - **Supersedes:** none; amends `spec/log-buffer.md` to version 1 and
@@ -393,6 +393,22 @@ direct link between `bench` and `grip` measured on 2026-10-31 (card 182: 0.12 to
 round trip, no loss in 200 pings, MTU 1500, hardware timestamps on both ports), which is
 what the MTU default and the cross-host rows will run over. The vectors' counts and the
 no-panic and `loom` runs are the accepting change's to record.
+
+Acceptance, 2026-10-31 *(acceptance)*: Rjae accepted the decision as proposed on
+2026-10-31, answering the recorded decision d-20261031-7e57a0 through the team's Slack
+gateway while pull request 90 was in review. The review's three blockers are folded
+into `spec/udp.md` and `spec/client-protocol.md`: the receiver asks a sender for a
+setup frame with a status message carrying the send-setup flag when data or a heartbeat
+arrives for a session with no image, pending for 1 s, and the sender's heartbeats begin
+with its first status message; an image has a registration id of its own from the
+correlation id counter, which `available image` carries and its log and counters are
+keyed by; and the static counters are 72 with the state machines and the eliciting
+counter, 14,344 in all, under 16384. The change that accepts this ADR carries the three
+pages, 91 UDP vectors, 61 log buffer vectors and 102 client protocol vectors, the
+`udp` and `channel` modules of `cavalry-proto` with their no-panic tests and fuzz
+targets, log buffer version 1 and the image writer in `cavalry-shm` with its loom model,
+the driver's channel check and 16384-counter file, and the client's reading of the new
+events.
 
 ## Consequences
 

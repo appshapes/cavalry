@@ -1,4 +1,4 @@
-# Client protocol, version 3
+# Client protocol, version 4
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -16,7 +16,16 @@ commands are version 1 commands. Version 2 adds the replay commands and events, 
 ids in the same ranges, and error code 23 (ADR 0030); every version 1 encoding is
 unchanged. Version 3 adds the retention commands, `truncate recording`, `purge segments`
 and `purge recording`, the next three ids, error code 24 and a registry of the commands
-in progress (ADR 0031); every version 2 encoding is unchanged.
+in progress (ADR 0031); every version 2 encoding is unchanged. Version 4 accepts a
+`cavalry:udp` channel wherever a command carries one (`spec/udp.md`, "The channel
+URI"), adds the channel status indicator id to `publication ready`, `exclusive
+publication ready` and `subscription ready`, the field ADR 0019 left to the UDP
+version, names an image's source identity by its sender's address, takes Aeron's error
+codes 4 and 9, adds the two endpoint registries and the `images/` directory, and grows
+the counters file (ADR 0040); every version 3 encoding is unchanged but those three
+events, so a version 3 client closes on the first `publication ready` or `subscription
+ready` a version 4 driver sends, as the reserved-id rule below says, and an upgrade
+restarts the clients before the driver.
 
 ## The driver directory
 
@@ -31,6 +40,7 @@ otherwise, where `<tmp>` is the system's temporary directory (`/tmp` on macOS) a
 | `command-ring` | `spec/command-ring.md` | when the driver starts, second |
 | `broadcast-buffer` | `spec/broadcast-buffer.md` | when the driver starts, last |
 | `publications/<registration id>.logbuffer` | `spec/log-buffer.md` | when a publication is added, named by the publication's registration id; when a replay starts, named by the replay session id |
+| `images/<registration id>.logbuffer` | `spec/log-buffer.md`, type 2 | when a setup frame creates an image over UDP (`spec/udp.md`, "The receiver"), named by the image's own registration id, taken from the correlation id counter as a publication's is |
 
 A driver that starts and finds the directory loads the command ring's consumer heartbeat
 with an acquire load: a heartbeat fresher than the driver timeout is `driver-active`, and
@@ -106,14 +116,14 @@ Then, by command:
 | Command | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- | --- |
 | add publication, add exclusive publication, add subscription, start recording | 16 | 4 | stream id | i32 | any |
-| add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | in this version exactly `cavalry:ipc`; any other channel is answered with error code 1 |
+| add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | `cavalry:ipc`, or a `cavalry:udp` channel as `spec/udp.md`, "The channel URI", says; any other string is answered with error code 1, a host that does not resolve with code 9 |
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 | start replay | 24 | 8 | position | i64 | −1 for the recording's retained position, its start position until a purge moves it; else a multiple of 32 from the retained position to the extent |
 | start replay | 32 | 8 | length | i64 | −1 for everything up to the recording's extent when the replay starts; 0 or more bytes, a frame that begins within them played whole; 2^63 − 1 to follow a live recording until it stops |
 | start replay | 40 | 4 | replay stream id | i32 | any: the stream the replay's publication is on |
-| start replay | 44 | 4 + n + pad | replay channel | string | in this version exactly `cavalry:ipc`; any other channel is answered with error code 1 |
+| start replay | 44 | 4 + n + pad | replay channel | string | `cavalry:ipc`, or a `cavalry:udp` channel; any other string is answered with error code 1, a host that does not resolve with code 9 |
 | stop replay | 16 | 8 | replay session id | i64 | 0 or more: the replay session id that `replay ready` carried |
 | truncate recording | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 | truncate recording | 24 | 8 | position | i64 | a multiple of 32 from the recording's retained position to its stop position, at which a frame begins or which is the stop position |
@@ -139,25 +149,43 @@ What the driver does with each, after the checks of "What the driver rejects":
   (`counters.toml`), and registers the publication under the command's correlation id,
   which is then its registration id and names its log. It answers with `publication
   ready`, then sends `available image` to every subscription whose stream id and
-  channel match, as under add subscription. A registry at capacity, or a counters file
-  with no free record, is error code 10; a log that cannot be created or sized is error
-  code 12.
+  channel match, as under add subscription. On a `cavalry:udp` channel the driver first
+  resolves the endpoint and, for the first publication on that resolved channel, opens
+  its send endpoint, one socket, whose `channel.status` counter the event names as its
+  channel status indicator id; the log has the UDP sizes of "Sizes", the publication is
+  connected by the first status message and not before, and the sender puts the stream
+  on the wire (`spec/udp.md`, "The sender"). A registry at capacity, or a counters
+  file with no free record, is error code 10; a log that cannot be created or sized is
+  error code 12; a socket that cannot be opened, bound or connected is code 4; a host
+  that does not resolve is code 9.
 - **add exclusive publication.** As add publication, with a new session and a log of
   type 1 every time, never shared; the answer is `exclusive publication ready`.
 - **remove publication.** The command names the client's registration, the correlation
   id of its add command. The driver removes it and answers `operation success`; once the
   last registration sharing the publication is removed, it stores the end of stream
-  position and lingers as `spec/log-buffer.md`, "Closing" says. A registration the
+  position and lingers as `spec/log-buffer.md`, "Closing" says, over UDP as
+  `spec/udp.md`, "The sender" says, and a send endpoint closes when its last
+  publication's linger ends. A registration the
   driver does not know, or that belongs to another client, is error code 3.
 - **add subscription.** The driver registers the subscription under the command's
   correlation id and answers `subscription ready`. Then, for every live publication whose
   stream id and channel match, now and whenever one is added later, it allocates a
   `subscription.position` counter for the client, owned by the client (ADR 0013), with
   the publication's producer position as its value, and sends `available image`: the
-  subscription joins the stream at the producer's position. A registry at capacity, or a
-  counters file with no free record, is error code 10.
+  subscription joins the stream at the producer's position. On a `cavalry:udp` channel
+  the driver resolves the endpoint and, for the first subscription on that resolved
+  channel, binds its receive endpoint, one socket, whose `channel.status` counter the
+  event names; an image is created when a setup frame for the stream arrives, with a
+  registration id of its own, and `available image` then carries that id, the image's
+  log under `images/` and the sender's address as the source identity (`spec/udp.md`,
+  "The receiver"). A registry at capacity, or a counters file with no free record, is
+  error code 10; a socket that cannot be opened or bound is code 4; a host that does
+  not resolve is code 9.
 - **remove subscription.** The driver removes the subscription and every image it has,
-  frees their position counters, and answers `operation success`; no `unavailable image`
+  frees their position counters, and answers `operation success`; an image over UDP
+  shared with other subscriptions on the endpoint and stream goes on with them, one the
+  subscription held alone is retired as `spec/udp.md`, "The receiver", step 5 says, and
+  a receive endpoint left with no subscription and no image closes; no `unavailable image`
   is sent for a subscription its client removed. An unknown registration id, or one that
   belongs to another client, is error code 2.
 - **client keepalive.** The driver refreshes the client's liveness. No answer.
@@ -389,11 +417,11 @@ the publication window, since the limit respects its position.
 | --- | --- | --- |
 | 3841 (`0x0F01`) | error | offending correlation id, error code, error message |
 | 3842 (`0x0F02`) | available image | correlation id, session id, stream id, subscriber registration id, subscriber position counter id, log file name, source identity |
-| 3843 (`0x0F03`) | publication ready | correlation id, registration id, session id, stream id, publication limit counter id, log file name |
+| 3843 (`0x0F03`) | publication ready | correlation id, registration id, session id, stream id, publication limit counter id, channel status indicator id, log file name |
 | 3844 (`0x0F04`) | operation success | correlation id |
 | 3845 (`0x0F05`) | unavailable image | correlation id, subscriber registration id, stream id, channel |
 | 3846 (`0x0F06`) | exclusive publication ready | as publication ready |
-| 3847 (`0x0F07`) | subscription ready | correlation id |
+| 3847 (`0x0F07`) | subscription ready | correlation id, channel status indicator id |
 | 3850 (`0x0F0A`) | client timeout | client id |
 | 4097 (`0x1001`) | recording ready | correlation id, recording id, session id, recording position counter id, recording synced position counter id |
 | 4098 (`0x1002`) | recording stopped | recording id, stop position |
@@ -416,25 +444,27 @@ answered with code 6 and keeps running.
 | error | 0 | 8 | offending correlation id | i64 | 0 or more: the correlation id of the command it answers |
 | error | 8 | 4 | error code | i32 | one of "Error codes" |
 | error | 12 | 4 + n + pad | error message | string | what the operator does next, ending with the page and section that explains it |
-| available image | 0 | 8 | correlation id | i64 | 0 or more: the publication's registration id, the one that created its log, which names the image |
+| available image | 0 | 8 | correlation id | i64 | 0 or more: the publication's registration id, the one that created its log, which names the image; for an image over UDP, the image's own registration id |
 | available image | 8 | 4 | session id | i32 | any |
 | available image | 12 | 4 | stream id | i32 | any |
 | available image | 16 | 8 | subscriber registration id | i64 | 0 or more: the subscription this image belongs to |
 | available image | 24 | 4 | subscriber position counter id | i32 | 0 to the counters file's capacity − 1: the `subscription.position` counter the client owns for this image |
-| available image | 28 | 4 + n + pad | log file name | string | the log's path relative to the driver's directory, `publications/<registration id>.logbuffer`, 1 to 4096 bytes |
-| available image | after log file name | 4 + n + pad | source identity | string | the publisher's channel, `cavalry:ipc` in this version |
+| available image | 28 | 4 + n + pad | log file name | string | the log's path relative to the driver's directory, `publications/<registration id>.logbuffer`, or `images/<registration id>.logbuffer` for an image over UDP, 1 to 4096 bytes |
+| available image | after log file name | 4 + n + pad | source identity | string | `cavalry:ipc` for an image of a publication on this host; `<host>:<port>`, the sender's address, for an image over UDP |
 | publication ready, exclusive publication ready | 0 | 8 | correlation id | i64 | 0 or more: the add command's |
 | publication ready, exclusive publication ready | 8 | 8 | registration id | i64 | 0 or more: the publication's registration id; equal to the correlation id unless the command joined a live concurrent publication |
 | publication ready, exclusive publication ready | 16 | 4 | session id | i32 | any |
 | publication ready, exclusive publication ready | 20 | 4 | stream id | i32 | any |
 | publication ready, exclusive publication ready | 24 | 4 | publication limit counter id | i32 | 0 to the counters file's capacity − 1: the `publication.limit` counter the publisher loads |
-| publication ready, exclusive publication ready | 28 | 4 + n + pad | log file name | string | as available image's |
+| publication ready, exclusive publication ready | 28 | 4 | channel status indicator id | i32 | −1 for `cavalry:ipc`, which has no endpoint; else 0 to the counters file's capacity − 1: the endpoint's `channel.status` counter |
+| publication ready, exclusive publication ready | 32 | 4 + n + pad | log file name | string | as available image's |
 | operation success | 0 | 8 | correlation id | i64 | 0 or more: the command's |
 | unavailable image | 0 | 8 | correlation id | i64 | 0 or more: the image's, as available image named it |
 | unavailable image | 8 | 8 | subscriber registration id | i64 | 0 or more |
 | unavailable image | 16 | 4 | stream id | i32 | any |
 | unavailable image | 20 | 4 + n + pad | channel | string | the publisher's channel |
 | subscription ready | 0 | 8 | correlation id | i64 | 0 or more: the add command's, which is the subscription's registration id |
+| subscription ready | 8 | 4 | channel status indicator id | i32 | −1 for `cavalry:ipc`; else 0 to the counters file's capacity − 1: the endpoint's `channel.status` counter |
 | client timeout | 0 | 8 | client id | i64 | 0 or more: the client the driver timed out |
 | recording ready | 0 | 8 | correlation id | i64 | 0 or more: the start recording command's |
 | recording ready | 8 | 8 | recording id | i64 | 0 or more: the recording's slot in the catalog (`spec/durable-log.md`) |
@@ -468,11 +498,13 @@ whose correlation id, registration id or client id is its own and ignores the re
 
 | Code | Name | When |
 | --- | --- | --- |
-| 1 | invalid channel | the channel is not `cavalry:ipc` |
+| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its endpoint, or a multicast address (`spec/udp.md`, "What a reader rejects"); the message names the reason and the parameter |
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
 | 3 | unknown publication | remove publication names a registration id the driver does not know, or another client's |
+| 4 | channel endpoint error | a `cavalry:udp` endpoint's socket could not be opened, bound or connected; the message carries the operating system's reason and the endpoint |
 | 6 | unknown command type | the record's type is not a command of this version |
 | 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read, or start replay's length is below −1 |
+| 9 | unknown host | a `cavalry:udp` channel's host does not resolve; the message names it |
 | 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
 | 11 | generic error | anything else; the message says what |
 | 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended |
@@ -482,7 +514,7 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's retained position or above its extent; truncate recording names one that is not a multiple of 32 from the retained position to the stop position or at which no frame begins; purge segments names one that is not a segment base above the retained position and at most the stop position; the message names the bounds |
 | 24 | recording busy | truncate recording, purge segments, purge recording or start replay names a recording that is live or stopping, that a replay is reading, or that a retention command is working on; the message says which and what to do |
 
-Codes 4, 5, 8, 9, 13 and 14 are Aeron's for features outside this version, 15 to 19 are
+Codes 5, 8, 13 and 14 are Aeron's for features outside this version, 15 to 19 are
 left free for Aeron's later codes, and all are reserved; Cavalry's own codes count up
 from 20.
 
@@ -511,10 +543,12 @@ The driver creates its files with these sizes in this version:
 
 | File | Size |
 | --- | --- |
-| counters file | capacity 8192 counters |
+| counters file | capacity 16384 counters: 6,291,584 bytes, 128 + 16384 × 384 (`spec/counters-file.md`) |
 | command ring | capacity 1048576 bytes, so the longest command is 131072 bytes |
 | broadcast buffer | capacity 1048576 bytes |
 | log buffer of a `cavalry:ipc` publication | term length 67108864 bytes, MTU length 1408, publication window term length ÷ 2 |
+| log buffer of a `cavalry:udp` publication | term length 16777216 bytes, MTU length 1408, publication window term length ÷ 2 (`spec/udp.md`, "Values") |
+| log buffer of an image | the sender's term length and MTU length from its setup frame, a receiver window of the lesser of 131072 bytes and term length ÷ 2 |
 
 Its registries have these capacities, and a command that would exceed one is answered
 with error code 10 and registers nothing:
@@ -524,16 +558,20 @@ with error code 10 and registers nothing:
 | clients | 256 | every client id the driver has not forgotten |
 | publications | 1024 | every registration of a publication, shared or not |
 | subscriptions | 1024 | every registration of a subscription |
-| images | 2048 | every pair of a subscription and a publication that match |
+| images | 2048 | every pair of a subscription and a publication, or a subscription and an image over UDP, that match: an image over UDP shared by several subscriptions on its endpoint and stream counts once per subscription, with a `subscription.position` per pair, so that the counters bound below holds |
 | recordings | 1024 | every recording that is starting or live, one per publication at most |
 | replays | 64 | every replay that is starting or live |
 | replay publications | 128 | every replay's publication, live or lingering after the replay ended, with the replays still starting |
 | commands in progress | 64 | every truncate recording, purge segments or purge recording the driver is working on |
+| send endpoints | 64 | every resolved `cavalry:udp` channel a publication sends on |
+| receive endpoints | 64 | every resolved `cavalry:udp` channel a subscription receives on |
 
 The counters file is sized so that the registries fill before it does: the static
-counters of `counters.toml`, 38 in this version, two per publication (2048), one per
-image (2048), three per recording (3072), one per replay (64) and two per replay
-publication (256) come to 7526, fewer than 8192.
+counters of `counters.toml`, 82 once the sender and the receiver land their 44 (`spec/udp.md`,
+"Counters"), four per publication (4096: its position, its limit, the sender position and
+the sender limit), three per image (6144: the subscriber's position, the rebuild position
+and the high-water mark), three per recording (3072), one per replay (64), two per replay
+publication (256) and five per endpoint (640) come to 14,354, fewer than 16384.
 
 ## What the driver rejects
 
@@ -551,8 +589,11 @@ and each answer adds one to `client_protocol.errors`.
 
 The vectors cover these: they are checks on bytes. A command that decodes is then
 checked by the driver against its state, which no vector holds; the checks and their
-codes are the ones "Commands" and "Error codes" name: a channel that is not
-`cavalry:ipc` is `channel`, code 1, and adds one to `client_protocol.rejected_command`;
+codes are the ones "Commands" and "Error codes" name: a channel that is neither
+`cavalry:ipc` nor a `cavalry:udp` channel this version accepts is code 1 with the reason
+`spec/udp.md` names, `grammar`, `key`, `endpoint` or `multicast`, and adds one to
+`client_protocol.rejected_command`; a `cavalry:udp` host that does not resolve is code
+9; a `cavalry:udp` endpoint whose socket fails is code 4;
 an unknown or another client's registration is code 2 or 3; a registry or the counters
 file at capacity is code 10 and adds one to `driver.registry_full`; a log that could not
 be created or sized is code 12 and adds one to `driver.log_create_failed`; a stream id and

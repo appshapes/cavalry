@@ -15,9 +15,9 @@ retention commands the soak runs do is
 - A Linux machine with a drive that has room for days of recordings and samples. At
   the defaults, 10,000 messages a second of 32 bytes, the stream is about 2.3 GB an
   hour before retention; the soak keeps a day of it, purged to about 30 GB, and the
-  samples add about 4.5 GB a day, since each minute's copy of the counters file is
-  3 MiB and nothing removes them. A week is about 62 GB, so 100 GB is enough for a
-  week, and each further week needs 32 GB more; `kip` has 3.6 TB.
+  samples add about 9 GB a day, since each minute's copy of the counters file is
+  6 MiB and nothing removes them. A week is about 93 GB, so 120 GB is enough for a
+  week, and each further week needs 63 GB more; `kip` has 3.6 TB.
   Nothing on the host is tuned: no isolated CPUs, no fixed clock, a stock kernel line,
   a stock governor and swap. A soak host is any machine, and a tuned one would hide
   what the stock one shows. `kip` arrives tuned, as the gate's second host until
@@ -181,11 +181,12 @@ retention commands the soak runs do is
   parts. The recordings under `log` hold at about 30 GB at the defaults from the
   second day on: a day of recordings would be 55 GB, and the purge of each stopped
   recording's first half leaves about 1.15 GB of each of the 24 kept, plus the live
-  hour's. The samples grow by about 4.5 GB a day and are never removed: each minute's
-  copy of the counters file is 3 MiB, the whole file at the driver's capacity of 8,192
-  counters (`docs/reference/counters-file.md`), 1,440 copies a day, and the doctor
-  reports beside them are a few KB each. So `df -h /srv/cavalry-soak` reads about
-  39 GB on the second day and about 62 GB at the end of a week. A `log` near 55 GB,
+  hour's. The samples grow by about 9 GB a day and are never removed: each minute's
+  copy of the counters file is 6 MiB, the whole file at the driver's capacity of 16,384
+  counters (`docs/reference/counters-file.md`; 3 MiB and 4.5 GB a day before client
+  protocol version 4), 1,440 copies a day, and the doctor reports beside them are a few
+  KB each. So `df -h /srv/cavalry-soak` reads about 48 GB on the second day and about
+  93 GB at the end of a week. A `log` near 55 GB,
   which is a `df` about 25 GB above that line, says the purges were refused, and
   `soak.log` says with which error.
 - The program's lines keep `behind 0` and `back-pressured 0` at the default rate; the

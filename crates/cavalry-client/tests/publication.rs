@@ -74,8 +74,9 @@ fn add_idle_subscription(dir: &Path, stream_id: i32) {
         let mut ready = false;
         receiver
             .receive(|type_id, message| {
-                if let Ok(Event::SubscriptionReady { correlation_id: id }) =
-                    Event::parse(type_id, message)
+                if let Ok(Event::SubscriptionReady {
+                    correlation_id: id, ..
+                }) = Event::parse(type_id, message)
                     && id == correlation_id
                 {
                     ready = true;
@@ -260,16 +261,16 @@ fn a_refused_command_carries_the_drivers_code_and_message() {
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let error = client
         .add_publication("cavalry:udp?endpoint=localhost:40123", 1004)
-        .expect_err("not this version's channel");
+        .expect_err("not this driver's transport yet");
     match &error {
         ClientError::Refused {
             code,
             raw_code,
             message,
         } => {
-            assert_eq!(*code, Some(ErrorCode::InvalidChannel));
-            assert_eq!(*raw_code, 1);
-            assert!(message.contains("cavalry:ipc"), "{message}");
+            assert_eq!(*code, Some(ErrorCode::GenericError));
+            assert_eq!(*raw_code, 11);
+            assert!(message.contains("cavalry:udp"), "{message}");
         }
         other => panic!("{other}"),
     }

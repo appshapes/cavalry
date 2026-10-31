@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/log-buffer.json: the test vectors for spec/log-buffer.md, version 0.
+"""Write spec/vectors/log-buffer.json: the test vectors for spec/log-buffer.md, version 1.
 The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/log-buffer.py
@@ -16,8 +16,9 @@ import struct
 from pathlib import Path
 
 MAGIC = b"CVLYLOGB"
-HEADER = struct.Struct("<8siiqiiii24s32s32s")  # magic, version, type, correlation id, initial term id,
-# term length, mtu length, publication window length, reserved, default frame header, reserved
+HEADER = struct.Struct("<8siiqiiiii20s32s32s")  # magic, version, type, correlation id, initial term id,
+# term length, mtu length, publication window length, receiver window length (version 1), reserved,
+# default frame header, reserved
 FRAME_HEADER = struct.Struct("<ibBHiiiiq")  # frame length, version, flags, type, term offset, session id,
 # stream id, term id, reserved value
 HEADER_LENGTH, META_DATA_LENGTH, PARTITIONS = 128, 4096, 3
@@ -49,12 +50,13 @@ def default_frame_header(initial_term_id, session_id=SESSION_ID, stream_id=STREA
 
 
 def header(term_length=65536, type_=0, correlation_id=42, initial_term_id=-5, mtu_length=1408,
-           window=None, version=0, magic=MAGIC, frame_header=None):
+           window=None, version=0, magic=MAGIC, frame_header=None, receiver_window=0):
     window = term_length // 2 if window is None else window
     frame_header = default_frame_header(initial_term_id) if frame_header is None else frame_header
     return {"magic": magic.hex(), "version": version, "type": type_, "correlation_id": correlation_id,
             "initial_term_id": initial_term_id, "term_length": term_length, "mtu_length": mtu_length,
-            "publication_window_length": window, "default_frame_header": frame_header.hex(),
+            "publication_window_length": window, "receiver_window_length": receiver_window,
+            "default_frame_header": frame_header.hex(),
             "session_id": struct.unpack_from("<i", frame_header, 12)[0],
             "stream_id": struct.unpack_from("<i", frame_header, 16)[0]}
 
@@ -62,7 +64,8 @@ def header(term_length=65536, type_=0, correlation_id=42, initial_term_id=-5, mt
 def encode_header(h):
     return HEADER.pack(bytes.fromhex(h["magic"]), h["version"], h["type"], h["correlation_id"],
                        h["initial_term_id"], h["term_length"], h["mtu_length"],
-                       h["publication_window_length"], b"", bytes.fromhex(h["default_frame_header"]), b"")
+                       h["publication_window_length"], h["receiver_window_length"], b"",
+                       bytes.fromhex(h["default_frame_header"]), b"")
 
 
 def file_length(term_length):
@@ -208,12 +211,20 @@ VECTORS = [
     valid_header("header-1g-exclusive", header(term_length=1 << 30, type_=1, correlation_id=-1,
                                               initial_term_id=2**31 - 1, mtu_length=65504, window=1)),
     valid_header("header-window-one", header(window=1)),
+    # version 1 (ADR 0040): a publication's log carries receiver window 0; an image, type 2,
+    # carries its receiver window, 1 to term length / 2.
+    valid_header("header-v1-concurrent", header(version=1)),
+    valid_header("header-v1-image", header(version=1, type_=2, correlation_id=23, receiver_window=32768)),
+    valid_header("header-v1-image-small-window", header(version=1, type_=2, receiver_window=32)),
+    valid_header("header-v1-image-1g", header(version=1, type_=2, term_length=1 << 30, receiver_window=131072,
+                                               mtu_length=65504)),
     invalid_header("too-short-file", "too-short", encode_header(plain), META_DATA_LENGTH - 1),
     invalid_header("too-short-bytes", "too-short", encode_header(plain)[:127], file_length(T)),
     invalid_header("not-ready", "not-ready", encode_header(header(magic=b"\0" * 8)), file_length(T)),
     invalid_header("magic-counters-file", "magic", encode_header(header(magic=b"CVLYCNTR")), file_length(T)),
-    invalid_header("version-1", "version", encode_header(header(version=1)), file_length(T)),
-    invalid_header("type-2", "type", encode_header(header(type_=2)), file_length(T)),
+    invalid_header("version-2", "version", encode_header(header(version=2)), file_length(T)),
+    invalid_header("version-negative", "version", encode_header(header(version=-1)), file_length(T)),
+    invalid_header("type-3", "type", encode_header(header(type_=3)), file_length(T)),
     invalid_header("term-length-not-power-of-two", "term-length", encode_header(header(term_length=100000)),
                    file_length(100000)),
     invalid_header("term-length-below-minimum", "term-length", encode_header(header(term_length=32768)),
@@ -225,6 +236,14 @@ VECTORS = [
     invalid_header("mtu-too-large", "mtu", encode_header(header(mtu_length=65536)), file_length(T)),
     invalid_header("window-zero", "window", encode_header(header(window=0)), file_length(T)),
     invalid_header("window-over-half", "window", encode_header(header(window=T // 2 + 1)), file_length(T)),
+    invalid_header("window-image-zero", "window", encode_header(header(version=1, type_=2, receiver_window=0)),
+                   file_length(T)),
+    invalid_header("window-image-over-half", "window",
+                   encode_header(header(version=1, type_=2, receiver_window=T // 2 + 32)), file_length(T)),
+    invalid_header("window-publication-receiver-nonzero", "window",
+                   encode_header(header(version=1, receiver_window=32)), file_length(T)),
+    invalid_header("window-v0-receiver-nonzero", "window", encode_header(header(receiver_window=32)),
+                   file_length(T)),
     invalid_header("frame-header-wrong-type", "frame-header",
                    encode_header(header(frame_header=default_frame_header(-5, frame_type=PAD))), file_length(T)),
     invalid_header("frame-header-wrong-term-id", "frame-header",
@@ -234,7 +253,8 @@ VECTORS = [
     invalid_header("length-short", "length", encode_header(plain), file_length(T) - 1),
     invalid_header("length-long", "length", encode_header(plain), file_length(T) + 4096),
     invalid_header("version-before-term-length", "version",
-                   encode_header(header(version=1, term_length=100000)), file_length(100000)),
+                   encode_header(header(version=2, term_length=100000)), file_length(100000)),
+    invalid_header("type-before-window", "type", encode_header(header(type_=3, window=0)), file_length(T)),
     # tail
     tail("tail-start", -5, 0),
     tail("tail-mid-term", -5, 4096),
@@ -272,7 +292,7 @@ VECTORS = [
 
 def main():
     out = Path(__file__).with_suffix(".json")
-    doc = {"spec": "spec/log-buffer.md", "version": 0,
+    doc = {"spec": "spec/log-buffer.md", "version": 1,
            "generated_by": "spec/vectors/log-buffer.py; do not edit by hand", "vectors": VECTORS}
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"{out}: {len(VECTORS)} vectors")

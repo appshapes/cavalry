@@ -844,3 +844,20 @@ user-visible change, added in the same commit as the change. The format follows
   codes 4 and 9; the pages, their vectors and the two crates land with the acceptance
   ([ADR 0040](docs/decisions/0040-adopt-aerons-transport-frames-as-the-udp-transport.md);
   card 179).
+- ADR 0040 Accepted: the UDP transport's wire format is specified. `spec/udp.md`
+  version 0 has Aeron's control frames field for field, the setup frame, the status
+  message, the NAK, the RTT measurement and the heartbeat, the sender's and the
+  receiver's rules with Aeron's values, the channel URI `cavalry:udp?endpoint=<host>:<port>`
+  with `interface` as its one option, and 91 vectors; `spec/log-buffer.md` version 1
+  adds the image type and the receiver window length; `spec/client-protocol.md` version
+  4 accepts a `cavalry:udp` channel, adds the channel status indicator id to the three
+  ready events, error codes 4 and 9, two endpoint registries and a 16384-counter file.
+  `cavalry-proto` reads and writes the frames, walks a datagram and parses a channel,
+  fuzzed; `cavalry-shm` reads and writes version 1 logs and inserts frames into an
+  image with a loom model. The driver refuses a `cavalry:udp` channel with code 11 and a
+  message naming the sender's change until card 180 lands, and a malformed one with
+  code 1 and the reason. A version 3 client closes on a version 4 driver's first
+  `publication ready`; restart clients before the driver. The soak host's samples
+  double with the counters file, to about 9 GB a day
+  ([ADR 0040](docs/decisions/0040-adopt-aerons-transport-frames-as-the-udp-transport.md);
+  card 179).

@@ -21,8 +21,12 @@ pub const HEADER_LENGTH: usize = 128;
 pub const PARTITION_COUNT: usize = 3;
 /// The first eight bytes of a log buffer's metadata page, `CVLYLOGB`, written last.
 pub const MAGIC: [u8; 8] = *b"CVLYLOGB";
-/// The version of `spec/log-buffer.md` this crate reads and writes.
-pub const VERSION: i32 = 0;
+/// The version of `spec/log-buffer.md` this crate writes; it reads [`MIN_VERSION`] to
+/// this one (ADR 0040: version 1 added the image type and the receiver window length).
+pub const VERSION: i32 = 1;
+/// The oldest version this crate reads: a version 0 log is a version 1 log whose
+/// receiver window length is 0.
+pub const MIN_VERSION: i32 = 0;
 /// The smallest term length, 64 KiB.
 pub const MIN_TERM_LENGTH: u32 = 64 * 1024;
 /// The largest term length, 1 GiB.
@@ -49,6 +53,10 @@ pub const END_OF_STREAM_POSITION_OFFSET: usize = 640;
 pub const IS_CONNECTED_OFFSET: usize = 704;
 /// The directory under the driver's that holds publication logs.
 pub const FILE_DIRECTORY: &str = "publications";
+/// The directory under the driver's that holds image logs, type 2 (ADR 0040).
+pub const IMAGE_DIRECTORY: &str = "images";
+/// Offset of the receiver window length in the header, version 1.
+pub const RECEIVER_WINDOW_LENGTH_OFFSET: usize = 40;
 /// The suffix of a log buffer's file name, after the correlation id in decimal.
 pub const FILE_SUFFIX: &str = ".logbuffer";
 /// The end of stream position of a publication that is open.
@@ -67,7 +75,8 @@ struct RawHeaderRest {
     term_length: I32,
     mtu_length: I32,
     publication_window_length: I32,
-    reserved_a: [u8; 24],
+    receiver_window_length: I32,
+    reserved_a: [u8; 20],
     default_frame_header: [u8; FRAME_HEADER_LENGTH],
     reserved_b: [u8; 32],
 }
@@ -76,8 +85,12 @@ const _: () = assert!(size_of::<RawHeaderRest>() == HEADER_LENGTH - 8);
 const _: () = assert!(
     core::mem::offset_of!(RawHeaderRest, default_frame_header) == DEFAULT_FRAME_HEADER_OFFSET - 8
 );
+const _: () = assert!(
+    core::mem::offset_of!(RawHeaderRest, receiver_window_length)
+        == RECEIVER_WINDOW_LENGTH_OFFSET - 8
+);
 
-/// How a log's tail is advanced: the header's type field.
+/// How a log's terms are written: the header's type field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum LogType {
@@ -85,6 +98,17 @@ pub enum LogType {
     Concurrent = 0,
     /// One publisher keeps the tail itself and stores it with release stores.
     Exclusive = 1,
+    /// An image: the driver's receiver writes frames by term offset as they arrive from
+    /// the wire, the first eight bytes last; the tails are not advanced and nobody reads
+    /// them (`spec/log-buffer.md`, version 1; `spec/udp.md`, "The receiver"; ADR 0040).
+    Image = 2,
+}
+
+impl LogType {
+    /// Whether this log's terms are written by the receiver, not by publishers.
+    pub const fn is_image(self) -> bool {
+        matches!(self, LogType::Image)
+    }
 }
 
 impl TryFrom<i32> for LogType {
@@ -94,23 +118,28 @@ impl TryFrom<i32> for LogType {
         match value {
             0 => Ok(LogType::Concurrent),
             1 => Ok(LogType::Exclusive),
+            2 => Ok(LogType::Image),
             found => Err(LogError::Type { found }),
         }
     }
 }
 
-/// The header's fields after the magic, validated: the type is one of [`LogType`], the
-/// term length a power of two from [`MIN_TERM_LENGTH`] to [`MAX_TERM_LENGTH`], the MTU
-/// length a multiple of 32 from [`MIN_MTU_LENGTH`] to [`MAX_MTU_LENGTH`], the window 1 to
-/// term length ÷ 2, and the default frame header what the spec says.
+/// The header's fields after the magic, validated: the version [`MIN_VERSION`] to
+/// [`VERSION`], the type one of [`LogType`], the term length a power of two from
+/// [`MIN_TERM_LENGTH`] to [`MAX_TERM_LENGTH`], the MTU length a multiple of 32 from
+/// [`MIN_MTU_LENGTH`] to [`MAX_MTU_LENGTH`], the publication window 1 to term length
+/// ÷ 2, the receiver window 1 to term length ÷ 2 in an image and 0 otherwise, and the
+/// default frame header what the spec says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HeaderFields {
+    version: i32,
     log_type: LogType,
     correlation_id: i64,
     initial_term_id: i32,
     term_length: u32,
     mtu_length: u32,
     publication_window_length: u32,
+    receiver_window_length: u32,
     session_id: i32,
     stream_id: i32,
 }
@@ -152,21 +181,83 @@ impl HeaderFields {
                 term_length,
             });
         }
+        if log_type.is_image() {
+            return Err(LogError::ReceiverWindow {
+                found: 0,
+                term_length,
+            });
+        }
         Ok(Self {
+            version: VERSION,
             log_type,
             correlation_id,
             initial_term_id,
             term_length,
             mtu_length,
             publication_window_length,
+            receiver_window_length: 0,
             session_id,
             stream_id,
         })
     }
 
-    /// The version this crate writes: [`VERSION`].
+    /// Fields for an image, type 2 (`spec/log-buffer.md`, version 1; ADR 0040): the log
+    /// the driver's receiver rebuilds for the publication `correlation_id` is the
+    /// image's own registration id, session `session_id` on stream `stream_id`, with the
+    /// sender's term length, MTU length and initial term id, a publication window of
+    /// term length ÷ 2 that nobody reads, and `receiver_window_length` from 1 to term
+    /// length ÷ 2, the `window` check.
+    pub fn new_image(
+        correlation_id: i64,
+        initial_term_id: i32,
+        term_length: u32,
+        mtu_length: u32,
+        receiver_window_length: u32,
+        session_id: i32,
+        stream_id: i32,
+    ) -> Result<Self, LogError> {
+        let mut fields = Self::new(
+            LogType::Exclusive,
+            correlation_id,
+            initial_term_id,
+            term_length,
+            mtu_length,
+            (term_length / 2).max(1),
+            session_id,
+            stream_id,
+        )?;
+        if !(1..=term_length / 2).contains(&receiver_window_length) {
+            return Err(LogError::ReceiverWindow {
+                found: i64::from(receiver_window_length),
+                term_length,
+            });
+        }
+        fields.log_type = LogType::Image;
+        fields.receiver_window_length = receiver_window_length;
+        Ok(fields)
+    }
+
+    /// The same fields with the version `version`, [`MIN_VERSION`] to [`VERSION`]:
+    /// what a reader of an older log holds, and what a test encodes an older vector
+    /// from; a writer writes [`VERSION`]. [`LogError::Version`] for any other.
+    pub fn with_version(mut self, version: i32) -> Result<Self, LogError> {
+        if !(MIN_VERSION..=VERSION).contains(&version) {
+            return Err(LogError::Version { found: version });
+        }
+        self.version = version;
+        Ok(self)
+    }
+
+    /// The version the header carries: [`VERSION`] for a log this crate created, or an
+    /// older one it read.
     pub const fn version(&self) -> i32 {
-        VERSION
+        self.version
+    }
+
+    /// How far past the consumption position the sender may send into an image: 1 to
+    /// term length ÷ 2; 0 in a publication's log (`spec/udp.md`, "The receiver").
+    pub const fn receiver_window_length(&self) -> u32 {
+        self.receiver_window_length
     }
 
     /// How the tail is advanced.
@@ -260,15 +351,44 @@ impl HeaderFields {
         bytes
     }
 
-    /// The file's name inside the driver's directory: `publications/<correlation id>.logbuffer`.
+    /// The file's name inside the driver's directory: `publications/<correlation
+    /// id>.logbuffer`, or `images/<correlation id>.logbuffer` for an image.
     pub fn file_name(&self) -> std::path::PathBuf {
-        file_name(self.correlation_id)
+        if self.log_type.is_image() {
+            image_file_name(self.correlation_id)
+        } else {
+            file_name(self.correlation_id)
+        }
     }
 }
 
 /// The file name of the log of publication `correlation_id`: `publications/<id>.logbuffer`.
 pub fn file_name(correlation_id: i64) -> std::path::PathBuf {
     std::path::PathBuf::from(FILE_DIRECTORY).join(format!("{correlation_id}{FILE_SUFFIX}"))
+}
+
+/// The file name of the log of image `correlation_id`: `images/<id>.logbuffer` (ADR 0040).
+pub fn image_file_name(correlation_id: i64) -> std::path::PathBuf {
+    std::path::PathBuf::from(IMAGE_DIRECTORY).join(format!("{correlation_id}{FILE_SUFFIX}"))
+}
+
+/// Which directory a log's file name names, and its correlation id: the inverse of
+/// [`file_name`] and [`image_file_name`] for the name an `available image` or
+/// `publication ready` event carries, which a client checks before it opens anything
+/// (ADR 0010). `None` for any other string.
+pub fn parse_file_name(name: &[u8]) -> Option<(LogType, i64)> {
+    let name = core::str::from_utf8(name).ok()?;
+    let (directory, rest) = name.split_once('/')?;
+    let log_type = match directory {
+        FILE_DIRECTORY => LogType::Concurrent,
+        IMAGE_DIRECTORY => LogType::Image,
+        _ => return None,
+    };
+    let id = rest.strip_suffix(FILE_SUFFIX)?;
+    if id.is_empty() || id.contains('/') {
+        return None;
+    }
+    Some((log_type, id.parse().ok()?))
 }
 
 /// The 128 bytes of a header for these fields, magic included.
@@ -282,14 +402,15 @@ pub fn encode_header(fields: &HeaderFields) -> [u8; HEADER_LENGTH] {
 /// The header's bytes after the magic.
 pub(crate) fn encode_header_rest(fields: &HeaderFields) -> [u8; HEADER_LENGTH - 8] {
     let raw = RawHeaderRest {
-        version: I32::new(VERSION),
+        version: I32::new(fields.version),
         log_type: I32::new(fields.log_type as i32),
         correlation_id: I64::new(fields.correlation_id),
         initial_term_id: I32::new(fields.initial_term_id),
         term_length: I32::new(fields.term_length as i32),
         mtu_length: I32::new(fields.mtu_length as i32),
         publication_window_length: I32::new(fields.publication_window_length as i32),
-        reserved_a: [0; 24],
+        receiver_window_length: I32::new(fields.receiver_window_length as i32),
+        reserved_a: [0; 20],
         default_frame_header: fields.default_frame_header(),
         reserved_b: [0; 32],
     };
@@ -340,7 +461,7 @@ pub(crate) fn parse_header_rest(
         });
     };
     let version = raw.version.get();
-    if version != VERSION {
+    if !(MIN_VERSION..=VERSION).contains(&version) {
         return Err(LogError::Version { found: version });
     }
     let log_type = LogType::try_from(raw.log_type.get())?;
@@ -374,16 +495,55 @@ pub(crate) fn parse_header_rest(
         && header[24..32] == [0; 8];
     let session_id = i32::from_le_bytes([header[12], header[13], header[14], header[15]]);
     let stream_id = i32::from_le_bytes([header[16], header[17], header[18], header[19]]);
-    let fields = HeaderFields::new(
-        log_type,
-        raw.correlation_id.get(),
-        initial_term_id,
-        term_length,
-        mtu_length,
-        window,
-        session_id,
-        stream_id,
-    )?;
+    let receiver_window = raw.receiver_window_length.get();
+    let fields = if log_type.is_image() {
+        let receiver_window =
+            u32::try_from(receiver_window).map_err(|_| LogError::ReceiverWindow {
+                found: i64::from(receiver_window),
+                term_length,
+            })?;
+        // The publication window is checked by `new_image` through `new`; the receiver
+        // window after it, as the spec orders the two.
+        let _ = HeaderFields::new(
+            LogType::Exclusive,
+            raw.correlation_id.get(),
+            initial_term_id,
+            term_length,
+            mtu_length,
+            window,
+            session_id,
+            stream_id,
+        )?;
+        let mut fields = HeaderFields::new_image(
+            raw.correlation_id.get(),
+            initial_term_id,
+            term_length,
+            mtu_length,
+            receiver_window,
+            session_id,
+            stream_id,
+        )?;
+        fields.publication_window_length = window;
+        fields
+    } else {
+        if receiver_window != 0 {
+            return Err(LogError::ReceiverWindow {
+                found: i64::from(receiver_window),
+                term_length,
+            });
+        }
+        HeaderFields::new(
+            log_type,
+            raw.correlation_id.get(),
+            initial_term_id,
+            term_length,
+            mtu_length,
+            window,
+            session_id,
+            stream_id,
+        )?
+    };
+    let fields = fields.with_version(version)?;
     if !frame_header_ok {
         return Err(LogError::FrameHeader);
     }

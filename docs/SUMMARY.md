@@ -34,6 +34,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Broadcast buffer](reference/broadcast-buffer.md)
 - [Client protocol](reference/client-protocol.md)
 - [Durable log](reference/durable-log.md)
+- [UDP transport](reference/udp.md)
 - [Configuration](reference/config.md)
 - [Glossary](glossary.md)
 
