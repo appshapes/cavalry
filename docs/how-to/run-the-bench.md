@@ -262,16 +262,14 @@ shared runner is
   row's p99.99 moves between processes of one tree with no change behind it. On `kip`
   the concurrent and client claim rows' medians move by a tenth and the exclusive
   row's by half, 102 to 148 ns over the eight processes at the tree of 4a09b6e (card
-  168). On `bench` a row's median moves by up to three 10 ns steps: over the eight
+  168). On `bench` a row's median moves by up to three 10 ns steps: over the twelve
   processes at the same tree the checked `one_way_32_exclusive` row read 210 to 230
   with its p50 at 140 in every one, and the unchecked `claim_commit_32_exclusive` row
   read 120 to 150. So a `REGRESSION` on a bench host is one of four things. On a
   changed tree it is a change. On the baseline's tree, with the row's p50 and its rate
   where the other processes read them, it is a part of the host's band the baseline
-  did not hold: on `kip` the process joins the baseline with step 4's `--join`; on
-  `bench`, whose baselines are one process each, re-run the job, and the baselines are
-  re-recorded from the tree's processes as step 4 says when master's own run there
-  fails or brushes the gate. A row whose p50 and p99 moved with its p99.99 is the next
+  did not hold, and the process joins the baseline with step 4's `--join` on either
+  host. A row whose p50 and p99 moved with its p99.99 is the next
   bullet, and a red after a change to `bench/` alone is the bullet after it. Check the
   host first with `bench/host/check.sh`, which the job also runs.
 - `REGRESSION` on a row whose p50 and p99 moved with its p99.99, and whose rate fell
