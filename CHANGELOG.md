@@ -835,3 +835,12 @@ user-visible change, added in the same commit as the change. The format follows
   lint-docs` runs over CI's range, the whole branch. `docs/how-to/implement-a-feature.md`
   and the `/pr` skill say when a card's change is more than one pull request: about a
   thousand changed lines (card 178).
+- ADR 0040, Proposed: the UDP transport's wire format, Aeron's control frames field for
+  field (setup, status message, NAK, RTT measurement, the heartbeat as a data frame of
+  length 0) with the sender's and the receiver's rules and Aeron's values, the channel
+  URI `cavalry:udp?endpoint=<host>:<port>` with `interface` as its one option, log
+  buffer version 1 with the image type and the receiver window, and client protocol
+  version 4 with the `cavalry:udp` channel, the channel status indicator id and error
+  codes 4 and 9; the pages, their vectors and the two crates land with the acceptance
+  ([ADR 0040](docs/decisions/0040-adopt-aerons-transport-frames-as-the-udp-transport.md);
+  card 179).
