@@ -691,6 +691,6 @@ user-visible change, added in the same commit as the change. The format follows
   handful of pushes). `bench/host/setup-ubuntu.sh` now stops and masks the twelve
   timers a stock Ubuntu Server starts jobs from, `sysstat-collect` every ten minutes
   among them, and `bench/host/check.sh` prints how many timers are active and fails
-  when one of the twelve is; applied on `grip` at its set-up and on `bench` on
-  2026-10-31 (card 170; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
+  when one of the twelve is; applied on `grip` at its set-up and on `bench` and `kip`
+  on 2026-10-31 (card 170; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
   "Updating the host").
