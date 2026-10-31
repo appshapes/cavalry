@@ -293,9 +293,11 @@ correlation id of the command that created it, and labelled with the resolved ch
 `channel.status` (0 initializing, 1 active, 2 closing, −1 errored), `channel.socket_rcvbuf` and `channel.socket_sndbuf` (what the socket holds,
 read back after it was set, which is what `doctor` compares with `net.core.rmem_max`
 and `wmem_max`), `channel.images` and `channel.publications`. The publication's
-connection and the image's life are state machines in `counters.toml`
-(`publication.connected`, `publication.disconnected`, `image.created`,
-`image.ended`, `image.timed_out`, `image.removed`).
+connection and the image's life are state machines in `counters.toml`, each transition
+counted by a static counter of its own: `publication.connected`,
+`publication.disconnected`, `image.created`, `image.ended`, `image.timed_out` and
+`image.removed`. The static counters this page adds are 35: the 15 under `sender`, the
+14 under `receiver` and these six.
 
 **Values**, Aeron's, the driver's in this version, so that a configuration key is
 justified later by a `why_not_default` and not here: setup interval 100 ms, pending
@@ -306,8 +308,10 @@ receiver window min(128 KiB, term ÷ 2), socket receive buffer 128 KiB, socket s
 buffer the operating system's, 16 datagrams per burst and per poll, 64 receive endpoints
 and 64 send endpoints per driver (a 65th is code 10), 2048 images (ADR 0019's registry,
 unchanged), and a counters file of 16384 counters, since the sum the client protocol
-page sizes it by becomes 14,337: 65 statics, four per publication, three per image,
-three per recording, one per replay, two per replay publication and five per endpoint.
+page sizes it by becomes 14,345: 73 statics (version 3's 38 and the 35 above), four per
+publication (4096), three per image (6144), three per recording (3072), one per replay
+(64), two per replay publication (256) and five per endpoint (640, over the 128
+endpoints).
 Session ids and initial term ids are the driver's as for IPC.
 
 **Vectors**, `spec/vectors/udp.json` from `spec/vectors/udp.py`: every frame once
@@ -363,7 +367,8 @@ Aeron's table; a `cavalry:udp` channel whose grammar fails, a multicast address 
 unknown parameter stay code 1. `add subscription` on an endpoint binds it, and the
 first `add publication` on an endpoint connects it; the registries gain 64 send and 64
 receive endpoints, and the counters file is created with 16384 counters, 6 MiB, so that
-the registries still fill first. The driver directory gains `images/`. A version 3 client closes on
+the registries still fill first: 14,345 counters when every registry is full ("Values"
+under `spec/udp.md`), against 8192 before. The driver directory gains `images/`. A version 3 client closes on
 the first `publication ready` of a version 4 driver, since it is longer than its fields,
 so an upgrade restarts the clients before the driver, as every version has said. The
 vectors gain the two events, an `available image` for an image over UDP with its own
