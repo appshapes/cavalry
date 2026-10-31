@@ -12,9 +12,11 @@ fourth dedicated thread puts a `cavalry:udp` publication's log on the wire by th
 of `spec/udp.md`, "The sender", which ADR 0040 accepted: setup frames until the first
 status message without the send-setup flag, data in bursts of whole frames up to the
 sender limit, heartbeats, retransmits on a NAK, an RTT reply, and the status messages,
-NAKs and RTT measurements that arrive on the send endpoint's own socket. ADR 0039 left
-two decisions to this ADR with their evidence: the socket dependency and what it
-carries, and the shape of the thread.
+NAKs and RTT measurements that arrive on the send endpoint's own socket. ADR 0039
+decided the thread itself, the driver's fourth dedicated thread with the idle strategy
+and the bench's pin hook, and left one decision to this ADR with its evidence: the
+socket dependency and what it carries. What this ADR adds about the thread is how it
+is linked to the conductor and what each side owns.
 
 The constraints are these. `std::net::UdpSocket` opens, binds, connects and sets a
 socket non-blocking, and sends one datagram per call; it has no `sendmmsg` or
@@ -25,11 +27,11 @@ the operating system's, what it holds in `channel.socket_sndbuf`). ADR 0039 fixe
 `sendmmsg` per burst on Linux and one `sendmsg` per datagram elsewhere, so that a
 message never triggers its own syscall (`CLAUDE.md`, invariant 2: no syscall per
 message on the data plane; a burst of up to 16 datagrams is one call). `unsafe` is
-denied outside `cavalry-shm` and `cavalry-ffi`
-(`CLAUDE.md`, Unsafe), so the driver cannot call `libc` itself, and a dependency of a
-data-plane crate needs this ADR, an `allowed-dependencies` entry and a justification in
-the commit message (ADR 0001, ADR 0003), and Rjae's approval before it exists
-(`CLAUDE.md`, Working rules for agents). Aeron's C driver makes the same split
+denied outside `cavalry-shm` and `cavalry-ffi` (`CLAUDE.md`, Unsafe), so the driver
+cannot call `libc` itself, and a dependency of a data-plane crate needs this ADR, an
+`allowed-dependencies` entry and a justification in the commit message (ADR 0001, ADR
+0003), and Rjae's approval before it exists (`CLAUDE.md`, Working rules for agents).
+Aeron's C driver makes the same split
 (`aeron_udp_channel_transport.c`): `sendmmsg` under `HAVE_SENDMMSG`, `sendmsg_x` under
 `HAVE_SENDMSG_X`, a per-datagram loop otherwise; `recvmmsg` under `HAVE_RECVMMSG` when
 more than one datagram is asked for; `SO_SNDBUF` and `SO_RCVBUF` set in
@@ -77,15 +79,24 @@ for `RcvBuf` and `SndBuf`, read once after that into `channel.socket_rcvbuf` and
 `channel.socket_sndbuf`. The send buffer stays the operating system's, as "Values"
 and "The sender" say, so nothing sets it: `channel.socket_sndbuf` records what the
 host gave, which the `doctor` check for a send buffer the host capped (ADR 0039)
-reads. The crate stays `unsafe_code = "deny"`: the `unsafe` that
-makes these calls sound is inside `nix`, whose bindings are reviewed under its own
-policy, as `zerocopy`'s and `memmap2`'s are (ADR 0009, ADR 0013). The sender is the
+reads. The crate stays `unsafe_code = "deny"`: the `unsafe` that makes these calls
+sound is inside `nix`, whose bindings are reviewed under its own policy, as
+`zerocopy`'s and `memmap2`'s are (ADR 0009, ADR 0013). The sender is the
 driver's fourth dedicated thread, `DriverThread::Sender`, with the driver's idle
 strategy and a name in the `start_with_threads` hook so that the bench pins it; it is
 linked to the conductor as the recorder is, by two bounded SPSC queues with capacities
 in `spec.rs` (a request for every publication and endpoint the conductor adds or
 removes, a reply for every state the sender alone can see: connected, disconnected,
-the linger's end); it owns the send endpoints' sockets and each publication's send
+the linger's end), each with the recorder's rule when it is full: an `add
+publication` whose request finds the request queue full, or finds a remove still
+waiting for room, is error code 10 to the client and registers nothing, as a `start
+recording` is (`spec/client-protocol.md`, "Commands"); a remove the queue has no room
+for waits in a bounded list in the conductor, one per registered publication and
+endpoint, offered again each cycle in order; and a reply the reply queue has no room
+for is held by the sender in a list with a bound of its own in `spec.rs`, derived as
+the recorder's `PENDING_REPLIES` is from how many replies can be owed at once, and at
+that bound the sender handles no request until the conductor takes replies again, and
+keeps sending; it owns the send endpoints' sockets and each publication's send
 state (the sender position, the sender limit, the setup and heartbeat clocks, the
 outstanding retransmit), reads the log through the `TermReader` the conductor hands it
 in the request, as the recorder's `Start` carries one, and moves `sender.position` and
@@ -149,29 +160,35 @@ error codes 4 and 9, the counters' allocation and release, the events to clients
   as `AsRef<[Option<S>]>` with `S: SockaddrLike` (line 1777), `sendmsg` its as
   `Option<&S>` (line 1730), and `MultiHeaders<S>` asks `S: Copy + SockaddrLike` (line
   1855), so a connected socket passes `()` throughout and calls nothing `net` gates.
-- The allocation audit, read 2026-10-31 at tag v0.31.3, `src/sys/socket/mod.rs`:
-  `sendmmsg` and `recvmmsg` (both `cfg(any(linux_android, target_os = "freebsd",
-  target_os = "netbsd"))`) write the slices, addresses and control messages into the
-  `MultiHeaders` passed to them and call `libc::sendmmsg` or `libc::recvmmsg`; neither
-  body allocates (no `Vec`, `Box`, `collect` or `String`); `recvmmsg`'s doc says "This
-  method performs no allocations" and `sendmmsg`'s doc line "Allocations are performed
-  for cmsgs and to build `msghdr` buffer" is older than its body. `MultiHeaders::preallocate(num_slices, cmsg_buffer)`
-  allocates the headers, the addresses and the optional control buffer once, at the
-  endpoint's opening on the control plane. `sendmsg` "Allocates if cmsgs is nonempty";
-  the sender passes none. The allocation assertion over the send path (ADR 0039; this
-  card's test) is the gate on this audit.
+- The allocation audit, read 2026-10-31 at tag v0.31.3, `src/sys/socket/mod.rs`, over
+  every `nix` call on the duty cycle of either path: `sendmmsg` (lines 1765 to 1832)
+  and `recvmmsg` (lines 1917 to 1962), both `cfg(any(linux_android, target_os =
+  "freebsd", target_os = "netbsd"))`, write the slices, addresses and control messages
+  into the `MultiHeaders` passed to them and call `libc::sendmmsg` or `libc::recvmmsg`;
+  neither body allocates (no `Vec`, `Box`, `collect` or `String`); `recvmmsg`'s doc
+  says "This method performs no allocations" and `sendmmsg`'s doc line "Allocations
+  are performed for cmsgs and to build `msghdr` buffer" is older than its body.
+  `sendmsg` (lines 1729 to 1744) "Allocates if cmsgs is nonempty": its one `Vec` is
+  sized to the control messages' space, 0 with none, and a `Vec` of capacity 0 does not
+  allocate; the sender passes none. `recvmsg` (lines 2193 to 2213) keeps the address in
+  a `MaybeUninit` on the stack and passes a null control buffer when `cmsg_buffer` is
+  `None`, which the sender passes, so the macOS path allocates nothing either.
+  `MultiHeaders::preallocate(num_slices, cmsg_buffer)` (lines 1853 to 1890) allocates
+  the headers, the addresses and the optional control buffer once, at the endpoint's
+  opening on the control plane. The allocation assertion over the send path (ADR 0039;
+  this card's test) is the gate on this audit.
 - Nothing measured: the UDP rows are card 182's, and this change puts the first
   datagram on the wire. Until then a commit under `cavalry-driver` says what the
   existing rows show, as ADR 0039 says.
 
 ## Consequences
 
-Easier: the receiver (card 181) takes `recvmmsg`, `RcvBuf` and the same endpoint
-shape from this dependency with no second ADR for it; the bench pins the sender as it
-pins the conductor, so the UDP rows measure a pinned thread; every fact the two threads
-share is a counter or a bounded queue entry, so `doctor` explains a stalled publication
-from `publication.limit`, `sender position`, `sender limit` and the connection state
-machine alone.
+Easier: the receiver (card 181) takes `recvmmsg`, `RcvBuf`, `net`'s `SockaddrIn` and
+`SockaddrIn6` and the same endpoint shape from this dependency with no second ADR for
+it; the bench pins the sender as it pins the conductor, so the UDP rows measure a
+pinned thread; every fact the two threads share is a counter or a bounded queue entry,
+so `doctor` explains a stalled publication from `publication.limit`, `sender
+position`, `sender limit` and the connection state machine alone.
 
 Harder: a 0.x crate on the data plane, moved by Dependabot one pull request at a time
 and reviewed by the agent; two platforms with two send paths, so the macOS gate runs
