@@ -738,3 +738,10 @@ user-visible change, added in the same commit as the change. The format follows
   one definition, in `cavalry-proto`
   ([ADR 0036](docs/decisions/0036-hand-the-replayer-the-stop-and-bound-the-replay-publications.md);
   card 160).
+- The harness reads a coarse counter's clock step from its jump: when most pairs of
+  consecutive readings show no advance, the counter moves less often than the harness
+  reads it, and the step is the smallest frequent advance rather than the divisor of
+  the advances, which read 1 ns on an Apple silicon laptop whose clock resolves 41 ns
+  (now `clock step 41 ns (41 ticks)` there); the bench hosts' steps are unchanged
+  ([ADR 0037](docs/decisions/0037-read-a-coarse-counters-step-from-its-jump.md); card
+  154).

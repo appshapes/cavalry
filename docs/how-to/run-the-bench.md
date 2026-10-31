@@ -111,8 +111,11 @@ shared runner is
    The harness measures its
    clock's step at start, prints it in its first line in nanoseconds and in the
    counter's own ticks (`clock step 10 ns (37 ticks)` on `bench`, whose counter
-   moves by 37 ticks every 10 ns, and `clock step 1 ns (2 ticks)` on `kip`, where one
-   step is below 5 percent of every gated row and the 5 percent rule decides alone)
+   moves by 37 ticks every 10 ns, `clock step 1 ns (2 ticks)` on `kip`, where one
+   step is below 5 percent of every gated row and the 5 percent rule decides alone,
+   and `clock step 41 ns (41 ticks)` on an Apple silicon laptop, whose counter moves
+   less often than the harness reads it and whose step is therefore the jump it makes,
+   [ADR 0037](../decisions/0037-read-a-coarse-counters-step-from-its-jump.md))
    and writes it into the result as `clock_step_ns`; a
    row over 5 percent but within one step is printed `within a step` and passes
    ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)). The
@@ -252,6 +255,12 @@ shared runner is
   10 ns of a 160 ns row; the gate cannot tell that from an unchanged commit and passes
   it ([ADR 0029](../decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)).
   Two steps fail. On `kip` the step is 1 ns, so the line never appears there.
+- `clock step 41 ns (41 ticks)` or another step of tens of nanoseconds on a laptop:
+  the machine's counter moves less often than the harness reads it, and the step is
+  the jump it makes when it moves, not a divisor of its readings
+  ([ADR 0037](../decisions/0037-read-a-coarse-counters-step-from-its-jump.md)). The
+  percentiles there resolve to that step, and a row's move below it is not a move. Such
+  a machine is a report, not a gate; it has no baseline unless you record one.
 - `clock step unknown` in `bench-compare`'s first line: the result was written by a
   harness from before the step was measured, so the 5 percent rule alone applies,
   whatever step the baseline carries; the failure line says so in place of a step, and
