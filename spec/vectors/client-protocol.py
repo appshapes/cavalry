@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/client-protocol.json: the test vectors for spec/client-protocol.md,
-version 2.
+version 3.
 
 This script is the spec's reference encoder, independent of the Rust code: it packs
 each command's and event's fields with the standard library and nothing else, so an
@@ -32,6 +32,8 @@ ON_RECORDING_READY, ON_RECORDING_STOPPED = 0x1001, 0x1002
 # Version 2: the replay commands and events (ADR 0030).
 START_REPLAY, STOP_REPLAY = 0x0103, 0x0104
 ON_REPLAY_READY, ON_REPLAY_STOPPED = 0x1003, 0x1004
+# Version 3: the retention commands, answered with operation success or error (ADR 0031).
+TRUNCATE_RECORDING, PURGE_SEGMENTS, PURGE_RECORDING = 0x0105, 0x0106, 0x0107
 # The replay's conventions, Aeron's: NULL_POSITION, NULL_LENGTH and Long.MAX_VALUE.
 NULL_POSITION, NULL_LENGTH, FOLLOW_LENGTH = -1, -1, 2**63 - 1
 
@@ -59,6 +61,12 @@ COMMANDS = {
                                     ("replay_stream_id", "i"), ("replay_channel", "s"))),
     STOP_REPLAY: ("stop_replay", (("client_id", "q"), ("correlation_id", "q"),
                                   ("replay_session_id", "q"))),
+    TRUNCATE_RECORDING: ("truncate_recording", (("client_id", "q"), ("correlation_id", "q"),
+                                                ("recording_id", "q"), ("position", "q"))),
+    PURGE_SEGMENTS: ("purge_segments", (("client_id", "q"), ("correlation_id", "q"),
+                                        ("recording_id", "q"), ("new_start_position", "q"))),
+    PURGE_RECORDING: ("purge_recording", (("client_id", "q"), ("correlation_id", "q"),
+                                          ("recording_id", "q"))),
 }
 EVENTS = {
     ON_ERROR: ("error", (("offending_correlation_id", "q"), ("error_code", "i"),
@@ -182,6 +190,20 @@ VECTORS = [
     command(STOP_REPLAY, "stop-replay", client_id=5, correlation_id=14, replay_session_id=13),
     command(STOP_REPLAY, "stop-replay-extremes", client_id=2**63 - 1, correlation_id=2**63 - 1,
             replay_session_id=2**63 - 1),
+    # Version 3: the retention commands.
+    command(TRUNCATE_RECORDING, "truncate-recording", client_id=5, correlation_id=15,
+            recording_id=0, position=4096),
+    command(TRUNCATE_RECORDING, "truncate-recording-to-the-start", client_id=5, correlation_id=15,
+            recording_id=0, position=0),
+    command(TRUNCATE_RECORDING, "truncate-recording-extremes", client_id=2**63 - 1,
+            correlation_id=2**63 - 1, recording_id=2**63 - 1, position=2**63 - 1),
+    command(PURGE_SEGMENTS, "purge-segments", client_id=5, correlation_id=16, recording_id=0,
+            new_start_position=134217728),
+    command(PURGE_SEGMENTS, "purge-segments-extremes", client_id=2**63 - 1,
+            correlation_id=2**63 - 1, recording_id=2**63 - 1, new_start_position=2**63 - 1),
+    command(PURGE_RECORDING, "purge-recording", client_id=5, correlation_id=17, recording_id=0),
+    command(PURGE_RECORDING, "purge-recording-extremes", client_id=2**63 - 1,
+            correlation_id=2**63 - 1, recording_id=2**63 - 1),
     # Events.
     event(ON_ERROR, "error-invalid-channel", offending_correlation_id=4, error_code=1,
           error_message="channel must be cavalry:ipc in this version (client-protocol.md, Error codes)"),
@@ -248,7 +270,7 @@ VECTORS = [
            raw=struct.pack("<qq", 0, 1)),
     vector("command", 0x0100, "unknown-type-between", error="type",
            raw=struct.pack("<qq", 0, 1)),
-    vector("command", 0x0105, "unknown-type-cavalry-reserved", error="type",
+    vector("command", 0x0108, "unknown-type-cavalry-reserved", error="type",
            raw=struct.pack("<qq", 0, 1)),
     vector("command", 0x0200, "unknown-type-above", error="type",
            raw=struct.pack("<qq", 0, 1)),
@@ -266,6 +288,12 @@ VECTORS = [
            raw=struct.pack("<qqqqqi", 5, 13, 0, -1, -1, 2001)),
     vector("command", STOP_REPLAY, "stop-replay-too-short-no-replay-session-id",
            error="too-short", raw=struct.pack("<qq", 5, 14)),
+    vector("command", TRUNCATE_RECORDING, "truncate-recording-too-short-no-position",
+           error="too-short", raw=struct.pack("<qqq", 5, 15, 0)),
+    vector("command", PURGE_SEGMENTS, "purge-segments-too-short-no-position",
+           error="too-short", raw=struct.pack("<qqq", 5, 16, 0)),
+    vector("command", PURGE_RECORDING, "purge-recording-too-short-no-recording-id",
+           error="too-short", raw=struct.pack("<qq", 5, 17)),
     vector("command", ADD_PUBLICATION, "string-negative-length", error="string",
            raw=struct.pack("<qqii", 0, 1, 1001, -1)),
     vector("command", ADD_PUBLICATION, "string-over-4096", error="string",
@@ -291,6 +319,12 @@ VECTORS = [
                            replay_stream_id=2001, replay_channel=IPC)) + b"\0\0\0\0"),
     vector("command", STOP_REPLAY, "stop-replay-length-trailing", error="length",
            raw=struct.pack("<qqqi", 5, 14, 13, 0)),
+    vector("command", TRUNCATE_RECORDING, "truncate-recording-length-trailing", error="length",
+           raw=struct.pack("<qqqqi", 5, 15, 0, 4096, 0)),
+    vector("command", PURGE_SEGMENTS, "purge-segments-length-trailing", error="length",
+           raw=struct.pack("<qqqqi", 5, 16, 0, 134217728, 0)),
+    vector("command", PURGE_RECORDING, "purge-recording-length-trailing", error="length",
+           raw=struct.pack("<qqqi", 5, 17, 0, 0)),
     # Invalid events, the same checks on the client's side.
     vector("event", ON_OPERATION_SUCCESS, "event-too-short", error="too-short",
            raw=struct.pack("<i", 3)),
@@ -320,7 +354,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 2,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 3,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")

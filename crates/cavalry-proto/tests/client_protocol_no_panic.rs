@@ -23,7 +23,9 @@ impl XorShift {
 
 const REASONS: [&str; 4] = ["too-short", "type", "string", "length"];
 
-const COMMAND_TYPES: [i32; 11] = [1, 2, 3, 4, 5, 6, 11, 0x0101, 0x0102, 0x0103, 0x0104];
+const COMMAND_TYPES: [i32; 14] = [
+    1, 2, 3, 4, 5, 6, 11, 0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107,
+];
 const EVENT_TYPES: [i32; 12] = [
     0x0F01, 0x0F02, 0x0F03, 0x0F04, 0x0F05, 0x0F06, 0x0F07, 0x0F0A, 0x1001, 0x1002, 0x1003, 0x1004,
 ];

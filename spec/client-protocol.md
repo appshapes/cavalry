@@ -1,4 +1,4 @@
-# Client protocol, version 2
+# Client protocol, version 3
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -14,7 +14,9 @@ Cavalry's own, in type id ranges of its own beside Aeron's, and the error codes 
 answer with (ADR 0025); every version 0 encoding is unchanged, so a version 0 client's
 commands are version 1 commands. Version 2 adds the replay commands and events, the next
 ids in the same ranges, and error code 23 (ADR 0030); every version 1 encoding is
-unchanged.
+unchanged. Version 3 adds the retention commands, `truncate recording`, `purge segments`
+and `purge recording`, the next three ids, error code 24 and a registry of the commands
+in progress (ADR 0031); every version 2 encoding is unchanged.
 
 ## The driver directory
 
@@ -82,11 +84,14 @@ whose bytes or padding run past the message is `string`.
 | 258 (`0x0102`) | stop recording | client id, correlation id, recording id |
 | 259 (`0x0103`) | start replay | client id, correlation id, recording id, position, length, replay stream id, replay channel |
 | 260 (`0x0104`) | stop replay | client id, correlation id, replay session id |
+| 261 (`0x0105`) | truncate recording | client id, correlation id, recording id, position |
+| 262 (`0x0106`) | purge segments | client id, correlation id, recording id, new start position |
+| 263 (`0x0107`) | purge recording | client id, correlation id, recording id |
 
 Type ids 1 to 255 (`0x01` to `0xFF`) are Aeron's: 7 to 10 and 12 to 255 are reserved for
 the commands Aeron's control protocol numbers, present and future, and a later version
 takes one with its feature under Aeron's number. Type ids 257 to 511 (`0x0101` to
-`0x01FF`) are Cavalry's own, taken in order from 257, and 261 to 511 are reserved for
+`0x01FF`) are Cavalry's own, taken in order from 257, and 264 to 511 are reserved for
 later versions; 256, and 512 and above, lie outside both ranges and are reserved too. The
 driver answers any reserved id with an `error` event whose code is 6. Every command
 begins with the same 16 bytes:
@@ -105,11 +110,16 @@ Then, by command:
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
-| start replay | 24 | 8 | position | i64 | −1 for the recording's start position, else a multiple of 32 from the recording's start position to its extent |
+| start replay | 24 | 8 | position | i64 | −1 for the recording's retained position, its start position until a purge moves it; else a multiple of 32 from the retained position to the extent |
 | start replay | 32 | 8 | length | i64 | −1 for everything up to the recording's extent when the replay starts; 0 or more bytes, a frame that begins within them played whole; 2^63 − 1 to follow a live recording until it stops |
 | start replay | 40 | 4 | replay stream id | i32 | any: the stream the replay's publication is on |
 | start replay | 44 | 4 + n + pad | replay channel | string | in this version exactly `cavalry:ipc`; any other channel is answered with error code 1 |
 | stop replay | 16 | 8 | replay session id | i64 | 0 or more: the replay session id that `replay ready` carried |
+| truncate recording | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
+| truncate recording | 24 | 8 | position | i64 | a multiple of 32 from the recording's retained position to its stop position, at which a frame begins or which is the stop position |
+| purge segments | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
+| purge segments | 24 | 8 | new start position | i64 | a segment base of the recording above its retained position and at most its stop position |
+| purge recording | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 
 A recording's *extent* is the bytes a replay may read: its stop position once it is
 stopped, and its synced position, `recording.synced_position`, while it is live, since a
@@ -195,10 +205,14 @@ What the driver does with each, after the checks of "What the driver rejects":
   `driver.registry_full`. Otherwise the driver registers the replay under the command's
   correlation id, which is its *replay session id*, and asks its replayer to read the
   recording's catalog slot: a recording id the catalog does not hold as a valid
-  recording, state 1, is code 21; a position of −1 is the recording's start position,
-  and a position that is not a multiple of 32, below the start position or above the
-  extent is code 23, position out of range; a segment file the replayer cannot open at
-  the position is code 12. Each of the three adds one to `replay.start_failed`. The
+  recording, state 1, is code 21; a recording a retention command is working on is code
+  24, since its slot's stop reads −1 while a truncate cuts; a position of −1 is the
+  recording's *retained position*, its start position until a `purge segments` moves it
+  (`spec/durable-log.md`, "Descriptor"; ADR 0031), and a position that is not a
+  multiple of 32, below the retained position or above the extent is code 23, position
+  out of range, the message naming both; a segment file the replayer cannot open at the
+  position is code 12. Each of the four, 21, 24, 23 and 12, adds one to
+  `replay.start_failed`. The
   replay's *end position* is the position plus the length: the extent when the replay
   starts for a length of −1, and 2^63 − 1 for a length of 2^63 − 1 or a sum past it.
   A replay of a stopped recording whose position is its end position or the extent has
@@ -245,6 +259,59 @@ What the driver does with each, after the checks of "What the driver rejects":
   session id no live replay holds is already stopped, and the answer is `operation
   success` with nothing done, since a correlation id is never reused. Any client may
   stop any replay.
+- **truncate recording.** Aeron Archive's `truncateRecording`: the recording keeps its
+  bytes before the position and loses the rest. The checks, in order: a recording id
+  below 0 or at or past the next recording id is code 21; a recording that is live or
+  stopping, that a replay starting or live is reading, or that one of the three
+  retention commands is working on is code 24, `recording busy`, the message saying
+  which and what to do; the commands in progress at their capacity ("Sizes"), or the
+  replayer's request queue full or holding requests still waiting for room, is code 10,
+  adding one to `driver.registry_full`. The driver then enters the command in the
+  registry of commands in progress and the replayer reads the slot: a state other than
+  1 is code 21; a position that is not a multiple of 32, below the retained position or
+  above the stop position is code 23, the message naming both; a position below the
+  stop at which no frame begins, the frame header there failing the `frame` check or
+  reading a length of 0, is code 23 with "no frame begins at the position"; a segment
+  file the replayer cannot open or read is code 12. Each refusal before the first
+  catalog write writes nothing. Otherwise the cut runs in `spec/durable-log.md`, "The
+  driver"'s three steps: the stop fields written as −1 and −1, the files past the
+  position removed from the highest base down one per duty cycle and the segment that
+  holds the position cut and extended, the index truncated to the entries at or before
+  the position, and the stop written as recovery would rebuild it; `operation success`
+  then answers, and `recording.truncated` adds one. A file the driver could not remove,
+  cut or extend is code 12 after the catalog write, adding one to
+  `recording.retention_failed`; the driver then runs recovery's rule for the slot at
+  once, so that the slot and the files agree before the error is answered, and the
+  message names the file and what the recording holds now.
+- **purge segments.** Aeron Archive's `purgeSegments`: the recording's segment files
+  whose bytes lie wholly before the new start position go, and the position becomes the
+  recording's retained position. The same first checks as truncate recording; then a
+  new start position that is not a segment base of the recording, at or below the
+  retained position or above the stop position is code 23, the message naming the
+  bounds. The driver writes the retained position under its checksum, migrating a slot
+  in version 0's form first (`spec/durable-log.md`, "The driver"), then removes the
+  segment files before it, one per duty cycle, and answers `operation success`;
+  `recording.segments_purged` adds one per file removed. The time index keeps its
+  entries, so an instant before the purge resolves as before and `start replay` refuses
+  the position it resolves to with code 23, naming the retained position. A file the
+  driver could not remove is code 12 as for a truncate.
+- **purge recording.** Aeron Archive's `purgeRecording`: the delete `spec/durable-log.md`
+  reserved as state 3. The same first checks as truncate recording, and a recording a
+  live replay reads is code 24. The driver writes the state, 3, then removes the segment
+  files and the time index, one per duty cycle, and answers `operation success`;
+  `recording.deleted` adds one. The slot stays, so the id never names another
+  recording, and a `start replay` of it is code 21 as of any slot whose state is not 1.
+  A file the driver could not remove is code 12 as for a truncate, and the slot's files
+  are removed again at the next start, as `spec/durable-log.md`, "The driver", says of
+  state 3.
+
+The commands in progress are a registry ("Sizes"): a command leaves it when its answer
+is sent. While a command is in it, the other two commands and `start replay` on its
+recording are code 24, and `stop recording` finds no live recording and answers
+`operation success` as today. The checks that need the disk run on the replayer before
+the first catalog write; the catalog is written through the recorder, one slot and a
+sync, as a stop is; the file work runs on the replayer; the conductor never touches the
+disk (ADR 0030, ADR 0031).
 
 The disk work of a replay is a third driver thread, the *replayer*, fed and answered
 through bounded queues as the recorder is: the conductor never touches the disk, and the
@@ -406,11 +473,12 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read, or start replay's length is below −1 |
 | 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
 | 11 | generic error | anything else; the message says what |
-| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, or a replay's segment file could not be opened |
+| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended |
 | 20 | no publication to record | start recording names a stream id and channel no live publication has |
-| 21 | unknown recording | stop recording or start replay names a recording id the catalog does not hold as a valid recording |
+| 21 | unknown recording | stop recording, start replay or a retention command names a recording id the catalog does not hold as a valid recording |
 | 22 | already recording | start recording names a stream whose live publications are all being recorded; the message names the recording id |
-| 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's start position or above its extent; the message names both |
+| 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's retained position or above its extent; truncate recording names one that is not a multiple of 32 from the retained position to the stop position or at which no frame begins; purge segments names one that is not a segment base above the retained position and at most the stop position; the message names the bounds |
+| 24 | recording busy | truncate recording, purge segments, purge recording or start replay names a recording that is live or stopping, that a replay is reading, or that a retention command is working on; the message says which and what to do |
 
 Codes 4, 5, 8, 9, 13 and 14 are Aeron's for features outside this version, 15 to 19 are
 left free for Aeron's later codes, and all are reserved; Cavalry's own codes count up
@@ -458,11 +526,12 @@ with error code 10 and registers nothing:
 | recordings | 1024 | every recording that is starting or live, one per publication at most |
 | replays | 64 | every replay that is starting or live |
 | replay publications | 128 | every replay's publication, live or lingering after the replay ended, with the replays still starting |
+| commands in progress | 64 | every truncate recording, purge segments or purge recording the driver is working on |
 
 The counters file is sized so that the registries fill before it does: the static
-counters of `counters.toml`, 34 in this version, two per publication (2048), one per
-image (2048), two per recording (2048), one per replay (64) and two per replay
-publication (256) come to 6498, fewer than 8192.
+counters of `counters.toml`, 38 in this version, two per publication (2048), one per
+image (2048), three per recording (3072), one per replay (64) and two per replay
+publication (256) come to 7526, fewer than 8192.
 
 ## What the driver rejects
 
@@ -491,8 +560,12 @@ slots used up is code 10 and adds one to `recording.catalog_full`; a recording's
 that could not be created is code 12 and adds one to `recording.start_failed`; a replay
 length below −1 is code 7 and adds one to `client_protocol.rejected_command`; a replay
 position out of range is code 23, and a replay's recording id the catalog does not hold
-is code 21, and a replay's segment file that could not be opened is code 12, each adding
-one to `replay.start_failed`. Every `error` event sent adds one to
+is code 21, and a replay of a recording a retention command is working on is code 24,
+and a replay's segment file that could not be opened is code 12, each adding one to
+`replay.start_failed`; a retention command's recording that is live, read by a
+replay or under another command is code 24, its position outside its rule is code 23,
+and a file the driver could not read, remove, cut or extend is code 12 and adds one to
+`recording.retention_failed`. Every `error` event sent adds one to
 `client_protocol.errors`.
 
 A record the ring itself rejects (`spec/command-ring.md`, "Reading") never reaches these
@@ -509,9 +582,12 @@ Static counters in `counters.toml` (`spec/counters-file.md`), written by the dri
 `recording.catalog_full`, and the recovery pass's `recording.recovered`,
 `recording.invalidated`, `recording.index_rewritten`, `recording.catalog_truncated`,
 `recording.slot_dropped` and `recording.files_removed` (`spec/durable-log.md`, "The
-driver"); and the replay's `replay.started`, `replay.stopped`, `replay.ended`,
-`replay.not_connected`, `replay.failed` and `replay.start_failed`. Instance gauges
-`recording.position` and `recording.synced_position`, one pair per recording: the key is
+driver"); the replay's `replay.started`, `replay.stopped`, `replay.ended`,
+`replay.not_connected`, `replay.failed` and `replay.start_failed`; and retention's
+`recording.truncated`, `recording.segments_purged`, `recording.deleted` and
+`recording.retention_failed` (ADR 0031). Instance gauges `recording.position`,
+`recording.synced_position` and `recording.bytes`, the segment files' bytes on disk kept
+at each roll, three per recording: the key is
 the recording id as an i64, little-endian, 8 bytes; the label is the counter's name, a
 space, and the recording id, the session id and the stream id in decimal separated by
 spaces. The driver stores both with release stores, and loads `recording.position` with

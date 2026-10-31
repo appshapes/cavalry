@@ -745,6 +745,19 @@ user-visible change, added in the same commit as the change. The format follows
   (now `clock step 41 ns (41 ticks)` there); the bench hosts' steps are unchanged
   ([ADR 0037](docs/decisions/0037-read-a-coarse-counters-step-from-its-jump.md); card
   154).
+- ADR 0031 is Accepted, with the four amendments its review asked for: the client
+  protocol moves to version 3 with `truncate recording` (261), `purge segments` (262)
+  and `purge recording` (263), error code 24 `recording busy` and a registry of the
+  commands in progress (64), and the catalog to version 1, whose descriptor carries a
+  retained position under its own checksum, read by a two-range rule so that a slot in
+  either form holds and a directory nobody has purged still opens under a version 0
+  driver. The spec pages, both vector sets, `cavalry-proto`'s commands and
+  `cavalry-log`'s layout follow; `counters.toml` gains `recording.truncated`,
+  `recording.segments_purged`, `recording.deleted`, `recording.retention_failed` and
+  the `recording.bytes` gauge. The driver decodes the three commands and refuses them
+  with error 11 until the change that implements them lands
+  ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md);
+  card 95).
 - ADR 0034 is Accepted: `grip` is the latency gate's second host and `kip` the soak
   host. `bench (grip)` is a required check of `master`, `bench (kip)` is gone from CI
   after three green pushes with grip's baselines in place, and `kip`'s baselines stay

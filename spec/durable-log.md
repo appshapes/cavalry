@@ -30,12 +30,13 @@ name.
 
 The first 128 bytes of `catalog`. The creator writes every field, then the magic last;
 a reader loads the magic first, and eight zero bytes mean `not-ready`. The header never
-changes after the magic is written.
+changes after the magic is written, but for the version, which the driver moves from 0
+to 1 once, before the first slot it writes in version 1's form (ADR 0031; "The driver").
 
 | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- |
 | 0 | 8 | magic | bytes | the bytes `43 56 4C 59 43 54 4C 47` (`CVLYCTLG`) |
-| 8 | 4 | version | i32 | 0 |
+| 8 | 4 | version | i32 | 0 or 1: under 1 a slot may hold a retained group, under 0 none does |
 | 12 | 4 | descriptor length | i32 | 1024 |
 | 16 | 4 | reserved | i32 | written as 0, never read |
 | 20 | 4 | data checksum kind | i32 | 0: version 0 carries no checksum beside the frames |
@@ -60,7 +61,7 @@ Slot i is at 128 + i × 1024 and describes recording i.
 | 4 | 4 | stop checksum | u32 | the zlib CRC32 of bytes 8 to 24 |
 | 8 | 8 | stop timestamp | i64 | −1 while the recording is live; otherwise at least the start timestamp |
 | 16 | 8 | stop position | i64 | −1 while the recording is live; otherwise at least the start position, a multiple of 32; −1 exactly when the stop timestamp is −1 |
-| 24 | 4 | creation checksum | u32 | the zlib CRC32 of bytes 28 to 1024 |
+| 24 | 4 | creation checksum | u32 | the zlib CRC32 of bytes 28 to 1024 for a slot in version 0's form, of bytes 28 to 472 and 484 to 1024 for one in version 1's |
 | 28 | 4 | reserved | i32 | written as 0, never read |
 | 32 | 8 | recording id | i64 | i |
 | 40 | 8 | start timestamp | i64 | 0 or more |
@@ -75,23 +76,47 @@ Slot i is at 128 + i × 1024 and describes recording i.
 | 84 | 256 | channel | bytes | the channel as UTF-8, zero padded |
 | 340 | 4 | source identity length | i32 | 0 to 128 |
 | 344 | 128 | source identity | bytes | the publisher's identity as UTF-8, zero padded |
-| 472 | 552 | reserved | bytes | written as 0, never read |
+| 472 | 8 | retained position | i64 | version 1's form: at least the start position, at most the stop position once there is one, and the start position or a segment base; version 0's form: 0, never read |
+| 480 | 4 | retained checksum | u32 | version 1's form: the zlib CRC32 of bytes 472 to 480; version 0's form: 0, never read |
+| 484 | 540 | reserved | bytes | written as 0, never read |
 
-The fields fall in two groups, each under its own checksum: the stop fields, bytes 8 to
-24, under the stop checksum; and the creation fields, bytes 28 to 1024, written once
-when the slot is created and never again, under the creation checksum. The state is
-the slot's commit word and lies outside both checksums on purpose: it is
-written last, in one four-byte store. While a recording is live only the stop fields
-and the state change: a stop writes the stop timestamp and the stop position, then the
-stop checksum; a delete writes the state, 3. A reader that finds a state of 1, 2 or 3
-checks its state first: 2 is `invalid`, a recording the driver found damaged, and the
-reader reads nothing else from the slot. For 1 and 3 it checks both checksums. A
-creation checksum that does not match is damage, since nothing
-writes those bytes after the state: the reader reports `checksum` at once. A stop
-checksum that does not match may be a stop the driver is writing, so the reader retries
-for up to 100 milliseconds and then reports `checksum`. Either way it reads nothing from
-that slot, and only the driver repairs it, as the section "The driver" says. A deleted
-recording keeps its slot and loses its files, so an old id never names a new recording.
+A slot is in one of two forms, and the catalog's version bounds which. In version 0's
+form the fields fall in two groups, each under its own checksum: the stop fields, bytes
+8 to 24, under the stop checksum; and the creation fields, bytes 28 to 1024, written
+once when the slot is created and never again, under the creation checksum. In version
+1's form there are three: the stop fields as before; the creation fields, bytes 28 to
+472 and 484 to 1024, under a creation checksum over those two ranges; and the *retained
+group*, bytes 472 to 484, the retained position under the retained checksum, which
+`purge segments` rewrites (ADR 0031). The **retained position** is where the
+recording's bytes begin on disk: the start position until a purge moves it to a
+segment base, and then the lowest segment base whose file is kept; it is what a replay
+of the recording may start from, and a slot in version 0's form has it at its start
+position without a group. Under a version 0 header every slot is in version 0's form;
+under a version 1 header a slot is in either, and a reader tells them apart by the
+creation checksum, never by a flag: it checks the checksum over version 1's ranges
+first, and a slot that holds is in version 1's form, its group read under the retained
+checksum; a slot that fails it is checked over version 0's range, bytes 28 to 1024, and
+one that holds is in version 0's form, byte for byte what a version 0 driver wrote; one
+that holds under neither is `checksum`. A healthy slot of either form holds under its
+own range, so no healthy slot reports `checksum`; the price is a second CRC32 over 996
+bytes for a slot in version 0's form, off the message path. The state is the slot's
+commit word and lies outside every checksum on purpose: it is written last, in one
+four-byte store. While a recording is live only the stop fields and the state change: a
+stop writes the stop timestamp and the stop position, then the stop checksum; a delete
+writes the state, 3; a truncate writes the stop fields as −1 and −1 under their
+checksum while it cuts, then the new stop ("The driver"); a purge writes the retained
+group. A reader that finds a state of 1, 2 or 3 checks its state first: 2 is
+`invalid`, a recording the driver found damaged, and the reader reads nothing else from
+the slot. For 1 and 3 it checks the creation checksum as above, then the stop checksum,
+then, in version 1's form, the retained checksum. A creation checksum that holds under
+neither range is damage, since nothing writes those bytes after the state: the reader
+reports `checksum` at once. A stop or retained checksum that does not match may be a
+write the driver is making, so the reader retries for up to 100 milliseconds and then
+reports `checksum`. Either way it reads nothing from that slot, and only the driver
+repairs it, as the section "The driver" says. A deleted recording keeps its slot and
+loses its files, so an old id never names a new recording. The stop fields at −1 and −1
+read "live, or being cut": a reader other than the driver treats them as live, and
+the stop is in the files either way.
 
 ## Segment files
 
@@ -160,7 +185,38 @@ stop fields are written at −1 and then the stop checksum, and the state, 1, la
 whose state is 0 is empty whatever its other bytes hold, so a crash during creation
 leaves an empty last slot. The recording's id is reported, and its files created, only
 after the state is 1. With one writer only the last slot can be empty, and the next
-recording id is the number of whole slots after recovery.
+recording id is the number of whole slots after recovery. Under a version 0 header the
+driver creates slots in version 0's form, so that a directory nobody has purged opens
+under a version 0 driver again; before the first slot whose retained group it writes,
+the directory's first `purge segments`, it writes 1 in the header's version and syncs,
+and from then on it creates slots in version 1's form, the retained position at the
+start position. A version 0 driver refuses a version 1 header with `version`. A slot in
+version 0's form that a `purge segments` names is migrated first, in the one order a
+crash cannot hurt: the creation checksum is written over version 1's ranges, which
+signs the bytes the old one vouched for less the twelve of the group, which it vouched
+were zero; then the retained position; then the retained checksum. A crash between the
+new checksum and the group leaves a slot in version 1's form whose retained checksum
+fails, which recovery rebuilds from the files as below.
+
+The retention commands (`spec/client-protocol.md`, "Commands"; ADR 0031) write the
+catalog before they touch the files, so that the rules below accept a crash at any
+point. A truncate to a position writes the stop fields as −1 and −1 under the stop
+checksum, which reads "live, or being cut" and puts the stop in the files; then removes
+the segment files whose base is at or past the position from the highest base down,
+one file per duty cycle, so that the files left are contiguous at every point and the
+stop recovery would rebuild is the end of the highest file left; then, when the
+position is not a segment base, cuts the segment file that holds it to the position's
+offset with one truncation and extends it to the segment file length again, so that
+the bytes past the position are zero; then truncates the time index to the entries at
+or before the position; and then writes the stop position and the stop timestamp,
+which is what recovery's rule gives for the files as cut, the timestamp of the last
+index entry left, or the start timestamp when no segment file is left, and the stop
+checksum. A purge writes the retained position under its checksum, then removes the
+segment files whose bytes lie wholly before it, one per duty cycle; the time index
+keeps its entries. A delete writes the state, 3, then removes the segment files and the
+time index, one per duty cycle. A file the driver could not remove, cut or extend is
+refused to the client, and the driver runs the rules below for that slot at once, so
+that the slot and the files agree before the refusal is answered.
 
 When the driver starts, and again at every `stop recording` for the slot it closes, it
 repairs the catalog. At start-up it first truncates the file to whole slots, then drops
@@ -171,8 +227,20 @@ damage the files cannot repair, since the segments confirm the session id, the s
 id, the initial term id and the start position but not the start timestamp, the term
 length, the MTU length, the segment file length or the channel; the slot gets state 2
 and `cavalry doctor` names it, and recovery never writes a creation field or the
-creation checksum. A valid slot whose creation checksum holds but whose stop checksum
-does not, or whose stop position is −1, was torn during a stop or live at a crash, and
+creation checksum, but for the migration above. A slot in version 1's form whose
+retained checksum does not match was torn between the group and its checksum, by a
+migration or a purge, and its retained position is derived from the files: the larger
+of the start position and the base of the lowest segment file present, or the start
+position when none is, written again under its checksum, which adds one to
+`recording.recovered`; a purge's files are removed only after its catalog write, so the
+lowest file present is at the retained position the purge replaced or the one it
+wrote. The rules below that count from the start position, the empty recording, the
+segment that is damage when missing and the segment the scan may read, count from the
+retained position, and segment files whose bytes lie wholly before the retained
+position are removed, not read, each adding one to `recording.files_removed`. A valid
+slot whose creation checksum holds but whose stop checksum
+does not, or whose stop position is −1, was torn during a stop, live at a crash, or
+being cut by a truncate the crash took, and
 its stop fields are derived wholly from the files, in this order. First the time index:
 one that is missing, too short for its header, or whose magic, version or recording id
 fails its check was torn while the recorder created it, and the driver writes it again,
@@ -180,9 +248,11 @@ the header with its magic last and one entry, the start timestamp at the start
 position; an index with a header and no whole entry gets that entry; then the index is
 truncated to whole entries and a last entry that breaks the order is dropped. Second,
 an empty recording: when no segment file of the recording exists, or the segment
-holding the start position exists and the frame length there is 0, the recorder
-crashed before the first frame; the stop position is the start position, the stop
-timestamp is the start timestamp, and the slot stays valid; a start segment file shorter
+holding the retained position exists and the frame length there is 0, the recorder
+crashed before the first frame, or a truncate to the retained position removed every
+file; the stop position is the retained position, the stop timestamp is the start
+timestamp, the index entries past the stop are dropped so the index holds its first
+entry alone, and the slot stays valid; a start segment file shorter
 than the start position's offset in it, which a pre-extension torn by a crash can leave,
 reads as a frame length of 0 there, an empty recording and not damage, and the scan below
 stops the same way at a position past the end of its segment file. Third, the scan's start:
@@ -224,7 +294,7 @@ The catalog header, with the file's length:
 | `too-short` | The file is shorter than 128 bytes. |
 | `not-ready` | The magic is eight zero bytes: the creator has not finished. |
 | `magic` | The magic is any other value than `CVLYCTLG`. |
-| `version` | The version is not 0. |
+| `version` | The version is not 0 or 1. |
 | `descriptor-length` | The descriptor length is not 1024. |
 | `checksum-kind` | The data checksum kind is not 0. |
 | `timestamp` | The creation timestamp is below 0. |
@@ -237,10 +307,10 @@ A descriptor, with its slot's index:
 | `too-short` | Fewer than 1024 bytes were given. |
 | `state` | The state is not 0 to 3. A state of 0 is an empty slot, not a failure: nothing else is read. |
 | `invalid` | The state is 2: the driver found the recording damaged, and `cavalry doctor` names it. Nothing else is read. |
-| `checksum` | The creation checksum is not the zlib CRC32 of bytes 28 to 1024, or the stop checksum is not that of bytes 8 to 24. A stop checksum is retried for 100 milliseconds first. |
+| `checksum` | The creation checksum is neither the zlib CRC32 of bytes 28 to 472 and 484 to 1024 (version 1's form) nor that of bytes 28 to 1024 (version 0's form), tried in that order; or the stop checksum is not that of bytes 8 to 24; or, in version 1's form, the retained checksum is not that of bytes 472 to 480. A stop or retained checksum is retried for 100 milliseconds first. |
 | `timestamp` | The start timestamp is below 0, or a stop timestamp that is not −1 is below the start timestamp. |
 | `recording-id` | The recording id is not the slot's index. |
-| `position` | The start position is below 0 or not a multiple of 32; a stop position that is not −1 is below the start position or not a multiple of 32; or one stop field is −1 and the other is not. |
+| `position` | The start position is below 0 or not a multiple of 32; a stop position that is not −1 is below the start position or not a multiple of 32; one stop field is −1 and the other is not; or, in version 1's form, the retained position is below the start position, not a multiple of 32, above a stop position that is not −1, or neither the start position nor a segment base. |
 | `term-length` | The term length is not a power of two from 65536 to 1073741824. |
 | `segment-length` | The segment file length is not a power of two, is below the term length, or is above 1073741824. |
 | `mtu` | The MTU length is not a multiple of 32 from 64 to 65504. |
@@ -272,8 +342,9 @@ and stream id, or the position is past the end of its segment file.
 ## Vectors
 
 `spec/vectors/durable-log.json`, written by `spec/vectors/durable-log.py`: catalog header
-vectors with the file length the reader sees and the whole slots it holds; descriptor
-vectors with the slot index;
+vectors with the file length the reader sees and the whole slots it holds, under version
+0 and version 1; descriptor vectors with the slot index, in both forms, a valid vector's
+`fields` naming its `form`, 0 or 1, and its retained position;
 index header and entry vectors, an entry vector with the entry before it; and position
 vectors, arithmetic, from a descriptor's fields and a position to the segment file name,
 the segment base position, the offset in the segment, the term id and the term offset.

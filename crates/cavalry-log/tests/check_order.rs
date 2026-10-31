@@ -158,7 +158,8 @@ fn a_catalog_header_reports_its_first_fault_in_the_page_order() {
     assert_eq!(reason, "magic");
     let reason = catalog_reason(
         |b| {
-            put_i32(b, 8, 1);
+            // 1 is a catalog version since ADR 0031; 2 is not.
+            put_i32(b, 8, 2);
             put_i32(b, 12, 512);
         },
         header,

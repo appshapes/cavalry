@@ -1,6 +1,6 @@
 {
  "spec": "spec/client-protocol.md",
- "version": 2,
+ "version": 3,
  "generated_by": "spec/vectors/client-protocol.py",
  "vectors": [
   {
@@ -308,6 +308,95 @@
     "correlation_id": 9223372036854775807,
     "replay_session_id": 9223372036854775807,
     "name": "stop_replay"
+   }
+  },
+  {
+   "name": "truncate-recording",
+   "region": "command",
+   "type": 261,
+   "bytes": "05000000000000000f0000000000000000000000000000000010000000000000",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 15,
+    "recording_id": 0,
+    "position": 4096,
+    "name": "truncate_recording"
+   }
+  },
+  {
+   "name": "truncate-recording-to-the-start",
+   "region": "command",
+   "type": 261,
+   "bytes": "05000000000000000f0000000000000000000000000000000000000000000000",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 15,
+    "recording_id": 0,
+    "position": 0,
+    "name": "truncate_recording"
+   }
+  },
+  {
+   "name": "truncate-recording-extremes",
+   "region": "command",
+   "type": 261,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7fffffffffffffff7f",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "recording_id": 9223372036854775807,
+    "position": 9223372036854775807,
+    "name": "truncate_recording"
+   }
+  },
+  {
+   "name": "purge-segments",
+   "region": "command",
+   "type": 262,
+   "bytes": "0500000000000000100000000000000000000000000000000000000800000000",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 16,
+    "recording_id": 0,
+    "new_start_position": 134217728,
+    "name": "purge_segments"
+   }
+  },
+  {
+   "name": "purge-segments-extremes",
+   "region": "command",
+   "type": 262,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7fffffffffffffff7f",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "recording_id": 9223372036854775807,
+    "new_start_position": 9223372036854775807,
+    "name": "purge_segments"
+   }
+  },
+  {
+   "name": "purge-recording",
+   "region": "command",
+   "type": 263,
+   "bytes": "050000000000000011000000000000000000000000000000",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 17,
+    "recording_id": 0,
+    "name": "purge_recording"
+   }
+  },
+  {
+   "name": "purge-recording-extremes",
+   "region": "command",
+   "type": 263,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7f",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "recording_id": 9223372036854775807,
+    "name": "purge_recording"
    }
   },
   {
@@ -658,7 +747,7 @@
   {
    "name": "unknown-type-cavalry-reserved",
    "region": "command",
-   "type": 261,
+   "type": 264,
    "bytes": "00000000000000000100000000000000",
    "error": "type"
   },
@@ -716,6 +805,27 @@
    "region": "command",
    "type": 260,
    "bytes": "05000000000000000e00000000000000",
+   "error": "too-short"
+  },
+  {
+   "name": "truncate-recording-too-short-no-position",
+   "region": "command",
+   "type": 261,
+   "bytes": "05000000000000000f000000000000000000000000000000",
+   "error": "too-short"
+  },
+  {
+   "name": "purge-segments-too-short-no-position",
+   "region": "command",
+   "type": 262,
+   "bytes": "050000000000000010000000000000000000000000000000",
+   "error": "too-short"
+  },
+  {
+   "name": "purge-recording-too-short-no-recording-id",
+   "region": "command",
+   "type": 263,
+   "bytes": "05000000000000001100000000000000",
    "error": "too-short"
   },
   {
@@ -793,6 +903,27 @@
    "region": "command",
    "type": 260,
    "bytes": "05000000000000000e000000000000000d0000000000000000000000",
+   "error": "length"
+  },
+  {
+   "name": "truncate-recording-length-trailing",
+   "region": "command",
+   "type": 261,
+   "bytes": "05000000000000000f000000000000000000000000000000001000000000000000000000",
+   "error": "length"
+  },
+  {
+   "name": "purge-segments-length-trailing",
+   "region": "command",
+   "type": 262,
+   "bytes": "050000000000000010000000000000000000000000000000000000080000000000000000",
+   "error": "length"
+  },
+  {
+   "name": "purge-recording-length-trailing",
+   "region": "command",
+   "type": 263,
+   "bytes": "05000000000000001100000000000000000000000000000000000000",
    "error": "length"
   },
   {
