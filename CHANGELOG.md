@@ -710,3 +710,10 @@ user-visible change, added in the same commit as the change. The format follows
   64 µs at p99.99; bench's and kip's isolated CPUs took no such interrupts. Applied on
   all three hosts on 2026-10-31 (card 159; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
   "Updating the host").
+- The harness reads a coarse counter's clock step from its jump: when most pairs of
+  consecutive readings show no advance, the counter moves less often than the harness
+  reads it, and the step is the smallest frequent advance rather than the divisor of
+  the advances, which read 1 ns on an Apple silicon laptop whose clock resolves 41 ns
+  (now `clock step 41 ns (41 ticks)` there); the bench hosts' steps are unchanged
+  ([ADR 0037](docs/decisions/0037-read-a-coarse-counters-step-from-its-jump.md); card
+  154).
