@@ -200,12 +200,16 @@ the socket. The driver's receiver id is a random i64 chosen at start, and it sen
 group tag (36-byte status messages). On a datagram from a source address:
 
 1. **Setup.** A setup frame for a stream id a subscription on the endpoint wants and a
-   session id with no image: the conductor creates an image, a log buffer of type 2
-   (`spec/log-buffer.md`, version 1) with the setup's term length, MTU and initial term
-   id, at the position of its active term id and term offset, with a receiver window of
-   min(128 KiB, term ÷ 2), announces it to every subscription on the endpoint and stream
-   with `available image`, the source identity `<host>:<port>` of the datagram's
-   source, and sends the first status message at once. A setup for a session with an
+   session id with no image: the conductor creates an image with a registration id of
+   its own, taken from the command ring's correlation id counter as the driver takes its
+   client id (`spec/client-protocol.md`), since the image has no local publication whose
+   id could name it; its log is a log buffer of type 2 (`spec/log-buffer.md`, version
+   1), `images/<registration id>.logbuffer`, with the setup's term length, MTU and
+   initial term id, at the position of its active term id and term offset, with a
+   receiver window of min(128 KiB, term ÷ 2); the conductor announces it to every
+   subscription on the endpoint and stream with `available image` carrying that id as
+   correlation id and the source identity `<host>:<port>` of the datagram's source, and
+   sends the first status message at once. A setup for a session with an
    image is ignored; one for a stream nobody wants is counted and dropped. Every
    control frame to that image's sender goes to the source address of its setup frame.
 2. **Asking for a setup.** A data datagram or heartbeat without the EOS flag for a
@@ -276,8 +280,9 @@ send-setup flag sent for a session with no image), `receiver.heartbeats_received
 heartbeats for a session with no image, by reason in `doctor`),
 `receiver.rejected_datagrams` (the datagram checks); per publication, keyed as
 `publication.position` is, `sender.position` and `sender.limit`; per image, keyed as
-`subscription.position` is with the image's registration id, `image.hwm_position` and
-`image.rebuild_position`; per endpoint, keyed by the endpoint's registration id, the
+`subscription.position` is, with the image's registration id as the correlation id and
+the image's session and stream ids, `image.hwm_position` and `image.rebuild_position`;
+per endpoint, keyed by the endpoint's registration id, the
 correlation id of the command that created it, and labelled with the resolved channel,
 `channel.status` (0 initializing, 1 active, 2 closing, −1 errored), `channel.socket_rcvbuf` and `channel.socket_sndbuf` (what the socket holds,
 read back after it was set, which is what `doctor` compares with `net.core.rmem_max`
@@ -322,7 +327,9 @@ stream ends. The 20 bytes from 44 and the 32 from 96 stay reserved. Unblocking d
 apply to an image; cleaning is the receiver's; `is connected` is 1 while the image is
 live. A reader of version 1 reads version 0 as version 1 with a receiver window of 0.
 Image logs live in `images/<registration id>.logbuffer` under the driver directory,
-beside `publications/`, so that a directory listing says what each log is. The vectors
+named by the registration id the driver gives the image when the setup frame creates it
+(`spec/client-protocol.md`, version 4), beside `publications/`, so that a directory
+listing says what each log is. The vectors
 gain a version 1 header for each type and the `window` rejection for an image.
 
 ### `spec/client-protocol.md`, version 4: the `cavalry:udp` channel
@@ -334,8 +341,16 @@ ready` and `exclusive publication ready` gain the channel status indicator id, i
 offset 28 before the log file name, Aeron's offset, and `subscription ready` gains it at
 offset 8 after the correlation id: the id of the endpoint's `channel.status` counter,
 or −1 for `cavalry:ipc`, so that a client can tell an endpoint that failed from one
-that is waiting. `available image`'s source identity is `<host>:<port>` for an image
-over UDP; `unavailable image`'s channel is the subscription's. Error codes 4 (channel
+that is waiting. An image over UDP has no local publication whose registration id
+could name it, as version 3's `available image` says a publication's does: the driver
+gives each such image a registration id of its own from the command ring's correlation
+id counter when the setup frame creates it, as Aeron's conductor does; `available
+image` and `unavailable image` carry it as correlation id, the log file name is
+`images/<that id>.logbuffer`, and the image's `image.hwm_position` and
+`image.rebuild_position` counters and its subscriptions' `subscription.position`
+counters are keyed by it with the image's session and stream ids. `available image`'s
+source identity is `<host>:<port>` for an image over UDP; `unavailable image`'s channel
+is the subscription's. Error codes 4 (channel
 endpoint error: the socket could not be opened, bound or connected, the message carrying
 the operating system's reason and the endpoint) and 9 (unknown host) are taken from
 Aeron's table; a `cavalry:udp` channel whose grammar fails, a multicast address and an
@@ -345,8 +360,9 @@ receive endpoints, and the counters file is created with 16384 counters, 6 MiB, 
 the registries still fill first. The driver directory gains `images/`. A version 3 client closes on
 the first `publication ready` of a version 4 driver, since it is longer than its fields,
 so an upgrade restarts the clients before the driver, as every version has said. The
-vectors gain the two events, a `cavalry:udp` channel in each of the five commands, and
-error events with codes 4 and 9.
+vectors gain the two events, an `available image` for an image over UDP with its own
+registration id and an `images/` log file name, a `cavalry:udp` channel in each of the
+five commands, and error events with codes 4 and 9.
 
 ### The crates
 
