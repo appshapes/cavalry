@@ -1990,7 +1990,8 @@ impl Conductor {
         };
         debug_assert!(
             self.replayer_deferred.len() < REPLAYER_DEFERRED_CAPACITY,
-            "the replayer's deferred requests passed one attach and one stop per replay"
+            "the replayer's deferred requests passed three per replay: an attach, a stop and \
+             its recording's stop"
         );
         self.replayer_deferred.push_back(request);
     }
@@ -4182,7 +4183,8 @@ mod replay {
     /// leave publications behind with no registry slot to count them. Twice the
     /// registry's capacity, 128, is the bound on them: the 129th `start replay` is
     /// refused with code 10 naming replay publications, counted in
-    /// `driver.registry_full`, and admitted again once the lingers have passed.
+    /// `driver.registry_full`, and admitted again once the lingers have passed. The
+    /// `publications` list, built for both registries, does not grow for them.
     #[test]
     fn the_replay_publications_are_bounded_at_twice_the_registry() {
         let (mut h, mut appender) = recorded("replay-publications-bound");
@@ -4193,6 +4195,7 @@ mod replay {
         // One subscription that never polls: every replay's publication lingers.
         h.conductor
             .add_subscription(CLIENT, 5, REPLAY_STREAM, IPC_CHANNEL);
+        let allocated = h.conductor.publications.capacity();
         let bound = spec::MAX_REPLAY_PUBLICATIONS as i64;
         for n in 0..bound {
             let id = 100 + n;
@@ -4207,6 +4210,11 @@ mod replay {
             .filter(|publication| publication.replay)
             .count();
         assert_eq!(lingering, spec::MAX_REPLAY_PUBLICATIONS);
+        assert_eq!(
+            h.conductor.publications.capacity(),
+            allocated,
+            "the list did not grow"
+        );
         assert!(h.conductor.replays.is_empty(), "every replay ended");
         let full_before = h.counter(DRIVER_REGISTRY_FULL);
 
@@ -4671,11 +4679,12 @@ mod replay {
     }
 
     /// The replayer's deferred requests at capacity (invariant 3): the registry full of
-    /// replays, each given its attach and its stop while the request queue is full,
-    /// fills the list to exactly its bound and not past its allocation, and every
-    /// request reaches the replayer once it catches up. A recording's stop is one more
-    /// request for the recording's live replays, one per recording, so the bound is
-    /// three per registered replay (ADR 0036).
+    /// replays, each of a recording of its own and each given its attach, its stop and
+    /// its recording's stop while the request queue is full, fills the list to exactly
+    /// its bound, three per registered replay, and not past its allocation, and every
+    /// request reaches the replayer once it catches up. A recording's stop is one
+    /// request for all its live replays, so replays sharing a recording stop short of
+    /// the bound; one recording each is the case that reaches it (ADR 0036).
     #[test]
     fn the_replayers_deferred_requests_are_bounded_by_three_per_replay() {
         let (mut h, mut appender) = recorded("replayer-deferred-capacity");
@@ -4699,7 +4708,7 @@ mod replay {
         for i in 0..n {
             h.conductor.replays.push(ReplayEntry {
                 replay_session_id: 100_000 + i,
-                recording_id: 0,
+                recording_id: i,
                 replay_stream_id: REPLAY_STREAM,
                 state: ReplayState::Starting,
                 position: None,
@@ -4710,7 +4719,7 @@ mod replay {
         let term = cavalry_shm::log::layout::MIN_TERM_LENGTH as i32;
         for i in 0..n {
             h.conductor
-                .on_replay_ready(100_000 + i, 0, 0, (0, term, 1408), (0, STREAM), now);
+                .on_replay_ready(100_000 + i, i, 0, (0, term, 1408), (0, STREAM), now);
             h.conductor.stop_replay(70_000 + i, 100_000 + i);
         }
         assert_eq!(
@@ -4718,13 +4727,16 @@ mod replay {
             2 * spec::MAX_REPLAYS,
             "one attach and one stop per replay"
         );
-        // The recording the replays play stops: one request for all of them.
-        h.conductor.on_stopped(0, 2, 640, None, now);
+        // Every recording stops, each with one registered replay of it: one request
+        // per recording, the third per replay, and the list stands at its bound.
+        for i in 0..n {
+            h.conductor.on_stopped(i, 2, 640, None, now);
+        }
         assert_eq!(
             h.conductor.replayer_deferred.len(),
-            2 * spec::MAX_REPLAYS + 1
+            REPLAYER_DEFERRED_CAPACITY,
+            "three per replay"
         );
-        assert!(h.conductor.replayer_deferred.len() <= REPLAYER_DEFERRED_CAPACITY);
         assert_eq!(
             h.conductor.replayer_deferred.capacity(),
             allocated,

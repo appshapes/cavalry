@@ -9,7 +9,7 @@
 //! environment, and `--dir` and `--log-dir` on top (ADR 0020; `docs/reference/config.md`).
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cavalry::config::Config;
@@ -35,8 +35,10 @@ const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
                            ends: at --to, at the recording's extent, or, with --follow,
                            when the recording stops; an instant is an RFC 3339 time
                            (2026-10-29T09:36:00Z) or @<nanoseconds since the Unix
-                           epoch>; --stream names the replay stream id, else one of the
-                           command's own
+                           epoch>; --from start is the recording's start position,
+                           whatever it is, alone or with --follow, not with --to, whose
+                           length needs the position; --stream names the replay stream
+                           id, else one of the command's own
   --version                print the version
 
   --dir <path>      the driver directory, for every command; the default is
@@ -588,10 +590,11 @@ fn record(config: &Config, action: RecordAction) -> ExitCode {
 /// the frame's header, the body as UTF-8 when it is printable and as hex otherwise, a
 /// fragment of a longer message marked `fragment begin`, `fragment` or `fragment end`,
 /// until the replay ends; then where it started and ended and how many messages it
-/// printed. An instant is resolved through the recording's time index in the log
-/// directory before the command is sent (`spec/durable-log.md`, "Time index"); `--to`
-/// becomes the length, `--follow` follows a live recording, and neither plays to the
-/// recording's extent. Exit 1 with the driver's message when the command is refused,
+/// printed. The position and the length are `replay_range`'s, settled before the
+/// command is sent: an instant is resolved through the recording's time index in the
+/// log directory (`spec/durable-log.md`, "Time index"), `--to` becomes the length,
+/// `--follow` follows a live recording, and neither plays to the recording's extent.
+/// Exit 1 with the driver's message when the command is refused,
 /// when the replay failed (`spec/client-protocol.md`, "Error codes" and `replay
 /// stopped`), and when the replay's log went before the command had read it to the end,
 /// with the positions it did not print (invariant 1).
@@ -600,47 +603,9 @@ fn replay(config: &Config, request: ReplayRequest) -> ExitCode {
         eprintln!("cavalry replay: {error}");
         ExitCode::FAILURE
     };
-    let resolve = |point: Point, what: &str| -> Result<i64, String> {
-        match point {
-            Point::Position(position) => Ok(position),
-            // The driver resolves the null position to the recording's start (spec,
-            // "start replay"); as an end it would mean nothing, and is refused.
-            Point::Start if what == "--from" => Ok(NULL_POSITION),
-            Point::Start => Err(format!(
-                "{what} start: the start is where a replay begins, not where it ends"
-            )),
-            Point::Instant(instant) => {
-                let log_dir = config.log_dir.as_deref().ok_or_else(|| {
-                    "an instant needs the log directory, which this host has no default for: \
-                     pass --log-dir, or a position"
-                        .to_string()
-                })?;
-                let resolved = if what == "--from" {
-                    index::position_at(log_dir, request.recording_id, instant)
-                } else {
-                    index::position_after(log_dir, request.recording_id, instant)
-                };
-                resolved.map_err(|error| format!("{what}: {error}"))
-            }
-        }
-    };
-    let from = match resolve(request.from, "--from") {
-        Ok(position) => position,
+    let (from, length) = match replay_range(&request, config.log_dir.as_deref()) {
+        Ok(range) => range,
         Err(error) => return fail(&error),
-    };
-    let length = if request.follow {
-        FOLLOW_LENGTH
-    } else {
-        match request.to.map(|to| resolve(to, "--to")) {
-            None => NULL_LENGTH,
-            Some(Ok(to)) if to >= from => to - from,
-            Some(Ok(to)) => {
-                return fail(&format!(
-                    "--to {to} is before --from {from}; nothing to play"
-                ));
-            }
-            Some(Err(error)) => return fail(&error),
-        }
     };
     let mut client = match Cavalry::connect_to(&config.dir) {
         Ok(client) => client,
@@ -660,6 +625,74 @@ fn replay(config: &Config, request: ReplayRequest) -> ExitCode {
             Err(error) => fail(&error),
         },
     }
+}
+
+/// The position and the length `cavalry replay` sends, from the request and the log
+/// directory, settled before the command goes so that a refusal costs no connection: a
+/// position as it is; `--from start` as the null position, which the driver resolves to
+/// the recording's start (`spec/client-protocol.md`, "start replay"); an instant through
+/// the recording's time index. The length is `--to` less `--from`, `NULL_LENGTH` for
+/// the extent, `FOLLOW_LENGTH` with `--follow`. Refused, each saying what to pass
+/// instead: `--to start`, an end where a replay begins; `--from start` with `--to`,
+/// since the length needs the start position and the command does not know it, so
+/// `--to` less the null position would play one frame past `--to` for a recording that
+/// started at 0 and the whole start offset past it for one that started later; and
+/// `--to` before `--from`, which the driver would refuse as a length below −1 (code 7)
+/// without saying why.
+fn replay_range(request: &ReplayRequest, log_dir: Option<&Path>) -> Result<(i64, i64), String> {
+    if request.to == Some(Point::Start) {
+        return Err(
+            "--to start: the start is where a replay begins, not where it ends".to_string(),
+        );
+    }
+    if request.from == Point::Start && request.to.is_some() {
+        return Err(
+            "--from start takes no --to: the length to --to is counted from the start \
+                    position, which only the driver knows; pass --from <position> instead; a \
+                    position the recording does not hold is refused with error 23, whose message \
+                    names the start; see docs/how-to/replay-a-recording.md#when-it-does-not-work"
+                .to_string(),
+        );
+    }
+    let resolve = |point: Point, what: &str| -> Result<i64, String> {
+        match point {
+            Point::Position(position) => Ok(position),
+            // The driver resolves the null position to the recording's start (spec,
+            // "start replay"); only `--from` reaches here with it.
+            Point::Start => Ok(NULL_POSITION),
+            Point::Instant(instant) => {
+                let log_dir = log_dir.ok_or_else(|| {
+                    "an instant needs the log directory, which this host has no default for: \
+                     pass --log-dir, or a position"
+                        .to_string()
+                })?;
+                let resolved = if what == "--from" {
+                    index::position_at(log_dir, request.recording_id, instant)
+                } else {
+                    index::position_after(log_dir, request.recording_id, instant)
+                };
+                resolved.map_err(|error| format!("{what}: {error}"))
+            }
+        }
+    };
+    let from = resolve(request.from, "--from")?;
+    let length = if request.follow {
+        FOLLOW_LENGTH
+    } else {
+        match request.to {
+            None => NULL_LENGTH,
+            Some(to) => {
+                let to = resolve(to, "--to")?;
+                if to < from {
+                    return Err(format!(
+                        "--to {to} is before --from {from}; nothing to play"
+                    ));
+                }
+                to - from
+            }
+        }
+    };
+    Ok((from, length))
 }
 
 /// The replay's image among the subscription's: the one with the replay publication's
@@ -928,9 +961,9 @@ mod tests {
     }
 
     /// `--from start` names the recording's start position without knowing it: the
-    /// request carries `Point::Start`, which the command sends as the null position;
-    /// `--to start` is refused when the command runs, since an end at the start plays
-    /// nothing, and the parser passes it through as any point (card 160).
+    /// request carries `Point::Start`, which `replay_range` sends as the null position;
+    /// the parser passes `start` through as any point, and what may go with it is
+    /// `replay_range`'s to refuse (card 160).
     #[test]
     fn replay_from_start_is_the_recordings_start_position() {
         match parsed(&["replay", "--recording", "3", "--from", "start"]) {
@@ -942,6 +975,74 @@ mod tests {
         }
         assert_eq!(parse_point("start"), Ok(Point::Start));
         assert!(parse_point("Start").is_err(), "the word is lowercase");
+    }
+
+    /// The position and the length before the command is sent (card 160): a position
+    /// and `--to` give the bytes between them; `--from start` goes as the null position
+    /// with the extent or the follow length, and takes no `--to`, whose length would be
+    /// `--to` less −1: one frame past `--to` for a recording that started at 0 and the
+    /// whole start offset past it for one that started later. `--to start`, `--to`
+    /// before `--from` and an instant without a log directory are refused too, each
+    /// saying what to pass.
+    #[test]
+    fn the_replay_range_sends_start_as_the_null_position_and_never_with_to() {
+        let request = |from: Point, to: Option<Point>, follow: bool| ReplayRequest {
+            recording_id: 3,
+            from,
+            to,
+            stream_id: None,
+            follow,
+        };
+        let range = |from, to, follow| replay_range(&request(from, to, follow), None);
+        assert_eq!(
+            range(Point::Position(64), Some(Point::Position(192)), false),
+            Ok((64, 128))
+        );
+        assert_eq!(
+            range(Point::Position(64), Some(Point::Position(64)), false),
+            Ok((64, 0))
+        );
+        assert_eq!(
+            range(Point::Position(64), None, false),
+            Ok((64, NULL_LENGTH))
+        );
+        assert_eq!(
+            range(Point::Position(64), None, true),
+            Ok((64, FOLLOW_LENGTH))
+        );
+        assert_eq!(
+            range(Point::Start, None, false),
+            Ok((NULL_POSITION, NULL_LENGTH))
+        );
+        assert_eq!(
+            range(Point::Start, None, true),
+            Ok((NULL_POSITION, FOLLOW_LENGTH))
+        );
+        for to in [
+            Point::Position(0),
+            Point::Position(64),
+            Point::Instant(1_700_000_000_000_000_000),
+        ] {
+            let refused = range(Point::Start, Some(to), false).expect_err("refused");
+            assert!(
+                refused.starts_with("--from start takes no --to"),
+                "{refused}"
+            );
+            assert!(refused.contains("error 23"), "{refused}");
+            assert!(
+                refused.contains("docs/how-to/replay-a-recording.md"),
+                "{refused}"
+            );
+        }
+        for from in [Point::Position(0), Point::Start] {
+            let refused = range(from, Some(Point::Start), false).expect_err("refused");
+            assert!(refused.starts_with("--to start"), "{refused}");
+        }
+        let refused =
+            range(Point::Position(128), Some(Point::Position(64)), false).expect_err("refused");
+        assert_eq!(refused, "--to 64 is before --from 128; nothing to play");
+        let refused = range(Point::Instant(0), None, false).expect_err("refused");
+        assert!(refused.contains("--log-dir"), "{refused}");
     }
 
     #[test]

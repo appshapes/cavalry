@@ -15,6 +15,7 @@ const DOC_LIVENESS: &str = "docs/reference/client-protocol.md#liveness-and-timeo
 const DOC_ERRORS: &str = "docs/reference/client-protocol.md#error-codes";
 const DOC_SIZES: &str = "docs/reference/client-protocol.md#sizes";
 const DOC_BROADCAST: &str = "docs/reference/broadcast-buffer.md#receiving";
+const DOC_REPLAY: &str = "docs/how-to/replay-a-recording.md#when-it-does-not-work";
 
 /// Why the client is closed: by the user, or by what the conductor found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -166,8 +167,8 @@ pub enum ClientError {
 
 impl ClientError {
     /// The reason's name: `not-found`, `driver-gone`, `closed`, `refused`,
-    /// `subscriptions-full`, `replays-full`, `response-timeout`, `command-ring`,
-    /// `broadcast`, `counters`, `protocol`, `log`, `driver` or `io`.
+    /// `subscriptions-full`, `replays-full`, `replay-queue-full`, `response-timeout`,
+    /// `command-ring`, `broadcast`, `counters`, `protocol`, `log`, `driver` or `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClientError::NotFound { .. } => "not-found",
@@ -259,8 +260,8 @@ impl fmt::Display for ClientError {
             ClientError::ReplayQueueFull { limit } => write!(
                 f,
                 "command refused ({reason}): this client has {limit} replay starts waiting for \
-                 the driver's answer and sent nothing; wait for one to be answered, then start \
-                 the next; see {DOC_SIZES}"
+                 the driver's answer, its own queue's bound, and sent nothing; wait for one to \
+                 be answered, then start the next; see {DOC_REPLAY}"
             ),
             ClientError::ResponseTimeout { command } => write!(
                 f,

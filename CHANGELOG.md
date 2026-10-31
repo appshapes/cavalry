@@ -717,9 +717,10 @@ user-visible change, added in the same commit as the change. The format follows
   past the stop and fail with reason 3. The replay publications, live or lingering
   after their replay ended, are bounded at 128, twice the replays registry; a `start
   replay` past it is refused with error 10 naming them. `cavalry replay --from start`
-  names a recording's start position without knowing it; the client's full replay
-  start queue is `ClientError::ReplayQueueFull` (reason `replay-queue-full`), not an
-  error that blamed the driver; and the replays bound has one definition, in
-  `cavalry-proto`
+  names a recording's start position without knowing it, alone or with `--follow`, and
+  is refused with `--to`, whose length needs the position; the client's full replay
+  start queue is `ClientError::ReplayQueueFull` (reason `replay-queue-full`, explained
+  in the replay how-to), not an error that blamed the driver; and the replays bound has
+  one definition, in `cavalry-proto`
   ([ADR 0036](docs/decisions/0036-hand-the-replayer-the-stop-and-bound-the-replay-publications.md);
   card 160).
