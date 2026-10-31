@@ -51,7 +51,7 @@ nothing depends on it.
   for the profile, on the `claim_commit` and `one_way` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017). The bench hosts' profiles have
   baselines, `bench-linux`, `kip-linux` and `grip-linux` with their `-unchecked` twins,
-  grip's recorded on 2026-10-31 at 0782ec5 from its job's first three processes, and CI runs
+  grip's recorded on 2026-10-31 at 0782ec5 from its job's first four processes, and CI runs
   the gate on each host, as `bench (linux)`, `bench (grip)` and, until grip's job has
   been green over a handful of pushes, `bench (kip)`
   ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)): a
@@ -79,7 +79,9 @@ nothing depends on it.
   tree, so `bench`'s two were re-recorded from master's three processes at 0782ec5,
   and `grip`'s two, `grip-linux` and `grip-linux-unchecked`, were recorded for the first
   time from the same three runs, the host's first processes with its Wi-Fi interrupts
-  off the isolated CPUs ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)).
+  off the isolated CPUs, and joined by a fourth process the same day when it read the
+  checked client claim row above the three's band
+  ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)).
 
 ## What it must never do
 

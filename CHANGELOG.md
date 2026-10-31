@@ -712,8 +712,10 @@ user-visible change, added in the same commit as the change. The format follows
   "Updating the host").
 - `grip`'s first baselines, `grip-linux` and `grip-linux-unchecked`, recorded from
   master's three processes at 0782ec5 (run 41196273792, attempts 3 to 5), the host's
-  first with its Wi-Fi interrupts off the isolated CPUs: the exclusive claim row's
-  slowest run 92 ns at p99.99 over runs of 73 to 92, the one_way rows 423 to 720. The
+  first with its Wi-Fi interrupts off the isolated CPUs, and joined by a fourth, this
+  change's own run, which read the checked client claim row at 133 ns against the
+  three's slowest 118 (ADR 0033): the exclusive claim row's slowest run 92 ns at p99.99
+  over runs of 73 to 92, the client row's 138, the one_way rows 423 to 720. The
   `bench` host's two re-recorded from the same three runs after the two host changes
   of the day ended its tree (ADR 0033): twelve rows move by a step or less and four
   tighten by more than one, the checked concurrent claim row 169 to 150 ns, the checked
