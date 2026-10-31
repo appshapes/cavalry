@@ -654,3 +654,15 @@ user-visible change, added in the same commit as the change. The format follows
   tree's other processes, is a disturbed host, joins no baseline and is re-run; the
   bench how-to's troubleshooting list reads it that way
   ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
+- `bench`'s two baselines are re-recorded from every process the host has run at the
+  tree of 4a09b6e, twelve, as ADR 0033 defines a baseline, so both hosts' baselines now
+  hold a band; the one process the host's `sysstat-collect` timer disturbed on
+  2026-10-30 joins nothing (card 170). Every process's medians sit where the
+  one-process baselines of 96fb91a were, and what the entries gain is the band's edge:
+  the compared value, the slowest run over the processes, moves on eight gated rows by
+  more than 5 percent, the checked concurrent claim row 150 to 169, exclusive 160 to
+  170 and `_recorded` 320 to 339, the unchecked concurrent 150 to 180, exclusive 150 to
+  180, `_recorded` 320 to 350, one-way client 300 to 340 and one-way exclusive 210 to
+  240 (card 168 owns the claim rows' spread); four rows move by one 10 ns step, the two
+  one-way `_recorded` rows by two, and the two client claim rows hold
+  ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
