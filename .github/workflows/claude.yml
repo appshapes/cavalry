@@ -104,7 +104,11 @@ jobs:
       # concurrency group QUEUES rather than cancels, so two runs of this gate for ONE review
       # are possible. A review addresses the head it was written against, so the run proceeds
       # only while the pull request's CURRENT head still equals the review's `commit_id`. The
-      # first fixer's push moves the head; a duplicate arriving after it skips as stale.
+      # first fixer's push moves the head; a duplicate arriving after it skips as stale. A
+      # body-only fix moves no head, so the second test is a claude review newer than this
+      # one at the same head: the loop has reviewed that fix already, and that review's own
+      # event runs the fixer if it needs to. A duplicate that arrives before that review
+      # lands still proceeds, and ends loud, with nothing left to push or edit.
       - name: Gate autonomous fix attempts
         id: fix_gate
         if: github.event_name == 'pull_request_review' && startsWith(github.event.review.user.login, 'claude')
@@ -113,6 +117,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEW_COMMIT_ID: ${{ github.event.review.commit_id }}
+          REVIEW_ID: ${{ github.event.review.id }}
           MAX_ATTEMPTS: 3
         run: |
           set -euo pipefail
@@ -128,6 +133,13 @@ jobs:
           head_now=$(gh_retry gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')
           if [ "$head_now" != "$REVIEW_COMMIT_ID" ]; then
             echo "stale review: a fix already landed (review addressed $REVIEW_COMMIT_ID, head is now $head_now); skipping"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          newer=$(gh_retry gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
+            --jq ".[] | select((.user.login // \"\" | startswith(\"claude\")) and .commit_id == \"$REVIEW_COMMIT_ID\" and .id > $REVIEW_ID) | .id")
+          if [ -n "$newer" ]; then
+            echo "stale review: the loop has reviewed $REVIEW_COMMIT_ID again since review $REVIEW_ID (review $(printf '%s' "$newer" | tr '\n' ' ')); skipping"
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi

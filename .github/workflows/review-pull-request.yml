@@ -102,8 +102,12 @@ jobs:
             echo "::notice::pull request $PR_NUMBER moved from $HEAD_SHA to $head_now; the run dispatched for the new head reviews it"
             echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          reviews_before=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" \
-            --jq ".[] | select((.user.login // \"\" | startswith(\"claude\")) and .commit_id == \"$HEAD_SHA\") | .id" | grep -c . || true)
+          # Captured on its own line, so that an API failure fails this step under `set -e`,
+          # loud and re-labelled by a person, rather than counting as zero reviews, which
+          # would reopen the gap the count closes.
+          ids=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" \
+            --jq ".[] | select((.user.login // \"\" | startswith(\"claude\")) and .commit_id == \"$HEAD_SHA\") | .id")
+          reviews_before=$(printf '%s\n' "$ids" | grep -c . || true)
           echo "claude reviews at $HEAD_SHA before this run: $reviews_before"
           echo "reviews_before=$reviews_before" >> "$GITHUB_OUTPUT"
           echo "proceed=true" >> "$GITHUB_OUTPUT"
