@@ -389,8 +389,18 @@ written with version 2, since 1 is now a version. Every one is run by
 `crates/cavalry-log/tests/check_order.rs` refuses a header of version 2 with `version`.
 `crates/cavalry-driver/tests/driver.rs` sends each of the three commands to a driver
 that decodes them and refuses them with code 11, counted in `client_protocol.errors`
-alone, until the implementing change lands. Error code 24 is a check on the driver's
-state, which no vector holds; its tests are the implementing change's, below.
+alone, until the implementing change lands. Three tests hold this ADR's additions to
+the format at their boundaries: `a_retained_checksum_that_fails_is_retried_then_reported`
+(`crates/cavalry-log/tests/catalog.rs`) tears a version 1 slot's retained checksum and
+shows the reader retries it for 100 ms before reporting `checksum`, as it retries a stop;
+`a_retained_position_at_the_minimum_is_position_not_an_overflow`
+(`crates/cavalry-log/tests/no_panic.rs`) shows `retained(i64::MIN)` on a start position
+in a later term is refused with `position`, never an overflow; and
+`rewrite_accepts_a_slot_in_version_1s_form_and_keeps_its_creation_bytes`
+(`tests/catalog.rs`) shows a stop written through the writer's one rewrite path on a
+version 1 slot succeeds by the two-range rule and leaves the creation checksum and the
+retained group as they were. Error code 24 is a check on the driver's state, which no
+vector holds; its tests are the implementing change's, below.
 `just lint`, `just test`, `just docs` and `just lint-docs` exit 0 on the change.
 
 The bench on the acceptance change, which touches no message path: on a laptop,

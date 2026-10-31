@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use cavalry_log::catalog::{CatalogError, CatalogReader, CatalogWriter};
 use cavalry_log::layout::{
-    CATALOG_FILE_NAME, CATALOG_MAGIC, CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, HEADER_LENGTH,
-    MAX_SLOTS, Recording, State,
+    CATALOG_FILE_NAME, CATALOG_MAGIC, CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, Form,
+    HEADER_LENGTH, MAX_SLOTS, Recording, State,
 };
 
 const NOW: i64 = 1_760_000_000_000_000_000;
@@ -56,6 +56,13 @@ impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// The bytes of slot `slot` as the file holds them.
+fn read_slot(dir: &TestDir, slot: u64) -> Vec<u8> {
+    let bytes = std::fs::read(dir.catalog()).expect("the catalog reads");
+    let offset = usize::try_from(CatalogHeader::slot_offset(slot)).expect("fits");
+    bytes[offset..offset + DESCRIPTOR_LENGTH].to_vec()
 }
 
 fn recording(stream_id: i32) -> Recording<'static> {
@@ -294,6 +301,37 @@ fn a_header_not_ready_over_whole_slots_is_refused() {
         CatalogHeader::slot_offset(1),
         "nothing is rewritten"
     );
+}
+
+/// A slot in version 1's form holds under version 1's checksum range, which `rewrite`
+/// checks by the parser's two-range rule: a stop written through it succeeds, reads
+/// back in version 1's form with the retained position at the start, and leaves the
+/// creation checksum and the retained group's bytes as they were (ADR 0031).
+#[test]
+fn rewrite_accepts_a_slot_in_version_1s_form_and_keeps_its_creation_bytes() {
+    let dir = TestDir::new("rewrite-version-1");
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
+    let id = writer.add(&recording(1)).expect("added");
+    let version_1 = Descriptor::new(&recording(1))
+        .expect("a valid recording")
+        .in_version_1()
+        .encode();
+    let offset = CatalogHeader::slot_offset(0);
+    dir.write_at(&version_1, offset);
+
+    writer.stop(id, 4096, NOW + 1).expect("the stop is written");
+
+    let reader = CatalogReader::open(dir.path()).expect("opens");
+    let stopped = reader.get(id).expect("reads").expect("the slot");
+    assert_eq!(stopped.form(), Form::Version1);
+    assert_eq!(
+        (stopped.stop_position(), stopped.stop_timestamp()),
+        (4096, NOW + 1)
+    );
+    assert_eq!(stopped.retained_position(), stopped.start_position());
+    let slot = read_slot(&dir, 0);
+    assert_eq!(slot[24..28], version_1[24..28], "the creation checksum");
+    assert_eq!(slot[472..484], version_1[472..484], "the retained group");
 }
 
 #[test]

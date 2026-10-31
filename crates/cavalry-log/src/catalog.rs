@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::layout::{
     CATALOG_FILE_NAME, CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, HEADER_LENGTH, LayoutError,
-    MAX_SLOTS, Recording, State, crc32,
+    MAX_SLOTS, Recording, State,
 };
 
 const DOC: &str = "docs/reference/durable-log.md#catalog-header";
@@ -412,9 +412,12 @@ impl CatalogWriter {
     /// state are not touched, so recovery never re-signs a creation field. The slot's
     /// stop checksum may fail, since rebuilding a torn stop is what this is for, but the
     /// rest must hold: a slot past the last is `unknown`, an empty one is `unknown`, a
-    /// state-2 one is `invalid`, a creation checksum that fails is `checksum`, a
+    /// state-2 one is `invalid`, a creation checksum that holds under neither form's
+    /// range is `checksum` (the two-range rule, `spec/durable-log.md`, "Descriptor"), a
     /// descriptor whose id is not `slot` is `recording-id`, and one whose creation
-    /// fields are not the slot's is `mismatch`. Nothing is written when any fails.
+    /// fields are not the slot's is `mismatch`. Nothing is written when any fails; bytes
+    /// 4 to 24 are written, so the creation checksum and a version 1 slot's retained
+    /// group stay as they are.
     pub fn rewrite(&mut self, slot: u64, descriptor: &Descriptor) -> Result<(), CatalogError> {
         let recording_id = i64::try_from(slot).unwrap_or(i64::MAX);
         if slot >= self.slots {
@@ -428,10 +431,9 @@ impl CatalogWriter {
             Some(State::Invalid) => return Err(LayoutError::Invalid.into()),
             None => return Err(LayoutError::State { found: state }.into()),
         }
-        let creation_checksum = u32::from_le_bytes([found[24], found[25], found[26], found[27]]);
-        if creation_checksum != crc32(&found[28..]) {
-            return Err(LayoutError::CreationChecksum.into());
-        }
+        // The two-range rule, the parser's: a slot in either form holds under its own
+        // range, so a stop written under a version 1 header is never refused as damage.
+        Descriptor::form_of(&found)?;
         if descriptor.recording_id() != recording_id {
             return Err(LayoutError::RecordingId {
                 found: descriptor.recording_id(),
