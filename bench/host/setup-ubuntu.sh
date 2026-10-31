@@ -3,8 +3,10 @@
 # is the page; bench/host/check.sh verifies the result after the reboot this needs.
 #
 # Run as root, once, on a host that does nothing else. Every step writes a fixed file or
-# value, so running it again changes nothing. Undo: delete the files it names and run
-# `update-grub`, then reboot.
+# value, so running it again changes nothing; a host takes a later version of this script
+# by running it again (docs/how-to/set-up-a-bench-host.md, "Updating the host"). Undo:
+# delete the files it names, `systemctl unmask` the timers of step 7, run `update-grub`,
+# then reboot.
 #
 # The isolated CPUs carry the harness's three spinning threads and nothing else; the
 # housekeeping CPUs carry the runner, the build, interrupts and every other process.
@@ -131,5 +133,24 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -q >/dev/null
 apt-get install -y -q build-essential >/dev/null
 echo "setup-ubuntu.sh: $(cc --version | head -1)"
+
+# 7. No scheduled jobs: a timer's service runs on the housekeeping CPUs while a bench may
+#    be on the isolated ones, and on 2026-10-30 sysstat-collect.service, which its timer
+#    starts every ten minutes, fired 85 seconds into a bench whose unchecked concurrent
+#    claim rows then read a tenth slower with the whole row moved, p50 to p99.99 (card
+#    170). A stock Ubuntu Server runs these twelve on a schedule and a bench host needs
+#    none of them. Masked, not disabled: a package upgrade re-enables a disabled unit
+#    and leaves a masked one alone. Two stay: logrotate.timer, because rsyslog writes
+#    /var/log/syslog and nothing else bounds it, and fstrim.timer, for the drive; both
+#    run at midnight UTC, daily and weekly. check.sh fails when one of the twelve is
+#    active. Undo: `systemctl unmask <timer>.timer`.
+for timer in sysstat-collect sysstat-rotate sysstat-summary fwupd-refresh \
+        update-notifier-download update-notifier-motd motd-news man-db dpkg-db-backup \
+        systemd-tmpfiles-clean e2scrub_all xfs_scrub_all; do
+    systemctl stop "$timer.timer" >/dev/null 2>&1 || true
+    systemctl mask "$timer.timer" >/dev/null 2>&1 || true
+done
+echo "setup-ubuntu.sh: timers masked: $(systemctl list-unit-files --type=timer --state=masked --no-legend | awk '{print $1}' | sed 's/\.timer$//' | paste -sd, -)"
+echo "setup-ubuntu.sh: timers still active: $(systemctl list-timers --no-legend | awk '{print $(NF-1)}' | sed 's/\.timer$//' | paste -sd, -)"
 
 echo "setup-ubuntu.sh: done; reboot, then run bench/host/check.sh with the CPUs the harness will pin"
