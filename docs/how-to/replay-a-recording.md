@@ -122,7 +122,10 @@ handle lives, as many as the driver allows live at once, 64; one more is
   before the command is sent.
 - `error 12 (storage space)`: a segment file of the recording is missing from the log
   directory, or the replay's log could not be created in the driver directory; the
-  message names the file.
+  message names the file. A recording that stopped at its start position has no
+  segment file and is not this error: a replay of it from that position ends at once
+  there with `0 messages`
+  ([ADR 0035](../decisions/0035-end-a-replay-with-nothing-to-play-at-once.md)).
 - `error 10 (resource temporarily unavailable)`: the replays registry (64), the
   replayer's queue or the counters file is full; stop replays that are not needed.
 - The replay prints nothing and ends after five seconds with `ended for want of a

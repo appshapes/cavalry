@@ -223,7 +223,11 @@ struct Replay {
     extent: Extent,
     /// Where the replay starts, until the writer is attached.
     start_position: i64,
-    segment: File,
+    /// The open segment file, or `None` for a replay with nothing to play, whose
+    /// position at the start is its end or its stopped recording's extent: it reads no
+    /// byte, so it opens no file, and the recorder keeps none for a recording that
+    /// stopped at its start (`spec/client-protocol.md`, "start replay"; ADR 0035).
+    segment: Option<File>,
     segment_base: i64,
     /// The open segment's path, formatted in place at a roll.
     segment_path: PathBuf,
@@ -383,7 +387,8 @@ impl Replayer {
         }
     }
 
-    /// Reads the slot, resolves and checks the position, opens the segment file.
+    /// Reads the slot, resolves and checks the position, opens the segment file unless
+    /// there is nothing to play.
     fn start(&mut self, start: Start, now: i64) {
         let replay_session_id = start.replay_session_id;
         let fail = |failure| Reply::StartFailed {
@@ -467,28 +472,39 @@ impl Replayer {
         } else {
             position.saturating_add(start.length.max(0))
         };
-        let located = match locate(&descriptor, position) {
-            Ok(located) => located,
-            Err(error) => {
-                self.pending
-                    .push_back(fail(StartFailure::Files(format!("{error}"))));
-                return;
-            }
-        };
+        // A stopped recording's replay from its end, or from the extent, has nothing to
+        // play: it ends with reason 0 on its first visit once its publication exists,
+        // and opens no file, since the recorder keeps no segment file for a recording
+        // that stopped at its start (spec, "start replay"; ADR 0035). A live
+        // recording's replay from its extent waits for bytes, and its file exists.
+        let nothing_to_play =
+            matches!(extent, Extent::Final(_)) && (position >= end || position >= extent_now);
         let mut segment_path =
             PathBuf::with_capacity(self.dir.as_os_str().len() + 1 + SEGMENT_NAME_CAPACITY);
-        segment_path.push(&self.dir);
-        segment_path.push(&located.segment_file);
-        let segment = match File::open(&segment_path) {
-            Ok(file) => file,
-            Err(error) => {
-                self.pending.push_back(fail(StartFailure::Files(format!(
-                    "cannot open the segment file {} of recording {} at position {position}: \
-                     {error}; the log directory lost a file, restore it from a backup; see {DOC}",
-                    segment_path.display(),
-                    start.recording_id
-                ))));
-                return;
+        let (segment, segment_base) = if nothing_to_play {
+            (None, position)
+        } else {
+            let located = match locate(&descriptor, position) {
+                Ok(located) => located,
+                Err(error) => {
+                    self.pending
+                        .push_back(fail(StartFailure::Files(format!("{error}"))));
+                    return;
+                }
+            };
+            segment_path.push(&self.dir);
+            segment_path.push(&located.segment_file);
+            match File::open(&segment_path) {
+                Ok(file) => (Some(file), located.segment_base_position),
+                Err(error) => {
+                    self.pending.push_back(fail(StartFailure::Files(format!(
+                        "cannot open the segment file {} of recording {} at position {position}: \
+                         {error}; the log directory lost a file, restore it from a backup; see {DOC}",
+                        segment_path.display(),
+                        start.recording_id
+                    ))));
+                    return;
+                }
             }
         };
         self.pending.push_back(Reply::Ready {
@@ -509,7 +525,7 @@ impl Replayer {
             extent,
             start_position: position,
             segment,
-            segment_base: located.segment_base_position,
+            segment_base,
             segment_path,
             attached: None,
         });
@@ -542,7 +558,9 @@ impl Replayer {
             return Step::Idle;
         }
         let segment_length = i64::from(replay.descriptor.segment_file_length());
-        if (position < replay.segment_base || position >= replay.segment_base + segment_length)
+        if (replay.segment.is_none()
+            || position < replay.segment_base
+            || position >= replay.segment_base + segment_length)
             && roll(&self.dir, replay, position).is_err()
         {
             if !may_stop {
@@ -574,8 +592,10 @@ impl Replayer {
             return Step::Idle;
         }
         let offset = (position - replay.segment_base) as u64;
-        if replay
-            .segment
+        let Some(segment) = replay.segment.as_ref() else {
+            return Step::Idle;
+        };
+        if segment
             .read_exact_at(&mut self.buffer[..length], offset)
             .is_err()
         {
@@ -749,7 +769,7 @@ fn roll(dir: &Path, replay: &mut Replay, position: i64) -> Result<(), std::io::E
     replay.segment_path.clear();
     replay.segment_path.push(dir);
     replay.segment_path.push(file_name);
-    replay.segment = File::open(&replay.segment_path)?;
+    replay.segment = Some(File::open(&replay.segment_path)?);
     replay.segment_base = base;
     Ok(())
 }

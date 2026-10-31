@@ -3607,6 +3607,64 @@ mod replay {
         }
     }
 
+    /// The empty case (invariant 1): a recording stopped at its start position has no
+    /// segment file, since the recorder removes the one it never wrote to; a replay of
+    /// it from the start to the extent is `replay ready` and ends at once with `replay
+    /// stopped` at the start position, reason 0, with nothing in its log and no error,
+    /// where it was refused with code 12, storage space (ADR 0035, card 165).
+    #[test]
+    fn a_replay_of_an_empty_recording_ends_at_once_at_its_start_position() {
+        let (mut h, appender) = recorded("replay-empty");
+        stop_recording(&mut h, 4);
+        assert!(
+            !h.log_dir.join("0-0.rec").exists(),
+            "the recorder removed the empty segment file"
+        );
+        let _ = events(&mut h);
+
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let mut got = events(&mut h);
+        wait_replay_end(&mut h, 6);
+        for _ in 0..3 {
+            h.cycle();
+        }
+        got.extend(events(&mut h));
+        assert_eq!(errors(&got), vec![], "no error event");
+        let (replay_session_id, recording_id, start, _, stream_id) =
+            replay_ready(&got, 6).expect("replay ready, not an error");
+        assert_eq!(
+            (replay_session_id, recording_id, start, stream_id),
+            (6, 0, 0, REPLAY_STREAM)
+        );
+        assert_eq!(replay_stopped(&got, 6), Some((0, 0)));
+        assert_eq!(h.counter(REPLAY_STARTED), 1);
+        assert_eq!(h.counter(REPLAY_START_FAILED), 0);
+        assert_eq!(h.counter(REPLAY_STOPPED), 1);
+        assert_eq!(h.counter(REPLAY_ENDED), 1);
+        assert_eq!(h.counter(REPLAY_FAILED), 0);
+        // The subscriber stood at the end from the start, so the publication closed at
+        // once: the image went and the empty log was removed.
+        assert!(
+            h.conductor
+                .publications
+                .iter()
+                .all(|publication| publication.registration_id != 6)
+        );
+        assert!(!h.dir.path().join("publications/6.logbuffer").exists());
+        let unavailable = got.iter().any(|(type_id, message)| {
+            matches!(
+                Event::parse(*type_id, message),
+                Ok(Event::UnavailableImage {
+                    correlation_id: 6,
+                    subscriber_registration_id: 5,
+                    ..
+                })
+            )
+        });
+        assert!(unavailable, "the subscriber heard the image go");
+        drop(appender);
+    }
+
     /// The full case (invariant 1): 100 messages recorded and stopped; a replay from
     /// the start to the extent into a subscription that joined first; `replay ready`
     /// and `available image` with the replay's publication at the start position;

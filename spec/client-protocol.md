@@ -199,6 +199,11 @@ What the driver does with each, after the checks of "What the driver rejects":
   the position is code 12. Each of the three adds one to `replay.start_failed`. The
   replay's *end position* is the position plus the length: the extent when the replay
   starts for a length of −1, and 2^63 − 1 for a length of 2^63 − 1 or a sum past it.
+  A replay of a stopped recording whose position is its end position or the extent has
+  nothing to play: the replayer opens no segment file for it, since the recorder keeps
+  none for a recording that stopped at its start (`spec/durable-log.md`, "The driver"),
+  and the replay is answered `replay ready` as any replay is and ends with reason 0 at
+  that position on the replayer's first visit once its publication exists.
   The replay plays the recording's frames from the position up to the earlier of its end
   position and the recording's stop position, so a length past a live recording's
   extent, 2^63 − 1 among them, plays bytes as they are synced and ends when the
@@ -267,7 +272,8 @@ frame length of 0 is found below the extent, so that a recording that has stoppe
 the replay at its stop position, reason 0, within a second.
 
 A replay ends by itself when its position reaches or passes its end position, or
-reaches the recording's stop position: the driver stores the end of stream position on the replay log, as it
+reaches the recording's stop position, which a replay that starts there, with nothing
+to play, does on the replayer's first visit: the driver stores the end of stream position on the replay log, as it
 does for a closed publication, and sends `replay stopped` with reason 0; the images go
 as a closed publication's do, once every subscriber has reached the end of stream
 position or the linger has passed, and then the log. `stop replay` ends a replay at the

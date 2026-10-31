@@ -694,3 +694,10 @@ user-visible change, added in the same commit as the change. The format follows
   when one of the twelve is; applied on `grip` at its set-up and on `bench` and `kip`
   on 2026-10-31 (card 170; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
   "Updating the host").
+- A replay of a recording that stopped at its start position, from that position,
+  ends at once: `replay ready`, then `replay stopped` at the position with reason 0,
+  and `cavalry replay` prints `0 messages`, where the driver refused it with error 12
+  (storage space) because the recorder keeps no segment file for an empty recording.
+  The replayer opens no file for a replay with nothing to play
+  ([ADR 0035](docs/decisions/0035-end-a-replay-with-nothing-to-play-at-once.md); card
+  165, found by `just quickstart` on 2026-10-29).
