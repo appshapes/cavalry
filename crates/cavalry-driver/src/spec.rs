@@ -45,7 +45,7 @@ pub const PUBLICATION_LINGER: Duration = Duration::from_secs(5);
 pub const COUNTER_REUSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The counters file's capacity, in counters: sized so that the registries fill before
-/// it does, 14,343 at most in client protocol version 4 (`spec/client-protocol.md`,
+/// it does, 14,354 at most in client protocol version 4 (`spec/client-protocol.md`,
 /// "Sizes"; ADR 0040).
 pub const COUNTERS_CAPACITY: u32 = 16384;
 
