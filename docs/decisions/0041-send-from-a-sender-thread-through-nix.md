@@ -50,10 +50,23 @@ sender from the log and put in a datagram, so the per-message checklist of
 ## Decision
 
 `cavalry-driver` depends on `nix` 0.31 with `default-features = false` and the
-features `socket`, `uio` and `net`, listed in its `allowed-dependencies`. A send
-endpoint's socket is a `std::net::UdpSocket`, opened, bound to the interface when one
-is named, connected to the endpoint and set non-blocking by `std` on the control plane
-as the command is handled; `nix` is called on its descriptor for what `std` lacks:
+features `socket`, `uio` and `net`, listed in its `allowed-dependencies`, each named
+for the calls it gates in `nix`'s source (Evidence has the lines). `socket` gates the
+`sys::socket` module itself: `setsockopt` and `getsockopt` with `sockopt::RcvBuf` and
+`sockopt::SndBuf`, `MsgFlags`, and the `SockaddrLike` trait with its implementation
+for `()`, the address a connected socket passes. `uio` gates the vectored and batched
+calls, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg` and `MultiHeaders`: every call on
+the sender's duty cycle. `net` gates `SockaddrIn` and `SockaddrIn6`, the readers of an
+IPv4 or IPv6 address out of a `SockaddrStorage`, and the conversions to and from
+`std::net`: the sender needs none of it, since its socket is connected and every send
+and receive passes `()` for the address, and the receiver (card 181) needs it for the
+source address `recvmmsg` fills in for every datagram, which is the image's source
+identity and where the receiver's status messages and NAKs go (`spec/udp.md`, "The
+receiver"); it is on from this ADR so that the receiver takes the dependency as
+Consequences says, with no second ADR. A send endpoint's socket is a
+`std::net::UdpSocket`, opened, bound to the interface when one is named, connected to
+the endpoint and set non-blocking by `std` on the control plane as the command is
+handled; `nix` is called on its descriptor for what `std` lacks:
 `sendmmsg` for a burst on Linux and `sendmsg` per datagram elsewhere, with no control
 messages, so that neither allocates, through one `MultiHeaders` the endpoint
 preallocates for the burst's 16 datagrams when it opens; `recvmmsg` on Linux and
@@ -116,7 +129,26 @@ error codes 4 and 9, the counters' allocation and release, the events to clients
   feature, `memoffset` 0.9. `nix` 0.31.3, `libc` 0.2.190, `bitflags` 2.13.2 and
   `cfg-if` 1.0.5 are already in `Cargo.lock` through `ctrlc` 3.5.2, the `cavalry`
   crate's control-plane dependency; `memoffset` is the one crate this adds to the
-  lock. No `default` features: 0 of 36 are on, so the three asked for are the surface.
+  lock. `default = []`, so none of the 34 named features in its `[features]` table is
+  on; `net` enables `socket`, `socket` enables `memoffset`, its optional dependency,
+  and `uio` enables nothing, so the surface is the three features asked for and
+  `memoffset`.
+- Which feature gates which call, read 2026-10-31 at tag v0.31.3. `src/sys/mod.rs`
+  lines 128 to 131 put the `sys::socket` module behind `socket`, and with it
+  `setsockopt` and `getsockopt` (`src/sys/socket/mod.rs` lines 2507 and 2487),
+  `MsgFlags` (line 318), `RcvBuf` and `SndBuf` (`src/sys/socket/sockopt.rs` lines 813
+  to 828, under no further gate), the `SockaddrLike` trait and its implementation for
+  `()` (`src/sys/socket/addr.rs` lines 651 and 784) and `SockaddrStorage` (line 1126).
+  The `feature!` block behind `uio` runs from `src/sys/socket/mod.rs` line 646 to line
+  2214 and holds `sendmsg` (line 1729), `sendmmsg` (line 1765), `MultiHeaders` and
+  `preallocate` (lines 1838 and 1853), `recvmmsg` (line 1917) and `recvmsg` (line
+  2193). `net` gates `SockaddrIn` and `SockaddrIn6` (`addr.rs` lines 812 and 959),
+  `SockaddrStorage`'s `as_sockaddr_in` and `as_sockaddr_in6` (lines 1364 to 1372),
+  `LinkAddr`, the conversions from `std::net::SocketAddr` (lines 1428 to 1458) and
+  the multicast and IP-level options in `sockopt.rs`. `sendmmsg` takes its addresses
+  as `AsRef<[Option<S>]>` with `S: SockaddrLike` (line 1777), `sendmsg` its as
+  `Option<&S>` (line 1730), and `MultiHeaders<S>` asks `S: Copy + SockaddrLike` (line
+  1855), so a connected socket passes `()` throughout and calls nothing `net` gates.
 - The allocation audit, read 2026-10-31 at tag v0.31.3, `src/sys/socket/mod.rs`:
   `sendmmsg` and `recvmmsg` (both `cfg(any(linux_android, target_os = "freebsd",
   target_os = "netbsd"))`) write the slices, addresses and control messages into the
