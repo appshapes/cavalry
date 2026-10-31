@@ -85,8 +85,9 @@ again every 100 µs while it persists; drops a duplicate silently, a frame befor
 last status message's position as an under-run and one beyond the threshold as an
 over-run, each counted; retires an image 10 s after its last data frame that was
 neither an over-run nor an under-run or its last heartbeat at or above the last status
-message's position less a term (`timeOfLastPacketNs`), an under-run moving only the
-per-source connection's clock; and at end of
+message's position less a term (`timeOfLastPacketNs`), an under-run within the max
+receiver window below that position moving only the per-source connection's clock; and
+at end of
 stream, once the rebuild position has reached the highest, stores the end-of-stream
 position and sends the status message with the end-of-stream flag. Its defaults: MTU
 1408, UDP term length 16 MiB, receiver window 128 KiB, socket receive buffer 128 KiB,
@@ -345,18 +346,23 @@ endpoint's five counters are freed after the counter reuse timeout, and the regi
 slot is returned, so a driver that has seen more than 64 distinct endpoints over its
 life refuses none that are gone. The endpoint's states are a state machine in
 `counters.toml`, initializing (0), active (1), closing (2) and errored (−1), with a
-transition counter each: `channel.opened` (initializing to active), `channel.closed`
-(active to closing, then freed) and `channel.errored` (active to errored only). The
-socket is opened, bound and connected on the control plane as the command is handled,
-so a port in use or an interface that is not there is error code 4 to that command,
-with nothing registered and no counter kept, as Aeron's `openDatagramChannel` fails
-under the conductor; `initializing` is the moment between the slot and the socket, which
-a client never observes. Errored is for a failure on a live socket the operating system
-reports to the sender or the receiver, an interface gone or an address no longer local,
-which `sender.send_failed` or `receiver.rejected_datagrams` counts too; `channel.status`
-holds −1 until the endpoint's last publication or subscription is removed, so that
-`doctor` explains it and a client that reads −1 from the indicator knows the endpoint
-failed after it was ready.
+transition counter each that this version takes: `channel.opened` (initializing to
+active) and `channel.closed` (active to closing, then freed). The socket is opened,
+bound and connected on the control plane as the command is handled, so a port in use
+or an interface that is not there is error code 4 to that command, with nothing
+registered and no counter kept, as Aeron's `openDatagramChannel` fails under the
+conductor; `initializing` is the moment between the slot and the socket, which a client
+never observes. No failure on a live socket moves an endpoint to errored in this
+version, as none does in Aeron: a send the operating system refuses is counted in
+`sender.send_failed` and the burst is retried on the next cycle as a short send is; a
+port unreachable the connected socket reports after an ICMP error, `ECONNREFUSED` on
+Linux, the normal case for a publisher started before its subscriber or whose
+subscriber's driver restarts, is counted the same way and ignored, as Aeron's
+`PortUnreachableException` catch ignores it, and so are `EAGAIN`, `ENOBUFS` and
+`EINTR`; a receive the operating system refuses is counted in `receiver.receive_failed`
+and the poll retried. Errored, −1, is reserved for the version that re-resolves names
+(Revisit), where Aeron's `updateEndpoint` is the one path that takes a live endpoint
+there; a client never reads −1 from the indicator in this version.
 
 A subscription's `subscription.position` on an image is the counter the status message's
 position is read from, as it is the counter the driver's cleaning reads (ADR 0013).
@@ -380,7 +386,8 @@ send-setup flag sent for a session with no image), `receiver.heartbeats_received
 and heartbeats for a session with no image: pending, in progress, on cool-down or
 unwanted, by reason in `doctor`), `receiver.sessions_full` (the datagrams dropped
 because the session table had no room for a new session),
-`receiver.rejected_datagrams` (the datagram checks); per publication, keyed as
+`receiver.rejected_datagrams` (the datagram checks), `receiver.receive_failed` (a
+receive the operating system refused); per publication, keyed as
 `publication.position` is, `sender.position` and `sender.limit`; per image, keyed as
 `subscription.position` is, with the image's registration id as the correlation id and
 the image's session and stream ids, `image.hwm_position` and `image.rebuild_position`;
@@ -392,9 +399,9 @@ and `wmem_max`), `channel.images` and `channel.publications`. The publication's
 connection and the image's life are state machines in `counters.toml`, each transition
 counted by a static counter of its own: `publication.connected`,
 `publication.disconnected`, `image.created`, `image.ended`, `image.timed_out` and
-`image.removed`; and the endpoint's life is a third, `channel.opened`, `channel.closed`
-and `channel.errored`. The static counters this page adds are 39: the 15 under
-`sender`, the 15 under `receiver` and these nine.
+`image.removed`; and the endpoint's life is a third, `channel.opened` and
+`channel.closed`. The static counters this page adds are 39: the 15 under `sender`, the
+16 under `receiver` and these eight.
 
 **Values**, Aeron's, the driver's in this version, so that a configuration key is
 justified later by a `why_not_default` and not here: setup interval 100 ms, pending
@@ -567,6 +574,13 @@ message naming card 180 until the sender lands.
 - **Resolving names on the receiver thread, or re-resolving them.** Lost: resolution is
   a syscall on the control plane, once, when the command is handled; a name that moves
   is a Revisit.
+- **Erroring a live endpoint on a socket failure, with `channel.status` −1 until its
+  last publication or subscription goes.** Lost: Aeron never moves a live endpoint to
+  errored, and a connected UDP socket reports an ICMP port unreachable as
+  `ECONNREFUSED` on a later send, which is the normal case for a publisher started
+  before its subscriber; an endpoint errored by that would read −1 for the life of the
+  publication under zero configuration (invariant 5). A send error is counted and the
+  burst retried, as a short send is; −1 waits for the version that re-resolves names.
 - **Configuration keys for the MTU, the window, the buffers and the intervals.** Lost:
   zero configuration, Aeron's values and a `doctor` check; a key returns with its
   `why_not_default` when a host shows a need (ADR 0039).
