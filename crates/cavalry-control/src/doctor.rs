@@ -576,11 +576,14 @@ struct StoppedRecording {
     recording_id: i64,
     /// The segment files it holds, by its descriptor.
     segments: i64,
-    /// The segment files a `purge segments` to its stop position removes: those whose
+    /// The segment files a `purge segments` to `purge_position` removes: those whose
     /// bytes lie wholly before the stop.
     purgeable: i64,
     segment_file_length: i64,
-    stop_position: i64,
+    /// The highest segment base at or below the stop position: the position a purge
+    /// names, since a purge position must be a segment base and the stop is one only
+    /// when the recording stopped on a boundary.
+    purge_position: i64,
 }
 
 impl StoppedRecording {
@@ -594,12 +597,13 @@ impl StoppedRecording {
         let stop = descriptor.stop_position();
         let retained_base = locate(descriptor, retained).ok()?.segment_base_position;
         let held = (stop - retained_base).max(0);
+        let purgeable = held / length;
         Some(StoppedRecording {
             recording_id: descriptor.recording_id(),
             segments: (held + length - 1) / length,
-            purgeable: held / length,
+            purgeable,
             segment_file_length: length,
-            stop_position: stop,
+            purge_position: retained_base.saturating_add(purgeable.saturating_mul(length)),
         })
     }
 
@@ -646,10 +650,11 @@ fn purge_advice(recording: &StoppedRecording) -> String {
         String::new()
     };
     format!(
-        "`cavalry record --purge {} --before {}` removes the {} segment files before its stop \
-         position, {} MiB{several}, and `cavalry record --delete {}` removes every file of it",
+        "`cavalry record --purge {} --before {}` removes the {} segment files before that \
+         position, the highest segment base at or below its stop, {} MiB{several}, and \
+         `cavalry record --delete {}` removes every file of it",
         recording.recording_id,
-        recording.stop_position,
+        recording.purge_position,
         recording.purgeable,
         recording.mib(recording.purgeable),
         recording.recording_id
@@ -2199,8 +2204,8 @@ mod tests {
     const MIB: u64 = 1024 * 1024;
     const SEGMENT: i64 = cavalry_log::layout::SEGMENT_FILE_LENGTH as i64;
 
-    /// A catalog of three recordings: 0 stopped after three segments, 1 stopped after
-    /// three with its first purged, and 2 live.
+    /// A catalog of three recordings: 0 stopped 4096 bytes into its fourth segment, 1
+    /// stopped after three with its first purged, and 2 live.
     fn catalog_with_three(dir: &TestDir) -> PathBuf {
         let log_dir = dir.0.join("log");
         std::fs::create_dir_all(&log_dir).expect("the log directory");
@@ -2222,7 +2227,9 @@ mod tests {
                 })
                 .expect("a slot");
         }
-        catalog.stop(0, 3 * SEGMENT, now + 1).expect("stopped");
+        catalog
+            .stop(0, 3 * SEGMENT + 4096, now + 1)
+            .expect("stopped");
         catalog.stop(1, 3 * SEGMENT, now + 1).expect("stopped");
         catalog.retain(1, SEGMENT).expect("purged");
         log_dir
@@ -2254,8 +2261,8 @@ mod tests {
                 "the filesystem under {} has 5120 MiB free of 102400 MiB, under a tenth: \
                  recording 0 holds the most segment files a purge frees, 3 of 128 MiB; \
                  `cavalry record --purge 0 --before {}` removes the 3 segment files before \
-                 its stop position, 384 MiB, and `cavalry record --delete 0` removes every \
-                 file of it",
+                 that position, the highest segment base at or below its stop, 384 MiB, and \
+                 `cavalry record --delete 0` removes every file of it",
                 log_dir.display(),
                 3 * SEGMENT
             )
@@ -2315,7 +2322,7 @@ mod tests {
         );
         assert!(
             found[1].starts_with(
-                "recording 0 takes 384 MiB by its descriptor, 3 segment files, over half of \
+                "recording 0 takes 512 MiB by its descriptor, 4 segment files, over half of \
                  the 600 MiB"
             ),
             "{}",

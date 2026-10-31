@@ -98,9 +98,9 @@ named below, stop and hand it back.
 ## 2. Watch the pull request
 
 Read the state in one go, then wait. A review lands about ten minutes after a push; a
-fix run takes up to thirty minutes; the `bench (linux)` job has the bench host to
-itself. Poll no more often than every five minutes, and touch nothing a rule below does
-not name. Every wait here is the loop's own work in progress; the stalls are the rules.
+fix run takes up to thirty minutes; the `bench (linux)` and `bench (grip)` jobs each
+have their host, `bench` and `grip`, to themselves. Poll no more often than every five
+minutes, and touch nothing a rule below does not name. Every wait here is the loop's own work in progress; the stalls are the rules.
 
 ```
 gh pr view <number> --json state,mergeable,headRefOid,labels,reviewDecision
@@ -144,10 +144,11 @@ gh pr checks <number>
 - **`CONFLICTING`.** `master` moved under the branch; GitHub starts no run on a
   conflicting pull request. Step 4, step 2, push.
 
-- **A red check.** `gh run view <run id> --log-failed`. `bench (linux)` runs on the bench
-  host: never run a bench there while the job may be running (`gh run list` shows it
-  `in_progress` or `queued`; `pgrep -a cavalry-bench` on the host), and a gate failure
-  there is read from `bench-compare`'s own lines before anything is changed.
+- **A red check.** `gh run view <run id> --log-failed`. `bench (linux)` runs on the host
+  `bench` and `bench (grip)` on `grip`: never run a bench on either while its job may be
+  running (`gh run list` shows it `in_progress` or `queued`; `pgrep -a cavalry-bench` on
+  the host), and a gate failure there is read from `bench-compare`'s own lines before
+  anything is changed.
 
 - **Approved.** `auto-merge.yml` arms the merge on an approval whose `commit_id` is the
   current head; an approval of an older head arms nothing, and the newer head gets its
