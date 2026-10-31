@@ -323,8 +323,8 @@ id = 38
 name = "replay.start_failed"
 kind = "counter"
 scope = "static"
-doc = "Start replay commands refused after the driver took them, with error code 21 (a recording id the catalog does not hold as a valid recording), 23 (a position out of range) or 12 (a segment file that could not be opened); a start the registries refuse with code 10 is driver.registry_full's, and a replay log that could not be created is driver.log_create_failed's (spec/client-protocol.md, Commands)."
-doctor = "The error event's message names the recording, the position and the recording's bounds, or the file: `cavalry doctor` lists the recordings with their start and stop positions; resolve an instant through the time index before asking for a position, and check the log directory's files for a recording whose segment is missing."
+doc = "Start replay commands refused after the driver took them, with error code 21 (a recording id the catalog does not hold as a valid recording), 24 (a recording a truncate recording, purge segments or purge recording is working on), 23 (a position out of range) or 12 (a segment file that could not be opened); a start the registries refuse with code 10 is driver.registry_full's, and a replay log that could not be created is driver.log_create_failed's (spec/client-protocol.md, Commands; ADR 0031)."
+doctor = "The error event's message names the recording, the position and the recording's bounds, the file, or the retention command in progress: `cavalry doctor` lists the recordings with their start and stop positions; resolve an instant through the time index before asking for a position; check the log directory's files for a recording whose segment is missing; and send the replay again once the retention command has been answered."
 
 [[counter]]
 id = 39

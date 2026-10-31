@@ -1623,3 +1623,78 @@ fn replay_commands_get_the_spec_error_codes() {
     assert!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS) >= errors_before + 5);
     driver.close().expect("closes");
 }
+
+/// Client protocol version 3's retention commands (ADR 0031) decode and are answered:
+/// until the change that implements them lands, each well-formed one is refused with
+/// code 11 and a message that names the ADR and what the operator does. A well-formed
+/// command of this version is not a rejected command, so the refusal counts in
+/// `client_protocol.errors` alone and `client_protocol.rejected_command` does not move.
+#[test]
+fn retention_commands_are_refused_with_code_11_until_implemented() {
+    let dir = TestDir::new("retention-interim");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let errors_before = counter(dir.path(), CLIENT_PROTOCOL_ERRORS);
+    let rejected_before = counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND);
+
+    let truncate = client.correlation_id();
+    let purge_segments = client.correlation_id();
+    let purge_recording = client.correlation_id();
+    let commands = [
+        Command::TruncateRecording {
+            client_id: client.id,
+            correlation_id: truncate,
+            recording_id: 0,
+            position: 0,
+        },
+        Command::PurgeSegments {
+            client_id: client.id,
+            correlation_id: purge_segments,
+            recording_id: 0,
+            new_start_position: 0,
+        },
+        Command::PurgeRecording {
+            client_id: client.id,
+            correlation_id: purge_recording,
+            recording_id: 0,
+        },
+    ];
+    for (sent, command) in commands.iter().enumerate() {
+        client.send(command);
+        let (code, message) = client.wait_error(command.correlation_id());
+        assert_eq!(code, 11, "{message}");
+        assert!(
+            message.starts_with(
+                "truncate recording, purge segments and purge recording are not in this \
+                 driver yet: ADR 0031 is accepted and the driver's change follows."
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("Upgrade the driver to a release that implements them"),
+            "{message}"
+        );
+        assert!(
+            message.contains("the recording's files are unchanged"),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("docs/reference/client-protocol.md#error-codes"),
+            "{message}"
+        );
+        // The error event is counted before it is transmitted, so the counter has moved
+        // by the time the client reads the event.
+        let sent = i64::try_from(sent + 1).expect("fits");
+        assert_eq!(
+            counter(dir.path(), CLIENT_PROTOCOL_ERRORS),
+            errors_before + sent,
+            "client_protocol.errors after {sent} refusals"
+        );
+        assert_eq!(
+            counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND),
+            rejected_before,
+            "a well-formed version 3 command is not a rejected command"
+        );
+    }
+    driver.close().expect("closes");
+}

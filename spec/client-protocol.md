@@ -209,7 +209,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   (`spec/durable-log.md`, "Descriptor"; ADR 0031), and a position that is not a
   multiple of 32, below the retained position or above the extent is code 23, position
   out of range, the message naming both; a segment file the replayer cannot open at the
-  position is code 12. Each of the three adds one to `replay.start_failed`. The
+  position is code 12. Each of the four, 21, 24, 23 and 12, adds one to
+  `replay.start_failed`. The
   replay's *end position* is the position plus the length: the extent when the replay
   starts for a length of −1, and 2^63 − 1 for a length of 2^63 − 1 or a sum past it.
   A replay of a stopped recording whose position is its end position or the extent has

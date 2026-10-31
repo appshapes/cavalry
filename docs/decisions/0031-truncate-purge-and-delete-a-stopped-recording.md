@@ -258,10 +258,11 @@ recorder's feature gave it: a retained group rebuilt from the files adds one to
 `recording.recovered`, as a rebuilt stop does, and a segment file before the retained
 position removed adds one to `recording.files_removed`, as a file past the stop does
 *(acceptance)*. The counters-file arithmetic becomes 38 statics, the 34 `counters.toml`
-holds with `scope = "static"` and these four, plus 2048 per publication pair, 2048 per
-image, 3072 per recording with the gauge, 64 per replay and 256 per replay publication
-(ADR 0036), 7526, under 8192; the "37 statics" that `spec/client-protocol.md`, "Sizes",
-counted was corrected to 34 by ADR 0036's change, and this change writes 38. `cavalry doctor` gains a check that
+holds with `scope = "static"` before this change and these four, plus two per
+publication (2048), one per image (2048), three per recording with the gauge (3072) and
+three per replay (192), 7398, under 8192, which `spec/client-protocol.md`, "Sizes",
+writes with this change; the "37 statics" and 6373 it counted before overcounted the 34
+`counters.toml` held, and this change corrects the count to 38. `cavalry doctor` gains a check that
 reads the free space of the log directory's filesystem and, under 10 percent, names the
 recording and the segment that would free the most, with the `purge segments` command
 that removes it, and a check that names a recording whose bytes, from the gauge while
@@ -370,30 +371,65 @@ purge segments and delete.
 
 ## Evidence
 
-To be filled at acceptance: the vectors of `spec/vectors/client-protocol.py` for the
-three commands and error code 24; the vectors of `spec/vectors/durable-log.py` for a
-version 1 header, a slot in each form under it, a slot in version 0's form that a
-version 1 reader reads with its start position as retained, and a retained group whose
-checksum fails; the catalog's version 1 read of a version 0 file and the refusal the
-other way, with `version`; recovery tests for a truncate cut at each of its steps
-(before the file work, after one of several segments past the position is removed,
-with the stop rebuilt at the end of the highest file left, after all of them are
-removed, after the cut and before the extension, after the index is truncated) and the
-stop each rebuilds to;
-for a migration cut after the creation checksum and before the group, and a purge cut
-between the position and its checksum, each rebuilding the group from the files; for a
-purge cut after the catalog write, whose leading files are removed at start-up; and for
-a torn delete; a conductor test for each refusal the conductor makes (live, replayed, in
-progress, `start replay` during a command, the registry at capacity, an id past the
-next) and a replayer test for each the replayer makes (a slot not valid, out of range,
-no frame at the position, a segment file it cannot read, with code 12 and its counter),
-each showing the slot unwritten; a test of each success with its counter, of a truncate
-at a segment base, which removes the file at that base, and of a failed file work
-answered with code 12 after the slot is repaired; `start replay` with −1 after a purge, starting
-at the retained position, and with a position below it, refused with code 23 naming it;
-the bench rows with the recorder idle, unchanged, and with a purge running on the
-replayer thread during the recorded rows; `just quickstart` recording and replaying on
-both runners, which this ADR's commit already has.
+What accepts this ADR is carried by the change that accepts it, pull request 80, which
+writes the two specs, the vectors and the two crates that encode them. The 97 vectors
+of `spec/vectors/client-protocol.py`, version 3, 13 of them new: each of the three
+commands valid, at its extremes, too short for its fields and with bytes past them,
+with the reserved-id vector moved to `0x0108`, every one run by
+`crates/cavalry-proto/tests/client_protocol_conformance.rs`, and the three ids in the
+type table of `client_protocol_no_panic.rs`. The 76 vectors of
+`spec/vectors/durable-log.py`, version 1, 9 of them new: a version 1 header; a
+descriptor in version 1's form live, purged, and purged to the stop; and five
+rejections, a retained checksum that fails, a body checksum that fails under both
+ranges, and a retained position below the start, above the stop and not a segment base;
+the version 0 form's vectors are kept, and the version 1 reader reads them under version
+0's range with their start position as retained position; the header rejection is
+written with version 2, since 1 is now a version. Every one is run by
+`crates/cavalry-log/tests/conformance.rs`, which asserts the header's version, and
+`crates/cavalry-log/tests/check_order.rs` refuses a header of version 2 with `version`.
+`crates/cavalry-driver/tests/driver.rs` sends each of the three commands to a driver
+that decodes them and refuses them with code 11, counted in `client_protocol.errors`
+alone, until the implementing change lands. Error code 24 is a check on the driver's
+state, which no vector holds; its tests are the implementing change's, below.
+`just lint`, `just test`, `just docs` and `just lint-docs` exit 0 on the change.
+
+The bench on the acceptance change, which touches no message path: on a laptop,
+`local-macos-aarch64`, 1,000,000 messages, unpinned, a report, p50 / p99 / p99.99 /
+max in ns before (0782ec5) and after, `claim_commit_32_client` 42 / 84 / 2709 / 16351
+to 41 / 83 / 124 / 5627, the before's tail the laptop's own, `claim_commit_32_concurrent`
+41 / 42 / 167 / 4875 to 40 / 41 / 166 / 6167, `claim_commit_32_exclusive`
+41 / 42 / 167 / 9423 to 40 / 41 / 166 / 6375 and `claim_commit_32_recorded`
+42 / 84 / 167 / 12087 to 41 / 83 / 165 / 8839, the one-way rows in the pull request's
+body as the commit recorded them; and the bench gate on the pull request's merge ref
+(CI run 41199177587), 5,000,000 messages, 21 runs per row: under `bench-linux`,
+`claim_commit_32_client` 160 ns at p99.99 (160 to 170 across the runs, the baseline's
+slowest 160, +0.0%) and `claim_commit_32_recorded` 310 ns (290 to 320, against 339,
+−8.6%); under `kip-linux`, 170 ns (158 to 184, against 198) and 245 ns (241 to 264,
+against 257); under `grip-linux`, 120 ns and 138 ns with no baseline yet (ADR 0034).
+No gated row regressed on either host. The hosts' rows on the head that merges are in
+the pull request's body.
+
+What the implementing change's pull request body records, with the change that writes
+the conductor's registry, the replayer's checks and file work, the recorder's catalog
+writes, the doctor checks and recovery's two rules: recovery tests for a truncate cut
+at each of its steps (before the file work, after one of several segments past the
+position is removed, with the stop rebuilt at the end of the highest file left, after
+all of them are removed, after the cut and before the extension, after the index is
+truncated) and the stop each rebuilds to; for a migration cut after the creation
+checksum and before the group, and a purge cut between the position and its checksum,
+each rebuilding the group from the files; for a purge cut after the catalog write,
+whose leading files are removed at start-up; and for a torn delete; a conductor test
+for each refusal the conductor makes (live, replayed, in progress, `start replay`
+during a command, the registry at capacity, an id past the next) and a replayer test
+for each the replayer makes (a slot not valid, out of range, no frame at the position,
+a segment file it cannot read, with code 12 and its counter), each showing the slot
+unwritten; a test of each success with its counter, of a truncate at a segment base,
+which removes the file at that base, and of a failed file work answered with code 12
+after the slot is repaired; `start replay` with −1 after a purge, starting at the
+retained position, and with a position below it, refused with code 23 naming it; the
+bench rows with the recorder idle, unchanged, and with a purge running on the replayer
+thread during the recorded rows; and `just quickstart` recording and replaying on both
+runners, which the acceptance change already has.
 
 ## Consequences
 
@@ -424,8 +460,7 @@ above.
   written with the acceptance; `spec/vectors/client-protocol.py` and
   `spec/vectors/durable-log.py`; ADR 0023 (the slice), ADR 0024 (the format, state 3),
   ADR 0025 (recording), ADR 0030 (replay, the replayer thread), ADR 0035 (an empty
-  replay), ADR 0036 (the stop handed to the replayer, which a truncate's reopened stop
-  travels by).
+  replay).
 - Aeron Archive: `AeronArchive.truncateRecording`, `purgeRecording`, `purgeSegments`,
   `detachSegments`, `ArchiveTool`.
 - Card 95, card 159 (the soak host that runs the purge).

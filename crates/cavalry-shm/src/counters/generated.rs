@@ -119,7 +119,7 @@ pub const REPLAY_NOT_CONNECTED: CounterId = CounterId(36);
 /// `replay.failed`, a static counter: Replays that ended on a failure, reason 3 of replay stopped: a segment file of the recording could not be read, or a frame in it failed a check, which log_buffer.rejected_frame counts as well; the position in the event is the last frame delivered.
 pub const REPLAY_FAILED: CounterId = CounterId(37);
 
-/// `replay.start_failed`, a static counter: Start replay commands refused after the driver took them, with error code 21 (a recording id the catalog does not hold as a valid recording), 23 (a position out of range) or 12 (a segment file that could not be opened); a start the registries refuse with code 10 is driver.registry_full's, and a replay log that could not be created is driver.log_create_failed's (spec/client-protocol.md, Commands).
+/// `replay.start_failed`, a static counter: Start replay commands refused after the driver took them, with error code 21 (a recording id the catalog does not hold as a valid recording), 24 (a recording a truncate recording, purge segments or purge recording is working on), 23 (a position out of range) or 12 (a segment file that could not be opened); a start the registries refuse with code 10 is driver.registry_full's, and a replay log that could not be created is driver.log_create_failed's (spec/client-protocol.md, Commands; ADR 0031).
 pub const REPLAY_START_FAILED: CounterId = CounterId(38);
 
 /// `replay.position`, a instance gauge: The position of one replay up to which the replayer has written the recording's frames into the replay's log, stored with a release store after each block; it moves no faster than the slowest subscriber's position plus the publication window, and not at all with no subscriber (spec/client-protocol.md, Commands); key: replay session id (i64), little-endian; label text: the replay session id, the recording id, the replay publication's session id and its stream id in decimal, space-separated.
@@ -451,8 +451,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "replay.start_failed",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Start replay commands refused after the driver took them, with error code 21 (a recording id the catalog does not hold as a valid recording), 23 (a position out of range) or 12 (a segment file that could not be opened); a start the registries refuse with code 10 is driver.registry_full's, and a replay log that could not be created is driver.log_create_failed's (spec/client-protocol.md, Commands).",
-        doctor: "The error event's message names the recording, the position and the recording's bounds, or the file: `cavalry doctor` lists the recordings with their start and stop positions; resolve an instant through the time index before asking for a position, and check the log directory's files for a recording whose segment is missing.",
+        doc: "Start replay commands refused after the driver took them, with error code 21 (a recording id the catalog does not hold as a valid recording), 24 (a recording a truncate recording, purge segments or purge recording is working on), 23 (a position out of range) or 12 (a segment file that could not be opened); a start the registries refuse with code 10 is driver.registry_full's, and a replay log that could not be created is driver.log_create_failed's (spec/client-protocol.md, Commands; ADR 0031).",
+        doctor: "The error event's message names the recording, the position and the recording's bounds, the file, or the retention command in progress: `cavalry doctor` lists the recordings with their start and stop positions; resolve an instant through the time index before asking for a position; check the log directory's files for a recording whose segment is missing; and send the replay again once the retention command has been answered.",
     },
     CounterDef {
         id: REPLAY_POSITION,
