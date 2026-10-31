@@ -54,7 +54,11 @@ in order after `stop replay`:
   driver writes the stop fields as −1 and −1 under the stop checksum: a stop of −1
   reads "live, or being cut", and either way the stop is in the files, not in the
   slot. Second, the file work, in this order: the segment files whose base is at or
-  past the position lie wholly past it and are removed, as recovery removes a segment
+  past the position lie wholly past it and are removed from the highest base down, one
+  file at a time, so that the files left are contiguous at every point: no crash leaves
+  a segment missing between the start position and the last segment file, which
+  recovery reads as damage (`spec/durable-log.md`, "The driver"), and the stop recovery
+  rebuilds is the end of the highest file left; this is what recovery does to a segment
   file wholly past the stop, so a truncate at a segment base removes the file at that
   base and cuts none; when the position is not a segment base, the segment file that
   holds it, the one whose base is below it, is cut to the position's offset with one
@@ -70,12 +74,13 @@ in order after `stop replay`:
   A crash before the third step leaves a stop of −1, and recovery rebuilds it from the
   files as for a recording live at a crash. Before the file work, it rebuilds the old
   stop and the truncate is lost, which the client learns from its response timeout and
-  sends again. During it, it rebuilds the stop at the boundary the cut reached, the
-  position, the old stop, or the end of the segment that holds the position when the
-  segments past it are gone and it is not yet cut, and finishes the cut, since it drops
-  the index entries and removes the segment files past the stop it rebuilds, and a
-  segment file cut and not yet extended reads as zeros past its end, as a short start
-  segment does today.
+  sends again. During it, it rebuilds the stop at the boundary the cut reached: the old
+  stop while no file is removed; the end of the highest segment file left while the
+  files past the position are being removed from the top; the end of the segment that
+  holds the position when they are gone and it is not yet cut; the position once it is
+  cut; and it finishes the cut, since it drops the index entries and removes the segment
+  files past the stop it rebuilds, and a segment file cut and not yet extended reads as
+  zeros past its end, as a short start segment does today.
 - **`purge segments`** (type id 262, `0x0106`): client id, correlation id, recording id,
   new start position (i64), Aeron's `purgeSegments`. The recording must be stopped; the
   position must be a segment base, a multiple of the segment file length from the
@@ -210,7 +215,11 @@ stop of −1, the retained group or the state 3, a slot in version 0's form migr
 first as above; on the recorder's reply the conductor hands the file work to the
 replayer; on the replayer's reply a truncate's third step is one more slot write
 through the recorder; and the conductor answers the client when the last reply
-arrives, as a replay is started. The repair after a failed file work runs on the
+arrives, as a replay is started. When the recorder's or the replayer's request queue
+has no room for a later hop, the conductor keeps the command in its registry entry and
+offers that hop again on its next duty cycle, in admission order, so the registry
+bounds what waits and no hop is dropped or sent twice; the first hop alone is refused
+at admission, with code 10, since nothing has been written then. The repair after a failed file work runs on the
 replayer, which has the files open, before it replies. Between the replayer's checks
 and the first catalog write nothing changes the slot: the recording is stopped, so the
 recorder writes nothing to it on its own, and the registry entry refuses the other
@@ -303,6 +312,11 @@ purge segments and delete.
   failing stop checksum as damage after 100 milliseconds, so `cavalry doctor` would name
   a recording being cut as damaged; a stop of −1 is the format's word for "the stop is
   in the files", which is true during the cut.
+- **Removing the segments past the position from the lowest base up.** Lost: a crash
+  after the first removal leaves a segment missing between the start position and the
+  last segment file, which recovery reads as damage and marks state 2, invalidating a
+  healthy recording (invariant 1); from the highest base down the files left are
+  contiguous at every point, and recovery's stop is the end of the highest file left.
 - **Zeroing the tail from the position forwards.** Lost: a crash midway leaves whole
   frames past a run of zeros, and recovery's scan, which starts at the last index entry
   whose frame checks, would set the stop past the hole; a cut of the file to the
@@ -342,8 +356,10 @@ version 1 header, a slot in each form under it, a slot in version 0's form that 
 version 1 reader reads with its start position as retained, and a retained group whose
 checksum fails; the catalog's version 1 read of a version 0 file and the refusal the
 other way, with `version`; recovery tests for a truncate cut at each of its steps
-(before the file work, after the segments past the position are removed, after the cut
-and before the extension, after the index is truncated) and the stop each rebuilds to;
+(before the file work, after one of several segments past the position is removed,
+with the stop rebuilt at the end of the highest file left, after all of them are
+removed, after the cut and before the extension, after the index is truncated) and the
+stop each rebuilds to;
 for a migration cut after the creation checksum and before the group, and a purge cut
 between the position and its checksum, each rebuilding the group from the files; for a
 purge cut after the catalog write, whose leading files are removed at start-up; and for
