@@ -666,3 +666,17 @@ user-visible change, added in the same commit as the change. The format follows
   240 (card 168 owns the claim rows' spread); four rows move by one 10 ns step, the two
   one-way `_recorded` rows by two, and the two client claim rows hold
   ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
+- ADR 0031, Proposed: a stopped recording is truncated to a position, purged of the
+  whole segments before a position, or deleted, with Aeron Archive's three commands,
+  `truncate recording`, `purge segments` and `purge recording`, as the client protocol's
+  version 3, answered with `operation success` or a new error, `recording busy`; the
+  catalog moves to version 1 for a retained position in the descriptor, which a purge
+  moves forward and a replay's −1 starts at, read beside version 0's slots with no
+  migration pass, a slot moving to the new form at its first purge, and a truncate
+  reopens the stop to −1 while it cuts the files so that a crash at any point is the
+  torn stop recovery already rebuilds; the checks that read the disk and the file work
+  run on the replayer thread, the checks before any catalog write, so a refused command
+  writes nothing; there is no `log.retain` key, since no default
+  can be right, so retention is the operator's command or script and never a schedule
+  the user did not set
+  ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md)).
