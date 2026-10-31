@@ -99,6 +99,16 @@ read from the counters file, and `client.stop_recording(id)?`, from any client, 
   log directory, and start the recording again.
 - `driver failed (log-dir): log directory locked`: another driver holds the directory;
   stop it, or give this one its own with `--log-dir`.
+- `log-directory-space` in `doctor --log-dir`: the log directory's filesystem has under
+  a tenth free. The finding names the stopped recording whose segment files a `purge
+  segments` command frees the most of, the position to send and the files and MiB it
+  removes; the command is in the client protocol
+  ([client protocol](../reference/client-protocol.md)), and its `cavalry record`
+  form follows in the next change.
+- `recording-over-half` in `doctor --log-dir`: one recording takes over half the
+  filesystem, a live one by its `recording.bytes` gauge, a stopped one by its
+  descriptor. Stop a live one with `--stop`, then purge its segments before the
+  filesystem fills.
 - `log-directory-backing` in `doctor` says the log directory's path is over 337 bytes:
   the recorder opens each segment file by its full path, and the standard library
   allocates for a path of 384 bytes or more instead of using its stack buffer, so a

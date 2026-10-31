@@ -21,9 +21,9 @@ The durable log: recording and replay. Data plane.
   warns on a longer path. A roll that fails on a full disk
   is an `io` error and is retried at the next write, never a stuck writer. On any error
   from `write`, the block was taken exactly when `position()` moved. The delete of a
-  stopped recording, state 3, arrives with card 95's purge, with its counter and its
-  caller in the driver; until then the catalog writer has no `delete`, so every
-  transition it writes is one the driver counts.
+  stopped recording, state 3, is `CatalogWriter::delete`, which the driver's `purge
+  recording` writes and counts in `recording.deleted` (ADR 0031); every transition
+  the writer writes is one the driver counts.
 - Resolves an instant to a position through a recording's time index for the driver's
   replay (ADR 0030): `index::position_at` is where a replay from an instant starts, the
   last entry at or before it, and `index::position_after` where one to an instant ends,
