@@ -17,8 +17,8 @@
 # runners, because a shared runner cannot tell a regression from its own noise (ADR 0016,
 # ADR 0034); kip ran it beside them from 2026-10-29 to 2026-10-31 and is the soak host.
 #
-# The job names are stable on purpose: "gates (linux)", "gates (macos)" and
-# "bench (linux)" are the checks branch protection on master requires, so renaming a
+# The job names are stable on purpose: "gates (linux)", "gates (macos)", "bench (linux)"
+# and "bench (grip)" are the checks branch protection on master requires, so renaming a
 # job means updating the protection rule in the same change.
 name: ci
 

@@ -141,7 +141,8 @@ the stock probe's, which would say the tuning, not the part, set the band.
 
 ## References
 
-- `.github/workflows/ci.yml`, the `bench-grip` and `bench-kip` jobs;
+- `.github/workflows/ci.yml`, the `bench-grip` job; `bench-kip`, the job this acceptance
+  removed;
   `bench/host/setup-ubuntu.sh`, `bench/host/check.sh`
 - `docs/how-to/set-up-a-bench-host.md`, "Further hosts"; `docs/how-to/run-the-bench.md`
 - ADR 0016 (the dedicated host), ADR 0033 (the baseline from every process at one

@@ -34,8 +34,8 @@ shared runner is
    first touch of a page costs microseconds, and 1,500 of them in a 5,000,000-message
    run were the whole p99.99 on the bench host. It prints one table and writes one
    file, `bench/results/<profile>-<unix time>.json`. The profile is
-   `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `grip-linux`,
-   `kip-linux`, `linux` or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
+   `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `grip-linux`, `linux`
+   or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier,
    `just bench --pin 8,10,12` binds the publisher, the subscriber and the driver's
    conductor to those CPUs, on Linux only, with the driver's recorder and replayer and
