@@ -9,6 +9,11 @@
     "adapter": "syncthing",
     "folders": [
       ".brigade"
-    ]
+    ],
+    "state": ".brigade/state"
+  },
+  "gateway": {
+    "email": "29975fe9@seluusa.resend.app",
+    "slack": "appshapes.slack.com: @brigade"
   }
 }

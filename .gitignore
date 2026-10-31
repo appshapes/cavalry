@@ -19,5 +19,5 @@ CLAUDE.*.md
 
 # other
 .ignored/
-.brigade/
+.brigade
 __pycache__/
