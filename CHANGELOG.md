@@ -801,3 +801,11 @@ user-visible change, added in the same commit as the change. The format follows
   recording reading live over files already cut
   ([ADR 0038](docs/decisions/0038-repair-a-retention-commands-slot-after-a-failed-catalog-write.md);
   card 95).
+- A soak host: `scripts/soak.sh` runs a driver recording a steady stream for days,
+  samples `cavalry doctor` and the counters file every minute, rotates the recording
+  every hour and purges and deletes by the rotation, stopping cleanly on SIGTERM; the
+  stream comes from `crates/cavalry/examples/soak.rs`, which publishes at a fixed rate
+  and reads every message back once and in order. `docs/how-to/set-up-a-soak-host.md`
+  sets the host up, `kip`, with a volume for the log directory and a systemd service
+  ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); card
+  159).
