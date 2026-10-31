@@ -1,11 +1,18 @@
 //! The ten-minute path's program (README, "The ten-minute path"; `just quickstart`): one
-//! process attaches to the driver running on this host, publishes 1,000 messages on a
-//! stream and reads them back through a subscription, each once and in order, then
-//! prints what it saw. `CAVALRY_DIR` names the driver's directory when it is not the
-//! default (`docs/reference/config.md`).
+//! process attaches to the driver running on this host, records the stream it is about
+//! to publish on, publishes 1,000 messages on it and reads them back through a
+//! subscription, each once and in order, waits until the recorder has written up to the
+//! publication's position, stops the recording and prints what it saw and the
+//! recording's id, so that `cavalry replay` plays the messages back from the durable
+//! log (card 95, the slice's acceptance test). The wait is the client's: `stop
+//! recording` stops at the position the recorder has written (`spec/client-protocol.md`),
+//! and the recorder is a thread of the driver's, so a stop sent the moment the
+//! subscriber has read the last message would race it. In Aeron, a client waits the
+//! same way before `stopRecording`. `CAVALRY_DIR` names the driver's directory when it
+//! is not the default (`docs/reference/config.md`).
 
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cavalry::{Cavalry, Offer};
 
@@ -32,6 +39,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut subscription = client.add_subscription("cavalry:ipc", STREAM_ID)?;
     let mut publication = client.add_publication("cavalry:ipc", STREAM_ID)?;
+    // Record the stream from here, position 0 of a publication that has published
+    // nothing yet: the driver's recorder writes every committed frame to the durable
+    // log under the log directory, and the recording outlives this process.
+    let recording = client.start_recording("cavalry:ipc", STREAM_ID)?;
 
     let mut sent: u64 = 0;
     let mut next: u64 = 0;
@@ -66,6 +77,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
          received once, in order, in {:.1} ms",
         publication.session_id(),
         started.elapsed().as_secs_f64() * 1e3
+    );
+    // The recorder is a thread of the driver's, behind the publisher by up to the
+    // publication window: a stop stops at what it has written so far. Wait until that
+    // is the publication's position, so that the recording holds every message.
+    let end = publication.position()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while recording.position() < end {
+        if Instant::now() > deadline {
+            return Err(format!(
+                "the recorder wrote up to position {} of {end} in 10 s",
+                recording.position()
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    recording.stop(&mut client)?;
+    println!(
+        "quickstart: recording {} of stream {STREAM_ID} stopped; cavalry replay --recording {} \
+         --from 0 plays it back",
+        recording.recording_id(),
+        recording.recording_id()
     );
     publication.close()?;
     subscription.close()?;

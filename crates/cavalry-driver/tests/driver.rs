@@ -884,9 +884,9 @@ fn the_publication_position_gauge_follows_the_publisher() {
         .offer(b"moved", window, 0)
         .expect("the message is offered");
 
-    // The driver loads the producer position at most once per millisecond and stores
-    // the gauge from that load (ADR 0022), so the gauge reaches the position well inside
-    // the deadline; the test asserts the value, not the millisecond.
+    // The driver loads the producer position at most once every two milliseconds and
+    // stores the gauge from that load (ADR 0022, ADR 0032), so the gauge reaches the
+    // position well inside the deadline; the test asserts the value, not the interval.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let value = reader.read_acquire(gauge).expect("gauge");

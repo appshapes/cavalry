@@ -16,7 +16,7 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   heartbeat, reads and answers commands, unblocks the ring, times out clients, and keeps
   every publication's positions, cleaning, unblocking and closing as
   `spec/log-buffer.md`, "The driver" says, loading a publication's producer position
-  at most once per millisecond so that the publisher's cache line is not read on every
+  at most once every two milliseconds so that the publisher's cache line is not read on every
   cycle (ADR 0022). The strategy it runs is stored once in the
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
   `Driver::start_with_threads` takes a hook each thread runs first, named the thread it

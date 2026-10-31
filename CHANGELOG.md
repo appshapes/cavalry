@@ -621,3 +621,36 @@ user-visible change, added in the same commit as the change. The format follows
   6,8,10) against the `kip-linux` and `kip-linux-unchecked` baselines, on every push and
   on pull requests from this repository, beside `bench (linux)`
   ([Set up a bench host](docs/how-to/set-up-a-bench-host.md), step 6).
+- The ten-minute path records and replays: the quickstart program starts a recording of
+  its stream before it publishes and stops it after, and `cavalry replay --recording 0
+  --from 0` plays the 1,000 messages back from the durable log as the path's fourth
+  command, which `just quickstart` checks on Linux and macOS: the second slice's
+  acceptance test (card 95, ADR 0023;
+  [the tutorial](docs/tutorials/publish-and-subscribe.md)).
+- The driver loads a publication's producer position at most once every two
+  milliseconds, where it was one: at ten million claims a second the transfer the
+  publisher's next store paid after each load landed on one claim in ten thousand, the
+  gate's percentile, so `claim_commit_32_exclusive` on kip read 107 or 156 ns by the
+  process; now one in twenty thousand, and the first runs at two milliseconds read 119
+  to 152 on kip inside one process, within its spread. The harness follows the same
+  constant; `publication.position` is at most two milliseconds behind the publisher;
+  neither bench host's baseline moves
+  ([ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md)).
+- A bench host's baseline is recorded from every process the host has run at the
+  baseline's tree, three at least, and the gate compares a row's median with the
+  slowest run over all of them: `scripts/bench-compare.py --update` takes the result
+  files and writes `processes: N`, `--join` adds a later process of the tree that read
+  a row above the baseline, and the comparison's first line says how many. `kip`'s two
+  baselines are re-recorded that way at the tree of 4a09b6e, eight and five processes,
+  where master's own runs had failed against one process's band: the exclusive claim
+  row's slowest run moves from 132 to 162 ns and the concurrent row's from 154 to 169
+  (card 168 owns the spread), the unchecked `_recorded` row's from 234 to 257 (card
+  169), and four rows tighten. Both bench jobs run the unchecked profile after a failed
+  checked comparison, so every run yields both profiles' results
+  ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
+- ADR 0033 is Accepted on three consecutive green `bench (kip)` runs at the tree of
+  4a09b6e with no process joining, and its text says what a joining process is not: a
+  run whose row moved as a whole, p50 and p99 with p99.99 and the rate down against the
+  tree's other processes, is a disturbed host, joins no baseline and is re-run; the
+  bench how-to's troubleshooting list reads it that way
+  ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).

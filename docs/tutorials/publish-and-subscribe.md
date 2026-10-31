@@ -1,9 +1,10 @@
 # Publish and subscribe in ten minutes
 
-A tutorial: in ten minutes, on a laptop or a cloud VM, start a driver, publish 1,000
-messages from a program and read them back in the same program, and read `doctor`. You
-type five commands and see a result after each. Nothing is configured. In Aeron, this is
-the media driver with a client that uses `tryClaim` and `poll` ([glossary](../glossary.md)).
+A tutorial: in ten minutes, on a laptop or a cloud VM, start a driver, record a stream
+and publish 1,000 messages on it from a program that reads them back, replay the
+recording from the durable log, and read `doctor`. You type six commands and see a
+result after each. Nothing is configured. In Aeron, this is the media driver and Archive
+with a client that uses `tryClaim`, `poll` and `replay` ([glossary](../glossary.md)).
 
 The same path is `just quickstart`, which CI runs on Linux and macOS on every commit, so
 what this page says happens is what the repository checks.
@@ -45,17 +46,41 @@ In a second terminal:
 target/release/examples/quickstart
 ```
 
-You will see two lines: `quickstart: client <id> attached to the driver at <directory>`,
+You will see three lines: `quickstart: client <id> attached to the driver at <directory>`,
 then `quickstart: 1000 messages published on stream 1001 by session <session> and
-received once, in order, in <n> ms`. The program is
+received once, in order, in <n> ms`, then `quickstart: recording 0 of stream 1001
+stopped; cavalry replay --recording 0 --from 0 plays it back`. The program is
 [`crates/cavalry/examples/quickstart.rs`](../../crates/cavalry/examples/quickstart.rs):
 it connects with `Cavalry::connect()`, adds a subscription and a publication on stream
-1001, claims a frame per message and writes it in place, and polls the subscription,
-which hands each message to a closure as a view into the shared log. Until the
-subscription's image joins, the claim is refused with `not-connected`; a full window is
-`back-pressured`; the program polls and tries again, which is what every refusal means.
+1001, starts a recording of the stream with `start_recording`, claims a frame per
+message and writes it in place, and polls the subscription, which hands each message to
+a closure as a view into the shared log; then it stops the recording once the recorder
+has written up to the publication's position, since a stop stops at what the recorder
+has written so far. Until the subscription's image joins, the claim is refused with
+`not-connected`; a full window is `back-pressured`; the program polls and tries again,
+which is what every refusal means. The recording is the driver's: its recorder thread
+wrote every committed frame to the log directory, `cavalry/log` under `$XDG_DATA_HOME`
+when that variable is set and `~/.local/share/cavalry/log` otherwise
+([`log.dir`](../reference/config.md#logdir)), and it outlived the program. The
+recording id is 0 on a fresh log directory; a directory that holds earlier recordings
+gives the next id, which is the one the program printed.
 
-## 4. Read doctor
+## 4. Replay the recording
+
+```sh
+target/release/cavalry replay --recording 0 --from 0 | tail -2
+```
+
+You will see the last message and the summary: `63936 e703000000000000`, the position of
+the thousandth message in the recording and its body, the number 999 as eight
+little-endian bytes in hex, then `replay <n> of recording 0 ended at position 64000: 1000
+messages from position 0`. Without `tail` the command prints all 1,000 lines, one per
+message, each a position and a body: the driver's replayer played the recording from
+position 0 into a replay stream of the command's own, and the command read it through an
+ordinary subscription, as any program would. [Replay a recording](../how-to/replay-a-recording.md)
+has the command's other forms, from and to an instant among them.
+
+## 5. Read doctor
 
 ```sh
 target/release/cavalry doctor
@@ -66,7 +91,7 @@ and whose last line is `0 failed, <n> warnings`: the driver is running, its coun
 healthy, and on Linux the host's governor, huge pages and isolated CPUs are reported.
 [Run a driver and read doctor](../how-to/run-the-driver.md) explains every line.
 
-## 5. Stop the driver
+## 6. Stop the driver
 
 Ctrl-C in the first terminal. You will see `cavalry run: stopping` and `cavalry run:
 closed; <directory> stays for doctor, and the next driver remakes it`. `doctor` now exits
@@ -78,15 +103,22 @@ One driver per host owns the shared-memory files; a client maps them and publish
 claim and commit, with no copy, no allocation and no lock on the message path; a
 subscription reads committed frames where its position says and tells the driver how far
 it got through a counter; the driver moves the publisher's limit behind the slowest
-subscriber, so a publisher that gets ahead is told, never buffered. Every refusal is a
-result the program decides on, and every state is a counter `doctor` reads.
+subscriber, so a publisher that gets ahead is told, never buffered; the driver's recorder
+wrote the stream to the durable log as one more reader, and its replayer played it back
+as one more publication, so the same subscription code read the live stream and the
+replay. Every refusal is a result the program decides on, and every state is a counter
+`doctor` reads.
 
 ## What to read next
 
 - [Run a driver and read doctor](../how-to/run-the-driver.md): the binary's flags, the
   two configuration keys and every `doctor` line.
+- [Record a stream to the durable log](../how-to/record-a-stream.md) and
+  [Replay a recording](../how-to/replay-a-recording.md): the two commands from a shell,
+  what the log directory holds, and replaying between two instants.
 - [`crates/cavalry-client/README.md`](../../crates/cavalry-client/README.md): the client
-  API, with the same program as its doctest, and what the crate must never do.
+  API, with the same program without the recording as its doctest, and what the crate
+  must never do.
 - [`spec/client-protocol.md`](../../spec/client-protocol.md) and
   [`spec/log-buffer.md`](../../spec/log-buffer.md): what the client and the driver say to
   each other, and how a message gets from a claim to a handler.

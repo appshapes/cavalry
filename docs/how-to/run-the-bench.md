@@ -62,7 +62,7 @@ shared runner is
    | `timer` | Two readings of the harness's clock back to back, the time stamp counter calibrated once ([ADR 0028](../decisions/0028-stamp-bench-samples-with-the-time-stamp-counter.md)): the harness's own overhead, present in every other row, about 20 ns on the bench host and 0 or 42 ns on Apple silicon, whose counter ticks at 24 MHz. |
    | `claim_commit_<body>` | The publisher's `try_claim`, writing the body, and `commit`, for a body of that many bytes. |
    | `one_way_<body>` | From the publisher's timestamp before its claim to the subscriber's handler receiving the frame, across two threads. |
-   | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor loads the publisher's tail at most once per millisecond on its duty cycle (ADR 0022), as a user's does. |
+   | `claim_commit_<body>_client` | The same claim, write and commit through the public API: `Publication::try_claim` against a real driver in the harness's process, whose conductor loads the publisher's tail at most once every two milliseconds on its duty cycle (ADR 0022, ADR 0032), as a user's does. |
    | `one_way_<body>_client` | From the publisher's timestamp to `Subscription::poll`'s handler, through a real driver and the client's conductor hand-off; the path a user's message takes (ADR 0021). |
    | `claim_commit_<body>_recorded` | The client row's claim, write and commit while the driver's recorder writes the same stream to the durable log under the bench directory (ADR 0025): what recording costs the publisher, whose limit respects the recorder's position. The run fails unless the recording reached the publisher's final position. |
    | `one_way_<body>_recorded` | The client row's publish to delivery with the recorder on: one more reader of the log, on the driver's recorder thread, which runs on a housekeeping CPU under `--pin` (the CPUs left to everything but the pinned threads, [the host's set](set-up-a-bench-host.md#steps)) (until card 136 it shared the conductor's CPU, where ADR 0025's cost of 80 ns at p99.99 was measured). |
@@ -74,7 +74,8 @@ shared runner is
    `producer position loads` line under the table counts the loads of the producer
    position by the harness's own conductor in the run that loaded most, for the two
    log rows only, since the client rows run the driver's conductor: about one per
-   millisecond of the run, the driver's cadence (ADR 0022), written to the result as
+   two milliseconds of the run, the driver's cadence (ADR 0022, ADR 0032), written to the
+   result as
    `producer_position_loads`, so each host's cadence is on record (card 161). The
    last line says how many allocations the measured loops made per message. It is 0
    or the run has failed: the gate requires zero allocations per message. When no
@@ -100,7 +101,14 @@ shared runner is
    clock above it, is a regression and the recipe exits 1; when the baseline was
    recorded with `--repeat`, the baseline's slowest run is the number compared, so a
    commit fails when its median tail is slower than anything the baseline measured, by
-   more than 5 percent and by more than one clock step. The harness measures its
+   more than 5 percent and by more than one clock step. A bench host's baseline holds
+   the runs of every process the host has run at the baseline's tree, three at least,
+   so "anything the baseline measured" spans processes as well as runs: on kip a row's
+   median moves by a tenth, and by half on the exclusive claim row, from one process
+   of the same tree to the next, and the first line then says `baseline from N
+   processes`
+   ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
+   The harness measures its
    clock's step at start, prints it in its first line in nanoseconds and in the
    counter's own ticks (`clock step 10 ns (37 ticks)` on `bench`, whose counter
    moves by 37 ticks every 10 ns, and `clock step 1 ns (2 ticks)` on `kip`, where one
@@ -137,19 +145,49 @@ shared runner is
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
    `python3 scripts/bench-compare.py --update`, which writes the newest result's git,
-   date, percentiles and clock step into `bench/baseline.json` for that profile. Commit
-   it with the histograms in the message. A bench host's baselines are set from its
-   own CI run: download the run's artifact, `bench-results-bench-linux` from
+   date, percentiles and clock step into `bench/baseline.json` for that profile, as one
+   process. Commit it with the histograms in the message. A bench host's baselines are
+   recorded from every process the host has run at one tree, three at least
+   ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
+   A tree is a commit and every later commit between which
+   `git diff --stat <first> <later> -- crates/ bench/src bench/host bench/Cargo.toml
+   Cargo.toml Cargo.lock justfile` prints nothing, so a dependency bump, a change to
+   the recipes that build the harness or to the host check ends a tree as a code
+   change does; a run of master's job at the tree is a process of it, and so is a run
+   of a pull request whose head is at the tree. A push gives the first run, and
+   `gh run rerun <run id> --job <job id>`, or the job's re-run button on the run's
+   page, gives the next at the same commit whether the first passed or failed. Download each run's artifact, `bench-results-bench-linux` from
    `bench (linux)` for `bench` or `bench-results-kip-linux` from `bench (kip)` for
-   `kip`, and pass each of its two files, the `bench-linux` and `bench-linux-unchecked`
-   results or the `kip-linux` and `kip-linux-unchecked` results, to `--update`. The
-   artifact is uploaded whether or not the run passed the gate, so a run that failed
-   after a change to the host is the one to record from
-   ([Set up a bench host](set-up-a-bench-host.md#updating-the-host)). A new row joins
-   a baseline that already exists by adding its entry from
-   that run's result and leaving the other rows as they were recorded, in a commit that
-   names the row and the run; `--update` rewrites the whole profile, which is for a host
-   whose numbers moved, never for one new row.
+   `kip`; every attempt of a run keeps an artifact of that name. Pass one profile's
+   files to one `--update`, the `bench-linux` results in one call and the
+   `bench-linux-unchecked` results in another, or the `kip-linux` and
+   `kip-linux-unchecked` results for `kip`; it refuses files of two profiles or of two
+   harness settings, and two processes. The entry then holds, for each percentile, the
+   largest value over the processes, the processes' runs in order in `p99_99_ns_runs`,
+   each `repeat` long, and `processes: N`. Take every run that reached the profile, never a choice
+   among them: a run that failed the gate is one of them, and the artifact is uploaded
+   whether or not the run passed, so a run that failed after a change to the host is
+   one to record from ([Set up a bench host](set-up-a-bench-host.md#updating-the-host)).
+
+   When a later run at the baseline's tree fails a row, it has measured a part of the
+   host's band the baseline did not hold, since nothing the gate measures changed:
+   download its artifact and add the process with
+   `python3 scripts/bench-compare.py --join <that profile's result file>`, which
+   appends its runs to the entry and raises the slowest run where it read higher, in a
+   commit whose message names the run and the row. A run at another tree never joins:
+   a pull request that changes the tree's paths is judged, and a red there is a
+   change. Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
+   with its p99.99 and its rate fell against the other processes at the tree, the
+   host was disturbed during the run (the troubleshooting list below); re-run the job
+   and name the disturbance where the host's journal shows it. A baseline is re-recorded at a new tree when master's own run fails or
+   brushes the gate there with no data-plane change behind it, from the tree's first
+   three processes and every one after them; the commit lists every gated row's
+   slowest run before and after and names the cause of every row that loosens by more
+   than 5 percent, or the card that will find it. A new row joins a baseline that
+   already exists by adding its entry from the tree's processes that have it and
+   leaving the other rows as they were recorded, in a commit that names the row and
+   the runs; `--update` rewrites the whole profile, which is for a host whose numbers
+   moved, never for one new row.
 
 ## How to verify it worked
 
@@ -220,10 +258,33 @@ shared runner is
 - `REGRESSION` on a p99.99: measure again on an idle machine before you believe either
   number; if it holds, the change under a data-plane crate is slower at the tail and
   does not merge until it is not, or the baseline is raised in a commit whose message
-  says why. Both histograms go in the commit message either way. On the bench host,
-  every row of the same commit repeated within 1 percent at p99.99 over three runs, so
-  a regression there is not noise; check the host first with `bench/host/check.sh`,
-  which the job also runs.
+  says why. Both histograms go in the commit message either way. On a bench host a
+  row's p99.99 moves between processes of one tree with no change behind it. On `kip`
+  the concurrent and client claim rows' medians move by a tenth and the exclusive
+  row's by half, 102 to 148 ns over the eight processes at the tree of 4a09b6e (card
+  168). On `bench` a row's median moves by up to three 10 ns steps: over the eight
+  processes at the same tree the checked `one_way_32_exclusive` row read 210 to 230
+  with its p50 at 140 in every one, and the unchecked `claim_commit_32_exclusive` row
+  read 120 to 150. So a `REGRESSION` on a bench host is one of four things. On a
+  changed tree it is a change. On the baseline's tree, with the row's p50 and its rate
+  where the other processes read them, it is a part of the host's band the baseline
+  did not hold: on `kip` the process joins the baseline with step 4's `--join`; on
+  `bench`, whose baselines are one process each, re-run the job, and the baselines are
+  re-recorded from the tree's processes as step 4 says when master's own run there
+  fails or brushes the gate. A row whose p50 and p99 moved with its p99.99 is the next
+  bullet, and a red after a change to `bench/` alone is the bullet after it. Check the
+  host first with `bench/host/check.sh`, which the job also runs.
+- `REGRESSION` on a row whose p50 and p99 moved with its p99.99, and whose rate fell
+  against the host's other processes at the tree: the host was disturbed during that
+  row, not the band and not a change. A band leaves p50 and the rate where they were;
+  on `bench` on 2026-10-30 the unchecked `claim_commit_32_concurrent` row read p50 90,
+  p99 120 and p99.99 170 at 8.17 million claims a second in one process, where the
+  six other processes of the same tree read 80, 90 to 100 and 150 at 9.35 to 9.45
+  million, and the next run read 80, 100 and 150 again. Re-run the job with
+  `gh run rerun <run id> --job <job id>`, read the host's journal for the bench's
+  window (`journalctl --since <start> --until <end>` on the host) and name what it
+  shows in the re-run's record; such a process joins no baseline
+  ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
 - `REGRESSION` after a change to `bench/` only, with no data-plane crate changed: the
   tail moved with the harness, not with the log. What a spinning harness thread does on
   every spin reaches the other two threads: a clock read on every spin of the conductor

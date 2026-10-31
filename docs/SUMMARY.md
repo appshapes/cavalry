@@ -70,3 +70,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0029. Fail a gated row only beyond one clock step as well as beyond 5 percent](decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)
 - [0030. Replay a recording into a subscription, with Aeron Archive's replay commands](decisions/0030-replay-a-recording-into-a-subscription.md)
 - [0031. Truncate, purge and delete a stopped recording with Aeron Archive's commands](decisions/0031-truncate-purge-and-delete-a-stopped-recording.md)
+- [0032. Load a publication's producer position at most once every two milliseconds](decisions/0032-load-the-producer-position-every-two-milliseconds.md)
+- [0033. Record a bench host's baseline from every process it has run at one tree](decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)

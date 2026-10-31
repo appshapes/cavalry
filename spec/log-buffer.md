@@ -190,9 +190,9 @@ is no subscriber.
 - **Positions.** It stores the producer position in `publication.position`, and the
   publisher limit, the consumer position + the publication window length, in
   `publication.limit`, each with a release store. For this store and for unblocking it
-  loads the producer position at most once per millisecond per publication, by its
+  loads the producer position at most once every two milliseconds per publication, by its
   own clock, so that the publisher's cache line is not read on every cycle;
-  `publication.position` is at most a millisecond behind the publisher. Closing and a
+  `publication.position` is at most two milliseconds behind the publisher. Closing and a
   subscription's join load it afresh: a join below the clean position would read
   cleaned bytes (ADR 0022). It raises the limit only when the new value is at least
   window ÷ 8 beyond the last, so that the publisher's cache line is not written on
