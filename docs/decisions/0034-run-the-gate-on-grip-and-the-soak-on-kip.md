@@ -107,7 +107,12 @@ wired port `eno2`, an Intel I219-LM with hardware timestamps, and the set-up pag
 link steps are run again there. `kip` is un-tuned by deleting the files
 `setup-ubuntu.sh` names, unmasking its timers, `update-grub` and a reboot, and its
 runner is removed, as card 159's soak host wants a stock machine; nothing is
-reinstalled. Until the acceptance, three bench jobs run on every push. `grip` reaches
+reinstalled. Until the acceptance, three bench jobs run on every push. The change that
+proposes this decision touches `bench/host/`, so it ends a tree for every host's
+baselines (ADR 0033): `bench`'s and `grip`'s are recorded from the first three
+processes of the new tree, as the set-up page's step 7 says, and `kip`'s are not; a red
+`bench (kip)` at a later tree is rerun or left, never joined and never re-recorded,
+since the job is required by nothing and goes with the acceptance. `grip` reaches
 the network over Wi-Fi alone today, so a reboot that does not come back needs a hand on
 the machine, as kip's and bench's do.
 

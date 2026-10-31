@@ -136,7 +136,10 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    the host that leaves the gate
    ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)). Until
    then `bench (kip)` runs beside it, on `[self-hosted, kip-linux]`, lists `6,8,10`,
-   profiles `kip-linux` and `kip-linux-unchecked`, required by nothing.
+   profiles `kip-linux` and `kip-linux-unchecked`, required by nothing. `kip`'s
+   baselines are not re-recorded again: a red `bench (kip)` at a tree later than the
+   one they hold is rerun or left, never joined and never re-recorded, since the job
+   goes with the acceptance.
 
 7. Record the baselines. The first run of the host's job reports every benchmark as
    `no baseline` and passes. A host's baselines are recorded from every process it has
