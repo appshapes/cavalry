@@ -202,6 +202,21 @@ impl LogDir {
         &self.catalog
     }
 
+    /// Runs the recovery pass for one recording's slot, as the driver does after a
+    /// retention command's file work failed, so that the slot and the files agree before
+    /// the refusal is answered (ADR 0031): the same rules as at start-up, counted the
+    /// same way. A recording id past the last slot is `unknown`.
+    pub fn repair(&mut self, recording_id: i64) -> Result<Recovery, DirError> {
+        let mut recovery = Recovery::default();
+        let slot = match u64::try_from(recording_id) {
+            Ok(slot) if slot < self.catalog.slots() => slot,
+            _ => return Err(CatalogError::Unknown { recording_id }.into()),
+        };
+        let dir = self.dir.clone();
+        recover_slot(&dir, &mut self.catalog, slot, &mut recovery)?;
+        Ok(recovery)
+    }
+
     /// The catalog, to write.
     pub fn catalog_mut(&mut self) -> &mut CatalogWriter {
         &mut self.catalog
@@ -227,41 +242,72 @@ fn recover(dir: &Path, catalog: &mut CatalogWriter, before: u64) -> Result<Recov
     recovery.dropped_empty_slot =
         before >= header && (before - header) / descriptor > catalog.slots();
     for slot in 0..catalog.slots() {
-        let bytes = catalog.slot_bytes(slot)?;
-        let state = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        match State::from_i32(state) {
-            Some(State::Valid | State::Deleted) => {}
-            Some(State::Invalid) => continue,
-            // An empty slot before the last cannot come from one writer, and a state the
-            // page does not name is damage too.
-            Some(State::Empty) | None => {
-                catalog.mark_invalid(slot)?;
-                recovery.invalidated += 1;
-                continue;
-            }
-        }
-        let id = i64::try_from(slot).unwrap_or(i64::MAX);
-        let (found, torn) = match Descriptor::parse_for_recovery(&bytes, id) {
-            Ok(Some(parsed)) => parsed,
-            // A creation checksum or a creation field that fails: damage the files
-            // cannot repair, and recovery never writes a creation field.
-            Ok(None) | Err(_) => {
-                catalog.mark_invalid(slot)?;
-                recovery.invalidated += 1;
-                continue;
-            }
-        };
-        if found.state() == State::Deleted {
-            // A deleted recording whose files are still present loses them again.
-            recovery.files_removed += remove_files(dir, id, i64::MIN)?;
-            continue;
-        }
-        if !torn && !found.is_live() {
-            continue;
-        }
-        rebuild(dir, catalog, slot, &found, &mut recovery)?;
+        recover_slot(dir, catalog, slot, &mut recovery)?;
     }
     Ok(recovery)
+}
+
+/// The recovery pass for one slot, the page's rules in order (`spec/durable-log.md`,
+/// "The driver"): at start-up for every slot, and again for the slot a retention
+/// command's file work failed on, so that the slot and the files agree before the
+/// refusal is answered (ADR 0031).
+fn recover_slot(
+    dir: &Path,
+    catalog: &mut CatalogWriter,
+    slot: u64,
+    recovery: &mut Recovery,
+) -> Result<(), DirError> {
+    let bytes = catalog.slot_bytes(slot)?;
+    let state = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    match State::from_i32(state) {
+        Some(State::Valid | State::Deleted) => {}
+        Some(State::Invalid) => return Ok(()),
+        // An empty slot before the last cannot come from one writer, and a state the
+        // page does not name is damage too.
+        Some(State::Empty) | None => {
+            catalog.mark_invalid(slot)?;
+            recovery.invalidated += 1;
+            return Ok(());
+        }
+    }
+    let id = i64::try_from(slot).unwrap_or(i64::MAX);
+    let (found, torn) = match Descriptor::parse_for_recovery(&bytes, id) {
+        Ok(Some(parsed)) => parsed,
+        // A creation checksum or a creation field that fails: damage the files
+        // cannot repair, and recovery never writes a creation field.
+        Ok(None) | Err(_) => {
+            catalog.mark_invalid(slot)?;
+            recovery.invalidated += 1;
+            return Ok(());
+        }
+    };
+    if found.state() == State::Deleted {
+        // A deleted recording whose files are still present loses them again.
+        recovery.files_removed += remove_files(dir, id, i64::MIN)?;
+        return Ok(());
+    }
+    // A retained group torn by a crash inside a migration or a purge is rebuilt from
+    // the files: the larger of the start position and the base of the lowest segment
+    // file present, or the start position when none is (ADR 0031).
+    let found = if torn.retained {
+        let lowest = list_segments(dir, id)?.first().map(|segment| segment.base);
+        let retained = lowest.map_or(found.start_position(), |base| {
+            base.max(found.start_position())
+        });
+        let rebuilt = found.retained(retained)?;
+        catalog.rewrite_retained(slot, &rebuilt)?;
+        recovery.recovered += 1;
+        rebuilt
+    } else {
+        found
+    };
+    // Segment files wholly before the retained position are a purge's leftovers,
+    // removed and never read.
+    recovery.files_removed += remove_leading_files(dir, id, found.retained_position())?;
+    if !torn.stop && !found.is_live() {
+        return Ok(());
+    }
+    rebuild(dir, catalog, slot, &found, recovery)
 }
 
 /// Rebuilds the stop fields of a recording live at a crash or whose stop was torn, from
@@ -275,7 +321,9 @@ fn rebuild(
     recovery: &mut Recovery,
 ) -> Result<(), DirError> {
     let id = found.recording_id();
-    let start = found.start_position();
+    // The recording's bytes begin at the retained position: the start position until a
+    // purge moved it (ADR 0031); every rule below counts from there.
+    let start = found.retained_position();
     let mut index = repair_index(dir, found, recovery)?;
     let segments = list_segments(dir, id)?;
     let mut damage = false;
@@ -359,7 +407,14 @@ fn rebuild(
     if changed {
         recovery.index_rewritten += 1;
     }
-    let stop_timestamp = index.read(index.count - 1)?.timestamp;
+    // An empty recording's stop timestamp is the start timestamp, whatever its first
+    // entry carries (`spec/durable-log.md`, "The driver"; ADR 0031); otherwise the last
+    // entry left gives it.
+    let stop_timestamp = if stop <= start {
+        found.start_timestamp()
+    } else {
+        index.read(index.count - 1)?.timestamp
+    };
     catalog.rewrite(slot, &found.stopped(stop, stop_timestamp)?)?;
     recovery.recovered += 1;
     recovery.files_removed += remove_files(dir, id, stop)?;
@@ -610,6 +665,38 @@ fn list_segments(dir: &Path, id: i64) -> Result<Vec<Segment>, DirError> {
     }
     segments.sort_by_key(|segment| segment.base);
     Ok(segments)
+}
+
+/// Removes the recording's segment files whose bytes lie wholly before `retained`, a
+/// purge's leftovers after a crash; returns how many went (ADR 0031).
+fn remove_leading_files(dir: &Path, id: i64, retained: i64) -> Result<u64, DirError> {
+    let mut removed = 0;
+    for segment in list_segments(dir, id)? {
+        let length = i64::try_from(segment.length).unwrap_or(i64::MAX);
+        if segment.base.saturating_add(length) <= retained && segment.base < retained {
+            fs::remove_file(&segment.path).map_err(io("remove", &segment.path))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// The recording's segment base positions, from its files in the directory, in no
+/// order; what a retention command's file work walks (ADR 0031).
+pub fn segment_bases(dir: &Path, recording_id: i64) -> Result<Vec<i64>, DirError> {
+    Ok(list_segments(dir, recording_id)?
+        .into_iter()
+        .map(|segment| segment.base)
+        .collect())
+}
+
+/// Whether a frame begins at `position` of the recording `found` describes: the frame
+/// header there passes the `frame` check, which a truncate requires of its position
+/// below the stop (ADR 0031). A position past the files, or at which the length reads
+/// 0, is `Ok(false)`; a file the operating system refuses is the error.
+pub fn frame_begins_at(dir: &Path, found: &Descriptor, position: i64) -> Result<bool, DirError> {
+    let segments = list_segments(dir, found.recording_id())?;
+    frame_checks(&segments, found, position)
 }
 
 /// Removes the recording's segment files whose base position is at or past `from`,

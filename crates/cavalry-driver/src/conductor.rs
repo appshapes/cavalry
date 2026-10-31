@@ -41,12 +41,13 @@ use cavalry_shm::counters::generated::{
     COMMAND_RING_REJECTED_RECORD, COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED,
     CONDUCTOR_IDLE_STRATEGY, DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL,
     LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT,
-    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_CATALOG_FULL,
-    RECORDING_CATALOG_TRUNCATED, RECORDING_FILES_REMOVED, RECORDING_INDEX_REWRITTEN,
-    RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED, RECORDING_SLOT_DROPPED,
+    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
+    RECORDING_CATALOG_TRUNCATED, RECORDING_DELETED, RECORDING_FILES_REMOVED,
+    RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED,
+    RECORDING_RETENTION_FAILED, RECORDING_SEGMENTS_PURGED, RECORDING_SLOT_DROPPED,
     RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_SYNCED_POSITION,
-    REPLAY_ENDED, REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED,
-    REPLAY_STARTED, REPLAY_STOPPED, SUBSCRIPTION_POSITION,
+    RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_POSITION,
+    REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
@@ -270,8 +271,47 @@ struct RecordingEntry {
     recording_id: Option<i64>,
     position: Option<Counter>,
     synced: Option<Counter>,
+    /// The `recording.bytes` gauge, the recorder's at each roll (ADR 0031).
+    bytes: Option<Counter>,
     /// A stop is with the recorder; a second `stop recording` is answered at once.
     stop_requested: bool,
+}
+
+/// One retention command in progress: truncate recording, purge segments or purge
+/// recording, from admission to the answer, through its hops on the replayer and the
+/// recorder (`spec/client-protocol.md`, "Commands"; ADR 0031). While an entry names a
+/// recording, the other two commands and `start replay` on it are code 24.
+struct CommandEntry {
+    correlation_id: i64,
+    command: replayer::Retention,
+    hop: Hop,
+    /// A hop the request queue had no room for, offered again each duty cycle in
+    /// admission order; the registry bounds what waits, and no hop is dropped or sent
+    /// twice.
+    pending: Option<PendingHop>,
+    /// A file error waiting for the repair's reply before it is answered.
+    failure: Option<String>,
+}
+
+/// Where a retention command stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hop {
+    /// The replayer checks the slot, the position and the frame.
+    Checking,
+    /// The recorder makes the first catalog write.
+    CatalogFirst,
+    /// The replayer does the file work, one file per duty cycle.
+    FileWork,
+    /// The recorder writes a truncate's stop.
+    CatalogLast,
+    /// The recorder runs recovery's rule for the slot after a file error.
+    Repair,
+}
+
+/// A hop kept for the next cycle.
+enum PendingHop {
+    Recorder(Request),
+    Replayer(replayer::Request),
 }
 
 /// The static counters the conductor moves.
@@ -289,6 +329,10 @@ struct Statics {
     log_buffer_rejected_tail: Counter,
     recording_started: Counter,
     recording_stopped: Counter,
+    recording_truncated: Counter,
+    recording_segments_purged: Counter,
+    recording_deleted: Counter,
+    recording_retention_failed: Counter,
     recording_start_failed: Counter,
     recording_catalog_full: Counter,
     replay_started: Counter,
@@ -316,6 +360,10 @@ impl Statics {
             log_buffer_rejected_tail: get(LOG_BUFFER_REJECTED_TAIL)?,
             recording_started: get(RECORDING_STARTED)?,
             recording_stopped: get(RECORDING_STOPPED)?,
+            recording_truncated: get(RECORDING_TRUNCATED)?,
+            recording_segments_purged: get(RECORDING_SEGMENTS_PURGED)?,
+            recording_deleted: get(RECORDING_DELETED)?,
+            recording_retention_failed: get(RECORDING_RETENTION_FAILED)?,
             recording_start_failed: get(RECORDING_START_FAILED)?,
             recording_catalog_full: get(RECORDING_CATALOG_FULL)?,
             replay_started: get(REPLAY_STARTED)?,
@@ -369,6 +417,8 @@ pub(crate) struct Conductor {
     images: Vec<Image>,
     recordings: Vec<RecordingEntry>,
     replays: Vec<ReplayEntry>,
+    /// The retention commands in progress (`spec/client-protocol.md`, "Sizes").
+    commands: Vec<CommandEntry>,
     /// The term length of every log this conductor creates: the spec's, and the
     /// smallest in a test at a registry's capacity (ADR 0027).
     term_length: u32,
@@ -443,6 +493,7 @@ impl Conductor {
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
             replays: Vec::with_capacity(spec::MAX_REPLAYS),
+            commands: Vec::with_capacity(spec::MAX_COMMANDS_IN_PROGRESS),
             recorder,
             replayer,
             replayer_thread: None,
@@ -533,6 +584,7 @@ impl Conductor {
         work += self.flush_deferred();
         work += self.take_replayer_replies(now);
         work += self.flush_replayer_deferred();
+        work += self.flush_commands();
         work += self.keep_replays(now);
         work += self.keep_publications(now);
         work
@@ -696,23 +748,35 @@ impl Conductor {
                 replay_session_id,
                 ..
             } => self.stop_replay(correlation_id, replay_session_id),
-            // The retention commands of client protocol version 3 (ADR 0031): decoded
-            // and answered, implemented by the change that follows this one; until it
-            // lands they are refused with code 11 and a message that says so.
-            Command::TruncateRecording { correlation_id, .. }
-            | Command::PurgeSegments { correlation_id, .. }
-            | Command::PurgeRecording { correlation_id, .. } => {
-                self.statics.rejected_command.increment();
-                self.send_error(
-                    correlation_id,
-                    ErrorCode::GenericError,
-                    &format!(
-                        "truncate recording, purge segments and purge recording are not in \
-                         this driver yet: ADR 0031 is accepted and the driver's change follows; \
-                         see {ERRORS_DOC}"
-                    ),
-                );
-            }
+            Command::TruncateRecording {
+                correlation_id,
+                recording_id,
+                position,
+                ..
+            } => self.retention(
+                correlation_id,
+                replayer::Retention::Truncate {
+                    recording_id,
+                    position,
+                },
+            ),
+            Command::PurgeSegments {
+                correlation_id,
+                recording_id,
+                new_start_position,
+                ..
+            } => self.retention(
+                correlation_id,
+                replayer::Retention::Purge {
+                    recording_id,
+                    position: new_start_position,
+                },
+            ),
+            Command::PurgeRecording {
+                correlation_id,
+                recording_id,
+                ..
+            } => self.retention(correlation_id, replayer::Retention::Delete { recording_id }),
         }
     }
 
@@ -1543,6 +1607,7 @@ impl Conductor {
             recording_id: None,
             position: None,
             synced: None,
+            bytes: None,
             stop_requested: false,
         });
         let _ = self.publications[index].log.set_connected(true);
@@ -1652,6 +1717,12 @@ impl Conductor {
                     correlation_id,
                     now,
                 ),
+                Reply::CatalogDone {
+                    correlation_id,
+                    recording_id,
+                    write,
+                    result,
+                } => self.on_catalog_done(correlation_id, recording_id, write, result),
                 Reply::StopIgnored { correlation_id } => {
                     if let Some(correlation_id) = correlation_id {
                         self.send(&Event::OperationSuccess { correlation_id });
@@ -1707,8 +1778,22 @@ impl Conductor {
                 return;
             }
         };
+        let bytes = match self
+            .counters
+            .allocate(RECORDING_BYTES, &key, &label("recording.bytes"))
+        {
+            Ok(counter) => counter,
+            Err(error) => {
+                let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+                let _ = self.counters.free(position.id(), reuse);
+                let _ = self.counters.free(synced.id(), reuse);
+                self.fail_start(index, recording_id, correlation_id, &error);
+                return;
+            }
+        };
         position.store_release(start_position);
         synced.store_release(start_position);
+        bytes.store_release(0);
         let (position_id, synced_id) = (counter_id(&position), counter_id(&synced));
         {
             let entry = &mut self.recordings[index];
@@ -1716,12 +1801,14 @@ impl Conductor {
             entry.recording_id = Some(recording_id);
             entry.position = Some(position.clone());
             entry.synced = Some(synced.clone());
+            entry.bytes = Some(bytes.clone());
         }
         self.statics.recording_started.increment();
         self.request(Request::Attach {
             recording_id,
             position,
             synced,
+            bytes,
         });
         self.send(&Event::RecordingReady {
             correlation_id,
@@ -1807,7 +1894,10 @@ impl Conductor {
             self.recordings[index].state = RecordingState::Stopped;
             let entry = self.recordings.swap_remove(index);
             let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-            for counter in [entry.position, entry.synced].into_iter().flatten() {
+            for counter in [entry.position, entry.synced, entry.bytes]
+                .into_iter()
+                .flatten()
+            {
                 let _ = self.counters.free(counter.id(), reuse);
             }
         }
@@ -1875,6 +1965,22 @@ impl Conductor {
                     "replay length {length} is below -1; -1 plays to the recording's extent, \
                      {} follows a live recording, and 0 or more is a byte count; see {ERRORS_DOC}",
                     i64::MAX
+                ),
+            );
+            return;
+        }
+        if self
+            .commands
+            .iter()
+            .any(|entry| entry.command.recording_id() == recording_id)
+        {
+            self.send_error(
+                correlation_id,
+                ErrorCode::RecordingBusy,
+                &format!(
+                    "recording {recording_id} is under a retention command, whose cut reads \
+                     as live until it is done; wait for that command's answer, then start the \
+                     replay again; see {ERRORS_DOC}"
                 ),
             );
             return;
@@ -2021,6 +2127,16 @@ impl Conductor {
                 } => {
                     self.on_replay_stopped(replay_session_id, position, reason, correlation_id, now)
                 }
+                replayer::Reply::Checked { correlation_id } => self.on_checked(correlation_id),
+                replayer::Reply::CheckFailed {
+                    correlation_id,
+                    failure,
+                } => self.on_check_failed(correlation_id, failure),
+                replayer::Reply::FileWorkDone {
+                    correlation_id,
+                    command,
+                    outcome,
+                } => self.on_file_work_done(correlation_id, command, outcome),
             }
             taken += 1;
         }
@@ -2254,8 +2370,9 @@ impl Conductor {
                 ErrorCode::PositionOutOfRange,
                 &format!(
                     "position {position} is not a multiple of 32 from {start} to {extent}, the \
-                     recording's start position and extent; resolve an instant through the time \
-                     index, or pass -1 for the start position; see {ERRORS_DOC}"
+                     recording's retained position, its start until a purge moved it, and its \
+                     extent; resolve an instant through the time index, or pass -1 for the \
+                     retained position; see {ERRORS_DOC}"
                 ),
             ),
             replayer::StartFailure::Files(text) => {
@@ -2379,6 +2496,362 @@ impl Conductor {
                  used; see {ERRORS_DOC}"
             ),
         );
+    }
+
+    /// `truncate recording`, `purge segments` and `purge recording`
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0031): the checks the conductor holds
+    /// in memory, in the spec's order, then the registry entry and the first hop, the
+    /// replayer's checks; nothing is written before those pass.
+    fn retention(&mut self, correlation_id: i64, command: replayer::Retention) {
+        let recording_id = command.recording_id();
+        if recording_id < 0 || recording_id >= self.recorder.next_recording_id {
+            self.send_error(
+                correlation_id,
+                ErrorCode::UnknownRecording,
+                &format!(
+                    "recording {recording_id} is not in the catalog, whose next id is {}; \
+                     `cavalry doctor` lists the recordings; see {ERRORS_DOC}",
+                    self.recorder.next_recording_id
+                ),
+            );
+            return;
+        }
+        if self
+            .recordings
+            .iter()
+            .any(|recording| recording.recording_id == Some(recording_id))
+        {
+            self.send_error(
+                correlation_id,
+                ErrorCode::RecordingBusy,
+                &format!(
+                    "recording {recording_id} is live or stopping; stop it with `cavalry record \
+                     --stop {recording_id}` and wait for `recording stopped`, then send {} \
+                     again; see {ERRORS_DOC}",
+                    command.name()
+                ),
+            );
+            return;
+        }
+        if self
+            .replays
+            .iter()
+            .any(|replay| replay.recording_id == recording_id)
+        {
+            self.send_error(
+                correlation_id,
+                ErrorCode::RecordingBusy,
+                &format!(
+                    "recording {recording_id} is being read by a replay; stop the replay with \
+                     `Cavalry::stop_replay` and its replay session id, or end the `cavalry \
+                     replay` process that holds it, then send {} again; see {ERRORS_DOC}",
+                    command.name()
+                ),
+            );
+            return;
+        }
+        if let Some(other) = self
+            .commands
+            .iter()
+            .find(|entry| entry.command.recording_id() == recording_id)
+        {
+            let name = other.command.name();
+            self.send_error(
+                correlation_id,
+                ErrorCode::RecordingBusy,
+                &format!(
+                    "recording {recording_id} is under a {name} that is still in progress; wait \
+                     for its answer, then send {} again; see {ERRORS_DOC}",
+                    command.name()
+                ),
+            );
+            return;
+        }
+        if self.commands.len() >= spec::MAX_COMMANDS_IN_PROGRESS {
+            self.registry_full(
+                correlation_id,
+                "commands in progress",
+                spec::MAX_COMMANDS_IN_PROGRESS,
+            );
+            return;
+        }
+        // The first hop alone is refused at admission: nothing has been written, and
+        // the registry bounds what waits for the later hops.
+        if !self.replayer_deferred.is_empty() {
+            self.replayer_queue_full(correlation_id);
+            return;
+        }
+        if self
+            .replayer
+            .requests
+            .offer(replayer::Request::Check {
+                correlation_id,
+                command,
+            })
+            .is_err()
+        {
+            self.replayer_queue_full(correlation_id);
+            return;
+        }
+        self.wake_replayer();
+        self.commands.push(CommandEntry {
+            correlation_id,
+            command,
+            hop: Hop::Checking,
+            pending: None,
+            failure: None,
+        });
+    }
+
+    /// The entry of the command `correlation_id`, if it is still in progress.
+    fn command_index(&self, correlation_id: i64) -> Option<usize> {
+        self.commands
+            .iter()
+            .position(|entry| entry.correlation_id == correlation_id)
+    }
+
+    /// Offers a command's next hop, or keeps it on the entry for the next cycle.
+    fn offer_hop(&mut self, index: usize, hop: PendingHop) {
+        let kept = match hop {
+            PendingHop::Recorder(request) => match self.recorder.requests.offer(request) {
+                Ok(()) => return,
+                Err(request) => PendingHop::Recorder(request),
+            },
+            PendingHop::Replayer(request) => match self.replayer.requests.offer(request) {
+                Ok(()) => {
+                    self.wake_replayer();
+                    return;
+                }
+                Err(request) => PendingHop::Replayer(request),
+            },
+        };
+        self.commands[index].pending = Some(kept);
+    }
+
+    /// Offers the hops the queues had no room for, in admission order, stopping at the
+    /// first the queue still refuses; returns how many went.
+    fn flush_commands(&mut self) -> usize {
+        let mut sent = 0;
+        for index in 0..self.commands.len() {
+            let Some(hop) = self.commands[index].pending.take() else {
+                continue;
+            };
+            self.offer_hop(index, hop);
+            if self.commands[index].pending.is_some() {
+                break;
+            }
+            sent += 1;
+        }
+        sent
+    }
+
+    /// The replayer's checks passed: the first catalog write goes to the recorder.
+    fn on_checked(&mut self, correlation_id: i64) {
+        let Some(index) = self.command_index(correlation_id) else {
+            return;
+        };
+        let command = self.commands[index].command;
+        let write = match command {
+            replayer::Retention::Truncate { .. } => crate::recorder::CatalogWrite::OpenCut,
+            replayer::Retention::Purge { position, .. } => {
+                crate::recorder::CatalogWrite::Retain { position }
+            }
+            replayer::Retention::Delete { .. } => crate::recorder::CatalogWrite::Delete,
+        };
+        self.commands[index].hop = Hop::CatalogFirst;
+        self.offer_hop(
+            index,
+            PendingHop::Recorder(Request::Catalog {
+                correlation_id,
+                recording_id: command.recording_id(),
+                write,
+            }),
+        );
+    }
+
+    /// The replayer's checks failed: the error, by the spec's code, and nothing written.
+    fn on_check_failed(&mut self, correlation_id: i64, failure: replayer::CheckFailure) {
+        let Some(index) = self.command_index(correlation_id) else {
+            return;
+        };
+        let command = self.commands.swap_remove(index).command;
+        match failure {
+            replayer::CheckFailure::UnknownRecording { recording_id, why } => self.send_error(
+                correlation_id,
+                ErrorCode::UnknownRecording,
+                &format!(
+                    "recording {recording_id} is not in the catalog as a valid recording: {why}; \
+                     `cavalry doctor` lists the recordings; see {ERRORS_DOC}"
+                ),
+            ),
+            replayer::CheckFailure::Busy { recording_id } => self.send_error(
+                correlation_id,
+                ErrorCode::RecordingBusy,
+                &format!(
+                    "recording {recording_id} reads as live or being cut in the catalog; wait \
+                     for the recording to stop or the cut to finish, then send {} again; see \
+                     {ERRORS_DOC}",
+                    command.name()
+                ),
+            ),
+            replayer::CheckFailure::PositionOutOfRange {
+                position,
+                retained,
+                stop,
+                rule,
+            } => self.send_error(
+                correlation_id,
+                ErrorCode::PositionOutOfRange,
+                &format!(
+                    "position {position} is not {rule}, {retained} to {stop} for recording {}; \
+                     resolve an instant through the time index, or pass a position within them; \
+                     see {ERRORS_DOC}",
+                    command.recording_id()
+                ),
+            ),
+            replayer::CheckFailure::NoFrame { position } => self.send_error(
+                correlation_id,
+                ErrorCode::PositionOutOfRange,
+                &format!(
+                    "no frame begins at the position {position} of recording {}; pass a position \
+                     an instant resolves to, or the stop position; see {ERRORS_DOC}",
+                    command.recording_id()
+                ),
+            ),
+            replayer::CheckFailure::Files(text) => {
+                self.statics.recording_retention_failed.increment();
+                self.send_error(correlation_id, ErrorCode::StorageSpace, &text);
+            }
+        }
+    }
+
+    /// A catalog write for a command is done or failed: the next hop, the answer, or
+    /// the error.
+    fn on_catalog_done(
+        &mut self,
+        correlation_id: i64,
+        recording_id: i64,
+        write: crate::recorder::CatalogWrite,
+        result: Result<(), String>,
+    ) {
+        let Some(index) = self.command_index(correlation_id) else {
+            return;
+        };
+        let command = self.commands[index].command;
+        debug_assert_eq!(command.recording_id(), recording_id);
+        match (self.commands[index].hop, write, result) {
+            (Hop::CatalogFirst, _, Ok(())) => {
+                self.commands[index].hop = Hop::FileWork;
+                self.offer_hop(
+                    index,
+                    PendingHop::Replayer(replayer::Request::FileWork {
+                        correlation_id,
+                        command,
+                    }),
+                );
+            }
+            (Hop::CatalogLast, _, Ok(())) => {
+                self.commands.swap_remove(index);
+                self.statics.recording_truncated.increment();
+                self.send(&Event::OperationSuccess { correlation_id });
+            }
+            (Hop::Repair, _, repaired) => {
+                let entry = self.commands.swap_remove(index);
+                let failure = entry.failure.unwrap_or_default();
+                let repaired = match repaired {
+                    Ok(()) => "the slot was repaired from the files and agrees with them",
+                    Err(_) => {
+                        "the repair of the slot from the files failed too; `cavalry doctor` \
+                               names what it found"
+                    }
+                };
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::StorageSpace,
+                    &format!(
+                        "{failure}; {repaired}; look at the file and the filesystem, then send {} \
+                         again; see {ERRORS_DOC}",
+                        command.name()
+                    ),
+                );
+            }
+            (_, _, Err(text)) => {
+                self.commands.swap_remove(index);
+                self.statics.recording_retention_failed.increment();
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::StorageSpace,
+                    &format!(
+                        "the catalog write of {} for recording {recording_id} failed: {text}; \
+                         `cavalry doctor` names what the slot holds; see {ERRORS_DOC}",
+                        command.name()
+                    ),
+                );
+            }
+            (hop, _, Ok(())) => {
+                debug_assert!(false, "a catalog reply at hop {hop:?}");
+            }
+        }
+    }
+
+    /// The replayer's file work ended: a truncate's last catalog write, a purge's or a
+    /// delete's answer with its counter, or the repair after a file the operating
+    /// system refused.
+    fn on_file_work_done(
+        &mut self,
+        correlation_id: i64,
+        command: replayer::Retention,
+        outcome: Result<replayer::FileWorkDone, String>,
+    ) {
+        let Some(index) = self.command_index(correlation_id) else {
+            return;
+        };
+        match outcome {
+            Ok(done) => match command {
+                replayer::Retention::Truncate {
+                    recording_id,
+                    position,
+                } => {
+                    self.commands[index].hop = Hop::CatalogLast;
+                    self.offer_hop(
+                        index,
+                        PendingHop::Recorder(Request::Catalog {
+                            correlation_id,
+                            recording_id,
+                            write: crate::recorder::CatalogWrite::CloseCut {
+                                stop_position: position,
+                                stop_timestamp: done.stop_timestamp,
+                            },
+                        }),
+                    );
+                }
+                replayer::Retention::Purge { .. } => {
+                    self.commands.swap_remove(index);
+                    for _ in 0..done.files_removed {
+                        self.statics.recording_segments_purged.increment();
+                    }
+                    self.send(&Event::OperationSuccess { correlation_id });
+                }
+                replayer::Retention::Delete { .. } => {
+                    self.commands.swap_remove(index);
+                    self.statics.recording_deleted.increment();
+                    self.send(&Event::OperationSuccess { correlation_id });
+                }
+            },
+            Err(text) => {
+                self.statics.recording_retention_failed.increment();
+                self.commands[index].hop = Hop::Repair;
+                self.commands[index].failure = Some(text);
+                self.offer_hop(
+                    index,
+                    PendingHop::Recorder(Request::Catalog {
+                        correlation_id,
+                        recording_id: command.recording_id(),
+                        write: crate::recorder::CatalogWrite::Repair,
+                    }),
+                );
+            }
+        }
     }
 
     /// Answers `start recording` with `error`, code 10, when the recorder's request
@@ -3251,6 +3724,7 @@ mod recording {
                 recording_id: None,
                 position: None,
                 synced: None,
+                bytes: None,
                 stop_requested: false,
             });
         }
@@ -3390,8 +3864,9 @@ mod replay {
 
     use cavalry_proto::client_protocol::{FOLLOW_LENGTH, NULL_LENGTH, NULL_POSITION};
     use cavalry_shm::counters::generated::{
-        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, REPLAY_ENDED, REPLAY_FAILED,
-        REPLAY_NOT_CONNECTED, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
+        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, RECORDING_DELETED,
+        RECORDING_RETENTION_FAILED, RECORDING_SEGMENTS_PURGED, RECORDING_TRUNCATED, REPLAY_ENDED,
+        REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
     };
     use cavalry_shm::log::ClaimError;
 
@@ -4668,6 +5143,395 @@ mod replay {
         assert_eq!(h.counter(REPLAY_ENDED), 1);
         assert_eq!(h.counter(REPLAY_STOPPED), 1);
         assert_eq!(read_replay(&h, 6, 0).len(), count as usize);
+        drop(appender);
+    }
+
+    // Retention (ADR 0031; card 95): truncate recording, purge segments and purge
+    // recording on the conductor, the recorder and the replayer driven by hand: the
+    // full cases first, then every error code, the registry's bound, and a file the
+    // operating system refused.
+
+    /// Cycles until the command `correlation_id` is answered: `Ok(())` for `operation
+    /// success`, `Err((code, message))` for `error`.
+    fn wait_answer(h: &mut Harness, correlation_id: i64) -> Result<(), (i32, String)> {
+        for _ in 0..10_000 {
+            h.cycle();
+            let got = events(h);
+            if successes(&got).contains(&correlation_id) {
+                return Ok(());
+            }
+            if let Some((_, code, message)) = errors(&got)
+                .into_iter()
+                .find(|(id, _, _)| *id == correlation_id)
+            {
+                return Err((code, message));
+            }
+        }
+        panic!("command {correlation_id} was not answered");
+    }
+
+    fn slot(h: &Harness, recording_id: i64) -> cavalry_log::layout::Descriptor {
+        cavalry_log::catalog::CatalogReader::open(&h.log_dir)
+            .expect("the catalog opens")
+            .get(recording_id)
+            .expect("the slot reads")
+            .expect("the slot holds a recording")
+    }
+
+    fn segment(h: &Harness, recording_id: i64, base: i64) -> std::path::PathBuf {
+        h.log_dir
+            .join(cavalry_log::layout::segment_file_name(recording_id, base))
+    }
+
+    fn index_count(h: &Harness, recording_id: i64) -> usize {
+        let bytes = std::fs::read(
+            h.log_dir
+                .join(cavalry_log::layout::index_file_name(recording_id)),
+        )
+        .expect("the index reads");
+        (bytes.len() - cavalry_log::layout::HEADER_LENGTH) / cavalry_log::layout::ENTRY_LENGTH
+    }
+
+    /// The full truncate (invariants 1 and 3): 100 frames recorded and stopped, cut to
+    /// 3200; the frames before stay and replay, the segment file is cut and extended
+    /// with zeros past the position, the index holds the entries at or before it, the
+    /// stop is the position with the last entry's timestamp, the counter moves, and a
+    /// replay from the start ends at the new stop with reason 0.
+    #[test]
+    fn truncate_keeps_the_frames_before_the_position_and_rewrites_the_stop() {
+        let (mut h, mut appender) = recorded("retention-truncate");
+        let end = offer(&mut h, &mut appender, 0, 100);
+        assert_eq!(end, 6400);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let entries_before = index_count(&h, 0);
+        let _ = events(&mut h);
+
+        h.conductor.retention(
+            20,
+            replayer::Retention::Truncate {
+                recording_id: 0,
+                position: 3200,
+            },
+        );
+        assert_eq!(h.conductor.commands.len(), 1, "registered");
+        wait_answer(&mut h, 20).expect("the truncate is answered with success");
+        assert!(
+            h.conductor.commands.is_empty(),
+            "the entry left the registry"
+        );
+        assert_eq!(h.counter(RECORDING_TRUNCATED), 1);
+        assert_eq!(h.counter(RECORDING_RETENTION_FAILED), 0);
+        let after = slot(&h, 0);
+        assert_eq!(after.stop_position(), 3200);
+        assert!(after.stop_timestamp() >= after.start_timestamp());
+        assert!(index_count(&h, 0) <= entries_before);
+        let file = std::fs::File::open(segment(&h, 0, 0)).expect("the segment file stays");
+        assert_eq!(
+            file.metadata().expect("stat").len(),
+            cavalry_log::layout::SEGMENT_FILE_LENGTH as u64,
+            "extended again"
+        );
+        let mut past = [0u8; 64];
+        file.read_exact_at(&mut past, 3200)
+            .expect("reads past the cut");
+        assert!(past.iter().all(|&b| b == 0), "zero past the position");
+
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((3200, 0)));
+        assert_eq!(read_replay(&h, 6, 0).len(), 50);
+        drop(appender);
+    }
+
+    /// A truncate to the retained position removes every file: the recording is
+    /// recovery's empty recording, its stop at the start with the start timestamp, its
+    /// index one entry, and a replay of it ends at once (ADR 0035).
+    #[test]
+    fn truncate_to_the_start_removes_the_files_and_leaves_an_empty_recording() {
+        let (mut h, mut appender) = recorded("retention-truncate-start");
+        offer(&mut h, &mut appender, 0, 100);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        h.conductor.retention(
+            20,
+            replayer::Retention::Truncate {
+                recording_id: 0,
+                position: 0,
+            },
+        );
+        wait_answer(&mut h, 20).expect("success");
+        let after = slot(&h, 0);
+        assert_eq!(after.stop_position(), 0);
+        assert_eq!(after.stop_timestamp(), after.start_timestamp());
+        assert!(!segment(&h, 0, 0).exists(), "the file at the position went");
+        assert_eq!(index_count(&h, 0), 1);
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        wait_replay_end(&mut h, 6);
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((0, 0)));
+        drop(appender);
+    }
+
+    /// The full purge (invariant 3): a recording of a segment and a bit, purged at the
+    /// second segment's base: the header moves to version 1, the slot to version 1's
+    /// form with the retained position there, the first file goes, the index keeps its
+    /// entries, a replay from −1 starts at the retained position and one from 0 is
+    /// refused with code 23 naming it.
+    #[test]
+    fn purge_segments_moves_the_retained_position_and_a_replay_starts_there() {
+        let (mut h, mut appender) = recorded("retention-purge");
+        let segment_length = i64::from(cavalry_log::layout::SEGMENT_FILE_LENGTH);
+        let mut message = [0u8; 1000];
+        let mut position = 0;
+        let mut n = 0i64;
+        while position < segment_length + 4096 {
+            message[..8].copy_from_slice(&n.to_le_bytes());
+            let limit = h.conductor.publications[0].limit.get();
+            match appender.offer(&message, limit, 0) {
+                Ok(after) => {
+                    position = after;
+                    n += 1;
+                }
+                Err(ClaimError::AdminAction) => {}
+                Err(ClaimError::BackPressured) => h.cycle(),
+                Err(error) => panic!("{error}"),
+            }
+        }
+        let end = position;
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let entries_before = index_count(&h, 0);
+        let _ = events(&mut h);
+
+        h.conductor.retention(
+            20,
+            replayer::Retention::Purge {
+                recording_id: 0,
+                position: segment_length,
+            },
+        );
+        wait_answer(&mut h, 20).expect("success");
+        assert_eq!(h.counter(RECORDING_SEGMENTS_PURGED), 1);
+        let after = slot(&h, 0);
+        assert_eq!(after.form(), cavalry_log::layout::Form::Version1);
+        assert_eq!(after.retained_position(), segment_length);
+        assert_eq!(after.stop_position(), end);
+        assert!(!segment(&h, 0, 0).exists());
+        assert!(segment(&h, 0, segment_length).exists());
+        assert_eq!(
+            index_count(&h, 0),
+            entries_before,
+            "the index keeps its entries"
+        );
+
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        let got = events(&mut h);
+        let (_, _, start, _, _) = replay_ready(&got, 6).expect("replay ready");
+        assert_eq!(start, segment_length, "-1 is the retained position");
+        wait_replay_end(&mut h, 6);
+        let _ = events(&mut h);
+        h.conductor
+            .start_replay(8, 0, 0, NULL_LENGTH, REPLAY_STREAM, IPC_CHANNEL);
+        let (code, message) = wait_answer(&mut h, 8).expect_err("below the retained position");
+        assert_eq!(code, 23, "{message}");
+        assert!(message.contains(&segment_length.to_string()), "{message}");
+        drop(appender);
+    }
+
+    /// The full delete (invariant 3): state 3, the files gone, the counter, and a replay
+    /// or a second delete refused with code 21.
+    #[test]
+    fn purge_recording_deletes_the_files_and_keeps_the_slot() {
+        let (mut h, mut appender) = recorded("retention-delete");
+        offer(&mut h, &mut appender, 0, 100);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        h.conductor
+            .retention(20, replayer::Retention::Delete { recording_id: 0 });
+        wait_answer(&mut h, 20).expect("success");
+        assert_eq!(h.counter(RECORDING_DELETED), 1);
+        assert_eq!(slot(&h, 0).state(), cavalry_log::layout::State::Deleted);
+        assert!(!segment(&h, 0, 0).exists());
+        assert!(
+            !h.log_dir
+                .join(cavalry_log::layout::index_file_name(0))
+                .exists()
+        );
+        h.conductor
+            .start_replay(8, 0, NULL_POSITION, NULL_LENGTH, REPLAY_STREAM, IPC_CHANNEL);
+        let (code, _) = wait_answer(&mut h, 8).expect_err("a deleted recording");
+        assert_eq!(code, 21);
+        h.conductor
+            .retention(21, replayer::Retention::Delete { recording_id: 0 });
+        let (code, _) = wait_answer(&mut h, 21).expect_err("deleted once");
+        assert_eq!(code, 21);
+        drop(appender);
+    }
+
+    /// Every refusal with its spec code (invariant 6): 21 for an id past the catalog,
+    /// 24 for a live recording, for one a replay reads, and for one under a command;
+    /// 23 for a position unaligned, above the stop, inside a frame, not a segment base
+    /// and at the retained position; 10 at the registry's bound; `start replay` on a
+    /// recording under a command is 24 too.
+    #[test]
+    fn retention_errors_get_the_spec_codes() {
+        let (mut h, mut appender) = recorded("retention-errors");
+        offer(&mut h, &mut appender, 0, 1000);
+        sync(&mut h);
+        h.conductor.retention(
+            20,
+            replayer::Retention::Truncate {
+                recording_id: 0,
+                position: 0,
+            },
+        );
+        let (code, message) = wait_answer(&mut h, 20).expect_err("live");
+        assert_eq!(code, 24, "{message}");
+        assert!(message.contains("--stop 0"), "{message}");
+        h.conductor
+            .retention(21, replayer::Retention::Delete { recording_id: 7 });
+        let (code, _) = wait_answer(&mut h, 21).expect_err("past the catalog");
+        assert_eq!(code, 21);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+
+        // A replay longer than the window stays live while its subscriber does not read.
+        start_replay(&mut h, 6, NULL_POSITION, NULL_LENGTH, Some(5));
+        assert_eq!(h.conductor.replays.len(), 1);
+        h.conductor.retention(
+            22,
+            replayer::Retention::Truncate {
+                recording_id: 0,
+                position: 64,
+            },
+        );
+        let (code, message) = wait_answer(&mut h, 22).expect_err("read by a replay");
+        assert_eq!(code, 24, "{message}");
+        assert!(message.contains("stop_replay"), "{message}");
+        h.conductor.stop_replay(9, 6);
+        wait_replay_end(&mut h, 6);
+        let _ = events(&mut h);
+
+        for (id, position, what) in [
+            (30, 48, "unaligned"),
+            (31, 64_000 + 64, "above the stop"),
+            (32, 32, "inside a frame"),
+        ] {
+            h.conductor.retention(
+                id,
+                replayer::Retention::Truncate {
+                    recording_id: 0,
+                    position,
+                },
+            );
+            let (code, message) = wait_answer(&mut h, id).expect_err(what);
+            assert_eq!(code, 23, "{what}: {message}");
+        }
+        let (_, message) = {
+            h.conductor.retention(
+                33,
+                replayer::Retention::Truncate {
+                    recording_id: 0,
+                    position: 32,
+                },
+            );
+            wait_answer(&mut h, 33).expect_err("inside a frame")
+        };
+        assert!(message.contains("no frame begins"), "{message}");
+        for (id, position, what) in [
+            (40, 64, "not a segment base"),
+            (41, 0, "at the retained position"),
+        ] {
+            h.conductor.retention(
+                id,
+                replayer::Retention::Purge {
+                    recording_id: 0,
+                    position,
+                },
+            );
+            let (code, message) = wait_answer(&mut h, id).expect_err(what);
+            assert_eq!(code, 23, "{what}: {message}");
+        }
+
+        // Two commands on one recording in one cycle: the second is 24, and so is a
+        // replay started while the first is in progress.
+        h.conductor.retention(
+            50,
+            replayer::Retention::Truncate {
+                recording_id: 0,
+                position: 6400,
+            },
+        );
+        h.conductor
+            .retention(51, replayer::Retention::Delete { recording_id: 0 });
+        h.conductor.start_replay(
+            52,
+            0,
+            NULL_POSITION,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            IPC_CHANNEL,
+        );
+        let got = events(&mut h);
+        let refused: Vec<(i64, i32)> = errors(&got)
+            .into_iter()
+            .map(|(id, code, _)| (id, code))
+            .collect();
+        assert!(refused.contains(&(51, 24)), "{refused:?}");
+        assert!(refused.contains(&(52, 24)), "{refused:?}");
+        wait_answer(&mut h, 50).expect("the first command completes");
+
+        // The registry's bound: 64 entries in progress refuse the 65th with code 10.
+        for i in 0..spec::MAX_COMMANDS_IN_PROGRESS as i64 {
+            h.conductor.commands.push(CommandEntry {
+                correlation_id: 1000 + i,
+                command: replayer::Retention::Delete {
+                    recording_id: 1000 + i,
+                },
+                hop: Hop::Checking,
+                pending: None,
+                failure: None,
+            });
+        }
+        h.conductor
+            .retention(60, replayer::Retention::Delete { recording_id: 0 });
+        let (code, message) = h.last_error(60).expect("refused at once");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("commands in progress"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
+        h.conductor.commands.clear();
+        drop(appender);
+    }
+
+    /// A file the operating system refuses (invariant 1): the log directory made
+    /// read-only before a delete's file work; the command is code 12 naming the file,
+    /// the slot is repaired from the files, and `recording.retention_failed` moves.
+    #[test]
+    fn a_file_the_system_refuses_is_code_12_and_the_slot_is_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut h, mut appender) = recorded("retention-refused");
+        offer(&mut h, &mut appender, 0, 100);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        let writable = std::fs::metadata(&h.log_dir).expect("stat").permissions();
+        std::fs::set_permissions(&h.log_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("read-only");
+        h.conductor
+            .retention(20, replayer::Retention::Delete { recording_id: 0 });
+        let answer = wait_answer(&mut h, 20);
+        std::fs::set_permissions(&h.log_dir, writable).expect("writable again");
+        let (code, message) = answer.expect_err("the file was refused");
+        assert_eq!(code, 12, "{message}");
+        assert!(message.contains("cannot remove"), "{message}");
+        // The repair runs in the same read-only directory, so it reports its own
+        // refusal; a directory writable again would read "repaired".
+        assert!(message.contains("repair"), "{message}");
+        assert_eq!(h.counter(RECORDING_RETENTION_FAILED), 1);
+        assert_eq!(h.counter(RECORDING_DELETED), 0);
+        assert!(h.conductor.commands.is_empty());
         drop(appender);
     }
 }

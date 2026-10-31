@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::layout::{
-    CATALOG_FILE_NAME, CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, HEADER_LENGTH, LayoutError,
-    MAX_SLOTS, Recording, State, crc32,
+    CATALOG_FILE_NAME, CATALOG_VERSION_1, CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, Form,
+    HEADER_LENGTH, LayoutError, MAX_SLOTS, Recording, State, VERSION,
 };
 
 const DOC: &str = "docs/reference/durable-log.md#catalog-header";
@@ -133,6 +133,9 @@ impl From<LayoutError> for CatalogError {
 
 /// The catalog as the driver holds it: the one writer.
 pub struct CatalogWriter {
+    /// The header's version as read at open or written since: 0, or 1 once a slot may
+    /// hold a retained group (ADR 0031).
+    version: i32,
     file: File,
     path: PathBuf,
     slots: u64,
@@ -239,11 +242,12 @@ impl CatalogWriter {
             .open(&path)
             .map_err(io("open", &path))?;
         let length = file_length(&file, &path)?;
-        if header_is_torn(&file, &path, length)? {
+        let version = if header_is_torn(&file, &path, length)? {
             write_header(&file, &path, now)?;
+            VERSION
         } else {
-            read_header(&file, &path)?;
-        }
+            read_header(&file, &path)?.version()
+        };
         let length = file_length(&file, &path)?;
         let mut slots = CatalogHeader::slots(length);
         let whole = CatalogHeader::slot_offset(slots);
@@ -263,7 +267,148 @@ impl CatalogWriter {
                 .map_err(io("drop the empty last slot of", &path))?;
             file.sync_all().map_err(io("sync", &path))?;
         }
-        Ok(CatalogWriter { file, path, slots })
+        Ok(CatalogWriter {
+            version,
+            file,
+            path,
+            slots,
+        })
+    }
+
+    /// The catalog's version, 0 or 1.
+    pub const fn version(&self) -> i32 {
+        self.version
+    }
+
+    /// Writes version 1 in the header, synced, before the first slot a retained group
+    /// is written in: the one header field that changes after the magic, once
+    /// (`spec/durable-log.md`, "Catalog header"; ADR 0031). Nothing to do at version 1.
+    pub fn move_to_version_1(&mut self) -> Result<(), CatalogError> {
+        if self.version == CATALOG_VERSION_1 {
+            return Ok(());
+        }
+        self.file
+            .write_all_at(&CATALOG_VERSION_1.to_le_bytes(), 8)
+            .map_err(io("write the version of", &self.path))?;
+        self.file.sync_all().map_err(io("sync", &self.path))?;
+        self.version = CATALOG_VERSION_1;
+        Ok(())
+    }
+
+    /// Writes a stopped recording's retained position, `purge segments`' catalog write:
+    /// the header moves to version 1 first when it is at 0, and a slot in version 0's
+    /// form is migrated in the one order a crash cannot hurt, the creation checksum over
+    /// version 1's ranges, then the position, then the retained checksum, each synced
+    /// (`spec/durable-log.md`, "The driver"; ADR 0031). A live, deleted or invalid
+    /// recording is `transition`, a position outside the page's rule is `position`, and
+    /// nothing is written.
+    pub fn retain(&mut self, recording_id: i64, position: i64) -> Result<(), CatalogError> {
+        let slot = self.slot(recording_id)?;
+        let found = self
+            .get(recording_id)?
+            .ok_or(CatalogError::Unknown { recording_id })?;
+        if found.state() != State::Valid || found.is_live() {
+            return Err(CatalogError::Transition {
+                recording_id,
+                from: found.state(),
+                needed: "a stopped recording",
+            });
+        }
+        let retained = found.retained(position)?;
+        self.move_to_version_1()?;
+        let offset = CatalogHeader::slot_offset(slot);
+        let encoded = retained.encode();
+        if found.form() == Form::Version0 {
+            // The migration: the new creation checksum signs the bytes the old one
+            // vouched for, less the twelve of the group, which it vouched were zero.
+            self.file
+                .write_all_at(&encoded[24..28], offset + 24)
+                .map_err(io("write the creation checksum of", &self.path))?;
+            self.file.sync_all().map_err(io("sync", &self.path))?;
+        }
+        self.file
+            .write_all_at(&encoded[472..480], offset + 472)
+            .map_err(io("write the retained position of", &self.path))?;
+        self.file.sync_all().map_err(io("sync", &self.path))?;
+        self.file
+            .write_all_at(&encoded[480..484], offset + 480)
+            .map_err(io("write the retained checksum of", &self.path))?;
+        self.file.sync_all().map_err(io("sync", &self.path))?;
+        Ok(())
+    }
+
+    /// Writes a slot's retained group alone, the position then its checksum, for
+    /// recovery's rebuild of a group torn by a crash: the slot is already in version 1's
+    /// form, its creation checksum written over version 1's ranges, so the group is the
+    /// only thing to write (ADR 0031). A slot past the last is `unknown`.
+    pub fn rewrite_retained(
+        &mut self,
+        slot: u64,
+        descriptor: &Descriptor,
+    ) -> Result<(), CatalogError> {
+        if slot >= self.slots {
+            return Err(CatalogError::Unknown {
+                recording_id: i64::try_from(slot).unwrap_or(i64::MAX),
+            });
+        }
+        let offset = CatalogHeader::slot_offset(slot);
+        let encoded = descriptor.in_version_1().encode();
+        self.file
+            .write_all_at(&encoded[472..480], offset + 472)
+            .map_err(io("write the retained position of", &self.path))?;
+        self.file.sync_all().map_err(io("sync", &self.path))?;
+        self.file
+            .write_all_at(&encoded[480..484], offset + 480)
+            .map_err(io("write the retained checksum of", &self.path))?;
+        self.file.sync_all().map_err(io("sync", &self.path))?;
+        Ok(())
+    }
+
+    /// Opens a truncate: writes a stopped recording's stop fields as −1 and −1 under
+    /// their checksum, which reads "live, or being cut" and puts the stop in the files
+    /// until [`stop`](Self::stop) writes the new one (ADR 0031). A live, deleted or
+    /// invalid recording is `transition`, and nothing is written.
+    pub fn open_cut(&mut self, recording_id: i64) -> Result<(), CatalogError> {
+        let slot = self.slot(recording_id)?;
+        let found = self
+            .get(recording_id)?
+            .ok_or(CatalogError::Unknown { recording_id })?;
+        if found.state() != State::Valid || found.is_live() {
+            return Err(CatalogError::Transition {
+                recording_id,
+                from: found.state(),
+                needed: "a stopped recording",
+            });
+        }
+        let cutting = found.reopened();
+        let offset = CatalogHeader::slot_offset(slot);
+        let encoded = cutting.encode();
+        self.file
+            .write_all_at(&encoded[8..24], offset + 8)
+            .map_err(io("write the stop fields of", &self.path))?;
+        self.file
+            .write_all_at(&encoded[4..8], offset + 4)
+            .map_err(io("write the stop checksum of", &self.path))?;
+        self.file.sync_all().map_err(io("sync", &self.path))?;
+        Ok(())
+    }
+
+    /// Writes state 3, deleted, on a stopped recording: `purge recording`'s catalog
+    /// write, after which the files go and the slot stays (ADR 0024, ADR 0031). A live,
+    /// deleted or invalid recording is `transition`, and nothing is written.
+    pub fn delete(&mut self, recording_id: i64) -> Result<(), CatalogError> {
+        let slot = self.slot(recording_id)?;
+        let found = self
+            .get(recording_id)?
+            .ok_or(CatalogError::Unknown { recording_id })?;
+        if found.state() != State::Valid || found.is_live() {
+            return Err(CatalogError::Transition {
+                recording_id,
+                from: found.state(),
+                needed: "a stopped recording",
+            });
+        }
+        self.write_state(slot, State::Deleted)
     }
 
     /// How many slots the catalog holds: whole slots, after an empty last slot left by a
@@ -371,11 +516,6 @@ impl CatalogWriter {
         self.rewrite(self.slot(recording_id)?, &descriptor)
     }
 
-    // The delete the page defines, state 3 on a stopped recording, arrives with card
-    // 95's purge, with its counter and its caller in the driver: a transition the driver
-    // cannot yet perform is not written here, so that every catalog transition on master
-    // is one the driver performs and counts (CLAUDE.md, invariant 4).
-
     /// Writes state 2 on a slot recovery found damaged: valid or deleted, whatever its
     /// checksums say, since damage is why. An empty slot is `unknown`, an invalid one
     /// is `transition`, and nothing is written.
@@ -424,8 +564,7 @@ impl CatalogWriter {
             Some(State::Invalid) => return Err(LayoutError::Invalid.into()),
             None => return Err(LayoutError::State { found: state }.into()),
         }
-        let creation_checksum = u32::from_le_bytes([found[24], found[25], found[26], found[27]]);
-        if creation_checksum != crc32(&found[28..]) {
+        if Descriptor::form_of(&found).is_none() {
             return Err(LayoutError::CreationChecksum.into());
         }
         if descriptor.recording_id() != recording_id {

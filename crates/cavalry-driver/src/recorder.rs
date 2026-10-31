@@ -34,7 +34,8 @@ use crate::spec;
 /// recording, which may stop on its own, and one per request handled in a cycle. With
 /// the pending replies at this bound the recorder handles no request and stops no
 /// recording until the conductor takes replies again; it keeps writing.
-pub(crate) const PENDING_REPLIES: usize = spec::MAX_RECORDINGS + spec::RECORDER_REQUESTS_PER_CYCLE;
+pub(crate) const PENDING_REPLIES: usize =
+    spec::MAX_RECORDINGS + spec::MAX_COMMANDS_IN_PROGRESS + spec::RECORDER_REQUESTS_PER_CYCLE;
 
 /// What a `start recording` command fixed about the recording, carried to the recorder
 /// once: the descriptor's fields and a reader on the log at the start position.
@@ -71,9 +72,9 @@ pub(crate) enum Request {
     /// Take a catalog slot and create the files; answered with [`Reply::Ready`] or
     /// [`Reply::StartFailed`].
     Start(Start),
-    /// The two counters the conductor allocated once the recording id was known; the
-    /// recorder stores its positions into them from now on. A recording already stopped
-    /// drops them.
+    /// The three counters the conductor allocated once the recording id was known; the
+    /// recorder stores its positions and its bytes into them from now on. A recording
+    /// already stopped drops them.
     Attach {
         /// The recording.
         recording_id: i64,
@@ -81,6 +82,9 @@ pub(crate) enum Request {
         position: Counter,
         /// Its `recording.synced_position` counter.
         synced: Counter,
+        /// Its `recording.bytes` gauge: the segment files' bytes on disk, stored at each
+        /// roll (ADR 0031).
+        bytes: Counter,
     },
     /// Stop a recording at the position written; answered with [`Reply::Stopped`], or
     /// [`Reply::StopIgnored`] when the recording already stopped on its own.
@@ -90,6 +94,42 @@ pub(crate) enum Request {
         /// The `stop recording` command's correlation id, when a command asked.
         correlation_id: Option<i64>,
     },
+    /// A retention command's catalog write, one slot and a sync, on the thread that owns
+    /// the catalog writer (ADR 0031); answered with [`Reply::CatalogDone`].
+    Catalog {
+        /// The command's correlation id, which the conductor's registry entry carries.
+        correlation_id: i64,
+        /// The stopped recording.
+        recording_id: i64,
+        /// The write.
+        write: CatalogWrite,
+    },
+}
+
+/// The catalog writes a retention command makes, in the order its hops run
+/// (`spec/durable-log.md`, "The driver"; ADR 0031).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogWrite {
+    /// A truncate's first step: the stop fields as −1 and −1, "live, or being cut".
+    OpenCut,
+    /// A truncate's third step: the stop recovery would rebuild for the files as cut.
+    CloseCut {
+        /// The position the recording was cut to.
+        stop_position: i64,
+        /// The timestamp of the last index entry left.
+        stop_timestamp: i64,
+    },
+    /// A purge's write: the retained position under its checksum, the slot migrated to
+    /// version 1's form first when it is in version 0's.
+    Retain {
+        /// The new retained position, a segment base.
+        position: i64,
+    },
+    /// A delete's write: state 3.
+    Delete,
+    /// After a file work the operating system refused: the recovery pass for the slot,
+    /// so that the slot and the files agree before the refusal is answered.
+    Repair,
 }
 
 /// Why a start failed, for the error event's code.
@@ -144,6 +184,17 @@ pub(crate) enum Reply {
         /// The command's correlation id, when a command asked.
         correlation_id: Option<i64>,
     },
+    /// A retention command's catalog write is done, or failed with the message.
+    CatalogDone {
+        /// The command.
+        correlation_id: i64,
+        /// The recording.
+        recording_id: i64,
+        /// The write that ran.
+        write: CatalogWrite,
+        /// `Ok`, or the error's text for the client's error event.
+        result: Result<(), String>,
+    },
 }
 
 /// One recording the recorder writes.
@@ -154,6 +205,10 @@ struct Live {
     writer: RecordingWriter,
     position: Option<Counter>,
     synced: Option<Counter>,
+    /// The `recording.bytes` gauge, stored when the segment count changes.
+    bytes: Option<Counter>,
+    /// The segment count last stored in `bytes`.
+    segments_stored: i64,
 }
 
 /// What one visit to a live recording did.
@@ -261,6 +316,7 @@ impl Recorder {
                 recording_id,
                 position,
                 synced,
+                bytes,
             } => {
                 if let Some(live) = self
                     .live
@@ -269,9 +325,59 @@ impl Recorder {
                 {
                     position.store_release(live.writer.position());
                     synced.store_release(live.writer.synced_position());
+                    let segments = live.writer.segments_written();
+                    bytes.store_release(
+                        segments.saturating_mul(i64::from(
+                            live.writer.descriptor().segment_file_length(),
+                        )),
+                    );
+                    live.segments_stored = segments;
                     live.position = Some(position);
                     live.synced = Some(synced);
+                    live.bytes = Some(bytes);
                 }
+            }
+            Request::Catalog {
+                correlation_id,
+                recording_id,
+                write,
+            } => {
+                let result = match write {
+                    CatalogWrite::OpenCut => self
+                        .log
+                        .catalog_mut()
+                        .open_cut(recording_id)
+                        .map_err(|error| error.to_string()),
+                    CatalogWrite::CloseCut {
+                        stop_position,
+                        stop_timestamp,
+                    } => self
+                        .log
+                        .catalog_mut()
+                        .stop(recording_id, stop_position, stop_timestamp)
+                        .map_err(|error| error.to_string()),
+                    CatalogWrite::Retain { position } => self
+                        .log
+                        .catalog_mut()
+                        .retain(recording_id, position)
+                        .map_err(|error| error.to_string()),
+                    CatalogWrite::Delete => self
+                        .log
+                        .catalog_mut()
+                        .delete(recording_id)
+                        .map_err(|error| error.to_string()),
+                    CatalogWrite::Repair => self
+                        .log
+                        .repair(recording_id)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string()),
+                };
+                self.pending.push_back(Reply::CatalogDone {
+                    correlation_id,
+                    recording_id,
+                    write,
+                    result,
+                });
             }
             Request::Stop {
                 recording_id,
@@ -326,6 +432,8 @@ impl Recorder {
             Ok(writer) => {
                 let recording_id = writer.recording_id();
                 self.live.push(Live {
+                    bytes: None,
+                    segments_stored: 0,
                     recording_id,
                     publication_id,
                     reader: start.reader,
@@ -395,6 +503,17 @@ impl Recorder {
                 debug_assert!(sought.is_ok(), "the block's end is in the reader's term");
                 if let Some(position) = &live.position {
                     position.store_release(live.writer.position());
+                }
+                let segments = live.writer.segments_written();
+                if segments != live.segments_stored
+                    && let Some(bytes) = &live.bytes
+                {
+                    bytes.store_release(
+                        segments.saturating_mul(i64::from(
+                            live.writer.descriptor().segment_file_length(),
+                        )),
+                    );
+                    live.segments_stored = segments;
                 }
                 worked = true;
             }

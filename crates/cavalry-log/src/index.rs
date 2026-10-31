@@ -216,6 +216,50 @@ pub fn position_at(dir: &Path, recording_id: i64, instant: i64) -> Result<i64, I
     Ok(index.read(j)?.position)
 }
 
+/// Truncates the index to the entries at or before `position`, a truncate's cut of the
+/// index (`spec/durable-log.md`, "The driver"; ADR 0031), and returns the timestamp of
+/// the last entry left, or `None` when no entry is at or before the position, in which
+/// case the file keeps its first entry alone, since one writer never leaves an index
+/// with none. The file is synced after the cut.
+pub fn truncate_at(
+    dir: &Path,
+    recording_id: i64,
+    position: i64,
+) -> Result<Option<i64>, IndexError> {
+    let index = Index::open(dir, recording_id)?;
+    // Positions never decrease from one entry to the next: the first entry past the
+    // position is found by a search, as the recovery pass finds it.
+    let (mut low, mut high) = (0u64, index.count);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if index.read(mid)?.position <= position {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let keep = low.max(1);
+    let io_error = |what: &'static str| {
+        let path = index.path.clone();
+        move |source| IndexError::Io { what, path, source }
+    };
+    if keep < index.count {
+        // The reader's handle is read-only; the cut needs one that writes.
+        let writable = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&index.path)
+            .map_err(io_error("open"))?;
+        writable
+            .set_len(HEADER_LENGTH as u64 + keep * ENTRY_LENGTH as u64)
+            .map_err(io_error("truncate"))?;
+        writable.sync_all().map_err(io_error("sync"))?;
+    }
+    if low == 0 {
+        return Ok(None);
+    }
+    Ok(Some(index.read(keep - 1)?.timestamp))
+}
+
 /// The position a replay to `instant` ends at: the position of the first entry whose
 /// timestamp is after the instant, or the last entry's position when there is none.
 pub fn position_after(dir: &Path, recording_id: i64, instant: i64) -> Result<i64, IndexError> {

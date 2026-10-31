@@ -36,7 +36,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cavalry_log::catalog::{CatalogError, CatalogReader};
-use cavalry_log::layout::{Descriptor, FRAME_ALIGNMENT, SEGMENT_SUFFIX, State, locate};
+use cavalry_log::layout::{
+    Descriptor, FRAME_ALIGNMENT, SEGMENT_SUFFIX, State, locate, segment_file_name,
+};
 use cavalry_proto::client_protocol::{NULL_LENGTH, NULL_POSITION, ReplayStopReason};
 use cavalry_proto::frame::FrameError;
 use cavalry_shm::counters::Counter;
@@ -53,7 +55,8 @@ const DOC: &str = "docs/reference/client-protocol.md#error-codes";
 /// replay, which may end on its own, and one per request handled in a cycle. At this
 /// bound the replayer handles no request and ends no replay until the conductor takes
 /// replies again; it keeps writing.
-pub(crate) const PENDING_REPLIES: usize = spec::MAX_REPLAYS + spec::REPLAYER_REQUESTS_PER_CYCLE;
+pub(crate) const PENDING_REPLIES: usize =
+    spec::MAX_REPLAYS + spec::MAX_COMMANDS_IN_PROGRESS + spec::REPLAYER_REQUESTS_PER_CYCLE;
 
 /// The longest segment file name, with room to spare, so a roll formats the name on
 /// the stack (`cavalry_log::recorder`).
@@ -110,6 +113,119 @@ pub(crate) enum Request {
         /// Why: by command, or for want of a subscriber.
         reason: ReplayStopReason,
     },
+    /// A retention command's checks that need the disk, before any catalog write
+    /// (ADR 0031): the slot read by the two-range rule, the position against the
+    /// retained position, the stop position and the segment base rule, and for a
+    /// truncate below the stop the frame header at the position; answered with
+    /// [`Reply::Checked`] or [`Reply::CheckFailed`].
+    Check {
+        /// The command's correlation id.
+        correlation_id: i64,
+        /// The command.
+        command: Retention,
+    },
+    /// A retention command's file work, after its first catalog write: one file per
+    /// duty cycle, a truncate's segments past the position from the highest base down,
+    /// then the cut and extension of the segment that holds the position and the index's
+    /// cut, a purge's segments wholly before the position, a delete's segments and then
+    /// its index; answered with [`Reply::FileWorkDone`].
+    FileWork {
+        /// The command's correlation id.
+        correlation_id: i64,
+        /// The command.
+        command: Retention,
+    },
+}
+
+/// A retention command as the conductor admitted it: `truncate recording`, `purge
+/// segments` or `purge recording` (`spec/client-protocol.md`, "Commands"; ADR 0031).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Retention {
+    /// Keep the bytes before `position`, lose the rest.
+    Truncate {
+        /// The stopped recording.
+        recording_id: i64,
+        /// The cut: a multiple of 32 from the retained position to the stop position,
+        /// at which a frame begins or which is the stop position.
+        position: i64,
+    },
+    /// Lose the segment files wholly before `position`, which becomes the retained
+    /// position.
+    Purge {
+        /// The stopped recording.
+        recording_id: i64,
+        /// A segment base above the retained position and at most the stop position.
+        position: i64,
+    },
+    /// Lose every file; the slot stays as state 3.
+    Delete {
+        /// The stopped recording.
+        recording_id: i64,
+    },
+}
+
+impl Retention {
+    /// The recording the command names.
+    pub(crate) const fn recording_id(self) -> i64 {
+        match self {
+            Retention::Truncate { recording_id, .. }
+            | Retention::Purge { recording_id, .. }
+            | Retention::Delete { recording_id } => recording_id,
+        }
+    }
+
+    /// The command's name in an error message.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Retention::Truncate { .. } => "truncate recording",
+            Retention::Purge { .. } => "purge segments",
+            Retention::Delete { .. } => "purge recording",
+        }
+    }
+}
+
+/// Why a retention command's checks failed, for the error event's code (ADR 0031).
+pub(crate) enum CheckFailure {
+    /// The catalog does not hold the recording as a valid recording: code 21.
+    UnknownRecording {
+        /// The id asked for.
+        recording_id: i64,
+        /// What the slot holds instead.
+        why: String,
+    },
+    /// The slot reads live or being cut: code 24.
+    Busy {
+        /// The id asked for.
+        recording_id: i64,
+    },
+    /// The position is outside the command's rule: code 23, with the bounds.
+    PositionOutOfRange {
+        /// The position asked for.
+        position: i64,
+        /// The recording's retained position.
+        retained: i64,
+        /// The recording's stop position.
+        stop: i64,
+        /// The rule, in the message's words.
+        rule: &'static str,
+    },
+    /// No frame begins at a truncate's position below the stop: code 23.
+    NoFrame {
+        /// The position asked for.
+        position: i64,
+    },
+    /// A segment file could not be opened or read, or the catalog read: code 12.
+    Files(String),
+}
+
+/// What a command's file work left: for the catalog's last write and the counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileWorkDone {
+    /// Segment files removed, and for a delete the index too.
+    pub files_removed: u64,
+    /// For a truncate, the timestamp of the last index entry left: the stop timestamp
+    /// recovery would rebuild.
+    pub stop_timestamp: i64,
 }
 
 /// Why a start failed, for the error event's code.
@@ -176,6 +292,45 @@ pub(crate) enum Reply {
         /// The `stop replay` command's correlation id, when a command asked.
         correlation_id: Option<i64>,
     },
+    /// A retention command's checks passed: the conductor hands the first catalog write
+    /// to the recorder.
+    Checked {
+        /// The command.
+        correlation_id: i64,
+    },
+    /// A retention command's checks failed; nothing was written.
+    CheckFailed {
+        /// The command.
+        correlation_id: i64,
+        /// Why.
+        failure: CheckFailure,
+    },
+    /// A retention command's file work ended, done or refused by a file.
+    FileWorkDone {
+        /// The command.
+        correlation_id: i64,
+        /// The command, for the catalog's last write.
+        command: Retention,
+        /// What it left, or the file error's text.
+        outcome: Result<FileWorkDone, String>,
+    },
+}
+
+/// One retention command's file work in progress, one file per duty cycle.
+struct Work {
+    correlation_id: i64,
+    command: Retention,
+    descriptor: Descriptor,
+    /// The segment bases still to remove, in the order they go: a truncate's from the
+    /// highest base down, a purge's and a delete's from the lowest up. Allocated once
+    /// per command, off every message path.
+    bases: Vec<i64>,
+    /// Whether the segment holding a truncate's position still waits for its cut.
+    cut_due: bool,
+    /// Whether the index still waits for its cut (a truncate) or removal (a delete).
+    index_due: bool,
+    files_removed: u64,
+    stop_timestamp: i64,
 }
 
 /// The bytes a replay may read of its recording: the stop position once the recording
@@ -260,6 +415,9 @@ pub(crate) struct Replayer {
     requests: Consumer<Request>,
     replies: Producer<Reply>,
     replays: Vec<Replay>,
+    /// The retention commands whose file work is in progress, bounded as the conductor's
+    /// registry of commands in progress is.
+    works: Vec<Work>,
     /// Replies the reply queue had no room for, offered again next cycle.
     pending: VecDeque<Reply>,
     /// The block read from a segment file, sized once.
@@ -284,6 +442,7 @@ impl Replayer {
             requests,
             replies,
             replays: Vec::with_capacity(spec::MAX_REPLAYS),
+            works: Vec::with_capacity(spec::MAX_COMMANDS_IN_PROGRESS),
             pending: VecDeque::with_capacity(PENDING_REPLIES),
             buffer: vec![0u8; spec::REPLAYER_BLOCK_LIMIT],
             rejected_frame,
@@ -299,7 +458,7 @@ impl Replayer {
             let now = now_nanos();
             if self.duty_cycle(now) != 0 {
                 self.idler.reset();
-            } else if self.replays.is_empty() && self.pending.is_empty() {
+            } else if self.replays.is_empty() && self.works.is_empty() && self.pending.is_empty() {
                 // Nothing can change until the conductor offers a request, and it
                 // unparks this thread when it does; an unpark that came before this
                 // park is a token the park consumes at once, so no request waits for
@@ -337,6 +496,7 @@ impl Replayer {
                 Step::Idle => index += 1,
             }
         }
+        work += self.file_work();
         work + self.flush_replies()
     }
 
@@ -362,6 +522,14 @@ impl Replayer {
                     });
                 }
             }
+            Request::Check {
+                correlation_id,
+                command,
+            } => self.check(correlation_id, command),
+            Request::FileWork {
+                correlation_id,
+                command,
+            } => self.begin_file_work(correlation_id, command),
             Request::Stop {
                 replay_session_id,
                 correlation_id,
@@ -450,19 +618,20 @@ impl Replayer {
             Extent::Final(descriptor.stop_position())
         };
         let extent_now = extent.value();
+        // A position of −1 is the recording's retained position: its start position
+        // until a purge moved it, and the lower bound of what a replay may read
+        // (`spec/client-protocol.md`, "start replay"; ADR 0031).
+        let retained = descriptor.retained_position();
         let position = if start.position == NULL_POSITION {
-            descriptor.start_position()
+            retained
         } else {
             start.position
         };
-        if position % FRAME_ALIGNMENT != 0
-            || position < descriptor.start_position()
-            || position > extent_now
-        {
+        if position % FRAME_ALIGNMENT != 0 || position < retained || position > extent_now {
             self.pending
                 .push_back(fail(StartFailure::PositionOutOfRange {
                     position,
-                    start: descriptor.start_position(),
+                    start: retained,
                     extent: extent_now,
                 }));
             return;
@@ -746,6 +915,321 @@ impl Replayer {
         }
         sent
     }
+}
+
+impl Replayer {
+    /// A retention command's checks (`spec/client-protocol.md`, "Commands"; ADR 0031), in
+    /// the spec's order, none of them writing: the slot, the position, the frame.
+    fn check(&mut self, correlation_id: i64, command: Retention) {
+        let recording_id = command.recording_id();
+        let fail = |failure| Reply::CheckFailed {
+            correlation_id,
+            failure,
+        };
+        let descriptor = match self.catalog.get(recording_id) {
+            Ok(Some(descriptor)) if descriptor.state() == State::Valid => descriptor,
+            Ok(Some(descriptor)) => {
+                let state = match descriptor.state() {
+                    State::Invalid => "invalid, damaged beyond repair",
+                    State::Deleted => "deleted",
+                    State::Valid | State::Empty => "not valid",
+                };
+                self.pending.push_back(fail(CheckFailure::UnknownRecording {
+                    recording_id,
+                    why: format!("its slot is {state}"),
+                }));
+                return;
+            }
+            Ok(None) => {
+                self.pending.push_back(fail(CheckFailure::UnknownRecording {
+                    recording_id,
+                    why: "its slot is empty".to_string(),
+                }));
+                return;
+            }
+            Err(CatalogError::Unknown { .. }) => {
+                let next = self.catalog.slots().unwrap_or(0);
+                self.pending.push_back(fail(CheckFailure::UnknownRecording {
+                    recording_id,
+                    why: format!("the catalog's next recording id is {next}"),
+                }));
+                return;
+            }
+            Err(error) => {
+                self.pending
+                    .push_back(fail(CheckFailure::Files(format!("{error}"))));
+                return;
+            }
+        };
+        if descriptor.is_live() {
+            // Live, or being cut by a truncate: the conductor's registry refuses both
+            // before this, so this is a slot another writer moved.
+            self.pending
+                .push_back(fail(CheckFailure::Busy { recording_id }));
+            return;
+        }
+        let retained = descriptor.retained_position();
+        let stop = descriptor.stop_position();
+        let out_of_range = |position, rule| {
+            fail(CheckFailure::PositionOutOfRange {
+                position,
+                retained,
+                stop,
+                rule,
+            })
+        };
+        match command {
+            Retention::Truncate { position, .. } => {
+                if position % FRAME_ALIGNMENT != 0 || position < retained || position > stop {
+                    self.pending.push_back(out_of_range(
+                        position,
+                        "a multiple of 32 from the retained position to the stop position",
+                    ));
+                    return;
+                }
+                if position < stop {
+                    match cavalry_log::dir::frame_begins_at(&self.dir, &descriptor, position) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            self.pending
+                                .push_back(fail(CheckFailure::NoFrame { position }));
+                            return;
+                        }
+                        Err(error) => {
+                            self.pending
+                                .push_back(fail(CheckFailure::Files(format!("{error}"))));
+                            return;
+                        }
+                    }
+                }
+            }
+            Retention::Purge { position, .. } => {
+                if !segment_base(&descriptor, position) || position <= retained || position > stop {
+                    self.pending.push_back(out_of_range(
+                        position,
+                        "a segment base of the recording above the retained position and at \
+                         most the stop position",
+                    ));
+                    return;
+                }
+            }
+            Retention::Delete { .. } => {}
+        }
+        self.pending.push_back(Reply::Checked { correlation_id });
+    }
+
+    /// Starts a command's file work: the files to remove are listed once, from the
+    /// catalog slot as the first catalog write left it, and one goes per duty cycle.
+    fn begin_file_work(&mut self, correlation_id: i64, command: Retention) {
+        let recording_id = command.recording_id();
+        let refuse = |text: String| Reply::FileWorkDone {
+            correlation_id,
+            command,
+            outcome: Err(text),
+        };
+        if self.works.len() >= spec::MAX_COMMANDS_IN_PROGRESS {
+            // The conductor bounds its registry to the same number, so this is a bug
+            // there; refused rather than grown.
+            self.pending.push_back(refuse(format!(
+                "the replayer holds {} commands, its capacity; see {DOC}",
+                spec::MAX_COMMANDS_IN_PROGRESS
+            )));
+            return;
+        }
+        let descriptor = match self.catalog.get(recording_id) {
+            Ok(Some(descriptor)) => descriptor,
+            Ok(None) => {
+                self.pending
+                    .push_back(refuse(format!("recording {recording_id}'s slot is empty")));
+                return;
+            }
+            Err(error) => {
+                self.pending.push_back(refuse(format!("{error}")));
+                return;
+            }
+        };
+        let segments = match cavalry_log::dir::segment_bases(&self.dir, recording_id) {
+            Ok(bases) => bases,
+            Err(error) => {
+                self.pending.push_back(refuse(format!("{error}")));
+                return;
+            }
+        };
+        let segment_length = i64::from(descriptor.segment_file_length());
+        let (mut bases, cut_due, index_due): (Vec<i64>, bool, bool) = match command {
+            Retention::Truncate { position, .. } => {
+                // Wholly past the position, from the highest base down; a position at
+                // a segment base removes that file and cuts none.
+                let mut past: Vec<i64> = segments
+                    .into_iter()
+                    .filter(|&base| base >= position)
+                    .collect();
+                past.sort_unstable_by(|a, b| b.cmp(a));
+                let at_base = segment_base(&descriptor, position);
+                (past, !at_base, true)
+            }
+            Retention::Purge { position, .. } => {
+                // Wholly before the position, from the lowest up.
+                let mut before: Vec<i64> = segments
+                    .into_iter()
+                    .filter(|&base| base.saturating_add(segment_length) <= position)
+                    .collect();
+                before.sort_unstable();
+                (before, false, false)
+            }
+            Retention::Delete { .. } => {
+                let mut all = segments;
+                all.sort_unstable();
+                (all, false, true)
+            }
+        };
+        // Popped from the end, so the order to go is reversed here.
+        bases.reverse();
+        self.works.push(Work {
+            correlation_id,
+            command,
+            descriptor,
+            bases,
+            cut_due,
+            index_due,
+            files_removed: 0,
+            stop_timestamp: 0,
+        });
+    }
+
+    /// One step of file work for every command in progress: one file removed, cut or
+    /// truncated per command per cycle; a command whose work is done, or whose file the
+    /// operating system refused, replies and leaves. Returns how many steps ran.
+    fn file_work(&mut self) -> usize {
+        let mut steps = 0;
+        let mut index = 0;
+        while index < self.works.len() {
+            if self.pending.len() >= PENDING_REPLIES {
+                break;
+            }
+            let outcome = self.file_work_step(index);
+            steps += 1;
+            match outcome {
+                None => index += 1,
+                Some(outcome) => {
+                    let work = self.works.swap_remove(index);
+                    self.pending.push_back(Reply::FileWorkDone {
+                        correlation_id: work.correlation_id,
+                        command: work.command,
+                        outcome,
+                    });
+                }
+            }
+        }
+        steps
+    }
+
+    /// The next step of the work at `index`: `None` while more remains, else the
+    /// outcome.
+    fn file_work_step(&mut self, index: usize) -> Option<Result<FileWorkDone, String>> {
+        let work = &mut self.works[index];
+        let recording_id = work.descriptor.recording_id();
+        if let Some(base) = work.bases.pop() {
+            let path = self.dir.join(segment_file_name(recording_id, base));
+            return match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    work.files_removed += 1;
+                    None
+                }
+                // A file already gone is a file removed: the work is idempotent, as
+                // recovery's is after a crash.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => Some(Err(format!(
+                    "cannot remove the segment file {}: {error}",
+                    path.display()
+                ))),
+            };
+        }
+        if work.cut_due
+            && let Retention::Truncate { position, .. } = work.command
+        {
+            work.cut_due = false;
+            return match cut_segment(&self.dir, &work.descriptor, position) {
+                Ok(()) => None,
+                Err(text) => Some(Err(text)),
+            };
+        }
+        if work.index_due {
+            work.index_due = false;
+            match work.command {
+                Retention::Truncate { position, .. } => {
+                    return match cavalry_log::index::truncate_at(&self.dir, recording_id, position)
+                    {
+                        Ok(timestamp) => {
+                            // A truncate to the retained position leaves recovery's
+                            // empty recording, whose stop timestamp is the start
+                            // timestamp whatever its first index entry carries
+                            // (`spec/durable-log.md`, "The driver"; ADR 0031).
+                            work.stop_timestamp = if position <= work.descriptor.retained_position()
+                            {
+                                work.descriptor.start_timestamp()
+                            } else {
+                                timestamp.unwrap_or(work.descriptor.start_timestamp())
+                            };
+                            None
+                        }
+                        Err(error) => Some(Err(format!("{error}"))),
+                    };
+                }
+                Retention::Delete { .. } => {
+                    let path = self
+                        .dir
+                        .join(cavalry_log::layout::index_file_name(recording_id));
+                    return match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            work.files_removed += 1;
+                            None
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => Some(Err(format!(
+                            "cannot remove the time index {}: {error}",
+                            path.display()
+                        ))),
+                    };
+                }
+                Retention::Purge { .. } => {}
+            }
+        }
+        Some(Ok(FileWorkDone {
+            files_removed: work.files_removed,
+            stop_timestamp: work.stop_timestamp,
+        }))
+    }
+}
+
+/// Whether `position` is one of the recording's segment bases: the start position's
+/// term base plus a whole number of segment file lengths (`spec/durable-log.md`,
+/// "Segment files").
+fn segment_base(descriptor: &Descriptor, position: i64) -> bool {
+    let term = i64::from(descriptor.term_length()).max(1);
+    let segment = i64::from(descriptor.segment_file_length()).max(1);
+    let start = descriptor.start_position();
+    let first = start - start % term;
+    position >= first && (position - first) % segment == 0
+}
+
+/// A truncate's cut of the segment that holds `position`: the file is cut to the
+/// position's offset with one truncation and extended to the segment file length
+/// again, so the bytes past the position are zero, and synced.
+fn cut_segment(dir: &Path, descriptor: &Descriptor, position: i64) -> Result<(), String> {
+    let located = locate(descriptor, position).map_err(|error| format!("{error}"))?;
+    let path = dir.join(&located.segment_file);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("cannot open the segment file {}: {error}", path.display()))?;
+    file.set_len(located.offset_in_segment as u64)
+        .map_err(|error| format!("cannot cut the segment file {}: {error}", path.display()))?;
+    file.set_len(descriptor.segment_file_length() as u64)
+        .map_err(|error| format!("cannot extend the segment file {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("cannot sync the segment file {}: {error}", path.display()))?;
+    Ok(())
 }
 
 /// Opens the segment file that holds `position`, by Aeron's rule for segment base

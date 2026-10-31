@@ -81,6 +81,11 @@ pub const MAX_RECORDINGS: usize = 1024;
 /// How many replays the driver holds: starting or live (ADR 0030).
 pub const MAX_REPLAYS: usize = 64;
 
+/// How many retention commands the driver holds in progress at once: truncate recording,
+/// purge segments and purge recording, from admission to the answer, the replays
+/// registry's capacity (`spec/client-protocol.md`, "Sizes"; ADR 0031).
+pub const MAX_COMMANDS_IN_PROGRESS: usize = MAX_REPLAYS;
+
 /// How long a replay's publication may have no subscriber before the replay ends with
 /// reason 2, from its start or from the moment its last subscriber went: Aeron's replay
 /// connect timeout.

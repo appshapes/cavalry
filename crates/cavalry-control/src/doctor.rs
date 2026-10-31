@@ -26,12 +26,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cavalry_driver::{IdleStrategy, spec};
 use cavalry_log::catalog::CatalogReader;
-use cavalry_log::layout::State as SlotState;
+use cavalry_log::layout::{Descriptor, State as SlotState, locate};
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
     CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
-    COUNTERS_ALLOCATION_FAILED, PUBLICATION_POSITION, RECORDING_INVALIDATED, RECORDING_POSITION,
-    RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
+    COUNTERS_ALLOCATION_FAILED, PUBLICATION_POSITION, RECORDING_BYTES, RECORDING_INVALIDATED,
+    RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -80,6 +80,15 @@ const OVERLAY_OR_NETWORK_FILESYSTEMS: [&str; 8] = [
 /// The least free space under the log directory worth no finding: eight segment files
 /// of 128 MiB, 1 GiB (ADR 0025).
 const LOG_FREE_WARNING: u64 = 8 * 128 * 1024 * 1024;
+
+/// The least share of its filesystem free under the log directory worth no finding
+/// naming a purge: one part in this many, a tenth (ADR 0031).
+const LOG_FREE_SHARE: u64 = 10;
+
+/// The segment files one `purge segments` command removes within the client's 10 second
+/// response timeout, one file's work per duty cycle, in the order of ten thousand (ADR
+/// 0031); a finding that names a larger purge says to send it as several.
+const SEGMENTS_PER_PURGE: i64 = 10_000;
 
 const DOC_DURABLE_LOG_DRIVER: &str = "docs/reference/durable-log.md#the-driver";
 const DOC_RECORDING_COMMANDS: &str = "docs/reference/client-protocol.md#commands";
@@ -200,10 +209,13 @@ pub fn examine(dir: &Path) -> Report {
 /// [`examine`], and with `log_dir` the log directory's checks too: the length of its
 /// path, its backing, whether
 /// the driver's user can write it and how much room it has (`log-directory-backing`,
-/// the `log.dir` key's check), the catalog slots recovery set to invalid, named
-/// (`recording-invalid`), and every recording's two positions from the counters file,
+/// the `log.dir` key's check), under a tenth of its filesystem free with the purge that
+/// frees the most (`log-directory-space`), the catalog slots recovery set to invalid,
+/// named (`recording-invalid`), every recording's two positions from the counters file,
 /// with a recorder a full window behind its publisher (`recording-stalled`) and failed
-/// writes (`recording-write-failed`) as findings (ADR 0025).
+/// writes (`recording-write-failed`) as findings (ADR 0025), and a recording over half
+/// its filesystem, live by its gauge or stopped by its descriptor
+/// (`recording-over-half`, ADR 0031).
 pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
     let mut findings = Vec::new();
     let mut checks = 0;
@@ -455,8 +467,9 @@ fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
         });
     }
     checks += 1;
-    if let Some(free) = free_bytes(&canonical)
-        && free < LOG_FREE_WARNING
+    let filesystem = filesystem_bytes(&canonical);
+    if let Some(filesystem) = filesystem
+        && filesystem.free < LOG_FREE_WARNING
     {
         findings.push(Finding {
             check: "log-directory-backing",
@@ -466,12 +479,13 @@ fn log_directory_checks(log_dir: &Path, findings: &mut Vec<Finding>) -> usize {
                  128 MiB: the next recording, or the next segment of a live one, cannot be \
                  created; free space, or set {}=<a directory with room>",
                 log_dir.display(),
-                free / (1024 * 1024),
+                filesystem.free / (1024 * 1024),
                 LOG_DIR_KEY.env
             ),
             doc: LOG_DIR_KEY.anchor,
         });
     }
+    checks += low_space_check(log_dir, filesystem, findings);
     checks
 }
 
@@ -521,9 +535,18 @@ impl UserIds {
     }
 }
 
-/// The free bytes on the filesystem under `path`, read from `df -P -k`, which every
-/// Unix has; `None` when it cannot be run or read, which is not a finding.
-fn free_bytes(path: &Path) -> Option<u64> {
+/// The bytes of the filesystem under a path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Filesystem {
+    /// Its size.
+    total: u64,
+    /// The bytes free to this user.
+    free: u64,
+}
+
+/// The filesystem under `path`, read from `df -P -k`, which every Unix has; `None`
+/// when it cannot be run or read, which is not a finding.
+fn filesystem_bytes(path: &Path) -> Option<Filesystem> {
     let output = std::process::Command::new("df")
         .args(["-P", "-k"])
         .arg(path)
@@ -533,10 +556,204 @@ fn free_bytes(path: &Path) -> Option<u64> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    // POSIX output: a header, then one line whose fourth field is the available 1K blocks.
+    // POSIX output: a header, then one line whose second field is the 1K blocks and
+    // whose fourth is the available ones.
     let line = text.lines().nth(1)?;
-    let available: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
-    Some(available.saturating_mul(1024))
+    let mut fields = line.split_whitespace();
+    let total: u64 = fields.nth(1)?.parse().ok()?;
+    let available: u64 = fields.nth(1)?.parse().ok()?;
+    Some(Filesystem {
+        total: total.saturating_mul(1024),
+        free: available.saturating_mul(1024),
+    })
+}
+
+/// A stopped recording's segment files, from its descriptor with no file read: the
+/// segments from the retained position's to the one holding the stop position's last
+/// byte, each of the segment file length (ADR 0031).
+#[derive(Clone, Copy, Debug)]
+struct StoppedRecording {
+    recording_id: i64,
+    /// The segment files it holds, by its descriptor.
+    segments: i64,
+    /// The segment files a `purge segments` to its stop position removes: those whose
+    /// bytes lie wholly before the stop.
+    purgeable: i64,
+    segment_file_length: i64,
+    stop_position: i64,
+}
+
+impl StoppedRecording {
+    /// `None` for a recording that is live, deleted or invalid.
+    fn from_descriptor(descriptor: &Descriptor) -> Option<Self> {
+        if descriptor.state() != SlotState::Valid || descriptor.is_live() {
+            return None;
+        }
+        let length = i64::from(descriptor.segment_file_length());
+        let retained = descriptor.retained_position();
+        let stop = descriptor.stop_position();
+        let retained_base = locate(descriptor, retained).ok()?.segment_base_position;
+        let held = (stop - retained_base).max(0);
+        Some(StoppedRecording {
+            recording_id: descriptor.recording_id(),
+            segments: (held + length - 1) / length,
+            purgeable: held / length,
+            segment_file_length: length,
+            stop_position: stop,
+        })
+    }
+
+    fn bytes(&self) -> u64 {
+        u64::try_from(self.segments.saturating_mul(self.segment_file_length)).unwrap_or(0)
+    }
+
+    fn mib(&self, segments: i64) -> i64 {
+        segments.saturating_mul(self.segment_file_length) / (1024 * 1024)
+    }
+}
+
+/// The stopped recordings of the catalog at `log_dir`; none when there is no catalog
+/// or it cannot be read, which is not this check's finding.
+fn stopped_recordings(log_dir: &Path) -> Vec<StoppedRecording> {
+    let Ok(catalog) = CatalogReader::open(log_dir) else {
+        return Vec::new();
+    };
+    let Ok(slots) = catalog.slots() else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for slot in 0..slots {
+        let Ok(recording_id) = i64::try_from(slot) else {
+            break;
+        };
+        if let Ok(Some(descriptor)) = catalog.get(recording_id)
+            && let Some(recording) = StoppedRecording::from_descriptor(&descriptor)
+        {
+            found.push(recording);
+        }
+    }
+    found
+}
+
+/// The purge that frees a stopped recording's segment files, for a finding.
+fn purge_advice(recording: &StoppedRecording) -> String {
+    let several = if recording.purgeable > SEGMENTS_PER_PURGE {
+        format!(
+            ", sent as several purges of at most {SEGMENTS_PER_PURGE} segments each, one \
+             command's work within the client's response timeout"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "a `purge segments` command for recording {} to its stop position {} removes the {} \
+         segment files before it, {} MiB{several}, and a `purge recording` command removes \
+         every file of it",
+        recording.recording_id,
+        recording.stop_position,
+        recording.purgeable,
+        recording.mib(recording.purgeable)
+    )
+}
+
+/// The free-space check (ADR 0031): under a tenth of the filesystem free, the finding
+/// names the stopped recording whose segment files a purge would free the most of and
+/// the `purge segments` command that removes them. Apart from
+/// [`log_directory_checks`] so a test can give it a filesystem.
+fn low_space_check(
+    log_dir: &Path,
+    filesystem: Option<Filesystem>,
+    findings: &mut Vec<Finding>,
+) -> usize {
+    let Some(filesystem) = filesystem else {
+        return 1;
+    };
+    if filesystem.free.saturating_mul(LOG_FREE_SHARE) >= filesystem.total {
+        return 1;
+    }
+    let largest = stopped_recordings(log_dir)
+        .into_iter()
+        .filter(|recording| recording.purgeable > 0)
+        .max_by_key(|recording| recording.purgeable);
+    let advice = match largest {
+        Some(recording) => format!(
+            "recording {} holds the most segment files a purge frees, {} of {} MiB; {}",
+            recording.recording_id,
+            recording.purgeable,
+            recording.mib(1),
+            purge_advice(&recording)
+        ),
+        None => format!(
+            "no stopped recording holds a segment file a purge frees; free space, or set \
+             {}=<a directory with room>, or --log-dir",
+            LOG_DIR_KEY.env
+        ),
+    };
+    findings.push(Finding {
+        check: "log-directory-space",
+        level: Level::Warn,
+        message: format!(
+            "the filesystem under {} has {} MiB free of {} MiB, under a tenth: {advice}",
+            log_dir.display(),
+            filesystem.free / (1024 * 1024),
+            filesystem.total / (1024 * 1024)
+        ),
+        doc: DOC_RECORDING_COMMANDS,
+    });
+    1
+}
+
+/// The check of each recording's bytes against its filesystem (ADR 0031): one over
+/// half of it, from the `recording.bytes` gauge while it is live and from its
+/// descriptor once stopped, is the one to purge before the filesystem fills. Apart from
+/// [`recording_checks`] so a test can give it a filesystem.
+fn over_half_checks(
+    log_dir: &Path,
+    filesystem: Option<Filesystem>,
+    live: &[(i64, i64)],
+    findings: &mut Vec<Finding>,
+) -> usize {
+    let Some(filesystem) = filesystem else {
+        return 1;
+    };
+    let half = filesystem.total / 2;
+    let total_mib = filesystem.total / (1024 * 1024);
+    for &(recording_id, bytes) in live {
+        if u64::try_from(bytes).unwrap_or(0) > half {
+            findings.push(Finding {
+                check: "recording-over-half",
+                level: Level::Warn,
+                message: format!(
+                    "live recording {recording_id} takes {} MiB, over half of the {total_mib} \
+                     MiB filesystem under {}: stop it with `stop recording` before the \
+                     filesystem fills, then a `purge segments` command removes its segment \
+                     files before a position",
+                    bytes / (1024 * 1024),
+                    log_dir.display()
+                ),
+                doc: DOC_RECORDING_COMMANDS,
+            });
+        }
+    }
+    for recording in stopped_recordings(log_dir) {
+        if recording.bytes() > half {
+            findings.push(Finding {
+                check: "recording-over-half",
+                level: Level::Warn,
+                message: format!(
+                    "recording {} takes {} MiB by its descriptor, {} segment files, over half \
+                     of the {total_mib} MiB filesystem under {}: {}",
+                    recording.recording_id,
+                    recording.mib(recording.segments),
+                    recording.segments,
+                    log_dir.display(),
+                    purge_advice(&recording)
+                ),
+                doc: DOC_RECORDING_COMMANDS,
+            });
+        }
+    }
+    1
 }
 
 /// The counters file: full or filling, then every static counter whose `doctor` text
@@ -714,6 +931,7 @@ fn recording_checks(
     let mut recordings: Vec<RecordingCounters> = Vec::new();
     let mut synced: Vec<([u8; 8], i64)> = Vec::new();
     let mut publications: Vec<(i32, i32, i64)> = Vec::new();
+    let mut live_bytes: Vec<(i64, i64)> = Vec::new();
     for id in 0..capacity {
         let Some(fields) = record(id) else { continue };
         let Ok(value) = reader.read_acquire(id) else {
@@ -750,6 +968,13 @@ fn recording_checks(
             let session = i32::from_le_bytes([key[8], key[9], key[10], key[11]]);
             let stream = i32::from_le_bytes([key[12], key[13], key[14], key[15]]);
             publications.push((session, stream, value));
+        } else if fields.type_id() == RECORDING_BYTES.0 {
+            // The gauge's label is the position's: the name, then the recording id.
+            if let Some(rid) = fields.label().split_whitespace().nth(1)
+                && let Ok(recording_id) = rid.parse::<i64>()
+            {
+                live_bytes.push((recording_id, value));
+            }
         }
     }
     for recording in &mut recordings {
@@ -865,6 +1090,9 @@ fn recording_checks(
             ),
             doc: DOC_DURABLE_LOG_DRIVER,
         });
+    }
+    if let Some(log_dir) = log_dir {
+        checks += over_half_checks(log_dir, filesystem_bytes(log_dir), &live_bytes, findings);
     }
     checks
 }
@@ -1965,5 +2193,141 @@ mod tests {
             "{}",
             found.message
         );
+    }
+
+    const MIB: u64 = 1024 * 1024;
+    const SEGMENT: i64 = cavalry_log::layout::SEGMENT_FILE_LENGTH as i64;
+
+    /// A catalog of three recordings: 0 stopped after three segments, 1 stopped after
+    /// three with its first purged, and 2 live.
+    fn catalog_with_three(dir: &TestDir) -> PathBuf {
+        let log_dir = dir.0.join("log");
+        std::fs::create_dir_all(&log_dir).expect("the log directory");
+        let now = now_nanos();
+        let mut catalog = CatalogWriter::open(&log_dir, now).expect("the catalog");
+        for recording_id in 0..3 {
+            catalog
+                .add(&Recording {
+                    recording_id,
+                    start_timestamp: now,
+                    start_position: 0,
+                    initial_term_id: 1,
+                    term_length: 65536,
+                    mtu_length: 1408,
+                    session_id: 1,
+                    stream_id: 1001,
+                    channel: "cavalry:ipc",
+                    source_identity: "cavalry:ipc",
+                })
+                .expect("a slot");
+        }
+        catalog.stop(0, 3 * SEGMENT, now + 1).expect("stopped");
+        catalog.stop(1, 3 * SEGMENT, now + 1).expect("stopped");
+        catalog.retain(1, SEGMENT).expect("purged");
+        log_dir
+    }
+
+    fn messages<'a>(findings: &'a [Finding], check: &str) -> Vec<&'a str> {
+        findings
+            .iter()
+            .filter(|finding| finding.check == check)
+            .map(|finding| finding.message.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn low_free_space_names_the_stopped_recording_a_purge_frees_the_most_of() {
+        let dir = TestDir::new("low-space");
+        let log_dir = catalog_with_three(&dir);
+        let mut findings = Vec::new();
+        let low = Some(Filesystem {
+            total: 100 * 1024 * MIB,
+            free: 5 * 1024 * MIB,
+        });
+        assert_eq!(low_space_check(&log_dir, low, &mut findings), 1);
+        let found = messages(&findings, "log-directory-space");
+        assert_eq!(found.len(), 1, "{findings:?}");
+        assert_eq!(
+            found[0],
+            format!(
+                "the filesystem under {} has 5120 MiB free of 102400 MiB, under a tenth: \
+                 recording 0 holds the most segment files a purge frees, 3 of 128 MiB; a \
+                 `purge segments` command for recording 0 to its stop position {} removes \
+                 the 3 segment files before it, 384 MiB, and a `purge recording` command \
+                 removes every file of it",
+                log_dir.display(),
+                3 * SEGMENT
+            )
+        );
+        assert_eq!(findings[0].level, Level::Warn);
+        assert_eq!(findings[0].doc, DOC_RECORDING_COMMANDS);
+
+        // A tenth free, or the filesystem unknown, is no finding.
+        let mut findings = Vec::new();
+        let enough = Some(Filesystem {
+            total: 100 * 1024 * MIB,
+            free: 10 * 1024 * MIB,
+        });
+        assert_eq!(low_space_check(&log_dir, enough, &mut findings), 1);
+        assert_eq!(low_space_check(&log_dir, None, &mut findings), 1);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        // With nothing to purge, the finding says so and names the key.
+        let empty = TestDir::new("low-space-empty");
+        let mut findings = Vec::new();
+        low_space_check(&empty.0, low, &mut findings);
+        let found = messages(&findings, "log-directory-space");
+        assert_eq!(found.len(), 1, "{findings:?}");
+        assert!(
+            found[0].contains("no stopped recording holds a segment file a purge frees"),
+            "{}",
+            found[0]
+        );
+        assert!(found[0].contains(LOG_DIR_KEY.env), "{}", found[0]);
+    }
+
+    #[test]
+    fn a_recording_over_half_its_filesystem_is_named_live_or_stopped() {
+        let dir = TestDir::new("over-half");
+        let log_dir = catalog_with_three(&dir);
+        let mut findings = Vec::new();
+        let filesystem = Some(Filesystem {
+            total: 600 * MIB,
+            free: 10 * MIB,
+        });
+        let live = [(7, 400 * MIB as i64), (8, 100 * MIB as i64)];
+        assert_eq!(
+            over_half_checks(&log_dir, filesystem, &live, &mut findings),
+            1
+        );
+        let found = messages(&findings, "recording-over-half");
+        assert_eq!(found.len(), 2, "{findings:?}");
+        assert!(
+            found[0].starts_with("live recording 7 takes 400 MiB, over half of the 600 MiB"),
+            "{}",
+            found[0]
+        );
+        assert!(found[0].contains("`stop recording`"), "{}", found[0]);
+        assert!(
+            found[1].starts_with(
+                "recording 0 takes 384 MiB by its descriptor, 3 segment files, over half of \
+                 the 600 MiB"
+            ),
+            "{}",
+            found[1]
+        );
+        assert!(found[1].contains("`purge segments`"), "{}", found[1]);
+        // Recording 1's two segments left, 256 MiB, are under half; so is the unknown.
+        let mut findings = Vec::new();
+        over_half_checks(&log_dir, None, &live, &mut findings);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn the_filesystem_is_read_from_df() {
+        let dir = TestDir::new("df");
+        let filesystem = filesystem_bytes(&dir.0).expect("df runs here");
+        assert!(filesystem.total >= filesystem.free, "{filesystem:?}");
+        assert!(filesystem.total > 0, "{filesystem:?}");
     }
 }
