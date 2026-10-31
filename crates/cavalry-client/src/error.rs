@@ -15,6 +15,7 @@ const DOC_LIVENESS: &str = "docs/reference/client-protocol.md#liveness-and-timeo
 const DOC_ERRORS: &str = "docs/reference/client-protocol.md#error-codes";
 const DOC_SIZES: &str = "docs/reference/client-protocol.md#sizes";
 const DOC_BROADCAST: &str = "docs/reference/broadcast-buffer.md#receiving";
+const DOC_REPLAY: &str = "docs/how-to/replay-a-recording.md#when-it-does-not-work";
 
 /// Why the client is closed: by the user, or by what the conductor found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -124,6 +125,14 @@ pub enum ClientError {
         /// The bound: the driver's own on replays.
         limit: usize,
     },
+    /// This client has as many `start replay` commands waiting for the driver's answer
+    /// as its conductor keeps registrations for between two of its cycles, so a new
+    /// one was not sent. Nothing reached the driver; the conductor takes the waiting
+    /// registrations at its next cycle, and a start after that is sent.
+    ReplayQueueFull {
+        /// The bound: the client's own on starts in flight.
+        limit: usize,
+    },
     /// An add or remove command went unanswered for the response timeout.
     ResponseTimeout {
         /// The command, by name.
@@ -158,8 +167,8 @@ pub enum ClientError {
 
 impl ClientError {
     /// The reason's name: `not-found`, `driver-gone`, `closed`, `refused`,
-    /// `subscriptions-full`, `replays-full`, `response-timeout`, `command-ring`,
-    /// `broadcast`, `counters`, `protocol`, `log`, `driver` or `io`.
+    /// `subscriptions-full`, `replays-full`, `replay-queue-full`, `response-timeout`,
+    /// `command-ring`, `broadcast`, `counters`, `protocol`, `log`, `driver` or `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
             ClientError::NotFound { .. } => "not-found",
@@ -168,6 +177,7 @@ impl ClientError {
             ClientError::Refused { .. } => "refused",
             ClientError::SubscriptionsFull { .. } => "subscriptions-full",
             ClientError::ReplaysFull { .. } => "replays-full",
+            ClientError::ReplayQueueFull { .. } => "replay-queue-full",
             ClientError::ResponseTimeout { .. } => "response-timeout",
             ClientError::CommandRing(_) => "command-ring",
             ClientError::Broadcast(_) => "broadcast",
@@ -246,6 +256,12 @@ impl fmt::Display for ClientError {
                 "command refused ({reason}): this client follows {limit} replays at once, the \
                  driver's bound; the new one was stopped again; wait for one of them to end, or \
                  stop one this process no longer needs; see {DOC_SIZES}"
+            ),
+            ClientError::ReplayQueueFull { limit } => write!(
+                f,
+                "command refused ({reason}): this client has {limit} replay starts waiting for \
+                 the driver's answer, its own queue's bound, and sent nothing; wait for one to \
+                 be answered, then start the next; see {DOC_REPLAY}"
             ),
             ClientError::ResponseTimeout { command } => write!(
                 f,

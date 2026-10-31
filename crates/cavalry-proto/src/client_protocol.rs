@@ -65,6 +65,14 @@ pub const NULL_LENGTH: i64 = -1;
 /// Aeron's `Long.MAX_VALUE`.
 pub const FOLLOW_LENGTH: i64 = i64::MAX;
 
+/// How many replays the driver holds, starting or live: its replays registry's capacity
+/// (`spec/client-protocol.md`, "Sizes"; ADR 0030). The client's conductor follows at
+/// most this many replays for one process, since the driver admits no more, so a
+/// `start replay` past it is refused by the driver with error code 10, or by the client
+/// with `ReplaysFull`, both naming this number; it lives here so that the two sides and
+/// the how-to's "64" move together (ADR 0036).
+pub const MAX_REPLAYS: usize = 64;
+
 /// The docs anchor every error message names.
 const DOC: &str = "docs/reference/client-protocol.md#what-the-driver-rejects";
 
