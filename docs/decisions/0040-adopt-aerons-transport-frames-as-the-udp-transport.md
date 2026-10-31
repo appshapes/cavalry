@@ -82,7 +82,8 @@ frame's first eight bytes last; keeps the highest position received and a rebuil
 position that stops at the first gap; sends a NAK for the gap after a delay of 1 µs,
 again every 100 µs while it persists; drops a duplicate silently, a frame before the
 last status message's position as an under-run and one beyond the threshold as an
-over-run, each counted; retires an image with no accepted frame in 10 s; and at end of
+over-run, each counted; retires an image 10 s after its last datagram that was not an
+over-run, heartbeats and under-runs included (`timeOfLastPacketNs`); and at end of
 stream, once the rebuild position has reached the highest, stores the end-of-stream
 position and sends the status message with the end-of-stream flag. Its defaults: MTU
 1408, UDP term length 16 MiB, receiver window 128 KiB, socket receive buffer 128 KiB,
@@ -289,7 +290,9 @@ group tag (36-byte status messages). On a datagram from a source address:
    the receiver cleans the image's log from the clean position to the slowest
    subscriber's position less the term length, as the driver cleans a publication's log,
    so that a term is zero before a frame lands in it.
-6. **End.** An image with no accepted frame for 10 s is retired: `unavailable image` to
+6. **End.** An image with no datagram for 10 s is retired: a heartbeat and an under-run
+   datagram count as activity and an over-run does not, so that a sender that pauses
+   its data while heartbeating keeps its image. Retiring is `unavailable image` to
    its subscriptions, its counters freed after the reuse timeout, its log removed once
    every subscription has unmapped it, and its session record put **on cool-down** for
    10 s, the liveness timeout, during which a setup, data datagram or heartbeat for the
@@ -422,7 +425,8 @@ the operating system's reason and the endpoint) and 9 (unknown host) are taken f
 Aeron's table; a `cavalry:udp` channel whose grammar fails, a multicast address and an
 unknown parameter stay code 1. `add subscription` on an endpoint binds it, and the
 first `add publication` on an endpoint connects it; the registries gain 64 send and 64
-receive endpoints, and the counters file is created with 16384 counters, 6 MiB, so that
+receive endpoints, and the counters file is created with 16384 counters, 128 + 16384 ×
+384 = 6,291,584 bytes (`spec/counters-file.md`, "File"), so that
 the registries still fill first: 14,346 counters when every registry is full ("Values"
 under `spec/udp.md`), against 8192 before. The driver directory gains `images/`. A version 3 client closes on
 the first `publication ready` of a version 4 driver, since it is longer than its fields,
