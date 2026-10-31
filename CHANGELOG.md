@@ -672,9 +672,11 @@ user-visible change, added in the same commit as the change. The format follows
   version 3, answered with `operation success` or a new error, `recording busy`; the
   catalog moves to version 1 for a retained position in the descriptor, which a purge
   moves forward and a replay's −1 starts at, read beside version 0's slots with no
-  migration of the catalog, and a truncate reopens the stop to −1 while it cuts the
-  files so that a crash at any point is the torn stop recovery already rebuilds; the
-  file work runs on the replayer thread; there is no `log.retain` key, since no default
+  migration pass, a slot moving to the new form at its first purge, and a truncate
+  reopens the stop to −1 while it cuts the files so that a crash at any point is the
+  torn stop recovery already rebuilds; the checks that read the disk and the file work
+  run on the replayer thread, the checks before any catalog write, so a refused command
+  writes nothing; there is no `log.retain` key, since no default
   can be right, so retention is the operator's command or script and never a schedule
   the user did not set
   ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md)).

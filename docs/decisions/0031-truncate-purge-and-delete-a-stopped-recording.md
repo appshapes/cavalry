@@ -47,19 +47,26 @@ in order after `stop replay`:
   id (i64), position (i64), Aeron's `truncateRecording`. The recording must be stopped;
   the position must be a multiple of 32 from the recording's retained position to its
   stop position, and a frame must begin at it or it must be the stop position, which
-  the driver checks by reading the frame header there. The cut has three steps, in an
+  the replayer checks by reading the frame header there before any catalog write, in
+  the order the paragraph on threads below gives. The cut has three steps, in an
   order that leaves, at every point a crash can take, a slot and files that recovery's
   rule for a torn stop already accepts (`spec/durable-log.md`, "The driver"). First the
-  driver writes the stop fields as −1 and −1 under the stop checksum: in version 1 a
-  stop of −1 reads "live, or being cut", and either way the stop is in the files, not
-  in the slot. Second, the file work, in this order: the segment files wholly past the
-  position are removed; the segment file that holds the position is cut to the
-  position's offset with one truncation and extended again to the segment file length,
-  so that the bytes past the position are zero and at every point the frames left are
-  whole up to one boundary with nothing past it; and the time index is truncated to the
-  entries at or before the position. Third it writes the stop position and the stop
-  timestamp, which is the timestamp of the last index entry at or before the new stop
-  position, recovery's rule, then the stop checksum, and `recording.truncated` adds one.
+  driver writes the stop fields as −1 and −1 under the stop checksum: a stop of −1
+  reads "live, or being cut", and either way the stop is in the files, not in the
+  slot. Second, the file work, in this order: the segment files whose base is at or
+  past the position lie wholly past it and are removed, as recovery removes a segment
+  file wholly past the stop, so a truncate at a segment base removes the file at that
+  base and cuts none; when the position is not a segment base, the segment file that
+  holds it, the one whose base is below it, is cut to the position's offset with one
+  truncation and extended again to the segment file length, so that the bytes past the
+  position are zero and at every point the frames left are whole up to one boundary
+  with nothing past it; and the time index is truncated to the entries at or before
+  the position. Third it writes the stop position and the stop timestamp, which is
+  what recovery's rule gives for the files as cut: the timestamp of the last index
+  entry left, or the start timestamp when no segment file is left, a truncate to the
+  retained position after a purge, which is recovery's empty recording; then the stop
+  checksum, and `recording.truncated` adds one. The third step thereby writes the stop
+  recovery would rebuild, so a crash before it changes nothing but who writes it.
   A crash before the third step leaves a stop of −1, and recovery rebuilds it from the
   files as for a recording live at a crash. Before the file work, it rebuilds the old
   stop and the truncate is lost, which the client learns from its response timeout and
@@ -84,23 +91,28 @@ in order after `stop replay`:
   segment files and the time index; the slot stays, so the id never names another
   recording. `recording.deleted` adds one.
 
-A recording that is live, that a live replay is reading, or that one of these three
-commands is working on, is refused with a new error code, 24, `recording busy`, whose
-message says which and what to do: `cavalry record --stop <id>` for a live recording;
-for a live replay, `Cavalry::stop_replay` with its replay session id, or ending the
-`cavalry replay` process that holds it; for a command in progress, wait for its answer.
-An unknown or invalid recording is code 21 as today; a position outside the rules above
-is code 23, position out of range, with the message naming the bounds, as `start replay`
-answers. A file the driver could not remove, cut or extend is code 12, storage space,
-after the catalog write, and `recording.retention_failed` adds one: it counts that path
-alone, a slot written and a file work not finished. The driver then runs recovery's rule
-for that slot at once, as `stop recording` runs it for the slot it closes, so that the
-slot and the files agree before the error is answered, and the message names the file
-and what the recording holds now. Each command writes the catalog before its file work,
-and the rules of this page accept a crash at any point: a torn truncate is a stop of −1
-and is rebuilt from the files; a torn purge leaves segment files before the retained
-position, which are removed, not read; a torn delete, state 3 with files present, runs
-again (ADR 0024).
+A recording that is live or stopping, that a replay starting or live is reading, or
+that one of these three commands is working on, is refused with a new error code, 24,
+`recording busy`, whose message says which and what to do: `cavalry record --stop <id>`
+for a live recording; for a replay, `Cavalry::stop_replay` with its replay session id,
+or ending the `cavalry replay` process that holds it; for a stop or a command in
+progress, wait for its answer. `start replay` on a recording one of the three commands
+is working on is code 24 the same way, since during a truncate the slot's stop reads
+−1 and the replayer would take the recording for a live one with no synced position to
+follow. An unknown or invalid recording is code 21 as today; a position outside the
+rules above is code 23, position out of range, with the message naming the bounds, as
+`start replay` answers. A file the driver could not remove, cut or extend is code 12,
+storage space, after the catalog write; so is a segment file the replayer could not
+open or read for a truncate's frame check, before any catalog write; and
+`recording.retention_failed` adds one on either, so that it counts every refusal the
+files made. After the catalog write the driver then runs recovery's rule for that slot
+at once, as `stop recording` runs it for the slot it closes, so that the slot and the
+files agree before the error is answered, and the message names the file and what the
+recording holds now. Each command checks before it writes, writes the catalog before
+its file work, and the rules of this page accept a crash at any point: a torn truncate
+is a stop of −1 and is rebuilt from the files; a torn purge leaves segment files before
+the retained position, which are removed, not read; a torn delete, state 3 with files
+present, runs again (ADR 0024).
 
 `start replay` after a purge: a position of −1 is the recording's retained position,
 which is its start position until a purge moves it, the role Aeron's moved
@@ -140,9 +152,15 @@ it writes. The version is thereby the one header field that changes after the ma
 which `spec/durable-log.md`, "Catalog header", says never happens; version 1 says this
 field does, once, from 0 to 1, and a version 1 reader's `version` check accepts 0 and 1.
 A catalog a version 1 driver has only read, stopped or truncated stays at version 0, and
-a version 0 driver still opens it. A version 0 driver refuses a version 1 header with
-`version`, the check it runs today, since the catalog is read by the driver alone and a
-downgrade is not an upgrade (invariant 3's mixed versions are a client and a driver).
+a version 0 driver still opens it. A truncate under a version 0 header leaves, while it
+cuts, a stop of −1 that version 0's text calls live; the bytes are the same bytes, every
+reader's rule for them is the same, the stop is in the files, and a version 0 driver
+started on such a catalog rebuilds the stop a version 1 driver would, at the boundary
+the cut reached, so version 0's wording, "−1 while the recording is live", is amended
+at acceptance to "live or being cut", and no reader changes. A version 0 driver refuses
+a version 1 header with `version`, the check it runs today, since the catalog is read by
+the driver alone and a downgrade is not an upgrade (invariant 3's mixed versions are a
+client and a driver).
 
 `purge segments` on a slot in version 0's form migrates it first, in the one order a
 crash cannot hurt: the driver, which has checked the slot under version 0's range,
@@ -163,28 +181,58 @@ that count from the start position, the empty recording, the missing segment tha
 damage and the segment the scan may read, count from the retained position in version
 1, and segment files before the retained position are removed, not read.
 
-The file work runs on the replayer thread, which already opens and reads segment files
-and holds no replay most of the time (ADR 0030): the conductor validates the command,
-asks the recorder for the catalog write, one slot and a sync, as a stop is written
-today, hands the file work to the replayer through its request queue on the recorder's
-reply, and answers the client when the replayer's reply arrives, as a replay is
-started; a truncate's third step is one more slot write on that reply, before the
-answer. The repair after a failed file work runs on the replayer, which has the files
-open. Nothing runs on the recorder thread or the conductor's duty cycle beyond a catalog
-write of one slot, which `start recording` and `stop recording` already do. The catalog
-writer gains one transition, stopped to cutting, −1 and −1, to stopped, for a truncate;
-every other transition stays refused.
+The replayer thread reads the slot and the files for a command's checks, as it reads
+the slot for `start replay`, and does the file work: it already opens and reads segment
+files and holds no replay most of the time (ADR 0030), the conductor never touches the
+disk, and the catalog is written through the recorder, which owns the catalog writer,
+one slot and a sync, as a stop is written today. The checks that need the disk run
+before the first catalog write, so a refused command writes nothing and needs no way
+back. A command runs in this order. The conductor checks what it holds in memory: a
+recording id below 0 or at or past the next recording id, the slot count its last
+reply refreshed, is code 21; a recording the recordings registry holds, live or
+stopping, one a replay in the replays registry is reading, or one a command in
+progress names, is code 24; the commands in progress are a registry of
+`spec/client-protocol.md`, "Sizes", with the replays registry's capacity, 64, and that
+registry at capacity, or the replayer's request queue full or holding requests still
+waiting for room, is code 10, adding one to `driver.registry_full`, as `start replay`
+answers. It enters the command in the registry and hands it to the replayer through
+the request queue. The replayer reads the slot under the two-range rule above: a state
+other than 1 is code 21, with the state in the message; a position outside the bounds,
+the retained position, the stop position and, for a purge, the segment base rule from
+the descriptor's start position, term length and segment file length, is code 23, with
+the bounds in the message; for a truncate at a position below the stop it reads the
+frame header at the position from its segment file, and a header that fails the
+`frame` check there, or a frame length of 0, is code 23 with "no frame begins at the
+position" in the message, while a segment file it cannot open or read is code 12. A
+refusal goes back to the conductor on the reply queue, which answers the client and
+frees the registry entry. A pass goes to the recorder for the first catalog write, the
+stop of −1, the retained group or the state 3, a slot in version 0's form migrated
+first as above; on the recorder's reply the conductor hands the file work to the
+replayer; on the replayer's reply a truncate's third step is one more slot write
+through the recorder; and the conductor answers the client when the last reply
+arrives, as a replay is started. The repair after a failed file work runs on the
+replayer, which has the files open, before it replies. Between the replayer's checks
+and the first catalog write nothing changes the slot: the recording is stopped, so the
+recorder writes nothing to it on its own, and the registry entry refuses the other
+three commands and `start replay`. Nothing runs on the recorder thread or the
+conductor's duty cycle beyond a catalog write of one slot, which `start recording` and
+`stop recording` already do. The catalog writer gains one transition, stopped to
+cutting, −1 and −1, to stopped, for a truncate; every other transition stays refused.
 
 Counters: `recording.truncated`, `recording.segments_purged`, `recording.deleted` and
-`recording.retention_failed`, which counts a command that wrote its slot and could not
-finish its file work, the code 12 path above, as counters; and one more instance gauge
+`recording.retention_failed`, which counts a command the files refused, a frame header
+the replayer could not read before the catalog write or a file work it could not finish
+after it, the two code 12 paths above, as counters; and one more instance gauge
 per live recording, `recording.bytes`, the bytes its segment files take on disk, kept
 by the recorder at each roll, keyed and labelled as `recording.position` is and freed
 with it after the stop. The three commands act on stopped recordings, whose gauges are
 gone; `cavalry doctor` computes a stopped recording's bytes from its descriptor, the
 segments from the retained position's to the stop position's times the segment file
-length, with no file read. The counters-file arithmetic becomes 41 statics plus 2048
-plus 2048 plus 3072 plus 192, 7401, under 8192. `cavalry doctor` gains a check that
+length, with no file read. The counters-file arithmetic becomes 38 statics, the 34
+`counters.toml` holds with `scope = "static"` today and these four, plus 2048 plus 2048
+plus 3072 plus 192, 7398, under 8192; `spec/client-protocol.md`, "Sizes", counts 37
+statics where the file holds 34, and the acceptance commit, which changes that page
+anyway, corrects it. `cavalry doctor` gains a check that
 reads the free space of the log directory's filesystem and, under 10 percent, names the
 recording and the segment that would free the most, with the `purge segments` command
 that removes it, and a check that names a recording whose bytes, from the gauge while
@@ -198,7 +246,16 @@ script on its own schedule, which is what an operator does.
 
 The `cavalry` binary: `record --truncate <id> --to <position or instant>`, `record
 --purge <id> --before <position or instant>` and `record --delete <id>`, instants
-resolved through the time index as `replay` resolves them; the client API gains
+resolved through the time index as `replay` resolves them. An instant for `--to`
+resolves to an index entry's position, a frame boundary the recorder wrote, which the
+frame check accepts. An instant for `--before` resolves to a position that is almost
+never a segment base, so the CLI rounds it down to the segment base at or before that
+position, from the descriptor's start position, term length and segment file length,
+so that no byte recorded after the instant is purged, and prints the position the
+instant resolved to and the base it sends; a base at or below the retained position is
+nothing to purge, which the driver refuses with code 23 and the CLI prints with the
+retained position, so the operator sees that an earlier purge already took it. The
+client API gains
 `Cavalry::truncate_recording`, `purge_segments` and `purge_recording`. The record how-to
 gains the three as steps 4 to 6, and the glossary the rows retained position, truncate,
 purge segments and delete.
@@ -255,6 +312,16 @@ purge segments and delete.
   are syscalls of unbounded length on a filesystem under load, and the conductor's duty
   cycle sets the publishers' limits; the replayer thread is the driver's disk thread and
   idles between replays (ADR 0030).
+- **The position checks on the conductor, from the slot.** Lost: the bounds are in the
+  catalog slot and a truncate's frame header is in a segment file, and the conductor
+  never touches the disk (ADR 0030); a copy of every stopped slot in the conductor's
+  memory would be a second catalog, bounded at a gigabyte, kept in step with the first.
+- **The position checks on the replayer after the first catalog write, on the file
+  work's visit.** Lost: a truncate refused there has reopened its stop to −1, so the
+  refusal needs the old stop written back under its checksum, a second slot write with
+  a sync, and `cavalry doctor` reads a healthy recording as being cut in between; a
+  check before the write refuses with nothing written, and costs one more pass through
+  the replayer's queue, off every data-plane thread.
 - **A delete that frees the slot for reuse.** Lost: ADR 0024's rule that an id never
   names another recording, which a client holding an old id depends on.
 - **Events for each command, as Aeron's `RecordingSignal`.** Lost for this version: the
@@ -280,9 +347,13 @@ and before the extension, after the index is truncated) and the stop each rebuil
 for a migration cut after the creation checksum and before the group, and a purge cut
 between the position and its checksum, each rebuilding the group from the files; for a
 purge cut after the catalog write, whose leading files are removed at start-up; and for
-a torn delete; a conductor test for each refusal (live, replayed, in progress, out of
-range, unknown) and each success with its counter, and for a failed file work answered
-with code 12 after the slot is repaired; `start replay` with −1 after a purge, starting
+a torn delete; a conductor test for each refusal the conductor makes (live, replayed, in
+progress, `start replay` during a command, the registry at capacity, an id past the
+next) and a replayer test for each the replayer makes (a slot not valid, out of range,
+no frame at the position, a segment file it cannot read, with code 12 and its counter),
+each showing the slot unwritten; a test of each success with its counter, of a truncate
+at a segment base, which removes the file at that base, and of a failed file work
+answered with code 12 after the slot is repaired; `start replay` with −1 after a purge, starting
 at the retained position, and with a position below it, refused with code 23 naming it;
 the bench rows with the recorder idle, unchanged, and with a purge running on the
 replayer thread during the recorded rows; `just quickstart` recording and replaying on
@@ -294,14 +365,15 @@ Easier: a log directory is bounded by the operator's commands, a recording can b
 to what matters, and a soak host runs for days with a script that purges behind the
 replays it has done. Harder: the catalog holds slots in two forms for the life of the
 directory, read with up to two CRC32 passes each, and its header's version is the one
-field that changes after the magic; the replayer thread has one more kind of request;
-recovery has two more rules, the files before the retained position and the retained
-group rebuilt from the files; and a recording being cut reads as live, stop −1, to
-`cavalry doctor` for as long as the cut takes. A torn retained group is rebuilt from the
-files, so a crash inside a purge's catalog write that coincides with the loss of the
-recording's leading segment files would read that loss as the purge: a double fault,
-accepted as ADR 0024 accepts the tail after a power loss. We now maintain three
-commands, an error code, four counters, a gauge, two doctor checks and three CLI forms.
+field that changes after the magic; the replayer thread has two more kinds of request,
+a command's checks and its file work, and the conductor one more registry; recovery has
+two more rules, the files before the retained position and the retained group rebuilt
+from the files; and a recording being cut reads as live, stop −1, to `cavalry doctor`
+for as long as the cut takes. A torn retained group is rebuilt from the files, so a
+crash inside a purge's catalog write that coincides with the loss of the recording's
+leading segment files would read that loss as the purge: a double fault, accepted as
+ADR 0024 accepts the tail after a power loss. We now maintain three commands, an error
+code, a registry, four counters, a gauge, two doctor checks and three CLI forms.
 
 Revisit: when a user asks for retention by age or size, for the key and its default;
 when the third slice moves segments between hosts, for detach and migrate; when a
