@@ -1056,6 +1056,8 @@ pub struct Block<'a> {
     pub length: usize,
     /// Whether the block is one padding frame.
     pub padding: bool,
+    /// How many frames the block holds: the data frames, or 1 for a padding frame.
+    pub frames: usize,
 }
 
 impl Block<'_> {
@@ -1205,14 +1207,35 @@ impl TermReader {
     /// once it has used the bytes, so a write that failed leaves the position where it
     /// was and the next call scans the same block again.
     pub fn block(&self, limit: usize) -> Result<Block<'_>, LogError> {
+        self.block_from(self.position, limit)
+    }
+
+    /// [`TermReader::block`] from `position` instead of the reader's own: a multiple of
+    /// 32 from 0 up to the log's largest position, else [`LogError::Position`]. The
+    /// reader does not move. The driver's sender scans the blocks of one burst this way,
+    /// each from the end of the one before, hands every block's bytes to the socket in
+    /// one call, and seeks to the end of the last block the socket took whole; and it
+    /// answers a NAK from a position below its own, inside the resend window the driver
+    /// keeps unclean (`spec/udp.md`, "The sender"; ADR 0041). A position the driver has
+    /// cleaned, or the publisher has not reached, scans as an empty block.
+    pub fn block_from(&self, position: i64, limit: usize) -> Result<Block<'_>, LogError> {
         let positions = self.mapped.positions;
+        let max_position = positions.max_position();
+        if position < 0 || position >= max_position || position % i64::from(FRAME_ALIGNMENT) != 0 {
+            return Err(LogError::Position {
+                found: position,
+                current: self.position,
+                limit: max_position,
+            });
+        }
         let term_length = positions.term_length();
-        let partition = positions.partition_of(self.position);
-        let start = positions.term_offset_of(self.position);
+        let partition = positions.partition_of(position);
+        let start = positions.term_offset_of(position);
         let end = (start as usize)
             .saturating_add(limit)
             .min(term_length as usize) as u32;
         let mut offset = start;
+        let mut frames = 0;
         while offset < term_length && (offset == start || offset < end) {
             let frame = self.mapped.frame(partition, offset);
             let word = frame.word();
@@ -1229,10 +1252,11 @@ impl TermReader {
             if header.frame_type() != FrameType::Data {
                 if offset == start {
                     return Ok(Block {
-                        position: self.position,
+                        position,
                         bytes: self.mapped.block(partition, start, FRAME_HEADER),
                         length: aligned as usize,
                         padding: true,
+                        frames: 1,
                     });
                 }
                 break;
@@ -1241,13 +1265,15 @@ impl TermReader {
                 break;
             }
             offset += aligned;
+            frames += 1;
         }
         let length = offset - start;
         Ok(Block {
-            position: self.position,
+            position,
             bytes: self.mapped.block(partition, start, length),
             length: length as usize,
             padding: false,
+            frames,
         })
     }
 }
