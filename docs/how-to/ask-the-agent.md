@@ -30,8 +30,11 @@ first one. Why the loop is built this way is in ADR 0004
      the Actions tab rather than among the pull request's checks because it runs on
      `master`, which either approves or requests changes;
    - on requested changes, a second `claude` run applies the blockers on the same
-     branch and pushes, then adds the `review` label itself, because a push by the
-     agent starts no review on its own; the label starts one, up to three times;
+     branch, one commit per blocker, pushed as each lands, then adds the `review`
+     label itself, because a push by the agent starts no review on its own; a blocker
+     in the pull request body alone it fixes by editing the body, and asks for the
+     review of the unchanged head the same way; the label starts one, up to three
+     times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
      pull request merges as one squash commit when `gates (linux)`, `gates (macos)`,
      `bench (linux)` and `bench (grip)` pass. The issue closes.
@@ -69,6 +72,14 @@ branch locally; GitHub has already deleted it on origin.
 - **"Autonomous fix cap reached."** The reviewer requested changes three times. The
   pull request is yours now: fix it by hand, or write `@claude` with instructions in
   a review to start the loop again.
+- **"Fix session ended without a push landing ... and without a change to the pull
+  request body."** The fixer's run ended with nothing it could show: no commit reached
+  the branch and the body is as the review found it. Its comment on the pull request
+  says what it did. A blocker it may not apply (`.github/workflows/`, `.claude/`,
+  `spec/`, `bench/baseline.json`) is yours: apply it and push, and the push starts the
+  review. A fixer run that ended early with some blockers done is not this case: it
+  pushed those as commits, its comment says which gates ran on the head it left, and
+  the review of that head lists what is left.
 - **No review arrived.** A review lands within about ten minutes of the push. A
   reviewer session that ends without submitting one is run again once, on its own,
   and a comment on the pull request says so. When the review is more than fifteen

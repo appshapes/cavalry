@@ -31,7 +31,7 @@ on:
 
 # One agent at a time per issue or pull request. `cancel-in-progress: false` on purpose,
 # unlike the reviewer: a cancelled FIXER can die between `git commit` and `git push`, leaving
-# a pull request whose head never moves and whose "Verify the fix was pushed" step never runs,
+# a pull request whose head never moves and whose "Verify the fix landed" step never runs,
 # a silent park, the exact failure this file's verifiers exist to make impossible. The fix cap
 # already bounds the loop, so queueing is safe.
 concurrency:
@@ -76,6 +76,10 @@ jobs:
     outputs:
       branch_name: ${{ steps.claude.outputs.branch_name }}
       agent_outcome: ${{ steps.claude.outcome }}   # 'success' | 'failure' (continue-on-error below): open-pr's tie-breaker when no branch was pushed
+      # 'push' | 'body' on a fixer run, from "Verify the fix landed": approve-fixer-runs asks for
+      # the review of a body-only fix, which raises no event. Computed from the pull request's
+      # state by a step that runs no agent, so nothing the model wrote crosses to that job.
+      fix_landed: ${{ steps.verify_fix.outputs.landed }}
     # NOTE what is NOT in this job: `secrets.GH_ACTIONS_TOKEN`. The agent's Bash children
     # inherit this step's environment (no `allowed_non_write_users`, so the action's secret
     # scrub is off, ADR 0004), so the token is kept out of the job entirely. Reachable here, by
@@ -127,6 +131,11 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # The body as the fixer finds it, so that "Verify the fix landed" can tell a fix
+          # that was an edit to the body (the review's blocker was in the pull request body,
+          # the squash commit's message) from a run that did nothing it could show.
+          body=$(gh_retry gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""')
+          echo "body_hash=$(printf '%s' "$body" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           ids=$(gh_retry gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" \
             --jq '.[] | select((.user.login // "" | startswith("claude")) and .state == "CHANGES_REQUESTED") | .id')
           count=$(printf '%s\n' "$ids" | grep -c . || true)
@@ -180,8 +189,18 @@ jobs:
         # --max-turns even after it pushed its branch. The verdicts live downstream: `open-pr`
         # for an issue (a pushed branch becomes a pull request; none, and `agent_outcome`
         # decides between "nothing to change" and "died: leave the issue open"), "Verify the
-        # fix was pushed" for the fixer, and "Fail on an undecided agent failure" for the rest.
+        # fix landed" for the fixer, and "Fail on an undecided agent failure" for the rest.
         continue-on-error: true
+        # The agent's Bash children inherit this step's environment (the scrub is off; see
+        # the job's NOTE above), which is the only way a variable reaches a command the
+        # agent runs: its allow list matches `just ...`, not `NAME=value just ...`, so the
+        # fixer's runs on pull request 84 (41214560013, 41217274690) could not set this one
+        # and ran `just lint-docs` over their own commit alone, and said so. CI's range for
+        # a pull request is origin/master...HEAD, the whole branch (scripts/lint-docs.py,
+        # header); on an issue run the branch starts at master, so the range is the run's
+        # own commits. `fetch-depth: 0` above is what makes origin/master a commit here.
+        env:
+          LINT_DOCS_RANGE: origin/master...HEAD
         # Pinned by SHA like every action here (ADR 0003), and this one matters most: it runs
         # a model with repository write access. Re-resolve the current `v1` when bumping:
         #   gh api repos/anthropics/claude-code-action/git/ref/tags/v1 --jq '.object.sha'
@@ -267,22 +286,42 @@ jobs:
           # trailer is not evidence. The action still asks the agent to co-author the person
           # who triggered it; `open-pr` drops those lines when it builds the body.
 
-      # The fixer can end green without its push landing: a narrated-only fix, or a remote
+      # The fixer can end green without its fix landing: a narrated-only fix, or a remote
       # rejection. No push means no `synchronize`, no re-review, and a silently parked pull
-      # request. Fail loud instead.
-      - name: Verify the fix was pushed
+      # request. Fail loud instead. Two things count as landed: a push, which moves the
+      # head, and an edit to the pull request body on the unchanged head, which is the whole
+      # fix when the review's only blocker was in the body (the squash commit's message,
+      # ADR 0004). Pull request 10 on 2026-10-12 (issue 11) and 84 on 2026-10-31 (run
+      # 41216229985) each parked that way, green head and changes requested, until a
+      # person added the `review` label. Neither a fixer push nor a body edit raises an
+      # event the loop runs on, so `approve-fixer-runs` below asks for the review in both
+      # cases, reading `landed`. Anything else that edits the body during the run reads as
+      # a fix too and costs one review of the same head, the cheaper mistake.
+      - name: Verify the fix landed
+        id: verify_fix
         if: ${{ !cancelled() && github.event_name == 'pull_request_review' && startsWith(github.event.review.user.login, 'claude') && steps.fix_gate.outputs.proceed == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEWED_SHA: ${{ github.event.pull_request.head.sha }}
+          BODY_HASH_BEFORE: ${{ steps.fix_gate.outputs.body_hash }}
         run: |
           set -euo pipefail
           head_now=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.head.sha')
-          if [ "$head_now" = "$REVIEWED_SHA" ]; then
-            echo "::error::Fix session ended without a push landing on the pull request branch (head still at the reviewed SHA $REVIEWED_SHA); no re-review will fire"
-            exit 1
+          if [ "$head_now" != "$REVIEWED_SHA" ]; then
+            echo "the fix landed as a push: the head moved from $REVIEWED_SHA to $head_now"
+            echo "landed=push" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          body=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""')
+          body_hash=$(printf '%s' "$body" | sha256sum | cut -d' ' -f1)
+          if [ "$body_hash" != "$BODY_HASH_BEFORE" ]; then
+            echo "::notice::The fix landed as an edit to the pull request body on the unchanged head $head_now; approve-fixer-runs asks for the review of that head"
+            echo "landed=body" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::error::Fix session ended without a push landing on the pull request branch (head still at the reviewed SHA $REVIEWED_SHA) and without a change to the pull request body; no re-review will fire"
+          exit 1
 
       # For the paths no verifier decides, a human's `@claude` comment or review, the agent
       # step's own outcome is the verdict; `continue-on-error` must not turn its death green.
@@ -436,7 +475,10 @@ jobs:
   # label, from the token-holding side of the boundary above: no agent runs here, nothing
   # here reads model output, and GH_ACTIONS_TOKEN stays out of the agent's job exactly as
   # it does for `open-pr`. It runs after the agent job on every pull-request-bound event
-  # and is a no-op when the head raised no held run and has its dispatch run already.
+  # and is a no-op when the head raised no held run and has its dispatch run already,
+  # with one exception: a fix that was an edit to the pull request body alone ("Verify
+  # the fix landed", `landed=body`) leaves the head where the review found it, its
+  # dispatch run already spent, so the label is the only way its review happens.
   # `needs: agent` skips it when the agent job failed.
   approve-fixer-runs:
     needs: agent
@@ -484,14 +526,17 @@ jobs:
       # (dispatch-review.yml) takes the label off and starts the reviewer: the signal a
       # person sends today, sent by the run that pushed. Nothing is sent for a head that
       # has a `dispatch review` run already, which every head a person pushed has, so no
-      # head is reviewed twice and a run that pushed nothing sends nothing. A skipped
-      # dispatch run is a `labeled` event for another label, not a review, so it does not
-      # count. The dispatcher refuses a fork, so a fork head gets no label either.
+      # head is reviewed twice and a run that pushed nothing sends nothing; the one head
+      # reviewed twice on purpose is a body-only fix's, whose fix is in the body the
+      # reviewer reads, not in the head. A skipped dispatch run is a `labeled` event for
+      # another label, not a review, so it does not count. The dispatcher refuses a fork,
+      # so a fork head gets no label either.
       - name: Ask for the review of the agent's push
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          FIX_LANDED: ${{ needs.agent.outputs.fix_landed }}
         run: |
           set -euo pipefail
           if ! IFS=$'\t' read -r head head_repo < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.repo.full_name] | @tsv' 2>/dev/null); then
@@ -500,6 +545,11 @@ jobs:
           fi
           if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then
             echo "#${PR_NUMBER} is from ${head_repo}; the reviewer does not run on forks (ADR 0005)"
+            exit 0
+          fi
+          if [ "$FIX_LANDED" = "body" ]; then
+            gh pr edit "$PR_NUMBER" --add-label review
+            echo "added the review label to #${PR_NUMBER}: the fix was an edit to the pull request body on the unchanged head ${head}, which raises no event"
             exit 0
           fi
           dispatched=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/dispatch-review.yml/runs?head_sha=${head}&per_page=50" \

@@ -813,3 +813,12 @@ user-visible change, added in the same commit as the change. The format follows
   how-to now names under "When it does not work"
   ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); card
   159).
+- The review loop's fixer commits each blocker as that blocker's test passes and pushes
+  as it goes, so a run that ends early leaves what it finished on the pull request; its
+  comment says which gates ran on the head it left, and the four gates still run on the
+  last head and in CI. A review whose only blocker is the pull request body is fixed by
+  editing the body, and the run asks for the review of the unchanged head as it does
+  for a push, instead of failing for want of a commit (issue 11). The agent's `just
+  lint-docs` runs over CI's range, the whole branch. `docs/how-to/implement-a-feature.md`
+  and the `/pr` skill say when a card's change is more than one pull request: about a
+  thousand changed lines (card 178).
