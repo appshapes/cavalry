@@ -170,12 +170,16 @@ Per publication, on every duty cycle, in this order:
    publication is closed and the sender position has reached the end of stream
    position. Before that status message only setup frames go, so that a receiver's
    request for a setup is answered by a setup and not by more heartbeats.
-4. **Retransmit.** A NAK for this publication whose term id and offset lie within the
-   last half term below the sender position, less the longest message, and below it:
-   the range it names, split at the MTU, in datagrams from the term, at once; one
-   retransmit outstanding at a time, lingering 10 ms, and a NAK whose offset lies
-   inside the outstanding range is ignored; a NAK outside the range is ignored and
-   counted. The retransmit never moves the sender position.
+4. **Retransmit.** A NAK for this publication whose term id and offset name a position
+   in the resend window, from sender position − term ÷ 2 − longest message up to but
+   not including the sender position: the range it names, split at the MTU, in datagrams
+   from the term, at once. The retransmit stays outstanding for 10 ms after it, and over
+   unicast one is outstanding at a time: a NAK whose offset lies inside the outstanding
+   range is dropped silently, since the answer is on its way, and one for another range
+   while a retransmit is outstanding is dropped and counted as
+   `sender.retransmit_overflow`, the 10 ms stall in recovery that `doctor` explains from
+   it. A NAK outside the resend window is dropped and counted as `sender.naks_ignored`.
+   The retransmit never moves the sender position.
 5. **RTT.** An RTT measurement with the reply flag is answered without the flag,
    echoing its timestamp and receiver id with a reception delta of 0. Nothing initiates
    one in this version.
@@ -254,9 +258,10 @@ group tag (36-byte status messages). On a datagram from a source address:
    its subscriptions, its counters freed after the reuse timeout, its log removed once
    every subscription has unmapped it. At end of stream, once the rebuild position
    reaches the high-water mark, the end-of-stream position is stored in the log, the
-   status message carries the end-of-stream flag, five times at the 200 ms cadence, and
-   the image is retired the same way once every subscriber has reached that position
-   or the liveness timeout passes.
+   status message carries the end-of-stream flag, five times at the 200 ms cadence (this
+   page's bound; Aeron's receiver sends them for as long as the image lingers), and the
+   image is retired the same way once every subscriber has reached that position or the
+   liveness timeout passes.
 7. **RTT.** A measurement with the reply flag is answered as the sender answers one.
 
 A subscription's `subscription.position` on an image is the counter the status message's
@@ -268,7 +273,8 @@ reads a publication's, stopping at a gap until it is filled.
 
 **Counters**, static unless keyed: `sender.bytes_sent`, `sender.frames_sent`,
 `sender.setups_sent`, `sender.heartbeats_sent`, `sender.retransmits_sent`,
-`sender.retransmitted_bytes`, `sender.short_sends`, `sender.flow_control_limited`,
+`sender.retransmitted_bytes`, `sender.retransmit_overflow`, `sender.short_sends`,
+`sender.flow_control_limited`,
 `sender.naks_received`, `sender.naks_ignored`, `sender.status_messages_received`,
 `sender.status_messages_rejected`, `sender.rtt_replies_sent`, `sender.send_failed`;
 `receiver.bytes_received`, `receiver.frames_received`, `receiver.setups_received`,
