@@ -587,6 +587,17 @@ impl Descriptor {
         Ok(stopped)
     }
 
+    /// The descriptor with its stop fields at −1 again: a stopped recording being cut by
+    /// a truncate, which reads "live, or being cut" until the new stop is written
+    /// (`spec/durable-log.md`, "Descriptor"; ADR 0031). The form and the retained
+    /// position are kept.
+    pub fn reopened(&self) -> Self {
+        let mut reopened = self.clone();
+        reopened.stop_position = -1;
+        reopened.stop_timestamp = -1;
+        reopened
+    }
+
     /// The descriptor with another state.
     pub fn with_state(&self, state: State) -> Self {
         let mut changed = self.clone();
@@ -754,12 +765,15 @@ impl Descriptor {
 
     /// Parses a descriptor for the recovery pass (`spec/durable-log.md`, "The driver"):
     /// as [`parse`](Self::parse), except that a stop checksum that does not match is not
-    /// a failure, since rebuilding a torn stop is what recovery does. The descriptor then
-    /// reads as live, its stop fields at −1, and the flag says the stop was torn.
+    /// a failure, since rebuilding a torn stop is what recovery does, and nor is a
+    /// retained checksum that does not match in version 1's form, since recovery rebuilds
+    /// the group from the files (ADR 0031). The descriptor then reads as live, its stop
+    /// fields at −1, or with its retained position at the start position, and the flags
+    /// say what was torn.
     pub fn parse_for_recovery(
         bytes: &[u8],
         slot: i64,
-    ) -> Result<Option<(Self, bool)>, LayoutError> {
+    ) -> Result<Option<(Self, Torn)>, LayoutError> {
         Self::parse_inner(bytes, slot, true)
     }
 
@@ -792,8 +806,8 @@ impl Descriptor {
     fn parse_inner(
         bytes: &[u8],
         slot: i64,
-        tolerate_torn_stop: bool,
-    ) -> Result<Option<(Self, bool)>, LayoutError> {
+        tolerate_torn: bool,
+    ) -> Result<Option<(Self, Torn)>, LayoutError> {
         if bytes.len() < DESCRIPTOR_LENGTH {
             return Err(LayoutError::TooShort {
                 length: bytes.len() as u64,
@@ -810,18 +824,23 @@ impl Descriptor {
         }
         let form = Self::form_of(bytes)?;
         let torn_stop = u32_at(bytes, 4) != crc32(&bytes[8..24]);
-        if torn_stop && !tolerate_torn_stop {
+        if torn_stop && !tolerate_torn {
             return Err(LayoutError::StopChecksum);
         }
-        if form == Form::Version1 && u32_at(bytes, 480) != crc32(&bytes[472..480]) {
+        let torn_retained = form == Form::Version1 && u32_at(bytes, 480) != crc32(&bytes[472..480]);
+        if torn_retained && !tolerate_torn {
             return Err(LayoutError::RetainedChecksum);
         }
+        let torn = Torn {
+            stop: torn_stop,
+            retained: torn_retained,
+        };
         let mut descriptor = Descriptor {
             state,
             form,
             retained_position: match form {
-                Form::Version1 => i64_at(bytes, 472),
-                Form::Version0 => i64_at(bytes, 48),
+                Form::Version1 if !torn_retained => i64_at(bytes, 472),
+                Form::Version1 | Form::Version0 => i64_at(bytes, 48),
             },
             stop_timestamp: if torn_stop { -1 } else { i64_at(bytes, 8) },
             stop_position: if torn_stop { -1 } else { i64_at(bytes, 16) },
@@ -853,8 +872,19 @@ impl Descriptor {
         descriptor.source_identity = std::str::from_utf8(&bytes[344..344 + source_length as usize])
             .map_err(|_| LayoutError::String)?
             .to_string();
-        Ok(Some((descriptor, torn_stop)))
+        Ok(Some((descriptor, torn)))
     }
+}
+
+/// What [`Descriptor::parse_for_recovery`] found torn: a stop whose checksum does not
+/// match, a retained group whose checksum does not match, both rebuilt from the files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Torn {
+    /// The stop checksum did not match; the descriptor reads as live.
+    pub stop: bool,
+    /// The retained checksum did not match; the descriptor's retained position is its
+    /// start position until recovery rebuilds the group.
+    pub retained: bool,
 }
 
 /// The time index header's fields.

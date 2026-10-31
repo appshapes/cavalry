@@ -91,6 +91,11 @@ pub const MAX_REPLAYS: usize = cavalry_proto::client_protocol::MAX_REPLAYS;
 /// starting replays and the replay publications together have reached it (ADR 0036).
 pub const MAX_REPLAY_PUBLICATIONS: usize = 2 * MAX_REPLAYS;
 
+/// How many retention commands the driver holds in progress at once: truncate recording,
+/// purge segments and purge recording, from admission to the answer, the replays
+/// registry's capacity (`spec/client-protocol.md`, "Sizes"; ADR 0031).
+pub const MAX_COMMANDS_IN_PROGRESS: usize = MAX_REPLAYS;
+
 /// How long a replay's publication may have no subscriber before the replay ends with
 /// reason 2, from its start or from the moment its last subscriber went: Aeron's replay
 /// connect timeout.

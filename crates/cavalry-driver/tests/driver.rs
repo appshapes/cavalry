@@ -1624,14 +1624,15 @@ fn replay_commands_get_the_spec_error_codes() {
     driver.close().expect("closes");
 }
 
-/// Client protocol version 3's retention commands (ADR 0031) decode and are answered:
-/// until the change that implements them lands, each well-formed one is refused with
-/// code 11 and a message that names the ADR and what the operator does. A well-formed
-/// command of this version is not a rejected command, so the refusal counts in
-/// `client_protocol.errors` alone and `client_protocol.rejected_command` does not move.
+/// Client protocol version 3's retention commands (ADR 0031) on a recording the catalog
+/// does not hold are each refused with code 21 and a message that says what the
+/// operator does. A well-formed command of this version is not a rejected command, so
+/// the refusal counts in `client_protocol.errors` alone and
+/// `client_protocol.rejected_command` does not move; the commands' own paths are
+/// tested with the conductor (`conductor::replay`).
 #[test]
-fn retention_commands_are_refused_with_code_11_until_implemented() {
-    let dir = TestDir::new("retention-interim");
+fn retention_commands_on_an_unknown_recording_are_code_21() {
+    let dir = TestDir::new("retention-unknown");
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
     let errors_before = counter(dir.path(), CLIENT_PROTOCOL_ERRORS);
@@ -1644,38 +1645,27 @@ fn retention_commands_are_refused_with_code_11_until_implemented() {
         Command::TruncateRecording {
             client_id: client.id,
             correlation_id: truncate,
-            recording_id: 0,
+            recording_id: 7,
             position: 0,
         },
         Command::PurgeSegments {
             client_id: client.id,
             correlation_id: purge_segments,
-            recording_id: 0,
+            recording_id: 7,
             new_start_position: 0,
         },
         Command::PurgeRecording {
             client_id: client.id,
             correlation_id: purge_recording,
-            recording_id: 0,
+            recording_id: 7,
         },
     ];
     for (sent, command) in commands.iter().enumerate() {
         client.send(command);
         let (code, message) = client.wait_error(command.correlation_id());
-        assert_eq!(code, 11, "{message}");
+        assert_eq!(code, 21, "{message}");
         assert!(
-            message.starts_with(
-                "truncate recording, purge segments and purge recording are not in this \
-                 driver yet: ADR 0031 is accepted and the driver's change follows."
-            ),
-            "{message}"
-        );
-        assert!(
-            message.contains("Upgrade the driver to a release that implements them"),
-            "{message}"
-        );
-        assert!(
-            message.contains("the recording's files are unchanged"),
+            message.starts_with("recording 7 is not in the catalog, whose next id is 0"),
             "{message}"
         );
         assert!(
@@ -1693,7 +1683,7 @@ fn retention_commands_are_refused_with_code_11_until_implemented() {
         assert_eq!(
             counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND),
             rejected_before,
-            "a well-formed version 3 command is not a rejected command"
+            "client_protocol.rejected_command after {sent} refusals"
         );
     }
     driver.close().expect("closes");

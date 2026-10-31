@@ -347,6 +347,16 @@ impl RecordingWriter {
         self.synced_position
     }
 
+    /// How many segment files the recording has, from the start position's segment to
+    /// the one being written: what `recording.bytes` counts times the segment file
+    /// length (ADR 0031).
+    pub fn segments_written(&self) -> i64 {
+        let start = self.descriptor.start_position();
+        let term = i64::from(self.descriptor.term_length()).max(1);
+        let first_base = start - start % term;
+        (self.segment_base - first_base) / self.segment_length.max(1) + 1
+    }
+
     /// Writes one block at the position: `bytes`, the frames with their headers as the
     /// scan hands them, with one positional write into the segment, and the position
     /// advances by `length`, the block's length in the stream, which is `bytes.len()`

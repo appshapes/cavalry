@@ -766,3 +766,22 @@ user-visible change, added in the same commit as the change. The format follows
   across processes, bench within one 10 ns step, kip wanders by 46 ns
   ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); cards
   159 and 168).
+- The driver truncates, purges and deletes a stopped recording: `truncate recording`
+  cuts the segment file and the time index at a position and rewrites the stop, `purge
+  segments` moves the retained position and removes the segment files before it, one
+  per duty cycle, and `purge recording` removes every file and marks the slot deleted;
+  each counts in its counter. A recording that is live, read by a replay or under
+  another command is refused with error 24, a slot that is not a valid recording with
+  21, a position outside its rule with 23, and a file the driver cannot read, cut or
+  remove with 12, after which the slot is repaired from its files; a `start replay` of
+  a recording under a command is error 24, counted in `replay.start_failed`. Recovery
+  rebuilds a retained group torn by a crash from the files and removes a segment file
+  before the retained position, counted in `recording.recovered` and
+  `recording.files_removed`. `cavalry doctor --log-dir` gains `log-directory-space`,
+  which under a tenth of the log directory's filesystem free names the stopped
+  recording a `purge segments` frees the most of and the command, and
+  `recording-over-half`, which names a recording over half the filesystem, live by its
+  `recording.bytes` gauge or stopped by its descriptor. The client API and the
+  `cavalry record` forms follow in the next change
+  ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md);
+  card 95).

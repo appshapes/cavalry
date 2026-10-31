@@ -582,3 +582,421 @@ fn an_index_with_many_entries_past_the_stop_is_cut_by_a_search() {
         (end, NOW + 2 * MS)
     );
 }
+
+/// A stopped recording of two segments, 128 bytes in each; returns its id, descriptor
+/// and stop position, with the second segment's base at `SEGMENT_FILE_LENGTH`.
+fn two_segments(dir: &TestDir, test: &str) -> (i64, Descriptor, i64) {
+    let _ = test;
+    let (id, found) = dir.add(1001, 0);
+    dir.write_frames(&found, 0, 2);
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    let stop = dir.write_frames(&found, second, 2);
+    dir.write_index(id, &[(NOW, 0), (NOW + MS, second), (NOW + 2 * MS, stop)]);
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("the catalog opens");
+    writer
+        .stop(id, stop, NOW + 2 * MS)
+        .expect("the stop is written");
+    let found = writer.get(id).expect("reads").expect("holds");
+    (id, found, stop)
+}
+
+/// `purge segments`' catalog write (ADR 0031): the header moves to version 1, the slot to
+/// version 1's form with the retained position at the segment base, and a reader of the
+/// other form still reads a slot nobody purged; a crash before the files went leaves the
+/// leading segment for recovery to remove, counted in `files_removed`.
+#[test]
+fn a_purge_moves_the_retained_position_and_recovery_removes_the_leading_files() {
+    let dir = TestDir::new("purge-retained");
+    let (id, found, stop) = two_segments(&dir, "purge-retained");
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    let (live, _) = dir.add(1002, 0);
+    {
+        let mut writer = CatalogWriter::open(dir.path(), NOW).expect("the catalog opens");
+        assert_eq!(writer.version(), 0);
+        let live_error = writer.retain(live, 0).unwrap_err().reason();
+        assert_eq!(live_error, "transition", "a live recording is not purged");
+        assert_eq!(
+            writer.retain(id, 64).unwrap_err().reason(),
+            "position",
+            "not a segment base"
+        );
+        assert_eq!(
+            writer.retain(id, stop + second).unwrap_err().reason(),
+            "position",
+            "above the stop"
+        );
+        writer
+            .retain(id, second)
+            .expect("the retained position is written");
+        assert_eq!(writer.version(), 1);
+        let retained = writer.get(id).expect("reads").expect("holds");
+        assert_eq!(retained.form(), cavalry_log::layout::Form::Version1);
+        assert_eq!(retained.retained_position(), second);
+        assert_eq!(retained.stop_position(), stop);
+        // The other slot stayed in version 0's form under the version 1 header.
+        let other = writer.get(1).expect("reads").expect("holds");
+        assert_eq!(other.form(), cavalry_log::layout::Form::Version0);
+        assert_eq!(other.retained_position(), 0);
+    }
+    assert!(
+        dir.segment(&found, 0).exists(),
+        "the purge's files are the replayer's to remove"
+    );
+    // A crash before the file work: recovery removes the leading segment and reads
+    // the recording from its retained position, nothing to rebuild.
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 3 * MS).expect("the directory opens");
+    assert_eq!(recovery.files_removed, 1, "{recovery:?}");
+    // The one rebuild is the live recording of the transition check, which the crash
+    // left with no frames: an empty recording, not this one.
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    assert!(!dir.segment(&found, 0).exists());
+    assert!(dir.segment(&found, second).exists());
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(after.retained_position(), second);
+    assert_eq!(after.stop_position(), stop);
+    assert_eq!(
+        read(&dir, id)
+            .expect("reads")
+            .expect("holds")
+            .retained_position(),
+        second
+    );
+}
+
+/// A retained group torn between the position and its checksum, by a crash inside a
+/// migration or a purge: recovery rebuilds it from the files, the base of the lowest
+/// segment present, counted in `recording.recovered` (ADR 0031).
+#[test]
+fn a_torn_retained_group_is_rebuilt_from_the_files() {
+    let dir = TestDir::new("torn-retained");
+    let (id, found, stop) = two_segments(&dir, "torn-retained");
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    {
+        let mut writer = CatalogWriter::open(dir.path(), NOW).expect("the catalog opens");
+        writer
+            .retain(id, second)
+            .expect("the retained position is written");
+    }
+    fs::remove_file(dir.segment(&found, 0)).expect("the purge removed the leading file");
+    // The checksum torn: the group reads as another position's.
+    let slot = CatalogHeader::slot_offset(id as u64);
+    dir.write_catalog_at(&0xDEAD_BEEFu32.to_le_bytes(), slot + 480);
+    assert_eq!(
+        read(&dir, id).unwrap_err(),
+        "checksum",
+        "a reader reports the torn group"
+    );
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 3 * MS).expect("the directory opens");
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    assert_eq!(recovery.invalidated, 0, "{recovery:?}");
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(after.form(), cavalry_log::layout::Form::Version1);
+    assert_eq!(
+        after.retained_position(),
+        second,
+        "the lowest segment present"
+    );
+    assert_eq!(after.stop_position(), stop, "the stop was not touched");
+}
+
+/// A truncate torn by a crash after the stop was reopened and the segment cut, before
+/// the new stop was written: the slot reads "live, or being cut", and recovery rebuilds
+/// the stop from the files as cut, dropping the index entries past it (ADR 0031).
+#[test]
+fn a_cut_torn_before_its_stop_is_rebuilt_from_the_files_as_cut() {
+    let dir = TestDir::new("torn-cut");
+    let (id, found) = dir.add(1001, 0);
+    let stop = dir.write_frames(&found, 0, 4);
+    assert_eq!(stop, 256);
+    dir.write_index(id, &[(NOW, 0), (NOW + MS, 128), (NOW + 2 * MS, 256)]);
+    {
+        let mut writer = CatalogWriter::open(dir.path(), NOW).expect("the catalog opens");
+        writer
+            .stop(id, stop, NOW + 2 * MS)
+            .expect("the stop is written");
+        writer.open_cut(id).expect("the cut opens");
+        let cutting = writer.get(id).expect("reads").expect("holds");
+        assert!(cutting.is_live(), "the stop reads -1 while the cut runs");
+        assert_eq!(
+            writer.open_cut(id).unwrap_err().reason(),
+            "transition",
+            "a cut is not reopened"
+        );
+    }
+    // The replayer's file work, done to the position 128: the segment cut and extended.
+    let segment = dir.segment(&found, 0);
+    let file = OpenOptions::new()
+        .write(true)
+        .open(&segment)
+        .expect("the segment opens");
+    file.set_len(128).expect("cut");
+    file.set_len(SEGMENT_FILE_LENGTH as u64).expect("extended");
+    drop(file);
+    // The crash: the index and the stop were not written.
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 3 * MS).expect("the directory opens");
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    assert_eq!(
+        recovery.index_rewritten, 1,
+        "the entries past the cut dropped: {recovery:?}"
+    );
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(after.stop_position(), 128);
+    assert_eq!(after.stop_timestamp(), NOW + MS, "the last entry left");
+    assert_eq!(dir.index_entries(id), vec![(NOW, 0), (NOW + MS, 128)]);
+}
+
+/// `purge recording`'s catalog write: state 3 on a stopped recording, refused on a live
+/// one and on a deleted one; recovery removes the files it finds (ADR 0024, ADR 0031).
+#[test]
+fn a_delete_writes_state_3_once_and_recovery_removes_the_files() {
+    let dir = TestDir::new("delete");
+    let (id, found, _stop) = two_segments(&dir, "delete");
+    let (live, _) = dir.add(1002, 0);
+    {
+        let mut writer = CatalogWriter::open(dir.path(), NOW).expect("the catalog opens");
+        assert_eq!(writer.delete(live).unwrap_err().reason(), "transition");
+        writer.delete(id).expect("deleted");
+        assert_eq!(
+            writer.delete(id).unwrap_err().reason(),
+            "transition",
+            "deleted once"
+        );
+        assert_eq!(
+            writer.get(id).expect("reads").expect("holds").state(),
+            State::Deleted
+        );
+    }
+    let (_log, recovery) = LogDir::open(dir.path(), NOW + 3 * MS).expect("the directory opens");
+    assert_eq!(
+        recovery.files_removed, 3,
+        "two segments and the index: {recovery:?}"
+    );
+    assert!(!dir.segment(&found, 0).exists());
+    assert!(!dir.index(id).exists());
+}
+
+/// The time index's cut (ADR 0031): entries past the position go, the last entry left
+/// gives the stop timestamp, and a cut below every entry keeps the first entry alone.
+#[test]
+fn the_index_is_cut_at_a_position() {
+    let dir = TestDir::new("index-cut");
+    let (id, _found) = dir.add(1001, 0);
+    dir.write_index(id, &[(NOW, 0), (NOW + MS, 128), (NOW + 2 * MS, 256)]);
+    assert_eq!(
+        cavalry_log::index::truncate_at(dir.path(), id, 128).expect("cut"),
+        Some(NOW + MS)
+    );
+    assert_eq!(dir.index_entries(id), vec![(NOW, 0), (NOW + MS, 128)]);
+    assert_eq!(
+        cavalry_log::index::truncate_at(dir.path(), id, 64).expect("cut"),
+        Some(NOW)
+    );
+    assert_eq!(dir.index_entries(id), vec![(NOW, 0)]);
+    let (id2, _found) = dir.add(1002, 4096);
+    dir.write_index(id2, &[(NOW, 4096), (NOW + MS, 8192)]);
+    assert_eq!(
+        cavalry_log::index::truncate_at(dir.path(), id2, 0).expect("cut"),
+        None,
+        "below every entry"
+    );
+    assert_eq!(
+        dir.index_entries(id2),
+        vec![(NOW, 4096)],
+        "the first entry stays"
+    );
+}
+
+/// Under a version 1 header every new slot is in version 1's form, the retained
+/// position at the start position (`spec/durable-log.md`, "The driver"; ADR 0031):
+/// a recording added after the directory's first purge reads back that way.
+#[test]
+fn a_slot_added_under_a_version_1_header_is_in_version_1s_form() {
+    let dir = TestDir::new("add-version-1");
+    let (id, _found, _stop) = two_segments(&dir, "add-version-1");
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("the catalog opens");
+    writer.retain(id, second).expect("the purge's write");
+    assert_eq!(writer.version(), cavalry_log::layout::CATALOG_VERSION_1);
+    let added = writer
+        .add(&Recording {
+            recording_id: 0,
+            start_timestamp: NOW + 5 * MS,
+            start_position: 4096,
+            initial_term_id: INITIAL_TERM_ID,
+            term_length: TERM,
+            mtu_length: 1408,
+            session_id: SESSION,
+            stream_id: 1002,
+            channel: "cavalry:ipc",
+            source_identity: "cavalry:ipc",
+        })
+        .expect("added");
+    let new = writer.get(added).expect("reads").expect("holds");
+    assert_eq!(new.form(), cavalry_log::layout::Form::Version1);
+    assert_eq!(new.retained_position(), 4096, "the start position");
+    assert!(new.is_live());
+}
+
+/// Three segments of two frames each, stopped at the end of the third, for the
+/// truncate's crash points: the cut at the first frame's end, 64.
+fn three_segments(dir: &TestDir) -> (i64, Descriptor, i64) {
+    let (id, found) = dir.add(1001, 0);
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    dir.write_frames(&found, 0, 2);
+    dir.write_frames(&found, second, 2);
+    let stop = dir.write_frames(&found, 2 * second, 2);
+    dir.write_index(
+        id,
+        &[
+            (NOW, 0),
+            (NOW + MS, 128),
+            (NOW + 2 * MS, second),
+            (NOW + 3 * MS, 2 * second),
+            (NOW + 4 * MS, stop),
+        ],
+    );
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("the catalog opens");
+    writer
+        .stop(id, stop, NOW + 4 * MS)
+        .expect("the stop is written");
+    writer.open_cut(id).expect("the cut opens");
+    let found = writer.get(id).expect("reads").expect("holds");
+    assert!(found.is_live(), "the stop reads -1 while the cut runs");
+    (id, found, stop)
+}
+
+/// A truncate torn by a crash before any file work: the slot reads "live, or being
+/// cut", and recovery rebuilds the old stop from the files, which are whole (ADR 0031).
+#[test]
+fn a_cut_torn_before_the_file_work_rebuilds_the_old_stop() {
+    let dir = TestDir::new("cut-before-files");
+    let (id, _found, stop) = three_segments(&dir);
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 5 * MS).expect("the directory opens");
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    assert_eq!(recovery.files_removed, 0, "{recovery:?}");
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(after.stop_position(), stop, "the old stop");
+    assert_eq!(after.stop_timestamp(), NOW + 4 * MS);
+    assert_eq!(dir.index_entries(id).len(), 5, "nothing dropped");
+}
+
+/// A truncate torn after one of the segments past the position went, the highest: the
+/// stop is rebuilt at the end of the highest file left, and the index entries past it
+/// are dropped (ADR 0031).
+#[test]
+fn a_cut_torn_after_one_segment_went_stops_at_the_highest_file_left() {
+    let dir = TestDir::new("cut-one-gone");
+    let (id, found, _stop) = three_segments(&dir);
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    fs::remove_file(dir.segment(&found, 2 * second)).expect("the highest segment went");
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 5 * MS).expect("the directory opens");
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    assert_eq!(recovery.index_rewritten, 1, "{recovery:?}");
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(
+        after.stop_position(),
+        second + 128,
+        "the second segment's frames end"
+    );
+    assert_eq!(after.stop_timestamp(), NOW + 2 * MS, "the last entry left");
+    assert_eq!(
+        dir.index_entries(id),
+        vec![(NOW, 0), (NOW + MS, 128), (NOW + 2 * MS, second)]
+    );
+}
+
+/// A truncate torn after every segment past the position went, before the cut: the
+/// stop is rebuilt at the end of the first segment's frames, the cut not yet made.
+#[test]
+fn a_cut_torn_after_every_later_segment_went_stops_at_the_first_files_end() {
+    let dir = TestDir::new("cut-all-gone");
+    let (id, found, _stop) = three_segments(&dir);
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    fs::remove_file(dir.segment(&found, 2 * second)).expect("the highest went");
+    fs::remove_file(dir.segment(&found, second)).expect("the second went");
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 5 * MS).expect("the directory opens");
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(after.stop_position(), 128, "the first segment's two frames");
+    assert_eq!(after.stop_timestamp(), NOW + MS);
+    assert_eq!(dir.index_entries(id), vec![(NOW, 0), (NOW + MS, 128)]);
+}
+
+/// A truncate torn after the segment was cut and before it was extended again: the
+/// file is shorter than the segment file length, which reads as a frame length of 0 at
+/// the cut, and the stop is rebuilt there (ADR 0031).
+#[test]
+fn a_cut_torn_before_the_extension_stops_at_the_cut() {
+    let dir = TestDir::new("cut-unextended");
+    let (id, found, _stop) = three_segments(&dir);
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    fs::remove_file(dir.segment(&found, 2 * second)).expect("the highest went");
+    fs::remove_file(dir.segment(&found, second)).expect("the second went");
+    let file = OpenOptions::new()
+        .write(true)
+        .open(dir.segment(&found, 0))
+        .expect("the segment opens");
+    file.set_len(64).expect("cut, not extended");
+    drop(file);
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 5 * MS).expect("the directory opens");
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(after.stop_position(), 64, "the cut");
+    assert_eq!(after.stop_timestamp(), NOW, "the one entry left");
+    assert_eq!(dir.index_entries(id), vec![(NOW, 0)]);
+}
+
+/// A truncate torn after the index was cut too, with only the stop left to write: the
+/// index needs nothing, and the stop is rebuilt at the cut.
+#[test]
+fn a_cut_torn_after_the_index_cut_rebuilds_the_stop_alone() {
+    let dir = TestDir::new("cut-index-done");
+    let (id, found, _stop) = three_segments(&dir);
+    let second = i64::from(SEGMENT_FILE_LENGTH);
+    fs::remove_file(dir.segment(&found, 2 * second)).expect("the highest went");
+    fs::remove_file(dir.segment(&found, second)).expect("the second went");
+    let file = OpenOptions::new()
+        .write(true)
+        .open(dir.segment(&found, 0))
+        .expect("the segment opens");
+    file.set_len(64).expect("cut");
+    file.set_len(SEGMENT_FILE_LENGTH as u64).expect("extended");
+    drop(file);
+    dir.write_index(id, &[(NOW, 0)]);
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 5 * MS).expect("the directory opens");
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    assert_eq!(
+        recovery.index_rewritten, 0,
+        "the index was already cut: {recovery:?}"
+    );
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(after.stop_position(), 64);
+    assert_eq!(after.stop_timestamp(), NOW);
+}
+
+/// A migration torn after the creation checksum was written over version 1's ranges
+/// and before the retained group: the slot holds under version 1's range with a group
+/// of zeros whose checksum fails, and recovery rebuilds the group from the files, the
+/// start position, since no file went (ADR 0031).
+#[test]
+fn a_migration_torn_before_the_group_is_rebuilt_at_the_start() {
+    let dir = TestDir::new("migration-torn");
+    let (id, found, stop) = two_segments(&dir, "migration-torn");
+    assert_eq!(found.form(), cavalry_log::layout::Form::Version0);
+    // The migration's first write: the creation checksum over version 1's ranges.
+    let encoded = found.in_version_1().encode();
+    let slot = CatalogHeader::slot_offset(id as u64);
+    dir.write_catalog_at(&encoded[24..28], slot + 24);
+    assert_eq!(
+        read(&dir, id).unwrap_err(),
+        "checksum",
+        "a reader reports the torn group"
+    );
+    let (log, recovery) = LogDir::open(dir.path(), NOW + 3 * MS).expect("the directory opens");
+    assert_eq!(recovery.recovered, 1, "{recovery:?}");
+    assert_eq!(recovery.files_removed, 0, "{recovery:?}");
+    let after = log.catalog().get(id).expect("reads").expect("holds");
+    assert_eq!(after.form(), cavalry_log::layout::Form::Version1);
+    assert_eq!(after.retained_position(), 0, "the start position");
+    assert_eq!(after.stop_position(), stop, "the stop was not touched");
+}

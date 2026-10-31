@@ -8,7 +8,11 @@ The durable log: recording and replay. Data plane.
 - Holds the log directory for the driver: `dir::LogDir` opens it under an exclusive
   advisory lock on the catalog, so two drivers never write one directory, and runs the
   recovery pass of the spec before any recording is added, reporting every action for
-  the driver to count (ADR 0025).
+  the driver to count (ADR 0025). The pass runs whole only there; the repair of one
+  slot after a retention command's file work failed is the same rules in two halves,
+  `dir::repair_files` on the thread that has the files and `LogDir::apply_repair`, the
+  one catalog write they end in, on the thread that owns the catalog, each reporting
+  what it did (ADR 0031).
 - Writes a recording for the driver: `LogDir::start` takes the catalog slot and
   creates the time index and the first segment file; `recorder::RecordingWriter` writes
   each block of committed frames with one positional write, appends an index entry at
@@ -21,9 +25,9 @@ The durable log: recording and replay. Data plane.
   warns on a longer path. A roll that fails on a full disk
   is an `io` error and is retried at the next write, never a stuck writer. On any error
   from `write`, the block was taken exactly when `position()` moved. The delete of a
-  stopped recording, state 3, arrives with card 95's purge, with its counter and its
-  caller in the driver; until then the catalog writer has no `delete`, so every
-  transition it writes is one the driver counts.
+  stopped recording, state 3, is `CatalogWriter::delete`, which the driver's `purge
+  recording` writes and counts in `recording.deleted` (ADR 0031); every transition
+  the writer writes is one the driver counts.
 - Resolves an instant to a position through a recording's time index for the driver's
   replay (ADR 0030): `index::position_at` is where a replay from an instant starts, the
   last entry at or before it, and `index::position_after` where one to an instant ends,
