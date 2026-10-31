@@ -143,8 +143,7 @@ shared runner is
    passes: a laptop has none unless you record one, and the shared CI runners have
    none on purpose, because their own noise moved p99.99 by 40 to 100 percent between
    two runs of the same commit; CI compares on the bench hosts only, `bench` in the
-   `bench (linux)` job and `grip` in the `bench (grip)` job, and `kip` in the
-   `bench (kip)` job until that host leaves the gate
+   `bench (linux)` job and `grip` in the `bench (grip)` job
    ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)), each
    against its own profile's baseline (ADR 0016).
 
@@ -163,8 +162,8 @@ shared runner is
    `gh run rerun <run id> --job <job id>`, or the job's re-run button on the run's
    page, gives the next at the same commit whether the first passed or failed. Download
    each attempt's artifact before the next re-run, `bench-results-bench-linux` from
-   `bench (linux)` for `bench`, `bench-results-grip-linux` from `bench (grip)` for
-   `grip` or `bench-results-kip-linux` from `bench (kip)` for `kip`: a re-run replaces
+   `bench (linux)` for `bench` or `bench-results-grip-linux` from `bench (grip)` for
+   `grip`: a re-run replaces
    the run's artifact of the same name, and the run's page and the artifacts endpoint
    keep only the newest attempt's, so an attempt whose artifact was not saved first is
    a lost process (attempts 1 and 2 of run 41196273792 went that way on 2026-10-31).

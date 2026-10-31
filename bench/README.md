@@ -50,12 +50,13 @@ nothing depends on it.
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
   for the profile, on the `claim_commit` and `one_way` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017). The bench hosts' profiles have
-  baselines, `bench-linux`, `kip-linux` and `grip-linux` with their `-unchecked` twins,
-  grip's recorded on 2026-10-31 at 0782ec5 from four of its job's processes at the tree,
-  and CI runs the gate on each host, as `bench (linux)`, `bench (grip)` and, until grip's
-  job has been green over a handful of pushes, `bench (kip)`
-  ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)): a
-  shared runner's run is a report. The `_recorded` rows repeat the client
+  baselines, `bench-linux` and `grip-linux` with their `-unchecked` twins, grip's
+  recorded on 2026-10-31 at 0782ec5 from four of its job's processes at the tree, and
+  CI runs the gate on each host, as `bench (linux)` and `bench (grip)`
+  ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md),
+  Accepted 2026-10-31); `kip-linux`'s pair stays in the file as the record of kip's
+  run as the second host, 2026-10-29 to 2026-10-31, compared by nothing: a shared
+  runner's run is a report. The `_recorded` rows repeat the client
   rows with the driver's recorder writing the stream to the durable log under the bench
   directory, from a housekeeping CPU under `--pin`, and are gated against their baseline
   like the other message rows; `record_block` times the recorder's own block path and is
