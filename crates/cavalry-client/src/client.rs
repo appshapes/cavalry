@@ -422,6 +422,94 @@ impl Cavalry {
         }
     }
 
+    /// Truncates stopped recording `recording_id` to `position`: the driver removes the
+    /// segment files past it, cuts the one holding it so the bytes past the position are
+    /// zero, cuts the time index to the entries at or before it, and writes the stop at
+    /// the position, counted in `recording.truncated`; a replay of the recording then
+    /// ends there (`spec/client-protocol.md`, "Commands"; ADR 0031). `position` is a
+    /// multiple of 32 at which a frame of the recording begins, from its retained
+    /// position to its stop position. The driver answers once the files and the catalog
+    /// are written, one file per duty cycle, within the response timeout for a
+    /// recording of the order of ten thousand segment files. A recording the catalog
+    /// does not hold is [`ClientError::Refused`] with error code 21; one that is live,
+    /// read by a replay or under another of these commands code 24, whose message says
+    /// which and what to do; a position outside its rule code 23, naming the retained
+    /// and stop positions; a file the driver could not read, cut or remove code 12,
+    /// after which the driver has repaired the recording's slot from its files; and the
+    /// driver's registry of commands in progress at capacity code 10.
+    pub fn truncate_recording(
+        &mut self,
+        recording_id: i64,
+        position: i64,
+    ) -> Result<(), ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let command = Command::TruncateRecording {
+            client_id: self.client_id,
+            correlation_id,
+            recording_id,
+            position,
+        };
+        match self.request(&command, correlation_id, "truncate recording")? {
+            Response::Success { .. } => Ok(()),
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to truncate recording"),
+            }),
+        }
+    }
+
+    /// Purges the segment files of stopped recording `recording_id` before
+    /// `new_start_position`: the driver writes the position as the recording's retained
+    /// position, then removes the segment files whose bytes lie wholly before it, one
+    /// per duty cycle, each counted in `recording.segments_purged`; the time index keeps
+    /// its entries, and a replay from the start, or from a position before the retained
+    /// position, is refused with code 23 naming it (`spec/client-protocol.md`,
+    /// "Commands"; ADR 0031). `new_start_position` is a segment base of the recording
+    /// above its retained position and at or below its stop position; a base at or
+    /// below the retained position is nothing to purge and is code 23, as an earlier
+    /// purge already took it. The error codes are
+    /// [`truncate_recording`](Self::truncate_recording)'s.
+    pub fn purge_segments(
+        &mut self,
+        recording_id: i64,
+        new_start_position: i64,
+    ) -> Result<(), ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let command = Command::PurgeSegments {
+            client_id: self.client_id,
+            correlation_id,
+            recording_id,
+            new_start_position,
+        };
+        match self.request(&command, correlation_id, "purge segments")? {
+            Response::Success { .. } => Ok(()),
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to purge segments"),
+            }),
+        }
+    }
+
+    /// Removes every file of stopped recording `recording_id` and marks its catalog
+    /// slot deleted, state 3, which no command reads again and the catalog never
+    /// reuses, counted in `recording.deleted` (`spec/client-protocol.md`, "Commands";
+    /// ADR 0031). The driver writes the state first, then removes the segment files
+    /// one per duty cycle and the time index last, so a crash in between leaves a
+    /// deleted slot whose files recovery removes. The error codes are
+    /// [`truncate_recording`](Self::truncate_recording)'s, less 23.
+    pub fn purge_recording(&mut self, recording_id: i64) -> Result<(), ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let command = Command::PurgeRecording {
+            client_id: self.client_id,
+            correlation_id,
+            recording_id,
+        };
+        match self.request(&command, correlation_id, "purge recording")? {
+            Response::Success { .. } => Ok(()),
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to purge recording"),
+            }),
+        }
+    }
+
     /// Asks the driver to play recording `recording_id` from `position` for `length`
     /// bytes into a publication on `replay_stream_id` and `channel`, which a
     /// subscription on them reads as any stream, its image's positions the recording's

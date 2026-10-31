@@ -741,3 +741,14 @@ user-visible change, added in the same commit as the change. The format follows
   `cavalry record` forms follow in the next change
   ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md);
   card 95).
+- `cavalry record --truncate <id> --to <position or instant>`, `--purge <id> --before
+  <position or instant>` and `--delete <id>` cut, purge and delete a stopped recording;
+  an instant is resolved through the time index as `replay` resolves one, and for
+  `--before` rounded down to the segment base at or before it, printed, so that no
+  byte recorded after the instant goes. The client API gains
+  `Cavalry::truncate_recording`, `purge_segments` and `purge_recording`. The two
+  doctor findings name the `cavalry record` commands to send; the record how-to has
+  the three as steps 4 to 6; the glossary has retained position, truncate recording,
+  purge segments, purge recording and recording busy
+  ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md);
+  card 95).

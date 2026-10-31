@@ -166,3 +166,81 @@ fn a_recording_follows_the_publisher_and_stops_on_request() {
     let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
     assert!(!catalog.get(2).expect("reads").expect("the slot").is_live());
 }
+
+/// The three retention commands through the client API (ADR 0031): a live recording is
+/// code 24; after the stop, a truncate cuts the stop to a frame boundary and a replay
+/// ends there; a purge moves the retained position and removes the file before it; a
+/// purge of the recording deletes every file and the slot; the codes for an unknown
+/// recording and a position outside its rule.
+#[test]
+fn a_stopped_recording_is_truncated_purged_and_deleted_through_the_client() {
+    let dir = TestDir::new("retention");
+    let driver_dir = dir.path().join("driver");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut client = Cavalry::connect_to(&driver_dir).expect("connects");
+    let mut publication = client
+        .add_exclusive_publication("cavalry:ipc", 73)
+        .expect("a publication");
+    let recording = client
+        .start_recording("cavalry:ipc", 73)
+        .expect("a recording");
+    let mut after = 0;
+    for i in 0..100u8 {
+        wait("the offer goes through", || {
+            publication
+                .offer(&[i; 32])
+                .map(|position| after = position)
+                .is_ok()
+        });
+    }
+    assert_eq!(after, 100 * 64);
+    wait("the recording is synced", || {
+        recording.synced_position() == after
+    });
+
+    // Live: every retention command is code 24.
+    refused(client.truncate_recording(0, 64), ErrorCode::RecordingBusy);
+    refused(client.purge_segments(0, 0), ErrorCode::RecordingBusy);
+    refused(client.purge_recording(0), ErrorCode::RecordingBusy);
+    client.stop_recording(0).expect("stops");
+
+    // Unknown, and outside the rule: 21 and 23.
+    refused(client.truncate_recording(9, 0), ErrorCode::UnknownRecording);
+    refused(client.purge_segments(9, 0), ErrorCode::UnknownRecording);
+    refused(client.purge_recording(9), ErrorCode::UnknownRecording);
+    refused(
+        client.truncate_recording(0, after + 64),
+        ErrorCode::PositionOutOfRange,
+    );
+    refused(
+        client.truncate_recording(0, 32),
+        ErrorCode::PositionOutOfRange,
+    );
+    refused(client.purge_segments(0, 0), ErrorCode::PositionOutOfRange);
+
+    // A truncate to the fiftieth frame: the catalog's stop moves there.
+    client.truncate_recording(0, 50 * 64).expect("truncates");
+    let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
+    let slot = catalog.get(0).expect("reads").expect("the slot");
+    assert_eq!(slot.stop_position(), 50 * 64);
+    assert_eq!(slot.retained_position(), 0);
+    drop(catalog);
+
+    // A purge of the recording: every file goes and the slot reads deleted.
+    client.purge_recording(0).expect("deletes");
+    let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
+    let slot = catalog.get(0).expect("reads").expect("the slot");
+    assert_eq!(slot.state(), cavalry_log::layout::State::Deleted);
+    assert!(
+        !log_dir.join("0-0.rec").exists() && !log_dir.join("0.idx").exists(),
+        "the files are gone"
+    );
+    drop(catalog);
+    // A deleted slot is not a valid recording: 21, whose message says the slot is deleted.
+    refused(client.purge_recording(0), ErrorCode::UnknownRecording);
+
+    publication.close().expect("closes");
+    client.close().expect("closes");
+    driver.close().expect("closes");
+}

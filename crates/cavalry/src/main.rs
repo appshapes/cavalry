@@ -1,7 +1,9 @@
 //! The `cavalry` binary (ADR 0002): `cavalry run` starts a driver and stops it on
 //! SIGINT, SIGTERM or SIGHUP; `cavalry doctor` explains the driver from its counters;
 //! `cavalry record <stream id>` records a stream to the durable log and `cavalry record
-//! --stop <recording id>` stops it (ADR 0025); `cavalry replay --recording <id> --from
+//! --stop <recording id>` stops it (ADR 0025), `--truncate <id> --to <point>`, `--purge <id>
+//! --before <point>` and `--delete <id>` cut, purge and delete a stopped one (ADR 0031);
+//! `cavalry replay --recording <id> --from
 //! <position or instant>` plays a recording back and prints every message (ADR 0030).
 //! `console` arrives with its feature. No arguments and no configuration are the primary way to run it (CLAUDE.md,
 //! invariant 5): the directory is `spec/client-protocol.md`'s default and the log
@@ -26,6 +28,15 @@ const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
                            log; prints the recording id (--channel <uri> for another
                            channel than cavalry:ipc)
   record --stop <id>       stop that recording
+  record --truncate <id> --to <position or instant>
+                           cut that stopped recording at the point: the bytes past it
+                           go, and its stop moves there
+  record --purge <id> --before <position or instant>
+                           remove that stopped recording's segment files before the
+                           point; an instant is rounded down to a segment base, so no
+                           byte recorded after it goes
+  record --delete <id>     remove every file of that stopped recording; its id is never
+                           reused
   replay --recording <id> --from <position or instant> [--to <position or instant>]
          [--stream <id>] [--follow]
                            play that recording back from the position, or from the
@@ -61,6 +72,9 @@ struct Flags {
 enum RecordAction {
     Start { stream_id: i32, channel: String },
     Stop { recording_id: i64 },
+    Truncate { recording_id: i64, to: Point },
+    Purge { recording_id: i64, before: Point },
+    Delete { recording_id: i64 },
 }
 
 /// A point in a recording as the command line names it: a position, or an instant the
@@ -96,7 +110,8 @@ enum Invocation {
 }
 
 /// `cavalry <command> [--dir <path> | --dir=<path>] [--log-dir <path> | --log-dir=<path>]`,
-/// `record` with its stream id, `--stop <id>` and `--channel <uri>`, `replay` with its
+/// `record` with its stream id and `--channel <uri>`, or `--stop <id>`, `--truncate <id>
+/// --to <point>`, `--purge <id> --before <point>` or `--delete <id>`, `replay` with its
 /// `--recording`, `--from`, `--to`, `--stream` and `--follow`, and nothing else.
 fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut args = args.peekable();
@@ -116,7 +131,9 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
     }
     let takes = match command.as_str() {
         "record" => {
-            "--dir <path>, --log-dir <path>, --stop <recording id>, --channel <uri> and a stream id"
+            "--dir <path>, --log-dir <path>, a stream id with --channel <uri>, --stop <recording \
+             id>, --truncate <id> with --to <position or instant>, --purge <id> with --before \
+             <position or instant>, and --delete <id>"
         }
         "replay" => {
             "--dir <path>, --log-dir <path>, --recording <id>, --from <position or instant>, \
@@ -127,6 +144,10 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut flags = Flags::default();
     let mut stream_id: Option<i32> = None;
     let mut stop: Option<i64> = None;
+    let mut truncate: Option<i64> = None;
+    let mut purge: Option<i64> = None;
+    let mut delete: Option<i64> = None;
+    let mut before: Option<Point> = None;
     let mut channel: Option<String> = None;
     let mut recording: Option<i64> = None;
     let mut from: Option<Point> = None;
@@ -177,17 +198,33 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 }
                 flags.log_dir = Some(PathBuf::from(value));
             }
-            "--stop" if command == "record" => {
-                if stop.is_some() {
+            "--stop" | "--truncate" | "--purge" | "--delete" if command == "record" => {
+                let slot = match name.as_str() {
+                    "--stop" => &mut stop,
+                    "--truncate" => &mut truncate,
+                    "--purge" => &mut purge,
+                    _ => &mut delete,
+                };
+                if slot.is_some() {
                     return twice(&name);
                 }
                 match value.parse::<i64>() {
-                    Ok(id) if id >= 0 => stop = Some(id),
+                    Ok(id) if id >= 0 => *slot = Some(id),
                     _ => {
                         return Invocation::Wrong(format!(
-                            "--stop needs a recording id, a whole number from 0; got `{value}`"
+                            "{name} needs a recording id, a whole number from 0; got `{value}`"
                         ));
                     }
+                }
+            }
+            "--to" | "--before" if command == "record" => {
+                let slot = if name == "--to" { &mut to } else { &mut before };
+                if slot.is_some() {
+                    return twice(&name);
+                }
+                match parse_point(&value) {
+                    Ok(point) => *slot = Some(point),
+                    Err(why) => return Invocation::Wrong(format!("{name}: {why}")),
                 }
             }
             "--channel" if command == "record" => {
@@ -275,28 +312,126 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
             (None, _) => Invocation::Wrong("replay needs --recording <id>".to_string()),
             (_, None) => Invocation::Wrong("replay needs --from <position or instant>".to_string()),
         },
-        _ => match (stream_id, stop) {
-            (Some(stream_id), None) => Invocation::Record(
-                flags,
+        _ => {
+            // One action: a stream id to start, or one of the four id flags.
+            let given = [
+                stream_id.map(|_| "a stream id"),
+                stop.map(|_| "--stop"),
+                truncate.map(|_| "--truncate"),
+                purge.map(|_| "--purge"),
+                delete.map(|_| "--delete"),
+            ];
+            let names: Vec<&str> = given.iter().flatten().copied().collect();
+            if names.len() > 1 {
+                return Invocation::Wrong(format!(
+                    "record takes one of a stream id, --stop, --truncate, --purge and --delete; \
+                     got {}",
+                    names.join(" and ")
+                ));
+            }
+            if channel.is_some() && stream_id.is_none() {
+                return Invocation::Wrong(
+                    "--channel goes with a stream id, not with --stop, --truncate, --purge or \
+                     --delete"
+                        .to_string(),
+                );
+            }
+            if to.is_some() && truncate.is_none() {
+                return Invocation::Wrong("--to goes with --truncate <id>".to_string());
+            }
+            if before.is_some() && purge.is_none() {
+                return Invocation::Wrong("--before goes with --purge <id>".to_string());
+            }
+            let action = if let Some(stream_id) = stream_id {
                 RecordAction::Start {
                     stream_id,
                     channel: channel.unwrap_or_else(|| "cavalry:ipc".to_string()),
-                },
-            ),
-            (None, Some(recording_id)) if channel.is_none() => {
-                Invocation::Record(flags, RecordAction::Stop { recording_id })
-            }
-            (None, Some(_)) => {
-                Invocation::Wrong("--channel goes with a stream id, not with --stop".to_string())
-            }
-            (Some(_), Some(_)) => {
-                Invocation::Wrong("record takes a stream id or --stop <id>, not both".to_string())
-            }
-            (None, None) => {
-                Invocation::Wrong("record needs a stream id, or --stop <recording id>".to_string())
-            }
-        },
+                }
+            } else if let Some(recording_id) = stop {
+                RecordAction::Stop { recording_id }
+            } else if let Some(recording_id) = truncate {
+                let Some(to) = to else {
+                    return Invocation::Wrong(
+                        "--truncate needs --to <position or instant>".to_string(),
+                    );
+                };
+                RecordAction::Truncate { recording_id, to }
+            } else if let Some(recording_id) = purge {
+                let Some(before) = before else {
+                    return Invocation::Wrong(
+                        "--purge needs --before <position or instant>".to_string(),
+                    );
+                };
+                RecordAction::Purge {
+                    recording_id,
+                    before,
+                }
+            } else if let Some(recording_id) = delete {
+                RecordAction::Delete { recording_id }
+            } else {
+                return Invocation::Wrong(
+                    "record needs a stream id, --stop <id>, --truncate <id> --to <point>, \
+                     --purge <id> --before <point> or --delete <id>"
+                        .to_string(),
+                );
+            };
+            Invocation::Record(flags, action)
+        }
     }
+}
+
+/// A point of a recording as a position: an instant is resolved through the time index
+/// in the log directory, to the first entry's position after it (`after`, where a
+/// `--to` keeps every byte written at the instant) or to the entry's at or before it
+/// (where a `--before` purges no byte recorded after the instant), which needs
+/// `--log-dir` on a host with no default.
+fn resolve_point(
+    config: &Config,
+    recording_id: i64,
+    point: Point,
+    what: &str,
+    after: bool,
+) -> Result<i64, String> {
+    match point {
+        Point::Position(position) => Ok(position),
+        Point::Instant(instant) => {
+            let log_dir = config.log_dir.as_deref().ok_or_else(|| {
+                "an instant needs the log directory, which this host has no default for: \
+                 pass --log-dir, or a position"
+                    .to_string()
+            })?;
+            let resolved = if after {
+                index::position_after(log_dir, recording_id, instant)
+            } else {
+                index::position_at(log_dir, recording_id, instant)
+            };
+            resolved.map_err(|error| format!("{what}: {error}"))
+        }
+    }
+}
+
+/// The segment base at or before `position` in `recording_id`, from its descriptor in
+/// the catalog: what a purge sends for an instant, so that no byte recorded after the
+/// instant is removed (ADR 0031).
+fn segment_base_at_or_before(
+    config: &Config,
+    recording_id: i64,
+    position: i64,
+) -> Result<i64, String> {
+    let log_dir = config.log_dir.as_deref().ok_or_else(|| {
+        "an instant needs the log directory, which this host has no default for: pass \
+         --log-dir, or a position"
+            .to_string()
+    })?;
+    let catalog = cavalry_log::catalog::CatalogReader::open(log_dir)
+        .map_err(|error| format!("--before: {error}"))?;
+    let descriptor = catalog
+        .get(recording_id)
+        .map_err(|error| format!("--before: {error}"))?
+        .ok_or_else(|| format!("--before: recording {recording_id} is not in the catalog"))?;
+    cavalry_log::layout::locate(&descriptor, position)
+        .map(|located| located.segment_base_position)
+        .map_err(|error| format!("--before: {error}"))
 }
 
 /// A point of a recording from the command line: a whole number is a position, a
@@ -562,6 +697,53 @@ fn record(config: &Config, action: RecordAction) -> ExitCode {
         RecordAction::Stop { recording_id } => client
             .stop_recording(recording_id)
             .map(|()| println!("recording {recording_id} stopped")),
+        RecordAction::Truncate { recording_id, to } => {
+            match resolve_point(config, recording_id, to, "--to", true) {
+                Ok(position) => client
+                    .truncate_recording(recording_id, position)
+                    .map(|()| println!("recording {recording_id} truncated to {position}")),
+                Err(error) => {
+                    eprintln!("cavalry record: {error}");
+                    let _ = client.close();
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        RecordAction::Purge {
+            recording_id,
+            before,
+        } => {
+            // An instant resolves to a frame boundary, which is almost never a segment
+            // base: the base at or before it is what goes, and both are printed.
+            let base = match before {
+                Point::Position(position) => Ok(position),
+                Point::Instant(_) => resolve_point(config, recording_id, before, "--before", false)
+                    .and_then(|position| {
+                        segment_base_at_or_before(config, recording_id, position)
+                            .map(|base| (position, base))
+                    })
+                    .map(|(position, base)| {
+                        println!(
+                            "--before resolved to position {position}; purging before the \
+                             segment base {base}"
+                        );
+                        base
+                    }),
+            };
+            match base {
+                Ok(base) => client
+                    .purge_segments(recording_id, base)
+                    .map(|()| println!("recording {recording_id} purged before {base}")),
+                Err(error) => {
+                    eprintln!("cavalry record: {error}");
+                    let _ = client.close();
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        RecordAction::Delete { recording_id } => client
+            .purge_recording(recording_id)
+            .map(|()| println!("recording {recording_id} deleted")),
     };
     let closed = client.close();
     match (outcome, closed) {
@@ -895,6 +1077,55 @@ mod tests {
             ["record", "--stop", "-1"].as_slice(),
             ["record", "--stop", "1", "--channel", "cavalry:ipc"].as_slice(),
             ["record", "--stop"].as_slice(),
+        ] {
+            assert!(matches!(parsed(args), Invocation::Wrong(_)), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn record_takes_one_retention_action_with_its_point() {
+        match parsed(&["record", "--truncate", "3", "--to", "6400"]) {
+            Invocation::Record(_, RecordAction::Truncate { recording_id, to }) => {
+                assert_eq!((recording_id, to), (3, Point::Position(6400)));
+            }
+            _ => panic!("a truncate"),
+        }
+        match parsed(&["record", "--purge", "3", "--before=2026-10-29T09:36:00Z"]) {
+            Invocation::Record(
+                _,
+                RecordAction::Purge {
+                    recording_id,
+                    before,
+                },
+            ) => {
+                assert_eq!(recording_id, 3);
+                assert_eq!(before, Point::Instant(1_793_266_560_000_000_000));
+            }
+            _ => panic!("a purge"),
+        }
+        match parsed(&["record", "--delete", "4", "--log-dir", "/l"]) {
+            Invocation::Record(
+                Flags {
+                    log_dir: Some(log_dir),
+                    ..
+                },
+                RecordAction::Delete { recording_id },
+            ) => {
+                assert_eq!((recording_id, log_dir), (4, PathBuf::from("/l")));
+            }
+            _ => panic!("a delete"),
+        }
+        for args in [
+            ["record", "--truncate", "3"].as_slice(),
+            ["record", "--truncate", "3", "--to", "33"].as_slice(),
+            ["record", "--purge", "3"].as_slice(),
+            ["record", "--purge", "3", "--before", "x"].as_slice(),
+            ["record", "--delete", "3", "--to", "0"].as_slice(),
+            ["record", "--delete", "3", "--before", "0"].as_slice(),
+            ["record", "--delete", "3", "--channel", "cavalry:ipc"].as_slice(),
+            ["record", "--stop", "1", "--delete", "1"].as_slice(),
+            ["record", "7", "--truncate", "1", "--to", "0"].as_slice(),
+            ["record", "--purge", "1", "--before", "0", "--before", "64"].as_slice(),
         ] {
             assert!(matches!(parsed(args), Invocation::Wrong(_)), "{args:?}");
         }

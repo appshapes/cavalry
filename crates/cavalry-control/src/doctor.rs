@@ -646,13 +646,13 @@ fn purge_advice(recording: &StoppedRecording) -> String {
         String::new()
     };
     format!(
-        "a `purge segments` command for recording {} to its stop position {} removes the {} \
-         segment files before it, {} MiB{several}, and a `purge recording` command removes \
-         every file of it",
+        "`cavalry record --purge {} --before {}` removes the {} segment files before its stop \
+         position, {} MiB{several}, and `cavalry record --delete {}` removes every file of it",
         recording.recording_id,
         recording.stop_position,
         recording.purgeable,
-        recording.mib(recording.purgeable)
+        recording.mib(recording.purgeable),
+        recording.recording_id
     )
 }
 
@@ -725,9 +725,10 @@ fn over_half_checks(
                 level: Level::Warn,
                 message: format!(
                     "live recording {recording_id} takes {} MiB, over half of the {total_mib} \
-                     MiB filesystem under {}: stop it with `stop recording` before the \
-                     filesystem fills, then a `purge segments` command removes its segment \
-                     files before a position",
+                     MiB filesystem under {}: stop it with `cavalry record --stop \
+                     {recording_id}` before the filesystem fills, then `cavalry record --purge \
+                     {recording_id} --before <position or instant>` removes its segment files \
+                     before that point",
                     bytes / (1024 * 1024),
                     log_dir.display()
                 ),
@@ -2251,10 +2252,10 @@ mod tests {
             found[0],
             format!(
                 "the filesystem under {} has 5120 MiB free of 102400 MiB, under a tenth: \
-                 recording 0 holds the most segment files a purge frees, 3 of 128 MiB; a \
-                 `purge segments` command for recording 0 to its stop position {} removes \
-                 the 3 segment files before it, 384 MiB, and a `purge recording` command \
-                 removes every file of it",
+                 recording 0 holds the most segment files a purge frees, 3 of 128 MiB; \
+                 `cavalry record --purge 0 --before {}` removes the 3 segment files before \
+                 its stop position, 384 MiB, and `cavalry record --delete 0` removes every \
+                 file of it",
                 log_dir.display(),
                 3 * SEGMENT
             )
@@ -2307,7 +2308,11 @@ mod tests {
             "{}",
             found[0]
         );
-        assert!(found[0].contains("`stop recording`"), "{}", found[0]);
+        assert!(
+            found[0].contains("`cavalry record --stop 7`"),
+            "{}",
+            found[0]
+        );
         assert!(
             found[1].starts_with(
                 "recording 0 takes 384 MiB by its descriptor, 3 segment files, over half of \
@@ -2316,7 +2321,11 @@ mod tests {
             "{}",
             found[1]
         );
-        assert!(found[1].contains("`purge segments`"), "{}", found[1]);
+        assert!(
+            found[1].contains("`cavalry record --purge 0 --before"),
+            "{}",
+            found[1]
+        );
         // Recording 1's two segments left, 256 MiB, are under half; so is the unknown.
         let mut findings = Vec::new();
         over_half_checks(&log_dir, None, &live, &mut findings);

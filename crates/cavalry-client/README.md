@@ -25,6 +25,9 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `Cavalry::stop_recording(id)`, or `Recording::stop(&mut client)`, stops it from any
   client. The recording is the driver's:
   it outlives the client, and dropping the handle stops nothing (ADR 0025).
+  `Cavalry::truncate_recording(id, position)`, `purge_segments(id, segment_base)` and
+  `purge_recording(id)` cut, purge and delete a stopped recording; a live one, one a
+  replay reads or one under another of the three is refused with code 24 (ADR 0031).
 - Plays a recording back: `Cavalry::start_replay(recording_id, position, length,
   stream_id, channel)` asks the driver for a replay onto a stream a subscription of this
   or any client reads as any stream, its image's positions the recording's, and returns

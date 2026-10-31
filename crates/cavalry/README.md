@@ -18,7 +18,9 @@ binary's `main`.
   it on Ctrl-C or SIGTERM, leaving the directory for `doctor`; `doctor` explains the
   driver from its counters and exits 0 when no check failed, listing every recording's
   two positions; `record <stream id>` records a stream's live publication to the durable
-  log and `record --stop <id>` stops it (ADR 0025); `replay --recording <id> --from
+  log, `record --stop <id>` stops it (ADR 0025), and `record --truncate <id> --to <point>`,
+  `--purge <id> --before <point>` and `--delete <id>` cut, purge and delete a stopped
+  one (ADR 0031); `replay --recording <id> --from
   <position or instant>` plays a recording back into a subscription of its own and prints
   one line per message, the position from the frame's header and the body, from a
   position or an instant the time index resolves, to `--to` or the recording's extent,

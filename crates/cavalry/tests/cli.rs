@@ -428,3 +428,68 @@ fn replay_exits_1_and_names_the_positions_not_printed_when_its_log_goes_first() 
     client.close().expect("closes");
     driver.close().expect("closes");
 }
+
+/// `cavalry record --truncate`, `--purge` and `--delete` against a stopped recording in
+/// this process's driver: each prints its line and exit 0; an instant for `--before`
+/// resolves through the time index and rounds down to a segment base, here the start,
+/// which is nothing to purge, so the driver refuses it with code 23 and the message
+/// names the retained position (ADR 0031).
+#[test]
+fn record_truncates_purges_and_deletes_a_stopped_recording() {
+    let dir = TestDir::new("retention");
+    let (driver, client, after) = recorded(&dir, 1001, 100, false);
+    assert_eq!(after, 100 * 64);
+    let record = |args: &[&str]| {
+        let mut command = cavalry();
+        command.arg("record").args(args).args([
+            "--dir",
+            &dir.0.join("driver").to_string_lossy(),
+            "--log-dir",
+            &dir.0.join("log").to_string_lossy(),
+        ]);
+        command.output().expect("runs")
+    };
+
+    let out = record(&["--truncate", "0", "--to", "3200"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "recording 0 truncated to 3200\n"
+    );
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_nanos();
+    let out = record(&["--purge", "0", "--before", &format!("@{now}")]);
+    assert!(!out.status.success(), "a purge of nothing is refused");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("purging before the segment base 0"),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("cavalry record: ") && stderr.contains("retained"),
+        "{stderr}"
+    );
+
+    let out = record(&["--delete", "0"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "recording 0 deleted\n"
+    );
+    assert!(!dir.0.join("log").join("0-0.rec").exists(), "the file went");
+
+    client.close().expect("closes");
+    driver.close().expect("closes");
+}
