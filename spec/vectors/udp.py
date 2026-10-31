@@ -284,6 +284,13 @@ VECTORS = [
     bad_channel("channel-endpoint-ipv6-no-brackets", "cavalry:udp?endpoint=fd00::2:40123", "endpoint"),
     bad_channel("channel-multicast-ipv4", "cavalry:udp?endpoint=224.0.1.1:40123", "multicast"),
     bad_channel("channel-multicast-ipv6", "cavalry:udp?endpoint=[ff02::1]:40123", "multicast"),
+    # The order of checks: a string wrong in two ways reports the earlier check, whatever
+    # the order of its parameters.
+    bad_channel("channel-key-before-endpoint", "cavalry:udp?endpoint=10.0.0.2:0|mtu=1408", "key"),
+    bad_channel("channel-grammar-before-key", "cavalry:udp?mtu=1|endpoint", "grammar"),
+    bad_channel("channel-grammar-before-endpoint", "cavalry:udp?endpoint=10.0.0.2:0|endpoint=10.0.0.2:0",
+                "grammar"),
+    bad_channel("channel-endpoint-before-multicast", "cavalry:udp?endpoint=224.0.1.1:0", "endpoint"),
     # Arithmetic: the rules of "The sender" and "The receiver" on given inputs.
     sender_limit("sender-limit-first-status-message", 0, 0, INITIAL_TERM_ID, 0, 131072),
     sender_limit("sender-limit-rises", 8192, 131072, INITIAL_TERM_ID, 8192, 131072),

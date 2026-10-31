@@ -19,7 +19,7 @@ use cavalry_shm::broadcast::{BroadcastError, Receiver};
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
 use cavalry_shm::counters::CountersWriter;
-use cavalry_shm::log::{LogBuffers, LogType};
+use cavalry_shm::log::{LogBuffers, LogDirectory};
 use cavalry_shm::spsc;
 
 use crate::error::Closed;
@@ -426,14 +426,14 @@ impl Conductor {
         session_id: i32,
         subscriber_registration_id: i64,
         position_counter_id: i32,
-        log_name: (LogType, i64),
+        log_name: (LogDirectory, i64),
         source_identity: String,
     ) -> Result<(), Closed> {
         let Some(registration) = self.registry.get(subscriber_registration_id) else {
             return Ok(());
         };
-        let (log_type, log_id) = log_name;
-        let log = LogBuffers::open_named(&self.dir, log_type, log_id, false)
+        let (directory, log_id) = log_name;
+        let log = LogBuffers::open_named(&self.dir, directory, log_id, false)
             .map_err(|_| Closed::Corrupt)?;
         let position = u32::try_from(position_counter_id)
             .ok()
@@ -615,7 +615,7 @@ enum Outcome {
         session_id: i32,
         subscriber_registration_id: i64,
         position_counter_id: i32,
-        log_name: (LogType, i64),
+        log_name: (LogDirectory, i64),
         source_identity: String,
     },
     /// `unavailable image` for one of this client's subscriptions.
@@ -634,7 +634,7 @@ enum Outcome {
 /// The kind and registration id a log file name carries: `publications/<id>.logbuffer`
 /// or `images/<id>.logbuffer`, as `spec/client-protocol.md`, "The driver directory"
 /// names them; anything else is a corrupt event (ADR 0010).
-fn log_name(log_file_name: &[u8]) -> Option<(LogType, i64)> {
+fn log_name(log_file_name: &[u8]) -> Option<(LogDirectory, i64)> {
     cavalry_shm::log::layout::parse_file_name(log_file_name)
 }
 
@@ -791,8 +791,8 @@ mod tests {
     use cavalry_shm::spsc;
 
     use super::{
-        LogType, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome, Registry, ReplayRegistration,
-        ReplayRegistry, event, log_name,
+        LogDirectory, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome, Registry,
+        ReplayRegistration, ReplayRegistry, event, log_name,
     };
     use crate::error::Closed;
     use crate::replay::ReplayEnd;
@@ -1021,15 +1021,18 @@ mod tests {
                 session_id: -2,
                 subscriber_registration_id: 6,
                 position_counter_id: 14,
-                log_name: (LogType::Concurrent, 7),
+                log_name: (LogDirectory::Publications, 7),
                 source_identity: "cavalry:ipc".to_string(),
             })
         );
         assert_eq!(
             log_name(b"publications/42.logbuffer"),
-            Some((LogType::Concurrent, 42))
+            Some((LogDirectory::Publications, 42))
         );
-        assert_eq!(log_name(b"images/42.logbuffer"), Some((LogType::Image, 42)));
+        assert_eq!(
+            log_name(b"images/42.logbuffer"),
+            Some((LogDirectory::Images, 42))
+        );
         assert_eq!(log_name(b"42.logbuffer"), None);
         assert_eq!(log_name(b"publications/x.logbuffer"), None);
     }

@@ -15,7 +15,7 @@ use cavalry_shm::log::layout::{
     file_name,
 };
 use cavalry_shm::log::{
-    ClaimError, HeaderFields, LogBuffers, LogError, LogType, Tail, UnblockOutcome,
+    ClaimError, HeaderFields, LogBuffers, LogDirectory, LogError, LogType, Tail, UnblockOutcome,
 };
 
 struct Dir(PathBuf);
@@ -1426,15 +1426,16 @@ fn an_image_is_created_under_images_and_read_back_as_one() {
     drop(log);
     let opened = LogBuffers::open_image(dir.path(), CORRELATION, false).unwrap();
     assert_eq!(opened.header(), image_fields());
-    let named = LogBuffers::open_named(dir.path(), LogType::Image, CORRELATION, false).unwrap();
+    let named =
+        LogBuffers::open_named(dir.path(), LogDirectory::Images, CORRELATION, false).unwrap();
     assert_eq!(named.header(), image_fields());
     assert_eq!(
         cavalry_shm::log::layout::parse_file_name(b"images/42.logbuffer"),
-        Some((LogType::Image, 42))
+        Some((LogDirectory::Images, 42))
     );
     assert_eq!(
         cavalry_shm::log::layout::parse_file_name(b"publications/7.logbuffer"),
-        Some((LogType::Concurrent, 7))
+        Some((LogDirectory::Publications, 7))
     );
     assert_eq!(
         cavalry_shm::log::layout::parse_file_name(b"../42.logbuffer"),
@@ -1542,6 +1543,23 @@ fn an_image_insert_refuses_a_frame_outside_the_term_or_unaligned() {
     let mut bad = wire_frame(0, -5, b"v");
     bad[4] = 1;
     assert_eq!(writer.insert(-5, 0, &bad).unwrap_err().reason(), "frame");
+    // A header that names another term or offset than the insert does: nothing lands.
+    assert_eq!(
+        writer
+            .insert(-4, 0, &wire_frame(0, -5, b"w"))
+            .unwrap_err()
+            .reason(),
+        "frame"
+    );
+    assert_eq!(
+        writer
+            .insert(-5, 64, &wire_frame(0, -5, b"w"))
+            .unwrap_err()
+            .reason(),
+        "frame"
+    );
+    let mut reader = log.reader(0).unwrap();
+    assert!(drain(&mut reader).is_empty(), "nothing was written");
 }
 
 #[test]

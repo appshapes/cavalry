@@ -199,9 +199,11 @@ impl<'a> Channel<'a> {
                 },
             });
         };
-        let mut endpoint = None;
-        let mut interface = None;
-        let mut at = UDP_PREFIX.len();
+        // `grammar` over every parameter first, then `key`, then `endpoint`, then
+        // `multicast`: the page's order, so that a string wrong in two ways reports the
+        // earlier check whatever the order of its parameters.
+        let mut seen_endpoint = false;
+        let mut seen_interface = false;
         for param in params.split('|') {
             let Some((key, value)) = param.split_once('=') else {
                 return Err(ChannelError::Grammar {
@@ -222,28 +224,35 @@ impl<'a> Channel<'a> {
                     what: "a value is empty",
                 });
             }
-            match key {
-                "endpoint" => {
-                    if endpoint.is_some() {
-                        return Err(ChannelError::Grammar {
-                            what: "the key endpoint appears twice",
-                        });
-                    }
-                    endpoint = Some(parse_address(value, true)?);
-                }
-                "interface" => {
-                    if interface.is_some() {
-                        return Err(ChannelError::Grammar {
-                            what: "the key interface appears twice",
-                        });
-                    }
-                    interface = Some(parse_address(value, false)?);
-                }
-                _ => {
-                    return Err(ChannelError::Key { at, len: key.len() });
-                }
+            let twice = match key {
+                "endpoint" => core::mem::replace(&mut seen_endpoint, true),
+                "interface" => core::mem::replace(&mut seen_interface, true),
+                _ => false,
+            };
+            if twice {
+                return Err(ChannelError::Grammar {
+                    what: "a key appears twice",
+                });
+            }
+        }
+        let mut at = UDP_PREFIX.len();
+        for param in params.split('|') {
+            // Checked above: every parameter is key=value.
+            let key = param.split_once('=').map_or("", |(key, _)| key);
+            if key != "endpoint" && key != "interface" {
+                return Err(ChannelError::Key { at, len: key.len() });
             }
             at += param.len() + 1;
+        }
+        let mut endpoint = None;
+        let mut interface = None;
+        for param in params.split('|') {
+            let (key, value) = param.split_once('=').unwrap_or(("", ""));
+            match key {
+                "endpoint" => endpoint = Some(parse_address(value, true)?),
+                "interface" => interface = Some(parse_address(value, false)?),
+                _ => {}
+            }
         }
         let Some(endpoint) = endpoint else {
             return Err(ChannelError::Endpoint {

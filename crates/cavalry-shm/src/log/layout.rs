@@ -372,23 +372,45 @@ pub fn image_file_name(correlation_id: i64) -> std::path::PathBuf {
     std::path::PathBuf::from(IMAGE_DIRECTORY).join(format!("{correlation_id}{FILE_SUFFIX}"))
 }
 
+/// The directory under the driver's that a log's file name names: a publication's log
+/// under `publications/`, of type 0 or 1, or an image's under `images/`, of type 2. The
+/// name says the directory and nothing about the tail protocol, so this is what
+/// [`parse_file_name`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LogDirectory {
+    /// `publications/`: a concurrent or exclusive publication's log, or a replay's.
+    Publications,
+    /// `images/`: an image's log, type 2 (ADR 0040).
+    Images,
+}
+
+impl LogDirectory {
+    /// The directory's name under the driver's directory.
+    pub const fn name(self) -> &'static str {
+        match self {
+            LogDirectory::Publications => FILE_DIRECTORY,
+            LogDirectory::Images => IMAGE_DIRECTORY,
+        }
+    }
+}
+
 /// Which directory a log's file name names, and its correlation id: the inverse of
 /// [`file_name`] and [`image_file_name`] for the name an `available image` or
 /// `publication ready` event carries, which a client checks before it opens anything
 /// (ADR 0010). `None` for any other string.
-pub fn parse_file_name(name: &[u8]) -> Option<(LogType, i64)> {
+pub fn parse_file_name(name: &[u8]) -> Option<(LogDirectory, i64)> {
     let name = core::str::from_utf8(name).ok()?;
     let (directory, rest) = name.split_once('/')?;
-    let log_type = match directory {
-        FILE_DIRECTORY => LogType::Concurrent,
-        IMAGE_DIRECTORY => LogType::Image,
+    let directory = match directory {
+        FILE_DIRECTORY => LogDirectory::Publications,
+        IMAGE_DIRECTORY => LogDirectory::Images,
         _ => return None,
     };
     let id = rest.strip_suffix(FILE_SUFFIX)?;
     if id.is_empty() || id.contains('/') {
         return None;
     }
-    Some((log_type, id.parse().ok()?))
+    Some((directory, id.parse().ok()?))
 }
 
 /// The 128 bytes of a header for these fields, magic included.

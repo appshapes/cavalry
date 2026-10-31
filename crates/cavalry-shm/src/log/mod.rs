@@ -32,7 +32,7 @@ pub use file::{
     Block, BufferClaim, ClaimError, ImageWriter, LogBuffers, Poll, TermAppender, TermReader,
     TermWriter, UnblockOutcome,
 };
-pub use layout::{ClaimRefused, HeaderFields, LogType, Positions, Tail};
+pub use layout::{ClaimRefused, HeaderFields, LogDirectory, LogType, Positions, Tail};
 
 /// Why a log, a position, a tail or a frame was refused. The first eleven variants are
 /// the spec's reader checks in the order they run; `Position`, `Tail` and `Frame` are

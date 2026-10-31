@@ -147,9 +147,11 @@ socket, shared by the publications on that channel, connected to the endpoint an
 to the interface when one is named, with the operating system's send buffer. Per
 publication, on every duty cycle, with p the sender position and L the sender limit:
 
-1. **Setup.** Until the first status message arrives, and again after a status message
-   with the send-setup flag, a setup frame every setup interval, carrying the sender
-   position's active term id and term offset.
+1. **Setup.** Until the first status message without the send-setup flag arrives, a
+   setup frame every setup interval, carrying the sender position's active term id and
+   term offset. A status message with the send-setup flag does nothing else: it does not
+   set the sender limit and does not connect the publication; it is answered with one
+   setup frame, sent once a setup interval has passed since the last one.
 2. **Data.** A burst of whole committed frames from p, stopping at the first frame
    whose length is 0 or less, at most L − p bytes in all, in datagrams of at most the
    MTU, at most one burst's worth of datagrams ("Values"); the sender position
@@ -158,9 +160,10 @@ publication, on every duty cycle, with p the sender position and L the sender li
    frame and counts `sender.short_sends`; a send the socket refused counts
    `sender.send_failed`. A cycle with a frame to send and L − p ≤ 0 counts
    `sender.flow_control_limited` once, on entry into that state.
-3. **Heartbeat.** Once the first status message has arrived, after a heartbeat interval
-   without a data frame sent, a heartbeat; before it, only setup frames go, so that a
-   receiver's ask for a setup is answered by a setup frame and not by more heartbeats.
+3. **Heartbeat.** Once the first status message without the send-setup flag has
+   arrived, after a heartbeat interval without a data frame sent, a heartbeat; before
+   it, only setup frames go, so that a receiver's ask for a setup is answered by a setup
+   frame and not by more heartbeats.
 4. **Retransmit.** On a NAK for this publication whose term id and offset name a
    position in the resend window, from p − term length ÷ 2 − the longest message up to
    but not including p, the frames of the range it names, from the term, in datagrams
@@ -175,12 +178,12 @@ publication, on every duty cycle, with p the sender position and L the sender li
    the flag, the echo timestamp and receiver id unchanged, a reception delta of 0.
 
 The sender limit is 0 when the publication is created and becomes
-max(L, position + receiver window length) on every status message whose position,
-consumption term id and offset as `spec/log-buffer.md` computes a position, lies within
-[p − term length ÷ 2, p + term length + term length ÷ 2]; a status message outside that
-window is counted in `sender.status_messages_rejected` and ignored. The publication is
-connected from its first status message until the connection timeout passes without
-one. The conductor keeps `publication.limit` at the sender position plus the publication
+max(L, position + receiver window length) on every status message without the
+send-setup flag whose position, consumption term id and offset as `spec/log-buffer.md`
+computes a position, lies within [p − term length ÷ 2, p + term length + term length
+÷ 2]; such a status message outside that window is counted in
+`sender.status_messages_rejected` and ignored. The publication is connected from the
+first such status message until the connection timeout passes without one. The conductor keeps `publication.limit` at the sender position plus the publication
 window while the publication is connected and at the sender position otherwise, so that
 the publisher reads `not connected` (`spec/log-buffer.md`, "Claim, commit and abort"),
 keeps `is connected` to match, and cleans and unblocks the log as "The driver" there
@@ -371,7 +374,7 @@ Static unless a key is named (`counters.toml`):
 | `sender.short_sends`, `sender.send_failed` | the socket took part of a datagram, or refused one |
 | `sender.flow_control_limited` | a publication enters the state of having a frame to send and no window |
 | `sender.naks_received`, `sender.naks_ignored` | a NAK arrives; one lies outside the resend window |
-| `sender.status_messages_received`, `sender.status_messages_rejected` | a status message arrives; one lies outside the window, or asks a publication at its end of stream for a setup |
+| `sender.status_messages_received`, `sender.status_messages_rejected` | a status message arrives; one without the send-setup flag lies outside the window, or one with it asks a publication at its end of stream for a setup; an elicit the sender answers with a setup frame is not rejected |
 | `sender.rtt_replies_sent` | an RTT measurement is answered |
 | `sender.position`, `sender.limit` | keyed as `publication.position` is: the sender position and the sender limit of one publication |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted |
@@ -448,11 +451,13 @@ and nothing from a rejected datagram is delivered.
 | `nak-length` | a NAK's length is not a positive multiple of 32, or runs past the end of the term |
 | `datagram` | a data datagram's frames fail `spec/frame.md`'s checks against the bytes left, a frame's term offset is not the running offset from the first, or the frames run past the end of the term |
 
-A channel is checked in this order: `grammar` (the scheme, the `?`, the `key=value`
-form, a repeated key), `key` (a key this version does not name), `endpoint` (missing, a
-port of 0 or above 65535, a malformed address), `multicast` (a multicast address), each
-error code 1 with the reason in the message; then `host` (the name does not resolve),
-error code 9. The socket that cannot be opened, bound or connected is error code 4 with
+A channel is checked in this order, each check over the whole string before the next:
+`grammar` (the scheme, the `?`, the `key=value` form of every parameter, a key outside
+`[a-z0-9-]+`, an empty value, a repeated key), `key` (a key this version does not name),
+`endpoint` (missing, a port of 0 or above 65535, a malformed address), `multicast` (a
+multicast address), each error code 1 with the reason in the message; then `host` (the
+name does not resolve), error code 9. A string wrong in two ways reports the earlier
+check, as the vectors pin. The socket that cannot be opened, bound or connected is error code 4 with
 the operating system's reason.
 
 ## Vectors

@@ -725,6 +725,34 @@
       "code": 1
     },
     {
+      "name": "channel-key-before-endpoint",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:0|mtu=1408",
+      "error": "key",
+      "code": 1
+    },
+    {
+      "name": "channel-grammar-before-key",
+      "kind": "channel",
+      "string": "cavalry:udp?mtu=1|endpoint",
+      "error": "grammar",
+      "code": 1
+    },
+    {
+      "name": "channel-grammar-before-endpoint",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:0|endpoint=10.0.0.2:0",
+      "error": "grammar",
+      "code": 1
+    },
+    {
+      "name": "channel-endpoint-before-multicast",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=224.0.1.1:0",
+      "error": "endpoint",
+      "code": 1
+    },
+    {
       "name": "sender-limit-first-status-message",
       "kind": "arithmetic",
       "rule": "sender-limit",

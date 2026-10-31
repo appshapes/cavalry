@@ -19,8 +19,8 @@ use crate::pretouch;
 use super::LogError;
 use super::cells::{FrameCells, MetaDataCells};
 use super::layout::{
-    self, ClaimRefused, HEADER_LENGTH, HeaderFields, LogType, META_DATA_LENGTH, NOT_ENDED,
-    PARTITION_COUNT, Padding, Positions, Reserved, Rotation, Tail, aligned_length,
+    self, ClaimRefused, HEADER_LENGTH, HeaderFields, LogDirectory, LogType, META_DATA_LENGTH,
+    NOT_ENDED, PARTITION_COUNT, Padding, Positions, Reserved, Rotation, Tail, aligned_length,
 };
 
 const FRAME_ALIGNMENT: u32 = cavalry_proto::frame::FRAME_ALIGNMENT as u32;
@@ -442,18 +442,16 @@ impl LogBuffers {
     }
 
     /// [`LogBuffers::open`] for the log a `publication ready` or `available image`
-    /// event names: `log_type` and `correlation_id` from [`layout::parse_file_name`],
-    /// an image under `images/` and anything else under `publications/`.
+    /// event names: `directory` and `correlation_id` from [`layout::parse_file_name`].
     pub fn open_named(
         dir: &Path,
-        log_type: LogType,
+        directory: LogDirectory,
         correlation_id: i64,
         writable: bool,
     ) -> Result<Self, LogError> {
-        if log_type.is_image() {
-            Self::open_image(dir, correlation_id, writable)
-        } else {
-            Self::open(dir, correlation_id, writable)
+        match directory {
+            LogDirectory::Images => Self::open_image(dir, correlation_id, writable),
+            LogDirectory::Publications => Self::open(dir, correlation_id, writable),
         }
     }
 
@@ -1469,7 +1467,9 @@ impl ImageWriter {
     /// duplicate changes nothing. Returns whether the frame was written. The term offset
     /// must be a multiple of 32 with the frame within the term, and `frame` at least a
     /// header long with a frame length that fits it; otherwise [`LogError::Position`]
-    /// or [`LogError::Frame`], with nothing written. The caller keeps the receiver's
+    /// or [`LogError::Frame`], with nothing written, as is a header whose term id or
+    /// term offset is not the one given, [`LogError::Mismatch`], so that a frame never
+    /// lands at an offset its header does not name. The caller keeps the receiver's
     /// bounds (`cavalry_proto::udp::receiver_bounds`): this writer trusts that the term
     /// is the stream's current one, as the datagram check trusted its term offset.
     pub fn insert(
@@ -1483,6 +1483,20 @@ impl ImageWriter {
             return Err(LogError::Frame(FrameError::TooShort { given: frame.len() }));
         };
         let header = DataFrameHeader::parse_within(head, frame.len())?;
+        if header.term_id() != term_id {
+            return Err(LogError::Mismatch {
+                field: "term id",
+                found: i64::from(header.term_id()),
+                expected: i64::from(term_id),
+            });
+        }
+        if u32::try_from(header.term_offset()) != Ok(term_offset) {
+            return Err(LogError::Mismatch {
+                field: "term offset",
+                found: i64::from(header.term_offset()),
+                expected: i64::from(term_offset),
+            });
+        }
         let frame_length = header.frame_length() as u32;
         let aligned = aligned_length(frame_length);
         let end = u64::from(term_offset) + u64::from(aligned);
