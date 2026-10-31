@@ -1,7 +1,8 @@
 # 0031. Truncate, purge and delete a stopped recording with Aeron Archive's commands
 
-- **Status:** Proposed
-- **Date:** 2026-10-29
+- **Status:** Accepted
+- **Date:** 2026-10-29; accepted 2026-10-31 with the four amendments the review of pull
+  request 72 asked for, each marked *(acceptance)* where it stands
 - **Invariants affected:** 1, 3, 4, 5, 6
 - **Supersedes:** none; it takes the client protocol to version 3 (ADR 0019, ADR 0025,
   ADR 0030) and the catalog to version 1 (ADR 0024)
@@ -68,8 +69,10 @@ in order after `stop replay`:
   the position. Third it writes the stop position and the stop timestamp, which is
   what recovery's rule gives for the files as cut: the timestamp of the last index
   entry left, or the start timestamp when no segment file is left, a truncate to the
-  retained position after a purge, which is recovery's empty recording; then the stop
-  checksum, and `recording.truncated` adds one. The third step thereby writes the stop
+  retained position after a purge, which is recovery's empty recording, whose index
+  entries past the stop are dropped as every rebuilt stop drops them, so the index
+  holds its first entry alone and the stop timestamp is the start timestamp
+  *(acceptance)*; then the stop checksum, and `recording.truncated` adds one. The third step thereby writes the stop
   recovery would rebuild, so a crash before it changes nothing but who writes it.
   A crash before the third step leaves a stop of −1, and recovery rebuilds it from the
   files as for a recording live at a crash. Before the file work, it rebuilds the old
@@ -150,14 +153,18 @@ under neither is `checksum`, as today. Under a version 0 header every slot is in
 reports `checksum`, which is what the version bump is for (invariant 1); the price is a
 second CRC32 over 996 bytes for a slot in version 0's form, off the message path.
 
-A version 1 driver opens a version 0 catalog and reads it as it is. It writes 1 in the
-header's version, and syncs, before the first slot it writes in version 1's form: a slot
-it creates, which gets the group and version 1's range at creation, or a slot whose group
-it writes. The version is thereby the one header field that changes after the magic,
-which `spec/durable-log.md`, "Catalog header", says never happens; version 1 says this
-field does, once, from 0 to 1, and a version 1 reader's `version` check accepts 0 and 1.
-A catalog a version 1 driver has only read, stopped or truncated stays at version 0, and
-a version 0 driver still opens it. A truncate under a version 0 header leaves, while it
+A version 1 driver opens a version 0 catalog and reads it as it is, and under a version
+0 header it creates slots in version 0's form, byte for byte what a version 0 driver
+writes, so that a directory nobody has purged opens under a version 0 driver again, a
+rollback *(acceptance)*. It writes 1 in the header's version, and syncs, before the
+first slot whose group it writes, the directory's first `purge segments`, the operator's
+own command and the one change that needs the group; from then on it creates slots in
+version 1's form, with the group and version 1's range at creation. The version is
+thereby the one header field that changes after the magic, which
+`spec/durable-log.md`, "Catalog header", says never happens; version 1 says this field
+does, once, from 0 to 1, and a version 1 reader's `version` check accepts 0 and 1. A
+catalog a version 1 driver has only read, recorded into, stopped or truncated stays at
+version 0, and a version 0 driver still opens it. A truncate under a version 0 header leaves, while it
 cuts, a stop of −1 that version 0's text calls live; the bytes are the same bytes, every
 reader's rule for them is the same, the stop is in the files, and a version 0 driver
 started on such a catalog rebuilds the stop a version 1 driver would, at the boundary
@@ -215,7 +222,16 @@ stop of −1, the retained group or the state 3, a slot in version 0's form migr
 first as above; on the recorder's reply the conductor hands the file work to the
 replayer; on the replayer's reply a truncate's third step is one more slot write
 through the recorder; and the conductor answers the client when the last reply
-arrives, as a replay is started. When the recorder's or the replayer's request queue
+arrives, as a replay is started. The replayer does a command's file work one file per
+duty cycle, one removal, or the cut and extension of the segment that holds the
+position, with the directory sync it needs, so that the replays it holds wait at most
+one file's work per cycle, and it runs those cycles back to back while a command is in
+progress, as it does while a replay is live, so a command over n files answers after n
+cycles, a thousand segments within a second on the bench hosts' NVMe drives; the
+client's 10 second response timeout thereby bounds one command to the order of ten
+thousand segment files, over a terabyte at the fixed segment file length, and
+`cavalry doctor`'s free-space check names the purge in segments, so an operator sends
+a purge of that size as several *(acceptance)*. When the recorder's or the replayer's request queue
 has no room for a later hop, the conductor keeps the command in its registry entry and
 offers that hop again on its next duty cycle, in admission order, so the registry
 bounds what waits and no hop is dropped or sent twice; the first hop alone is refused
@@ -237,11 +253,15 @@ by the recorder at each roll, keyed and labelled as `recording.position` is and 
 with it after the stop. The three commands act on stopped recordings, whose gauges are
 gone; `cavalry doctor` computes a stopped recording's bytes from its descriptor, the
 segments from the retained position's to the stop position's times the segment file
-length, with no file read. The counters-file arithmetic becomes 38 statics, the 34
-`counters.toml` holds with `scope = "static"` today and these four, plus 2048 plus 2048
-plus 3072 plus 192, 7398, under 8192; `spec/client-protocol.md`, "Sizes", counts 37
-statics where the file holds 34, and the acceptance commit, which changes that page
-anyway, corrects it. `cavalry doctor` gains a check that
+length, with no file read. Recovery's two new outcomes count in the counters the
+recorder's feature gave it: a retained group rebuilt from the files adds one to
+`recording.recovered`, as a rebuilt stop does, and a segment file before the retained
+position removed adds one to `recording.files_removed`, as a file past the stop does
+*(acceptance)*. The counters-file arithmetic becomes 38 statics, the 34 `counters.toml`
+holds with `scope = "static"` and these four, plus 2048 per publication pair, 2048 per
+image, 3072 per recording with the gauge, 64 per replay and 256 per replay publication
+(ADR 0036), 7526, under 8192; the "37 statics" that `spec/client-protocol.md`, "Sizes",
+counted was corrected to 34 by ADR 0036's change, and this change writes 38. `cavalry doctor` gains a check that
 reads the free space of the log directory's filesystem and, under 10 percent, names the
 recording and the segment that would free the most, with the `purge segments` command
 that removes it, and a check that names a recording whose bytes, from the gauge while
@@ -400,9 +420,12 @@ above.
 
 ## References
 
-- `spec/client-protocol.md` version 3 and `spec/durable-log.md` catalog version 1 (to be
-  written on acceptance), ADR 0023 (the slice), ADR 0024 (the format, state 3), ADR 0025
-  (recording), ADR 0030 (replay, the replayer thread).
+- `spec/client-protocol.md` version 3 and `spec/durable-log.md` catalog version 1,
+  written with the acceptance; `spec/vectors/client-protocol.py` and
+  `spec/vectors/durable-log.py`; ADR 0023 (the slice), ADR 0024 (the format, state 3),
+  ADR 0025 (recording), ADR 0030 (replay, the replayer thread), ADR 0035 (an empty
+  replay), ADR 0036 (the stop handed to the replayer, which a truncate's reopened stop
+  travels by).
 - Aeron Archive: `AeronArchive.truncateRecording`, `purgeRecording`, `purgeSegments`,
   `detachSegments`, `ArchiveTool`.
 - Card 95, card 159 (the soak host that runs the purge).

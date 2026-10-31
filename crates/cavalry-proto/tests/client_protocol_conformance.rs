@@ -106,6 +106,29 @@ fn command_fields(command: &Command<'_>) -> Value {
         } => {
             json!({"name": "stop_replay", "client_id": client_id, "correlation_id": correlation_id, "replay_session_id": replay_session_id})
         }
+        Command::TruncateRecording {
+            client_id,
+            correlation_id,
+            recording_id,
+            position,
+        } => {
+            json!({"name": "truncate_recording", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id, "position": position})
+        }
+        Command::PurgeSegments {
+            client_id,
+            correlation_id,
+            recording_id,
+            new_start_position,
+        } => {
+            json!({"name": "purge_segments", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id, "new_start_position": new_start_position})
+        }
+        Command::PurgeRecording {
+            client_id,
+            correlation_id,
+            recording_id,
+        } => {
+            json!({"name": "purge_recording", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id})
+        }
     }
 }
 
@@ -205,7 +228,7 @@ fn event_fields(event: &Event<'_>) -> Value {
 #[test]
 fn every_vector_in_spec_vectors_client_protocol_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("client-protocol.json parses");
-    assert_eq!(doc["version"], 2, "the vectors are for version 2");
+    assert_eq!(doc["version"], 3, "the vectors are for version 3");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
         vectors.len() >= 80,

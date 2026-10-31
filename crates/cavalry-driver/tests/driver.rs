@@ -1295,12 +1295,13 @@ fn recording_commands_get_the_spec_error_codes() {
         assert!(message.contains("not in the catalog"), "{message}");
     }
 
-    // A reserved type id in Cavalry's range is code 6, as any reserved id.
+    // A reserved type id in Cavalry's range is code 6, as any reserved id: 0x0108, the
+    // first after version 3's retention commands (ADR 0031).
     let reserved = client.correlation_id();
     let mut message = [0u8; 16];
     message[..8].copy_from_slice(&client.id.to_le_bytes());
     message[8..].copy_from_slice(&reserved.to_le_bytes());
-    client.send_raw(0x0105, &message);
+    client.send_raw(0x0108, &message);
     let (code, text) = client.wait_error(reserved);
     assert_eq!(code, 6, "{text}");
 
@@ -1600,7 +1601,7 @@ fn replay_commands_get_the_spec_error_codes() {
     let mut raw = [0u8; 16];
     raw[..8].copy_from_slice(&client.id.to_le_bytes());
     raw[8..].copy_from_slice(&correlation_id.to_le_bytes());
-    client.send_raw(0x0105, &raw);
+    client.send_raw(0x0108, &raw);
     let (code, _) = client.wait_error(correlation_id);
     assert_eq!(code, 6);
     assert_eq!(

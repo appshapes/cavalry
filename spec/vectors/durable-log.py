@@ -48,12 +48,17 @@ def encode_catalog_header(h):
 def descriptor(recording_id=0, state=VALID, start_timestamp=1_760_000_000_000_000_000, stop_timestamp=-1,
                start_position=0, stop_position=-1, initial_term_id=7, segment_file_length=128 * 1024 * 1024,
                term_length=64 * 1024 * 1024, mtu_length=1408, session_id=1, stream_id=1001,
-               channel="cavalry:ipc", source_identity="cavalry:ipc"):
-    return {"recording_id": recording_id, "state": state, "start_timestamp": start_timestamp,
-            "stop_timestamp": stop_timestamp, "start_position": start_position, "stop_position": stop_position,
-            "initial_term_id": initial_term_id, "segment_file_length": segment_file_length,
-            "term_length": term_length, "mtu_length": mtu_length, "session_id": session_id,
-            "stream_id": stream_id, "channel": channel, "source_identity": source_identity}
+               channel="cavalry:ipc", source_identity="cavalry:ipc", form=0, retained_position=None):
+    """A slot's fields. `form` is 0 or 1 (spec/durable-log.md, "Descriptor"; ADR 0031): in form 1
+    the retained group holds `retained_position`, the start position unless given, and the
+    creation checksum skips bytes 472 to 484."""
+    d = {"recording_id": recording_id, "state": state, "start_timestamp": start_timestamp,
+         "stop_timestamp": stop_timestamp, "start_position": start_position, "stop_position": stop_position,
+         "initial_term_id": initial_term_id, "segment_file_length": segment_file_length,
+         "term_length": term_length, "mtu_length": mtu_length, "session_id": session_id,
+         "stream_id": stream_id, "channel": channel, "source_identity": source_identity, "form": form}
+    d["retained_position"] = start_position if retained_position is None else retained_position
+    return d
 
 
 def descriptor_body(d):
@@ -71,10 +76,19 @@ def descriptor_stop(d):
     return struct.pack("<qq", d["stop_timestamp"], d["stop_position"])
 
 
-def encode_descriptor(d, body_checksum=None, stop_checksum=None):
+def encode_descriptor(d, body_checksum=None, stop_checksum=None, retained_checksum=None):
     body, stop = descriptor_body(d), descriptor_stop(d)
     creation = struct.pack("<i", 0) + body  # bytes 28 to 1024
-    body_crc = zlib.crc32(creation) & 0xFFFFFFFF if body_checksum is None else body_checksum
+    if d.get("form", 0) == 1:
+        # Bytes 472 to 484 are the retained group: the position and its own CRC32; the
+        # creation checksum covers bytes 28 to 472 and 484 to 1024.
+        position = struct.pack("<q", d["retained_position"])
+        group_crc = zlib.crc32(position) & 0xFFFFFFFF if retained_checksum is None else retained_checksum
+        creation = creation[:444] + position + struct.pack("<I", group_crc) + creation[456:]
+        signed = creation[:444] + creation[456:]
+    else:
+        signed = creation
+    body_crc = zlib.crc32(signed) & 0xFFFFFFFF if body_checksum is None else body_checksum
     stop_crc = zlib.crc32(stop) & 0xFFFFFFFF if stop_checksum is None else stop_checksum
     return struct.pack("<iI", d["state"], stop_crc) + stop + struct.pack("<I", body_crc) + creation
 
@@ -128,7 +142,9 @@ def main():
     vectors.append(invalid("catalog-too-short", "catalog-header", "too-short", encode_catalog_header(h)[:64], file_length=64))
     vectors.append(invalid("catalog-magic", "catalog-header", "magic", encode_catalog_header(catalog_header(magic=b"CVLYCNTR")), file_length=HEADER_LENGTH))
     vectors.append(invalid("catalog-not-ready", "catalog-header", "not-ready", encode_catalog_header(catalog_header(magic=bytes(8))), file_length=HEADER_LENGTH))
-    vectors.append(invalid("catalog-version", "catalog-header", "version", encode_catalog_header(catalog_header(version=1)), file_length=HEADER_LENGTH))
+    h1 = catalog_header(version=1)
+    vectors.append(valid("catalog-header-version-1", "catalog-header", encode_catalog_header(h1), h1, file_length=HEADER_LENGTH + 2 * DESCRIPTOR_LENGTH, slots=2))
+    vectors.append(invalid("catalog-version", "catalog-header", "version", encode_catalog_header(catalog_header(version=2)), file_length=HEADER_LENGTH))
     vectors.append(invalid("catalog-descriptor-length", "catalog-header", "descriptor-length", encode_catalog_header(catalog_header(descriptor_length=512)), file_length=HEADER_LENGTH))
     vectors.append(invalid("catalog-checksum-kind", "catalog-header", "checksum-kind", encode_catalog_header(catalog_header(checksum_kind=1)), file_length=HEADER_LENGTH))
     vectors.append(invalid("catalog-created", "catalog-header", "timestamp", encode_catalog_header(catalog_header(created=-1)), file_length=HEADER_LENGTH))
@@ -151,6 +167,21 @@ def main():
                     "fields": {"state": EMPTY}, "slot": 2})
     deleted = descriptor(recording_id=3, state=DELETED, stop_timestamp=1_760_000_001_000_000_000, stop_position=4096)
     vectors.append(valid("descriptor-deleted", "descriptor", encode_descriptor(deleted), deleted, slot=3))
+    # Version 1's form (ADR 0031): the retained group under its checksum, the creation checksum
+    # over bytes 28 to 472 and 484 to 1024; a reader tries this range first, then version 0's.
+    live_v1 = descriptor(recording_id=4, form=1)
+    vectors.append(valid("descriptor-form-1-live", "descriptor", encode_descriptor(live_v1), live_v1, slot=4))
+    purged = descriptor(recording_id=5, form=1, stop_timestamp=1_760_000_001_000_000_000,
+                        stop_position=3 * 128 * 1024 * 1024, retained_position=128 * 1024 * 1024)
+    vectors.append(valid("descriptor-form-1-purged", "descriptor", encode_descriptor(purged), purged, slot=5))
+    purged_to_the_stop = descriptor(recording_id=6, form=1, stop_timestamp=1_760_000_001_000_000_000,
+                                    stop_position=2 * 128 * 1024 * 1024, retained_position=2 * 128 * 1024 * 1024)
+    vectors.append(valid("descriptor-form-1-purged-to-the-stop", "descriptor", encode_descriptor(purged_to_the_stop), purged_to_the_stop, slot=6))
+    vectors.append(invalid("descriptor-form-1-retained-checksum", "descriptor", "checksum", encode_descriptor(live_v1, retained_checksum=0xDEADBEEF), slot=4))
+    vectors.append(invalid("descriptor-form-1-body-checksum", "descriptor", "checksum", encode_descriptor(live_v1, body_checksum=0xDEADBEEF), slot=4))
+    vectors.append(invalid("descriptor-form-1-retained-below-start", "descriptor", "position", encode_descriptor(descriptor(recording_id=4, form=1, start_position=4096, retained_position=0)), slot=4))
+    vectors.append(invalid("descriptor-form-1-retained-above-stop", "descriptor", "position", encode_descriptor(descriptor(recording_id=4, form=1, stop_timestamp=1_760_000_001_000_000_000, stop_position=4096, retained_position=128 * 1024 * 1024)), slot=4))
+    vectors.append(invalid("descriptor-form-1-retained-not-a-segment-base", "descriptor", "position", encode_descriptor(descriptor(recording_id=4, form=1, stop_timestamp=1_760_000_001_000_000_000, stop_position=3 * 128 * 1024 * 1024, retained_position=4096)), slot=4))
     # A slot the driver set to state 2: reported invalid before anything else is read, zeros or not.
     vectors.append(invalid("descriptor-invalid", "descriptor", "invalid", struct.pack("<i", INVALID) + bytes(DESCRIPTOR_LENGTH - 4), slot=3))
     vectors.append(invalid("descriptor-invalid-with-fields", "descriptor", "invalid", encode_descriptor(descriptor(recording_id=3, state=INVALID)), slot=3))
@@ -189,8 +220,8 @@ def main():
     vectors.append(invalid("descriptor-order-invalid-before-checksum", "descriptor", "invalid", struct.pack("<i", INVALID) + encode_descriptor(descriptor(), body_checksum=1)[4:], slot=0))
     vectors.append(invalid("descriptor-stop-timestamp-live-position-set", "descriptor", "position", encode_descriptor(descriptor(stop_position=4096)), slot=0))
     vectors.append(invalid("descriptor-stop-position-live-timestamp-set", "descriptor", "position", encode_descriptor(descriptor(stop_timestamp=1_760_000_001_000_000_000)), slot=0))
-    vectors.append(invalid("catalog-order-version-before-descriptor-length", "catalog-header", "version", encode_catalog_header(catalog_header(version=1, descriptor_length=512)), file_length=HEADER_LENGTH))
-    vectors.append(invalid("catalog-order-magic-before-version", "catalog-header", "magic", encode_catalog_header(catalog_header(magic=b"CVLYCNTR", version=1)), file_length=HEADER_LENGTH))
+    vectors.append(invalid("catalog-order-version-before-descriptor-length", "catalog-header", "version", encode_catalog_header(catalog_header(version=2, descriptor_length=512)), file_length=HEADER_LENGTH))
+    vectors.append(invalid("catalog-order-magic-before-version", "catalog-header", "magic", encode_catalog_header(catalog_header(magic=b"CVLYCNTR", version=2)), file_length=HEADER_LENGTH))
     vectors.append(invalid("descriptor-order-state-before-checksum", "descriptor", "state", struct.pack("<i", 4) + encode_descriptor(descriptor(), body_checksum=1)[4:], slot=0))
     vectors.append(invalid("catalog-order-checksum-kind-before-timestamp", "catalog-header", "checksum-kind", encode_catalog_header(catalog_header(checksum_kind=1, created=-1)), file_length=HEADER_LENGTH))
     vectors.append(invalid("catalog-order-timestamp-before-length", "catalog-header", "timestamp", encode_catalog_header(catalog_header(created=-1)), file_length=HEADER_LENGTH + (MAX_SLOTS + 1) * DESCRIPTOR_LENGTH))
@@ -225,7 +256,7 @@ def main():
     late = descriptor(start_position=64 * 1024 * 1024 + 4096)
     vectors.append(position_vector("position-start-inside-second-term", late, late["start_position"]))
     vectors.append(position_vector("position-second-segment-of-late-start", late, 64 * 1024 * 1024 + 128 * 1024 * 1024 + 64))
-    doc = {"spec": "durable-log", "version": 0, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
+    doc = {"spec": "durable-log", "version": 1, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
     out = Path(__file__).resolve().parent / "durable-log.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"durable-log.py: wrote {len(vectors)} vectors to {out}")

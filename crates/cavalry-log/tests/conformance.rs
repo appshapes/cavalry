@@ -52,15 +52,24 @@ fn descriptor_from(fields: &Value) -> Descriptor {
         live.stopped(int(fields, "stop_position"), int(fields, "stop_timestamp"))
             .expect("a vector's stopped descriptor is valid")
     };
+    // Version 1's form carries its retained position; version 0's has none
+    // (`spec/durable-log.md`, "Descriptor"; ADR 0031).
+    let formed = if fields.get("form").and_then(Value::as_i64) == Some(1) {
+        stopped
+            .retained(int(fields, "retained_position"))
+            .expect("a vector's retained position is valid")
+    } else {
+        stopped
+    };
     let state = State::from_i32(int(fields, "state") as i32).expect("a vector's state is valid");
-    stopped.with_state(state)
+    formed.with_state(state)
 }
 
 #[test]
 fn every_vector_agrees_with_the_layout_layer() {
     let doc: Value = serde_json::from_str(VECTORS).expect("the vectors are JSON");
     assert_eq!(doc["spec"], "durable-log");
-    assert_eq!(doc["version"], 0);
+    assert_eq!(doc["version"], 1, "the vectors are for catalog version 1");
     let mut count = 0;
     for vector in doc["vectors"].as_array().expect("a vector list") {
         let name = vector["name"].as_str().expect("a name");
@@ -75,6 +84,11 @@ fn every_vector_agrees_with_the_layout_layer() {
                         assert_eq!(
                             header.created(),
                             int(&vector["fields"], "created"),
+                            "{name}"
+                        );
+                        assert_eq!(
+                            i64::from(header.version()),
+                            int(&vector["fields"], "version"),
                             "{name}"
                         );
                         assert_eq!(&header.encode()[..], &bytes[..HEADER_LENGTH], "{name}");

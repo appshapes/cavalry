@@ -1,6 +1,6 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 2
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 3
 //! (ADR 0019; the recording commands and events are ADR 0025, the replay commands and
-//! events ADR 0030).
+//! events ADR 0030, the retention commands ADR 0031).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -42,7 +42,7 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 2;
+pub const VERSION: i32 = 3;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
@@ -97,6 +97,14 @@ pub enum CommandType {
     StartReplay = 0x0103,
     /// Stop a replay at the position reached.
     StopReplay = 0x0104,
+    /// Truncate a stopped recording to a position: its bytes before stay, the rest go
+    /// (ADR 0031).
+    TruncateRecording = 0x0105,
+    /// Remove a stopped recording's segment files before a segment base, which becomes
+    /// its retained position.
+    PurgeSegments = 0x0106,
+    /// Delete a stopped recording's files; its slot stays as state 3.
+    PurgeRecording = 0x0107,
 }
 
 impl TryFrom<i32> for CommandType {
@@ -117,6 +125,9 @@ impl TryFrom<i32> for CommandType {
             0x0102 => Ok(CommandType::StopRecording),
             0x0103 => Ok(CommandType::StartReplay),
             0x0104 => Ok(CommandType::StopReplay),
+            0x0105 => Ok(CommandType::TruncateRecording),
+            0x0106 => Ok(CommandType::PurgeSegments),
+            0x0107 => Ok(CommandType::PurgeRecording),
             found => Err(ProtocolError::Type { found }),
         }
     }
@@ -212,9 +223,12 @@ pub enum ErrorCode {
     UnknownRecording = 21,
     /// Start recording named a stream whose live publications are all being recorded.
     AlreadyRecording = 22,
-    /// Start replay named a position that is not a multiple of 32, below the
-    /// recording's start position or above its extent.
+    /// Start replay, truncate recording or purge segments named a position outside
+    /// its rule; the message names the bounds.
     PositionOutOfRange = 23,
+    /// A retention command or start replay named a recording that is live or stopping,
+    /// that a replay is reading, or that a retention command is working on (ADR 0031).
+    RecordingBusy = 24,
 }
 
 impl ErrorCode {
@@ -233,6 +247,7 @@ impl ErrorCode {
             21 => Some(ErrorCode::UnknownRecording),
             22 => Some(ErrorCode::AlreadyRecording),
             23 => Some(ErrorCode::PositionOutOfRange),
+            24 => Some(ErrorCode::RecordingBusy),
             _ => None,
         }
     }
@@ -485,6 +500,39 @@ pub enum Command<'a> {
         /// The replay session id that `replay ready` carried.
         replay_session_id: i64,
     },
+    /// Type 261 (`0x0105`): Aeron Archive's `truncateRecording` (ADR 0031).
+    TruncateRecording {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; `operation success` or `error` names it.
+        correlation_id: i64,
+        /// The stopped recording to cut.
+        recording_id: i64,
+        /// Where the cut falls: a multiple of 32 from the recording's retained position
+        /// to its stop position, at which a frame begins or which is the stop position.
+        position: i64,
+    },
+    /// Type 262 (`0x0106`): Aeron Archive's `purgeSegments`.
+    PurgeSegments {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; `operation success` or `error` names it.
+        correlation_id: i64,
+        /// The stopped recording whose leading segment files go.
+        recording_id: i64,
+        /// The recording's new retained position: one of its segment bases, above the
+        /// retained position and at most the stop position.
+        new_start_position: i64,
+    },
+    /// Type 263 (`0x0107`): Aeron Archive's `purgeRecording`, the delete of ADR 0024.
+    PurgeRecording {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; `operation success` or `error` names it.
+        correlation_id: i64,
+        /// The stopped recording to delete.
+        recording_id: i64,
+    },
 }
 
 impl<'a> Command<'a> {
@@ -502,6 +550,9 @@ impl<'a> Command<'a> {
             Command::StopRecording { .. } => CommandType::StopRecording,
             Command::StartReplay { .. } => CommandType::StartReplay,
             Command::StopReplay { .. } => CommandType::StopReplay,
+            Command::TruncateRecording { .. } => CommandType::TruncateRecording,
+            Command::PurgeSegments { .. } => CommandType::PurgeSegments,
+            Command::PurgeRecording { .. } => CommandType::PurgeRecording,
         }
     }
 
@@ -518,7 +569,10 @@ impl<'a> Command<'a> {
             | Command::StartRecording { client_id, .. }
             | Command::StopRecording { client_id, .. }
             | Command::StartReplay { client_id, .. }
-            | Command::StopReplay { client_id, .. } => client_id,
+            | Command::StopReplay { client_id, .. }
+            | Command::TruncateRecording { client_id, .. }
+            | Command::PurgeSegments { client_id, .. }
+            | Command::PurgeRecording { client_id, .. } => client_id,
         }
     }
 
@@ -535,7 +589,10 @@ impl<'a> Command<'a> {
             | Command::StartRecording { correlation_id, .. }
             | Command::StopRecording { correlation_id, .. }
             | Command::StartReplay { correlation_id, .. }
-            | Command::StopReplay { correlation_id, .. } => correlation_id,
+            | Command::StopReplay { correlation_id, .. }
+            | Command::TruncateRecording { correlation_id, .. }
+            | Command::PurgeSegments { correlation_id, .. }
+            | Command::PurgeRecording { correlation_id, .. } => correlation_id,
         }
     }
 
@@ -617,6 +674,23 @@ impl<'a> Command<'a> {
                 correlation_id,
                 replay_session_id: cursor.i64()?,
             },
+            CommandType::TruncateRecording => Command::TruncateRecording {
+                client_id,
+                correlation_id,
+                recording_id: cursor.i64()?,
+                position: cursor.i64()?,
+            },
+            CommandType::PurgeSegments => Command::PurgeSegments {
+                client_id,
+                correlation_id,
+                recording_id: cursor.i64()?,
+                new_start_position: cursor.i64()?,
+            },
+            CommandType::PurgeRecording => Command::PurgeRecording {
+                client_id,
+                correlation_id,
+                recording_id: cursor.i64()?,
+            },
         };
         cursor.finish()?;
         Ok(command)
@@ -690,6 +764,23 @@ impl<'a> Command<'a> {
             Command::StopReplay {
                 replay_session_id, ..
             } => out.i64(replay_session_id),
+            Command::TruncateRecording {
+                recording_id,
+                position,
+                ..
+            } => {
+                out.i64(recording_id)?;
+                out.i64(position)
+            }
+            Command::PurgeSegments {
+                recording_id,
+                new_start_position,
+                ..
+            } => {
+                out.i64(recording_id)?;
+                out.i64(new_start_position)
+            }
+            Command::PurgeRecording { recording_id, .. } => out.i64(recording_id),
             Command::ClientKeepalive { .. } | Command::ClientClose { .. } => Ok(()),
         }
     }
@@ -1309,7 +1400,9 @@ mod tests {
             ErrorCode::from_code(23),
             Some(ErrorCode::PositionOutOfRange)
         );
-        assert_eq!(ErrorCode::from_code(24), None);
+        assert_eq!(ErrorCode::from_code(24), Some(ErrorCode::RecordingBusy));
+        assert_eq!(ErrorCode::RecordingBusy.code(), 24);
+        assert_eq!(ErrorCode::from_code(25), None);
     }
 
     #[test]

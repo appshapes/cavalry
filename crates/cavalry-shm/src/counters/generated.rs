@@ -125,6 +125,21 @@ pub const REPLAY_START_FAILED: CounterId = CounterId(38);
 /// `replay.position`, a instance gauge: The position of one replay up to which the replayer has written the recording's frames into the replay's log, stored with a release store after each block; it moves no faster than the slowest subscriber's position plus the publication window, and not at all with no subscriber (spec/client-protocol.md, Commands); key: replay session id (i64), little-endian; label text: the replay session id, the recording id, the replay publication's session id and its stream id in decimal, space-separated.
 pub const REPLAY_POSITION: CounterId = CounterId(39);
 
+/// `recording.truncated`, a static counter: Stopped recordings truncated to a position by `truncate recording`: the segment files past the position removed, the one holding it cut, the time index shortened and the stop written again (spec/client-protocol.md, Commands; ADR 0031).
+pub const RECORDING_TRUNCATED: CounterId = CounterId(40);
+
+/// `recording.segments_purged`, a static counter: Segment files removed by `purge segments`, one per file, once the recording's retained position was written past them (spec/durable-log.md, The driver; ADR 0031).
+pub const RECORDING_SEGMENTS_PURGED: CounterId = CounterId(41);
+
+/// `recording.deleted`, a static counter: Stopped recordings deleted by `purge recording`: the slot's state written as 3, then the segment files and the time index removed; the slot stays, so the id never names another recording (ADR 0024, ADR 0031).
+pub const RECORDING_DELETED: CounterId = CounterId(42);
+
+/// `recording.retention_failed`, a static counter: Retention commands the files refused with error code 12: a segment file the replayer could not open or read for a truncate's frame check before the catalog write, or a file it could not remove, cut or extend after it, when the driver ran recovery's rule for the slot at once so that the slot and the files agree (spec/client-protocol.md, Commands; ADR 0031).
+pub const RECORDING_RETENTION_FAILED: CounterId = CounterId(43);
+
+/// `recording.bytes`, a instance gauge: The bytes one live recording's segment files take on disk, the segment file length times the files present, kept by the recorder at each roll and stored with a release store; key and label as recording.position; freed with it after the stop, after which `cavalry doctor` computes a stopped recording's bytes from its descriptor (ADR 0031).
+pub const RECORDING_BYTES: CounterId = CounterId(44);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -446,5 +461,45 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Instance,
         doc: "The position of one replay up to which the replayer has written the recording's frames into the replay's log, stored with a release store after each block; it moves no faster than the slowest subscriber's position plus the publication window, and not at all with no subscriber (spec/client-protocol.md, Commands); key: replay session id (i64), little-endian; label text: the replay session id, the recording id, the replay publication's session id and its stream id in decimal, space-separated.",
         doctor: "A replay.position that does not move while the replay has a subscriber is a subscriber that stopped polling: compare the subscription.position counters of the replay stream; one with no subscriber waits, and ends with reason 2 after the replay connect timeout.",
+    },
+    CounterDef {
+        id: RECORDING_TRUNCATED,
+        name: "recording.truncated",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Stopped recordings truncated to a position by `truncate recording`: the segment files past the position removed, the one holding it cut, the time index shortened and the stop written again (spec/client-protocol.md, Commands; ADR 0031).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_SEGMENTS_PURGED,
+        name: "recording.segments_purged",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Segment files removed by `purge segments`, one per file, once the recording's retained position was written past them (spec/durable-log.md, The driver; ADR 0031).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_DELETED,
+        name: "recording.deleted",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Stopped recordings deleted by `purge recording`: the slot's state written as 3, then the segment files and the time index removed; the slot stays, so the id never names another recording (ADR 0024, ADR 0031).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECORDING_RETENTION_FAILED,
+        name: "recording.retention_failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Retention commands the files refused with error code 12: a segment file the replayer could not open or read for a truncate's frame check before the catalog write, or a file it could not remove, cut or extend after it, when the driver ran recovery's rule for the slot at once so that the slot and the files agree (spec/client-protocol.md, Commands; ADR 0031).",
+        doctor: "The error event's message names the file and what the recording holds now; `cavalry doctor` lists the log directory's filesystem and its free space, and a file the driver could not remove is one to look at by hand (permissions, a filesystem mounted read-only) before the command is sent again.",
+    },
+    CounterDef {
+        id: RECORDING_BYTES,
+        name: "recording.bytes",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The bytes one live recording's segment files take on disk, the segment file length times the files present, kept by the recorder at each roll and stored with a release store; key and label as recording.position; freed with it after the stop, after which `cavalry doctor` computes a stopped recording's bytes from its descriptor (ADR 0031).",
+        doctor: "A recording whose bytes are over half the log directory's filesystem is the one `cavalry doctor` names for a `purge segments`; the free-space check names the segment that would free the most.",
     },
 ];

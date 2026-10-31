@@ -25,6 +25,10 @@ pub const CATALOG_MAGIC: [u8; 8] = *b"CVLYCTLG";
 pub const INDEX_MAGIC: [u8; 8] = *b"CVLYTIDX";
 /// This version of the layouts.
 pub const VERSION: i32 = 0;
+/// The catalog version under which a slot may hold a retained group, bytes 472 to 484
+/// of its descriptor, in version 1's form; a version 1 reader accepts 0 and 1
+/// (`spec/durable-log.md`, "Catalog header"; ADR 0031).
+pub const CATALOG_VERSION_1: i32 = 1;
 /// The catalog's bound: slots per directory, fixed by this version (1 GiB of slots).
 pub const MAX_SLOTS: u64 = 1 << 20;
 /// The longest channel a descriptor holds.
@@ -101,6 +105,9 @@ pub enum LayoutError {
     /// A descriptor's stop checksum is not the CRC32 of bytes 8 to 24: a stop in
     /// progress, or damage.
     StopChecksum,
+    /// A descriptor in version 1's form whose retained checksum is not the CRC32 of
+    /// bytes 472 to 480: a purge or a migration in progress, or damage (ADR 0031).
+    RetainedChecksum,
     /// A recording id is not its slot's index, or is negative.
     RecordingId {
         /// The value found.
@@ -149,7 +156,9 @@ impl LayoutError {
             LayoutError::Length { .. } => "length",
             LayoutError::Invalid => "invalid",
             LayoutError::State { .. } => "state",
-            LayoutError::CreationChecksum | LayoutError::StopChecksum => "checksum",
+            LayoutError::CreationChecksum
+            | LayoutError::StopChecksum
+            | LayoutError::RetainedChecksum => "checksum",
             LayoutError::RecordingId { .. } => "recording-id",
             LayoutError::Position { .. } => "position",
             LayoutError::TermLength { .. } => "term-length",
@@ -206,6 +215,12 @@ impl fmt::Display for LayoutError {
                  stop fields after 100 ms of retries: a stop torn by a crash, which the driver \
                  repairs from the files when it starts or stops the recording; see {DOC}"
             ),
+            LayoutError::RetainedChecksum => write!(
+                f,
+                "durable log rejected ({reason}): a descriptor's retained checksum does not match \
+                 its retained position after 100 ms of retries: a purge or a migration torn by a \
+                 crash, which the driver repairs from the files when it starts; see {DOC}"
+            ),
             LayoutError::Frame => write!(
                 f,
                 "durable log rejected ({reason}): the frame at a position does not carry the \
@@ -256,15 +271,22 @@ fn check_version(found: i32) -> Result<(), LayoutError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogHeader {
     created: i64,
+    /// 0, or [`CATALOG_VERSION_1`] once a slot may hold a retained group.
+    version: i32,
 }
 
 impl CatalogHeader {
-    /// A header for a catalog created at `created`, nanoseconds since the Unix epoch.
+    /// A header for a catalog created at `created`, nanoseconds since the Unix epoch,
+    /// at version 0: the driver moves it to version 1 before the first retained group it
+    /// writes (ADR 0031).
     pub fn new(created: i64) -> Result<Self, LayoutError> {
         if created < 0 {
             return Err(LayoutError::Timestamp);
         }
-        Ok(CatalogHeader { created })
+        Ok(CatalogHeader {
+            created,
+            version: VERSION,
+        })
     }
 
     /// When the catalog was created.
@@ -272,11 +294,24 @@ impl CatalogHeader {
         self.created
     }
 
+    /// The catalog's version, 0 or 1.
+    pub const fn version(&self) -> i32 {
+        self.version
+    }
+
+    /// The same header at version 1.
+    pub const fn in_version_1(self) -> Self {
+        CatalogHeader {
+            created: self.created,
+            version: CATALOG_VERSION_1,
+        }
+    }
+
     /// The header's bytes, magic first.
     pub fn encode(&self) -> [u8; HEADER_LENGTH] {
         let mut out = [0u8; HEADER_LENGTH];
         out[..8].copy_from_slice(&CATALOG_MAGIC);
-        out[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        out[8..12].copy_from_slice(&self.version.to_le_bytes());
         out[12..16].copy_from_slice(&(DESCRIPTOR_LENGTH as i32).to_le_bytes());
         out[20..24].copy_from_slice(&DATA_CHECKSUM_NONE.to_le_bytes());
         out[24..32].copy_from_slice(&self.created.to_le_bytes());
@@ -292,7 +327,10 @@ impl CatalogHeader {
             });
         }
         check_magic(bytes, &CATALOG_MAGIC)?;
-        check_version(i32_at(bytes, 8))?;
+        let version = i32_at(bytes, 8);
+        if version != VERSION && version != CATALOG_VERSION_1 {
+            return Err(LayoutError::Version { found: version });
+        }
         let descriptor_length = i32_at(bytes, 12);
         if descriptor_length != DESCRIPTOR_LENGTH as i32 {
             return Err(LayoutError::DescriptorLength {
@@ -312,7 +350,7 @@ impl CatalogHeader {
                 length: file_length,
             });
         }
-        Ok(CatalogHeader { created })
+        Ok(CatalogHeader { created, version })
     }
 
     /// How many whole slots a catalog of `file_length` bytes holds; bytes past the last
@@ -363,6 +401,8 @@ impl State {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Descriptor {
     state: State,
+    form: Form,
+    retained_position: i64,
     recording_id: i64,
     start_timestamp: i64,
     stop_timestamp: i64,
@@ -376,6 +416,20 @@ pub struct Descriptor {
     stream_id: i32,
     channel: String,
     source_identity: String,
+}
+
+/// The form a slot is in (`spec/durable-log.md`, "Descriptor"; ADR 0031): version 0's,
+/// the creation checksum over bytes 28 to 1024 and no retained group, or version 1's,
+/// the creation checksum over bytes 28 to 472 and 484 to 1024 and the retained group
+/// at 472 to 484 under its own checksum. A reader tells them apart by trying version
+/// 1's range first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    /// Version 0's form: what a version 0 driver wrote, or a version 1 driver under a
+    /// version 0 header.
+    Version0,
+    /// Version 1's form: the retained group is present and read.
+    Version1,
 }
 
 /// What a new recording's descriptor is made from.
@@ -412,6 +466,8 @@ impl Descriptor {
     pub fn new(recording: &Recording<'_>) -> Result<Self, LayoutError> {
         let descriptor = Descriptor {
             state: State::Valid,
+            form: Form::Version0,
+            retained_position: recording.start_position,
             recording_id: recording.recording_id,
             start_timestamp: recording.start_timestamp,
             stop_timestamp: -1,
@@ -491,6 +547,37 @@ impl Descriptor {
         self.stop_position == -1
     }
 
+    /// The slot's form, version 0's or version 1's.
+    pub const fn form(&self) -> Form {
+        self.form
+    }
+
+    /// Where the recording's bytes begin on disk: the start position until a purge
+    /// moves it to a segment base; the start position in version 0's form (ADR 0031).
+    pub const fn retained_position(&self) -> i64 {
+        self.retained_position
+    }
+
+    /// The descriptor in version 1's form, its retained group at the start position
+    /// unless [`retained`](Self::retained) moved it; what a version 1 driver creates
+    /// under a version 1 header, and what a migration writes.
+    pub fn in_version_1(&self) -> Self {
+        let mut changed = self.clone();
+        changed.form = Form::Version1;
+        changed
+    }
+
+    /// The descriptor in version 1's form with its retained position at `position`:
+    /// at least the start position, at most the stop position once there is one, and
+    /// the start position or a segment base of the recording.
+    pub fn retained(&self, position: i64) -> Result<Self, LayoutError> {
+        let mut changed = self.clone();
+        changed.form = Form::Version1;
+        changed.retained_position = position;
+        changed.check(self.recording_id)?;
+        Ok(changed)
+    }
+
     /// The descriptor with its stop fields set.
     pub fn stopped(&self, stop_position: i64, stop_timestamp: i64) -> Result<Self, LayoutError> {
         let mut stopped = self.clone();
@@ -549,6 +636,20 @@ impl Descriptor {
                 found: self.stop_position,
             });
         }
+        if self.form == Form::Version1 {
+            let retained = self.retained_position;
+            let segment = i64::from(self.segment_file_length);
+            let start_term_base =
+                self.start_position - self.start_position % i64::from(self.term_length).max(1);
+            let at_a_base = segment > 0 && (retained - start_term_base) % segment == 0;
+            if retained < self.start_position
+                || retained % FRAME_ALIGNMENT != 0
+                || (self.stop_position != -1 && retained > self.stop_position)
+                || (retained != self.start_position && !at_a_base)
+            {
+                return Err(LayoutError::Position { found: retained });
+            }
+        }
         if !is_power_of_two(self.term_length)
             || self.term_length < MIN_TERM_LENGTH
             || self.term_length > MAX_TERM_LENGTH
@@ -590,7 +691,27 @@ impl Descriptor {
         c[56..56 + self.channel.len()].copy_from_slice(self.channel.as_bytes());
         c[312..316].copy_from_slice(&(self.source_identity.len() as i32).to_le_bytes());
         c[316..316 + self.source_identity.len()].copy_from_slice(self.source_identity.as_bytes());
+        if self.form == Form::Version1 {
+            // Bytes 472 to 484 of the slot: the retained position and its CRC32.
+            let position = self.retained_position.to_le_bytes();
+            c[444..452].copy_from_slice(&position);
+            c[452..456].copy_from_slice(&crc32(&position).to_le_bytes());
+        }
         c
+    }
+
+    /// The creation checksum over the creation bytes `creation`, by form: all of them in
+    /// version 0's, all but the retained group's twelve in version 1's.
+    fn creation_checksum(form: Form, creation: &[u8; DESCRIPTOR_LENGTH - 28]) -> u32 {
+        match form {
+            Form::Version0 => crc32(creation),
+            Form::Version1 => {
+                let mut signed = [0u8; DESCRIPTOR_LENGTH - 28 - 12];
+                signed[..444].copy_from_slice(&creation[..444]);
+                signed[444..].copy_from_slice(&creation[456..]);
+                crc32(&signed)
+            }
+        }
     }
 
     /// The slot's bytes 8 to 24: the stop fields, what the stop checksum covers.
@@ -610,7 +731,7 @@ impl Descriptor {
         out[0..4].copy_from_slice(&(self.state as i32).to_le_bytes());
         out[4..8].copy_from_slice(&crc32(&stop).to_le_bytes());
         out[8..24].copy_from_slice(&stop);
-        out[24..28].copy_from_slice(&crc32(&creation).to_le_bytes());
+        out[24..28].copy_from_slice(&Self::creation_checksum(self.form, &creation).to_le_bytes());
         out[28..].copy_from_slice(&creation);
         out
     }
@@ -653,15 +774,32 @@ impl Descriptor {
         if state == State::Invalid {
             return Err(LayoutError::Invalid);
         }
-        if u32_at(bytes, 24) != crc32(&bytes[28..DESCRIPTOR_LENGTH]) {
+        // The two-range rule: version 1's ranges first, then version 0's; a healthy slot
+        // of either form holds under its own, so neither form reports `checksum`.
+        let found = u32_at(bytes, 24);
+        let mut creation = [0u8; DESCRIPTOR_LENGTH - 28];
+        creation.copy_from_slice(&bytes[28..DESCRIPTOR_LENGTH]);
+        let form = if found == Self::creation_checksum(Form::Version1, &creation) {
+            Form::Version1
+        } else if found == Self::creation_checksum(Form::Version0, &creation) {
+            Form::Version0
+        } else {
             return Err(LayoutError::CreationChecksum);
-        }
+        };
         let torn_stop = u32_at(bytes, 4) != crc32(&bytes[8..24]);
         if torn_stop && !tolerate_torn_stop {
             return Err(LayoutError::StopChecksum);
         }
+        if form == Form::Version1 && u32_at(bytes, 480) != crc32(&bytes[472..480]) {
+            return Err(LayoutError::RetainedChecksum);
+        }
         let mut descriptor = Descriptor {
             state,
+            form,
+            retained_position: match form {
+                Form::Version1 => i64_at(bytes, 472),
+                Form::Version0 => i64_at(bytes, 48),
+            },
             stop_timestamp: if torn_stop { -1 } else { i64_at(bytes, 8) },
             stop_position: if torn_stop { -1 } else { i64_at(bytes, 16) },
             recording_id: i64_at(bytes, 32),
