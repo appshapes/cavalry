@@ -310,8 +310,11 @@ enum Hop {
     FileWork,
     /// The recorder writes a truncate's stop.
     CatalogLast,
-    /// The recorder runs recovery's rule for the slot after a file error.
-    Repair,
+    /// The replayer runs the file side of recovery's rules for the slot after a file
+    /// error, where the files are open.
+    RepairFiles,
+    /// The recorder makes the one catalog write the repair ended in.
+    RepairSlot,
 }
 
 /// A hop kept for the next cycle.
@@ -1732,7 +1735,8 @@ impl Conductor {
                     recording_id,
                     write,
                     result,
-                } => self.on_catalog_done(correlation_id, recording_id, write, result),
+                    repaired,
+                } => self.on_catalog_done(correlation_id, recording_id, write, result, repaired),
                 Reply::StopIgnored { correlation_id } => {
                     if let Some(correlation_id) = correlation_id {
                         self.send(&Event::OperationSuccess { correlation_id });
@@ -2182,6 +2186,11 @@ impl Conductor {
                     command,
                     outcome,
                 } => self.on_file_work_done(correlation_id, command, outcome),
+                replayer::Reply::Repaired {
+                    correlation_id,
+                    recording_id,
+                    outcome,
+                } => self.on_repaired(correlation_id, recording_id, outcome),
             }
             taken += 1;
         }
@@ -2779,12 +2788,16 @@ impl Conductor {
         recording_id: i64,
         write: crate::recorder::CatalogWrite,
         result: Result<(), String>,
+        repaired: Recovery,
     ) {
         let Some(index) = self.command_index(correlation_id) else {
             return;
         };
         let command = self.commands[index].command;
         debug_assert_eq!(command.recording_id(), recording_id);
+        // The catalog side of a repair is a transition the counters record, as the
+        // start-up pass's are (invariant 4).
+        self.add_recovery(&repaired);
         match (self.commands[index].hop, write, result) {
             (Hop::CatalogFirst, _, Ok(())) => {
                 self.commands[index].hop = Hop::FileWork;
@@ -2801,7 +2814,7 @@ impl Conductor {
                 self.statics.recording_truncated.increment();
                 self.send(&Event::OperationSuccess { correlation_id });
             }
-            (Hop::Repair, _, repaired) => {
+            (Hop::RepairSlot, _, repaired) => {
                 let entry = self.commands.swap_remove(index);
                 let failure = entry.failure.unwrap_or_default();
                 let repaired = match repaired {
@@ -2822,16 +2835,23 @@ impl Conductor {
                 );
             }
             (_, _, Err(text)) => {
-                self.commands.swap_remove(index);
+                // A catalog write that fails can leave the slot between two of its
+                // writes, a truncate's at "live, or being cut" with the files already
+                // cut: the same repair as after a file error puts the slot and the
+                // files in agreement before the refusal is answered, and the spec
+                // sentence that names it is the third change's.
                 self.statics.recording_retention_failed.increment();
-                self.send_error(
-                    correlation_id,
-                    ErrorCode::StorageSpace,
-                    &format!(
-                        "the catalog write of {} for recording {recording_id} failed: {text}; \
-                         `cavalry doctor` names what the slot holds; see {ERRORS_DOC}",
-                        command.name()
-                    ),
+                self.commands[index].hop = Hop::RepairFiles;
+                self.commands[index].failure = Some(format!(
+                    "the catalog write of {} for recording {recording_id} failed: {text}",
+                    command.name()
+                ));
+                self.offer_hop(
+                    index,
+                    PendingHop::Replayer(replayer::Request::Repair {
+                        correlation_id,
+                        recording_id,
+                    }),
                 );
             }
             (hop, _, Ok(())) => {
@@ -2886,18 +2906,76 @@ impl Conductor {
             },
             Err(text) => {
                 self.statics.recording_retention_failed.increment();
-                self.commands[index].hop = Hop::Repair;
+                self.commands[index].hop = Hop::RepairFiles;
                 self.commands[index].failure = Some(text);
                 self.offer_hop(
                     index,
-                    PendingHop::Recorder(Request::Catalog {
+                    PendingHop::Replayer(replayer::Request::Repair {
                         correlation_id,
                         recording_id: command.recording_id(),
-                        write: crate::recorder::CatalogWrite::Repair,
                     }),
                 );
             }
         }
+    }
+
+    /// The file side of a slot's repair ran on the replayer: its counts move, and the
+    /// recorder makes the write it ended in; or the files refused the repair too, and
+    /// the command is answered with its file error and that.
+    fn on_repaired(
+        &mut self,
+        correlation_id: i64,
+        recording_id: i64,
+        outcome: Result<(cavalry_log::dir::SlotWrite, Recovery), String>,
+    ) {
+        let Some(index) = self.command_index(correlation_id) else {
+            return;
+        };
+        debug_assert_eq!(self.commands[index].command.recording_id(), recording_id);
+        match outcome {
+            Ok((write, recovery)) => {
+                self.add_recovery(&recovery);
+                self.commands[index].hop = Hop::RepairSlot;
+                self.offer_hop(
+                    index,
+                    PendingHop::Recorder(Request::Catalog {
+                        correlation_id,
+                        recording_id,
+                        write: crate::recorder::CatalogWrite::Repair(write),
+                    }),
+                );
+            }
+            Err(_) => {
+                let entry = self.commands.swap_remove(index);
+                let failure = entry.failure.unwrap_or_default();
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::StorageSpace,
+                    &format!(
+                        "{failure}; the repair of the slot from the files failed too; `cavalry \
+                         doctor` names what it found; look at the file and the filesystem, \
+                         then send {} again; see {ERRORS_DOC}",
+                        entry.command.name()
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Adds what a repair's two sides did to the recovery counters, which the start-up
+    /// pass set: each field is a transition (invariant 4).
+    fn add_recovery(&self, recovery: &Recovery) {
+        let add = |id: CounterId, value: u64| {
+            if value > 0
+                && let Ok(counter) = self.counters.counter(id.record())
+            {
+                counter.add(i64::try_from(value).unwrap_or(i64::MAX));
+            }
+        };
+        add(RECORDING_RECOVERED, recovery.recovered);
+        add(RECORDING_INVALIDATED, recovery.invalidated);
+        add(RECORDING_INDEX_REWRITTEN, recovery.index_rewritten);
+        add(RECORDING_FILES_REMOVED, recovery.files_removed);
     }
 
     /// Answers `start recording` with `error`, code 10, when the recorder's request
@@ -5742,6 +5820,105 @@ mod replay {
         assert!(message.contains("repair"), "{message}");
         assert_eq!(h.counter(RECORDING_RETENTION_FAILED), 1);
         assert_eq!(h.counter(RECORDING_DELETED), 0);
+        assert!(h.conductor.commands.is_empty());
+        drop(appender);
+    }
+
+    /// A segment file the operating system refuses at check time, before any catalog
+    /// write (invariant 1; ADR 0031): the truncate is code 12 naming the file,
+    /// `recording.retention_failed` moves, and the slot is as it was.
+    #[test]
+    fn a_file_refused_at_check_time_is_code_12_with_the_slot_unwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut h, mut appender) = recorded("retention-check-refused");
+        offer(&mut h, &mut appender, 0, 100);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        let before = slot(&h, 0);
+        let file = segment(&h, 0, 0);
+        let mode = std::fs::metadata(&file).expect("stat").permissions();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000))
+            .expect("unreadable");
+        h.conductor.retention(
+            20,
+            replayer::Retention::Truncate {
+                recording_id: 0,
+                position: 3200,
+            },
+        );
+        let answer = wait_answer(&mut h, 20);
+        std::fs::set_permissions(&file, mode).expect("readable again");
+        let (code, message) = answer.expect_err("the file was refused");
+        assert_eq!(code, 12, "{message}");
+        assert_eq!(h.counter(RECORDING_RETENTION_FAILED), 1);
+        assert_eq!(h.counter(RECORDING_TRUNCATED), 0);
+        let after = slot(&h, 0);
+        assert_eq!(after.stop_position(), before.stop_position(), "unwritten");
+        assert_eq!(after.stop_timestamp(), before.stop_timestamp());
+        assert!(!after.is_live(), "no cut was opened");
+        assert!(h.conductor.commands.is_empty());
+        drop(appender);
+    }
+
+    /// A truncate whose file work fails after the cut opened, on a segment file made
+    /// read-only, with the file writable again before the repair runs (invariant 4; ADR
+    /// 0031): the repair's file side runs on the replayer, the recorder writes the one
+    /// slot it ended in, the stop is rebuilt from the files, and `recording.recovered`
+    /// moves by one.
+    #[test]
+    fn a_repair_after_failed_file_work_counts_and_rebuilds_the_stop() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut h, mut appender) = recorded("retention-repair-counts");
+        offer(&mut h, &mut appender, 0, 100);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        let before = slot(&h, 0);
+        let recovered_before = h.counter(cavalry_shm::counters::generated::RECORDING_RECOVERED);
+        let file = segment(&h, 0, 0);
+        let mode = std::fs::metadata(&file).expect("stat").permissions();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+        h.conductor.retention(
+            20,
+            replayer::Retention::Truncate {
+                recording_id: 0,
+                position: 3200,
+            },
+        );
+        // The cut opens, then the cut of the file fails; the repair is the next hop,
+        // and the file is writable again before it runs.
+        let mut cycles = 0;
+        while h
+            .conductor
+            .commands
+            .first()
+            .is_none_or(|entry| entry.hop != Hop::RepairFiles)
+        {
+            h.cycle();
+            cycles += 1;
+            assert!(cycles < 10_000, "the file work did not fail");
+        }
+        std::fs::set_permissions(&file, mode).expect("writable again");
+        let (code, message) = wait_answer(&mut h, 20).expect_err("the file was refused");
+        assert_eq!(code, 12, "{message}");
+        assert!(
+            message.contains("the slot was repaired from the files"),
+            "{message}"
+        );
+        assert_eq!(h.counter(RECORDING_RETENTION_FAILED), 1);
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_RECOVERED),
+            recovered_before + 1,
+            "the rebuilt stop is counted"
+        );
+        let after = slot(&h, 0);
+        assert!(!after.is_live(), "the cut was closed by the repair");
+        assert_eq!(
+            after.stop_position(),
+            before.stop_position(),
+            "rebuilt from the files"
+        );
         assert!(h.conductor.commands.is_empty());
         drop(appender);
     }

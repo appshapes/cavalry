@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cavalry_log::catalog::{CatalogError, CatalogReader};
+use cavalry_log::dir::{Recovery, SlotWrite};
 use cavalry_log::layout::{
     Descriptor, FRAME_ALIGNMENT, SEGMENT_SUFFIX, State, locate, segment_file_name,
 };
@@ -147,6 +148,16 @@ pub(crate) enum Request {
         correlation_id: i64,
         /// The command.
         command: Retention,
+    },
+    /// The file side of a slot's repair after a command's file work failed: recovery's
+    /// rules on the slot and its files, here where the files are open, with the catalog
+    /// write they end in handed back for the recorder (ADR 0031); answered with
+    /// [`Reply::Repaired`].
+    Repair {
+        /// The command's correlation id.
+        correlation_id: i64,
+        /// The recording.
+        recording_id: i64,
     },
 }
 
@@ -326,6 +337,16 @@ pub(crate) enum Reply {
         command: Retention,
         /// What it left, or the file error's text.
         outcome: Result<FileWorkDone, String>,
+    },
+    /// The file side of a slot's repair ran: the write the recorder makes and what the
+    /// file side did, or the error's text when the files refused the repair too.
+    Repaired {
+        /// The command.
+        correlation_id: i64,
+        /// The recording.
+        recording_id: i64,
+        /// The catalog write recovery's rules ended in, with the file side's counts.
+        outcome: Result<(SlotWrite, Recovery), String>,
     },
 }
 
@@ -543,6 +564,23 @@ impl Replayer {
                 correlation_id,
                 command,
             } => self.begin_file_work(correlation_id, command),
+            Request::Repair {
+                correlation_id,
+                recording_id,
+            } => {
+                let outcome = u64::try_from(recording_id)
+                    .map_err(|_| format!("recording {recording_id} is not a slot"))
+                    .and_then(|slot| self.catalog.slot_bytes(slot).map_err(|e| e.to_string()))
+                    .and_then(|bytes| {
+                        cavalry_log::dir::repair_files(&self.dir, recording_id, &bytes)
+                            .map_err(|e| e.to_string())
+                    });
+                self.pending.push_back(Reply::Repaired {
+                    correlation_id,
+                    recording_id,
+                    outcome,
+                });
+            }
             Request::Stop {
                 replay_session_id,
                 correlation_id,

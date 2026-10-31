@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cavalry_log::catalog::CatalogError;
-use cavalry_log::dir::LogDir;
+use cavalry_log::dir::{LogDir, Recovery, SlotWrite};
 use cavalry_log::layout::Recording;
 use cavalry_log::recorder::{RecorderError, RecordingWriter};
 use cavalry_proto::frame::FRAME_ALIGNMENT;
@@ -108,7 +108,7 @@ pub(crate) enum Request {
 
 /// The catalog writes a retention command makes, in the order its hops run
 /// (`spec/durable-log.md`, "The driver"; ADR 0031).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CatalogWrite {
     /// A truncate's first step: the stop fields as −1 and −1, "live, or being cut".
     OpenCut,
@@ -127,9 +127,11 @@ pub(crate) enum CatalogWrite {
     },
     /// A delete's write: state 3.
     Delete,
-    /// After a file work the operating system refused: the recovery pass for the slot,
-    /// so that the slot and the files agree before the refusal is answered.
-    Repair,
+    /// The catalog side of a slot's repair after a command's file work failed: the one
+    /// write recovery's rules ended in, which the replayer computed with the files
+    /// (`Request::Repair` there), synced here on the thread that owns the catalog (ADR
+    /// 0031). Nothing else of the recovery pass runs on this thread.
+    Repair(SlotWrite),
 }
 
 /// Why a start failed, for the error event's code.
@@ -194,6 +196,8 @@ pub(crate) enum Reply {
         write: CatalogWrite,
         /// `Ok`, or the error's text for the client's error event.
         result: Result<(), String>,
+        /// For a repair, what the catalog side did, for the counters; nothing otherwise.
+        repaired: Recovery,
     },
 }
 
@@ -342,6 +346,7 @@ impl Recorder {
                 recording_id,
                 write,
             } => {
+                let mut repaired = Recovery::default();
                 let result = match write {
                     CatalogWrite::OpenCut => self
                         .log
@@ -366,10 +371,10 @@ impl Recorder {
                         .catalog_mut()
                         .delete(recording_id)
                         .map_err(|error| error.to_string()),
-                    CatalogWrite::Repair => self
+                    CatalogWrite::Repair(ref slot_write) => self
                         .log
-                        .repair(recording_id)
-                        .map(|_| ())
+                        .apply_repair(recording_id, slot_write)
+                        .map(|recovery| repaired = recovery)
                         .map_err(|error| error.to_string()),
                 };
                 self.pending.push_back(Reply::CatalogDone {
@@ -377,6 +382,7 @@ impl Recorder {
                     recording_id,
                     write,
                     result,
+                    repaired,
                 });
             }
             Request::Stop {

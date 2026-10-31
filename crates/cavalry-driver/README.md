@@ -46,6 +46,18 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   ends at its end, no faster than the slowest subscriber's position plus the window
   and never past what the recorder has synced; a subscription on the replay stream
   reads it as any stream, and `replay stopped` says where it ended and why (ADR 0030).
+- Truncates, purges and deletes a stopped recording on command: `truncate recording`,
+  `purge segments` and `purge recording` (`spec/client-protocol.md`, "Commands"; ADR
+  0031). The conductor admits each into a registry of commands in progress, bounded at
+  `spec::MAX_COMMANDS_IN_PROGRESS` (64, code 10 when full), and refuses a recording that
+  is live, read by a replay or under another command with code 24; the replayer checks
+  the position against the slot and the files and does the file work one file per duty
+  cycle; the recorder, which owns the catalog, makes each command's catalog writes, one
+  slot and a sync each, in the page's order; and after a file error the replayer runs
+  the file side of recovery's rules for the slot and the recorder writes the one slot
+  they end in, so the slot and the files agree before the refusal is answered. Each
+  outcome moves its counter: `recording.truncated`, `recording.segments_purged`,
+  `recording.deleted` and `recording.retention_failed`.
 - Will run dedicated threads for the sender and the receiver, pinned when the operating
   system allows, when the UDP slice arrives: a receiver that detects a gap sends a NAK,
   the sender retransmits from its own term buffer, and status messages drive flow

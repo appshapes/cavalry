@@ -477,6 +477,14 @@ impl CatalogWriter {
             recording_id: id,
             ..recording.clone()
         })?;
+        // Under a version 1 header every new slot is in version 1's form, the retained
+        // position at the start position (`spec/durable-log.md`, "The driver"; ADR
+        // 0031); under version 0's, version 0's form, which a version 0 driver reads.
+        let descriptor = if self.version == CATALOG_VERSION_1 {
+            descriptor.in_version_1()
+        } else {
+            descriptor
+        };
         let offset = CatalogHeader::slot_offset(self.slots);
         let encoded = descriptor.encode();
         self.file
@@ -605,6 +613,18 @@ impl CatalogReader {
         let file = File::open(&path).map_err(io("open", &path))?;
         read_header(&file, &path)?;
         Ok(CatalogReader { file, path })
+    }
+
+    /// A slot's bytes as the file holds them, for the file side of a repair, which
+    /// reads a slot whose stop or retained checksum may fail (ADR 0031). A slot past the
+    /// last is `unknown`.
+    pub fn slot_bytes(&self, slot: u64) -> Result<[u8; DESCRIPTOR_LENGTH], CatalogError> {
+        if slot >= self.slots()? {
+            return Err(CatalogError::Unknown {
+                recording_id: i64::try_from(slot).unwrap_or(i64::MAX),
+            });
+        }
+        read_slot_bytes(&self.file, &self.path, slot)
     }
 
     /// How many slots the catalog holds now.
