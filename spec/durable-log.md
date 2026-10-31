@@ -216,7 +216,10 @@ segment files whose bytes lie wholly before it, one per duty cycle; the time ind
 keeps its entries. A delete writes the state, 3, then removes the segment files and the
 time index, one per duty cycle. A file the driver could not remove, cut or extend is
 refused to the client, and the driver runs the rules below for that slot at once, so
-that the slot and the files agree before the refusal is answered.
+that the slot and the files agree before the refusal is answered; a catalog write of
+the command's that fails is refused and repaired the same way, since a truncate's last
+write failing would otherwise leave the slot reading live, or being cut, over files
+already cut.
 
 When the driver starts, and again at every `stop recording` for the slot it closes, it
 repairs the catalog. At start-up it first truncates the file to whole slots, then drops

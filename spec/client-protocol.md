@@ -282,7 +282,9 @@ What the driver does with each, after the checks of "What the driver rejects":
   cut or extend is code 12 after the catalog write, adding one to
   `recording.retention_failed`; the driver then runs recovery's rule for the slot at
   once, so that the slot and the files agree before the error is answered, and the
-  message names the file and what the recording holds now.
+  message names the file and what the recording holds now. A catalog write of the
+  command's that fails is code 12 the same way, with the same repair, so a failed last
+  write of a truncate never leaves the slot reading live over files already cut.
 - **purge segments.** Aeron Archive's `purgeSegments`: the recording's segment files
   whose bytes lie wholly before the new start position go, and the position becomes the
   recording's retained position. The same first checks as truncate recording; then a
@@ -564,8 +566,9 @@ is code 21, and a replay of a recording a retention command is working on is cod
 and a replay's segment file that could not be opened is code 12, each adding one to
 `replay.start_failed`; a retention command's recording that is live, read by a
 replay or under another command is code 24, its position outside its rule is code 23,
-and a file the driver could not read, remove, cut or extend is code 12 and adds one to
-`recording.retention_failed`. Every `error` event sent adds one to
+and a file the driver could not read, remove, cut or extend, or a catalog write of the
+command's that failed, is code 12 and adds one to `recording.retention_failed`. Every
+`error` event sent adds one to
 `client_protocol.errors`.
 
 A record the ring itself rejects (`spec/command-ring.md`, "Reading") never reaches these
