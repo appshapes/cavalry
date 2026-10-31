@@ -20,11 +20,12 @@ The constraints are these. `std::net::UdpSocket` opens, binds, connects and sets
 socket non-blocking, and sends one datagram per call; it has no `sendmmsg` or
 `recvmmsg`, no vectored send on a connected socket, and no way to set or read the socket
 buffer lengths, which `spec/udp.md`, "Values" asks for (131072 bytes asked for the
-receive buffer, the socket's answer in `channel.socket_rcvbuf`, and the send buffer's
-in `channel.socket_sndbuf`). ADR 0039 fixed one `sendmmsg` per burst on Linux and one
-`sendmsg` per datagram elsewhere, so that a message never triggers its own syscall
-(`CLAUDE.md`, invariant 2: no syscall per message on the data plane; a burst of up to 16
-datagrams is one call). `unsafe` is denied outside `cavalry-shm` and `cavalry-ffi`
+receive buffer, the socket's answer in `channel.socket_rcvbuf`; the send buffer left
+the operating system's, what it holds in `channel.socket_sndbuf`). ADR 0039 fixed one
+`sendmmsg` per burst on Linux and one `sendmsg` per datagram elsewhere, so that a
+message never triggers its own syscall (`CLAUDE.md`, invariant 2: no syscall per
+message on the data plane; a burst of up to 16 datagrams is one call). `unsafe` is
+denied outside `cavalry-shm` and `cavalry-ffi`
 (`CLAUDE.md`, Unsafe), so the driver cannot call `libc` itself, and a dependency of a
 data-plane crate needs this ADR, an `allowed-dependencies` entry and a justification in
 the commit message (ADR 0001, ADR 0003), and Rjae's approval before it exists
@@ -57,9 +58,13 @@ as the command is handled; `nix` is called on its descriptor for what `std` lack
 messages, so that neither allocates, through one `MultiHeaders` the endpoint
 preallocates for the burst's 16 datagrams when it opens; `recvmmsg` on Linux and
 `recvmsg` elsewhere for the status messages, NAKs and RTT measurements the endpoint
-receives, into buffers the endpoint owns; and `setsockopt` and `getsockopt` for
-`SndBuf` and `RcvBuf`, read back into `channel.socket_sndbuf` and
-`channel.socket_rcvbuf`. The crate stays `unsafe_code = "deny"`: the `unsafe` that
+receives, into buffers the endpoint owns; `setsockopt` for `RcvBuf` alone, set to the
+131072 bytes of `spec/udp.md`, "Values", when the socket is opened; and `getsockopt`
+for `RcvBuf` and `SndBuf`, read once after that into `channel.socket_rcvbuf` and
+`channel.socket_sndbuf`. The send buffer stays the operating system's, as "Values"
+and "The sender" say, so nothing sets it: `channel.socket_sndbuf` records what the
+host gave, which the `doctor` check for a send buffer the host capped (ADR 0039)
+reads. The crate stays `unsafe_code = "deny"`: the `unsafe` that
 makes these calls sound is inside `nix`, whose bindings are reviewed under its own
 policy, as `zerocopy`'s and `memmap2`'s are (ADR 0009, ADR 0013). The sender is the
 driver's fourth dedicated thread, `DriverThread::Sender`, with the driver's idle
