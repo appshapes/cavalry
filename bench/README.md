@@ -50,8 +50,8 @@ nothing depends on it.
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
   for the profile, on the `claim_commit` and `one_way` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017). The bench hosts' profiles have
-  baselines, `bench-linux` and `kip-linux` with their `-unchecked` twins, and
-  `grip-linux`'s pair once its job's first three processes are recorded, and CI runs
+  baselines, `bench-linux`, `kip-linux` and `grip-linux` with their `-unchecked` twins,
+  grip's recorded on 2026-10-31 at 0782ec5 from its job's first three processes, and CI runs
   the gate on each host, as `bench (linux)`, `bench (grip)` and, until grip's job has
   been green over a handful of pushes, `bench (kip)`
   ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)): a

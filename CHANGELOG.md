@@ -715,8 +715,10 @@ user-visible change, added in the same commit as the change. The format follows
   first with its Wi-Fi interrupts off the isolated CPUs: the exclusive claim row's
   slowest run 92 ns at p99.99 over runs of 73 to 92, the one_way rows 423 to 720. The
   `bench` host's two re-recorded from the same three runs after the two host changes
-  of the day ended its tree (ADR 0033): eight rows move by a step or less, the
-  unchecked `one_way_32_client` row from 340 to 290 ns and the checked concurrent claim
-  row from 169 to 150 as the twelve-process band gives way to three
+  of the day ended its tree (ADR 0033): twelve rows move by a step or less and four
+  tighten by more than one, the checked concurrent claim row 169 to 150 ns, the checked
+  recorded claim row 339 to 310, the unchecked recorded claim row 350 to 330 and the
+  unchecked `one_way_32_client` row 340 to 290, as the twelve-process band gives way to
+  three
   ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); cards
   159 and 170).
