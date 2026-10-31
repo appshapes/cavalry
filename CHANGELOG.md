@@ -710,6 +710,41 @@ user-visible change, added in the same commit as the change. The format follows
   64 µs at p99.99; bench's and kip's isolated CPUs took no such interrupts. Applied on
   all three hosts on 2026-10-31 (card 159; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
   "Updating the host").
+- `grip`'s first baselines, `grip-linux` and `grip-linux-unchecked`, recorded from
+  master's three processes at 0782ec5 (run 41196273792, attempts 3 to 5), the host's
+  first with its Wi-Fi interrupts off the isolated CPUs, and joined by a fourth, this
+  change's own run, which read the checked client claim row at 133 ns against the
+  three's slowest 118 (ADR 0033): the exclusive claim row's slowest run 92 ns at p99.99
+  over runs of 73 to 92, the client row's 138, the one_way rows 423 to 720. The
+  `bench` host's two re-recorded from the same three runs after the two host changes
+  of the day ended its tree (ADR 0033): twelve rows move by a step or less and four
+  tighten by more than one, the checked concurrent claim row 169 to 150 ns, the checked
+  recorded claim row 339 to 310, the unchecked recorded claim row 350 to 330 and the
+  unchecked `one_way_32_client` row 340 to 290, as the twelve-process band gives way to
+  three
+  ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); cards
+  159 and 170).
+- A replay of a live recording ends on the recorder's word: when the recorder reports
+  the stop, the conductor hands the replayer the stop position and the replay ends
+  there with reason 0 in the replayer's next cycle, where it read the catalog once a
+  second and, standing at a segment boundary, could trust a freed and reused counter
+  past the stop and fail with reason 3. The replay publications, live or lingering
+  after their replay ended, are bounded at 128, twice the replays registry; a `start
+  replay` past it is refused with error 10 naming them. `cavalry replay --from start`
+  names a recording's start position without knowing it, alone or with `--follow`, and
+  is refused with `--to`, whose length needs the position; the client's full replay
+  start queue is `ClientError::ReplayQueueFull` (reason `replay-queue-full`, explained
+  in the replay how-to), not an error that blamed the driver; and the replays bound has
+  one definition, in `cavalry-proto`
+  ([ADR 0036](docs/decisions/0036-hand-the-replayer-the-stop-and-bound-the-replay-publications.md);
+  card 160).
+- The harness reads a coarse counter's clock step from its jump: when most pairs of
+  consecutive readings show no advance, the counter moves less often than the harness
+  reads it, and the step is the smallest frequent advance rather than the divisor of
+  the advances, which read 1 ns on an Apple silicon laptop whose clock resolves 41 ns
+  (now `clock step 41 ns (41 ticks)` there); the bench hosts' steps are unchanged
+  ([ADR 0037](docs/decisions/0037-read-a-coarse-counters-step-from-its-jump.md); card
+  154).
 - ADR 0031 is Accepted, with the four amendments its review asked for: the client
   protocol moves to version 3 with `truncate recording` (261), `purge segments` (262)
   and `purge recording` (263), error code 24 `recording busy` and a registry of the

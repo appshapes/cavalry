@@ -71,8 +71,10 @@ const COMMANDS_PER_CYCLE: usize = 16;
 const DEFERRED_CAPACITY: usize = 2 * spec::MAX_RECORDINGS;
 
 /// The replayer's deferred requests' bound: one attach and one stop per registered
-/// replay, by the argument on `Conductor::deferred`.
-const REPLAYER_DEFERRED_CAPACITY: usize = 2 * spec::MAX_REPLAYS;
+/// replay, by the argument on `Conductor::deferred`, and one recording stop per
+/// registered replay, since a stop is sent only for a recording a registered replay
+/// plays and a recording stops once.
+const REPLAYER_DEFERRED_CAPACITY: usize = 3 * spec::MAX_REPLAYS;
 
 /// A frame's alignment as the positions count.
 const FRAME_ALIGN: i64 = FRAME_ALIGNMENT as i64;
@@ -154,6 +156,10 @@ struct Publication {
     session_id: i32,
     stream_id: i32,
     exclusive: bool,
+    /// A replay's publication (the registration id is the replay session id): it
+    /// counts against [`spec::MAX_REPLAY_PUBLICATIONS`] while it lives and while it
+    /// lingers after the replay ended, since the replay's registry slot is free by then.
+    replay: bool,
     log: LogBuffers,
     position: Counter,
     limit: Counter,
@@ -429,8 +435,9 @@ pub(crate) struct Conductor {
     /// (`replayer::Replayer::run`). `None` in the tests that drive the duty cycles by
     /// hand.
     replayer_thread: Option<std::thread::Thread>,
-    /// The replayer's attaches and stops its request queue had no room for, kept and
-    /// bounded as `deferred` is; while it holds any, `start replay` is code 10.
+    /// The replayer's attaches, stops and recording stops its request queue had no
+    /// room for, kept and bounded as `deferred` is; while it holds any, `start replay`
+    /// is code 10.
     replayer_deferred: VecDeque<replayer::Request>,
     /// Attaches and stops the request queue had no room for, offered again each cycle
     /// in order, before anything newer. While it holds any, `start recording` is
@@ -488,7 +495,9 @@ impl Conductor {
             clients: Vec::with_capacity(spec::MAX_CLIENTS),
             // A replay's publication has no registration, so the publications sit
             // beside the registrations' bound.
-            publications: Vec::with_capacity(spec::MAX_PUBLICATIONS + spec::MAX_REPLAYS),
+            publications: Vec::with_capacity(
+                spec::MAX_PUBLICATIONS + spec::MAX_REPLAY_PUBLICATIONS,
+            ),
             subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
@@ -937,6 +946,7 @@ impl Conductor {
             session_id,
             stream_id,
             exclusive,
+            replay: false,
             log,
             position,
             limit,
@@ -1910,6 +1920,19 @@ impl Conductor {
             stop_position,
         });
         self.refresh_connected(publication_id);
+        // A replay of this recording learns the stop from the conductor, not from the
+        // synced counter it holds, which is freed above and another's after the reuse
+        // timeout, nor from the catalog slot it reads once a second (ADR 0036).
+        if self
+            .replays
+            .iter()
+            .any(|replay| replay.recording_id == recording_id)
+        {
+            self.replayer_request(replayer::Request::RecordingStopped {
+                recording_id,
+                stop_position,
+            });
+        }
     }
 
     /// Sets is connected for one publication from its images and its recording.
@@ -1987,6 +2010,27 @@ impl Conductor {
         }
         if self.replays.len() >= spec::MAX_REPLAYS {
             self.registry_full(correlation_id, "replays", spec::MAX_REPLAYS);
+            return;
+        }
+        // A replay's publication outlives its registry slot while it lingers, so the
+        // publications of every replay, live or lingering, and the starts whose
+        // publication is still to come have a bound of their own (ADR 0036).
+        let starting = self
+            .replays
+            .iter()
+            .filter(|replay| replay.state == ReplayState::Starting)
+            .count();
+        let replay_publications = self
+            .publications
+            .iter()
+            .filter(|publication| publication.replay)
+            .count();
+        if starting + replay_publications >= spec::MAX_REPLAY_PUBLICATIONS {
+            self.registry_full(
+                correlation_id,
+                "replay publications",
+                spec::MAX_REPLAY_PUBLICATIONS,
+            );
             return;
         }
         // Requests still waiting for room go first, and none of a new replay's join
@@ -2069,7 +2113,8 @@ impl Conductor {
         };
         debug_assert!(
             self.replayer_deferred.len() < REPLAYER_DEFERRED_CAPACITY,
-            "the replayer's deferred requests passed one attach and one stop per replay"
+            "the replayer's deferred requests passed three per replay: an attach, a stop and \
+             its recording's stop"
         );
         self.replayer_deferred.push_back(request);
     }
@@ -2276,6 +2321,7 @@ impl Conductor {
             session_id,
             stream_id,
             exclusive: true,
+            replay: true,
             log,
             position,
             limit,
@@ -4623,10 +4669,91 @@ mod replay {
         drop(appender);
     }
 
+    /// The replay publications' bound (invariant 3; card 160): a replay leaves the
+    /// registry when it ends, but its publication lingers until its subscriber reaches
+    /// the end or the linger passes, so replays that start and end under the linger
+    /// leave publications behind with no registry slot to count them. Twice the
+    /// registry's capacity, 128, is the bound on them: the 129th `start replay` is
+    /// refused with code 10 naming replay publications, counted in
+    /// `driver.registry_full`, and admitted again once the lingers have passed. The
+    /// `publications` list, built for both registries, does not grow for them.
+    #[test]
+    fn the_replay_publications_are_bounded_at_twice_the_registry() {
+        let (mut h, mut appender) = recorded("replay-publications-bound");
+        offer(&mut h, &mut appender, 0, 100);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        // One subscription that never polls: every replay's publication lingers.
+        h.conductor
+            .add_subscription(CLIENT, 5, REPLAY_STREAM, IPC_CHANNEL);
+        let allocated = h.conductor.publications.capacity();
+        let bound = spec::MAX_REPLAY_PUBLICATIONS as i64;
+        for n in 0..bound {
+            let id = 100 + n;
+            start_replay(&mut h, id, NULL_POSITION, NULL_LENGTH, None);
+            wait_replay_end(&mut h, id);
+        }
+        let _ = events(&mut h);
+        let lingering = h
+            .conductor
+            .publications
+            .iter()
+            .filter(|publication| publication.replay)
+            .count();
+        assert_eq!(lingering, spec::MAX_REPLAY_PUBLICATIONS);
+        assert_eq!(
+            h.conductor.publications.capacity(),
+            allocated,
+            "the list did not grow"
+        );
+        assert!(h.conductor.replays.is_empty(), "every replay ended");
+        let full_before = h.counter(DRIVER_REGISTRY_FULL);
+
+        let refused = 100 + bound;
+        h.conductor.start_replay(
+            refused,
+            0,
+            NULL_POSITION,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            IPC_CHANNEL,
+        );
+        h.cycle();
+        let (code, message) = h.last_error(refused).expect("an error event");
+        assert_eq!(code, 10);
+        assert!(
+            message.contains("replay publications registry holds 128"),
+            "{message}"
+        );
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), full_before + 1);
+        assert!(h.conductor.replays.is_empty(), "nothing was registered");
+
+        // The lingers pass: the publications go, and a replay starts again.
+        h.now += 6 * SECOND;
+        for _ in 0..5 {
+            h.cycle();
+        }
+        assert!(
+            h.conductor
+                .publications
+                .iter()
+                .all(|publication| !publication.replay),
+            "the lingering replay publications closed"
+        );
+        let admitted = refused + 1;
+        start_replay(&mut h, admitted, NULL_POSITION, NULL_LENGTH, None);
+        wait_replay_end(&mut h, admitted);
+        assert_eq!(replay_stopped(&events(&mut h), admitted), Some((6400, 0)));
+        drop(appender);
+    }
+
     /// A replay that follows a live recording (invariant 1): it plays what is synced
     /// and no more, moves when the recorder syncs, and ends at the recording's stop
-    /// position with reason 0 once the catalog holds the stop; a replay with length −1
-    /// of the same live recording ends at the extent it started with.
+    /// position with reason 0 as soon as the conductor hands the replayer the stop the
+    /// recorder reported, within a cycle and not within the second the catalog is read
+    /// again (ADR 0036); a replay with length −1 of the same live recording ends at the
+    /// extent it started with.
     #[test]
     fn a_replay_follows_a_live_recording_to_its_stop_and_plays_only_synced_bytes() {
         let (mut h, mut appender) = recorded("replay-follow");
@@ -4661,20 +4788,90 @@ mod replay {
         assert_eq!(follow.load_acquire(), 1280, "synced, played");
         assert_eq!(read_replay(&h, 6, 0).len(), 20);
 
-        // The recording stops: the replay learns it from the catalog within a second.
+        // The recording stops: the conductor hands the replayer the stop as it
+        // forgets the recording, and the replay ends within the next cycles, long
+        // before the catalog slot would be read again.
         stop_recording(&mut h, 4);
-        for _ in 0..20 {
+        for _ in 0..5 {
             h.cycle();
         }
+        assert!(
+            h.conductor.replays.is_empty(),
+            "the replay ended on the stop the conductor handed over"
+        );
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((1280, 0)));
+        assert_eq!(h.counter(REPLAY_ENDED), 2);
+        drop(appender);
+    }
+
+    /// A recording stopped exactly at a segment boundary while a replay follows it
+    /// (invariant 1; card 160): the recorder removes the segment file it had just
+    /// rolled into, and a replay standing at the boundary that trusted its synced
+    /// counter past the stop, a counter the conductor frees at the stop and another
+    /// may hold after the reuse timeout, would roll into the removed file and fail with
+    /// reason 3. The conductor hands the replayer the stop instead, and the replay ends
+    /// with reason 0 at the boundary, nothing failed, within the stop's own cycles
+    /// (ADR 0036).
+    #[test]
+    fn a_recording_stopped_at_a_segment_boundary_ends_its_live_replay_with_reason_0() {
+        let (mut h, mut appender) = recorded("replay-boundary-stop");
+        let segment = i64::from(cavalry_log::layout::SEGMENT_FILE_LENGTH);
+        // 64-byte frames tile the 64 KiB terms, so the segment ends on a frame.
+        let end = offer(&mut h, &mut appender, 0, segment / 64);
+        assert_eq!(end, segment, "the recording stands at the segment boundary");
+        sync(&mut h);
+        assert!(
+            h.log_dir
+                .join(cavalry_log::layout::segment_file_name(0, segment))
+                .exists(),
+            "the recorder rolled into the second segment file"
+        );
+
+        start_replay(&mut h, 6, NULL_POSITION, FOLLOW_LENGTH, Some(5));
+        let subscriber = h
+            .conductor
+            .images
+            .iter()
+            .find(|image| image.publication_id == 6)
+            .map(|image| image.position.clone())
+            .expect("the image");
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        for _ in 0..100_000 {
+            subscriber.store_release(replay_position.load_acquire());
+            h.cycle();
+            if replay_position.load_acquire() == end {
+                break;
+            }
+        }
+        assert_eq!(
+            replay_position.load_acquire(),
+            end,
+            "the replay caught up to the boundary"
+        );
         assert_eq!(
             h.conductor.replays.len(),
             1,
-            "not yet: the slot is read once per second"
+            "and follows the live recording there"
         );
-        h.now += SECOND;
-        wait_replay_end(&mut h, 6);
-        assert_eq!(replay_stopped(&events(&mut h), 6), Some((1280, 0)));
-        assert_eq!(h.counter(REPLAY_ENDED), 2);
+
+        stop_recording(&mut h, 4);
+        assert!(
+            !h.log_dir
+                .join(cavalry_log::layout::segment_file_name(0, segment))
+                .exists(),
+            "the stop removed the empty second segment file"
+        );
+        for _ in 0..5 {
+            h.cycle();
+        }
+        assert!(
+            h.conductor.replays.is_empty(),
+            "the replay ended on the stop"
+        );
+        assert_eq!(replay_stopped(&events(&mut h), 6), Some((end, 0)));
+        assert_eq!(h.counter(REPLAY_FAILED), 0);
+        assert_eq!(h.counter(LOG_BUFFER_REJECTED_FRAME), 0);
+        assert_eq!(h.counter(REPLAY_ENDED), 1);
         drop(appender);
     }
 
@@ -4974,11 +5171,14 @@ mod replay {
     }
 
     /// The replayer's deferred requests at capacity (invariant 3): the registry full of
-    /// replays, each given its attach and its stop while the request queue is full,
-    /// fills the list to exactly its bound and not past its allocation, and every
-    /// request reaches the replayer once it catches up.
+    /// replays, each of a recording of its own and each given its attach, its stop and
+    /// its recording's stop while the request queue is full, fills the list to exactly
+    /// its bound, three per registered replay, and not past its allocation, and every
+    /// request reaches the replayer once it catches up. A recording's stop is one
+    /// request for all its live replays, so replays sharing a recording stop short of
+    /// the bound; one recording each is the case that reaches it (ADR 0036).
     #[test]
-    fn the_replayers_deferred_requests_are_bounded_by_one_attach_and_one_stop_per_replay() {
+    fn the_replayers_deferred_requests_are_bounded_by_three_per_replay() {
         let (mut h, mut appender) = recorded("replayer-deferred-capacity");
         offer(&mut h, &mut appender, 0, 10);
         sync(&mut h);
@@ -5000,7 +5200,7 @@ mod replay {
         for i in 0..n {
             h.conductor.replays.push(ReplayEntry {
                 replay_session_id: 100_000 + i,
-                recording_id: 0,
+                recording_id: i,
                 replay_stream_id: REPLAY_STREAM,
                 state: ReplayState::Starting,
                 position: None,
@@ -5011,12 +5211,23 @@ mod replay {
         let term = cavalry_shm::log::layout::MIN_TERM_LENGTH as i32;
         for i in 0..n {
             h.conductor
-                .on_replay_ready(100_000 + i, 0, 0, (0, term, 1408), (0, STREAM), now);
+                .on_replay_ready(100_000 + i, i, 0, (0, term, 1408), (0, STREAM), now);
             h.conductor.stop_replay(70_000 + i, 100_000 + i);
         }
         assert_eq!(
             h.conductor.replayer_deferred.len(),
-            REPLAYER_DEFERRED_CAPACITY
+            2 * spec::MAX_REPLAYS,
+            "one attach and one stop per replay"
+        );
+        // Every recording stops, each with one registered replay of it: one request
+        // per recording, the third per replay, and the list stands at its bound.
+        for i in 0..n {
+            h.conductor.on_stopped(i, 2, 640, None, now);
+        }
+        assert_eq!(
+            h.conductor.replayer_deferred.len(),
+            REPLAYER_DEFERRED_CAPACITY,
+            "three per replay"
         );
         assert_eq!(
             h.conductor.replayer_deferred.capacity(),

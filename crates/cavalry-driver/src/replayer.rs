@@ -19,8 +19,10 @@
 //! does, rather than being read again for ever. A replay reads no byte the
 //! recorder has not synced, so what it plays is what a restart would find (invariant
 //! 1); a replay of a live recording waits for the synced position to move, and learns
-//! the recording's stop from its catalog slot, read again once per second and whenever
-//! a frame length of 0 is found below the extent. While it holds a replay the replayer
+//! the recording's stop from the conductor, which hands it the stop position the
+//! recorder reported (ADR 0036), and otherwise from its catalog slot, read again once
+//! per second and whenever a frame length of 0 is found below the extent, so that a
+//! synced counter freed at the stop and reused is never trusted past it. While it holds a replay the replayer
 //! idles with the conductor's idle strategy; while it holds none, and no reply, it
 //! parks until the conductor hands it a request and unparks it, or for a second, so a
 //! replayer with nothing to play wakes no CPU. Nothing here allocates per block, locks
@@ -112,6 +114,17 @@ pub(crate) enum Request {
         correlation_id: Option<i64>,
         /// Why: by command, or for want of a subscriber.
         reason: ReplayStopReason,
+    },
+    /// The recorder stopped a recording that a registered replay plays: its stop
+    /// position becomes the final extent of every replay of it that still follows the
+    /// synced counter, which the conductor has freed and which another counter may
+    /// hold after the reuse timeout; not answered. Sent once per recording stop, before
+    /// the catalog slot would be read again (ADR 0036).
+    RecordingStopped {
+        /// The recording.
+        recording_id: i64,
+        /// Where it stopped.
+        stop_position: i64,
     },
     /// A retention command's checks that need the disk, before any catalog write
     /// (ADR 0031): the slot read by the two-range rule, the position against the
@@ -550,6 +563,18 @@ impl Replayer {
                         reason,
                         correlation_id: Some(correlation_id),
                     });
+                }
+            }
+            Request::RecordingStopped {
+                recording_id,
+                stop_position,
+            } => {
+                for replay in &mut self.replays {
+                    if replay.recording_id == recording_id
+                        && matches!(replay.extent, Extent::Live { .. })
+                    {
+                        replay.extent = Extent::Final(stop_position);
+                    }
                 }
             }
         }
