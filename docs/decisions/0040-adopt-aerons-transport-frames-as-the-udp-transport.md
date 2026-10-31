@@ -5,7 +5,9 @@
 - **Invariants affected:** 1, 2, 3, 4, 5, 6
 - **Supersedes:** none; amends `spec/log-buffer.md` to version 1 and
   `spec/client-protocol.md` to version 4, as ADR 0013's and ADR 0019's Revisit
-  clauses said UDP would
+  clauses said UDP would; departs from ADR 0039's Decision, item 1, on where the
+  socket buffer lengths live: in the endpoint's counters, not in the log header's
+  reserved bytes (Alternatives considered)
 
 ## Context
 
@@ -17,10 +19,15 @@ with the acceptance, as ADR 0024's format did with its (card 92) and ADR 0031's 
 its (card 95). What the slice needs from the pages is fixed by ADR 0039: Aeron's
 control frames field for field; Aeron's rules for setup, status messages, NAKs,
 heartbeats and flow control, with Aeron's defaults; a log buffer type for the image the
-receiver rebuilds; a `cavalry:udp` channel on the five commands that carry one, the
+receiver rebuilds, with "the receiver window length and the socket buffer lengths in
+the reserved bytes, as ADR 0013's Revisit says" (ADR 0039, Decision, item 1); a
+`cavalry:udp` channel on the five commands that carry one, the
 channel status indicator id ADR 0019 left out "since IPC has no endpoint and the UDP
 version adds it", the source identity as an address, and Aeron's error codes 4 and 9.
-What is already specified and does not change: the data frame header (`spec/frame.md`,
+This ADR keeps all of it but one point: the receiver window length goes in the reserved
+bytes and the socket buffer lengths go in the endpoint's counters instead, a departure
+from ADR 0039's Decision named on the Supersedes line and argued under Alternatives
+considered. What is already specified and does not change: the data frame header (`spec/frame.md`,
 version 0, whose "other types are specified with their frames"), the log's three
 terms, its claim protocol and its reader (`spec/log-buffer.md`), and the command ring,
 the broadcast buffer and every command and event of versions 0 to 3
@@ -463,11 +470,18 @@ message naming card 180 until the sender lands.
 - **The rebuild and high-water positions in the image's metadata page, as its tails.**
   Lost: every position is a counter in the counters file (ADR 0013), where `doctor`
   reads it without mapping a log.
-- **The socket buffer lengths in the log buffer's header, as ADR 0013's Revisit and
-  Aeron's metadata have them.** Lost: they belong to the endpoint, not the stream, a
-  counter is the primary instrument (invariant 4), and `doctor` compares them with the
-  host's limits from the counters file alone. The receiver window goes in the header,
-  since it is the image's as the publication window is the publication's.
+- **The socket buffer lengths in the log buffer's header, as ADR 0013's Revisit named
+  them, ADR 0039's Decision (item 1, "the receiver window length and the socket buffer
+  lengths in the reserved bytes") adopted them and Aeron's metadata has them.** Lost,
+  and this is the one point on which this ADR departs from ADR 0039's Decision, an
+  Accepted ADR that is not edited and is superseded here on this point alone: the
+  lengths belong to the endpoint, not the stream, since one socket serves every
+  publication or image on its channel and a log that carried them would carry a copy
+  per stream; a counter is the primary instrument (invariant 4); and `doctor` compares
+  them with the host's limits from the counters file alone, without mapping a log.
+  They are `channel.socket_rcvbuf` and `channel.socket_sndbuf` under "Counters". The
+  receiver window goes in the header as ADR 0039 said, since it is the image's as the
+  publication window is the publication's.
 - **Gap detection and NAKs in the client, from the subscriber's poll.** Lost: a client
   never holds a socket (`CLAUDE.md`: one daemon per host owns the sockets), and the
   subscriber's poll must stay free of syscalls (invariant 2).
