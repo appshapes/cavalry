@@ -724,3 +724,17 @@ user-visible change, added in the same commit as the change. The format follows
   three
   ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); cards
   159 and 170).
+- A replay of a live recording ends on the recorder's word: when the recorder reports
+  the stop, the conductor hands the replayer the stop position and the replay ends
+  there with reason 0 in the replayer's next cycle, where it read the catalog once a
+  second and, standing at a segment boundary, could trust a freed and reused counter
+  past the stop and fail with reason 3. The replay publications, live or lingering
+  after their replay ended, are bounded at 128, twice the replays registry; a `start
+  replay` past it is refused with error 10 naming them. `cavalry replay --from start`
+  names a recording's start position without knowing it, alone or with `--follow`, and
+  is refused with `--to`, whose length needs the position; the client's full replay
+  start queue is `ClientError::ReplayQueueFull` (reason `replay-queue-full`, explained
+  in the replay how-to), not an error that blamed the driver; and the replays bound has
+  one definition, in `cavalry-proto`
+  ([ADR 0036](docs/decisions/0036-hand-the-replayer-the-stop-and-bound-the-replay-publications.md);
+  card 160).
