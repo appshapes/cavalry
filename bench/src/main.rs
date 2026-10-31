@@ -542,7 +542,8 @@ const STEP_ADVANCES: usize = 4096;
 fn clock_step() -> (u64, u64) {
     // How often each advance below STEP_ADVANCES ticks occurred; the rest are outliers.
     // Pairs with no advance are counted apart: a counter that moves less often than
-    // the harness reads it shows its step as a jump, not as a divisor (ADR 0037).
+    // the harness reads it shows its step as a jump, not as a divisor (ADR 0037, ADR
+    // 0038).
     let mut counts = [0u32; STEP_ADVANCES];
     let mut unmoved = 0usize;
     for _ in 0..STEP_PAIRS {
@@ -566,15 +567,18 @@ fn clock_step() -> (u64, u64) {
 /// of readings advanced by `a` ticks and `unmoved` how many advanced by none. An
 /// advance seen in fewer than one pair in a thousand is an interrupt or a migration and
 /// is ignored. When most pairs advanced by none, the counter moves less often than the
-/// harness reads it and its step is the jump it makes when it moves: the smallest
-/// frequent advance, since the jumps of a counter whose period is not a whole number of
-/// the reading's ticks come in two sizes and the smaller one under-reads the step,
-/// which a floor may do and over-read may not (ADR 0037). On an Apple silicon laptop
+/// harness reads it and its step is the jump it makes when it moves (ADR 0037): the
+/// largest frequent advance, since the jumps of a counter whose period is not a whole
+/// number of the reading's ticks come in two adjacent sizes, and the floor must admit
+/// every one-jump move an unchanged commit can make, which only the larger size does; a
+/// floor of the smaller size fails a one-jump move of the larger, as a floor of 9 would
+/// fail a move of 10 in `clock_step`'s rounding (ADR 0038). On an Apple silicon laptop
 /// `quanta` reads the machine's own counter at 1 GHz, which moves 24 million times a
 /// second: 987,728 pairs in a million advanced by none, 3,318 by 41 ticks and 8,942 by
 /// 42, which a divisor over 41 and 42 read as a step of 1 ns where the clock resolves
-/// 42; the macOS CI runner's counter ticks at 24 MHz itself and reads 1 tick, 42 ns,
-/// either way. Otherwise, as ADR 0029 says, an advance below half the most frequent one
+/// 42, and a floor of 41 would fail the two jumps in three that are 42; the macOS CI
+/// runner's counter ticks at 24 MHz itself and reads 1 tick, 42 ns, either way.
+/// Otherwise, as ADR 0029 says, an advance below half the most frequent one
 /// is the counter's own residual, not a step, and is ignored too: the bench host's
 /// counter moves by 37 ticks, 10 ns, at a time and reads 37 or 74 between two readings,
 /// with a one-tick residual in 2 percent of them, and a divisor over everything read 1
@@ -589,6 +593,7 @@ fn step_ticks(counts: &[u32; STEP_ADVANCES], unmoved: usize, pairs: usize) -> u6
     let frequent = ((pairs / 1000) as u32).max(1);
     if unmoved > pairs / 2 {
         return (1..STEP_ADVANCES)
+            .rev()
             .find(|&a| counts[a] >= frequent)
             .map_or(1, |a| a as u64);
     }
@@ -1622,12 +1627,14 @@ mod tests {
     /// `quanta` raw readings in `clock_step`'s own loop (card 154): the counter counts at
     /// 1 GHz and moves 24 million times a second, so 987,728 pairs advanced by none,
     /// 3,318 by 41 ticks and 8,942 by 42, with 18, 58 and 59 a few times each. A
-    /// divisor over 41 and 42 read 1; the jump is the step, and the smaller of the two
-    /// sizes it comes in, 41 ticks, 41 ns (ADR 0037).
+    /// divisor over 41 and 42 read 1; the jump is the step (ADR 0037), and the larger of
+    /// the two sizes it comes in, 42 ticks, 42 ns, so that a one-jump move of either
+    /// size is within the floor; 41 would fail the two jumps in three that are 42
+    /// (ADR 0038).
     #[test]
     fn a_counter_that_moves_less_often_than_it_is_read_steps_by_its_jump() {
         let laptop = counts(&[(41, 3_318), (42, 8_942), (18, 3), (58, 2), (59, 4)]);
-        assert_eq!(step_ticks(&laptop, 987_728, STEP_PAIRS), 41);
+        assert_eq!(step_ticks(&laptop, 987_728, STEP_PAIRS), 42);
     }
 
     /// The macOS CI runner's counter ticks at 24 MHz itself: most pairs read the same
@@ -1640,6 +1647,7 @@ mod tests {
 
     /// Just under half the pairs unmoved is still a counter that advances on most
     /// readings, read by the divisor: the bench host with a slow half would read 37.
+    /// One more pair unmoved takes the jump rule and the larger size (ADR 0038).
     #[test]
     fn the_jump_rule_needs_most_pairs_unmoved() {
         let half = counts(&[(41, 200_000), (42, 300_000)]);
@@ -1648,7 +1656,7 @@ mod tests {
             1,
             "41 and 42 divide to 1"
         );
-        assert_eq!(step_ticks(&half, 500_001, STEP_PAIRS), 41);
+        assert_eq!(step_ticks(&half, 500_001, STEP_PAIRS), 42);
     }
 
     /// An advance in fewer than one pair in a thousand is an interrupt or a migration,

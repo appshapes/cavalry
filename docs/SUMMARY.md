@@ -76,3 +76,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0035. End a replay with nothing to play at once, without a segment file](decisions/0035-end-a-replay-with-nothing-to-play-at-once.md)
 - [0036. Hand the replayer a recording's stop and bound the replay publications](decisions/0036-hand-the-replayer-the-stop-and-bound-the-replay-publications.md)
 - [0037. Read the clock step from the counter's jump when most readings show no advance](decisions/0037-read-a-coarse-counters-step-from-its-jump.md)
+- [0038. Read a coarse counter's step from the larger of the two sizes its jump comes in](decisions/0038-read-a-coarse-counters-step-from-its-larger-jump.md)

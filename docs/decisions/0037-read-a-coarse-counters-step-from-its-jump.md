@@ -1,6 +1,6 @@
 # 0037. Read the clock step from the counter's jump when most readings show no advance
 
-- **Status:** Accepted
+- **Status:** Superseded by 0038
 - **Date:** 2026-10-31
 - **Invariants affected:** 2, 6
 - **Supersedes:** the measurement rule of ADR 0029 for a counter that moves less often

@@ -745,3 +745,10 @@ user-visible change, added in the same commit as the change. The format follows
   (now `clock step 41 ns (41 ticks)` there); the bench hosts' steps are unchanged
   ([ADR 0037](docs/decisions/0037-read-a-coarse-counters-step-from-its-jump.md); card
   154).
+- A coarse counter's clock step is the larger of the two adjacent sizes its jump comes
+  in, not the smaller: a floor of the smaller size failed a row that moved by one jump
+  of the larger, two jumps in three on the Apple silicon laptop, whose histogram now
+  reads `clock step 42 ns (42 ticks)` in place of 41; the bench hosts' steps are
+  unchanged
+  ([ADR 0038](docs/decisions/0038-read-a-coarse-counters-step-from-its-larger-jump.md),
+  which supersedes ADR 0037; card 154).
