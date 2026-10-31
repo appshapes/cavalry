@@ -698,18 +698,21 @@ impl Conductor {
             } => self.stop_replay(correlation_id, replay_session_id),
             // The retention commands of client protocol version 3 (ADR 0031): decoded
             // and answered, implemented by the change that follows this one; until it
-            // lands they are refused with code 11 and a message that says so.
+            // lands they are refused with code 11 and a message that says what the
+            // operator does. A well-formed command of this version is not a rejected
+            // command, so the refusal counts in `client_protocol.errors` alone, as every
+            // error event does (`spec/client-protocol.md`, "What the driver rejects").
             Command::TruncateRecording { correlation_id, .. }
             | Command::PurgeSegments { correlation_id, .. }
             | Command::PurgeRecording { correlation_id, .. } => {
-                self.statics.rejected_command.increment();
                 self.send_error(
                     correlation_id,
                     ErrorCode::GenericError,
                     &format!(
                         "truncate recording, purge segments and purge recording are not in \
-                         this driver yet: ADR 0031 is accepted and the driver's change follows; \
-                         see {ERRORS_DOC}"
+                         this driver yet: ADR 0031 is accepted and the driver's change \
+                         follows. Upgrade the driver to a release that implements them; the \
+                         recording's files are unchanged; see {ERRORS_DOC}"
                     ),
                 );
             }
