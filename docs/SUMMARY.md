@@ -79,3 +79,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0037. Read the clock step from the counter's jump when most readings show no advance](decisions/0037-read-a-coarse-counters-step-from-its-jump.md)
 - [0038. Repair a retention command's slot after a failed catalog write as after a file error](decisions/0038-repair-a-retention-commands-slot-after-a-failed-catalog-write.md)
 - [0039. Build UDP unicast between hosts third, in four features](decisions/0039-build-udp-between-hosts-third.md)
+- [0040. Adopt Aeron's control frames and rules as the UDP transport, version 0, with log buffer version 1 and client protocol version 4](decisions/0040-adopt-aerons-transport-frames-as-the-udp-transport.md)
