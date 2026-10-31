@@ -61,8 +61,12 @@ that NAKs are still answered. The receiver creates an image from a setup frame a
 position the setup names; asks for one, when a data frame or heartbeat without EOS
 arrives for a stream it wants and a session it has no image for, with a status message
 carrying the send-setup flag, term id 0, term offset 0 and window 0, at most once a
-second while no setup arrives (`DataPacketDispatcher`); sends a status message at once
-and then on three triggers,
+second while no setup arrives (`DataPacketDispatcher`); keeps a record per session while it has no image, pending a
+setup, in progress while the conductor creates the image, and on cool-down after the
+image is removed, so that a second setup, a late data frame or a late retransmit
+creates no second image (`DataPacketDispatcher`'s `SessionInterest`, with the record
+removed by the conductor's `removeCoolDown` after the image's linger); sends a status
+message at once and then on three triggers,
 the slowest subscriber's position a quarter of the window past the last one, a change
 of window, or 200 ms without one, carrying the slowest subscriber's position and the
 window; inserts a data frame at its term offset only if its position is at or past the
@@ -194,7 +198,14 @@ sender position otherwise, so that the publisher reads `not connected`, and keep
 publication, with the sender position as the consumer position (`spec/log-buffer.md`,
 "The driver"). After close, the publication lingers 5 s, or until a status message with
 the end-of-stream flag arrives, sending heartbeats with EOS and answering NAKs, then its
-log is removed. The socket send buffer is the operating system's.
+log is removed. Once the publication is closed and the sender position has reached the
+end-of-stream position, the condition under which its heartbeats carry EOS, a status
+message with the send-setup flag is ignored and counted in
+`sender.status_messages_rejected`, lingering or not: a setup then would create an image
+that ends at once, and the heartbeats with EOS already tell a receiver with no image
+that the stream is over ("The receiver", step 2). Before the sender position reaches
+it, a closed publication answers one as step 1 says, since frames are still to be
+sent. The socket send buffer is the operating system's.
 
 **The receiver**, one dedicated thread per driver. A `cavalry:udp` subscription has a
 receive endpoint per resolved channel, one socket bound to the endpoint, shared by the
@@ -204,7 +215,11 @@ the socket. The driver's receiver id is a random i64 chosen at start, and it sen
 group tag (36-byte status messages). On a datagram from a source address:
 
 1. **Setup.** A setup frame for a stream id a subscription on the endpoint wants and a
-   session id with no image: the conductor creates an image with a registration id of
+   session id with no record, or one pending a setup (step 2): the receiver marks the
+   session **in progress** and hands the setup to the conductor through the bounded
+   queue between them; a setup the queue cannot take is dropped and counted in
+   `receiver.dropped_frames`, the session stays as it was, and the sender's next setup
+   tries again. The conductor creates an image with a registration id of
    its own, taken from the command ring's correlation id counter as the driver takes its
    client id (`spec/client-protocol.md`), since the image has no local publication whose
    id could name it; its log is a log buffer of type 2 (`spec/log-buffer.md`, version
@@ -213,22 +228,35 @@ group tag (36-byte status messages). On a datagram from a source address:
    receiver window of min(128 KiB, term ÷ 2); the conductor announces it to every
    subscription on the endpoint and stream with `available image` carrying that id as
    correlation id and the source identity `<host>:<port>` of the datagram's source, and
-   sends the first status message at once. A setup for a session with an
-   image is ignored; one for a stream nobody wants is counted and dropped. Every
+   hands the image back to the receiver, which puts it in the session's record and
+   sends the first status message at once. While the session is in progress, a setup,
+   data datagram or heartbeat for it is dropped and counted in `receiver.dropped_frames`,
+   no status message is sent and no second image is created: the sender sends a setup
+   every 100 ms until its first status message, and the conductor's creation can take
+   longer than that under cgroup CPU throttling, which the driver degrades under
+   (invariant 3), so a second setup inside that time is the normal case and must not
+   deliver every message twice (invariant 1). A conductor that cannot create the image,
+   the images registry full (`driver.registry_full`) or the log not created
+   (`driver.log_create_failed`), hands the refusal back instead, and the receiver
+   removes the record, so the sender's next setup tries again. A setup for a session
+   with an image is ignored, as a duplicate data frame is; one for a session on
+   cool-down (step 6) is dropped and counted in `receiver.dropped_frames`; one for a
+   stream nobody wants is counted as `receiver.setups_unwanted` and dropped. Every
    control frame to that image's sender goes to the source address of its setup frame.
 2. **Asking for a setup.** A data datagram or heartbeat without the EOS flag for a
-   stream id a subscription on the endpoint wants and a session id with no image and no
-   pending setup: the receiver records the session as pending a setup for 1 s and sends
+   stream id a subscription on the endpoint wants and a session id with no record: the
+   receiver records the session as **pending a setup** for 1 s and sends
    the datagram's source a status message with the send-setup flag, consumption term
    id 0, consumption term offset 0 and receiver window 0, and the receiver id as in
    every status message, counting `receiver.setups_elicited`; the datagram itself is
    dropped and counted in `receiver.dropped_frames`, as is every one for the session
-   while it is pending. A setup frame for the pending session creates the image as
+   while it is pending, in progress or on cool-down, with no status message sent for
+   any of them. A setup frame for the pending session creates the image as
    step 1 says and ends the wait; after 1 s without one the record expires and the next
    datagram asks again, so a sender that stopped sending setups at its first status
    message, before this receiver started, restarted or added its subscription back, is
    asked at most once a second until it answers. A datagram with EOS for a session with
-   no image is dropped and counted the same way and asks for nothing: the stream is
+   no record is dropped and counted the same way and asks for nothing: the stream is
    over. A data datagram or heartbeat for a stream nobody on the endpoint wants is
    dropped and counted the same way.
 3. **Data.** A data datagram for an image whose first position is below the last status
@@ -256,13 +284,29 @@ group tag (36-byte status messages). On a datagram from a source address:
    so that a term is zero before a frame lands in it.
 6. **End.** An image with no accepted frame for 10 s is retired: `unavailable image` to
    its subscriptions, its counters freed after the reuse timeout, its log removed once
-   every subscription has unmapped it. At end of stream, once the rebuild position
+   every subscription has unmapped it, and its session record put **on cool-down** for
+   10 s, the liveness timeout, during which a setup, data datagram or heartbeat for the
+   session is dropped and counted in `receiver.dropped_frames` with no status message
+   sent, so that a late retransmit or heartbeat for a retired session creates no second
+   image at its position; when the cool-down ends the record is removed, and a setup
+   for the session creates a new image with a registration id of its own. At end of
+   stream, once the rebuild position
    reaches the high-water mark, the end-of-stream position is stored in the log, the
    status message carries the end-of-stream flag, five times at the 200 ms cadence (this
    page's bound; Aeron's receiver sends them for as long as the image lingers), and the
    image is retired the same way once every subscriber has reached that position or the
    liveness timeout passes.
 7. **RTT.** A measurement with the reply flag is answered as the sender answers one.
+
+The receiver keeps one table of 4096 session records for the driver, keyed by
+endpoint, stream id and session id, each record in one of four states: pending a
+setup (step 2), in progress (step 1), with an image (steps 3 to 5) or on cool-down
+(step 6). The table is twice the images registry, so that every image's record has
+room beside as many sessions without one. When it is full, a datagram for a session
+with no record is dropped and counted as `receiver.sessions_full`, and no status
+message is sent, so that a sender that opens a session per datagram fills the table and
+not the driver; a record is freed when a pending setup expires, when the conductor
+refuses the image, and when a cool-down ends.
 
 A subscription's `subscription.position` on an image is the counter the status message's
 position is read from, as it is the counter the driver's cleaning reads (ADR 0013).
@@ -282,8 +326,10 @@ reads a publication's, stopping at a gap until it is filled.
 send-setup flag sent for a session with no image), `receiver.heartbeats_received`,
 `receiver.status_messages_sent`, `receiver.naks_sent`, `receiver.gaps_detected`,
 `receiver.under_runs`, `receiver.over_runs`, `receiver.rtt_replies_sent`,
-`receiver.dropped_frames` (the version and type drops, and the data datagrams and
-heartbeats for a session with no image, by reason in `doctor`),
+`receiver.dropped_frames` (the version and type drops, and the setups, data datagrams
+and heartbeats for a session with no image: pending, in progress, on cool-down or
+unwanted, by reason in `doctor`), `receiver.sessions_full` (the datagrams dropped
+because the session table had no room for a new session),
 `receiver.rejected_datagrams` (the datagram checks); per publication, keyed as
 `publication.position` is, `sender.position` and `sender.limit`; per image, keyed as
 `subscription.position` is, with the image's registration id as the correlation id and
@@ -296,19 +342,22 @@ and `wmem_max`), `channel.images` and `channel.publications`. The publication's
 connection and the image's life are state machines in `counters.toml`, each transition
 counted by a static counter of its own: `publication.connected`,
 `publication.disconnected`, `image.created`, `image.ended`, `image.timed_out` and
-`image.removed`. The static counters this page adds are 35: the 15 under `sender`, the
-14 under `receiver` and these six.
+`image.removed`. The static counters this page adds are 36: the 15 under `sender`, the
+15 under `receiver` and these six.
 
 **Values**, Aeron's, the driver's in this version, so that a configuration key is
 justified later by a `why_not_default` and not here: setup interval 100 ms, pending
 setup 1 s, heartbeat interval 100 ms, status message interval 200 ms, status message threshold window ÷ 4,
 NAK delay 1 µs, NAK retry 100 µs, retransmit linger 10 ms, connection timeout 5 s, image
-liveness 10 s, linger 5 s, MTU 1408, UDP term length 16 MiB, publication window term ÷ 2,
+liveness 10 s, image cool-down 10 s (the liveness timeout, the length of Aeron's image
+linger), linger 5 s, MTU 1408, UDP term length 16 MiB, publication window term ÷ 2,
 receiver window min(128 KiB, term ÷ 2), socket receive buffer 128 KiB, socket send
 buffer the operating system's, 16 datagrams per burst and per poll, 64 receive endpoints
 and 64 send endpoints per driver (a 65th is code 10), 2048 images (ADR 0019's registry,
-unchanged), and a counters file of 16384 counters, since the sum the client protocol
-page sizes it by becomes 14,345: 73 statics (version 3's 38 and the 35 above), four per
+unchanged), 4096 session records per driver (a datagram for a 4097th session is dropped
+and counted as `receiver.sessions_full`), and a counters file of 16384 counters, since
+the sum the client protocol
+page sizes it by becomes 14,346: 74 statics (version 3's 38 and the 36 above), four per
 publication (4096), three per image (6144), three per recording (3072), one per replay
 (64), two per replay publication (256) and five per endpoint (640, over the 128
 endpoints).
@@ -367,7 +416,7 @@ Aeron's table; a `cavalry:udp` channel whose grammar fails, a multicast address 
 unknown parameter stay code 1. `add subscription` on an endpoint binds it, and the
 first `add publication` on an endpoint connects it; the registries gain 64 send and 64
 receive endpoints, and the counters file is created with 16384 counters, 6 MiB, so that
-the registries still fill first: 14,345 counters when every registry is full ("Values"
+the registries still fill first: 14,346 counters when every registry is full ("Values"
 under `spec/udp.md`), against 8192 before. The driver directory gains `images/`. A version 3 client closes on
 the first `publication ready` of a version 4 driver, since it is longer than its fields,
 so an upgrade restarts the clients before the driver, as every version has said. The
@@ -437,6 +486,18 @@ message naming card 180 until the sender lands.
   message could not size the image's log; Aeron's receiver asks for the setup with a
   status message carrying the send-setup flag and the sender answers with one setup, so
   a late receiver costs one round trip and no new frame type.
+- **Two session states on the receiver, no image and image, with no record between a
+  setup and its image or after an image is removed, and no bound on the records.**
+  Lost: the sender sends a setup every 100 ms until its first status message, and the
+  conductor's creation of the image can take longer than that under cgroup CPU
+  throttling, which the driver degrades under (invariant 3), so a second setup inside
+  that time would create a second image for the session, two `available image`
+  events, two logs and every message delivered twice (invariant 1); and a retransmit
+  or heartbeat that arrives after an image is retired would create a new image at its
+  position. Aeron's `DataPacketDispatcher` keeps a record per session in three states
+  while it has no image, pending, in progress and on cool-down, and this page keeps
+  them, in a table of 4096 with a counter for a datagram it has no room for, since
+  Aeron's maps grow and every map here has a bound.
 - **An error frame (type 4) to tell a sender its image was rejected.** Lost: nothing
   rejects an image in this version; the type stays reserved.
 - **Resolving names on the receiver thread, or re-resolving them.** Lost: resolution is
@@ -466,7 +527,8 @@ and every state has a counter; the sender and the receiver (cards 180 and 181) i
 a page each.
 
 Harder: three pages move versions at once and a version 3 client restarts before a
-version 4 driver; the driver gains two registries and five endpoint counters; the
+version 4 driver; the driver gains two registries, a session table and five endpoint
+counters; the
 `loom` model for the image's writer is new `unsafe` in `cavalry-shm`; `doctor` gains the
 checks the counters above imply, which cards 180 and 181 build.
 
