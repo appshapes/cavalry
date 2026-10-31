@@ -13,8 +13,8 @@ the harness and read its table is [Run the bench](run-the-bench.md).
   part is enough; the first host, `bench`, is an AMD Ryzen 7 2700X with 60 GiB, and
   the second, `grip`, a Dell with an Intel Core i7-10700, eight cores under one L3,
   and 16 GB. `kip`, a Minisforum MS-01 with an Intel Core i9-13900H and 64 GB, whose
-  six P-cores are the part that counts, ran the gate from 2026-10-29 and leaves it for
-  the soak host's role once `grip`'s job has been green over a handful of pushes
+  six P-cores are the part that counts, ran the gate from 2026-10-29 to 2026-10-31 and
+  is the soak host
   ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)).
 - Ubuntu Server, 24.04 LTS or later, installed with one administrative user and SSH.
   The scripts use systemd, GRUB and apt and have run on 26.04.1.
@@ -60,7 +60,7 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    runner into `/home/runner/actions-runner` and run `./config.sh` with a one-hour
    registration token. Give the runner the custom label `bench-linux`, which is the
    label the bench job names. Another host gets a label of its own, `grip-linux` for
-   the host `grip` and `kip-linux` for `kip`, and never `bench-linux`: the gate job
+   the host `grip`, and never `bench-linux`: the gate job
    selects that label, and its baseline belongs to the host that recorded it. Then
    install it as a service so it starts at boot:
 
@@ -137,15 +137,12 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    protection, beside `gates (linux)` and `gates (macos)`. The second host, `grip`, has
    a job of its own in the same file, `bench (grip)`, on `[self-hosted, grip-linux]`
    with its own lists, `4,5,6`, and its own profiles, `grip-linux` and
-   `grip-linux-unchecked`; it joins the required checks once it has been green over a
-   handful of pushes to `master`, in the change that removes `bench (kip)`, the job of
-   the host that leaves the gate
-   ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)). Until
-   then `bench (kip)` runs beside it, on `[self-hosted, kip-linux]`, lists `6,8,10`,
-   profiles `kip-linux` and `kip-linux-unchecked`, required by nothing. `kip`'s
-   baselines are not re-recorded again: a red `bench (kip)` at a tree later than the
-   one they hold is rerun or left, never joined and never re-recorded, since the job
-   goes with the acceptance.
+   `grip-linux-unchecked`, and is a required check too since ADR 0034's acceptance on
+   2026-10-31, after it had been green over three pushes to `master` with its
+   baselines in place; `bench (kip)`, the job of the host that left the gate, went
+   from the file in the same change, and `kip`'s baselines stay in
+   `bench/baseline.json` as its record, compared by nothing
+   ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)).
 
 7. Record the baselines. The first run of the host's job reports every benchmark as
    `no baseline` and passes. A host's baselines are recorded from every process it has
