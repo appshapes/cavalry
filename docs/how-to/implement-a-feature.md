@@ -67,6 +67,16 @@ feature that followed this page, commit by commit.
    7. One crate per commit; data plane and control plane in separate commits. Under a
       data-plane crate, run `just bench` before and after and put both histograms in
       the message; while `just bench` prints `not built yet`, write that instead.
+   8. One pull request per crate and per plane as well, when the work goes through the
+      review loop, and none over about a thousand changed lines, generated and recorded
+      files aside. The reviewer reads a pull request whole and the fixer applies every
+      blocker of a review in one run, so the blocker count of a first review must fit
+      one run. Card 95's driver change went as one pull request of about 3,000 lines
+      (82); its first review found seven blockers, and the fixer applied all seven and
+      ended without committing them. The other rounds that day found five or fewer, on
+      pull requests under 1,600 lines. Split by crate, then by command or by file within
+      a crate, so that each pull request passes the four gates on its own; the rest
+      waits on its own branch until the first merges.
 
 4. **Run the gates and commit.**
    - A person: `/commit <card>` runs the four gates, then `git add`, `git commit`,

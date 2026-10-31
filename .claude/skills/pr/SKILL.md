@@ -28,7 +28,11 @@ named below, stop and hand it back.
    `git switch -c <card>-<slug>`. Check the diff against CLAUDE.md as `/commit` does
    (one crate per commit, docs in the same commit, histograms for a data-plane change, a
    dependency's justification, an ADR for `spec/`), and scan every added line for a
-   secret.
+   secret. A diff over about a thousand changed lines, generated and recorded files
+   aside, is more than one pull request: split it by crate and by plane as
+   `docs/how-to/implement-a-feature.md`, step 3.8, says, so that the first review's
+   blockers fit one fix run, and open the rest from their own branches after this one
+   merges.
 
 2. **Run the gates, one command each.** Read each exit code before the next command:
 
@@ -117,11 +121,14 @@ gh pr checks <number>
   and GitHub keeps one pending run per queue, so a push of yours now gets its own
   review, and the fix run that review starts cancels the one already waiting; on pull
   request 57 two reviews lost their fix run that way and the run that did work answered
-  a review two heads old. When the run completes, its last job approves the `ci` run
-  GitHub held on the agent's push and adds the `review` label if the head has no
-  `dispatch review` run yet (`claude.yml`, "Ask for the review of the agent's push"),
-  so a `dispatch review` run for the new head appears within a minute of the run's end.
-  Add `review` yourself only when a minute has passed and none has.
+  a review two heads old. The fixer commits each blocker as its test passes and pushes
+  as it goes, so the head may move more than once during one run; the review is of the
+  head it leaves. When the run completes, its last job approves the `ci` run GitHub
+  held on the agent's push and adds the `review` label if the head has no `dispatch
+  review` run yet, or if the fix was an edit to the pull request body alone
+  (`claude.yml`, "Ask for the review of the agent's push"), so a `dispatch review` run
+  appears within a minute of the run's end. Add `review` yourself only when a minute
+  has passed and none has.
 
 - **"Autonomous fix cap reached".** The fourth changes-requested review ends the fixer's
   part (`claude.yml`, `MAX_ATTEMPTS: 3`). The pull request is the author's now: fix,
@@ -129,10 +136,12 @@ gh pr checks <number>
 
 - **A blocker the fixer cannot apply.** The fixer's run denies writes to
   `.github/workflows/**`, `.claude/**`, `spec/**` and `bench/baseline.json`
-  (`claude.yml`, `settings.deny`), and a blocker on the pull request body alone leaves
-  it nothing to push, so its run fails with "Fix session ended without a push landing"
-  (issue 11). These are the author's from the first review: apply them, push, or for the
-  body alone `gh pr edit <number> --body-file <file>` and then `gh pr edit <number>
+  (`claude.yml`, `settings.deny`), so a review whose blockers are all there ends its run
+  with "Fix session ended without a push landing ... and without a change to the pull
+  request body". These are the author's from the first review: apply them, push. A
+  blocker on the pull request body alone the fixer applies itself with `gh pr edit`,
+  and its run asks for the review of the unchanged head (issue 11); when you edit the
+  body yourself, `gh pr edit <number> --body-file <file>` and then `gh pr edit <number>
   --add-label review`, because an edit to the body raises no review.
 
 - **No review fifteen minutes after a head.** `gh run list --workflow "review pr"`: a
