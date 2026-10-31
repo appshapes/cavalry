@@ -616,7 +616,7 @@ applied on the spec page, where `receiver.dropped_frames` is split by reason int
 counters and the image's states are named with `image.unsubscribed`, so that the page's
 static counters are 44 and the sum 14,354, against this ADR's 39 and 14,349, both under
 16384. The change that accepts this ADR carries the three
-pages, 91 UDP vectors, 61 log buffer vectors and 102 client protocol vectors, the
+pages, 96 UDP vectors, 61 log buffer vectors and 102 client protocol vectors, the
 `udp` and `channel` modules of `cavalry-proto` with their no-panic tests and fuzz
 targets, log buffer version 1 and the image writer in `cavalry-shm` with its loom model,
 the driver's channel check and 16384-counter file, and the client's reading of the new

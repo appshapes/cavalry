@@ -739,6 +739,13 @@
       "code": 1
     },
     {
+      "name": "channel-repeated-unknown-key",
+      "kind": "channel",
+      "string": "cavalry:udp?mtu=1|mtu=2",
+      "error": "grammar",
+      "code": 1
+    },
+    {
       "name": "channel-grammar-before-endpoint",
       "kind": "channel",
       "string": "cavalry:udp?endpoint=10.0.0.2:0|endpoint=10.0.0.2:0",

@@ -708,7 +708,10 @@ fn check_term_offset(term_offset: i32, term_length: u32) -> Result<(), UdpError>
 /// order against `term_length`, the image's term length for a status message, a NAK or
 /// a heartbeat, which a setup frame does not need since it carries its own. A data or
 /// padding frame with a frame length above 0 is [`ControlFrame::Data`], unchecked here:
-/// [`Datagram::check`] is its check.
+/// [`Datagram::check`] is its check. A heartbeat can arrive for a session the receiver
+/// has no record of, before any image (`spec/udp.md`, "The receiver", step 1); the
+/// receiver passes [`MAX_TERM_LENGTH`] there, so that only the frame's shape is checked
+/// and the offset is held against the image's term length once it has one (card 181).
 pub fn parse(bytes: &[u8], term_length: u32) -> Result<ControlFrame, UdpError> {
     let Ok((head, _)) = RawCommon::ref_from_prefix(bytes) else {
         return Err(UdpError::TooShort {

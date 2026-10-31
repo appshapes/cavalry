@@ -760,15 +760,11 @@ pub struct TermAppender {
 impl TermAppender {
     fn new(mapped: Arc<Mapped>) -> Result<Self, LogError> {
         mapped.require_writable()?;
-        if mapped.fields.log_type().is_image() {
-            return Err(LogError::Type {
-                found: mapped.fields.log_type() as i32,
-            });
-        }
         let default_header = mapped.fields.default_frame_header();
         let exclusive = match mapped.fields.log_type() {
             LogType::Concurrent => None,
-            // Refused above; no claim ever lands in an image.
+            // No claim ever lands in an image: the receiver writes it by term offset
+            // (`ImageWriter`), so an appender over one is refused here, once.
             LogType::Image => {
                 return Err(LogError::Type {
                     found: LogType::Image as i32,

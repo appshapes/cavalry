@@ -848,7 +848,7 @@ user-visible change, added in the same commit as the change. The format follows
   version 0 has Aeron's control frames field for field, the setup frame, the status
   message, the NAK, the RTT measurement and the heartbeat, the sender's and the
   receiver's rules with Aeron's values, the channel URI `cavalry:udp?endpoint=<host>:<port>`
-  with `interface` as its one option, and 91 vectors; `spec/log-buffer.md` version 1
+  with `interface` as its one option, and 96 vectors; `spec/log-buffer.md` version 1
   adds the image type and the receiver window length; `spec/client-protocol.md` version
   4 accepts a `cavalry:udp` channel, adds the channel status indicator id to the three
   ready events, error codes 4 and 9, two endpoint registries and a 16384-counter file.

@@ -363,7 +363,9 @@ filled.
 
 ## Counters
 
-Static unless a key is named (`counters.toml`):
+Static unless a key is named. None is in `counters.toml` until the feature that moves it
+lands: the sender's rows with card 180, the receiver's, the image's and the endpoint's
+with card 181.
 
 | Counter | Moves when |
 | --- | --- |
