@@ -1,7 +1,8 @@
 # Record a stream to the durable log
 
 A how-to page: one task, record a stream's live publication to disk while a driver
-runs, watch the recording's progress in `doctor`, and stop it. What the files hold is
+runs, watch the recording's progress in `doctor`, stop it, and then cut, purge or
+delete it. What the files hold is
 [`spec/durable-log.md`](../reference/durable-log.md); what the commands mean is
 [`spec/client-protocol.md`](../reference/client-protocol.md), "Commands". In Aeron, this
 is Archive's `startRecording` ([glossary](../glossary.md)).
@@ -64,10 +65,56 @@ is Archive's `startRecording` ([glossary](../glossary.md)).
    recording also stops by itself when its publication closes, once the recorder has
    written up to the end of stream.
 
-From a program, the same three steps are `client.start_recording("cavalry:ipc", 1001)?`,
+4. Cut it, when the end of the recording is not wanted:
+
+   ```sh
+   cargo run --release -p cavalry -- record --truncate 0 --to 2026-10-29T09:36:00Z
+   ```
+
+   You will see `recording 0 truncated to <position>`: the driver resolved the instant
+   through the recording's time index to the first position written after it, removed
+   the segment files past that position, cut the one holding it so the bytes past it
+   are zero, cut the time index, and moved the stop there. A position in place of the
+   instant (`--to 3200`) is taken as given: a multiple of 32 at which a frame begins,
+   from the recording's retained position to its stop. An instant needs `--log-dir`
+   on a host with no default log directory. A replay of the recording now ends at the
+   new stop.
+
+5. Purge the segment files before a point, when the disk is wanted back:
+
+   ```sh
+   cargo run --release -p cavalry -- record --purge 0 --before 2026-10-29T09:36:00Z
+   ```
+
+   You will see `--before resolved to position <p>; purging before the segment base
+   <b>` and `recording 0 purged before <b>`: the instant resolved to the position
+   recorded at it, which is almost never a segment base, so the command rounded it
+   down to the segment base at or before it and sent that, so that no byte recorded
+   after the instant goes. The driver wrote the base as the recording's retained
+   position and removed the segment files wholly before it, one per duty cycle; the
+   time index keeps its entries. A replay from the start, or from a position before
+   the retained position, is refused with error 23 naming it. A base at or below the
+   retained position is nothing to purge, which the driver refuses with error 23 and
+   the retained position, so you see that an earlier purge already took it. A
+   position in place of the instant (`--before 134217728`) is sent as given and must
+   be a segment base.
+
+6. Delete it, when none of it is wanted:
+
+   ```sh
+   cargo run --release -p cavalry -- record --delete 0
+   ```
+
+   You will see `recording 0 deleted`: every file of the recording is gone and its
+   catalog slot reads deleted, which no command reads again; the id is never reused.
+
+From a program, the same six steps are `client.start_recording("cavalry:ipc", 1001)?`,
 which returns a `Recording` with `recording_id()`, `position()` and `synced_position()`
-read from the counters file, and `client.stop_recording(id)?`, from any client, or
-`recording.stop(&mut client)?`, the same command with the handle's id. Dropping the
+read from the counters file, `client.stop_recording(id)?`, from any client, or
+`recording.stop(&mut client)?`, the same command with the handle's id, and
+`client.truncate_recording(id, position)?`, `client.purge_segments(id, segment_base)?`
+and `client.purge_recording(id)?`, each with a position, since a program resolves an
+instant through `cavalry::index::position_after` or `position_at` itself. Dropping the
 `Recording` stops nothing.
 
 ## How to verify it worked
@@ -76,6 +123,11 @@ read from the counters file, and `client.stop_recording(id)?`, from any client, 
   bytes of `0-0.rec` are the stream's frames as the publisher wrote them, header and
   body, so a position in the recording is a position in the stream.
 - `just doctor` after the stop lists no recording and reports no `recording-*` finding.
+- After step 4, `cavalry replay --recording 0 --from start` ends at the new stop; after
+  step 5, `ls -l ~/.local/share/cavalry/log` no longer lists the segment files before
+  the base you purged, and a replay from a position before it is refused with error 23;
+  after step 6, the directory holds no `0-*.rec` and no `0.idx`, and `cavalry record
+  --delete 0` again is refused with error 21, whose message says the slot is deleted.
 - `cavalry record --stop 0` a second time prints `recording 0 stopped` again: a stop of
   a stopped recording is success with nothing written.
 
@@ -99,16 +151,25 @@ read from the counters file, and `client.stop_recording(id)?`, from any client, 
   log directory, and start the recording again.
 - `driver failed (log-dir): log directory locked`: another driver holds the directory;
   stop it, or give this one its own with `--log-dir`.
+- `error 24 (recording busy)`: the recording is live, read by a replay, or under
+  another truncate, purge or delete; the message says which and what to do: `--stop`
+  it, `cavalry replay --stop` the replay, or wait for the other command's answer.
+- `error 23 (position out of range)` from `--truncate` or `--purge`: the position is
+  not at a frame of the recording between its retained position and its stop, or not
+  a segment base above the retained position; the message names both. An instant that
+  resolves before the retained position means an earlier purge already took it.
+- `error 12 (storage space)` from `--truncate`, `--purge` or `--delete`: a file could
+  not be read, cut or removed; the message names it, and the driver has repaired the
+  recording's catalog slot from what its files hold. Fix the directory's permissions
+  or disk, and send the command again.
 - `log-directory-space` in `doctor --log-dir`: the log directory's filesystem has under
-  a tenth free. The finding names the stopped recording whose segment files a `purge
-  segments` command frees the most of, the position to send and the files and MiB it
-  removes; the command is in the client protocol
-  ([client protocol](../reference/client-protocol.md)), and its `cavalry record`
-  form follows in the next change.
+  a tenth free. The finding names the stopped recording whose segment files a purge
+  frees the most of, and the `cavalry record --purge` and `--delete` commands that
+  remove them, with the files and MiB each frees.
 - `recording-over-half` in `doctor --log-dir`: one recording takes over half the
   filesystem, a live one by its `recording.bytes` gauge, a stopped one by its
   descriptor. Stop a live one with `--stop`, then purge its segments before the
-  filesystem fills.
+  filesystem fills, as step 5 does.
 - `log-directory-backing` in `doctor` says the log directory's path is over 337 bytes:
   the recorder opens each segment file by its full path, and the standard library
   allocates for a path of 384 bytes or more instead of using its stack buffer, so a
