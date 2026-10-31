@@ -1,6 +1,6 @@
 # 0039. Build UDP unicast between hosts third, in four features
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-31
 - **Invariants affected:** 1, 2, 3, 4, 5, 6
 - **Supersedes:** none; ADR 0023's Revisit named UDP as the third slice, and this ADR
@@ -233,6 +233,13 @@ the source (the status message's drawn length against its stated one, the receiv
 of an RTT measurement); the hosts' state in ADR 0034 and the link's record on the
 set-up page; and cards 179 to 183 on the Cavalry list with their briefs and "Done
 when" sections.
+
+Acceptance, 2026-10-31 *(acceptance)*: Rjae accepted the decision as proposed on
+2026-10-31, answering the recorded decision d-20261031-d718fc through the team's Slack
+gateway after the proposal merged as e545119 (pull request 86, reviewed and approved at
+5c5a549). Nothing in the Decision changed; the four feature cards stand as written, and
+the hand on the hosts the Consequences ask for stays Rjae's, before card 182. Card 179
+is the next task.
 
 ## Consequences
 
