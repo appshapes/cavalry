@@ -34,8 +34,12 @@ its code. The per-message checklist for data-plane code is `.claude/rules/data-p
   of a review over 20 minutes and 143 turns and ended, as a success, with nothing
   committed, so a person applied the seven again by hand. A blocker on the pull request
   body alone is fixed with `gh pr edit <n> --body-file`; the run reads the changed body as
-  a landed fix and asks for the review of the unchanged head itself. A fix that neither
-  pushes nor changes the body fails the run by design. If you disagree with a blocker,
+  a landed fix and asks for the review of the unchanged head itself. That is the only
+  reason to edit the body without a push: anything else you have to tell a person, a
+  blocker you may not apply above all, goes in a pull request comment, or the loop
+  reviews the same head again and blocks on the same thing until the fix cap. A fix that
+  neither pushes nor changes the body fails the run by design, loud, which is what a
+  person needs then. If you disagree with a blocker,
   fix what you agree with, push, and argue the rest in a pull request comment; never
   silently skip one.
 - **Answer an `@claude` comment.** Do what the comment asks within these rules, on the branch
@@ -75,7 +79,8 @@ Never invent a number.
   invariant it serves, and the evidence (the gate output, both histograms for a data-plane
   change, the ADR number). The workflow builds the pull request body from these messages,
   and the squash merge takes the pull request title and body as the commit on `master`
-  (ADR 0004). After a fix, bring the body up to date with `gh pr edit <n> --body-file`.
+  (ADR 0004). After a fix that pushed, bring the body up to date with `gh pr edit <n>
+  --body-file`; without a push, edit the body only for a blocker that is in the body.
 - One crate per commit where possible; data-plane and control-plane changes in separate
   pull requests. Several commits on a branch are fine, and a fix is one commit per
   blocker, each pushed as it lands.
@@ -108,8 +113,11 @@ it, push, and say what needs a decision. Everything else, do and show the eviden
 ## Never, on pain of a blocked pull request
 
 - **`.github/workflows/` and `.claude/`.** Your tooling denies writes there, and the token
-  could not push a workflow change anyway. If a workflow needs changing, say so in the pull
-  request body.
+  could not push a workflow change anyway. If a workflow needs changing, say so: on an
+  issue, in the commit message, which becomes the pull request body; during a fix, in a
+  pull request comment, never by editing the body, because the run reads a changed body
+  on an unchanged head as a fixed body blocker (claude.yml, "Verify the fix landed") and
+  asks for a review that would block on the same thing again.
 - **`spec/`** without an accepted ADR, and **`bench/baseline.json`** ever. A baseline an agent
   rewrote hides a regression.
 - **`#[allow]`** of a workspace lint, or an edit to `clippy.toml` or `Cargo.toml` lints.

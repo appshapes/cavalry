@@ -504,7 +504,11 @@ jobs:
           fi
           # The held runs appear within seconds of the push, which happened before this job
           # started; poll for up to two minutes, approve whatever is held, and stop after one
-          # quiet poll once runs exist.
+          # quiet poll once runs exist. Only the head's runs: the fixer pushes each blocker
+          # as it lands, and a run held on an earlier head of the same cycle stays at action
+          # required and never runs, which is right, since it would test a superseded head
+          # and queue on the single-tenant bench hosts; it sits in the Actions tab's waiting
+          # list and nothing reads it, as the pull request's checks are the head's alone.
           approved=0; seen=0; quiet=0; deadline=$((SECONDS + 120))
           while :; do
             runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${head}&per_page=50" --jq '.workflow_runs[] | "\(.id) \(.status) \(.conclusion // "")"')
@@ -528,7 +532,10 @@ jobs:
       # has a `dispatch review` run already, which every head a person pushed has, so no
       # head is reviewed twice and a run that pushed nothing sends nothing; the one head
       # reviewed twice on purpose is a body-only fix's, whose fix is in the body the
-      # reviewer reads, not in the head. A skipped dispatch run is a `labeled` event for
+      # reviewer reads, not in the head, and the reviewer's "Verify a review was
+      # submitted" counts only a review newer than its run's start, so the second review
+      # of that head is a real verdict or a retry, never the first one read again. A
+      # skipped dispatch run is a `labeled` event for
       # another label, not a review, so it does not count. The dispatcher refuses a fork,
       # so a fork head gets no label either.
       - name: Ask for the review of the agent's push

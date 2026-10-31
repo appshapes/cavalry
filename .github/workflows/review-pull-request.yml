@@ -71,7 +71,10 @@ jobs:
       # Check their shape before they reach a command line; refuse a pull request whose
       # head is not in this repository, since its code would meet the secrets; and stop
       # quietly when the head has moved on, because the dispatch for the new head is
-      # the one that reviews it.
+      # the one that reviews it. Last, count the claude reviews already at the head, so
+      # that the verify step below can tell a review this run submitted from one that
+      # was there before it: a head reviewed again after a body-only fix (claude.yml,
+      # "Verify the fix landed") carries the changes-requested review that started it.
       - name: Check the pull request
         id: pr
         env:
@@ -99,6 +102,10 @@ jobs:
             echo "::notice::pull request $PR_NUMBER moved from $HEAD_SHA to $head_now; the run dispatched for the new head reviews it"
             echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          reviews_before=$(gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" \
+            --jq ".[] | select((.user.login // \"\" | startswith(\"claude\")) and .commit_id == \"$HEAD_SHA\") | .id" | grep -c . || true)
+          echo "claude reviews at $HEAD_SHA before this run: $reviews_before"
+          echo "reviews_before=$reviews_before" >> "$GITHUB_OUTPUT"
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
       # Base at the root, head in a subdirectory: the pattern the action's own security
@@ -218,8 +225,14 @@ jobs:
       # auto-merge never armed; in Cavalry, runs 38983393674, 40322905586 and
       # 40357199403, each a "success" result with no `gh pr review`, after 28 and 32
       # turns where the log survives). This step is the job's verdict: a claude review
-      # at the head SHA passes; none on attempt 1 hands the head to the `retry` job
-      # below; none on attempt 2 fails, whatever the action reported. It also writes the
+      # at the head SHA that is newer than the run's start passes; none on attempt 1
+      # hands the head to the `retry` job below; none on attempt 2 fails, whatever the
+      # action reported. Newer than the run's start, not merely at the head: after a
+      # body-only fix the loop reviews the same head again (claude.yml, "Verify the fix
+      # landed", `landed=body`), and that head already carries the changes-requested
+      # review that started the fix, so "any claude review at the head" would read a
+      # session that submitted nothing as that old verdict, with no retry and the pull
+      # request parked with changes requested on a green head. It also writes the
       # job summary: the session's result line, the tool calls the settings above
       # denied, and on a miss the session's final text, which the action discards, so
       # the second attempt can be read against the first. Bounded excerpts, on a page as
@@ -235,12 +248,20 @@ jobs:
           ATTEMPT: ${{ inputs.attempt }}
           REVIEW_OUTCOME: ${{ steps.review.outcome }}
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+          REVIEWS_BEFORE: ${{ steps.pr.outputs.reviews_before }}
         run: |
           set -euo pipefail
           # One line per claude review at head: "STATE<TAB>has-trailer". Paginated so a
-          # long-lived pull request cannot hide the newest review.
+          # long-lived pull request cannot hide the newest review. Only a review newer
+          # than the run's start counts: the count before it comes from "Check the pull
+          # request", and the API lists reviews oldest first, so the last line is the
+          # newest and the one this run submitted when the count grew.
           reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" \
             --jq ".[] | select((.user.login // \"\" | startswith(\"claude\")) and .commit_id == \"$HEAD_SHA\") | [.state, (.body // \"\" | contains(\"@claude\") | tostring)] | @tsv")
+          count=$(printf '%s\n' "$reviews" | grep -c . || true)
+          if [ "$count" -le "${REVIEWS_BEFORE:-0}" ]; then
+            reviews=""
+          fi
           last=$(printf '%s\n' "$reviews" | tail -n 1)
           state=${last%%$'\t'*}
           has_trailer=${last##*$'\t'}
@@ -250,7 +271,7 @@ jobs:
           {
             echo "## Reviewer session, attempt $ATTEMPT of 2, head $HEAD_SHA"
             echo
-            if [ -n "$reviews" ]; then echo "- Verdict: $state"; else echo "- Verdict: none submitted"; fi
+            if [ -n "$reviews" ]; then echo "- Verdict: $state"; else echo "- Verdict: none submitted (claude reviews at this head before the run: ${REVIEWS_BEFORE:-0})"; fi
             if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
               jq -r '.[] | select(.type == "result") | "- Result: \(.subtype), is_error \(.is_error), \(.num_turns // "?") turns, \((.duration_ms // 0) / 1000 | floor) s, \(.permission_denials // [] | length) denied tool calls"' "$EXECUTION_FILE"
               echo
@@ -274,11 +295,11 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY" || echo "::warning::The job summary could not be written"
           if [ -z "$reviews" ]; then
             if [ "$ATTEMPT" = "1" ]; then
-              echo "::warning::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt 1 of 2 (the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did); the retry job dispatches attempt 2"
+              echo "::warning::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt 1 of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did); the retry job dispatches attempt 2"
               echo "reviewed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt $ATTEMPT of 2 (the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did): add the review label to the pull request to run it again (docs/how-to/ask-the-agent.md, \"When it does not work\")"
+            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt $ATTEMPT of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did): add the review label to the pull request to run it again (docs/how-to/ask-the-agent.md, \"When it does not work\")"
             exit 1
           fi
           echo "reviewed=true" >> "$GITHUB_OUTPUT"
