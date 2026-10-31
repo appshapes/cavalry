@@ -115,9 +115,9 @@ handle lives, as many as the driver allows live at once, 64; one more is
   one `cavalry record` printed.
 - `error 23 (position out of range)`: the position is not a multiple of 32 from the
   recording's start position to its extent; the message names both. Resolve an instant
-  instead, or pass `--from 0`, which the command sends as the start position only when
-  the recording started at 0: a recording that started later refuses a position before
-  its start.
+  instead, or pass `--from start`, which names the recording's start position whatever
+  it is; `--from 0` is the start only of a recording that started at 0, and a recording
+  that started later refuses a position before its start.
 - `error 7 (malformed command)`: a length below −1; `--to` before `--from` is refused
   before the command is sent.
 - `error 12 (storage space)`: a segment file of the recording is missing from the log
@@ -126,8 +126,11 @@ handle lives, as many as the driver allows live at once, 64; one more is
   segment file and is not this error: a replay of it from that position ends at once
   there with `0 messages`
   ([ADR 0035](../decisions/0035-end-a-replay-with-nothing-to-play-at-once.md)).
-- `error 10 (resource temporarily unavailable)`: the replays registry (64), the
-  replayer's queue or the counters file is full; stop replays that are not needed.
+- `error 10 (resource temporarily unavailable)`: the replays registry (64), the replay
+  publications (128: every replay's publication, live or lingering after its replay
+  ended until its subscribers read to the end or five seconds pass), the replayer's
+  queue or the counters file is full; the message names which. Stop replays that are
+  not needed, or wait for the lingering ones to close.
 - The replay prints nothing and ends after five seconds with `ended for want of a
   subscriber`: a program started the replay before adding its subscription. Subscribe
   first, as the command does.

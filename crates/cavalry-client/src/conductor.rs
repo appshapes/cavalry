@@ -55,12 +55,13 @@ pub(crate) const REGISTRATION_QUEUE: usize = 64;
 
 /// How many replays one client follows for their `replay stopped` at once: the
 /// driver's own bound on replays, starting or live (`spec/client-protocol.md`, "Sizes";
-/// ADR 0030). [`ReplayRegistry`] forgets a replay once its end is stored or its handle
+/// ADR 0030), the one definition of which is `cavalry_proto`'s (ADR 0036).
+/// [`ReplayRegistry`] forgets a replay once its end is stored or its handle
 /// is gone, so what it holds is bounded by what the driver holds, and its capacity is
 /// one more than this for the command in flight. Full even so, a registration is
 /// refused, never dropped in silence: `start_replay` stops the replay and returns
 /// [`crate::ClientError::ReplaysFull`].
-pub(crate) const MAX_REPLAYS: usize = 64;
+pub(crate) const MAX_REPLAYS: usize = cavalry_proto::client_protocol::MAX_REPLAYS;
 
 /// How many replay registrations may wait for the conductor between two of its cycles.
 /// One command is in flight per client, so one waits at most; the rest is room.

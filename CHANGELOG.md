@@ -701,3 +701,16 @@ user-visible change, added in the same commit as the change. The format follows
   The replayer opens no file for a replay with nothing to play
   ([ADR 0035](docs/decisions/0035-end-a-replay-with-nothing-to-play-at-once.md); card
   165, found by `just quickstart` on 2026-10-29).
+- A replay of a live recording ends on the recorder's word: when the recorder reports
+  the stop, the conductor hands the replayer the stop position and the replay ends
+  there with reason 0 in the replayer's next cycle, where it read the catalog once a
+  second and, standing at a segment boundary, could trust a freed and reused counter
+  past the stop and fail with reason 3. The replay publications, live or lingering
+  after their replay ended, are bounded at 128, twice the replays registry; a `start
+  replay` past it is refused with error 10 naming them. `cavalry replay --from start`
+  names a recording's start position without knowing it; the client's full replay
+  start queue is `ClientError::ReplayQueueFull` (reason `replay-queue-full`), not an
+  error that blamed the driver; and the replays bound has one definition, in
+  `cavalry-proto`
+  ([ADR 0036](docs/decisions/0036-hand-the-replayer-the-stop-and-bound-the-replay-publications.md);
+  card 160).

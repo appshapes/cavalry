@@ -2,7 +2,7 @@
 //! SIGINT, SIGTERM or SIGHUP; `cavalry doctor` explains the driver from its counters;
 //! `cavalry record <stream id>` records a stream to the durable log and `cavalry record
 //! --stop <recording id>` stops it (ADR 0025); `cavalry replay --recording <id> --from
-//! <position or instant>` plays a recording back and prints every message (ADR 0030).
+//! <position, instant or start>` plays a recording back and prints every message (ADR 0030).
 //! `console` arrives with its feature. No arguments and no configuration are the primary way to run it (CLAUDE.md,
 //! invariant 5): the directory is `spec/client-protocol.md`'s default and the log
 //! directory `Driver::default_log_dir()`'s. The keys of `config.toml` are read from the
@@ -14,7 +14,8 @@ use std::process::ExitCode;
 
 use cavalry::config::Config;
 use cavalry::{
-    Cavalry, Driver, FOLLOW_LENGTH, Image, NULL_LENGTH, Positions, Subscription, doctor, index,
+    Cavalry, Driver, FOLLOW_LENGTH, Image, NULL_LENGTH, NULL_POSITION, Positions, Subscription,
+    doctor, index,
 };
 
 const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
@@ -26,7 +27,7 @@ const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
                            log; prints the recording id (--channel <uri> for another
                            channel than cavalry:ipc)
   record --stop <id>       stop that recording
-  replay --recording <id> --from <position or instant> [--to <position or instant>]
+  replay --recording <id> --from <position, instant or start> [--to <position or instant>]
          [--stream <id>] [--follow]
                            play that recording back from the position, or from the
                            instant resolved through its time index, and print one line
@@ -63,13 +64,16 @@ enum RecordAction {
     Stop { recording_id: i64 },
 }
 
-/// A point in a recording as the command line names it: a position, or an instant the
-/// time index resolves.
+/// A point in a recording as the command line names it: a position, an instant the
+/// time index resolves, or the recording's start, which `--from start` names without
+/// knowing it (card 160).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Point {
     Position(i64),
     /// Nanoseconds since the Unix epoch.
     Instant(i64),
+    /// The recording's start position, whatever it is: sent as the null position.
+    Start,
 }
 
 /// What `cavalry replay` asked for.
@@ -119,7 +123,7 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
             "--dir <path>, --log-dir <path>, --stop <recording id>, --channel <uri> and a stream id"
         }
         "replay" => {
-            "--dir <path>, --log-dir <path>, --recording <id>, --from <position or instant>, \
+            "--dir <path>, --log-dir <path>, --recording <id>, --from <position, instant or start>, \
              --to <position or instant>, --stream <id> and --follow"
         }
         _ => "--dir <path> and --log-dir <path>",
@@ -273,7 +277,9 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 },
             ),
             (None, _) => Invocation::Wrong("replay needs --recording <id>".to_string()),
-            (_, None) => Invocation::Wrong("replay needs --from <position or instant>".to_string()),
+            (_, None) => {
+                Invocation::Wrong("replay needs --from <position, instant or start>".to_string())
+            }
         },
         _ => match (stream_id, stop) {
             (Some(stream_id), None) => Invocation::Record(
@@ -299,11 +305,15 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
     }
 }
 
-/// A point of a recording from the command line: a whole number is a position, a
-/// multiple of 32 from 0; `@<n>` is an instant, n nanoseconds since the Unix epoch;
-/// anything else is an RFC 3339 time, `2026-10-29T09:36:00Z`, with an optional
-/// fraction of a second and an offset `Z` or `±HH:MM`.
+/// A point of a recording from the command line: `start` is the recording's start
+/// position, whatever it is; a whole number is a position, a multiple of 32 from 0;
+/// `@<n>` is an instant, n nanoseconds since the Unix epoch; anything else is an RFC
+/// 3339 time, `2026-10-29T09:36:00Z`, with an optional fraction of a second and an
+/// offset `Z` or `±HH:MM`.
 fn parse_point(value: &str) -> Result<Point, String> {
+    if value == "start" {
+        return Ok(Point::Start);
+    }
     if let Some(nanos) = value.strip_prefix('@') {
         return nanos
             .parse::<i64>()
@@ -593,6 +603,12 @@ fn replay(config: &Config, request: ReplayRequest) -> ExitCode {
     let resolve = |point: Point, what: &str| -> Result<i64, String> {
         match point {
             Point::Position(position) => Ok(position),
+            // The driver resolves the null position to the recording's start (spec,
+            // "start replay"); as an end it would mean nothing, and is refused.
+            Point::Start if what == "--from" => Ok(NULL_POSITION),
+            Point::Start => Err(format!(
+                "{what} start: the start is where a replay begins, not where it ends"
+            )),
             Point::Instant(instant) => {
                 let log_dir = config.log_dir.as_deref().ok_or_else(|| {
                     "an instant needs the log directory, which this host has no default for: \
@@ -909,6 +925,23 @@ mod tests {
                 assert!(USAGE.contains(flag), "{flag}");
             }
         }
+    }
+
+    /// `--from start` names the recording's start position without knowing it: the
+    /// request carries `Point::Start`, which the command sends as the null position;
+    /// `--to start` is refused when the command runs, since an end at the start plays
+    /// nothing, and the parser passes it through as any point (card 160).
+    #[test]
+    fn replay_from_start_is_the_recordings_start_position() {
+        match parsed(&["replay", "--recording", "3", "--from", "start"]) {
+            Invocation::Replay(_, request) => {
+                assert_eq!(request.from, Point::Start);
+                assert_eq!(request.to, None);
+            }
+            _ => panic!("not a replay invocation"),
+        }
+        assert_eq!(parse_point("start"), Ok(Point::Start));
+        assert!(parse_point("Start").is_err(), "the word is lowercase");
     }
 
     #[test]

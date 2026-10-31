@@ -139,7 +139,7 @@ id = 15
 name = "driver.registry_full"
 kind = "counter"
 scope = "static"
-doc = "Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions or images, or the counters file, was at capacity (spec/client-protocol.md, Sizes)."
+doc = "Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions, images, recordings or replays, its bound on replay publications (live or lingering after their replay ended), the recorder's or the replayer's request queue, or the counters file, was at capacity; the error message names which (spec/client-protocol.md, Sizes; ADR 0036)."
 doctor = "A fixed capacity of the driver is reached: clients, publications or subscriptions are not being closed, or this host needs more than one driver's worth. Close what is not used; the error event's message names the registry; the capacities are the driver's in this version."
 
 [[counter]]

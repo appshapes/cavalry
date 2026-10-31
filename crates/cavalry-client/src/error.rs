@@ -124,6 +124,14 @@ pub enum ClientError {
         /// The bound: the driver's own on replays.
         limit: usize,
     },
+    /// This client has as many `start replay` commands waiting for the driver's answer
+    /// as its conductor keeps registrations for between two of its cycles, so a new
+    /// one was not sent. Nothing reached the driver; the conductor takes the waiting
+    /// registrations at its next cycle, and a start after that is sent.
+    ReplayQueueFull {
+        /// The bound: the client's own on starts in flight.
+        limit: usize,
+    },
     /// An add or remove command went unanswered for the response timeout.
     ResponseTimeout {
         /// The command, by name.
@@ -168,6 +176,7 @@ impl ClientError {
             ClientError::Refused { .. } => "refused",
             ClientError::SubscriptionsFull { .. } => "subscriptions-full",
             ClientError::ReplaysFull { .. } => "replays-full",
+            ClientError::ReplayQueueFull { .. } => "replay-queue-full",
             ClientError::ResponseTimeout { .. } => "response-timeout",
             ClientError::CommandRing(_) => "command-ring",
             ClientError::Broadcast(_) => "broadcast",
@@ -246,6 +255,12 @@ impl fmt::Display for ClientError {
                 "command refused ({reason}): this client follows {limit} replays at once, the \
                  driver's bound; the new one was stopped again; wait for one of them to end, or \
                  stop one this process no longer needs; see {DOC_SIZES}"
+            ),
+            ClientError::ReplayQueueFull { limit } => write!(
+                f,
+                "command refused ({reason}): this client has {limit} replay starts waiting for \
+                 the driver's answer and sent nothing; wait for one to be answered, then start \
+                 the next; see {DOC_SIZES}"
             ),
             ClientError::ResponseTimeout { command } => write!(
                 f,

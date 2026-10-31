@@ -78,8 +78,18 @@ pub const MAX_IMAGES: usize = 2048;
 /// (ADR 0025).
 pub const MAX_RECORDINGS: usize = 1024;
 
-/// How many replays the driver holds: starting or live (ADR 0030).
-pub const MAX_REPLAYS: usize = 64;
+/// How many replays the driver holds: starting or live (ADR 0030); the one definition
+/// is `cavalry_proto`'s, which the client shares (ADR 0036).
+pub const MAX_REPLAYS: usize = cavalry_proto::client_protocol::MAX_REPLAYS;
+
+/// How many replay publications the driver holds: a live replay's, and one that lingers
+/// after its replay ended, until every subscriber has reached its end of stream or the
+/// publication linger has passed. A replay leaves the replays registry when it ends,
+/// so its publication outlives its registry slot, and new replays could start and end
+/// under the linger with no bound on the publications they leave behind; this is that
+/// bound, two per replay slot. `start replay` is refused with error code 10 when the
+/// starting replays and the replay publications together have reached it (ADR 0036).
+pub const MAX_REPLAY_PUBLICATIONS: usize = 2 * MAX_REPLAYS;
 
 /// How long a replay's publication may have no subscriber before the replay ends with
 /// reason 2, from its start or from the moment its last subscriber went: Aeron's replay

@@ -74,3 +74,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0033. Record a bench host's baseline from every process it has run at one tree](decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)
 - [0034. Run the latency gate's second host on grip and the soak host on kip](decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)
 - [0035. End a replay with nothing to play at once, without a segment file](decisions/0035-end-a-replay-with-nothing-to-play-at-once.md)
+- [0036. Hand the replayer a recording's stop and bound the replay publications](decisions/0036-hand-the-replayer-the-stop-and-bound-the-replay-publications.md)
