@@ -861,3 +861,11 @@ user-visible change, added in the same commit as the change. The format follows
   double with the counters file, to about 9 GB a day
   ([ADR 0040](docs/decisions/0040-adopt-aerons-transport-frames-as-the-udp-transport.md);
   card 179).
+- ADR 0041, Proposed: the UDP sender is the driver's fourth dedicated thread,
+  `DriverThread::Sender`, linked to the conductor by two bounded queues as the recorder
+  is, owning the send endpoints' sockets and each publication's send state; the socket
+  calls `std` lacks come through `nix` 0.31 (`socket`, `uio`, `net`): `sendmmsg` per
+  burst on Linux and `sendmsg` per datagram elsewhere, `recvmmsg` and `recvmsg` for the
+  control frames, `SndBuf` and `RcvBuf` read back into the endpoint's counters, none of
+  them allocating per call; the dependency needs Rjae's approval before it exists
+  ([ADR 0041](docs/decisions/0041-send-from-a-sender-thread-through-nix.md); card 180).
