@@ -89,6 +89,16 @@ reports it running with a new pid.
   so it takes a whole core from the clients. Set `CAVALRY_CONDUCTOR_IDLE_STRATEGY` to
   `backoff`, or isolate a core and pin the driver there. The same check notes isolated
   CPUs a backoff conductor is not using.
+- **The directory vanished under a running driver.** `doctor` reports `FAIL
+  driver-directory ... no driver directory` while the driver and its clients run on,
+  since their mappings outlive the unlink, and a new client is refused with `no driver
+  at <dir>`. On Linux the usual cause is logind: when a user's last session ends and
+  the user does not linger, it removes every POSIX shared-memory object the user owns
+  (`RemoveIPC=yes` in `logind.conf`, the default), which is the driver's files under
+  `/dev/shm`. A driver run as a service under a normal user needs `sudo loginctl
+  enable-linger <user>`, as [Set up a soak host](set-up-a-soak-host.md) does, or
+  `RemoveIPC=no`. Stop and start the driver afterwards: recovery rebuilds the stop of a
+  recording that was live.
 - **`configuration refused (invalid)`, exit 2.** A key was set to a value it does not
   take, `CAVALRY_CONDUCTOR_IDLE_STRATEGY=spin` for example; the message names the
   values the key takes and the default. Nothing started, and no directory was touched.
