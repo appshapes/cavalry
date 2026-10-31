@@ -198,8 +198,10 @@ What the driver does with each, after the checks of "What the driver rejects":
   holds is already stopped, and the answer is `operation success` with nothing written,
   since a recording id is never reused.
 - **start replay.** A channel other than `cavalry:ipc` is error code 1; a length below
-  −1 is code 7; the replays registry at capacity, or the replayer's request queue full
-  or holding requests that are still waiting for room in it, is code 10, adding one to
+  −1 is code 7; the replays registry at capacity, the replay publications at their
+  bound (the publications of every replay, live or lingering after its end, with the
+  replays still starting; "Sizes"), or the replayer's request queue full or holding
+  requests that are still waiting for room in it, is code 10, adding one to
   `driver.registry_full`. Otherwise the driver registers the replay under the command's
   correlation id, which is its *replay session id*, and asks its replayer to read the
   recording's catalog slot: a recording id the catalog does not hold as a valid
@@ -333,10 +335,15 @@ limit waits for the limit to move, and one that would start at or past the repla
 position ends the replay; a term that is full is rotated as a publisher rotates it. After each block the replayer stores `replay.position` with a release store. A frame
 that fails a check stops the replay with reason 3, adding one to
 `log_buffer.rejected_frame`; a segment file that cannot be read stops it with reason 3.
-A replay of a live recording reads up to the synced position and waits for it to move;
-the replayer reads the recording's catalog slot again once per second and whenever a
-frame length of 0 is found below the extent, so that a recording that has stopped ends
-the replay at its stop position, reason 0, within a second.
+A replay of a live recording reads up to the synced position and waits for it to move.
+When the recorder reports the recording's stop, the conductor hands the replayer the
+stop position, and every replay of the recording that still followed its synced
+counter takes it as its final extent in the replayer's next duty cycle, so that the
+replay ends at the stop position, reason 0, without trusting the counter past the stop,
+since the conductor frees that counter at the stop and another may hold its record
+after the counter reuse timeout; the replayer also reads the recording's catalog slot
+again once per second and whenever a frame length of 0 is found below the extent, so
+that a stop the hand-off missed ends the replay within a second.
 
 A replay ends by itself when its position reaches or passes its end position, or
 reaches the recording's stop position, which a replay that starts there, with nothing
@@ -518,12 +525,13 @@ with error code 10 and registers nothing:
 | images | 2048 | every pair of a subscription and a publication that match |
 | recordings | 1024 | every recording that is starting or live, one per publication at most |
 | replays | 64 | every replay that is starting or live |
+| replay publications | 128 | every replay's publication, live or lingering after the replay ended, with the replays still starting |
 | commands in progress | 64 | every truncate recording, purge segments or purge recording the driver is working on |
 
 The counters file is sized so that the registries fill before it does: the static
 counters of `counters.toml`, 38 in this version, two per publication (2048), one per
-image (2048), three per recording (3072) and three per replay (192) come to 7398, fewer
-than 8192.
+image (2048), three per recording (3072), one per replay (64) and two per replay
+publication (256) come to 7526, fewer than 8192.
 
 ## What the driver rejects
 

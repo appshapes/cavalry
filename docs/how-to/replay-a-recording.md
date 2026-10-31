@@ -115,9 +115,13 @@ handle lives, as many as the driver allows live at once, 64; one more is
   one `cavalry record` printed.
 - `error 23 (position out of range)`: the position is not a multiple of 32 from the
   recording's start position to its extent; the message names both. Resolve an instant
-  instead, or pass `--from 0`, which the command sends as the start position only when
-  the recording started at 0: a recording that started later refuses a position before
-  its start.
+  instead, or pass `--from start`, which names the recording's start position whatever
+  it is and plays to the extent or, with `--follow`, to the stop; `--from 0` is the
+  start only of a recording that started at 0, and a recording that started later
+  refuses a position before its start. `--from start` takes no `--to`: the length to
+  `--to` is counted from the start position, which only the driver knows, so the
+  command refuses the pair before anything is sent; pass the start position error 23's
+  message names to `--from` instead.
 - `error 7 (malformed command)`: a length below −1; `--to` before `--from` is refused
   before the command is sent.
 - `error 12 (storage space)`: a segment file of the recording is missing from the log
@@ -126,8 +130,11 @@ handle lives, as many as the driver allows live at once, 64; one more is
   segment file and is not this error: a replay of it from that position ends at once
   there with `0 messages`
   ([ADR 0035](../decisions/0035-end-a-replay-with-nothing-to-play-at-once.md)).
-- `error 10 (resource temporarily unavailable)`: the replays registry (64), the
-  replayer's queue or the counters file is full; stop replays that are not needed.
+- `error 10 (resource temporarily unavailable)`: the replays registry (64), the replay
+  publications (128: every replay's publication, live or lingering after its replay
+  ended until its subscribers read to the end or five seconds pass), the replayer's
+  queue or the counters file is full; the message names which. Stop replays that are
+  not needed, or wait for the lingering ones to close.
 - The replay prints nothing and ends after five seconds with `ended for want of a
   subscriber`: a program started the replay before adding its subscription. Subscribe
   first, as the command does.
@@ -144,6 +151,11 @@ handle lives, as many as the driver allows live at once, 64; one more is
 - `command refused (replays-full)` from a program: this client has 64 replays live at
   once, the driver's bound, and the new one was stopped again; wait for one to end, or
   stop one.
+- `command refused (replay-queue-full)` from a program: this client has 16 `start
+  replay` commands whose registrations its own conductor has not taken yet, the queue
+  it keeps between two of its cycles, and the new one sent nothing to the driver; the
+  bound is the client's, not one of the driver's registries. Wait for a start to be
+  answered, then start the next.
 - `time index refused (io)` or `rejected (empty)` on `--from <instant>`: the recording's
   index is missing, unreadable or has no entry yet; pass a position, or `--log-dir` the
   directory the driver uses.

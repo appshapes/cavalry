@@ -50,7 +50,7 @@ pub const CLIENT_PROTOCOL_REJECTED_COMMAND: CounterId = CounterId(13);
 /// `client_protocol.errors`, a static counter: Error events the driver sent, whatever the code: every command this version refused after the ring delivered it (spec/client-protocol.md, Error codes); the causes with a counter of their own are client_protocol.rejected_command, driver.registry_full and driver.log_create_failed.
 pub const CLIENT_PROTOCOL_ERRORS: CounterId = CounterId(14);
 
-/// `driver.registry_full`, a static counter: Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions or images, or the counters file, was at capacity (spec/client-protocol.md, Sizes).
+/// `driver.registry_full`, a static counter: Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions, images, recordings or replays, its bound on replay publications (live or lingering after their replay ended), the recorder's or the replayer's request queue, or the counters file, was at capacity; the error message names which (spec/client-protocol.md, Sizes; ADR 0036).
 pub const DRIVER_REGISTRY_FULL: CounterId = CounterId(15);
 
 /// `driver.log_create_failed`, a static counter: Log buffers the driver could not create or size, refused with error code 12: the filesystem under the driver directory is full or not writable (spec/client-protocol.md, Commands).
@@ -267,7 +267,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "driver.registry_full",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions or images, or the counters file, was at capacity (spec/client-protocol.md, Sizes).",
+        doc: "Commands refused with error code 10 because the driver's registry of clients, publications, subscriptions, images, recordings or replays, its bound on replay publications (live or lingering after their replay ended), the recorder's or the replayer's request queue, or the counters file, was at capacity; the error message names which (spec/client-protocol.md, Sizes; ADR 0036).",
         doctor: "A fixed capacity of the driver is reached: clients, publications or subscriptions are not being closed, or this host needs more than one driver's worth. Close what is not used; the error event's message names the registry; the capacities are the driver's in this version.",
     },
     CounterDef {

@@ -259,10 +259,11 @@ recorder's feature gave it: a retained group rebuilt from the files adds one to
 position removed adds one to `recording.files_removed`, as a file past the stop does
 *(acceptance)*. The counters-file arithmetic becomes 38 statics, the 34 `counters.toml`
 holds with `scope = "static"` before this change and these four, plus two per
-publication (2048), one per image (2048), three per recording with the gauge (3072) and
-three per replay (192), 7398, under 8192, which `spec/client-protocol.md`, "Sizes",
-writes with this change; the "37 statics" and 6373 it counted before overcounted the 34
-`counters.toml` held, and this change corrects the count to 38. `cavalry doctor` gains a check that
+publication (2048), one per image (2048), three per recording with the gauge (3072),
+one per replay (64) and two per replay publication (256, ADR 0036), 7526, under 8192,
+which `spec/client-protocol.md`, "Sizes", writes with this change; the "37 statics" and
+6373 it counted before overcounted the 34 `counters.toml` held, and this change corrects
+the count to 38 *(acceptance)*. `cavalry doctor` gains a check that
 reads the free space of the log directory's filesystem and, under 10 percent, names the
 recording and the segment that would free the most, with the `purge segments` command
 that removes it, and a check that names a recording whose bytes, from the gauge while
