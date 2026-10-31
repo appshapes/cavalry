@@ -71,9 +71,10 @@ carrying the send-setup flag, term id 0, term offset 0 and window 0, at most onc
 second while no setup arrives (`DataPacketDispatcher`); keeps a record per session while it has no image, pending a
 setup, in progress while the conductor creates the image, and on cool-down after the
 image is removed, so that a second setup, a late data frame or a late retransmit
-creates no second image (`DataPacketDispatcher`'s `SessionInterest`, with the record
-removed by the conductor's `removeCoolDown` after the image's linger); sends a status
-message at once and then on three triggers,
+creates no second image (`DataPacketDispatcher`'s `SessionInterest`; the record is put
+on cool-down from the liveness timeout and not at end of stream, and removed by the
+conductor's `removeCoolDown` when the image enters its linger with the subscription's
+`rejoin` set, its default); sends a status message at once and then on three triggers,
 the slowest subscriber's position a quarter of the window past the last one, a change
 of window, or 200 ms without one, carrying the slowest subscriber's position and the
 window; inserts a data frame at its term offset only if its position is at or past the
@@ -82,8 +83,10 @@ frame's first eight bytes last; keeps the highest position received and a rebuil
 position that stops at the first gap; sends a NAK for the gap after a delay of 1 µs,
 again every 100 µs while it persists; drops a duplicate silently, a frame before the
 last status message's position as an under-run and one beyond the threshold as an
-over-run, each counted; retires an image 10 s after its last datagram that was not an
-over-run, heartbeats and under-runs included (`timeOfLastPacketNs`); and at end of
+over-run, each counted; retires an image 10 s after its last data frame that was
+neither an over-run nor an under-run or its last heartbeat at or above the last status
+message's position less a term (`timeOfLastPacketNs`), an under-run moving only the
+per-source connection's clock; and at end of
 stream, once the rebuild position has reached the highest, stores the end-of-stream
 position and sends the status message with the end-of-stream flag. Its defaults: MTU
 1408, UDP term length 16 MiB, receiver window 128 KiB, socket receive buffer 128 KiB,
@@ -209,7 +212,8 @@ the end-of-stream flag arrives, sending heartbeats with EOS and answering NAKs, 
 log is removed. Once the publication is closed and the sender position has reached the
 end-of-stream position, the condition under which its heartbeats carry EOS, a status
 message with the send-setup flag is ignored and counted in
-`sender.status_messages_rejected`, lingering or not: a setup then would create an image
+`sender.status_messages_rejected`, lingering or not, as Aeron's
+`NetworkPublication.triggerSendSetupFrame` is guarded by `!isEndOfStream`: a setup then would create an image
 that ends at once, and the heartbeats with EOS already tell a receiver with no image
 that the stream is over ("The receiver", step 2). Before the sender position reaches
 it, a closed publication answers one as step 1 says, since frames are still to be
@@ -297,17 +301,23 @@ group tag (36-byte status messages). On a datagram from a source address:
    for a subscription its client removed (version 3's rule), and the sender, hearing
    no status message for the connection timeout, disconnects its publication so that
    the publisher reads `not connected` as it does over `cavalry:ipc` when the last
-   subscriber goes. An image with no datagram for 10 s is retired too: a heartbeat
-   and an under-run datagram count as activity and an over-run does not, so that a
-   sender that pauses its data while heartbeating keeps its image. Retiring is
+   subscriber goes. An image with no activity for 10 s is retired too: a data datagram
+   that is accepted and a heartbeat at or above the last status message's position
+   less a term count, an under-run and an over-run do not, as Aeron's
+   `timeOfLastPacketNs` moves, so that a sender that pauses its data while heartbeating
+   keeps its image. Retiring is
    `unavailable image` to its subscriptions, its counters freed after the reuse
    timeout, its log removed once every subscription has unmapped it, and its session
-   record put **on cool-down** for
-   10 s, the liveness timeout, during which a setup, data datagram or heartbeat for the
+   record put **on cool-down** for 10 s, a bound of this page's own on every retire
+   (Aeron's cool-down runs from the liveness timeout until the image enters its linger
+   and not at end of stream), during which a setup, data datagram or heartbeat for the
    session is dropped and counted in `receiver.dropped_frames` with no status message
    sent, so that a late retransmit or heartbeat for a retired session creates no second
    image at its position; when the cool-down ends the record is removed, and a setup
-   for the session creates a new image with a registration id of its own. At end of
+   for the session creates a new image with a registration id of its own. The cost:
+   a subscription added back on an endpoint that stays open for another stream waits up
+   to 10 s for the session's cool-down, shown by `receiver.dropped_frames` and explained
+   by `doctor`, where Aeron rejoins at once. At end of
    stream, once the rebuild position
    reaches the high-water mark, the end-of-stream position is stored in the log, the
    status message carries the end-of-stream flag, five times at the 200 ms cadence (this
@@ -336,10 +346,17 @@ slot is returned, so a driver that has seen more than 64 distinct endpoints over
 life refuses none that are gone. The endpoint's states are a state machine in
 `counters.toml`, initializing (0), active (1), closing (2) and errored (−1), with a
 transition counter each: `channel.opened` (initializing to active), `channel.closed`
-(active to closing, then freed) and `channel.errored` (initializing or active to
-errored, the socket refused by the operating system, which `channel.status` holds
-until the endpoint's last publication or subscription is removed and `doctor` explains
-from it).
+(active to closing, then freed) and `channel.errored` (active to errored only). The
+socket is opened, bound and connected on the control plane as the command is handled,
+so a port in use or an interface that is not there is error code 4 to that command,
+with nothing registered and no counter kept, as Aeron's `openDatagramChannel` fails
+under the conductor; `initializing` is the moment between the slot and the socket, which
+a client never observes. Errored is for a failure on a live socket the operating system
+reports to the sender or the receiver, an interface gone or an address no longer local,
+which `sender.send_failed` or `receiver.rejected_datagrams` counts too; `channel.status`
+holds −1 until the endpoint's last publication or subscription is removed, so that
+`doctor` explains it and a client that reads −1 from the indicator knows the endpoint
+failed after it was ready.
 
 A subscription's `subscription.position` on an image is the counter the status message's
 position is read from, as it is the counter the driver's cleaning reads (ADR 0013).
@@ -383,8 +400,8 @@ and `channel.errored`. The static counters this page adds are 39: the 15 under
 justified later by a `why_not_default` and not here: setup interval 100 ms, pending
 setup 1 s, heartbeat interval 100 ms, status message interval 200 ms, status message threshold window ÷ 4,
 NAK delay 1 µs, NAK retry 100 µs, retransmit linger 10 ms, connection timeout 5 s, image
-liveness 10 s, image cool-down 10 s (the liveness timeout, the length of Aeron's image
-linger), linger 5 s, MTU 1408, UDP term length 16 MiB, publication window term ÷ 2,
+liveness 10 s, image cool-down 10 s (this page's bound; Aeron's ends when the image
+enters its linger), linger 5 s, MTU 1408, UDP term length 16 MiB, publication window term ÷ 2,
 receiver window min(128 KiB, term ÷ 2), socket receive buffer 128 KiB, socket send
 buffer the operating system's, 16 datagrams per burst and per poll, 64 receive endpoints
 and 64 send endpoints per driver (a 65th is code 10), 2048 images (ADR 0019's registry,
@@ -450,8 +467,10 @@ Aeron's table; a `cavalry:udp` channel whose grammar fails, a multicast address 
 unknown parameter stay code 1. `add subscription` on an endpoint binds it, and the
 first `add publication` on an endpoint connects it; `remove subscription`, `client
 close` and `client timeout` retire an image when they remove its last subscription on
-the endpoint and stream, and close an endpoint they leave without a subscription or a
-publication, as "The receiver" says; the registries gain 64 send and 64
+the endpoint and stream, and a receive endpoint they leave without a subscription or an
+image closes, as "The receiver" says; `remove publication`, `client close` and `client
+timeout` start a publication's linger, and a send endpoint closes when its last
+publication's linger ends, as "The sender" says; the registries gain 64 send and 64
 receive endpoints, and the counters file is created with 16384 counters, 128 + 16384 ×
 384 = 6,291,584 bytes (`spec/counters-file.md`, "File"), so that
 the registries still fill first: 14,349 counters when every registry is full ("Values"
