@@ -78,3 +78,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0036. Hand the replayer a recording's stop and bound the replay publications](decisions/0036-hand-the-replayer-the-stop-and-bound-the-replay-publications.md)
 - [0037. Read the clock step from the counter's jump when most readings show no advance](decisions/0037-read-a-coarse-counters-step-from-its-jump.md)
 - [0038. Repair a retention command's slot after a failed catalog write as after a file error](decisions/0038-repair-a-retention-commands-slot-after-a-failed-catalog-write.md)
+- [0039. Build UDP unicast between hosts third, in four features](decisions/0039-build-udp-between-hosts-third.md)
