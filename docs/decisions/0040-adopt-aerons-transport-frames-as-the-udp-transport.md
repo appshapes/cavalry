@@ -290,11 +290,19 @@ group tag (36-byte status messages). On a datagram from a source address:
    the receiver cleans the image's log from the clean position to the slowest
    subscriber's position less the term length, as the driver cleans a publication's log,
    so that a term is zero before a frame lands in it.
-6. **End.** An image with no datagram for 10 s is retired: a heartbeat and an under-run
-   datagram count as activity and an over-run does not, so that a sender that pauses
-   its data while heartbeating keeps its image. Retiring is `unavailable image` to
-   its subscriptions, its counters freed after the reuse timeout, its log removed once
-   every subscription has unmapped it, and its session record put **on cool-down** for
+6. **End.** A subscription removed while others remain on the endpoint and stream, by
+   `remove subscription`, `client close` or `client timeout`, frees its
+   `subscription.position` and the image goes on with the slowest of the rest; when
+   the last one is removed, the image is retired as below, with no `unavailable image`
+   for a subscription its client removed (version 3's rule), and the sender, hearing
+   no status message for the connection timeout, disconnects its publication so that
+   the publisher reads `not connected` as it does over `cavalry:ipc` when the last
+   subscriber goes. An image with no datagram for 10 s is retired too: a heartbeat
+   and an under-run datagram count as activity and an over-run does not, so that a
+   sender that pauses its data while heartbeating keeps its image. Retiring is
+   `unavailable image` to its subscriptions, its counters freed after the reuse
+   timeout, its log removed once every subscription has unmapped it, and its session
+   record put **on cool-down** for
    10 s, the liveness timeout, during which a setup, data datagram or heartbeat for the
    session is dropped and counted in `receiver.dropped_frames` with no status message
    sent, so that a late retransmit or heartbeat for a retired session creates no second
@@ -317,6 +325,21 @@ with no record is dropped and counted as `receiver.sessions_full`, and no status
 message is sent, so that a sender that opens a session per datagram fills the table and
 not the driver; a record is freed when a pending setup expires, when the conductor
 refuses the image, and when a cool-down ends.
+
+An endpoint has a life of its own, so the two registries have a release. A receive
+endpoint is bound by the first `add subscription` on its resolved channel and closes
+when its last subscription is removed and its last image retired; a send endpoint is
+opened by the first `add publication` on its resolved channel and closes when its last
+publication's linger ends. Closing is `channel.status` 2: the socket is closed, the
+endpoint's five counters are freed after the counter reuse timeout, and the registry
+slot is returned, so a driver that has seen more than 64 distinct endpoints over its
+life refuses none that are gone. The endpoint's states are a state machine in
+`counters.toml`, initializing (0), active (1), closing (2) and errored (−1), with a
+transition counter each: `channel.opened` (initializing to active), `channel.closed`
+(active to closing, then freed) and `channel.errored` (initializing or active to
+errored, the socket refused by the operating system, which `channel.status` holds
+until the endpoint's last publication or subscription is removed and `doctor` explains
+from it).
 
 A subscription's `subscription.position` on an image is the counter the status message's
 position is read from, as it is the counter the driver's cleaning reads (ADR 0013).
@@ -352,8 +375,9 @@ and `wmem_max`), `channel.images` and `channel.publications`. The publication's
 connection and the image's life are state machines in `counters.toml`, each transition
 counted by a static counter of its own: `publication.connected`,
 `publication.disconnected`, `image.created`, `image.ended`, `image.timed_out` and
-`image.removed`. The static counters this page adds are 36: the 15 under `sender`, the
-15 under `receiver` and these six.
+`image.removed`; and the endpoint's life is a third, `channel.opened`, `channel.closed`
+and `channel.errored`. The static counters this page adds are 39: the 15 under
+`sender`, the 15 under `receiver` and these nine.
 
 **Values**, Aeron's, the driver's in this version, so that a configuration key is
 justified later by a `why_not_default` and not here: setup interval 100 ms, pending
@@ -367,7 +391,7 @@ and 64 send endpoints per driver (a 65th is code 10), 2048 images (ADR 0019's re
 unchanged), 4096 session records per driver (a datagram for a 4097th session is dropped
 and counted as `receiver.sessions_full`), and a counters file of 16384 counters, since
 the sum the client protocol
-page sizes it by becomes 14,346: 74 statics (version 3's 38 and the 36 above), four per
+page sizes it by becomes 14,349: 77 statics (version 3's 38 and the 39 above), four per
 publication (4096), three per image (6144), three per recording (3072), one per replay
 (64), two per replay publication (256) and five per endpoint (640, over the 128
 endpoints).
@@ -424,10 +448,13 @@ endpoint error: the socket could not be opened, bound or connected, the message 
 the operating system's reason and the endpoint) and 9 (unknown host) are taken from
 Aeron's table; a `cavalry:udp` channel whose grammar fails, a multicast address and an
 unknown parameter stay code 1. `add subscription` on an endpoint binds it, and the
-first `add publication` on an endpoint connects it; the registries gain 64 send and 64
+first `add publication` on an endpoint connects it; `remove subscription`, `client
+close` and `client timeout` retire an image when they remove its last subscription on
+the endpoint and stream, and close an endpoint they leave without a subscription or a
+publication, as "The receiver" says; the registries gain 64 send and 64
 receive endpoints, and the counters file is created with 16384 counters, 128 + 16384 ×
 384 = 6,291,584 bytes (`spec/counters-file.md`, "File"), so that
-the registries still fill first: 14,346 counters when every registry is full ("Values"
+the registries still fill first: 14,349 counters when every registry is full ("Values"
 under `spec/udp.md`), against 8192 before. The driver directory gains `images/`. A version 3 client closes on
 the first `publication ready` of a version 4 driver, since it is longer than its fields,
 so an upgrade restarts the clients before the driver, as every version has said. The
