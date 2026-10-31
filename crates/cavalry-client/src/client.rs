@@ -556,9 +556,8 @@ impl Cavalry {
             end: Arc::clone(&end),
         };
         if self.replay_registrations.offer(registration).is_err() {
-            return Err(ClientError::Driver {
-                what: "the replay registration queue is full: start replays one at a time"
-                    .to_string(),
+            return Err(ClientError::ReplayQueueFull {
+                limit: REPLAY_QUEUE,
             });
         }
         let command = Command::StartReplay {

@@ -541,16 +541,21 @@ const STEP_ADVANCES: usize = 4096;
 /// both numbers, so the log shows which clock the harness is on.
 fn clock_step() -> (u64, u64) {
     // How often each advance below STEP_ADVANCES ticks occurred; the rest are outliers.
+    // Pairs with no advance are counted apart: a counter that moves less often than
+    // the harness reads it shows its step as a jump, not as a divisor (ADR 0037).
     let mut counts = [0u32; STEP_ADVANCES];
+    let mut unmoved = 0usize;
     for _ in 0..STEP_PAIRS {
         let a = tick();
         let b = tick();
         let advance = b.wrapping_sub(a) as usize;
-        if advance != 0 && advance < STEP_ADVANCES {
+        if advance == 0 {
+            unmoved += 1;
+        } else if advance < STEP_ADVANCES {
             counts[advance] += 1;
         }
     }
-    let ticks = step_ticks(&counts, STEP_PAIRS);
+    let ticks = step_ticks(&counts, unmoved, STEP_PAIRS);
     // To the nearest nanosecond, not truncated: 37 ticks of a counter calibrated at
     // 3.7001 GHz are 9.9997 ns, and a floor of 9 would still fail a move of 10.
     let ns = (span_ns(0, ticks * 1000) + 500) / 1000;
@@ -558,23 +563,35 @@ fn clock_step() -> (u64, u64) {
 }
 
 /// The step in ticks that `counts` shows, where `counts[a]` is how many of `pairs` pairs
-/// of readings advanced by `a` ticks. An advance seen in fewer than one pair in a
-/// thousand is an interrupt or a migration and is ignored; an advance below half the
-/// most frequent one is the counter's own residual, not a step, and is ignored too: the
-/// bench host's counter moves by 37 ticks, 10 ns, at a time and reads 37 or 74 between
-/// two readings, with a one-tick residual in 2 percent of them, and a divisor over
-/// everything read 1 there. The step is the greatest common divisor of what remains, at
-/// least 1: 37 ticks on the bench host; 2 ticks, a third of a nanosecond each, on kip,
-/// whose readings are 26 to 34 ticks apart in even numbers, so its percentiles resolve
-/// to the nanosecond; and on Apple silicon one tick of the machine's own counter, which
-/// `quanta` reads on every aarch64 build (ADR 0028): 42 ns of the 24 MHz counter on the
-/// macOS CI runner, 1 ns on the laptop this was first run on; neither has a baseline.
-/// Pure, so the tests below hold the two bench hosts' histograms.
-fn step_ticks(counts: &[u32; STEP_ADVANCES], pairs: usize) -> u64 {
+/// of readings advanced by `a` ticks and `unmoved` how many advanced by none. An
+/// advance seen in fewer than one pair in a thousand is an interrupt or a migration and
+/// is ignored. When most pairs advanced by none, the counter moves less often than the
+/// harness reads it and its step is the jump it makes when it moves: the smallest
+/// frequent advance, since the jumps of a counter whose period is not a whole number of
+/// the reading's ticks come in two sizes and the smaller one under-reads the step,
+/// which a floor may do and over-read may not (ADR 0037). On an Apple silicon laptop
+/// `quanta` reads the machine's own counter at 1 GHz, which moves 24 million times a
+/// second: 987,728 pairs in a million advanced by none, 3,318 by 41 ticks and 8,942 by
+/// 42, which a divisor over 41 and 42 read as a step of 1 ns where the clock resolves
+/// 42; the macOS CI runner's counter ticks at 24 MHz itself and reads 1 tick, 42 ns,
+/// either way. Otherwise, as ADR 0029 says, an advance below half the most frequent one
+/// is the counter's own residual, not a step, and is ignored too: the bench host's
+/// counter moves by 37 ticks, 10 ns, at a time and reads 37 or 74 between two readings,
+/// with a one-tick residual in 2 percent of them, and a divisor over everything read 1
+/// there. The step is the greatest common divisor of what remains, at least 1: 37 ticks
+/// on the bench host; 2 ticks, a third of a nanosecond each, on kip, whose readings are
+/// 26 to 34 ticks apart in even numbers, so its percentiles resolve to the nanosecond.
+/// Pure, so the tests below hold the bench hosts' and the laptop's histograms.
+fn step_ticks(counts: &[u32; STEP_ADVANCES], unmoved: usize, pairs: usize) -> u64 {
     fn gcd(a: u64, b: u64) -> u64 {
         if b == 0 { a } else { gcd(b, a % b) }
     }
     let frequent = ((pairs / 1000) as u32).max(1);
+    if unmoved > pairs / 2 {
+        return (1..STEP_ADVANCES)
+            .find(|&a| counts[a] >= frequent)
+            .map_or(1, |a| a as u64);
+    }
     let mode = (1..STEP_ADVANCES).max_by_key(|&a| counts[a]).unwrap_or(1);
     (mode / 2..STEP_ADVANCES)
         .filter(|&a| a > 0 && counts[a] >= frequent)
@@ -1583,7 +1600,7 @@ mod tests {
     #[test]
     fn the_bench_hosts_counter_steps_by_37_ticks_despite_its_residual() {
         let bench = counts(&[(37, 965_497), (1, 23_282), (74, 11_203)]);
-        assert_eq!(step_ticks(&bench, STEP_PAIRS), 37);
+        assert_eq!(step_ticks(&bench, 18, STEP_PAIRS), 37);
     }
 
     /// kip's counter on its publisher CPU on 2026-10-28, from `clock_step`'s loop printing
@@ -1598,7 +1615,40 @@ mod tests {
             (32, 173_417),
             (34, 32_290),
         ]);
-        assert_eq!(step_ticks(&kip, STEP_PAIRS), 2);
+        assert_eq!(step_ticks(&kip, 3, STEP_PAIRS), 2);
+    }
+
+    /// The Apple silicon laptop pull request 58 was written on, a million pairs of
+    /// `quanta` raw readings in `clock_step`'s own loop (card 154): the counter counts at
+    /// 1 GHz and moves 24 million times a second, so 987,728 pairs advanced by none,
+    /// 3,318 by 41 ticks and 8,942 by 42, with 18, 58 and 59 a few times each. A
+    /// divisor over 41 and 42 read 1; the jump is the step, and the smaller of the two
+    /// sizes it comes in, 41 ticks, 41 ns (ADR 0037).
+    #[test]
+    fn a_counter_that_moves_less_often_than_it_is_read_steps_by_its_jump() {
+        let laptop = counts(&[(41, 3_318), (42, 8_942), (18, 3), (58, 2), (59, 4)]);
+        assert_eq!(step_ticks(&laptop, 987_728, STEP_PAIRS), 41);
+    }
+
+    /// The macOS CI runner's counter ticks at 24 MHz itself: most pairs read the same
+    /// value and the rest are one tick apart, 42 ns, as before (ADR 0029).
+    #[test]
+    fn a_counter_read_faster_than_it_ticks_steps_by_one_tick() {
+        let runner = counts(&[(1, 12_000), (2, 30)]);
+        assert_eq!(step_ticks(&runner, 987_970, STEP_PAIRS), 1);
+    }
+
+    /// Just under half the pairs unmoved is still a counter that advances on most
+    /// readings, read by the divisor: the bench host with a slow half would read 37.
+    #[test]
+    fn the_jump_rule_needs_most_pairs_unmoved() {
+        let half = counts(&[(41, 200_000), (42, 300_000)]);
+        assert_eq!(
+            step_ticks(&half, 500_000, STEP_PAIRS),
+            1,
+            "41 and 42 divide to 1"
+        );
+        assert_eq!(step_ticks(&half, 500_001, STEP_PAIRS), 41);
     }
 
     /// An advance in fewer than one pair in a thousand is an interrupt or a migration,
@@ -1606,11 +1656,11 @@ mod tests {
     #[test]
     fn a_rare_advance_is_left_out() {
         assert_eq!(
-            step_ticks(&counts(&[(37, 998_000), (1_001, 999)]), STEP_PAIRS),
+            step_ticks(&counts(&[(37, 998_000), (1_001, 999)]), 0, STEP_PAIRS),
             37
         );
         assert_eq!(
-            step_ticks(&counts(&[(37, 998_000), (1_001, 1_000)]), STEP_PAIRS),
+            step_ticks(&counts(&[(37, 998_000), (1_001, 1_000)]), 0, STEP_PAIRS),
             1
         );
     }
@@ -1620,11 +1670,11 @@ mod tests {
     #[test]
     fn a_residual_below_half_the_mode_is_left_out() {
         assert_eq!(
-            step_ticks(&counts(&[(40, 500_000), (19, 400_000)]), STEP_PAIRS),
+            step_ticks(&counts(&[(40, 500_000), (19, 400_000)]), 0, STEP_PAIRS),
             40
         );
         assert_eq!(
-            step_ticks(&counts(&[(40, 500_000), (20, 400_000)]), STEP_PAIRS),
+            step_ticks(&counts(&[(40, 500_000), (20, 400_000)]), 0, STEP_PAIRS),
             20
         );
     }
@@ -1632,7 +1682,8 @@ mod tests {
     /// No frequent advance at all reads one tick: the floor is never zero.
     #[test]
     fn an_empty_histogram_reads_one_tick() {
-        assert_eq!(step_ticks(&counts(&[]), STEP_PAIRS), 1);
+        assert_eq!(step_ticks(&counts(&[]), 0, STEP_PAIRS), 1);
+        assert_eq!(step_ticks(&counts(&[]), STEP_PAIRS, STEP_PAIRS), 1);
     }
 
     /// `parse` over `args` with a fixed profile and no `--pin`, so no CPU is read and

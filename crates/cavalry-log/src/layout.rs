@@ -649,15 +649,23 @@ impl Descriptor {
         }
         if self.form == Form::Version1 {
             let retained = self.retained_position;
-            let segment = i64::from(self.segment_file_length);
-            let start_term_base =
-                self.start_position - self.start_position % i64::from(self.term_length).max(1);
-            let at_a_base = segment > 0 && (retained - start_term_base) % segment == 0;
             if retained < self.start_position
                 || retained % FRAME_ALIGNMENT != 0
                 || (self.stop_position != -1 && retained > self.stop_position)
-                || (retained != self.start_position && !at_a_base)
             {
+                return Err(LayoutError::Position { found: retained });
+            }
+            // The start position or a segment base: the start position's term base plus
+            // a multiple of the segment file length. The checks above have put the
+            // retained position at or above the start position, which is at or above 0,
+            // and the term base at or below the start position, so the difference
+            // cannot overflow; the term length and the segment file length are checked
+            // after this, so a value outside its rule is never divided by.
+            let term = i64::from(self.term_length).max(1);
+            let start_term_base = self.start_position - self.start_position % term;
+            let segment = i64::from(self.segment_file_length);
+            let at_a_base = segment > 0 && (retained - start_term_base) % segment == 0;
+            if retained != self.start_position && !at_a_base {
                 return Err(LayoutError::Position { found: retained });
             }
         }
@@ -769,21 +777,29 @@ impl Descriptor {
         Self::parse_inner(bytes, slot, true)
     }
 
-    /// The two forms the creation checksum of a slot's bytes holds under, version 1's
-    /// range tried first, or `None` for neither: the two-range rule of the page.
-    pub fn form_of(bytes: &[u8]) -> Option<Form> {
+    /// The form a slot's creation checksum holds under, by the two-range rule: version
+    /// 1's ranges first, then version 0's; a healthy slot of either form holds under its
+    /// own, and one that holds under neither is `checksum`. The one place the rule
+    /// lives: the parser reads a slot by it and [`CatalogWriter::rewrite`] checks a slot
+    /// by it before writing the stop, so a slot in version 1's form is never refused
+    /// as damage by a writer reading version 0's range (ADR 0031).
+    ///
+    /// [`CatalogWriter::rewrite`]: crate::catalog::CatalogWriter::rewrite
+    pub(crate) fn form_of(bytes: &[u8]) -> Result<Form, LayoutError> {
         if bytes.len() < DESCRIPTOR_LENGTH {
-            return None;
+            return Err(LayoutError::TooShort {
+                length: bytes.len() as u64,
+            });
         }
         let found = u32_at(bytes, 24);
         let mut creation = [0u8; DESCRIPTOR_LENGTH - 28];
         creation.copy_from_slice(&bytes[28..DESCRIPTOR_LENGTH]);
         if found == Self::creation_checksum(Form::Version1, &creation) {
-            Some(Form::Version1)
+            Ok(Form::Version1)
         } else if found == Self::creation_checksum(Form::Version0, &creation) {
-            Some(Form::Version0)
+            Ok(Form::Version0)
         } else {
-            None
+            Err(LayoutError::CreationChecksum)
         }
     }
 
@@ -806,18 +822,7 @@ impl Descriptor {
         if state == State::Invalid {
             return Err(LayoutError::Invalid);
         }
-        // The two-range rule: version 1's ranges first, then version 0's; a healthy slot
-        // of either form holds under its own, so neither form reports `checksum`.
-        let found = u32_at(bytes, 24);
-        let mut creation = [0u8; DESCRIPTOR_LENGTH - 28];
-        creation.copy_from_slice(&bytes[28..DESCRIPTOR_LENGTH]);
-        let form = if found == Self::creation_checksum(Form::Version1, &creation) {
-            Form::Version1
-        } else if found == Self::creation_checksum(Form::Version0, &creation) {
-            Form::Version0
-        } else {
-            return Err(LayoutError::CreationChecksum);
-        };
+        let form = Self::form_of(bytes)?;
         let torn_stop = u32_at(bytes, 4) != crc32(&bytes[8..24]);
         if torn_stop && !tolerate_torn {
             return Err(LayoutError::StopChecksum);

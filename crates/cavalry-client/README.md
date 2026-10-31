@@ -38,7 +38,9 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   recording, and `Image::positions()` the same arithmetic as a value a handler holds; a
   padding frame moves the position and is handed to no handler. The client follows the
   end of every replay it started while the handle lives, as many as the driver allows
-  live at once; one more is refused with `replays-full` and stopped again.
+  live at once; one more is refused with `replays-full` and stopped again, and a start
+  while 16 starts wait for the client's own conductor is refused with
+  `replay-queue-full` before anything reaches the driver.
 
 In Aeron, this is the client, with `tryClaim` and `commit`
 ([glossary](../../docs/glossary.md)).

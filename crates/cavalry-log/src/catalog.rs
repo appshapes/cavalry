@@ -15,8 +15,10 @@ use crate::layout::{
 };
 
 const DOC: &str = "docs/reference/durable-log.md#catalog-header";
-/// How long a reader retries a descriptor whose checksum does not match before it
-/// reports `checksum`: the driver may be between the two writes of a stop.
+/// How long a reader retries a descriptor whose stop or retained checksum does not
+/// match before it reports `checksum`: the driver may be between the two writes of a
+/// stop, or between a retained group and its checksum during a purge or a migration
+/// (`spec/durable-log.md`, "Descriptor"; ADR 0031).
 const RETRY: Duration = Duration::from_millis(100);
 const RETRY_STEP: Duration = Duration::from_millis(1);
 
@@ -180,14 +182,16 @@ fn read_slot_bytes(
     Ok(bytes)
 }
 
-/// Reads a slot as a reader does: a stop checksum that does not match is retried for
-/// [`RETRY`], since the driver may be between the two writes of a stop.
+/// Reads a slot as a reader does: a stop or retained checksum that does not match is
+/// retried for [`RETRY`], since the driver may be between the two writes of a stop, or
+/// between a purge's or a migration's retained group and its checksum. A creation
+/// checksum that fails is reported at once: nothing writes those bytes after the state.
 fn read_slot(file: &File, path: &Path, slot: u64) -> Result<Option<Descriptor>, CatalogError> {
     let mut waited = Duration::ZERO;
     loop {
         let bytes = read_slot_bytes(file, path, slot)?;
         match Descriptor::parse(&bytes, slot as i64) {
-            Err(LayoutError::StopChecksum) if waited < RETRY => {
+            Err(LayoutError::StopChecksum | LayoutError::RetainedChecksum) if waited < RETRY => {
                 std::thread::sleep(RETRY_STEP);
                 waited += RETRY_STEP;
             }
@@ -418,8 +422,8 @@ impl CatalogWriter {
     }
 
     /// The descriptor in slot `recording_id`, `None` when the slot is empty. The writer
-    /// is the only writer, so it is never in the middle of its own stop and does not
-    /// retry a stop checksum.
+    /// is the only writer, so it is never in the middle of its own stop or purge and
+    /// does not retry a stop or retained checksum.
     pub fn get(&self, recording_id: i64) -> Result<Option<Descriptor>, CatalogError> {
         let slot = self.slot(recording_id)?;
         let bytes = read_slot_bytes(&self.file, &self.path, slot)?;
@@ -548,9 +552,12 @@ impl CatalogWriter {
     /// state are not touched, so recovery never re-signs a creation field. The slot's
     /// stop checksum may fail, since rebuilding a torn stop is what this is for, but the
     /// rest must hold: a slot past the last is `unknown`, an empty one is `unknown`, a
-    /// state-2 one is `invalid`, a creation checksum that fails is `checksum`, a
+    /// state-2 one is `invalid`, a creation checksum that holds under neither form's
+    /// range is `checksum` (the two-range rule, `spec/durable-log.md`, "Descriptor"), a
     /// descriptor whose id is not `slot` is `recording-id`, and one whose creation
-    /// fields are not the slot's is `mismatch`. Nothing is written when any fails.
+    /// fields are not the slot's is `mismatch`. Nothing is written when any fails; bytes
+    /// 4 to 24 are written, so the creation checksum and a version 1 slot's retained
+    /// group stay as they are.
     pub fn rewrite(&mut self, slot: u64, descriptor: &Descriptor) -> Result<(), CatalogError> {
         let recording_id = i64::try_from(slot).unwrap_or(i64::MAX);
         if slot >= self.slots {
@@ -564,9 +571,9 @@ impl CatalogWriter {
             Some(State::Invalid) => return Err(LayoutError::Invalid.into()),
             None => return Err(LayoutError::State { found: state }.into()),
         }
-        if Descriptor::form_of(&found).is_none() {
-            return Err(LayoutError::CreationChecksum.into());
-        }
+        // The two-range rule, the parser's: a slot in either form holds under its own
+        // range, so a stop written under a version 1 header is never refused as damage.
+        Descriptor::form_of(&found)?;
         if descriptor.recording_id() != recording_id {
             return Err(LayoutError::RecordingId {
                 found: descriptor.recording_id(),
