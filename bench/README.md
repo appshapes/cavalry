@@ -74,6 +74,12 @@ nothing depends on it.
   process of the tree that reads above it joins it with `--join`, and the gate
   compares with the slowest run over all of them
   ([ADR 0033](../docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
+  On 2026-10-31 the host set-up changed twice under `bench/host/` (the stock timers
+  masked, the driver-bound interrupts moved to the housekeeping CPUs), which ends a
+  tree, so `bench`'s two were re-recorded from master's three processes at 0782ec5,
+  and `grip`'s two, `grip-linux` and `grip-linux-unchecked`, were recorded for the first
+  time from the same three runs, the host's first processes with its Wi-Fi interrupts
+  off the isolated CPUs ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)).
 
 ## What it must never do
 

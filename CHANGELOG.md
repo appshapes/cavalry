@@ -710,3 +710,13 @@ user-visible change, added in the same commit as the change. The format follows
   64 µs at p99.99; bench's and kip's isolated CPUs took no such interrupts. Applied on
   all three hosts on 2026-10-31 (card 159; [Set up a bench host](docs/how-to/set-up-a-bench-host.md),
   "Updating the host").
+- `grip`'s first baselines, `grip-linux` and `grip-linux-unchecked`, recorded from
+  master's three processes at 0782ec5 (run 41196273792, attempts 3 to 5), the host's
+  first with its Wi-Fi interrupts off the isolated CPUs: the exclusive claim row's
+  slowest run 92 ns at p99.99 over runs of 73 to 92, the one_way rows 423 to 720. The
+  `bench` host's two re-recorded from the same three runs after the two host changes
+  of the day ended its tree (ADR 0033): eight rows move by a step or less, the
+  unchecked `one_way_32_client` row from 340 to 290 ns and the checked concurrent claim
+  row from 169 to 150 as the twelve-process band gives way to three
+  ([ADR 0034](docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); cards
+  159 and 170).
