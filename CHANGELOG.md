@@ -795,3 +795,8 @@ user-visible change, added in the same commit as the change. The format follows
   purge segments, purge recording and recording busy
   ([ADR 0031](docs/decisions/0031-truncate-purge-and-delete-a-stopped-recording.md);
   card 95).
+- A retention command whose catalog write fails is refused with error 12 and its slot
+  repaired as after a file error, so a truncate's failed last write never leaves the
+  recording reading live over files already cut
+  ([ADR 0038](docs/decisions/0038-repair-a-retention-commands-slot-after-a-failed-catalog-write.md);
+  card 95).
