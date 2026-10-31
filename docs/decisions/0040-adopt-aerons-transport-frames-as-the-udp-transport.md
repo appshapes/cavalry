@@ -30,8 +30,8 @@ Aeron's transport, read from its source on 2026-10-31 (`aeron_udp_protocol.h`; t
 `Setup`, `StatusMessage`, `Nak`, `RttMeasurement`, `Error` and `DataHeader`
 flyweights; `NetworkPublication`, `Sender`, `SendChannelEndpoint`,
 `UnicastFlowControl`, `RetransmitHandler`; `PublicationImage`, `Receiver`,
-`ReceiveChannelEndpoint`, `LossDetector`, `TermRebuilder`, `TermGapScanner`,
-`StaticDelayGenerator`; `LogBufferDescriptor`, `ChannelUri`, `CommonContext`, the
+`ReceiveChannelEndpoint`, `DataPacketDispatcher`, `LossDetector`, `TermRebuilder`,
+`TermGapScanner`, `StaticDelayGenerator`; `LogBufferDescriptor`, `ChannelUri`, `CommonContext`, the
 command flyweights, `ErrorCode`, `UdpChannel`, `DriverConductor`, `PublicationParams`
 and `Configuration`). Every frame begins with the data frame header's first eight bytes,
 and the types are PAD 0, DATA 1, NAK 2, SM 3, ERR 4, SETUP 5, RTTM 6, RES 7, with 8 to 11
@@ -46,17 +46,23 @@ is 28 bytes: session id, stream id, term id, term offset, length. An RTT measure
 64-bit receiver id, with the flag `0x80` (reply). A heartbeat is a 32-byte data frame
 header whose frame length is 0, carrying the sender's term id and term offset, with
 BEGIN and END set and EOS once the publication is closed. The sender sends a setup
-frame every 100 ms until the first status message, data frames in a datagram of at most
-the MTU and the window, a heartbeat after 100 ms without data, and retransmits from its
-own term on a NAK, one outstanding retransmit at a time over unicast, lingering 10 ms,
-ignoring a NAK whose offset lies inside it; its sender limit is the maximum of itself
+frame every 100 ms until the first status message, and one more when a status message
+with the send-setup flag asks for it; data frames in a datagram of at most the MTU and
+the window; a heartbeat after 100 ms without data, once a status message has arrived;
+and retransmits from its own term on a NAK, one outstanding retransmit at a time over
+unicast, lingering 10 ms, ignoring a NAK whose offset lies inside it and counting one
+for another range as a retransmit overflow; its sender limit is the maximum of itself
 and the status message's position plus receiver window, taken only from a status
 message whose position lies within half a term below the sender position and a term and
 a half above it; its publisher limit is the sender position plus the publication window
 while a status message has arrived within 5 s, and the sender position alone otherwise;
 it lingers 5 s after close, or until a status message with the end-of-stream flag, so
 that NAKs are still answered. The receiver creates an image from a setup frame at the
-position the setup names, sends a status message at once and then on three triggers,
+position the setup names; asks for one, when a data frame or heartbeat without EOS
+arrives for a stream it wants and a session it has no image for, with a status message
+carrying the send-setup flag, term id 0, term offset 0 and window 0, at most once a
+second while no setup arrives (`DataPacketDispatcher`); sends a status message at once
+and then on three triggers,
 the slowest subscriber's position a quarter of the window past the last one, a change
 of window, or 200 ms without one, carrying the slowest subscriber's position and the
 window; inserts a data frame at its term offset only if its position is at or past the
@@ -142,10 +148,13 @@ and a send endpoint per resolved channel, one socket, shared by the publications
 that channel, connected to the endpoint, bound to the interface when one is named.
 Per publication, on every duty cycle, in this order:
 
-1. **Setup.** Until the first status message, and again after a status message with
-   the send-setup flag, a setup frame every 100 ms carrying the active term id and term
-   offset of the sender position, the session and stream ids, the initial term id, the
-   term length, the MTU and TTL 0.
+1. **Setup.** Until the first status message without the send-setup flag, a setup
+   frame every 100 ms carrying the active term id and term offset of the sender
+   position, the session and stream ids, the initial term id, the term length, the MTU
+   and TTL 0. A status message with the send-setup flag is a receiver asking for a
+   setup ("The receiver", step 2) and does nothing else: it does not set the sender
+   limit and does not connect the publication; it is answered with one setup frame,
+   sent once 100 ms have passed since the last one.
 2. **Data.** With the sender position p and the sender limit L, a burst of whole frames
    from p, committed ones only, stopping at the first frame not committed, in datagrams
    of at most the MTU and at most L − p bytes in all, at most 16 datagrams per cycle,
@@ -155,9 +164,12 @@ Per publication, on every duty cycle, in this order:
    unsent frame and counts `sender.short_sends`. A cycle that finds L − p ≤ 0 while
    there is a frame to send counts one `sender.flow_control_limited` per entry into that
    state.
-3. **Heartbeat.** After 100 ms without a data frame sent, a heartbeat carrying the
-   sender position's term id and term offset; with the EOS flag once the publication is
-   closed and the sender position has reached the end of stream position.
+3. **Heartbeat.** Once the first status message without the send-setup flag has
+   arrived, after 100 ms without a data frame or heartbeat sent, a heartbeat carrying
+   the sender position's term id and term offset; with the EOS flag once the
+   publication is closed and the sender position has reached the end of stream
+   position. Before that status message only setup frames go, so that a receiver's
+   request for a setup is answered by a setup and not by more heartbeats.
 4. **Retransmit.** A NAK for this publication whose term id and offset lie within the
    last half term below the sender position, less the longest message, and below it:
    the range it names, split at the MTU, in datagrams from the term, at once; one
@@ -169,9 +181,9 @@ Per publication, on every duty cycle, in this order:
    one in this version.
 
 The sender limit starts at 0 and becomes max(L, position + receiver window) on every
-status message whose position lies within [p − term ÷ 2, p + term + term ÷ 2]; one
-outside is counted and ignored. The publication is connected from the first status
-message until 5 s pass without one; the conductor keeps `publication.limit` at the
+status message without the send-setup flag whose position lies within [p − term ÷ 2,
+p + term + term ÷ 2]; one outside is counted and ignored. The publication is connected
+from the first such status message until 5 s pass without one; the conductor keeps `publication.limit` at the
 sender position plus the publication window (term ÷ 2) while connected, and at the
 sender position otherwise, so that the publisher reads `not connected`, and keeps
 `is connected` in the log accordingly; the conductor cleans the log as for an IPC
@@ -196,7 +208,22 @@ group tag (36-byte status messages). On a datagram from a source address:
    source, and sends the first status message at once. A setup for a session with an
    image is ignored; one for a stream nobody wants is counted and dropped. Every
    control frame to that image's sender goes to the source address of its setup frame.
-2. **Data.** A data datagram for an image whose first position is below the last status
+2. **Asking for a setup.** A data datagram or heartbeat without the EOS flag for a
+   stream id a subscription on the endpoint wants and a session id with no image and no
+   pending setup: the receiver records the session as pending a setup for 1 s and sends
+   the datagram's source a status message with the send-setup flag, consumption term
+   id 0, consumption term offset 0 and receiver window 0, and the receiver id as in
+   every status message, counting `receiver.setups_elicited`; the datagram itself is
+   dropped and counted in `receiver.dropped_frames`, as is every one for the session
+   while it is pending. A setup frame for the pending session creates the image as
+   step 1 says and ends the wait; after 1 s without one the record expires and the next
+   datagram asks again, so a sender that stopped sending setups at its first status
+   message, before this receiver started, restarted or added its subscription back, is
+   asked at most once a second until it answers. A datagram with EOS for a session with
+   no image is dropped and counted the same way and asks for nothing: the stream is
+   over. A data datagram or heartbeat for a stream nobody on the endpoint wants is
+   dropped and counted the same way.
+3. **Data.** A data datagram for an image whose first position is below the last status
    message's position is dropped as `receiver.under_runs`; one whose end is beyond that
    position plus half a term is dropped as `receiver.over_runs`; otherwise each frame is
    written at its term offset, the bytes after the first eight first and the first eight
@@ -204,14 +231,14 @@ group tag (36-byte status messages). On a datagram from a source address:
    duplicate changes nothing; the high-water mark becomes the greater of itself and the
    datagram's end position. A heartbeat moves the high-water mark the same way, and one
    with EOS records the end-of-stream position as its position.
-3. **Rebuild and NAK.** The rebuild position is the end of the contiguous frames from
+4. **Rebuild and NAK.** The rebuild position is the end of the contiguous frames from
    the greater of itself and the fastest subscriber's position, up to the high-water
    mark. A gap between it and the next frame, or the high-water mark, is a loss: after
    1 µs a NAK for the gap's term id, term offset and length, and again every 100 µs
    while the gap is the same; a gap that changes restarts the delay. A subscriber reads
    the image's log as any log (`spec/log-buffer.md`, "Reading") and stops at the gap
    itself; nothing is delivered from beyond a gap before it is filled (invariant 1).
-4. **Status messages.** One at once at creation, then whenever the slowest subscriber's
+5. **Status messages.** One at once at creation, then whenever the slowest subscriber's
    position is at least a quarter of the window past the last status message's
    position, when the window changes, or 200 ms after the last one; it carries the
    slowest subscriber's position as consumption term id and offset and the window, and
@@ -219,14 +246,14 @@ group tag (36-byte status messages). On a datagram from a source address:
    the receiver cleans the image's log from the clean position to the slowest
    subscriber's position less the term length, as the driver cleans a publication's log,
    so that a term is zero before a frame lands in it.
-5. **End.** An image with no accepted frame for 10 s is retired: `unavailable image` to
+6. **End.** An image with no accepted frame for 10 s is retired: `unavailable image` to
    its subscriptions, its counters freed after the reuse timeout, its log removed once
    every subscription has unmapped it. At end of stream, once the rebuild position
    reaches the high-water mark, the end-of-stream position is stored in the log, the
    status message carries the end-of-stream flag, five times at the 200 ms cadence, and
    the image is retired the same way once every subscriber has reached that position
    or the liveness timeout passes.
-6. **RTT.** A measurement with the reply flag is answered as the sender answers one.
+7. **RTT.** A measurement with the reply flag is answered as the sender answers one.
 
 A subscription's `subscription.position` on an image is the counter the status message's
 position is read from, as it is the counter the driver's cleaning reads (ADR 0013).
@@ -241,10 +268,12 @@ reads a publication's, stopping at a gap until it is filled.
 `sender.naks_received`, `sender.naks_ignored`, `sender.status_messages_received`,
 `sender.status_messages_rejected`, `sender.rtt_replies_sent`, `sender.send_failed`;
 `receiver.bytes_received`, `receiver.frames_received`, `receiver.setups_received`,
-`receiver.setups_unwanted`, `receiver.heartbeats_received`,
+`receiver.setups_unwanted`, `receiver.setups_elicited` (the status messages with the
+send-setup flag sent for a session with no image), `receiver.heartbeats_received`,
 `receiver.status_messages_sent`, `receiver.naks_sent`, `receiver.gaps_detected`,
 `receiver.under_runs`, `receiver.over_runs`, `receiver.rtt_replies_sent`,
-`receiver.dropped_frames` (the version and type drops, by reason in `doctor`),
+`receiver.dropped_frames` (the version and type drops, and the data datagrams and
+heartbeats for a session with no image, by reason in `doctor`),
 `receiver.rejected_datagrams` (the datagram checks); per publication, keyed as
 `publication.position` is, `sender.position` and `sender.limit`; per image, keyed as
 `subscription.position` is with the image's registration id, `image.hwm_position` and
@@ -258,8 +287,8 @@ connection and the image's life are state machines in `counters.toml`
 `image.ended`, `image.timed_out`, `image.removed`).
 
 **Values**, Aeron's, the driver's in this version, so that a configuration key is
-justified later by a `why_not_default` and not here: setup interval 100 ms, heartbeat
-interval 100 ms, status message interval 200 ms, status message threshold window ÷ 4,
+justified later by a `why_not_default` and not here: setup interval 100 ms, pending
+setup 1 s, heartbeat interval 100 ms, status message interval 200 ms, status message threshold window ÷ 4,
 NAK delay 1 µs, NAK retry 100 µs, retransmit linger 10 ms, connection timeout 5 s, image
 liveness 10 s, linger 5 s, MTU 1408, UDP term length 16 MiB, publication window term ÷ 2,
 receiver window min(128 KiB, term ÷ 2), socket receive buffer 128 KiB, socket send
@@ -272,7 +301,9 @@ Session ids and initial term ids are the driver's as for IPC.
 
 **Vectors**, `spec/vectors/udp.json` from `spec/vectors/udp.py`: every frame once
 valid and once per rejection in the order the checks run, a status message with and
-without the group tag, a heartbeat with and without EOS, a datagram of two data frames
+without the group tag and the one that asks for a setup (send-setup flag, consumption
+term id 0, consumption term offset 0, receiver window 0), a heartbeat with and without
+EOS, a datagram of two data frames
 and one of a padding frame, the datagram rejections, URI vectors (the shortest, an IPv6
 host, an interface, each refusal with its code), and arithmetic vectors for the sender
 limit's window, the retransmit window, the receiver's under-run and over-run bounds, the
@@ -373,6 +404,12 @@ message naming card 180 until the sender lands.
 - **Recording over UDP by source location, as Aeron Archive's `sourceLocation`.** Lost
   for this version: a channel and a stream id name the logs on this host, and a host
   that both sends to an endpoint and receives on it is the case the Revisit names.
+- **An image from the first data frame or heartbeat, with no setup asked for.** Lost:
+  a data frame carries no term length, MTU or initial term id, so a receiver that
+  starts, restarts or adds its subscription back after the sender's first status
+  message could not size the image's log; Aeron's receiver asks for the setup with a
+  status message carrying the send-setup flag and the sender answers with one setup, so
+  a late receiver costs one round trip and no new frame type.
 - **An error frame (type 4) to tell a sender its image was rejected.** Lost: nothing
   rejects an image in this version; the type stays reserved.
 - **Resolving names on the receiver thread, or re-resolving them.** Lost: resolution is
@@ -422,7 +459,7 @@ measurements; when encryption takes Aeron's types 8 to 10 or Cavalry's own.
 - Aeron, read 2026-10-31 at `master`:
   `aeron-client/src/main/c/protocol/aeron_udp_protocol.h`;
   `aeron-client/src/main/java/io/aeron/protocol/{HeaderFlyweight,DataHeaderFlyweight,SetupFlyweight,StatusMessageFlyweight,NakFlyweight,RttMeasurementFlyweight,ErrorFlyweight}.java`;
-  `aeron-driver/src/main/java/io/aeron/driver/{NetworkPublication,Sender,UnicastFlowControl,RetransmitHandler,PublicationImage,Receiver,LossDetector,StaticDelayGenerator,DriverConductor,PublicationParams,Configuration}.java`;
+  `aeron-driver/src/main/java/io/aeron/driver/{NetworkPublication,Sender,UnicastFlowControl,RetransmitHandler,PublicationImage,Receiver,DataPacketDispatcher,LossDetector,StaticDelayGenerator,DriverConductor,PublicationParams,Configuration}.java`;
   `aeron-driver/src/main/java/io/aeron/driver/media/{SendChannelEndpoint,ReceiveChannelEndpoint,UdpChannel,UdpChannelTransport}.java`;
   `aeron-client/src/main/java/io/aeron/logbuffer/{LogBufferDescriptor,TermRebuilder,TermGapScanner}.java`;
   `aeron-client/src/main/java/io/aeron/{ChannelUri,CommonContext,ErrorCode}.java`;
