@@ -6,7 +6,7 @@
 
 use cavalry_log::layout::{
     CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, ENTRY_LENGTH, HEADER_LENGTH, IndexEntry,
-    IndexHeader, locate,
+    IndexHeader, Recording, crc32, locate,
 };
 
 struct XorShift(u64);
@@ -119,6 +119,37 @@ fn descriptors_never_panic() {
             Err(error) => named(error.reason()),
         }
     }
+}
+
+/// A retained position at the minimum, against a start position in a later term, is
+/// `position`, never an overflow in the arithmetic that places it at a segment base
+/// (`spec/durable-log.md`, "What a reader rejects"; ADR 0031): through the builder,
+/// and through the parser on a slot in version 1's form whose checksums hold.
+#[test]
+fn a_retained_position_at_the_minimum_is_position_not_an_overflow() {
+    let later_term = Descriptor::new(&Recording {
+        recording_id: 0,
+        start_timestamp: 1_760_000_000_000_000_000,
+        start_position: 64 * 1024 * 1024 + 4096,
+        initial_term_id: 7,
+        term_length: 64 * 1024 * 1024,
+        mtu_length: 1408,
+        session_id: 1,
+        stream_id: 1001,
+        channel: "cavalry:ipc",
+        source_identity: "cavalry:ipc",
+    })
+    .expect("a valid recording");
+    let refused = later_term
+        .retained(i64::MIN)
+        .expect_err("below the start position");
+    assert_eq!(refused.reason(), "position");
+    let mut bytes = later_term.in_version_1().encode();
+    bytes[472..480].copy_from_slice(&i64::MIN.to_le_bytes());
+    let retained = crc32(&bytes[472..480]);
+    bytes[480..484].copy_from_slice(&retained.to_le_bytes());
+    let refused = Descriptor::parse(&bytes, 0).expect_err("below the start position");
+    assert_eq!(refused.reason(), "position");
 }
 
 #[test]
