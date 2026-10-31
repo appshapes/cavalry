@@ -259,9 +259,11 @@ fn a_refused_command_carries_the_drivers_code_and_message() {
     let dir = TestDir::new("refused");
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
+    // A publication sends on a cavalry:udp channel (ADR 0041); a subscription on one is
+    // refused with code 11 until the receiver lands (card 181).
     let error = client
-        .add_publication("cavalry:udp?endpoint=localhost:40123", 1004)
-        .expect_err("not this driver's transport yet");
+        .add_subscription("cavalry:udp?endpoint=localhost:40123", 1004)
+        .expect_err("not this driver's transport to receive yet");
     match &error {
         ClientError::Refused {
             code,
@@ -271,6 +273,7 @@ fn a_refused_command_carries_the_drivers_code_and_message() {
             assert_eq!(*code, Some(ErrorCode::GenericError));
             assert_eq!(*raw_code, 11);
             assert!(message.contains("cavalry:udp"), "{message}");
+            assert!(message.contains("card 181"), "{message}");
         }
         other => panic!("{other}"),
     }

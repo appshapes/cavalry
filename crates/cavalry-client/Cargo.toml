@@ -23,6 +23,10 @@ cavalry-proto = { path = "../cavalry-proto" }
 cavalry-driver = { path = "../cavalry-driver" }
 # The recording test reads the catalog's stop back (ADR 0025). Dev only.
 cavalry-log = { path = "../cavalry-log" }
+# The UDP tests count allocations across the send path with the counting allocator the
+# bench uses, so the sender's zero-allocation claim is a test (CLAUDE.md, gate 2; ADR
+# 0041). Dev only.
+stats_alloc = "0.1"
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]
