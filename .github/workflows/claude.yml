@@ -108,7 +108,8 @@ jobs:
       # body-only fix moves no head, so the second test is a claude review newer than this
       # one at the same head: the loop has reviewed that fix already, and that review's own
       # event runs the fixer if it needs to. A duplicate that arrives before that review
-      # lands still proceeds, and ends loud, with nothing left to push or edit.
+      # lands still proceeds, and ends loud, or costs one more review of the same head
+      # when its fixer rewrites the already-fixed body; the fix cap bounds it.
       - name: Gate autonomous fix attempts
         id: fix_gate
         if: github.event_name == 'pull_request_review' && startsWith(github.event.review.user.login, 'claude')
