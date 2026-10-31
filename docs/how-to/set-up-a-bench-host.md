@@ -175,10 +175,8 @@ and its own job (step 6); today that host is `grip`, label `grip-linux`, job
 `bench (grip)`, pinned to CPUs 4, 5 and 6. The gate's hosts are the ones whose rows
 hold still from one process to the next, because the gate compares a run with the
 slowest run of three or more processes (ADR 0033), and a host whose medians wander
-widens its own band: pinned at stock, before any tuning, `grip`'s exclusive claim row
-read 84, 84 and 86 ns at p99.99 over three processes, where `kip`'s read 102 to 148
-over eight and `bench`'s 149 to 160 over twelve
-([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)). `kip` is
+widens its own band; why `grip` took the role from `kip`, with the measurement, is
+[ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md). `kip` is
 the soak host, where a driver records for days (card 159): a soak host is not tuned,
 so any machine serves it, and the gate gets the host that holds still.
 

@@ -111,7 +111,7 @@ case "$smt" in off|forceoff|notsupported|notimplemented) ;; *) fail "SMT is $smt
 [ "$swap" = 0 ] || fail "$swap swap devices are active"
 [ -z "$active_timers" ] || fail "timers active that setup-ubuntu.sh masks: $active_timers; run it again (docs/how-to/set-up-a-bench-host.md, Updating the host)"
 if [ "$failures" -gt 0 ]; then
-    echo "check.sh: $failures finding(s); run bench/host/setup-ubuntu.sh as root and reboot (docs/how-to/set-up-a-bench-host.md)" >&2
+    echo "check.sh: $failures finding(s); run bench/host/setup-ubuntu.sh as root, and reboot when the kernel line is among them (docs/how-to/set-up-a-bench-host.md)" >&2
     exit 1
 fi
 echo "check.sh: ok, CPUs $1 are isolated and tickless on a tuned host"

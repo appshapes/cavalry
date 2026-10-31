@@ -13,8 +13,9 @@
 # The three cavalry-shm gates of CLAUDE.md's gate 1, `just conformance`, `just loom`
 # and `just miri`, run in the gates jobs too (GitHub issue 9), so the reviewer's rule
 # of ADR 0005, CI green on the head under review, covers them.
-# The latency gate runs on the two dedicated bench hosts, bench and kip, self-hosted
-# runners, because a shared runner cannot tell a regression from its own noise (ADR 0016).
+# The latency gate runs on the two dedicated bench hosts, bench and grip, self-hosted
+# runners, because a shared runner cannot tell a regression from its own noise (ADR 0016);
+# `bench (kip)` runs beside them until the change that accepts ADR 0034 removes it.
 #
 # The job names are stable on purpose: "gates (linux)", "gates (macos)" and
 # "bench (linux)" are the checks branch protection on master requires, so renaming a
