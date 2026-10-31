@@ -202,9 +202,13 @@ impl<'a> Channel<'a> {
         // `grammar` over every parameter first, then `key`, then `endpoint`, then
         // `multicast`: the page's order, so that a string wrong in two ways reports the
         // earlier check whatever the order of its parameters.
-        let mut seen_endpoint = false;
-        let mut seen_interface = false;
-        for param in params.split('|') {
+        //
+        // `grammar`: the key=value form, the key's characters, a non-empty value, and no
+        // key twice, whether or not this version names the key. The repeated-key check
+        // reads the earlier parameters again rather than remember them, so that it
+        // allocates nothing; a channel string is bounded by the client protocol's string
+        // length, and this runs on the control plane.
+        for (index, param) in params.split('|').enumerate() {
             let Some((key, value)) = param.split_once('=') else {
                 return Err(ChannelError::Grammar {
                     what: "a parameter is not key=value",
@@ -224,30 +228,30 @@ impl<'a> Channel<'a> {
                     what: "a value is empty",
                 });
             }
-            let twice = match key {
-                "endpoint" => core::mem::replace(&mut seen_endpoint, true),
-                "interface" => core::mem::replace(&mut seen_interface, true),
-                _ => false,
-            };
-            if twice {
+            if params
+                .split('|')
+                .take(index)
+                .any(|earlier| key_of(earlier) == key)
+            {
                 return Err(ChannelError::Grammar {
                     what: "a key appears twice",
                 });
             }
         }
+        // `key`, over every parameter: one this version names.
         let mut at = UDP_PREFIX.len();
         for param in params.split('|') {
-            // Checked above: every parameter is key=value.
-            let key = param.split_once('=').map_or("", |(key, _)| key);
+            let key = key_of(param);
             if key != "endpoint" && key != "interface" {
                 return Err(ChannelError::Key { at, len: key.len() });
             }
             at += param.len() + 1;
         }
+        // `endpoint`: each address left to right, then that there is an endpoint.
         let mut endpoint = None;
         let mut interface = None;
         for param in params.split('|') {
-            let (key, value) = param.split_once('=').unwrap_or(("", ""));
+            let (key, value) = param.split_once('=').unwrap_or((param, ""));
             match key {
                 "endpoint" => endpoint = Some(parse_address(value, true)?),
                 "interface" => interface = Some(parse_address(value, false)?),
@@ -259,6 +263,7 @@ impl<'a> Channel<'a> {
                 what: "no endpoint parameter",
             });
         };
+        // `multicast`.
         if endpoint.is_multicast() {
             return Err(ChannelError::Multicast);
         }
@@ -267,6 +272,12 @@ impl<'a> Channel<'a> {
             interface,
         }))
     }
+}
+
+/// The key of a `key=value` parameter: the whole parameter when it has no `=`, which
+/// `grammar` has refused before any later check asks.
+fn key_of(param: &str) -> &str {
+    param.split_once('=').map_or(param, |(key, _)| key)
 }
 
 /// `<host>:<port>`, or `[<ipv6>]:<port>`, with the port required for an endpoint and
@@ -342,4 +353,59 @@ fn parse_address(value: &str, port_required: bool) -> Result<Address<'_>, Channe
         None => None,
     };
     Ok(Address { host, port })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A channel wrong in two ways reports the earlier check whichever parameter
+    /// carries each fault (`spec/udp.md`, "What a reader rejects"): the grammar of the
+    /// whole string before any key, every key before any address, every address before
+    /// the multicast check. A repeated key is `grammar` whether or not this version
+    /// names the key, so `mtu` twice is `grammar` and not `key`. Four of these strings
+    /// are vectors in `spec/vectors/udp.py` too; these pin the order between every pair
+    /// of checks.
+    #[test]
+    fn a_channel_wrong_in_two_ways_reports_the_earlier_check() {
+        let cases = [
+            ("cavalry:udp?mtu=1|endpoint", "grammar"),
+            (
+                "cavalry:udp?endpoint=10.0.0.2:1|mtu=1|endpoint=10.0.0.2:2",
+                "grammar",
+            ),
+            ("cavalry:udp?mtu=1|mtu=2", "grammar"),
+            ("cavalry:udp?endpoint=10.0.0.2:0|mtu=1408", "key"),
+            ("cavalry:udp?interface=10.0.0.1|mtu=1408", "key"),
+            ("cavalry:udp?endpoint=224.0.1.1:0", "endpoint"),
+            (
+                "cavalry:udp?endpoint=224.0.1.1:40123|interface=10.0.0.1:0",
+                "endpoint",
+            ),
+        ];
+        for (string, reason) in cases {
+            match Channel::parse(string.as_bytes()) {
+                Err(error) => assert_eq!(error.reason(), reason, "{string}: {error}"),
+                Ok(channel) => panic!("{string}: accepted as {channel:?}, expected {reason}"),
+            }
+        }
+    }
+
+    /// The `key` error names the unknown parameter wherever it stands, the key check
+    /// having run after the grammar of every parameter.
+    #[test]
+    fn the_key_error_slices_the_unknown_parameter() {
+        for (string, key) in [
+            ("cavalry:udp?mtu=1408|endpoint=10.0.0.2:1", "mtu"),
+            (
+                "cavalry:udp?endpoint=10.0.0.2:0|term-length=65536",
+                "term-length",
+            ),
+        ] {
+            match Channel::parse(string.as_bytes()) {
+                Err(error) => assert_eq!(error.key(string.as_bytes()), key.as_bytes(), "{string}"),
+                Ok(channel) => panic!("{string}: accepted as {channel:?}"),
+            }
+        }
+    }
 }
