@@ -100,8 +100,8 @@ for unit in /etc/systemd/system/actions.runner.*.service; do
     cat > "$unit.d/cavalry-bench.conf" <<DROPIN
 # Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016).
 [Unit]
-After=cavalry-bench-host.service
-Wants=cavalry-bench-host.service
+After=cavalry-bench-host.service cavalry-bench-irqs.service
+Wants=cavalry-bench-host.service cavalry-bench-irqs.service
 
 [Service]
 CPUAffinity=${HOUSEKEEPING}
@@ -152,5 +152,49 @@ for timer in sysstat-collect sysstat-rotate sysstat-summary fwupd-refresh \
 done
 echo "setup-ubuntu.sh: timers masked: $(systemctl list-unit-files --type=timer --state=masked --no-legend | awk '{print $1}' | sed 's/\.timer$//' | paste -sd, -)"
 echo "setup-ubuntu.sh: timers still active: $(systemctl list-timers --no-legend | awk '{print $(NF-1)}' | sed 's/\.timer$//' | paste -sd, -)"
+
+# 8. Device interrupts on the housekeeping CPUs, every one that can be moved. The
+#    kernel line's irqaffinity sets the default, but a driver that binds its own vectors
+#    overrides it: Intel's Wi-Fi driver (iwlwifi) gives each receive queue one CPU, the
+#    isolated ones included, so on grip the runner's own traffic to GitHub during a job
+#    fired queue 5 on CPU 4 and queue 6 on CPU 5, 600 to 900 times a bench, and one
+#    one_way run in about twenty read 17 to 64 µs at p99.99 where the others read 400
+#    to 500 ns (card 159). Those bindings are hints, so /proc/irq takes the write; a
+#    kernel-managed vector (an NVMe queue's) refuses it and fires only for I/O submitted
+#    on its own CPU, which the harness never does. The service runs once the network is
+#    up, when the Wi-Fi vectors exist, and the runner waits for it. check.sh fails when a
+#    driver-bound vector still names an isolated CPU. Undo: disable the service; the
+#    bindings return at the next boot.
+cat > /usr/local/sbin/cavalry-bench-irqs <<IRQS
+#!/usr/bin/env bash
+# Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016); cavalry-bench-irqs.service runs it.
+moved=0
+for irq in /proc/irq/[0-9]*; do
+    [ -w "\$irq/smp_affinity_list" ] || continue
+    if echo "${HOUSEKEEPING}" > "\$irq/smp_affinity_list" 2>/dev/null; then
+        moved=\$((moved + 1))
+    fi
+done
+echo "cavalry-bench-irqs: \$moved interrupts bound to CPUs ${HOUSEKEEPING}"
+IRQS
+chmod 755 /usr/local/sbin/cavalry-bench-irqs
+cat > /etc/systemd/system/cavalry-bench-irqs.service <<UNIT
+# Written by bench/host/setup-ubuntu.sh (Cavalry, ADR 0016).
+[Unit]
+Description=Cavalry bench host: device interrupts on the housekeeping CPUs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cavalry-bench-irqs
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now cavalry-bench-irqs.service >/dev/null
+echo "setup-ubuntu.sh: $(/usr/local/sbin/cavalry-bench-irqs)"
 
 echo "setup-ubuntu.sh: done; reboot, then run bench/host/check.sh with the CPUs the harness will pin"

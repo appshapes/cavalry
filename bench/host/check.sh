@@ -10,8 +10,9 @@
 #                                    turbo is off (cpufreq boost, or intel_pstate's
 #                                    no_turbo), no idle state deeper than C1 is enabled
 #                                    on those CPUs, transparent huge pages are off,
-#                                    swap is off and none of the timers setup-ubuntu.sh
-#                                    masks is active
+#                                    swap is off, none of the timers setup-ubuntu.sh
+#                                    masks is active and no driver-bound interrupt names
+#                                    one of those CPUs
 set -euo pipefail
 
 cpu=/sys/devices/system/cpu
@@ -45,6 +46,18 @@ for timer in $masked_timers; do
 done
 active_timers=${active_timers# }
 timers_total=$(systemctl list-timers --no-legend 2>/dev/null | grep -c . || true)
+# Device interrupts a driver bound itself (a non-zero affinity_hint): the kernel line's
+# irqaffinity does not reach them, and cavalry-bench-irqs.service moves them (step 8).
+# A kernel-managed vector has no hint and fires only for I/O from its own CPU.
+bound_irqs() {
+    local irq hint name
+    for irq in /proc/irq/[0-9]*; do
+        hint=$(read_or "$irq/affinity_hint" 0)
+        [ "$(echo "$hint" | tr -d '0,')" != "" ] || continue
+        name=$(ls "$irq" 2>/dev/null | grep -v -E '^(affinity_hint|effective_affinity|effective_affinity_list|node|smp_affinity|smp_affinity_list|spurious)$' | head -1)
+        echo "$(basename "$irq")|${name:-?}|$(read_or "$irq/smp_affinity_list" "")"
+    done
+}
 
 # The idle states a CPU may enter, "name(exit latency in µs)" for each enabled one, and
 # the deepest enabled exit latency. C1 exits in a microsecond or two; C2 and deeper in
@@ -79,6 +92,8 @@ echo "  idle states:    $(idle_states "$first")on CPU $first"
 echo "  huge pages:     $thp"
 echo "  swap devices:   $swap"
 echo "  timers:         $timers_total active${active_timers:+, of the masked set: $active_timers}"
+bound_list=$(bound_irqs | sed -E 's/^([0-9]+)\|([^|]*)\|(.*)$/\1 \2 on CPUs \3/' | paste -sd ';' - | sed 's/;/; /g')
+echo "  bound irqs:     ${bound_list:-none}"
 echo "  cmdline:        $(cat /proc/cmdline)"
 
 [ $# -ge 1 ] || exit 0
@@ -110,6 +125,16 @@ case "$smt" in off|forceoff|notsupported|notimplemented) ;; *) fail "SMT is $smt
 [ "$thp" = never ] || fail "transparent huge pages are $thp, not never"
 [ "$swap" = 0 ] || fail "$swap swap devices are active"
 [ -z "$active_timers" ] || fail "timers active that setup-ubuntu.sh masks: $active_timers; run it again (docs/how-to/set-up-a-bench-host.md, Updating the host)"
+for entry in $(bound_irqs); do
+    irq_list=${entry##*|}
+    irq_name=${entry#*|}; irq_name=${irq_name%|*}
+    for pin in $(expand "$1"); do
+        if expand "$irq_list" | grep -qx "$pin"; then
+            fail "irq ${entry%%|*} ($irq_name) is bound to isolated CPU $pin; cavalry-bench-irqs.service did not run (setup-ubuntu.sh step 8)"
+            break
+        fi
+    done
+done
 if [ "$failures" -gt 0 ]; then
     echo "check.sh: $failures finding(s); run bench/host/setup-ubuntu.sh as root, and reboot when the kernel line is among them (docs/how-to/set-up-a-bench-host.md)" >&2
     exit 1
