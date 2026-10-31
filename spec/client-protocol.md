@@ -552,8 +552,9 @@ slots used up is code 10 and adds one to `recording.catalog_full`; a recording's
 that could not be created is code 12 and adds one to `recording.start_failed`; a replay
 length below −1 is code 7 and adds one to `client_protocol.rejected_command`; a replay
 position out of range is code 23, and a replay's recording id the catalog does not hold
-is code 21, and a replay's segment file that could not be opened is code 12, each adding
-one to `replay.start_failed`; a retention command's recording that is live, read by a
+is code 21, and a replay of a recording a retention command is working on is code 24,
+and a replay's segment file that could not be opened is code 12, each adding one to
+`replay.start_failed`; a retention command's recording that is live, read by a
 replay or under another command is code 24, its position outside its rule is code 23,
 and a file the driver could not read, remove, cut or extend is code 12 and adds one to
 `recording.retention_failed`. Every `error` event sent adds one to
