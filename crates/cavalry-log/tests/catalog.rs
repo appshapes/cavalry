@@ -1,8 +1,8 @@
 //! The catalog's writer and reader on a real file: the bound, the ids that are not
-//! there, a creation and a header torn by a crash, a stop torn by a crash, a delete,
-//! and the checks [`CatalogWriter::rewrite`] makes before it writes
-//! (`spec/durable-log.md`, "Catalog header", "Descriptor" and "The driver"; ADR 0024;
-//! CLAUDE.md, invariants 1 and 3).
+//! there, a creation and a header torn by a crash, a stop torn by a crash, a retained
+//! group torn by a crash, a delete, and the checks [`CatalogWriter::rewrite`] makes
+//! before it writes (`spec/durable-log.md`, "Catalog header", "Descriptor" and "The
+//! driver"; ADR 0024; ADR 0031; CLAUDE.md, invariants 1 and 3).
 
 use std::fs::OpenOptions;
 use std::os::unix::fs::FileExt;
@@ -208,6 +208,45 @@ fn a_stop_checksum_that_fails_is_retried_then_reported() {
         started.elapsed() >= Duration::from_millis(100),
         "retried for {:?}",
         started.elapsed()
+    );
+    assert_eq!(reason(writer.get(id)), "checksum");
+}
+
+/// A slot in version 1's form whose retained checksum does not match may be a purge or
+/// a migration the driver is between the two writes of, so the reader retries it for
+/// 100 ms as it retries a stop, then reports `checksum` (`spec/durable-log.md`,
+/// "Descriptor"; ADR 0031). The writer, never between its own writes, does not retry.
+#[test]
+fn a_retained_checksum_that_fails_is_retried_then_reported() {
+    let dir = TestDir::new("retained-checksum");
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
+    let id = writer.add(&recording(1)).expect("added");
+    let formed = Descriptor::new(&recording(1))
+        .expect("a valid recording")
+        .in_version_1();
+    dir.write_at(&formed.encode(), CatalogHeader::slot_offset(0));
+    let reader = CatalogReader::open(dir.path()).expect("the catalog opens");
+    assert_eq!(
+        reader.get(id).expect("both checksums hold"),
+        Some(formed),
+        "a slot in version 1's form reads under a version 0 header"
+    );
+    // Torn between the retained group and its checksum.
+    dir.write_at(
+        &[0xDE, 0xAD, 0xBE, 0xEF],
+        CatalogHeader::slot_offset(0) + 480,
+    );
+    let started = Instant::now();
+    let error = reader.get(id).expect_err("a torn retained group");
+    assert_eq!(error.reason(), "checksum");
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "retried for {:?}",
+        started.elapsed()
+    );
+    assert!(
+        error.to_string().contains("retained checksum"),
+        "the message names the retained group: {error}"
     );
     assert_eq!(reason(writer.get(id)), "checksum");
 }

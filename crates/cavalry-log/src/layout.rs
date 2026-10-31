@@ -638,15 +638,23 @@ impl Descriptor {
         }
         if self.form == Form::Version1 {
             let retained = self.retained_position;
-            let segment = i64::from(self.segment_file_length);
-            let start_term_base =
-                self.start_position - self.start_position % i64::from(self.term_length).max(1);
-            let at_a_base = segment > 0 && (retained - start_term_base) % segment == 0;
             if retained < self.start_position
                 || retained % FRAME_ALIGNMENT != 0
                 || (self.stop_position != -1 && retained > self.stop_position)
-                || (retained != self.start_position && !at_a_base)
             {
+                return Err(LayoutError::Position { found: retained });
+            }
+            // The start position or a segment base: the start position's term base plus
+            // a multiple of the segment file length. The checks above have put the
+            // retained position at or above the start position, which is at or above 0,
+            // and the term base at or below the start position, so the difference
+            // cannot overflow; the term length and the segment file length are checked
+            // after this, so a value outside its rule is never divided by.
+            let term = i64::from(self.term_length).max(1);
+            let start_term_base = self.start_position - self.start_position % term;
+            let segment = i64::from(self.segment_file_length);
+            let at_a_base = segment > 0 && (retained - start_term_base) % segment == 0;
+            if retained != self.start_position && !at_a_base {
                 return Err(LayoutError::Position { found: retained });
             }
         }
