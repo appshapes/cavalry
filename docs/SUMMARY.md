@@ -81,3 +81,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0038. Repair a retention command's slot after a failed catalog write as after a file error](decisions/0038-repair-a-retention-commands-slot-after-a-failed-catalog-write.md)
 - [0039. Build UDP unicast between hosts third, in four features](decisions/0039-build-udp-between-hosts-third.md)
 - [0040. Adopt Aeron's control frames and rules as the UDP transport, version 0, with log buffer version 1 and client protocol version 4](decisions/0040-adopt-aerons-transport-frames-as-the-udp-transport.md)
+- [0041. Send a UDP publication from a dedicated sender thread through nix's socket calls](decisions/0041-send-from-a-sender-thread-through-nix.md)
