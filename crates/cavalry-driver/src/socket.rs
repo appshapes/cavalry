@@ -138,7 +138,7 @@ impl SendSocket {
                 &mut headers.send,
                 datagrams,
                 &NO_ADDRESS[..count],
-                &[],
+                [],
                 MsgFlags::MSG_DONTWAIT,
             )
             .map_err(io::Error::from)?;
