@@ -202,8 +202,12 @@ struct Publication {
 struct UdpPublication {
     /// The send endpoint's registration id.
     endpoint_id: i64,
-    /// The sender's `sender.position` counter, loaded on the duty cycle.
+    /// The sender's `sender.position` counter, loaded on the duty cycle; freed with the
+    /// publication's own two when the close completes.
     sender_position: Counter,
+    /// The id of the sender's `sender.limit` counter, which the sender alone reads and
+    /// moves; kept so that the conductor frees its record with the others.
+    sender_limit_id: u32,
     /// The log's term length: the log is cleaned a term behind the sender position.
     term_length: i64,
     /// A status message arrived within the connection timeout, as the sender last said.
@@ -1329,7 +1333,10 @@ impl Conductor {
         };
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         // The spec's UDP term, or the smaller one a test at a registry's capacity set,
-        // since every log is made resident when it is created (ADR 0027).
+        // since every log is made resident when it is created (ADR 0027). The sender
+        // reads the control frames it receives with `spec::UDP_TERM_LENGTH` itself, so
+        // the two agree only while nothing overrides the field: the one test that does
+        // has no receiver, and sends no control frame.
         let term_length = self.term_length.min(spec::UDP_TERM_LENGTH);
         let fields = HeaderFields::new(
             log_type,
@@ -1430,6 +1437,7 @@ impl Conductor {
             udp: Some(UdpPublication {
                 endpoint_id,
                 sender_position: sender_position.clone(),
+                sender_limit_id: sender_limit.id(),
                 term_length: i64::from(term_length),
                 connected: false,
                 close_sent: false,
@@ -2128,7 +2136,10 @@ impl Conductor {
 
     /// Closes the publication at `index` once every subscriber has reached the end of
     /// stream or the linger has passed: unavailable image events, counters freed, the
-    /// log removed. Returns whether it was removed.
+    /// log removed. A `cavalry:udp` publication waits for the sender's closed reply
+    /// first, and its `sender.position` and `sender.limit` are freed with its own two,
+    /// since the sender dropped its handles before it replied. Returns whether it was
+    /// removed.
     fn close_if_done(&mut self, index: usize, now: i64) -> bool {
         let Some((end, since)) = self.publications[index].closing else {
             return false;
@@ -2184,6 +2195,8 @@ impl Conductor {
         drop(publication.log);
         remove_log(&self.dir, publication_id);
         if let Some(udp) = publication.udp {
+            let _ = self.counters.free(udp.sender_position.id(), reuse);
+            let _ = self.counters.free(udp.sender_limit_id, reuse);
             self.release_send_endpoint(udp.endpoint_id, reuse);
         }
         true
@@ -4182,7 +4195,8 @@ mod recording {
         ControlFrame, STATUS_MESSAGE_END_OF_STREAM, SetupFrame, StatusMessage, parse as parse_udp,
     };
     use cavalry_shm::counters::generated::{
-        PUBLICATION_CONNECTED, SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
+        COUNTERS_ALLOCATED, COUNTERS_FREED, PUBLICATION_CONNECTED, SENDER_SETUPS_SENT,
+        SENDER_STATUS_MESSAGES_RECEIVED,
     };
 
     /// A receiver by hand: a socket of its own that reads what the sender puts on the
@@ -4518,6 +4532,93 @@ mod recording {
         assert!(message.contains("send endpoints"), "{message}");
         assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
         assert_eq!(h.conductor.publications.len(), spec::MAX_SEND_ENDPOINTS);
+    }
+
+    /// The full case first (invariant 3): every record a `cavalry:udp` publication and
+    /// its endpoint held is freed when the close completes, `sender.position` and
+    /// `sender.limit` with `publication.position`, `publication.limit` and the
+    /// endpoint's five, and every one is allocated again once the reuse timeout has
+    /// passed. A driver that kept the sender's two would lose two of the counters
+    /// file's records per publication for its life.
+    #[test]
+    fn a_closed_udp_publication_frees_its_nine_records_and_they_are_reused_after_the_timeout() {
+        let mut h = Harness::new("udp-counters-freed");
+        let mut receiver = TestReceiver::bind();
+        let allocated_before = h.counter(COUNTERS_ALLOCATED);
+        let freed_before = h.counter(COUNTERS_FREED);
+        let setup = connect_udp(&mut h, &mut receiver, 2, 7, 131072);
+        let mut held: Vec<u32> = {
+            let publication = &h.conductor.publications[0];
+            let udp = publication.udp.as_ref().expect("a cavalry:udp publication");
+            let endpoint = &h.conductor.send_endpoints[0];
+            vec![
+                publication.position.id(),
+                publication.limit.id(),
+                udp.sender_position.id(),
+                udp.sender_limit_id,
+                endpoint.status.id(),
+                endpoint.socket_rcvbuf.id(),
+                endpoint.socket_sndbuf.id(),
+                endpoint.images.id(),
+                endpoint.publications.id(),
+            ]
+        };
+        held.sort_unstable();
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated_before + 9);
+
+        // The close: handed to the sender, acknowledged by the receiver with the
+        // end-of-stream flag, completed by the conductor with the endpoint's.
+        let now = now_nanos();
+        h.conductor.remove_publication(1, 20, 2, now);
+        h.sender.duty_cycle(now);
+        receiver.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !h.conductor.send_endpoints.is_empty() {
+            let now = now_nanos();
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the endpoint did not close");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(h.conductor.publications.is_empty());
+        for &id in &held {
+            assert!(
+                matches!(
+                    h.conductor.counters.counter(id),
+                    Err(CountersError::Unallocated { .. })
+                ),
+                "record {id} is freed"
+            );
+        }
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated_before);
+        assert_eq!(h.counter(COUNTERS_FREED), freed_before + 9);
+
+        // Reusable once the reuse timeout has passed: the next nine allocations take
+        // exactly these records, the lowest that are free.
+        std::thread::sleep(spec::COUNTER_REUSE_TIMEOUT + Duration::from_millis(100));
+        let mut reused: Vec<u32> = (0..9u8)
+            .map(|i| {
+                h.conductor
+                    .counters
+                    .allocate(SENDER_POSITION, &[i], "sender.position reused")
+                    .expect("a record is free again")
+                    .id()
+            })
+            .collect();
+        reused.sort_unstable();
+        assert_eq!(
+            reused, held,
+            "the freed records are the ones allocated again"
+        );
     }
 
     /// A closed publication lingers with the sender: the conductor keeps its log until
