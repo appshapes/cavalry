@@ -334,6 +334,12 @@ impl<'a> Burst<'a> {
                 break;
             }
             let length = block.length as i64;
+            // The block was scanned under `limit`, at most `room`, and the scan always
+            // takes the first committed frame, so a block longer than `room` is one
+            // frame the window does not cover whole: it waits for the next status
+            // message, which the status message interval bounds, and the burst is
+            // limited at it. A window that is not a multiple of the frame length
+            // leaves that remainder unspent until then.
             if !block.padding && length > room {
                 burst.limited = true;
                 break;
@@ -396,6 +402,12 @@ impl Sender {
             .iter()
             .find(|live| live.registration_id == registration_id)
             .map(|live| (live.sender_position, live.sender_limit))
+    }
+
+    /// How many replies the sender holds back, for the tests.
+    #[cfg(test)]
+    pub(crate) fn pending_replies(&self) -> usize {
+        self.pending.len()
     }
 
     /// The sender's loop: duty cycles until `stop`, idling with the strategy while it
@@ -556,13 +568,17 @@ impl Sender {
         }
     }
 
-    /// Takes every control frame that arrived at the endpoint and acts on it.
+    /// Takes every control frame that arrived at the endpoint and acts on it; returns
+    /// how many arrived. A receive the operating system refused is counted in
+    /// `receiver.receive_failed` and retried on the next cycle, and is not work: a
+    /// socket that refuses every poll would otherwise keep the sender from idling
+    /// under the backoff strategy, a core spent on a broken socket.
     fn poll_endpoint(&mut self, index: usize, now: i64) -> usize {
         let count = match self.endpoints[index].socket.receive(&mut self.headers) {
             Ok(count) => count,
             Err(_) => {
                 self.statics.receive_failed.increment();
-                return 1;
+                return 0;
             }
         };
         for datagram in 0..count {
