@@ -187,12 +187,9 @@ impl Driver {
             conductor.counter(LOG_BUFFER_REJECTED_FRAME)?,
             idle,
         );
-        let sender = sender::Sender::new(
-            sender_request_consumer,
-            sender_reply_producer,
-            sender::Statics::new(|id| conductor.counter(id))?,
-            idle,
-        );
+        // The sender's counters here, where the conductor is; the sender itself is built
+        // on its thread below, since the headers it preallocates are not `Send`.
+        let sender_statics = sender::Statics::new(|id| conductor.counter(id))?;
         let stop = Arc::new(AtomicBool::new(false));
         let io = |what: &'static str, path: &PathBuf| {
             let path = path.clone();
@@ -218,6 +215,14 @@ impl Driver {
             .name("cavalry-sender".to_string())
             .spawn(move || {
                 on_start(DriverThread::Sender);
+                // Built on its own thread: the headers `sendmmsg` and `recvmmsg` fill
+                // hold raw pointers and cannot be sent to it (ADR 0041, acceptance).
+                let sender = sender::Sender::new(
+                    sender_request_consumer,
+                    sender_reply_producer,
+                    sender_statics,
+                    idle,
+                );
                 sender.run(&flag)
             }) {
             Ok(handle) => handle,

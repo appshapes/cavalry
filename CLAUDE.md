@@ -124,7 +124,7 @@ conformance/          protocol conformance suite and upgrade tests
 - Concurrent branches collide in the files everyone appends to: `CHANGELOG.md`, `docs/SUMMARY.md`, `docs/glossary.md`, `spec/README.md`, `counters.toml` and a crate's `lib.rs`. Collaborators tell each other which of these they are appending to before they do, append at the end of the section so both sides can be kept, and resolve a conflict in them by keeping both sides with `master`'s lines first, in the branch that merges second.
 - Before claiming a change is faster, run `just bench-compare`. Before claiming it is correct, run `just conformance` and `just replay-check`.
 - Do not add a dependency to a data-plane crate without a justification in the commit message. Data-plane crates have a dependency allowlist in `Cargo.toml` metadata; `just lint` checks it.
-- Ask before: changing the wire format, adding `unsafe` outside the two permitted crates, adding a configuration key, adding a dependency to a data-plane crate, or weakening a gate. Everything else, do and show the evidence.
+- Decide, do, and show the evidence; no change waits on a person's approval. A decision that cannot be undone is an ADR before it is acted on (Documentation, above), and a weakened gate says why in its commit message.
 - A new crate or feature starts with its README, its ADR and its example, in that order, before the code. Make the example compile first.
 - When the docs failed to tell you something you needed, fix the docs in the same session. That is a bug report with the fix attached.
 - Keep this file under 200 lines. Instructions that matter only for part of the tree go in `.claude/rules/` with a `paths:` scope.
@@ -134,7 +134,7 @@ conformance/          protocol conformance suite and upgrade tests
 - Copy Aeron's semantics and name.
 - Make it bounded first, then fast. Measure at p99.99. Never quote a mean.
 - A counter beats a log line. A `doctor` check beats a documentation page.
-- If a decision cannot be undone (wire format, on-disk log format, C ABI), stop and write it up instead of choosing.
+- If a decision cannot be undone (wire format, on-disk log format, C ABI), write it up as an ADR, then act on it.
 
 # Overrides
 - @./.brigade/CLAUDE.brigade.md

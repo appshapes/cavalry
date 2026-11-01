@@ -49,6 +49,18 @@ named below, stop and hand it back.
    `just lint` and one that did not build, and each cost a review cycle. A non-zero exit
    stops the sequence; fix, then start this step again.
 
+   The laptop's gates compile the laptop's platform alone. A change that adds or
+   touches a `cfg(target_os = "linux")` block, or its `not` twin, is type-checked for
+   Linux before the push, because the Linux gates and both bench hosts build it:
+
+   ```
+   cargo check --workspace --all-targets --target x86_64-unknown-linux-gnu; echo "check exit $?"
+   ```
+
+   `rustup target add x86_64-unknown-linux-gnu`, once, installs the target; a check
+   needs no linker. Pull request 94's first review on 2026-11-01 was CI's three Linux
+   errors in a file every macOS gate had passed.
+
 3. **Commit.** The message is the review record, as `/commit` writes it: subject
    `<card>: <Imperative subject>` under 72 characters; body with what changed, which
    invariant by number, and the evidence (the gate results, the ADR number, both

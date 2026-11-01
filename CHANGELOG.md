@@ -869,6 +869,36 @@ user-visible change, added in the same commit as the change. The format follows
   control frames, `SndBuf` and `RcvBuf` read back into the endpoint's counters, none of
   them allocating per call; the dependency needs Rjae's approval before it exists
   ([ADR 0041](docs/decisions/0041-send-from-a-sender-thread-through-nix.md); card 180).
+- ADR 0041 Accepted: a `cavalry:udp` publication reaches the wire. `add publication` on
+  `cavalry:udp?endpoint=<host>:<port>` resolves the host once (code 9 when it does not),
+  opens the channel's send endpoint (code 4 when the socket cannot be opened, bound or
+  connected; 64 endpoints, code 10 past them, and code 10 when the sender's queue has
+  no room), creates the log with the UDP sizes and names the endpoint's
+  `channel.status` counter in `publication ready`; the driver's fourth thread, the
+  sender, sends setup frames until a status message answers, data in bursts of whole
+  frames up to the sender limit in one `sendmmsg` per burst on Linux and one `sendmsg`
+  per datagram elsewhere, heartbeats when idle and with EOS after the close, and the
+  frames a NAK names; the publisher reads connected from the first status message and
+  its limit runs a publication window ahead of the sender position; a closed
+  publication lingers until the receiver acknowledges the end of stream or five seconds
+  pass, and the last publication's close closes the endpoint. The counters `sender.*`
+  (fifteen, with `sender.position` and `sender.limit` per publication),
+  `publication.connected` and `publication.disconnected`, `channel.opened`,
+  `channel.closed` and the endpoint's five, and `receiver.receive_failed` are in
+  `counters.toml` with the publication connection and endpoint state machines.
+  `cavalry-driver` depends on `nix` for the socket calls `std` lacks.
+  `TermReader::block_from` scans a block from any position. `spec/udp.md`, "The
+  sender", cleans a term behind the sender position so the resend window stays, and
+  `spec/client-protocol.md`'s `add publication` names the sender's queue as a code 10;
+  the receiver, the image and `start recording` over UDP follow with card 181
+  ([ADR 0041](docs/decisions/0041-send-from-a-sender-thread-through-nix.md); card 180).
+- The client's tests drive a `cavalry:udp` publication against a receiver by hand on the
+  loopback, and an allocation gate holds the send path at zero allocations per message
+  under the counting allocator, alone in its process (card 180).
+- `Driver::start_with_threads` names a fourth thread, `DriverThread::Sender`, which
+  parks while it holds nothing to send, as the replayer does with no replay; the bench
+  places it on the housekeeping CPU beside the recorder and the replayer until the UDP
+  rows give it a core (card 182).
 - `cavalry doctor` names a `cavalry:udp` publication no receiver has answered
   (`udp-publication-not-connected`, from a `sender.limit` of 0 and the endpoint the
   label names) and a send endpoint's socket buffer the host capped

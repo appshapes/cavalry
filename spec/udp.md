@@ -167,11 +167,14 @@ publication, on every duty cycle, with p the sender position and L the sender li
 4. **Retransmit.** On a NAK for this publication whose term id and offset name a
    position in the resend window, from p − term length ÷ 2 − the longest message up to
    but not including p, the frames of the range it names, from the term, in datagrams
-   of at most the MTU, at once. The retransmit stays outstanding for the retransmit
-   linger after it, and one is outstanding at a time: a NAK whose offset lies inside the
-   outstanding range is dropped silently, since the answer is on its way; one for
-   another range while a retransmit is outstanding is dropped and counted in
-   `sender.retransmit_overflow`, the recovery stall `doctor` explains from it; and a
+   of at most the MTU, one burst's worth of datagrams per duty cycle ("Values") until
+   the range is covered, with the data burst of step 2 beside it on every cycle, so
+   that one NAK holds up neither the stream nor the other publications on the thread.
+   The retransmit is outstanding from the NAK until the range is covered and for the
+   retransmit linger after that, and one is outstanding at a time: a NAK whose offset
+   lies inside the outstanding range is dropped silently, since the answer is on its
+   way; one for another range while a retransmit is outstanding is dropped and counted
+   in `sender.retransmit_overflow`, the recovery stall `doctor` explains from it; and a
    NAK outside the resend window is dropped and counted in `sender.naks_ignored`. A
    retransmit never moves the sender position.
 5. **RTT.** An RTT measurement with the reply flag is answered: the same frame without
@@ -186,8 +189,10 @@ computes a position, lies within [p − term length ÷ 2, p + term length + term
 first such status message until the connection timeout passes without one. The conductor keeps `publication.limit` at the sender position plus the publication
 window while the publication is connected and at the sender position otherwise, so that
 the publisher reads `not connected` (`spec/log-buffer.md`, "Claim, commit and abort"),
-keeps `is connected` to match, and cleans and unblocks the log as "The driver" there
-says with the sender position as the consumer position. After the publication is closed
+keeps `is connected` to match, unblocks the log as "The driver" there says with the
+sender position as the consumer position, and cleans it only up to a term length behind
+the sender position, Aeron's rule, so that the resend window below the sender position
+is never cleaned (ADR 0041). After the publication is closed
 it lingers for the linger timeout, or until a status message with the end-of-stream flag
 arrives, sending heartbeats with EOS and answering NAKs; then its log is removed. Once
 the publication is closed and the sender position has reached the end of stream
@@ -364,8 +369,8 @@ filled.
 ## Counters
 
 Static unless a key is named. None is in `counters.toml` until the feature that moves it
-lands: the sender's rows with card 180, the receiver's, the image's and the endpoint's
-with card 181.
+lands: the sender's and the endpoint's rows, the publication's connection and
+`receiver.receive_failed` with card 180, the receiver's and the image's with card 181.
 
 | Counter | Moves when |
 | --- | --- |

@@ -9,13 +9,42 @@ use std::net::{SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::Cavalry;
+use cavalry_client::{Cavalry, Publication};
 use cavalry_driver::{Driver, spec};
 use cavalry_proto::udp::{ControlFrame, Datagram, SetupFrame, StatusMessage, parse};
+use nix::sys::socket::{getsockopt, setsockopt, sockopt};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+
+/// The messages the gate sends: ten rounds of a thousand, each 32 bytes in a 64-byte
+/// frame, with a status message after every round.
+const ROUNDS: usize = 10;
+const MESSAGES_PER_ROUND: usize = 1000;
+const FRAME_LENGTH: usize = 64;
+
+/// How long any wait in this test may last before it fails with a message: a
+/// regression fails in seconds, never at the job's `timeout-minutes`.
+const DEADLINE: Duration = Duration::from_secs(5);
+
+/// The receive buffer the receiver by hand asks of its socket. The sender puts frames
+/// on the wire as the publisher commits them, in datagrams of whatever is committed at
+/// each duty cycle, so a round of a thousand frames published before any is read may
+/// arrive as a thousand datagrams; the kernel charges each against the socket's buffer
+/// at its own size, about two kibibytes for a small datagram on Linux and macOS, and
+/// drops what does not fit. Linux's default buffer, 212992 bytes, holds a round only
+/// when the sender gathers most frames into full datagrams, which is a race the sender
+/// loses on a slow publisher; this receiver has no NAK, so a dropped datagram is a gap
+/// it cannot close. The host may give less than asked (Linux caps at
+/// `net.core.rmem_max`), so [`Receiver::bind`] reads back what it gave and the test
+/// publishes no more than that holds before it reads.
+const RECEIVE_BUFFER: usize = 4 * 1024 * 1024;
+
+/// What the kernel charges one datagram against the receive buffer, at most: Linux
+/// rounds a small datagram's buffer up to a kibibyte or two of `skb->truesize`, macOS
+/// to a two-kibibyte mbuf cluster.
+const KERNEL_BYTES_PER_DATAGRAM: usize = 2048;
 
 /// A directory of its own per test, removed when the guard drops.
 struct TestDir(PathBuf);
@@ -52,6 +81,30 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     true
 }
 
+/// Offers `message` until the publication takes it, within [`DEADLINE`]: a refusal is
+/// retried, since `back-pressured` and `not-connected` are the publisher's to wait out,
+/// and one that lasts fails with its reason and the publication's state, never hangs.
+/// Nothing here allocates while the offer is taken or refused.
+fn offer(publication: &mut Publication, message: &[u8]) {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        match publication.offer(message) {
+            Ok(_) => return,
+            Err(refusal) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the offer was refused for {DEADLINE:?} ({refusal}); connected {}, limit {}, \
+                     position {:?}",
+                    publication.is_connected(),
+                    publication.limit(),
+                    publication.position()
+                );
+                std::thread::sleep(Duration::from_micros(50));
+            }
+        }
+    }
+}
+
 /// A receiver by hand: a loopback socket that reads what the sender puts on the wire and
 /// answers as `spec/udp.md`, "The receiver" says a receiver answers. It allocates
 /// nothing after `bind`.
@@ -59,6 +112,10 @@ struct Receiver {
     socket: UdpSocket,
     buffer: Vec<u8>,
     peer: Option<SocketAddr>,
+    /// How many frames may be on the wire unread without the socket dropping one: the
+    /// receive buffer the host gave, at one frame per datagram and
+    /// [`KERNEL_BYTES_PER_DATAGRAM`] each.
+    unread_frames: usize,
 }
 
 /// What one datagram carried.
@@ -81,10 +138,16 @@ impl Receiver {
         socket
             .set_read_timeout(Some(Duration::from_millis(300)))
             .expect("a read timeout");
+        // What the host gives is the bound, not what was asked: a capped buffer is read
+        // back here and shrinks how much a round publishes before it is read.
+        let _ = setsockopt(&socket, sockopt::RcvBuf, &RECEIVE_BUFFER);
+        let given = getsockopt(&socket, sockopt::RcvBuf).expect("the receive buffer is read back");
+        let unread_frames = (given / KERNEL_BYTES_PER_DATAGRAM).clamp(1, MESSAGES_PER_ROUND);
         Self {
             socket,
             buffer: vec![0u8; 2048],
             peer: None,
+            unread_frames,
         }
     }
 
@@ -116,7 +179,7 @@ impl Receiver {
 
     /// Takes datagrams until a setup frame arrives.
     fn setup(&mut self) -> SetupFrame {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + DEADLINE;
         loop {
             if let Some(Received::Control(ControlFrame::Setup(setup))) = self.next() {
                 return setup;
@@ -137,8 +200,11 @@ impl Receiver {
 
     /// Takes data datagrams until `bytes` of frames have arrived in order from `from`,
     /// and returns how many frames they held; a control frame on the way is skipped.
+    /// The deadline is checked on every datagram, not only at a read timeout: once the
+    /// data stops, the sender's heartbeats keep arriving every 100 ms, under the read
+    /// timeout, and a check at the timeout alone would never run.
     fn take_data(&mut self, from: u32, bytes: usize) -> usize {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + DEADLINE;
         let mut expected = from;
         let mut frames = 0;
         let end = from as usize + bytes;
@@ -155,8 +221,12 @@ impl Receiver {
                 }
                 Some(Received::Control(_)) => {}
                 Some(Received::Other) => panic!("a datagram failed the check"),
-                None => assert!(Instant::now() < deadline, "the data stopped at {expected}"),
+                None => {}
             }
+            assert!(
+                Instant::now() < deadline,
+                "the data stopped at {expected} of {end}"
+            );
         }
         assert_eq!(
             expected as usize, end,
@@ -193,35 +263,41 @@ fn the_send_path_allocates_nothing_per_message() {
         .expect("a publication");
     let setup = receiver.setup();
     receiver.send_status_message(&status_message(&setup, 0, 131072, 0));
-    assert!(wait_until(Duration::from_secs(5), || publication.is_connected()));
+    assert!(wait_until(DEADLINE, || publication.is_connected()));
     // Warm up: the first burst, the first heartbeat, every thread's first cycle, and
     // a quiet second for the client's first keepalive and every first-time path.
     for _ in 0..100 {
-        publication.offer(&[1u8; 32]).expect("offers");
+        offer(&mut publication, &[1u8; 32]);
     }
-    assert_eq!(receiver.take_data(0, 6400), 100);
+    assert_eq!(receiver.take_data(0, 100 * FRAME_LENGTH), 100);
     std::thread::sleep(Duration::from_millis(1200));
 
-    // The window is kept open as the receiver reads, with a status message every
-    // thousand frames; nothing in the region allocates: not the publisher, not the
-    // conductor, not the sender's bursts, and not this receiver.
+    // Ten rounds of a thousand messages, each read once it is published and never more
+    // than the receiver's buffer holds unread, with a status message after every round
+    // to keep the window open; nothing in the region allocates: not the publisher, not
+    // the conductor, not the sender's bursts, and not this receiver.
     let region = Region::new(GLOBAL);
-    let mut offset = 6400u32;
-    for _ in 0..10 {
-        for _ in 0..1000 {
-            while publication.offer(&[2u8; 32]).is_err() {
-                std::thread::sleep(Duration::from_micros(50));
+    let mut offset = (100 * FRAME_LENGTH) as u32;
+    for _ in 0..ROUNDS {
+        let mut published = 0;
+        while published < MESSAGES_PER_ROUND {
+            let batch = receiver.unread_frames.min(MESSAGES_PER_ROUND - published);
+            for _ in 0..batch {
+                offer(&mut publication, &[2u8; 32]);
             }
+            assert_eq!(receiver.take_data(offset, batch * FRAME_LENGTH), batch);
+            offset += (batch * FRAME_LENGTH) as u32;
+            published += batch;
         }
-        assert_eq!(receiver.take_data(offset, 64_000), 1000);
-        offset += 64_000;
         receiver.send_status_message(&status_message(&setup, offset as i32, 131072, 0));
     }
     std::thread::sleep(Duration::from_millis(150));
     let change = region.change();
     assert_eq!(
-        change.allocations, 0,
-        "allocations on the send path over 10,000 messages: {change:?}"
+        change.allocations,
+        0,
+        "allocations on the send path over {} messages: {change:?}",
+        ROUNDS * MESSAGES_PER_ROUND
     );
     publication.close().expect("closes");
     client.close().expect("closes");
