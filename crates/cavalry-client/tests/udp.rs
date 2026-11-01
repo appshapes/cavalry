@@ -255,7 +255,9 @@ fn a_udp_publication_connects_on_a_status_message_and_sends_its_stream_in_order(
     assert_eq!(read_counter(dir.path(), SENDER_RETRANSMITTED_BYTES), 640);
 
     // Idle for the heartbeat interval: a heartbeat at the sender position, no EOS.
+    let deadline = Instant::now() + Duration::from_secs(5);
     let heartbeat = loop {
+        assert!(Instant::now() < deadline, "no heartbeat arrived");
         match receiver.next() {
             Some(Received::Control(ControlFrame::Heartbeat(heartbeat))) => break heartbeat,
             Some(Received::Data { .. }) => panic!("data after the stream"),
@@ -273,7 +275,9 @@ fn a_udp_publication_connects_on_a_status_message_and_sends_its_stream_in_order(
     let log = dir
         .path()
         .join(format!("publications/{registration_id}.logbuffer"));
+    let deadline = Instant::now() + Duration::from_secs(5);
     let eos = loop {
+        assert!(Instant::now() < deadline, "no heartbeat with EOS arrived");
         match receiver.next() {
             Some(Received::Control(ControlFrame::Heartbeat(heartbeat)))
                 if heartbeat.is_end_of_stream() =>
