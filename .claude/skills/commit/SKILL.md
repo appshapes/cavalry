@@ -80,6 +80,12 @@ command, and read its exit code before the next; never chain a gate through a pi
 through). All four must pass before the commit. `just lint-docs` on a dirty tree checks the change about to be
 committed; on a clean tree it checks the last commit.
 
+A change that adds or touches a `cfg(target_os = "linux")` block, or its `not` twin,
+is also type-checked for Linux, since the laptop's gates compile the laptop's platform
+alone and CI's Linux jobs build the other side: `cargo check --workspace --all-targets
+--target x86_64-unknown-linux-gnu` (`rustup target add x86_64-unknown-linux-gnu`
+installs the target once; a check needs no linker), read for its exit code like a gate.
+
 - A recipe that prints `not built yet` is a gate that does not exist yet, not a pass.
   If the change touches what that gate would check, building the gate is part of the
   change (CLAUDE.md, "Gates"): stop and name the gate. If the change cannot touch it
