@@ -85,6 +85,9 @@ is also type-checked for Linux, since the laptop's gates compile the laptop's pl
 alone and CI's Linux jobs build the other side: `cargo check --workspace --all-targets
 --target x86_64-unknown-linux-gnu` (`rustup target add x86_64-unknown-linux-gnu`
 installs the target once; a check needs no linker), read for its exit code like a gate.
+A `cfg(target_os)` ladder with more than two arms is checked on a third target as well,
+`--target x86_64-unknown-freebsd`, since on Linux and macOS exactly one arm is live and
+a dead or overlapping arm shows only elsewhere.
 
 - A recipe that prints `not built yet` is a gate that does not exist yet, not a pass.
   If the change touches what that gate would check, building the gate is part of the

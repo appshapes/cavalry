@@ -85,6 +85,10 @@ feature that followed this page, commit by commit.
      x86_64-unknown-linux-gnu`, after `rustup target add x86_64-unknown-linux-gnu`
      once. It prints `Finished` and exits 0, or the errors `gates (linux)` and both
      bench hosts would find; a check needs no linker.
+   - A `cfg(target_os)` ladder with more than two arms is checked on a third target as
+     well, `cargo check -p <crate> --target x86_64-unknown-freebsd`, since on Linux and
+     macOS exactly one arm is live and an arm that is dead or doubled there shows only
+     elsewhere.
    - A person: `/commit <card>` runs the four gates, then `git add`, `git commit`,
      `git pull --no-edit` and `git push` to `master`. The message is the review record.
      Subject: `<card>: <Imperative subject>`. Body: what changed, which invariant by

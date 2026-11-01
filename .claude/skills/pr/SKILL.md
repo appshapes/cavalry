@@ -60,6 +60,11 @@ named below, stop and hand it back.
    `rustup target add x86_64-unknown-linux-gnu`, once, installs the target; a check
    needs no linker. Pull request 94's first review on 2026-11-01 was CI's three Linux
    errors in a file every macOS gate had passed.
+   A `cfg(target_os)` ladder with more than two arms is checked on a target that is
+   neither, `--target x86_64-unknown-freebsd` after `rustup target add` once: on the two
+   targets CI runs exactly one arm is live, so a third arm that is dead there, or an arm
+   that overlaps another, shows only elsewhere. Pull request 95's second review on
+   2026-11-01 was two constants defined twice on every target but Linux and macOS.
 
 3. **Commit.** The message is the review record, as `/commit` writes it: subject
    `<card>: <Imperative subject>` under 72 characters; body with what changed, which
