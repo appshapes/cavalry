@@ -105,12 +105,12 @@ Never invent a number.
   request comment that a person must merge `master` because it changed
   `.github/workflows/`.
 
-## Ask before, by stopping and saying so in a comment
+## Decide, and say so
 
-CLAUDE.md's list: changing the wire format, adding `unsafe` outside `cavalry-shm` and
-`cavalry-ffi`, adding a configuration key, adding a dependency to a data-plane crate, or
-weakening a gate. If the issue seems to ask for one of these, do the part that does not need
-it, push, and say what needs a decision. Everything else, do and show the evidence.
+Nothing waits on a person's decision (CLAUDE.md, Working rules for agents). A change that
+cannot be undone, adding a configuration key or a dependency to a data-plane crate among
+them, is made with its ADR and its reason in the commit message, and the review reads both;
+what the list below denies stays denied. Everything else, do and show the evidence.
 
 ## Never, on pain of a blocked pull request
 
