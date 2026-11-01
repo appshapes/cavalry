@@ -1,6 +1,6 @@
 # 0041. Send a UDP publication from a dedicated sender thread through nix's socket calls
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-31
 - **Invariants affected:** 2, 3, 4
 - **Supersedes:** none
@@ -180,6 +180,40 @@ error codes 4 and 9, the counters' allocation and release, the events to clients
 - Nothing measured: the UDP rows are card 182's, and this change puts the first
   datagram on the wire. Until then a commit under `cavalry-driver` says what the
   existing rows show, as ADR 0039 says.
+
+Acceptance, 2026-11-01 *(acceptance)*: Rjae accepted the decision as proposed on
+2026-11-01, answering the recorded decision d-20261031-b93489 through the team's Slack
+gateway. The review of pull request 92 left two notes for the acceptance, taken here:
+`spec/client-protocol.md`, "Commands", gains the rule that `add publication` on a
+`cavalry:udp` channel is error code 10 when the sender's request queue has no room for
+the endpoint and the publication or holds a remove still waiting for room; and the "tens
+of microseconds" of the alternative that kept the sender inside the conductor's cycle
+has no source and is withdrawn, that alternative losing on ADR 0039 alone. Two points of
+the Decision were implemented differently, with the reason: the log is cleaned only up
+to a term length behind the sender position, Aeron's rule in
+`NetworkPublication.cleanBufferTo`, and not up to the sender position as `spec/udp.md`,
+"The sender" said, since the resend window the same page keeps for a NAK lies in that
+term, so the page's sentence is amended; and `sendmsg` and `recvmsg` run per datagram on
+every platform but Linux, with `std`'s `send` and `recv` used nowhere, so that one audit
+covers every call. One point the Decision did not name: the sender parks while it holds
+no endpoint and no publication, unparked by the conductor's next request, as the
+replayer parks with no replay (ADR 0030), because a sender idling with the backoff
+strategy woke every millisecond and the laptop's client claim row read its p99.99 at 292
+ns against master's 125 ns in two runs, and 125 ns again once the sender parked. The
+change that accepts this ADR carries the sender thread with its socket layer, the
+conductor's `cavalry:udp` publication path with the send endpoint registry, the counters
+of `spec/udp.md` the sender and the endpoints move (the 15 `sender.*` rows,
+`sender.position` and `sender.limit`, the publication's connection and the endpoint's
+state machines with their five counters, and `receiver.receive_failed`, which the send
+endpoint's receives count too), `TermReader::block_from` in `cavalry-shm` for a burst's
+blocks and a retransmit's, the bench's pin of the fourth thread beside the recorder and
+the replayer until card 182, and the tests: the conductor's against a receiver by hand
+on the loopback, the client's over the public API for the stream in order, the NAK, the
+window, the heartbeat and the close, and the allocation gate over the send path, alone
+in its process. `add subscription`, `start recording` and `start replay` on a
+`cavalry:udp` channel stay code 11 until the receiver lands (card 181), and `doctor`'s
+two checks of ADR 0039, an unconnected publication and a capped send buffer, follow on
+the control plane in their own change.
 
 ## Consequences
 

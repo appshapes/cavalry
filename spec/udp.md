@@ -186,8 +186,10 @@ computes a position, lies within [p − term length ÷ 2, p + term length + term
 first such status message until the connection timeout passes without one. The conductor keeps `publication.limit` at the sender position plus the publication
 window while the publication is connected and at the sender position otherwise, so that
 the publisher reads `not connected` (`spec/log-buffer.md`, "Claim, commit and abort"),
-keeps `is connected` to match, and cleans and unblocks the log as "The driver" there
-says with the sender position as the consumer position. After the publication is closed
+keeps `is connected` to match, unblocks the log as "The driver" there says with the
+sender position as the consumer position, and cleans it only up to a term length behind
+the sender position, Aeron's rule, so that the resend window below the sender position
+is never cleaned (ADR 0041). After the publication is closed
 it lingers for the linger timeout, or until a status message with the end-of-stream flag
 arrives, sending heartbeats with EOS and answering NAKs; then its log is removed. Once
 the publication is closed and the sender position has reached the end of stream
@@ -364,8 +366,8 @@ filled.
 ## Counters
 
 Static unless a key is named. None is in `counters.toml` until the feature that moves it
-lands: the sender's rows with card 180, the receiver's, the image's and the endpoint's
-with card 181.
+lands: the sender's and the endpoint's rows, the publication's connection and
+`receiver.receive_failed` with card 180, the receiver's and the image's with card 181.
 
 | Counter | Moves when |
 | --- | --- |

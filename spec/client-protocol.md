@@ -154,10 +154,11 @@ What the driver does with each, after the checks of "What the driver rejects":
   its send endpoint, one socket, whose `channel.status` counter the event names as its
   channel status indicator id; the log has the UDP sizes of "Sizes", the publication is
   connected by the first status message and not before, and the sender puts the stream
-  on the wire (`spec/udp.md`, "The sender"). A registry at capacity, or a counters
-  file with no free record, is error code 10; a log that cannot be created or sized is
-  error code 12; a socket that cannot be opened, bound or connected is code 4; a host
-  that does not resolve is code 9.
+  on the wire (`spec/udp.md`, "The sender"). A registry at capacity, a counters file
+  with no free record, or the sender's request queue with no room for the endpoint and
+  the publication, or with a remove still waiting for room (ADR 0041), is error code
+  10; a log that cannot be created or sized is error code 12; a socket that cannot be
+  opened, bound or connected is code 4; a host that does not resolve is code 9.
 - **add exclusive publication.** As add publication, with a new session and a log of
   type 1 every time, never shared; the answer is `exclusive publication ready`.
 - **remove publication.** The command names the client's registration, the correlation
