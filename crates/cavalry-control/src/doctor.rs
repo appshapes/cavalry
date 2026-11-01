@@ -27,6 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cavalry_driver::{IdleStrategy, spec};
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
+use cavalry_proto::udp::{DATAGRAMS_PER_BURST, LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
     CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF, CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS,
@@ -96,12 +97,58 @@ const DOC_RECORDING_COMMANDS: &str = "docs/reference/client-protocol.md#commands
 const DOC_UDP_SENDER: &str = "docs/reference/udp.md#the-sender";
 const DOC_UDP_VALUES: &str = "docs/reference/udp.md#values";
 
-/// A burst: the most bytes the sender hands the socket in one call, sixteen datagrams
-/// of the MTU (`spec/udp.md`, "Values"); a send buffer below it is a host that capped it.
-const BURST_BYTES: i64 = 16 * 1408;
+/// The least send buffer a send endpoint's socket needs: one datagram of the MTU,
+/// Aeron's rule (`UdpChannelTransport` refuses an `SO_SNDBUF` below the MTU), and on
+/// Linux a burst, the sixteen datagrams one `sendmmsg` hands the socket in one call
+/// (`spec/udp.md`, "Values"; ADR 0041). Elsewhere the sender sends one `sendmsg` per
+/// datagram, so a burst never meets the buffer, and macOS's default, 9216 bytes from
+/// `net.inet.udp.sendspace`, holds one datagram: it is not a cap, and a burst as the
+/// line there would name every send endpoint on a Mac.
+#[cfg(target_os = "linux")]
+const SNDBUF_LEAST: i64 = DATAGRAMS_PER_BURST as i64 * MTU_LENGTH_DEFAULT as i64;
+#[cfg(not(target_os = "linux"))]
+const SNDBUF_LEAST: i64 = MTU_LENGTH_DEFAULT as i64;
 
-/// The receive buffer an endpoint asks for (`spec/udp.md`, "Values").
-const RCVBUF_ASKED: i64 = 131_072;
+/// What [`SNDBUF_LEAST`] is, for the finding.
+#[cfg(target_os = "linux")]
+const SNDBUF_LEAST_WHAT: &str = "a burst, sixteen datagrams of the MTU in one sendmmsg";
+#[cfg(not(target_os = "linux"))]
+const SNDBUF_LEAST_WHAT: &str = "one datagram of the MTU";
+
+/// What raises a send buffer below [`SNDBUF_LEAST`]. The driver sets no send buffer
+/// (`spec/udp.md`, "Values"; ADR 0041), so the socket holds the operating system's
+/// default for a new UDP socket, and the sysctl that moves it is the default's, not the
+/// cap on `setsockopt(SO_SNDBUF)`, a call the driver never makes: on Linux
+/// `net.core.wmem_default`, since `wmem_max` caps a buffer a socket asks for and does
+/// not move one that asked for nothing; on macOS `net.inet.udp.sendspace`, the buffer
+/// a new UDP socket is given there.
+#[cfg(target_os = "linux")]
+const SNDBUF_REMEDY: &str = "raise net.core.wmem_default with sysctl (wmem_max caps a \
+                             buffer a socket asks for, and the driver asks for none)";
+#[cfg(target_os = "macos")]
+const SNDBUF_REMEDY: &str = "raise net.inet.udp.sendspace with sysctl";
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const SNDBUF_REMEDY: &str = "raise the operating system's default send buffer for a new UDP socket";
+
+/// The receive buffer the driver asks of a send endpoint's socket (`spec/udp.md`,
+/// "Values"), as the socket reads it back when the host granted the ask: on Linux
+/// `getsockopt(SO_RCVBUF)` returns twice what `setsockopt` set, the kernel's allowance
+/// for its own bookkeeping, so a host that granted the ask reads back twice it, and a
+/// readback below that is `net.core.rmem_max` below the ask; elsewhere the socket reads
+/// back what was set.
+#[cfg(target_os = "linux")]
+const RCVBUF_EXPECTED: i64 = 2 * SOCKET_RCVBUF_LENGTH as i64;
+#[cfg(not(target_os = "linux"))]
+const RCVBUF_EXPECTED: i64 = SOCKET_RCVBUF_LENGTH as i64;
+
+/// What raises a receive buffer below [`RCVBUF_EXPECTED`]: the host's cap on a buffer
+/// a socket asks for, which is what the driver does for this one.
+#[cfg(target_os = "linux")]
+const RCVBUF_REMEDY: &str = "raise net.core.rmem_max with sysctl";
+#[cfg(target_os = "macos")]
+const RCVBUF_REMEDY: &str = "raise kern.ipc.maxsockbuf with sysctl";
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const RCVBUF_REMEDY: &str = "raise the operating system's cap on a socket's receive buffer";
 
 /// How serious a finding is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -895,9 +942,11 @@ struct EndpointCounters {
 
 /// The `cavalry:udp` checks ADR 0039 names, from the counters file alone (ADR 0041):
 /// a publication no receiver has answered, whose `sender.limit` is 0 while the driver
-/// runs, and a send endpoint's socket buffer the host capped, a send buffer below a
-/// burst or a receive buffer below what was asked. Every send endpoint is listed as a
-/// note, as recordings are, with its status, its publications and its buffers.
+/// runs, and a send endpoint's socket buffer the host capped, a send buffer below
+/// [`SNDBUF_LEAST`] or a receive buffer below [`RCVBUF_EXPECTED`], each finding naming
+/// the sysctl of the platform `doctor` runs on, which is the driver's host. Every send
+/// endpoint is listed as a note, as recordings are, with its status, its publications
+/// and its buffers.
 fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
     if !running {
         return 0;
@@ -995,34 +1044,44 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             doc: DOC_UDP_SENDER,
         });
     }
+    // A raised sysctl reaches a socket opened after it, and an endpoint's socket is
+    // opened once, by the first `add publication` on its channel, and closed when its
+    // last publication's linger ends (`spec/udp.md`, "The receiver"), so the step after
+    // the sysctl is to close the endpoint and open a new one.
+    let reopen = format!(
+        "then remove every publication on the channel, wait the {} s linger for the \
+         endpoint to close, and add them again",
+        LINGER.as_secs()
+    );
     for endpoint in &endpoints {
         if let Some(sndbuf) = endpoint.sndbuf
-            && sndbuf < BURST_BYTES
+            && sndbuf < SNDBUF_LEAST
         {
             findings.push(Finding {
                 check: "udp-socket-buffers",
                 level: Level::Warn,
                 message: format!(
-                    "send endpoint {}: the socket's send buffer is {sndbuf} bytes, below a \
-                     burst of {BURST_BYTES} (sixteen datagrams of the MTU), which the host \
-                     capped: raise net.core.wmem_max with sysctl on Linux and add the \
-                     publication again, or expect sender.short_sends",
+                    "send endpoint {}: the socket's send buffer is {sndbuf} bytes, below the \
+                     {SNDBUF_LEAST} that {SNDBUF_LEAST_WHAT} needs; the driver sets no send \
+                     buffer, so this is the operating system's default for a new UDP socket, \
+                     which the host lowered: {SNDBUF_REMEDY}, {reopen}; until then expect \
+                     sender.send_failed and sender.short_sends",
                     endpoint.channel
                 ),
                 doc: DOC_UDP_VALUES,
             });
         }
         if let Some(rcvbuf) = endpoint.rcvbuf
-            && rcvbuf < RCVBUF_ASKED
+            && rcvbuf < RCVBUF_EXPECTED
         {
             findings.push(Finding {
                 check: "udp-socket-buffers",
                 level: Level::Warn,
                 message: format!(
-                    "send endpoint {}: the socket's receive buffer is {rcvbuf} bytes, below \
-                     the {RCVBUF_ASKED} asked, which the host capped: raise net.core.rmem_max \
-                     with sysctl on Linux and add the publication again, or expect status \
-                     messages and NAKs dropped under load",
+                    "send endpoint {}: the socket's receive buffer reads back {rcvbuf} bytes, \
+                     below the {RCVBUF_EXPECTED} a host that granted the {SOCKET_RCVBUF_LENGTH} \
+                     asked reads back, so the host capped the ask: {RCVBUF_REMEDY}, {reopen}; \
+                     until then expect status messages and NAKs dropped under load",
                     endpoint.channel
                 ),
                 doc: DOC_UDP_VALUES,
@@ -1579,9 +1638,15 @@ mod tests {
 
     /// ADR 0039's two `cavalry:udp` checks, from the counters file alone: a publication
     /// whose `sender.limit` is 0 is one no receiver answered, named with its endpoint's
-    /// channel from the label's endpoint id; a send buffer below a burst or a receive
-    /// buffer below what was asked is a host that capped it; and every send endpoint
-    /// is listed as a note.
+    /// channel from the label's endpoint id; a send buffer below [`SNDBUF_LEAST`] is a
+    /// host that lowered the default the driver leaves alone, and the finding names the
+    /// sysctl of that default, not `wmem_max`, which does not move a buffer nobody asked
+    /// for; a receive buffer below [`RCVBUF_EXPECTED`] is a host that capped the ask,
+    /// and the finding names the cap; each half is exercised alone, with the other at
+    /// its line, so that a message or a threshold of one half cannot pass for the
+    /// other's; and every send endpoint is listed as a note. The figures below the line
+    /// are below it on every platform, so the test reads the same on Linux and macOS,
+    /// whose lines differ.
     #[test]
     fn a_udp_publication_no_receiver_answered_and_a_capped_socket_buffer_are_warnings() {
         let dir = TestDir::new("udp");
@@ -1606,7 +1671,8 @@ mod tests {
                 &format!("channel.socket_sndbuf {channel}"),
             )
             .expect("room");
-        sndbuf.set(8192);
+        // Below one datagram of the MTU, so below the line on every platform.
+        sndbuf.set(1024);
         let rcvbuf = counters
             .allocate(
                 CHANNEL_SOCKET_RCVBUF,
@@ -1614,7 +1680,7 @@ mod tests {
                 &format!("channel.socket_rcvbuf {channel}"),
             )
             .expect("room");
-        rcvbuf.set(131_072);
+        rcvbuf.set(RCVBUF_EXPECTED);
         let publications = counters
             .allocate(
                 CHANNEL_PUBLICATIONS,
@@ -1631,26 +1697,76 @@ mod tests {
             .allocate(SENDER_LIMIT, &key, "sender.limit 7 5 1001 9")
             .expect("room");
         limit.set(0);
+        let buffer_findings = |report: &Report| -> Vec<String> {
+            report
+                .findings
+                .iter()
+                .filter(|f| f.check == "udp-socket-buffers")
+                .inspect(|f| assert_eq!(f.level, Level::Warn))
+                .inspect(|f| assert_eq!(f.doc, "docs/reference/udp.md#values"))
+                .map(|f| f.message.clone())
+                .collect()
+        };
+        let reopen = format!("wait the {} s linger", LINGER.as_secs());
 
+        // No receiver answered, and the send buffer is below the line: two warnings.
         let report = examine(&dir.0);
         let found = finding(&report, "udp-publication-not-connected");
         assert_eq!(found.level, Level::Warn);
         assert!(found.message.contains("stream 1001"), "{}", found.message);
         assert!(found.message.contains(channel), "{}", found.message);
         assert_eq!(found.doc, "docs/reference/udp.md#the-sender");
-        let found = finding(&report, "udp-socket-buffers");
-        assert_eq!(found.level, Level::Warn);
-        assert!(found.message.contains("8192"), "{}", found.message);
-        assert!(found.message.contains("22528"), "{}", found.message);
+        let buffers = buffer_findings(&report);
+        assert_eq!(buffers.len(), 1, "{report}");
+        let message = &buffers[0];
+        assert!(message.contains("send buffer is 1024 bytes"), "{message}");
+        assert!(
+            message.contains(&format!("below the {SNDBUF_LEAST} ")),
+            "{message}"
+        );
+        assert!(message.contains(SNDBUF_REMEDY), "{message}");
+        assert!(message.contains(&reopen), "{message}");
+        assert!(
+            !message.contains("wmem_max with"),
+            "wmem_max moves nothing: {message}"
+        );
         let note = finding(&report, "udp-endpoint");
         assert_eq!(note.level, Level::Note);
         assert!(note.message.contains("active"), "{}", note.message);
         assert!(note.message.contains("1 publication"), "{}", note.message);
         assert!(report.ok(), "warnings do not fail: {report}");
 
-        // A receiver answered and the host gave the buffer: the note alone remains.
-        limit.store_release(131_072);
+        // The send buffer is Linux's default, and the receive buffer reads back one
+        // byte below what a host that granted the ask reads back: the receive half
+        // alone, naming the cap.
         sndbuf.set(212_992);
+        rcvbuf.set(RCVBUF_EXPECTED - 1);
+        let report = examine(&dir.0);
+        let buffers = buffer_findings(&report);
+        assert_eq!(buffers.len(), 1, "{report}");
+        let message = &buffers[0];
+        assert!(
+            message.contains(&format!(
+                "receive buffer reads back {} bytes",
+                RCVBUF_EXPECTED - 1
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("below the {RCVBUF_EXPECTED} ")),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("the {SOCKET_RCVBUF_LENGTH} asked")),
+            "{message}"
+        );
+        assert!(message.contains(RCVBUF_REMEDY), "{message}");
+        assert!(message.contains(&reopen), "{message}");
+        assert!(!message.contains("send buffer"), "{message}");
+
+        // A receiver answered and the host gave both buffers: the note alone remains.
+        limit.store_release(131_072);
+        rcvbuf.set(RCVBUF_EXPECTED);
         let report = examine(&dir.0);
         assert!(
             !report.findings.iter().any(|f| {
