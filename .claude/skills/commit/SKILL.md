@@ -80,6 +80,12 @@ command, and read its exit code before the next; never chain a gate through a pi
 through). All four must pass before the commit. `just lint-docs` on a dirty tree checks the change about to be
 committed; on a clean tree it checks the last commit.
 
+A change that adds or touches a `cfg(target_os = "linux")` block, or its `not` twin,
+is also type-checked for Linux, since the laptop's gates compile the laptop's platform
+alone and CI's Linux jobs build the other side: `cargo check --workspace --all-targets
+--target x86_64-unknown-linux-gnu` (`rustup target add x86_64-unknown-linux-gnu`
+installs the target once; a check needs no linker), read for its exit code like a gate.
+
 - A recipe that prints `not built yet` is a gate that does not exist yet, not a pass.
   If the change touches what that gate would check, building the gate is part of the
   change (CLAUDE.md, "Gates"): stop and name the gate. If the change cannot touch it
@@ -100,14 +106,10 @@ committed; on a clean tree it checks the last commit.
 - Wrap the body at 72 characters. Backticks and quotes are safe inside the quoted
   heredoc below, so use the real names of files, flags and crates.
 
-## 6. Confirm with the user
+## 6. Execute
 
-Show the subject, the body and the exact sequence that will run. Ask the user to
-confirm or to edit the message. This pushes to `master`; never auto-execute.
-
-## 7. Execute
-
-Once confirmed, run exactly:
+No confirmation is asked: the user has authorized every commit this sequence makes
+(Alyne, 2026-11-01), and the gates above are the check. Run exactly:
 
 ```
 git add --verbose :/ .
@@ -124,8 +126,8 @@ git push
 If `git pull --no-edit` created a merge commit, run the four gates again
 before `git push`. If either fails, stop and report; do not push.
 
-## 8. Report the result
+## 7. Report the result
 
-- On success, give the commit hash and subject and confirm it was pushed.
+- On success, give the commit hash, the subject and the body, and say it was pushed.
 - On failure (a gate, a merge conflict, a rejected push), report the error output
   clearly. Do not retry automatically. On a merge conflict, hand it back as it is.

@@ -45,12 +45,13 @@ and the Collaborating section below does not apply:
    user's next prompt, usually their answer in step 2, and the roster follows.
 2. **Review it.** Say in a few lines what the card asks for, where it lands (a crate, `spec/`, the
    book, a gate it builds because that gate prints `not built yet`), what is decided for now and what
-   is still to confirm. Then interact with the user only where it is necessary: the things `CLAUDE.md`
-   says to ask before (the wire format, a shared-memory layout, the on-disk log format or the C ABI;
-   `unsafe` outside `cavalry-shm` and `cavalry-ffi`; a configuration key; a dependency of a data-plane
-   crate; weakening a gate), or a reading of the card that would lead to materially different work.
-   Everything else is a routine call: make it, say so, and go on. Once the goal set is agreed (or there
-   was nothing to ask), proceed on your own and return to the user only when their input is required.
+   is still to confirm. Then interact with the user only where it is necessary: a reading of the card
+   that would lead to materially different work. Everything else is the session's call, a decision that
+   cannot be undone included (the wire format, a shared-memory layout, the on-disk log format or the C
+   ABI; `unsafe` outside `cavalry-shm` and `cavalry-ffi`; a configuration key; a dependency of a
+   data-plane crate; a gate's threshold): make it, record it as `CLAUDE.md` says (an ADR, the reason in
+   the commit message), say so, and go on. Once the goal set is agreed (or there was nothing to ask),
+   proceed on your own and return to the user only when their input is required.
 3. **Work the card** as `docs/how-to/implement-a-feature.md` says, on a branch. First check who else is
    in this checkout (`brigade sessions --here`) and that `git status` is clean; then `git switch
    master`, `git pull --no-edit` (a plain merge, never a rebase) and `git switch -c <number>-<slug>`: a
