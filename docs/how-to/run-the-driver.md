@@ -94,12 +94,25 @@ reports it running with a new pid.
   connected. Check that a subscription on the stream exists on the endpoint's host,
   that its driver receives on that port, and that both drivers run the same version
   ([the sender](../reference/udp.md#the-sender)).
-- **`WARN udp-socket-buffers`.** A send endpoint's socket holds a send buffer below a
-  burst, sixteen datagrams of the MTU, or a receive buffer below the 131072 bytes
-  asked: the host capped it. Raise `net.core.wmem_max` or `net.core.rmem_max` with
-  `sysctl` on Linux and add the publication again ([values](../reference/udp.md#values)).
-  `note udp-endpoint` lists every send endpoint with its status, its publications and
-  its two buffers.
+- **`WARN udp-socket-buffers`, the send buffer.** A send endpoint's socket holds a send
+  buffer below one datagram of the MTU, 1408 bytes, or on Linux below a burst, the
+  sixteen datagrams one `sendmmsg` hands the socket, 22528 bytes. The driver sets no
+  send buffer, so this is the operating system's default for a new UDP socket, which
+  the host lowered. Raise that default: `net.core.wmem_default` with `sysctl` on Linux,
+  `net.inet.udp.sendspace` on macOS, whose default of 9216 bytes holds a datagram and
+  is not a cap. `net.core.wmem_max` caps a buffer a socket asks for, and this socket
+  asks for none, so raising it changes nothing here. Then remove every publication on
+  the channel, wait the 5 s linger, and add them again: the endpoint's socket is opened
+  by the first publication on the channel and closed when the last one's linger ends,
+  and a raised default reaches a new socket alone
+  ([values](../reference/udp.md#values)).
+- **`WARN udp-socket-buffers`, the receive buffer.** The socket's receive buffer reads
+  back less than a host that granted the 131072 bytes asked reads back: 262144 on
+  Linux, whose `getsockopt` returns twice what `setsockopt` set, and 131072 elsewhere.
+  The host capped the ask: raise `net.core.rmem_max` with `sysctl` on Linux,
+  `kern.ipc.maxsockbuf` on macOS, then remove the channel's publications, wait the
+  linger and add them again, as for the send buffer. `note udp-endpoint` lists every
+  send endpoint with its status, its publications and its two buffers.
 - **The directory vanished under a running driver.** `doctor` reports `FAIL
   driver-directory ... no driver directory` while the driver and its clients run on,
   since their mappings outlive the unlink, and a new client is refused with `no driver
