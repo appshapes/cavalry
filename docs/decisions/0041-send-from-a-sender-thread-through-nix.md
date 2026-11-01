@@ -188,8 +188,9 @@ gateway. The review of pull request 92 left two notes for the acceptance, taken 
 `cavalry:udp` channel is error code 10 when the sender's request queue has no room for
 the endpoint and the publication or holds a remove still waiting for room; and the "tens
 of microseconds" of the alternative that kept the sender inside the conductor's cycle
-has no source and is withdrawn, that alternative losing on ADR 0039 alone. Three points
-of the Decision were implemented differently, with the reason: the log is cleaned only
+has no source and is withdrawn, that alternative losing on ADR 0039 alone. Four points
+of the Decision and of `spec/udp.md`, "The sender", as ADR 0040 accepted it were
+implemented differently, with the reason: the log is cleaned only
 up to a term length behind the sender position, Aeron's rule in
 `NetworkPublication.cleanBufferTo`, and not up to the sender position as `spec/udp.md`,
 "The sender" said, since the resend window the same page keeps for a NAK lies in that
@@ -203,7 +204,18 @@ time, and not by the endpoint when it opens on the control plane as the Decision
 one could not cross the queue from the conductor to the sender, and the sender holding
 one could not be moved to its thread, which is why `Sender::new` runs on that thread.
 The allocation audit above stands: the one allocation moved from the endpoint's opening
-to the sender's start. One point the Decision did not name: the sender parks while it holds
+to the sender's start. And a NAK is answered one burst of the range per duty cycle,
+sixteen datagrams, until the range is covered, with the data burst beside it on every
+cycle, and not the whole range at once as step 4 of the page said: a NAK may name up to
+half a term, some six thousand datagrams at the MTU, and a cycle that sent them all would
+hold the stream and every other publication on the thread for that long, where one burst
+per cycle keeps every cycle bounded (invariant 3) and the stream moving beside the
+recovery; Aeron's `NetworkPublication.resend` sends the range in one call and bounds it
+by the receiver's NAK length instead. The retransmit is outstanding from the NAK until
+the range is covered and for the retransmit linger after that, which is what the
+receiver (card 181) sets its NAK retry from, and step 4 of the page is amended to say
+so. One
+point the Decision did not name: the sender parks while it holds
 no endpoint and no publication, unparked by the conductor's next request, as the
 replayer parks with no replay (ADR 0030), because a sender idling with the backoff
 strategy woke every millisecond and the laptop's client claim row read its p99.99 at 292
