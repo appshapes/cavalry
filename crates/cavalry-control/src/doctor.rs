@@ -27,7 +27,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cavalry_driver::{IdleStrategy, spec};
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
-use cavalry_proto::udp::{DATAGRAMS_PER_BURST, LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
+#[cfg(target_os = "linux")]
+use cavalry_proto::udp::DATAGRAMS_PER_BURST;
+use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
     CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF, CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS,
@@ -126,7 +128,7 @@ const SNDBUF_LEAST_WHAT: &str = "one datagram of the MTU";
 #[cfg(target_os = "linux")]
 const SNDBUF_REMEDY: &str = "raise net.core.wmem_default with sysctl (wmem_max caps a \
                              buffer a socket asks for, and the driver asks for none)";
-#[cfg(target_os = "macos")]
+#[cfg(not(target_os = "linux"))]
 const SNDBUF_REMEDY: &str = "raise net.inet.udp.maxdgram with sysctl";
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const SNDBUF_REMEDY: &str = "raise the operating system's default send buffer for a new UDP socket";
@@ -146,7 +148,7 @@ const RCVBUF_EXPECTED: i64 = SOCKET_RCVBUF_LENGTH as i64;
 /// a socket asks for, which is what the driver does for this one.
 #[cfg(target_os = "linux")]
 const RCVBUF_REMEDY: &str = "raise net.core.rmem_max with sysctl";
-#[cfg(target_os = "macos")]
+#[cfg(not(target_os = "linux"))]
 const RCVBUF_REMEDY: &str = "raise kern.ipc.maxsockbuf with sysctl";
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const RCVBUF_REMEDY: &str = "raise the operating system's cap on a socket's receive buffer";
