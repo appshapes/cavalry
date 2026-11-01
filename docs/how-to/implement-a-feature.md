@@ -79,6 +79,12 @@ feature that followed this page, commit by commit.
       waits on its own branch until the first merges.
 
 4. **Run the gates and commit.**
+   - First, on a macOS laptop, where the gates compile macOS alone: a change that adds
+     or touches a `cfg(target_os = "linux")` block, or its `not` twin, is type-checked
+     for Linux with `cargo check --workspace --all-targets --target
+     x86_64-unknown-linux-gnu`, after `rustup target add x86_64-unknown-linux-gnu`
+     once. It prints `Finished` and exits 0, or the errors `gates (linux)` and both
+     bench hosts would find; a check needs no linker.
    - A person: `/commit <card>` runs the four gates, then `git add`, `git commit`,
      `git pull --no-edit` and `git push` to `master`. The message is the review record.
      Subject: `<card>: <Imperative subject>`. Body: what changed, which invariant by

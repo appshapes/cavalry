@@ -233,7 +233,10 @@ enum ChannelState {
     /// The last publication's linger ended: the socket is closing with the sender, and
     /// the counters are freed once it has; `channel.status` reads 2.
     Closing,
-    /// Reserved for a later version that re-resolves names; never entered here.
+    /// Reserved for the change that re-resolves names while a stream lives, which ADR
+    /// 0040 leaves to a later version and no card numbers yet (`spec/udp.md`, "The
+    /// receiver", the endpoints): nothing in this version stores it, so a client never
+    /// reads −1 from `channel.status`.
     #[allow(dead_code)]
     Errored,
 }
@@ -4200,11 +4203,12 @@ mod recording {
     use std::time::Instant;
 
     use cavalry_proto::udp::{
-        ControlFrame, STATUS_MESSAGE_END_OF_STREAM, SetupFrame, StatusMessage, parse as parse_udp,
+        CONNECTION_TIMEOUT, ControlFrame, STATUS_MESSAGE_END_OF_STREAM, SetupFrame, StatusMessage,
+        parse as parse_udp,
     };
     use cavalry_shm::counters::generated::{
-        COUNTERS_ALLOCATED, COUNTERS_FREED, PUBLICATION_CONNECTED, SENDER_SETUPS_SENT,
-        SENDER_STATUS_MESSAGES_RECEIVED,
+        COUNTERS_ALLOCATED, COUNTERS_FREED, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
+        SENDER_FRAMES_SENT, SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
     };
 
     /// A receiver by hand: a socket of its own that reads what the sender puts on the
@@ -4540,6 +4544,359 @@ mod recording {
         assert!(message.contains("send endpoints"), "{message}");
         assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 1);
         assert_eq!(h.conductor.publications.len(), spec::MAX_SEND_ENDPOINTS);
+    }
+
+    /// The sender's request queue full (invariant 3; `spec/client-protocol.md`,
+    /// "Commands"): `add publication` on a `cavalry:udp` channel is code 10 naming the
+    /// queue, counted, with no socket opened, no endpoint and no publication registered
+    /// and no counter allocated; a close that finds the queue full waits in the
+    /// deferred list, and an add behind it is code 10 too; once the sender drains the
+    /// queue the close reaches it, the list empties, and the next add goes through.
+    #[test]
+    fn a_udp_add_is_refused_while_the_senders_queue_is_full_and_a_close_waits_behind_it() {
+        let mut h = Harness::new("udp-sender-queue-full");
+        let mut receiver = TestReceiver::bind();
+        let other = TestReceiver::bind();
+        connect_udp(&mut h, &mut receiver, 2, 7, 131072);
+        h.now = now_nanos();
+        assert!(
+            h.conductor.sender.requests.is_empty(),
+            "the sender took the endpoint and the publication"
+        );
+
+        // The request queue full of removes of endpoints the sender does not hold.
+        let mut filler = 0;
+        while h
+            .conductor
+            .sender
+            .requests
+            .offer(sender::Request::RemoveEndpoint {
+                registration_id: 1_000_000 + filler,
+            })
+            .is_ok()
+        {
+            filler += 1;
+        }
+        assert_eq!(filler, spec::SENDER_QUEUE_CAPACITY as i64);
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+
+        // An add on another channel, which needs a socket, an endpoint and a
+        // publication, and one on the open channel's second stream, which needs the
+        // publication alone: both code 10, counted, and the room check runs before
+        // the socket is opened, so no endpoint, publication or counter is left behind.
+        h.conductor
+            .add_publication(1, 30, 8, &other.channel(), false, h.now);
+        let (code, message) = h.last_error(30).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("request queue"), "{message}");
+        h.conductor
+            .add_publication(1, 31, 8, &receiver.channel(), false, h.now);
+        let (code, message) = h.last_error(31).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("request queue"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 2);
+        assert_eq!(h.conductor.send_endpoints.len(), 1, "no endpoint opened");
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+        assert_eq!(h.conductor.publications.len(), 1, "nothing registered");
+        assert_eq!(h.conductor.registration_count, 1);
+        assert_eq!(
+            h.counter(COUNTERS_ALLOCATED),
+            allocated,
+            "no counter allocated"
+        );
+        assert!(
+            h.conductor.sender_deferred.is_empty(),
+            "an add is refused, never deferred"
+        );
+
+        // A close waits for room; an add behind it is code 10 as well.
+        h.conductor.remove_publication(1, 32, 2, h.now);
+        assert_eq!(h.conductor.sender_deferred.len(), 1, "the close waits");
+        assert!(h.conductor.publications[0].closing.is_some());
+        h.conductor
+            .add_publication(1, 33, 8, &other.channel(), false, h.now);
+        let (code, message) = h.last_error(33).expect("an error event");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("request queue"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), 3);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+
+        // The sender drains the queue, answering every remove; the close reaches it
+        // and the publication lingers there; the list is empty and the next add goes
+        // through.
+        for _ in 0..10_000 {
+            h.now += MS;
+            h.sender.duty_cycle(h.now);
+            h.conductor.duty_cycle(h.now);
+            if h.conductor.sender_deferred.is_empty() && h.conductor.sender.requests.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            h.conductor.sender_deferred.is_empty(),
+            "the close was offered"
+        );
+        assert!(
+            h.conductor.sender.requests.is_empty(),
+            "the sender took every request"
+        );
+        assert_eq!(h.sender.pending_replies(), 0);
+        assert!(
+            h.sender.positions_of(2).is_some(),
+            "the sender lingers the publication"
+        );
+        assert_eq!(
+            h.conductor.publications.len(),
+            1,
+            "the conductor keeps its log until the sender's reply"
+        );
+        h.conductor
+            .add_publication(1, 34, 8, &other.channel(), false, h.now);
+        assert_eq!(h.last_error(34), None);
+        assert_eq!(h.conductor.send_endpoints.len(), 2, "the add went through");
+        assert_eq!(h.conductor.publications.len(), 2);
+    }
+
+    /// The sender's deferred requests at capacity (invariant 3): the publications
+    /// registry full of `cavalry:udp` publications over the full registry of
+    /// endpoints, every publication closed while the request queue is full, and every
+    /// close completed, which releases its endpoint and the last release removes it,
+    /// fills the list to exactly its bound, one close per publication and one remove
+    /// per endpoint, and not past its allocation; every request reaches the sender once
+    /// it catches up.
+    #[test]
+    fn the_senders_deferred_requests_are_bounded_by_a_close_per_publication_and_a_remove_per_endpoint()
+     {
+        let mut h = Harness::new("udp-sender-deferred-capacity");
+        // Every log is made resident at creation: the smallest term for 1024 of them.
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let now = h.now;
+        let per_endpoint = spec::MAX_PUBLICATIONS / spec::MAX_SEND_ENDPOINTS;
+        let mut ids: Vec<i64> = Vec::with_capacity(spec::MAX_PUBLICATIONS);
+        for endpoint in 0..spec::MAX_SEND_ENDPOINTS {
+            let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", 40_300 + endpoint);
+            for stream in 0..per_endpoint {
+                let correlation_id = 10 + ids.len() as i64;
+                h.conductor.add_publication(
+                    1,
+                    correlation_id,
+                    100 + stream as i32,
+                    channel.as_bytes(),
+                    false,
+                    now,
+                );
+                assert_eq!(
+                    h.last_error(correlation_id),
+                    None,
+                    "publication {correlation_id}"
+                );
+                ids.push(correlation_id);
+            }
+        }
+        assert_eq!(h.conductor.publications.len(), spec::MAX_PUBLICATIONS);
+        assert_eq!(h.conductor.send_endpoints.len(), spec::MAX_SEND_ENDPOINTS);
+        assert_eq!(
+            h.conductor.sender.requests.len(),
+            spec::MAX_PUBLICATIONS + spec::MAX_SEND_ENDPOINTS,
+            "an endpoint and a publication each, waiting for the sender"
+        );
+
+        // The rest of the request queue full of removes of endpoints the sender does
+        // not hold, so that nothing the conductor offers from here finds room.
+        while h
+            .conductor
+            .sender
+            .requests
+            .offer(sender::Request::RemoveEndpoint {
+                registration_id: 1_000_000,
+            })
+            .is_ok()
+        {}
+        let allocated = h.conductor.sender_deferred.capacity();
+
+        // Every publication closed: one close each, deferred.
+        for (i, &id) in ids.iter().enumerate() {
+            h.conductor
+                .remove_publication(1, 70_000 + i as i64, id, now);
+        }
+        assert_eq!(
+            h.conductor.sender_deferred.len(),
+            spec::MAX_PUBLICATIONS,
+            "one close per publication"
+        );
+        // Every close completing releases the publication's endpoint, and the last
+        // release of each endpoint sends its remove: one per endpoint, behind the
+        // closes. `close_if_done` releases once the sender has answered the close,
+        // which it cannot while the queue is full, so the release is called here as
+        // the completion would call it, once per publication.
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        for index in 0..spec::MAX_PUBLICATIONS {
+            let endpoint_id = h.conductor.publications[index]
+                .udp
+                .as_ref()
+                .expect("a cavalry:udp publication")
+                .endpoint_id;
+            h.conductor.release_send_endpoint(endpoint_id, reuse);
+        }
+        assert_eq!(
+            h.conductor.sender_deferred.len(),
+            SENDER_DEFERRED_CAPACITY,
+            "and one remove per endpoint"
+        );
+        assert_eq!(
+            h.conductor.sender_deferred.capacity(),
+            allocated,
+            "the list did not grow"
+        );
+        assert_eq!(h.counter(CHANNEL_CLOSED), spec::MAX_SEND_ENDPOINTS as i64);
+        assert!(
+            h.conductor
+                .send_endpoints
+                .iter()
+                .all(|endpoint| endpoint.state == ChannelState::Closing)
+        );
+
+        for _ in 0..10_000 {
+            h.now += MS;
+            h.sender.duty_cycle(h.now);
+            h.conductor.duty_cycle(h.now);
+            if h.conductor.sender_deferred.is_empty() && h.conductor.sender.requests.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            h.conductor.sender_deferred.is_empty(),
+            "every request was offered"
+        );
+        assert!(
+            h.conductor.sender.requests.is_empty(),
+            "the sender took every one"
+        );
+        assert!(
+            h.conductor.send_endpoints.is_empty(),
+            "every endpoint's socket is closed and its counters freed on the reply"
+        );
+    }
+
+    /// The sender's pending replies at capacity (invariant 3): with the conductor
+    /// taking no replies, the reply queue and then the pending replies fill; at the
+    /// bound the sender handles no request and moves no publication's connection state,
+    /// a connection timeout that is due included, but keeps sending; once the conductor
+    /// takes replies, the held ones go through and the due timeout disconnects the
+    /// publication.
+    #[test]
+    fn the_senders_pending_replies_are_bounded_and_it_keeps_sending() {
+        let mut h = Harness::new("udp-sender-pending");
+        let mut receiver = TestReceiver::bind();
+        connect_udp(&mut h, &mut receiver, 2, 7, 131072);
+        h.now = now_nanos();
+
+        // Removes of endpoints the sender does not hold, each answered, until the
+        // replies are at their bound.
+        let fill = |h: &mut Harness| {
+            while h
+                .conductor
+                .sender
+                .requests
+                .offer(sender::Request::RemoveEndpoint {
+                    registration_id: 1_000_000,
+                })
+                .is_ok()
+            {}
+        };
+        for _ in 0..10_000 {
+            if h.sender.pending_replies() >= sender::PENDING_REPLIES {
+                break;
+            }
+            fill(&mut h);
+            h.now += MS;
+            h.sender.duty_cycle(h.now);
+        }
+        assert_eq!(h.sender.pending_replies(), sender::PENDING_REPLIES);
+        assert_eq!(
+            h.conductor.sender.replies.len(),
+            spec::SENDER_QUEUE_CAPACITY
+        );
+        fill(&mut h);
+        let queued = h.conductor.sender.requests.len();
+        assert_eq!(h.counter(PUBLICATION_DISCONNECTED), 0);
+
+        // Three frames committed and the connection timeout due: the sender sends the
+        // frames in one burst and moves its position, handles no request, and holds
+        // the disconnect, since it could not reply.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        for n in 0..3u8 {
+            appender.offer(&[n; 32], limit, 0).expect("offered");
+        }
+        h.now += spec::nanos(CONNECTION_TIMEOUT) + MS;
+        for _ in 0..4 {
+            h.now += MS;
+            h.sender.duty_cycle(h.now);
+        }
+        assert_eq!(
+            h.sender.positions_of(2).map(|positions| positions.0),
+            Some(192),
+            "it kept sending"
+        );
+        assert_eq!(h.counter(SENDER_FRAMES_SENT), 3);
+        let mut data = false;
+        for _ in 0..16 {
+            match receiver.next_control() {
+                Some(ControlFrame::Data) => {
+                    data = true;
+                    break;
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(data, "the burst reached the receiver");
+        assert_eq!(
+            h.conductor.sender.requests.len(),
+            queued,
+            "it handled no request"
+        );
+        assert_eq!(h.sender.pending_replies(), sender::PENDING_REPLIES);
+        assert_eq!(
+            h.counter(PUBLICATION_DISCONNECTED),
+            0,
+            "it moved no connection state"
+        );
+        assert!(h.conductor.publications[0].log.is_connected());
+
+        // The conductor takes replies again: the held replies go through, the sender
+        // handles requests, and the due timeout disconnects the publication.
+        for _ in 0..10_000 {
+            h.now += MS;
+            h.conductor.duty_cycle(h.now);
+            h.sender.duty_cycle(h.now);
+            if h.counter(PUBLICATION_DISCONNECTED) == 1
+                && h.conductor.sender.requests.is_empty()
+                && h.sender.pending_replies() == 0
+            {
+                break;
+            }
+        }
+        h.conductor.duty_cycle(h.now);
+        assert_eq!(h.counter(PUBLICATION_DISCONNECTED), 1);
+        assert_eq!(h.sender.pending_replies(), 0);
+        assert!(h.conductor.sender.requests.is_empty());
+        assert!(
+            !h.conductor.publications[0].log.is_connected(),
+            "the conductor acted on the held reply"
+        );
+        assert!(
+            !h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .expect("a cavalry:udp publication")
+                .connected
+        );
+        drop(appender);
     }
 
     /// The full case first (invariant 3): every record a `cavalry:udp` publication and
