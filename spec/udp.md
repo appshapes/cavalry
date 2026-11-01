@@ -167,14 +167,14 @@ publication, on every duty cycle, with p the sender position and L the sender li
 4. **Retransmit.** On a NAK for this publication whose term id and offset name a
    position in the resend window, from p − term length ÷ 2 − the longest message up to
    but not including p, the frames of the range it names, from the term, in datagrams
-   of at most the MTU, one burst of them per duty cycle, beside that cycle's data
-   burst, until the range is covered, so that a cycle's work stays bounded whatever
-   range a NAK names and the stream moves beside the recovery. The retransmit stays
-   outstanding until the range is covered and for the retransmit linger after that,
-   and one is outstanding at a time: a NAK whose offset lies inside the outstanding
-   range is dropped silently, since the answer is on its way; one for another range
-   while a retransmit is outstanding is dropped and counted in
-   `sender.retransmit_overflow`, the recovery stall `doctor` explains from it; and a
+   of at most the MTU, one burst's worth of datagrams per duty cycle ("Values") until
+   the range is covered, with the data burst of step 2 beside it on every cycle, so
+   that one NAK holds up neither the stream nor the other publications on the thread.
+   The retransmit is outstanding from the NAK until the range is covered and for the
+   retransmit linger after that, and one is outstanding at a time: a NAK whose offset
+   lies inside the outstanding range is dropped silently, since the answer is on its
+   way; one for another range while a retransmit is outstanding is dropped and counted
+   in `sender.retransmit_overflow`, the recovery stall `doctor` explains from it; and a
    NAK outside the resend window is dropped and counted in `sender.naks_ignored`. A
    retransmit never moves the sender position.
 5. **RTT.** An RTT measurement with the reply flag is answered: the same frame without
