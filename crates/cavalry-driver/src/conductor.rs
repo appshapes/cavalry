@@ -714,7 +714,15 @@ impl Conductor {
         work += self.flush_deferred();
         work += self.take_replayer_replies(now);
         work += self.flush_replayer_deferred();
-        work += self.take_sender_replies(now);
+        // The sender answers only for endpoints this registry holds, from the add that
+        // put the entry there to the closed reply that removes it (no request goes to the
+        // sender for an endpoint `abandon_send_endpoint` undoes), so while it holds none
+        // the reply queue is empty and the poll's load of the sender's tail is skipped: a
+        // driver that sends nothing pays nothing per cycle for the sender's queue
+        // (invariant 2); card 182's rows are the first that send.
+        if !self.send_endpoints.is_empty() {
+            work += self.take_sender_replies(now);
+        }
         work += self.flush_sender_deferred();
         work += self.flush_commands();
         work += self.keep_replays(now);
