@@ -899,3 +899,17 @@ user-visible change, added in the same commit as the change. The format follows
   parks while it holds nothing to send, as the replayer does with no replay; the bench
   places it on the housekeeping CPU beside the recorder and the replayer until the UDP
   rows give it a core (card 182).
+- `cavalry doctor` names a `cavalry:udp` publication no receiver has answered
+  (`udp-publication-not-connected`, from a `sender.limit` of 0 and the endpoint the
+  label names) and a send endpoint's socket buffer the host capped
+  (`udp-socket-buffers`: a send buffer below one datagram of the MTU, Aeron's rule, or
+  below a burst on Linux, where one `sendmmsg` hands the socket sixteen; a receive
+  buffer reading back less than a host that granted the 131072 asked reads back, twice
+  that on Linux), each naming the sysctl of the driver's platform that moves it,
+  `net.core.wmem_default` for the send buffer the driver never sets, and the remove,
+  wait the linger, add again step that opens a new socket; lists every send endpoint
+  (`note udp-endpoint`); and reads a rising `receiver.receive_failed` on an unanswered
+  endpoint as the kernel's port unreachable, not a starved socket, from the counters
+  file alone
+  ([ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md),
+  [ADR 0041](docs/decisions/0041-send-from-a-sender-thread-through-nix.md); card 180).

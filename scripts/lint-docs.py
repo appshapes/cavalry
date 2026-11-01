@@ -85,13 +85,22 @@ def canon(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
-def headings(path: Path) -> set[str]:
+def headings(path: Path, depth: int = 0) -> set[str]:
+    """The headings of a page, and of every page it includes with mdBook's
+    `{{#include <path>}}`, since a reference page is one include of its spec page and a
+    link to a heading of the spec page lands on it in the book."""
     out: set[str] = set()
     for line in strip_code(path.read_text(encoding="utf-8")).splitlines():
         m = re.match(r"^#{1,6}\s+(.*?)\s*#*\s*$", line)
         if m:
             title = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", m.group(1))
             out.add(canon(title))
+            continue
+        include = re.match(r"^\s*\{\{#include\s+([^}:\s]+)[^}]*\}\}\s*$", line)
+        if include and depth < 4:
+            target = (path.parent / include.group(1)).resolve()
+            if target.is_file():
+                out |= headings(target, depth + 1)
     return out
 
 

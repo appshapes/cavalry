@@ -99,6 +99,7 @@ version = "0.1.0"
 dependencies = [
  "cavalry-driver",
  "cavalry-log",
+ "cavalry-proto",
  "cavalry-shm",
 ]
 

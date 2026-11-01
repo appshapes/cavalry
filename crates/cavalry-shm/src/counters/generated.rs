@@ -645,7 +645,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Datagrams the socket took only part of; the sender position stays at the datagram's first frame and the burst is sent again on the next cycle.",
-        doctor: "The socket's send buffer is smaller than a burst: channel.socket_sndbuf says what the host gave; raise the host's wmem_max, or send fewer bytes per cycle.",
+        doctor: "The socket's send buffer is smaller than a burst: channel.socket_sndbuf says what the host gave, the operating system's default for a new UDP socket, since the driver sets none; raise that default, net.core.wmem_default on Linux (wmem_max caps a buffer a socket asks for, and does not move this one), then remove the channel's publications, wait the linger and add them again, or send fewer bytes per cycle.",
     },
     CounterDef {
         id: SENDER_SEND_FAILED,
@@ -765,7 +765,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Gauge,
         scope: Scope::Instance,
         doc: "The receive buffer length one endpoint's socket holds, read back after the endpoint was opened; key and label as channel.status.",
-        doctor: "Below what the page asks for (131072 bytes for a receive endpoint) is a host that capped it: raise rmem_max.",
+        doctor: "Below what was asked, 131072 bytes, is a host that capped the ask: raise net.core.rmem_max on Linux, kern.ipc.maxsockbuf on macOS, then close and open the endpoint again. On Linux the socket reads back twice what was set, so a host that granted the ask reads back 262144 and doctor's line there is that.",
     },
     CounterDef {
         id: CHANNEL_SOCKET_SNDBUF,
@@ -773,7 +773,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Gauge,
         scope: Scope::Instance,
         doc: "The send buffer length one endpoint's socket holds, the operating system's, read back after the endpoint was opened; key and label as channel.status.",
-        doctor: "Below a burst, 16 datagrams of the MTU, is a host whose send buffer cannot hold one cycle's sends, which sender.short_sends then counts: raise wmem_max.",
+        doctor: "Below one datagram of the MTU, Aeron's rule, or on Linux below a burst, the 16 datagrams one sendmmsg hands the socket, is a host that lowered the operating system's default send buffer for a new UDP socket, which the driver leaves as it is: raise net.core.wmem_default on Linux (wmem_max caps a buffer a socket asks for, and the driver asks for none), net.inet.udp.maxdgram on macOS, then close and open the endpoint again; sender.send_failed and sender.short_sends count the cost until then.",
     },
     CounterDef {
         id: CHANNEL_IMAGES,
@@ -797,6 +797,6 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).",
-        doctor: "A count that rises on a live endpoint is a socket the host is starving: look at the host's memory pressure and at dmesg.",
+        doctor: "On a send endpoint whose publication no receiver has answered, this is the port unreachable the kernel reports for a port nobody listens on, one per setup frame and expected beside udp-publication-not-connected; a count that rises while a receiver is live is a socket the host is starving: look at the host's memory pressure and at dmesg.",
     },
 ];
