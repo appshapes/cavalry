@@ -102,7 +102,7 @@ const DOC_UDP_VALUES: &str = "docs/reference/udp.md#values";
 /// Linux a burst, the sixteen datagrams one `sendmmsg` hands the socket in one call
 /// (`spec/udp.md`, "Values"; ADR 0041). Elsewhere the sender sends one `sendmsg` per
 /// datagram, so a burst never meets the buffer, and macOS's default, 9216 bytes from
-/// `net.inet.udp.sendspace`, holds one datagram: it is not a cap, and a burst as the
+/// `net.inet.udp.maxdgram`, holds one datagram: it is not a cap, and a burst as the
 /// line there would name every send endpoint on a Mac.
 #[cfg(target_os = "linux")]
 const SNDBUF_LEAST: i64 = DATAGRAMS_PER_BURST as i64 * MTU_LENGTH_DEFAULT as i64;
@@ -120,13 +120,14 @@ const SNDBUF_LEAST_WHAT: &str = "one datagram of the MTU";
 /// default for a new UDP socket, and the sysctl that moves it is the default's, not the
 /// cap on `setsockopt(SO_SNDBUF)`, a call the driver never makes: on Linux
 /// `net.core.wmem_default`, since `wmem_max` caps a buffer a socket asks for and does
-/// not move one that asked for nothing; on macOS `net.inet.udp.sendspace`, the buffer
+/// not move one that asked for nothing; on macOS `net.inet.udp.maxdgram`, the name XNU
+/// gives its `udp_sendspace` (`net.inet.udp.sendspace` is no oid on macOS 15), the buffer
 /// a new UDP socket is given there.
 #[cfg(target_os = "linux")]
 const SNDBUF_REMEDY: &str = "raise net.core.wmem_default with sysctl (wmem_max caps a \
                              buffer a socket asks for, and the driver asks for none)";
 #[cfg(target_os = "macos")]
-const SNDBUF_REMEDY: &str = "raise net.inet.udp.sendspace with sysctl";
+const SNDBUF_REMEDY: &str = "raise net.inet.udp.maxdgram with sysctl";
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const SNDBUF_REMEDY: &str = "raise the operating system's default send buffer for a new UDP socket";
 

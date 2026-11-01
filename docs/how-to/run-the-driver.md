@@ -99,7 +99,7 @@ reports it running with a new pid.
   sixteen datagrams one `sendmmsg` hands the socket, 22528 bytes. The driver sets no
   send buffer, so this is the operating system's default for a new UDP socket, which
   the host lowered. Raise that default: `net.core.wmem_default` with `sysctl` on Linux,
-  `net.inet.udp.sendspace` on macOS, whose default of 9216 bytes holds a datagram and
+  `net.inet.udp.maxdgram` on macOS, whose default of 9216 bytes holds a datagram and
   is not a cap. `net.core.wmem_max` caps a buffer a socket asks for, and this socket
   asks for none, so raising it changes nothing here. Then remove every publication on
   the channel, wait the 5 s linger, and add them again: the endpoint's socket is opened

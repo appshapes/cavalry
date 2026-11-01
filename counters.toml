@@ -743,7 +743,7 @@ name = "channel.socket_sndbuf"
 kind = "gauge"
 scope = "instance"
 doc = "The send buffer length one endpoint's socket holds, the operating system's, read back after the endpoint was opened; key and label as channel.status."
-doctor = "Below one datagram of the MTU, Aeron's rule, or on Linux below a burst, the 16 datagrams one sendmmsg hands the socket, is a host that lowered the operating system's default send buffer for a new UDP socket, which the driver leaves as it is: raise net.core.wmem_default on Linux (wmem_max caps a buffer a socket asks for, and the driver asks for none), net.inet.udp.sendspace on macOS, then close and open the endpoint again; sender.send_failed and sender.short_sends count the cost until then."
+doctor = "Below one datagram of the MTU, Aeron's rule, or on Linux below a burst, the 16 datagrams one sendmmsg hands the socket, is a host that lowered the operating system's default send buffer for a new UDP socket, which the driver leaves as it is: raise net.core.wmem_default on Linux (wmem_max caps a buffer a socket asks for, and the driver asks for none), net.inet.udp.maxdgram on macOS, then close and open the endpoint again; sender.send_failed and sender.short_sends count the cost until then."
 
 [[counter]]
 id = 69
