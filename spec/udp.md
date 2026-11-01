@@ -167,9 +167,11 @@ publication, on every duty cycle, with p the sender position and L the sender li
 4. **Retransmit.** On a NAK for this publication whose term id and offset name a
    position in the resend window, from p − term length ÷ 2 − the longest message up to
    but not including p, the frames of the range it names, from the term, in datagrams
-   of at most the MTU, at once. The retransmit stays outstanding for the retransmit
-   linger after it, and one is outstanding at a time: a NAK whose offset lies inside the
-   outstanding range is dropped silently, since the answer is on its way; one for
+   of at most the MTU, one burst of them per duty cycle until the range is covered, so
+   that a cycle's work stays one burst per publication whatever range a NAK names. The
+   retransmit stays outstanding until the range is covered and for the retransmit
+   linger after that, and one is outstanding at a time: a NAK whose offset lies inside
+   the outstanding range is dropped silently, since the answer is on its way; one for
    another range while a retransmit is outstanding is dropped and counted in
    `sender.retransmit_overflow`, the recovery stall `doctor` explains from it; and a
    NAK outside the resend window is dropped and counted in `sender.naks_ignored`. A

@@ -188,7 +188,7 @@ gateway. The review of pull request 92 left two notes for the acceptance, taken 
 `cavalry:udp` channel is error code 10 when the sender's request queue has no room for
 the endpoint and the publication or holds a remove still waiting for room; and the "tens
 of microseconds" of the alternative that kept the sender inside the conductor's cycle
-has no source and is withdrawn, that alternative losing on ADR 0039 alone. Three points
+has no source and is withdrawn, that alternative losing on ADR 0039 alone. Four points
 of the Decision were implemented differently, with the reason: the log is cleaned only
 up to a term length behind the sender position, Aeron's rule in
 `NetworkPublication.cleanBufferTo`, and not up to the sender position as `spec/udp.md`,
@@ -203,25 +203,31 @@ time, and not by the endpoint when it opens on the control plane as the Decision
 one could not cross the queue from the conductor to the sender, and the sender holding
 one could not be moved to its thread, which is why `Sender::new` runs on that thread.
 The allocation audit above stands: the one allocation moved from the endpoint's opening
-to the sender's start. One point the Decision did not name: the sender parks while it holds
-no endpoint and no publication, unparked by the conductor's next request, as the
-replayer parks with no replay (ADR 0030), because a sender idling with the backoff
-strategy woke every millisecond and the laptop's client claim row read its p99.99 at 292
-ns against master's 125 ns in two runs, and 125 ns again once the sender parked. The
-change that accepts this ADR carries the sender thread with its socket layer, the
-conductor's `cavalry:udp` publication path with the send endpoint registry, the counters
-of `spec/udp.md` the sender and the endpoints move (the 15 `sender.*` rows,
-`sender.position` and `sender.limit`, the publication's connection and the endpoint's
-state machines with their five counters, and `receiver.receive_failed`, which the send
-endpoint's receives count too), `TermReader::block_from` in `cavalry-shm` for a burst's
-blocks and a retransmit's, the bench's pin of the fourth thread beside the recorder and
-the replayer until card 182, and the tests: the conductor's against a receiver by hand
-on the loopback, the client's over the public API for the stream in order, the NAK, the
-window, the heartbeat and the close, and the allocation gate over the send path, alone
-in its process. `add subscription`, `start recording` and `start replay` on a
-`cavalry:udp` channel stay code 11 until the receiver lands (card 181), and `doctor`'s
-two checks of ADR 0039, an unconnected publication and a capped send buffer, follow on
-the control plane in their own change.
+to the sender's start. And a retransmit goes out one burst per duty cycle until its
+range is covered, outstanding until then and for the retransmit linger after, and not at
+once as `spec/udp.md`, "The sender", step 4 said, so that a cycle's work stays bounded
+by one burst per publication whatever range a NAK names (invariant 3), where Aeron's
+`NetworkPublication.resend` sends the range in one call; the page's sentence is amended,
+and the receiver (card 181) sets its NAK retry from the amended one. One point the
+Decision did not name: the sender parks while it holds no endpoint and no publication,
+unparked by the conductor's next request, as the replayer parks with no replay (ADR
+0030), because a sender idling with the backoff strategy woke every millisecond and the
+laptop's client claim row read its p99.99 at 292 ns against master's 125 ns in two runs,
+and 125 ns again once the sender parked. The change that accepts this ADR carries the
+sender thread with its socket layer, the conductor's `cavalry:udp` publication path with
+the send endpoint registry, the counters of `spec/udp.md` the sender and the endpoints
+move (the 15 `sender.*` rows, `sender.position` and `sender.limit`, the publication's
+connection and the endpoint's state machines with their five counters, and
+`receiver.receive_failed`, which the send endpoint's receives count too),
+`TermReader::block_from` in `cavalry-shm` for a burst's blocks and a retransmit's, the
+bench's pin of the fourth thread beside the recorder and the replayer until card 182,
+and the tests: the conductor's against a receiver by hand on the loopback, the client's
+over the public API for the stream in order, the NAK, the window, the heartbeat and the
+close, and the allocation gate over the send path, alone in its process. `add
+subscription`, `start recording` and `start replay` on a `cavalry:udp` channel stay code
+11 until the receiver lands (card 181), and `doctor`'s two checks of ADR 0039, an
+unconnected publication and a capped send buffer, follow on the control plane in their
+own change.
 
 ## Consequences
 
