@@ -797,6 +797,6 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).",
-        doctor: "A count that rises on a live endpoint is a socket the host is starving: look at the host's memory pressure and at dmesg.",
+        doctor: "On a send endpoint whose publication no receiver has answered, this is the port unreachable the kernel reports for a port nobody listens on, one per setup frame and expected beside udp-publication-not-connected; a count that rises while a receiver is live is a socket the host is starving: look at the host's memory pressure and at dmesg.",
     },
 ];

@@ -767,7 +767,7 @@ name = "receiver.receive_failed"
 kind = "counter"
 scope = "static"
 doc = "Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver)."
-doctor = "A count that rises on a live endpoint is a socket the host is starving: look at the host's memory pressure and at dmesg."
+doctor = "On a send endpoint whose publication no receiver has answered, this is the port unreachable the kernel reports for a port nobody listens on, one per setup frame and expected beside udp-publication-not-connected; a count that rises while a receiver is live is a socket the host is starving: look at the host's memory pressure and at dmesg."
 
 # The publication's connection over UDP and the endpoint's life (spec/udp.md, "The
 # sender" and "The receiver"; ADR 0040, ADR 0041). The sender moves the connection's

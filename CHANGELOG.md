@@ -903,6 +903,8 @@ user-visible change, added in the same commit as the change. The format follows
   (`udp-publication-not-connected`, from a `sender.limit` of 0 and the endpoint the
   label names) and a send endpoint's socket buffer the host capped
   (`udp-socket-buffers`: a send buffer below a burst, a receive buffer below the
-  131072 asked), and lists every send endpoint (`note udp-endpoint`), from the
-  counters file alone ([ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md),
+  131072 asked), lists every send endpoint (`note udp-endpoint`), and reads a rising
+  `receiver.receive_failed` on an unanswered endpoint as the kernel's port unreachable,
+  not a starved socket, from the counters file alone
+  ([ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md),
   [ADR 0041](docs/decisions/0041-send-from-a-sender-thread-through-nix.md); card 180).
