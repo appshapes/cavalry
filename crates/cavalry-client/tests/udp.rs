@@ -20,6 +20,7 @@ use cavalry_shm::counters::generated::{
     CHANNEL_CLOSED, SENDER_FLOW_CONTROL_LIMITED, SENDER_HEARTBEATS_SENT, SENDER_RETRANSMITS_SENT,
     SENDER_RETRANSMITTED_BYTES,
 };
+use nix::sys::socket::{setsockopt, sockopt};
 
 /// A directory of its own per test, removed when the guard drops.
 struct TestDir(PathBuf);
@@ -83,6 +84,13 @@ impl Receiver {
         socket
             .set_read_timeout(Some(Duration::from_millis(300)))
             .expect("a read timeout");
+        // A receiver with no NAK must not drop: the sender sends frames as they are
+        // committed, in datagrams of what each duty cycle finds, so a burst published
+        // before it is read may arrive one frame per datagram, each charged about two
+        // kibibytes against this buffer by the kernel. The hundred frames of the longest
+        // burst here fit a default buffer; the room is asked for so that they fit with
+        // margin on every host (`tests/udp_allocations.rs` says more).
+        let _ = setsockopt(&socket, sockopt::RcvBuf, &(4 * 1024 * 1024));
         Self {
             socket,
             buffer: vec![0u8; 2048],
@@ -148,6 +156,9 @@ impl Receiver {
 
     /// Takes data datagrams until `bytes` of frames have arrived in order from `from`,
     /// and returns how many frames they held; a control frame on the way is skipped.
+    /// The deadline is checked on every datagram, not only at a read timeout: once the
+    /// data stops, the sender's heartbeats keep arriving every 100 ms, under the read
+    /// timeout, and a check at the timeout alone would never run.
     fn take_data(&mut self, from: u32, bytes: usize) -> usize {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut expected = from;
@@ -166,8 +177,12 @@ impl Receiver {
                 }
                 Some(Received::Control(_)) => {}
                 Some(Received::Other) => panic!("a datagram failed the check"),
-                None => assert!(Instant::now() < deadline, "the data stopped at {expected}"),
+                None => {}
             }
+            assert!(
+                Instant::now() < deadline,
+                "the data stopped at {expected} of {end}"
+            );
         }
         assert_eq!(
             expected as usize, end,

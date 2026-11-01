@@ -89,6 +89,7 @@ dependencies = [
  "cavalry-log",
  "cavalry-proto",
  "cavalry-shm",
+ "nix",
  "stats_alloc",
 ]
 
