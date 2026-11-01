@@ -122,16 +122,16 @@ const SNDBUF_LEAST_WHAT: &str = "one datagram of the MTU";
 /// default for a new UDP socket, and the sysctl that moves it is the default's, not the
 /// cap on `setsockopt(SO_SNDBUF)`, a call the driver never makes: on Linux
 /// `net.core.wmem_default`, since `wmem_max` caps a buffer a socket asks for and does
-/// not move one that asked for nothing; on macOS `net.inet.udp.maxdgram`, the name XNU
-/// gives its `udp_sendspace` (`net.inet.udp.sendspace` is no oid on macOS 15), the buffer
-/// a new UDP socket is given there.
+/// not move one that asked for nothing; elsewhere `net.inet.udp.maxdgram`, the name XNU
+/// and FreeBSD both give `udp_sendspace` (`net.inet.udp.sendspace` is no oid on macOS
+/// 15), the buffer a new UDP socket is given there. Two arms, linux and not-linux, as
+/// `cavalry-driver`'s `socket.rs` is written, so that exactly one is live on every
+/// target.
 #[cfg(target_os = "linux")]
 const SNDBUF_REMEDY: &str = "raise net.core.wmem_default with sysctl (wmem_max caps a \
                              buffer a socket asks for, and the driver asks for none)";
 #[cfg(not(target_os = "linux"))]
 const SNDBUF_REMEDY: &str = "raise net.inet.udp.maxdgram with sysctl";
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-const SNDBUF_REMEDY: &str = "raise the operating system's default send buffer for a new UDP socket";
 
 /// The receive buffer the driver asks of a send endpoint's socket (`spec/udp.md`,
 /// "Values"), as the socket reads it back when the host granted the ask: on Linux
@@ -145,13 +145,14 @@ const RCVBUF_EXPECTED: i64 = 2 * SOCKET_RCVBUF_LENGTH as i64;
 const RCVBUF_EXPECTED: i64 = SOCKET_RCVBUF_LENGTH as i64;
 
 /// What raises a receive buffer below [`RCVBUF_EXPECTED`]: the host's cap on a buffer
-/// a socket asks for, which is what the driver does for this one.
+/// a socket asks for, which is what the driver does for this one. On Linux
+/// `net.core.rmem_max`; elsewhere `kern.ipc.maxsockbuf`, the cap `sbreserve` applies on
+/// macOS and the BSDs alike. Two arms, linux and not-linux, so that exactly one is live
+/// on every target.
 #[cfg(target_os = "linux")]
 const RCVBUF_REMEDY: &str = "raise net.core.rmem_max with sysctl";
 #[cfg(not(target_os = "linux"))]
 const RCVBUF_REMEDY: &str = "raise kern.ipc.maxsockbuf with sysctl";
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-const RCVBUF_REMEDY: &str = "raise the operating system's cap on a socket's receive buffer";
 
 /// How serious a finding is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
