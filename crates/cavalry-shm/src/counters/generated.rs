@@ -140,6 +140,87 @@ pub const RECORDING_RETENTION_FAILED: CounterId = CounterId(43);
 /// `recording.bytes`, a instance gauge: The bytes one live recording's segment files take on disk, the segment file length times the files present, kept by the recorder at each roll and stored with a release store; key and label as recording.position; freed with it after the stop, after which `cavalry doctor` computes a stopped recording's bytes from its descriptor (ADR 0031).
 pub const RECORDING_BYTES: CounterId = CounterId(44);
 
+/// `sender.bytes_sent`, a static counter: Bytes of data and padding frames the sender put on the wire for every cavalry:udp publication, headers included (spec/udp.md, The sender).
+pub const SENDER_BYTES_SENT: CounterId = CounterId(45);
+
+/// `sender.frames_sent`, a static counter: Data and padding frames the sender put on the wire; a padding frame counts whether or not its header went out (spec/udp.md, The sender).
+pub const SENDER_FRAMES_SENT: CounterId = CounterId(46);
+
+/// `sender.setups_sent`, a static counter: Setup frames sent: one every setup interval until a publication's first status message without the send-setup flag, and one for each status message with it (spec/udp.md, The sender).
+pub const SENDER_SETUPS_SENT: CounterId = CounterId(47);
+
+/// `sender.heartbeats_sent`, a static counter: Heartbeats sent: one after each heartbeat interval without a data frame, once a publication has its first status message (spec/udp.md, Heartbeat).
+pub const SENDER_HEARTBEATS_SENT: CounterId = CounterId(48);
+
+/// `sender.retransmits_sent`, a static counter: NAKs answered with the frames of the range they name, from the publication's own term (spec/udp.md, The sender).
+pub const SENDER_RETRANSMITS_SENT: CounterId = CounterId(49);
+
+/// `sender.retransmitted_bytes`, a static counter: Bytes of frames sent again in answer to NAKs.
+pub const SENDER_RETRANSMITTED_BYTES: CounterId = CounterId(50);
+
+/// `sender.retransmit_overflow`, a static counter: NAKs dropped because a retransmit for another range was outstanding: one retransmit at a time, kept for the retransmit linger after it (spec/udp.md, The sender).
+pub const SENDER_RETRANSMIT_OVERFLOW: CounterId = CounterId(51);
+
+/// `sender.short_sends`, a static counter: Datagrams the socket took only part of; the sender position stays at the datagram's first frame and the burst is sent again on the next cycle.
+pub const SENDER_SHORT_SENDS: CounterId = CounterId(52);
+
+/// `sender.send_failed`, a static counter: Sends the operating system refused, EAGAIN, ENOBUFS, EINTR and ECONNREFUSED among them, counted and retried on the next cycle; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).
+pub const SENDER_SEND_FAILED: CounterId = CounterId(53);
+
+/// `sender.flow_control_limited`, a static counter: Times a publication with a frame to send found its sender limit reached: the receiver's window is full, counted once on entry into that state (spec/udp.md, The sender).
+pub const SENDER_FLOW_CONTROL_LIMITED: CounterId = CounterId(54);
+
+/// `sender.naks_received`, a static counter: NAKs that arrived at a send endpoint for a publication it carries.
+pub const SENDER_NAKS_RECEIVED: CounterId = CounterId(55);
+
+/// `sender.naks_ignored`, a static counter: NAKs whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, dropped (spec/udp.md, The sender).
+pub const SENDER_NAKS_IGNORED: CounterId = CounterId(56);
+
+/// `sender.status_messages_received`, a static counter: Status messages that arrived at a send endpoint for a publication it carries, with or without the send-setup flag.
+pub const SENDER_STATUS_MESSAGES_RECEIVED: CounterId = CounterId(57);
+
+/// `sender.status_messages_rejected`, a static counter: Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, or one with it that asks a publication at its end of stream for a setup (spec/udp.md, The sender).
+pub const SENDER_STATUS_MESSAGES_REJECTED: CounterId = CounterId(58);
+
+/// `sender.rtt_replies_sent`, a static counter: RTT measurements with the reply flag answered: the same frame without the flag, the echo timestamp and the receiver id unchanged (spec/udp.md, The sender).
+pub const SENDER_RTT_REPLIES_SENT: CounterId = CounterId(59);
+
+/// `sender.position`, a instance gauge: The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint.
+pub const SENDER_POSITION: CounterId = CounterId(60);
+
+/// `sender.limit`, a instance gauge: The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.
+pub const SENDER_LIMIT: CounterId = CounterId(61);
+
+/// `publication.connected`, a static counter: cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the sender position plus the publication window from here (spec/udp.md, The sender).
+pub const PUBLICATION_CONNECTED: CounterId = CounterId(62);
+
+/// `publication.disconnected`, a static counter: cavalry:udp publications that passed the connection timeout without a status message: the limit falls to the sender position and the publisher reads not connected until the next one (spec/udp.md, The sender).
+pub const PUBLICATION_DISCONNECTED: CounterId = CounterId(63);
+
+/// `channel.opened`, a static counter: Endpoints whose socket was opened, bound and connected on the control plane as the command was handled: initializing to active (spec/udp.md, The receiver).
+pub const CHANNEL_OPENED: CounterId = CounterId(64);
+
+/// `channel.closed`, a static counter: Endpoints closed once their last publication's linger ended or their last subscription and image went: active to closing, the socket closed and the five counters freed after the reuse timeout (spec/udp.md, The receiver).
+pub const CHANNEL_CLOSED: CounterId = CounterId(65);
+
+/// `channel.status`, a instance gauge: One endpoint's state, the channel status indicator a client reads: 0 initializing, 1 active, 2 closing, -1 errored, which this version never stores; key: the endpoint's registration id (i64), the correlation id of the command that opened it, little-endian; label text: the resolved channel.
+pub const CHANNEL_STATUS: CounterId = CounterId(66);
+
+/// `channel.socket_rcvbuf`, a instance gauge: The receive buffer length one endpoint's socket holds, read back after the endpoint was opened; key and label as channel.status.
+pub const CHANNEL_SOCKET_RCVBUF: CounterId = CounterId(67);
+
+/// `channel.socket_sndbuf`, a instance gauge: The send buffer length one endpoint's socket holds, the operating system's, read back after the endpoint was opened; key and label as channel.status.
+pub const CHANNEL_SOCKET_SNDBUF: CounterId = CounterId(68);
+
+/// `channel.images`, a instance gauge: How many images one receive endpoint carries; 0 on a send endpoint; key and label as channel.status.
+pub const CHANNEL_IMAGES: CounterId = CounterId(69);
+
+/// `channel.publications`, a instance gauge: How many publications one send endpoint carries; 0 on a receive endpoint; the endpoint closes when it reaches 0 and the last linger ends; key and label as channel.status.
+pub const CHANNEL_PUBLICATIONS: CounterId = CounterId(70);
+
+/// `receiver.receive_failed`, a static counter: Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).
+pub const RECEIVER_RECEIVE_FAILED: CounterId = CounterId(71);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -501,5 +582,221 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Instance,
         doc: "The bytes one live recording's segment files take on disk, the segment file length times the files present, kept by the recorder at each roll and stored with a release store; key and label as recording.position; freed with it after the stop, after which `cavalry doctor` computes a stopped recording's bytes from its descriptor (ADR 0031).",
         doctor: "A recording whose bytes are over half the log directory's filesystem is the one `cavalry doctor` names for a `purge segments`; the free-space check names the segment that would free the most.",
+    },
+    CounterDef {
+        id: SENDER_BYTES_SENT,
+        name: "sender.bytes_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Bytes of data and padding frames the sender put on the wire for every cavalry:udp publication, headers included (spec/udp.md, The sender).",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_FRAMES_SENT,
+        name: "sender.frames_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Data and padding frames the sender put on the wire; a padding frame counts whether or not its header went out (spec/udp.md, The sender).",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_SETUPS_SENT,
+        name: "sender.setups_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Setup frames sent: one every setup interval until a publication's first status message without the send-setup flag, and one for each status message with it (spec/udp.md, The sender).",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_HEARTBEATS_SENT,
+        name: "sender.heartbeats_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Heartbeats sent: one after each heartbeat interval without a data frame, once a publication has its first status message (spec/udp.md, Heartbeat).",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_RETRANSMITS_SENT,
+        name: "sender.retransmits_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "NAKs answered with the frames of the range they name, from the publication's own term (spec/udp.md, The sender).",
+        doctor: "Retransmits are loss made good: a steady count under load is the network dropping datagrams; compare receiver.gaps_detected on the receiving host and look at the link and the socket buffers.",
+    },
+    CounterDef {
+        id: SENDER_RETRANSMITTED_BYTES,
+        name: "sender.retransmitted_bytes",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Bytes of frames sent again in answer to NAKs.",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_RETRANSMIT_OVERFLOW,
+        name: "sender.retransmit_overflow",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "NAKs dropped because a retransmit for another range was outstanding: one retransmit at a time, kept for the retransmit linger after it (spec/udp.md, The sender).",
+        doctor: "A receiver with gaps in more than one range at once is losing more than one retransmit can mend: the recovery stall this explains ends when the receiver's next NAK, after its retry delay, is answered; a count that keeps rising is a lossy link.",
+    },
+    CounterDef {
+        id: SENDER_SHORT_SENDS,
+        name: "sender.short_sends",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Datagrams the socket took only part of; the sender position stays at the datagram's first frame and the burst is sent again on the next cycle.",
+        doctor: "The socket's send buffer is smaller than a burst: channel.socket_sndbuf says what the host gave; raise the host's wmem_max, or send fewer bytes per cycle.",
+    },
+    CounterDef {
+        id: SENDER_SEND_FAILED,
+        name: "sender.send_failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Sends the operating system refused, EAGAIN, ENOBUFS, EINTR and ECONNREFUSED among them, counted and retried on the next cycle; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).",
+        doctor: "ECONNREFUSED is the normal case for a publisher started before its subscriber or whose subscriber's driver restarted; a count rising while a receiver is live is a send buffer the host capped or a link that is down.",
+    },
+    CounterDef {
+        id: SENDER_FLOW_CONTROL_LIMITED,
+        name: "sender.flow_control_limited",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Times a publication with a frame to send found its sender limit reached: the receiver's window is full, counted once on entry into that state (spec/udp.md, The sender).",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_NAKS_RECEIVED,
+        name: "sender.naks_received",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "NAKs that arrived at a send endpoint for a publication it carries.",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_NAKS_IGNORED,
+        name: "sender.naks_ignored",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "NAKs whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, dropped (spec/udp.md, The sender).",
+        doctor: "A receiver asking for frames the sender no longer holds has fallen more than half a term behind: the receiving host is too slow for the stream, or was away longer than the link can bridge; its image times out and a new one starts from the setup.",
+    },
+    CounterDef {
+        id: SENDER_STATUS_MESSAGES_RECEIVED,
+        name: "sender.status_messages_received",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Status messages that arrived at a send endpoint for a publication it carries, with or without the send-setup flag.",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_STATUS_MESSAGES_REJECTED,
+        name: "sender.status_messages_rejected",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, or one with it that asks a publication at its end of stream for a setup (spec/udp.md, The sender).",
+        doctor: "A receiver reporting a position the sender cannot place is a receiver of another stream's term ids on the same session and stream, or a stale image: its driver's receiver.dropped_* counters say which.",
+    },
+    CounterDef {
+        id: SENDER_RTT_REPLIES_SENT,
+        name: "sender.rtt_replies_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "RTT measurements with the reply flag answered: the same frame without the flag, the echo timestamp and the receiver id unchanged (spec/udp.md, The sender).",
+        doctor: "",
+    },
+    CounterDef {
+        id: SENDER_POSITION,
+        name: "sender.position",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint.",
+        doctor: "A sender.position that does not move while publication.position does is a publication whose receiver window is full (sender.limit) or whose endpoint cannot send (sender.send_failed, sender.short_sends).",
+    },
+    CounterDef {
+        id: SENDER_LIMIT,
+        name: "sender.limit",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position.",
+        doctor: "A sender.limit that stays at 0 is a publication no receiver has answered: see sender.setups_sent; one that stops rising while sender.position reaches it is a receiver whose subscriber is slow.",
+    },
+    CounterDef {
+        id: PUBLICATION_CONNECTED,
+        name: "publication.connected",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the sender position plus the publication window from here (spec/udp.md, The sender).",
+        doctor: "",
+    },
+    CounterDef {
+        id: PUBLICATION_DISCONNECTED,
+        name: "publication.disconnected",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "cavalry:udp publications that passed the connection timeout without a status message: the limit falls to the sender position and the publisher reads not connected until the next one (spec/udp.md, The sender).",
+        doctor: "A receiver that stopped answering: its driver stopped, its host went away, or the link dropped its status messages; sender.setups_sent does not rise for a connected publication, so the receiver's own counters say what happened.",
+    },
+    CounterDef {
+        id: CHANNEL_OPENED,
+        name: "channel.opened",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Endpoints whose socket was opened, bound and connected on the control plane as the command was handled: initializing to active (spec/udp.md, The receiver).",
+        doctor: "",
+    },
+    CounterDef {
+        id: CHANNEL_CLOSED,
+        name: "channel.closed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Endpoints closed once their last publication's linger ended or their last subscription and image went: active to closing, the socket closed and the five counters freed after the reuse timeout (spec/udp.md, The receiver).",
+        doctor: "",
+    },
+    CounterDef {
+        id: CHANNEL_STATUS,
+        name: "channel.status",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "One endpoint's state, the channel status indicator a client reads: 0 initializing, 1 active, 2 closing, -1 errored, which this version never stores; key: the endpoint's registration id (i64), the correlation id of the command that opened it, little-endian; label text: the resolved channel.",
+        doctor: "A client whose channel status indicator reads 2 holds an endpoint that is closing: its publications ended; add the publication again to open a new one.",
+    },
+    CounterDef {
+        id: CHANNEL_SOCKET_RCVBUF,
+        name: "channel.socket_rcvbuf",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The receive buffer length one endpoint's socket holds, read back after the endpoint was opened; key and label as channel.status.",
+        doctor: "Below what the page asks for (131072 bytes for a receive endpoint) is a host that capped it: raise rmem_max.",
+    },
+    CounterDef {
+        id: CHANNEL_SOCKET_SNDBUF,
+        name: "channel.socket_sndbuf",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The send buffer length one endpoint's socket holds, the operating system's, read back after the endpoint was opened; key and label as channel.status.",
+        doctor: "Below a burst, 16 datagrams of the MTU, is a host whose send buffer cannot hold one cycle's sends, which sender.short_sends then counts: raise wmem_max.",
+    },
+    CounterDef {
+        id: CHANNEL_IMAGES,
+        name: "channel.images",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "How many images one receive endpoint carries; 0 on a send endpoint; key and label as channel.status.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CHANNEL_PUBLICATIONS,
+        name: "channel.publications",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "How many publications one send endpoint carries; 0 on a receive endpoint; the endpoint closes when it reaches 0 and the last linger ends; key and label as channel.status.",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_RECEIVE_FAILED,
+        name: "receiver.receive_failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).",
+        doctor: "A count that rises on a live endpoint is a socket the host is starving: look at the host's memory pressure and at dmesg.",
     },
 ];

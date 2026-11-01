@@ -440,6 +440,7 @@ struct DriverPins {
     conductor: AtomicUsize,
     recorder: AtomicUsize,
     replayer: AtomicUsize,
+    sender: AtomicUsize,
 }
 
 impl DriverPins {
@@ -448,6 +449,7 @@ impl DriverPins {
             conductor: AtomicUsize::new(0),
             recorder: AtomicUsize::new(0),
             replayer: AtomicUsize::new(0),
+            sender: AtomicUsize::new(0),
         }
     }
 
@@ -457,6 +459,7 @@ impl DriverPins {
             DriverThread::Conductor => &self.conductor,
             DriverThread::Recorder => &self.recorder,
             DriverThread::Replayer => &self.replayer,
+            DriverThread::Sender => &self.sender,
         }
     }
 
@@ -474,6 +477,7 @@ impl DriverPins {
                     DriverThread::Conductor => "conductor",
                     DriverThread::Recorder => "recorder",
                     DriverThread::Replayer => "replayer",
+                    DriverThread::Sender => "sender",
                 },
                 failed - 1
             )),
@@ -662,7 +666,9 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
             fields.max_payload_length()
         ));
     }
-    let mut counters = CountersFile::create(dir, 64).map_err(|e| e.to_string())?;
+    // Every static counter lives in the record whose index is its id, so the file holds
+    // more records than the largest static id in counters.toml (72 at ADR 0041).
+    let mut counters = CountersFile::create(dir, 128).map_err(|e| e.to_string())?;
     let mut key = [0u8; 16];
     key[..8].copy_from_slice(&CORRELATION_ID.to_le_bytes());
     key[8..12].copy_from_slice(&SESSION_ID.to_le_bytes());
@@ -877,9 +883,13 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     let on_thread_start: ThreadStart = {
         let pins = Arc::clone(&pins);
         Arc::new(move |thread| {
+            // The sender goes with the housekeeping threads until the UDP rows give it
+            // a core of its own (card 182): no row of this version sends a datagram.
             let cpu = match thread {
                 DriverThread::Conductor => conductor_cpu,
-                DriverThread::Recorder | DriverThread::Replayer => housekeeping,
+                DriverThread::Recorder | DriverThread::Replayer | DriverThread::Sender => {
+                    housekeeping
+                }
             };
             if pin_to(cpu).is_err() {
                 pins.slot(thread)

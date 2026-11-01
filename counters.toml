@@ -552,3 +552,255 @@ kind = "gauge"
 scope = "instance"
 doc = "The bytes one live recording's segment files take on disk, the segment file length times the files present, kept by the recorder at each roll and stored with a release store; key and label as recording.position; freed with it after the stop, after which `cavalry doctor` computes a stopped recording's bytes from its descriptor (ADR 0031)."
 doctor = "A recording whose bytes are over half the log directory's filesystem is the one `cavalry doctor` names for a `purge segments`; the free-space check names the segment that would free the most."
+
+[[counter]]
+id = 45
+name = "sender.bytes_sent"
+kind = "counter"
+scope = "static"
+doc = "Bytes of data and padding frames the sender put on the wire for every cavalry:udp publication, headers included (spec/udp.md, The sender)."
+doctor = ""
+
+[[counter]]
+id = 46
+name = "sender.frames_sent"
+kind = "counter"
+scope = "static"
+doc = "Data and padding frames the sender put on the wire; a padding frame counts whether or not its header went out (spec/udp.md, The sender)."
+doctor = ""
+
+[[counter]]
+id = 47
+name = "sender.setups_sent"
+kind = "counter"
+scope = "static"
+doc = "Setup frames sent: one every setup interval until a publication's first status message without the send-setup flag, and one for each status message with it (spec/udp.md, The sender)."
+doctor = ""
+
+[[counter]]
+id = 48
+name = "sender.heartbeats_sent"
+kind = "counter"
+scope = "static"
+doc = "Heartbeats sent: one after each heartbeat interval without a data frame, once a publication has its first status message (spec/udp.md, Heartbeat)."
+doctor = ""
+
+[[counter]]
+id = 49
+name = "sender.retransmits_sent"
+kind = "counter"
+scope = "static"
+doc = "NAKs answered with the frames of the range they name, from the publication's own term (spec/udp.md, The sender)."
+doctor = "Retransmits are loss made good: a steady count under load is the network dropping datagrams; compare receiver.gaps_detected on the receiving host and look at the link and the socket buffers."
+
+[[counter]]
+id = 50
+name = "sender.retransmitted_bytes"
+kind = "counter"
+scope = "static"
+doc = "Bytes of frames sent again in answer to NAKs."
+doctor = ""
+
+[[counter]]
+id = 51
+name = "sender.retransmit_overflow"
+kind = "counter"
+scope = "static"
+doc = "NAKs dropped because a retransmit for another range was outstanding: one retransmit at a time, kept for the retransmit linger after it (spec/udp.md, The sender)."
+doctor = "A receiver with gaps in more than one range at once is losing more than one retransmit can mend: the recovery stall this explains ends when the receiver's next NAK, after its retry delay, is answered; a count that keeps rising is a lossy link."
+
+[[counter]]
+id = 52
+name = "sender.short_sends"
+kind = "counter"
+scope = "static"
+doc = "Datagrams the socket took only part of; the sender position stays at the datagram's first frame and the burst is sent again on the next cycle."
+doctor = "The socket's send buffer is smaller than a burst: channel.socket_sndbuf says what the host gave; raise the host's wmem_max, or send fewer bytes per cycle."
+
+[[counter]]
+id = 53
+name = "sender.send_failed"
+kind = "counter"
+scope = "static"
+doc = "Sends the operating system refused, EAGAIN, ENOBUFS, EINTR and ECONNREFUSED among them, counted and retried on the next cycle; no failure on a live socket errors the endpoint (spec/udp.md, The receiver)."
+doctor = "ECONNREFUSED is the normal case for a publisher started before its subscriber or whose subscriber's driver restarted; a count rising while a receiver is live is a send buffer the host capped or a link that is down."
+
+[[counter]]
+id = 54
+name = "sender.flow_control_limited"
+kind = "counter"
+scope = "static"
+doc = "Times a publication with a frame to send found its sender limit reached: the receiver's window is full, counted once on entry into that state (spec/udp.md, The sender)."
+doctor = ""
+
+[[counter]]
+id = 55
+name = "sender.naks_received"
+kind = "counter"
+scope = "static"
+doc = "NAKs that arrived at a send endpoint for a publication it carries."
+doctor = ""
+
+[[counter]]
+id = 56
+name = "sender.naks_ignored"
+kind = "counter"
+scope = "static"
+doc = "NAKs whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, dropped (spec/udp.md, The sender)."
+doctor = "A receiver asking for frames the sender no longer holds has fallen more than half a term behind: the receiving host is too slow for the stream, or was away longer than the link can bridge; its image times out and a new one starts from the setup."
+
+[[counter]]
+id = 57
+name = "sender.status_messages_received"
+kind = "counter"
+scope = "static"
+doc = "Status messages that arrived at a send endpoint for a publication it carries, with or without the send-setup flag."
+doctor = ""
+
+[[counter]]
+id = 58
+name = "sender.status_messages_rejected"
+kind = "counter"
+scope = "static"
+doc = "Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, or one with it that asks a publication at its end of stream for a setup (spec/udp.md, The sender)."
+doctor = "A receiver reporting a position the sender cannot place is a receiver of another stream's term ids on the same session and stream, or a stale image: its driver's receiver.dropped_* counters say which."
+
+[[counter]]
+id = 59
+name = "sender.rtt_replies_sent"
+kind = "counter"
+scope = "static"
+doc = "RTT measurements with the reply flag answered: the same frame without the flag, the echo timestamp and the receiver id unchanged (spec/udp.md, The sender)."
+doctor = ""
+
+[[counter]]
+id = 60
+name = "sender.position"
+kind = "gauge"
+scope = "instance"
+doc = "The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint."
+doctor = "A sender.position that does not move while publication.position does is a publication whose receiver window is full (sender.limit) or whose endpoint cannot send (sender.send_failed, sender.short_sends)."
+
+[[counter]]
+id = 61
+name = "sender.limit"
+kind = "gauge"
+scope = "instance"
+doc = "The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position."
+doctor = "A sender.limit that stays at 0 is a publication no receiver has answered: see sender.setups_sent; one that stops rising while sender.position reaches it is a receiver whose subscriber is slow."
+
+[[counter]]
+id = 62
+name = "publication.connected"
+kind = "counter"
+scope = "static"
+doc = "cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the sender position plus the publication window from here (spec/udp.md, The sender)."
+doctor = ""
+
+[[counter]]
+id = 63
+name = "publication.disconnected"
+kind = "counter"
+scope = "static"
+doc = "cavalry:udp publications that passed the connection timeout without a status message: the limit falls to the sender position and the publisher reads not connected until the next one (spec/udp.md, The sender)."
+doctor = "A receiver that stopped answering: its driver stopped, its host went away, or the link dropped its status messages; sender.setups_sent does not rise for a connected publication, so the receiver's own counters say what happened."
+
+[[counter]]
+id = 64
+name = "channel.opened"
+kind = "counter"
+scope = "static"
+doc = "Endpoints whose socket was opened, bound and connected on the control plane as the command was handled: initializing to active (spec/udp.md, The receiver)."
+doctor = ""
+
+[[counter]]
+id = 65
+name = "channel.closed"
+kind = "counter"
+scope = "static"
+doc = "Endpoints closed once their last publication's linger ended or their last subscription and image went: active to closing, the socket closed and the five counters freed after the reuse timeout (spec/udp.md, The receiver)."
+doctor = ""
+
+[[counter]]
+id = 66
+name = "channel.status"
+kind = "gauge"
+scope = "instance"
+doc = "One endpoint's state, the channel status indicator a client reads: 0 initializing, 1 active, 2 closing, -1 errored, which this version never stores; key: the endpoint's registration id (i64), the correlation id of the command that opened it, little-endian; label text: the resolved channel."
+doctor = "A client whose channel status indicator reads 2 holds an endpoint that is closing: its publications ended; add the publication again to open a new one."
+
+[[counter]]
+id = 67
+name = "channel.socket_rcvbuf"
+kind = "gauge"
+scope = "instance"
+doc = "The receive buffer length one endpoint's socket holds, read back after the endpoint was opened; key and label as channel.status."
+doctor = "Below what the page asks for (131072 bytes for a receive endpoint) is a host that capped it: raise rmem_max."
+
+[[counter]]
+id = 68
+name = "channel.socket_sndbuf"
+kind = "gauge"
+scope = "instance"
+doc = "The send buffer length one endpoint's socket holds, the operating system's, read back after the endpoint was opened; key and label as channel.status."
+doctor = "Below a burst, 16 datagrams of the MTU, is a host whose send buffer cannot hold one cycle's sends, which sender.short_sends then counts: raise wmem_max."
+
+[[counter]]
+id = 69
+name = "channel.images"
+kind = "gauge"
+scope = "instance"
+doc = "How many images one receive endpoint carries; 0 on a send endpoint; key and label as channel.status."
+doctor = ""
+
+[[counter]]
+id = 70
+name = "channel.publications"
+kind = "gauge"
+scope = "instance"
+doc = "How many publications one send endpoint carries; 0 on a receive endpoint; the endpoint closes when it reaches 0 and the last linger ends; key and label as channel.status."
+doctor = ""
+
+[[counter]]
+id = 71
+name = "receiver.receive_failed"
+kind = "counter"
+scope = "static"
+doc = "Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver)."
+doctor = "A count that rises on a live endpoint is a socket the host is starving: look at the host's memory pressure and at dmesg."
+
+# The publication's connection over UDP and the endpoint's life (spec/udp.md, "The
+# sender" and "The receiver"; ADR 0040, ADR 0041). The sender moves the connection's
+# counters; the conductor moves the endpoint's.
+
+[[state_machine]]
+name = "publication_connection"
+states = ["disconnected", "connected"]
+
+[[transition]]
+machine = "publication_connection"
+from = "disconnected"
+to = "connected"
+counter = "publication.connected"
+
+[[transition]]
+machine = "publication_connection"
+from = "connected"
+to = "disconnected"
+counter = "publication.disconnected"
+
+[[state_machine]]
+name = "channel"
+states = ["initializing", "active", "closing", "errored"]
+
+[[transition]]
+machine = "channel"
+from = "initializing"
+to = "active"
+counter = "channel.opened"
+
+[[transition]]
+machine = "channel"
+from = "active"
+to = "closing"
+counter = "channel.closed"

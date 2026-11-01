@@ -60,11 +60,17 @@ pub enum DriverError {
         /// The log directory.
         log_dir: PathBuf,
     },
+    /// The sender thread panicked; its publications' receivers see heartbeats stop and
+    /// time their images out.
+    Sender {
+        /// The directory.
+        dir: PathBuf,
+    },
 }
 
 impl DriverError {
     /// The reason's name: `driver-active`, `io`, `counters`, `command-ring`,
-    /// `broadcast`, `log`, `conductor`, `log-dir`, `recorder` or `replayer`.
+    /// `broadcast`, `log`, `conductor`, `log-dir`, `recorder`, `replayer` or `sender`.
     pub const fn reason(&self) -> &'static str {
         match self {
             DriverError::Active { .. } => "driver-active",
@@ -77,6 +83,7 @@ impl DriverError {
             DriverError::LogDir(_) => "log-dir",
             DriverError::Recorder { .. } => "recorder",
             DriverError::Replayer { .. } => "replayer",
+            DriverError::Sender { .. } => "sender",
         }
     }
 }
@@ -124,6 +131,14 @@ impl fmt::Display for DriverError {
                  docs/reference/client-protocol.md#commands",
                 log_dir.display()
             ),
+            DriverError::Sender { dir } => write!(
+                f,
+                "driver failed (sender): the sender thread of the driver at {} panicked; its \
+                 cavalry:udp publications stopped on the wire, and their receivers time their \
+                 images out; add the publications again on the next driver; see \
+                 docs/reference/udp.md#the-sender",
+                dir.display()
+            ),
         }
     }
 }
@@ -140,7 +155,8 @@ impl std::error::Error for DriverError {
             DriverError::Active { .. }
             | DriverError::Conductor { .. }
             | DriverError::Recorder { .. }
-            | DriverError::Replayer { .. } => None,
+            | DriverError::Replayer { .. }
+            | DriverError::Sender { .. } => None,
         }
     }
 }

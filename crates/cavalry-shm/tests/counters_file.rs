@@ -71,7 +71,7 @@ fn statics() -> usize {
 
 /// A valid file whose header bytes are then changed by `patch`, for the header checks.
 fn file_with_header(dir: &Dir, patch: impl FnOnce(&mut [u8])) {
-    let file = CountersFile::create(dir.path(), 64).unwrap();
+    let file = CountersFile::create(dir.path(), 128).unwrap();
     drop(file);
     let mut bytes = fs::read(dir.file()).unwrap();
     patch(&mut bytes[..HEADER_LENGTH]);
@@ -82,7 +82,7 @@ fn file_with_header(dir: &Dir, patch: impl FnOnce(&mut [u8])) {
 #[cfg_attr(miri, ignore)]
 fn the_full_case_before_anything_else() {
     let dir = Dir::new("full");
-    let capacity = 64;
+    let capacity = 128;
     let mut file = CountersFile::create(dir.path(), capacity).unwrap();
     let statics = statics();
     let reader = CountersReader::open(dir.path()).unwrap();
@@ -116,7 +116,7 @@ fn the_full_case_before_anything_else() {
 
     let refused = file.allocate(INSTANCE, &[], "one too many").unwrap_err();
     assert!(
-        matches!(refused, CountersError::Full { capacity: 64 }),
+        matches!(refused, CountersError::Full { capacity: 128 }),
         "{refused}"
     );
     assert_eq!(refused.reason(), "full");
@@ -145,9 +145,9 @@ fn the_full_case_before_anything_else() {
 #[cfg_attr(miri, ignore)]
 fn create_then_open_round_trips_the_header_and_the_bytes_are_the_specs() {
     let dir = Dir::new("round-trip");
-    let file = CountersFile::create(dir.path(), 64).unwrap();
+    let file = CountersFile::create(dir.path(), 128).unwrap();
     let header = file.header();
-    assert_eq!(header.capacity(), 64);
+    assert_eq!(header.capacity(), 128);
     assert_eq!(header.creator_pid(), i64::from(std::process::id()));
     assert!(
         header.start_timestamp() > 1_700_000_000_000_000_000,
@@ -155,12 +155,12 @@ fn create_then_open_round_trips_the_header_and_the_bytes_are_the_specs() {
     );
     assert_eq!(
         fs::metadata(dir.file()).unwrap().len(),
-        (HEADER_LENGTH + 64 * (RECORD_LENGTH + SLOT_LENGTH)) as u64
+        (HEADER_LENGTH + 128 * (RECORD_LENGTH + SLOT_LENGTH)) as u64
     );
 
     let reader = CountersReader::open(dir.path()).unwrap();
     assert_eq!(reader.header(), header);
-    assert_eq!(reader.capacity(), 64);
+    assert_eq!(reader.capacity(), 128);
 
     let bytes = fs::read(dir.file()).unwrap();
     assert_eq!(
@@ -198,7 +198,7 @@ fn create_then_open_round_trips_the_header_and_the_bytes_are_the_specs() {
 #[cfg_attr(miri, ignore)]
 fn static_counters_are_present_with_their_labels() {
     let dir = Dir::new("statics");
-    let file = CountersFile::create(dir.path(), 64).unwrap();
+    let file = CountersFile::create(dir.path(), 128).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
     for def in COUNTERS.iter().filter(|def| def.scope == Scope::Static) {
         let id = def.id.record();
@@ -229,7 +229,7 @@ fn static_counters_are_present_with_their_labels() {
     );
     assert_eq!(reader.read(COUNTERS_ALLOCATION_FAILED.record()).unwrap(), 0);
     assert!(
-        reader.record(free_records(64)[0]).unwrap().is_none(),
+        reader.record(free_records(128)[0]).unwrap().is_none(),
         "the first free record is unused"
     );
 }
@@ -238,7 +238,7 @@ fn static_counters_are_present_with_their_labels() {
 #[cfg_attr(miri, ignore)]
 fn a_handle_moves_the_value_a_reader_sees() {
     let dir = Dir::new("handle");
-    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let mut file = CountersFile::create(dir.path(), 128).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
     let counter = file.allocate(INSTANCE, &[9], "image.gaps 9").unwrap();
     let id = counter.id();
@@ -339,7 +339,7 @@ fn capacity_when_the_header_claims_an_impossible_one() {
 #[cfg_attr(miri, ignore)]
 fn length_when_the_file_is_truncated() {
     let dir = Dir::new("length");
-    let file = CountersFile::create(dir.path(), 64).unwrap();
+    let file = CountersFile::create(dir.path(), 128).unwrap();
     drop(file);
     let full = fs::metadata(dir.file()).unwrap().len();
     fs::OpenOptions::new()
@@ -360,7 +360,7 @@ fn length_when_the_file_is_truncated() {
 #[cfg_attr(miri, ignore)]
 fn a_longer_file_is_fine() {
     let dir = Dir::new("longer");
-    let file = CountersFile::create(dir.path(), 64).unwrap();
+    let file = CountersFile::create(dir.path(), 128).unwrap();
     drop(file);
     let full = fs::metadata(dir.file()).unwrap().len();
     fs::OpenOptions::new()
@@ -380,20 +380,20 @@ fn a_longer_file_is_fine() {
 #[cfg_attr(miri, ignore)]
 fn id_when_a_counter_is_beyond_the_capacity() {
     let dir = Dir::new("id");
-    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let mut file = CountersFile::create(dir.path(), 128).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
     for error in [
-        reader.read(64).unwrap_err(),
-        reader.record(64).unwrap_err(),
-        file.counter(64).unwrap_err(),
-        file.free(64, 0).unwrap_err(),
+        reader.read(128).unwrap_err(),
+        reader.record(128).unwrap_err(),
+        file.counter(128).unwrap_err(),
+        file.free(128, 0).unwrap_err(),
     ] {
         assert!(
             matches!(
                 error,
                 CountersError::Id {
-                    found: 64,
-                    capacity: 64
+                    found: 128,
+                    capacity: 128
                 }
             ),
             "{error}"
@@ -406,7 +406,7 @@ fn id_when_a_counter_is_beyond_the_capacity() {
 #[cfg_attr(miri, ignore)]
 fn unallocated_when_the_record_holds_no_counter() {
     let dir = Dir::new("unallocated");
-    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let mut file = CountersFile::create(dir.path(), 128).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
     let unused = free_records(64)[0];
     assert!(reader.record(unused).unwrap().is_none());
@@ -427,7 +427,7 @@ fn unallocated_when_the_record_holds_no_counter() {
 #[cfg_attr(miri, ignore)]
 fn free_then_reuse_after_the_deadline() {
     let dir = Dir::new("free");
-    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let mut file = CountersFile::create(dir.path(), 128).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
     let statics = statics() as i64;
     let free = free_records(64);
@@ -501,8 +501,8 @@ fn create_refuses_a_file_that_exists_and_an_impossible_capacity() {
     );
     assert!(!dir.file().exists(), "a refused capacity creates nothing");
 
-    let file = CountersFile::create(dir.path(), 64).unwrap();
-    let error = CountersFile::create(dir.path(), 64).unwrap_err();
+    let file = CountersFile::create(dir.path(), 128).unwrap();
+    let error = CountersFile::create(dir.path(), 128).unwrap_err();
     assert!(matches!(error, CountersError::Io(_)), "{error}");
     assert_eq!(error.reason(), "io");
     assert!(
@@ -521,7 +521,7 @@ fn create_refuses_a_file_that_exists_and_an_impossible_capacity() {
 #[cfg_attr(miri, ignore)]
 fn allocate_refuses_a_long_key_or_label_without_touching_the_file() {
     let dir = Dir::new("bounds");
-    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let mut file = CountersFile::create(dir.path(), 128).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
     let error = file.allocate(INSTANCE, &[0u8; 113], "x").unwrap_err();
     assert!(
@@ -618,7 +618,7 @@ fn every_error_names_the_page_that_explains_it() {
 #[cfg_attr(miri, ignore)]
 fn a_value_handle_reads_what_the_owner_stores_and_outlives_its_reader() {
     let dir = Dir::new("value-handle");
-    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let mut file = CountersFile::create(dir.path(), 128).unwrap();
     let limit = file
         .allocate(INSTANCE, &[1, 2, 3, 4], "publication.limit 1")
         .unwrap();
@@ -644,7 +644,7 @@ fn a_value_handle_reads_what_the_owner_stores_and_outlives_its_reader() {
     // A record that holds no counter, and an id past the capacity, are refused at the
     // one check, not in the hot loop.
     let reader = CountersReader::open(dir.path()).unwrap();
-    let free = free_records(64);
+    let free = free_records(128);
     let unallocated = free
         .iter()
         .copied()
@@ -654,21 +654,21 @@ fn a_value_handle_reads_what_the_owner_stores_and_outlives_its_reader() {
         reader.value(unallocated).unwrap_err().reason(),
         "unallocated"
     );
-    assert_eq!(reader.value(64).unwrap_err().reason(), "id");
+    assert_eq!(reader.value(128).unwrap_err().reason(), "id");
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_writer_stores_the_value_of_the_counter_the_driver_allocated_for_it() {
     let dir = Dir::new("writer");
-    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let mut file = CountersFile::create(dir.path(), 128).unwrap();
     let position = file
         .allocate(INSTANCE, &[1, 2, 3, 4], "subscription.position 1")
         .unwrap();
     position.store_release(64);
 
     let writer = CountersWriter::open(dir.path()).unwrap();
-    assert_eq!(writer.capacity(), 64);
+    assert_eq!(writer.capacity(), 128);
     assert_eq!(writer.header(), file.header());
     assert!(format!("{writer:?}").contains("CountersWriter"));
     let owned = writer.counter(position.id()).unwrap();
@@ -686,7 +686,7 @@ fn a_writer_stores_the_value_of_the_counter_the_driver_allocated_for_it() {
     assert_eq!(writer.value(position.id()).unwrap().load_acquire(), 4096);
 
     // The same refusals as a reader, at the one check.
-    let free = free_records(64);
+    let free = free_records(128);
     let unallocated = free
         .iter()
         .copied()
@@ -696,17 +696,17 @@ fn a_writer_stores_the_value_of_the_counter_the_driver_allocated_for_it() {
         writer.counter(unallocated).unwrap_err().reason(),
         "unallocated"
     );
-    assert_eq!(writer.counter(64).unwrap_err().reason(), "id");
+    assert_eq!(writer.counter(128).unwrap_err().reason(), "id");
     assert_eq!(
         writer.read(unallocated).unwrap_err().reason(),
         "unallocated"
     );
-    assert_eq!(writer.read(64).unwrap_err().reason(), "id");
+    assert_eq!(writer.read(128).unwrap_err().reason(), "id");
     assert_eq!(
         writer.value(unallocated).unwrap_err().reason(),
         "unallocated"
     );
-    assert_eq!(writer.value(64).unwrap_err().reason(), "id");
+    assert_eq!(writer.value(128).unwrap_err().reason(), "id");
     assert_eq!(
         CountersWriter::open(Dir::new("writer-none").path())
             .unwrap_err()
@@ -721,7 +721,7 @@ fn a_writer_stores_the_value_of_the_counter_the_driver_allocated_for_it() {
 #[cfg_attr(miri, ignore)]
 fn every_allocation_and_every_free_is_counted() {
     let dir = Dir::new("transitions");
-    let mut file = CountersFile::create(dir.path(), 64).unwrap();
+    let mut file = CountersFile::create(dir.path(), 128).unwrap();
     let reader = CountersReader::open(dir.path()).unwrap();
     let read = |id: CounterId| reader.read(id.record()).unwrap();
     let statics = statics() as i64;

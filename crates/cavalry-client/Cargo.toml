@@ -23,6 +23,15 @@ cavalry-proto = { path = "../cavalry-proto" }
 cavalry-driver = { path = "../cavalry-driver" }
 # The recording test reads the catalog's stop back (ADR 0025). Dev only.
 cavalry-log = { path = "../cavalry-log" }
+# The UDP tests count allocations across the send path with the counting allocator the
+# bench uses, so the sender's zero-allocation claim is a test (CLAUDE.md, gate 2; ADR
+# 0041). Dev only.
+stats_alloc = "0.1"
+# The UDP tests' receiver by hand sets its socket's receive buffer and reads back what
+# the host gave, which `std::net::UdpSocket` cannot: it has no NAK, so what the sender
+# puts on the wire before the test reads it must fit the buffer (ADR 0041). The version
+# and features the driver already takes, so nothing new enters the lock. Dev only.
+nix = { version = "0.31", default-features = false, features = ["socket"] }
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]

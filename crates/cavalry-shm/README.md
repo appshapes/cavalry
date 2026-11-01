@@ -11,7 +11,9 @@ the two crates where `unsafe` is permitted.
   claims a frame in place and commits it with one release store, a `TermReader` reads
   committed frames where its position says, or scans a `Block` of them with their
   headers for the recorder to write in one go
-  ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)), a
+  ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)) or, from any
+  position with `block_from`, for the driver's sender to put a burst or a retransmit on
+  the wire ([ADR 0041](../../docs/decisions/0041-send-from-a-sender-thread-through-nix.md)), a
   `TermWriter` puts a recording's frames back into a replay's log, created at the
   recording's position with `LogBuffers::create_at`, by the claim protocol
   ([ADR 0030](../../docs/decisions/0030-replay-a-recording-into-a-subscription.md)),

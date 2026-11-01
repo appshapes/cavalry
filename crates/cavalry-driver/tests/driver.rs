@@ -309,14 +309,17 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
     const CONDUCTOR: usize = 0;
     const RECORDER: usize = 1;
     const REPLAYER: usize = 2;
+    const SENDER: usize = 3;
     // Per thread: how many times the hook ran, and how many of those on the thread of
     // the expected name. Atomics, not a mutex: the lock ban covers the test target.
     let runs = Arc::new([
         AtomicUsize::new(0),
         AtomicUsize::new(0),
         AtomicUsize::new(0),
+        AtomicUsize::new(0),
     ]);
     let named = Arc::new([
+        AtomicUsize::new(0),
         AtomicUsize::new(0),
         AtomicUsize::new(0),
         AtomicUsize::new(0),
@@ -331,6 +334,7 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
                 DriverThread::Conductor => (CONDUCTOR, "cavalry-conductor"),
                 DriverThread::Recorder => (RECORDER, "cavalry-recorder"),
                 DriverThread::Replayer => (REPLAYER, "cavalry-replayer"),
+                DriverThread::Sender => (SENDER, "cavalry-sender"),
             };
             runs[index].fetch_add(1, Ordering::AcqRel);
             if std::thread::current().name() == Some(expected) {
@@ -391,6 +395,7 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
         (CONDUCTOR, "conductor"),
         (RECORDER, "recorder"),
         (REPLAYER, "replayer"),
+        (SENDER, "sender"),
     ] {
         assert_eq!(
             runs[index].load(Ordering::Acquire),
@@ -547,19 +552,19 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     client.send_raw(7, &message);
     assert_eq!(client.wait_error(unknown_type).0, 6);
 
-    // A channel that is not cavalry:ipc: code 1.
+    // A cavalry:udp channel parses in version 4: a publication sends on one (ADR
+    // 0041), and a subscription is refused with code 11 until the receiver lands (card
+    // 181); a channel that fails the grammar is code 1 (ADR 0040).
     let bad_channel = client.correlation_id();
-    client.send(&Command::AddPublication {
+    client.send(&Command::AddSubscription {
         client_id: client.id,
         correlation_id: bad_channel,
         stream_id: 7,
         channel: b"cavalry:udp?endpoint=localhost:40123",
     });
-    // A cavalry:udp channel parses in version 4 and is refused with code 11 until the
-    // sender lands (card 180); a channel that fails the grammar is code 1 (ADR 0040).
     let (code, message) = client.wait_error(bad_channel);
     assert_eq!(code, 11, "{message}");
-    assert!(message.contains("card"), "{message}");
+    assert!(message.contains("card 181"), "{message}");
     let bad_grammar = client.correlation_id();
     client.send(&Command::AddPublication {
         client_id: client.id,

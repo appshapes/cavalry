@@ -142,7 +142,7 @@ fn a_log_buffer_is_resident_in_the_creator_a_publisher_and_a_subscriber() {
 #[cfg_attr(miri, ignore)]
 fn the_counters_file_is_resident_in_the_driver_a_writer_and_a_reader() {
     let dir = Dir::new("counters");
-    let file = CountersFile::create(dir.path(), 64).expect("create");
+    let file = CountersFile::create(dir.path(), 128).expect("create");
     let writer = CountersWriter::open(dir.path()).expect("open writable");
     let reader = CountersReader::open(dir.path()).expect("open read-only");
     assert_resident(&dir.path().join("counters"), 3);

@@ -21,9 +21,9 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
   `Driver::start_with_threads` takes a hook each thread runs first, named the thread it
   is on, where a caller that owns the host's CPUs pins the conductor to a CPU of its own
-  and leaves the recorder and the replayer on the housekeeping CPUs, as the bench does
-  under `--pin`; otherwise every thread keeps the affinity of the thread that started
-  the driver.
+  and leaves the recorder, the replayer and the sender on the housekeeping CPUs, as the
+  bench does under `--pin`; otherwise every thread keeps the affinity of the thread
+  that started the driver.
 - Records a stream to the durable log on a second thread, the recorder, with the same
   idle strategy: `start recording` and `stop recording` (`spec/client-protocol.md`,
   "Commands") name a stream, the conductor hands the recorder each start and stop
@@ -61,10 +61,26 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   refusal is answered. Each outcome moves its counter: `recording.truncated`,
   `recording.segments_purged`, `recording.deleted` and `recording.retention_failed`,
   the last for a file the operating system refused and nothing else.
-- Will run dedicated threads for the sender and the receiver, pinned when the operating
-  system allows, when the UDP slice arrives: a receiver that detects a gap sends a NAK,
-  the sender retransmits from its own term buffer, and status messages drive flow
-  control with the max, min and tagged policies.
+- Sends a `cavalry:udp` publication's log on a fourth thread, the sender, by the rules
+  of `spec/udp.md`, "The sender" (ADR 0040, ADR 0041): `add publication` on
+  `cavalry:udp?endpoint=<host>:<port>` resolves the host once, opens the channel's send
+  endpoint, one socket shared by the publications on it, and hands the sender the
+  socket and a reader on the publication's log through a bounded queue; the sender
+  sends setup frames until the first status message answers, data in bursts of whole
+  committed frames up to the sender limit, the receiver's consumption position plus its
+  window, in one socket call per burst on Linux, heartbeats when it has nothing to send
+  and with EOS once the publication is closed, and the frames a NAK names from the
+  log's own term; the conductor keeps the publisher's limit at the sender position plus
+  the publication window while a status message arrived within the connection timeout,
+  cleans the log a term behind the sender position so that the resend window stays, and
+  lingers a closed publication until the receiver acknowledges the end of stream or the
+  linger passes. Every step has its counter, `sender.*`, `publication.connected` and
+  `channel.*`, and the socket calls `std` lacks come through `nix`. The sender idles
+  with the driver's strategy while it holds an endpoint or a publication and parks
+  while it holds none, unparked by the conductor's next request, so a driver that
+  sends nothing wakes no CPU for it, as it wakes none for the replayer. The receiver, the
+  image and `start recording` on a `cavalry:udp` channel follow (card 181): a
+  subscription on one is refused with code 11 until then.
 - Degrades under cgroup CPU throttling, shared-memory pressure or packet loss. It does
   not fall over, and every state transition increments a counter.
 

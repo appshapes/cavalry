@@ -50,6 +50,33 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 42 | `recording.deleted` | counter | static | Stopped recordings deleted by `purge recording`: the slot's state written as 3, then the segment files and the time index removed; the slot stays, so the id never names another recording (ADR 0024, ADR 0031). |  |
 | 43 | `recording.retention_failed` | counter | static | Retention commands the files refused with error code 12: a segment file the replayer could not open or read for a truncate's frame check before the catalog write, or a file it could not remove, cut or extend after it, when the driver ran recovery's rule for the slot at once so that the slot and the files agree (spec/client-protocol.md, Commands; ADR 0031). | The error event's message names the file and what the recording holds now; `cavalry doctor` lists the log directory's filesystem and its free space, and a file the driver could not remove is one to look at by hand (permissions, a filesystem mounted read-only) before the command is sent again. |
 | 44 | `recording.bytes` | gauge | instance | The bytes one live recording's segment files take on disk, the segment file length times the files present, kept by the recorder at each roll and stored with a release store; key and label as recording.position; freed with it after the stop, after which `cavalry doctor` computes a stopped recording's bytes from its descriptor (ADR 0031). | A recording whose bytes are over half the log directory's filesystem is the one `cavalry doctor` names for a `purge segments`; the free-space check names the segment that would free the most. |
+| 45 | `sender.bytes_sent` | counter | static | Bytes of data and padding frames the sender put on the wire for every cavalry:udp publication, headers included (spec/udp.md, The sender). |  |
+| 46 | `sender.frames_sent` | counter | static | Data and padding frames the sender put on the wire; a padding frame counts whether or not its header went out (spec/udp.md, The sender). |  |
+| 47 | `sender.setups_sent` | counter | static | Setup frames sent: one every setup interval until a publication's first status message without the send-setup flag, and one for each status message with it (spec/udp.md, The sender). |  |
+| 48 | `sender.heartbeats_sent` | counter | static | Heartbeats sent: one after each heartbeat interval without a data frame, once a publication has its first status message (spec/udp.md, Heartbeat). |  |
+| 49 | `sender.retransmits_sent` | counter | static | NAKs answered with the frames of the range they name, from the publication's own term (spec/udp.md, The sender). | Retransmits are loss made good: a steady count under load is the network dropping datagrams; compare receiver.gaps_detected on the receiving host and look at the link and the socket buffers. |
+| 50 | `sender.retransmitted_bytes` | counter | static | Bytes of frames sent again in answer to NAKs. |  |
+| 51 | `sender.retransmit_overflow` | counter | static | NAKs dropped because a retransmit for another range was outstanding: one retransmit at a time, kept for the retransmit linger after it (spec/udp.md, The sender). | A receiver with gaps in more than one range at once is losing more than one retransmit can mend: the recovery stall this explains ends when the receiver's next NAK, after its retry delay, is answered; a count that keeps rising is a lossy link. |
+| 52 | `sender.short_sends` | counter | static | Datagrams the socket took only part of; the sender position stays at the datagram's first frame and the burst is sent again on the next cycle. | The socket's send buffer is smaller than a burst: channel.socket_sndbuf says what the host gave; raise the host's wmem_max, or send fewer bytes per cycle. |
+| 53 | `sender.send_failed` | counter | static | Sends the operating system refused, EAGAIN, ENOBUFS, EINTR and ECONNREFUSED among them, counted and retried on the next cycle; no failure on a live socket errors the endpoint (spec/udp.md, The receiver). | ECONNREFUSED is the normal case for a publisher started before its subscriber or whose subscriber's driver restarted; a count rising while a receiver is live is a send buffer the host capped or a link that is down. |
+| 54 | `sender.flow_control_limited` | counter | static | Times a publication with a frame to send found its sender limit reached: the receiver's window is full, counted once on entry into that state (spec/udp.md, The sender). |  |
+| 55 | `sender.naks_received` | counter | static | NAKs that arrived at a send endpoint for a publication it carries. |  |
+| 56 | `sender.naks_ignored` | counter | static | NAKs whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, dropped (spec/udp.md, The sender). | A receiver asking for frames the sender no longer holds has fallen more than half a term behind: the receiving host is too slow for the stream, or was away longer than the link can bridge; its image times out and a new one starts from the setup. |
+| 57 | `sender.status_messages_received` | counter | static | Status messages that arrived at a send endpoint for a publication it carries, with or without the send-setup flag. |  |
+| 58 | `sender.status_messages_rejected` | counter | static | Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, or one with it that asks a publication at its end of stream for a setup (spec/udp.md, The sender). | A receiver reporting a position the sender cannot place is a receiver of another stream's term ids on the same session and stream, or a stale image: its driver's receiver.dropped_* counters say which. |
+| 59 | `sender.rtt_replies_sent` | counter | static | RTT measurements with the reply flag answered: the same frame without the flag, the echo timestamp and the receiver id unchanged (spec/udp.md, The sender). |  |
+| 60 | `sender.position` | gauge | instance | The sender position of one cavalry:udp publication: the next byte the sender puts on the wire, stored by the sender with a release store after each burst; key as publication.position; label text: publication.position's three and the endpoint's registration id in decimal, space-separated, so that doctor names the endpoint. | A sender.position that does not move while publication.position does is a publication whose receiver window is full (sender.limit) or whose endpoint cannot send (sender.send_failed, sender.short_sends). |
+| 61 | `sender.limit` | gauge | instance | The sender limit of one cavalry:udp publication: the consumption position of the last accepted status message plus its receiver window length, never lowered; key and label as sender.position. | A sender.limit that stays at 0 is a publication no receiver has answered: see sender.setups_sent; one that stops rising while sender.position reaches it is a receiver whose subscriber is slow. |
+| 62 | `publication.connected` | counter | static | cavalry:udp publications whose first status message without the send-setup flag arrived: the publication's limit rises to the sender position plus the publication window from here (spec/udp.md, The sender). |  |
+| 63 | `publication.disconnected` | counter | static | cavalry:udp publications that passed the connection timeout without a status message: the limit falls to the sender position and the publisher reads not connected until the next one (spec/udp.md, The sender). | A receiver that stopped answering: its driver stopped, its host went away, or the link dropped its status messages; sender.setups_sent does not rise for a connected publication, so the receiver's own counters say what happened. |
+| 64 | `channel.opened` | counter | static | Endpoints whose socket was opened, bound and connected on the control plane as the command was handled: initializing to active (spec/udp.md, The receiver). |  |
+| 65 | `channel.closed` | counter | static | Endpoints closed once their last publication's linger ended or their last subscription and image went: active to closing, the socket closed and the five counters freed after the reuse timeout (spec/udp.md, The receiver). |  |
+| 66 | `channel.status` | gauge | instance | One endpoint's state, the channel status indicator a client reads: 0 initializing, 1 active, 2 closing, -1 errored, which this version never stores; key: the endpoint's registration id (i64), the correlation id of the command that opened it, little-endian; label text: the resolved channel. | A client whose channel status indicator reads 2 holds an endpoint that is closing: its publications ended; add the publication again to open a new one. |
+| 67 | `channel.socket_rcvbuf` | gauge | instance | The receive buffer length one endpoint's socket holds, read back after the endpoint was opened; key and label as channel.status. | Below what the page asks for (131072 bytes for a receive endpoint) is a host that capped it: raise rmem_max. |
+| 68 | `channel.socket_sndbuf` | gauge | instance | The send buffer length one endpoint's socket holds, the operating system's, read back after the endpoint was opened; key and label as channel.status. | Below a burst, 16 datagrams of the MTU, is a host whose send buffer cannot hold one cycle's sends, which sender.short_sends then counts: raise wmem_max. |
+| 69 | `channel.images` | gauge | instance | How many images one receive endpoint carries; 0 on a send endpoint; key and label as channel.status. |  |
+| 70 | `channel.publications` | gauge | instance | How many publications one send endpoint carries; 0 on a receive endpoint; the endpoint closes when it reaches 0 and the last linger ends; key and label as channel.status. |  |
+| 71 | `receiver.receive_failed` | counter | static | Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver). | A count that rises on a live endpoint is a socket the host is starving: look at the host's memory pressure and at dmesg. |
 
 ## State machines
 
@@ -108,3 +135,21 @@ States: `starting`, `live`, `stopped`, `failed`.
 | `live` | `stopped` | `replay.not_connected` |
 | `live` | `stopped` | `replay.failed` |
 | `live` | `stopped` | `log_buffer.rejected_frame` |
+
+### `publication_connection`
+
+States: `disconnected`, `connected`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `disconnected` | `connected` | `publication.connected` |
+| `connected` | `disconnected` | `publication.disconnected` |
+
+### `channel`
+
+States: `initializing`, `active`, `closing`, `errored`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `initializing` | `active` | `channel.opened` |
+| `active` | `closing` | `channel.closed` |
