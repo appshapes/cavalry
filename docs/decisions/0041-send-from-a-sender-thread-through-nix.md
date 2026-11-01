@@ -188,14 +188,22 @@ gateway. The review of pull request 92 left two notes for the acceptance, taken 
 `cavalry:udp` channel is error code 10 when the sender's request queue has no room for
 the endpoint and the publication or holds a remove still waiting for room; and the "tens
 of microseconds" of the alternative that kept the sender inside the conductor's cycle
-has no source and is withdrawn, that alternative losing on ADR 0039 alone. Two points of
-the Decision were implemented differently, with the reason: the log is cleaned only up
-to a term length behind the sender position, Aeron's rule in
+has no source and is withdrawn, that alternative losing on ADR 0039 alone. Three points
+of the Decision were implemented differently, with the reason: the log is cleaned only
+up to a term length behind the sender position, Aeron's rule in
 `NetworkPublication.cleanBufferTo`, and not up to the sender position as `spec/udp.md`,
 "The sender" said, since the resend window the same page keeps for a NAK lies in that
-term, so the page's sentence is amended; and `sendmsg` and `recvmsg` run per datagram on
+term, so the page's sentence is amended; `sendmsg` and `recvmsg` run per datagram on
 every platform but Linux, with `std`'s `send` and `recv` used nowhere, so that one audit
-covers every call. One point the Decision did not name: the sender parks while it holds
+covers every call; and the `MultiHeaders` the batched calls fill are preallocated once
+by the sender, as it is built on its own thread, one for a burst of 16 datagrams and one
+for a poll of 16, lent to every endpoint's calls since the thread uses one socket at a
+time, and not by the endpoint when it opens on the control plane as the Decision said:
+`MultiHeaders` holds raw pointers into itself and is not `Send`, so a socket carrying
+one could not cross the queue from the conductor to the sender, and the sender holding
+one could not be moved to its thread, which is why `Sender::new` runs on that thread.
+The allocation audit above stands: the one allocation moved from the endpoint's opening
+to the sender's start. One point the Decision did not name: the sender parks while it holds
 no endpoint and no publication, unparked by the conductor's next request, as the
 replayer parks with no replay (ADR 0030), because a sender idling with the backoff
 strategy woke every millisecond and the laptop's client claim row read its p99.99 at 292

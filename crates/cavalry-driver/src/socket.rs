@@ -4,12 +4,16 @@
 //! is handled, and `nix` on its descriptor for what `std` lacks: one `sendmmsg` per burst
 //! on Linux and one `sendmsg` per datagram elsewhere, `recvmmsg` or `recvmsg` for the
 //! control frames the endpoint receives, and the buffer lengths read back for
-//! `channel.socket_rcvbuf` and `channel.socket_sndbuf`. Nothing here allocates after
-//! [`SendSocket::open`]: the headers the batched calls fill are preallocated once, and
-//! no call passes a control message, so none allocates per call (ADR 0041, Evidence).
-//! A send or a receive the operating system refuses is returned to the sender, which
-//! counts it and tries again on its next cycle; no failure on a live socket errors the
-//! endpoint in this version.
+//! `channel.socket_rcvbuf` and `channel.socket_sndbuf`. The headers the batched calls
+//! fill are [`Headers`], preallocated once by the sender as it is built on its own
+//! thread and lent to every endpoint's calls: `nix`'s `MultiHeaders` holds raw
+//! pointers and cannot be sent between threads, so a socket could not carry its own
+//! through the queue from the conductor to the sender, and the sender uses one socket
+//! at a time (ADR 0041, acceptance). Nothing here allocates after [`SendSocket::open`]
+//! and [`Headers::preallocate`], and no call passes a control message, so none
+//! allocates per call (ADR 0041, Evidence). A send or a receive the operating system
+//! refuses is returned to the sender, which counts it and tries again on its next
+//! cycle; no failure on a live socket errors the endpoint in this version.
 
 use std::io::{self, IoSlice, IoSliceMut};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -38,13 +42,38 @@ pub(crate) struct Sent {
     pub failed: bool,
 }
 
-/// One send endpoint's socket, with the preallocated headers and buffers its calls use.
+/// The headers `sendmmsg` and `recvmmsg` fill, one set for a burst and one for a poll,
+/// preallocated once on the sender's thread and lent to every endpoint's calls: the
+/// sender uses one socket at a time, so one set serves them all. `nix`'s
+/// `MultiHeaders` holds raw pointers into itself and is not `Send`, which is why the
+/// sender makes it as it is built on its thread, and not the conductor in
+/// [`SendSocket::open`]. Nothing on another platform, where every call is per datagram
+/// with its header on the stack.
+pub(crate) struct Headers {
+    #[cfg(target_os = "linux")]
+    send: MultiHeaders<()>,
+    #[cfg(target_os = "linux")]
+    receive: MultiHeaders<()>,
+}
+
+impl Headers {
+    /// Allocates the headers for [`DATAGRAMS_PER_BURST`] sends and [`DATAGRAMS_PER_POLL`]
+    /// receives, once, with no control message buffer; the one allocation of the
+    /// sender's life after its queues.
+    pub(crate) fn preallocate() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            send: MultiHeaders::preallocate(DATAGRAMS_PER_BURST, None),
+            #[cfg(target_os = "linux")]
+            receive: MultiHeaders::preallocate(DATAGRAMS_PER_POLL, None),
+        }
+    }
+}
+
+/// One send endpoint's socket, with the buffers its receives fill; the headers its
+/// batched calls fill are the sender's [`Headers`], lent to each call.
 pub(crate) struct SendSocket {
     socket: UdpSocket,
-    #[cfg(target_os = "linux")]
-    send_headers: MultiHeaders<()>,
-    #[cfg(target_os = "linux")]
-    receive_headers: MultiHeaders<()>,
     /// The control datagrams the last poll received, one buffer each.
     receive_buffers: Box<[[u8; CONTROL_DATAGRAM_LENGTH]; DATAGRAMS_PER_POLL]>,
     /// How many bytes each of the last poll's datagrams holds.
@@ -70,10 +99,6 @@ impl SendSocket {
         socket.set_nonblocking(true)?;
         Ok(Self {
             socket,
-            #[cfg(target_os = "linux")]
-            send_headers: MultiHeaders::preallocate(DATAGRAMS_PER_BURST, None),
-            #[cfg(target_os = "linux")]
-            receive_headers: MultiHeaders::preallocate(DATAGRAMS_PER_POLL, None),
             receive_buffers: Box::new([[0u8; CONTROL_DATAGRAM_LENGTH]; DATAGRAMS_PER_POLL]),
             received: [0; DATAGRAMS_PER_POLL],
         })
@@ -92,9 +117,14 @@ impl SendSocket {
     }
 
     /// Sends up to [`DATAGRAMS_PER_BURST`] datagrams, each one slice, in one call on Linux
-    /// and one call each elsewhere, and says how many the socket took whole. `Err` is the
-    /// operating system's refusal of the first datagram, with nothing sent.
-    pub(crate) fn send_burst(&mut self, datagrams: &[[IoSlice<'_>; 1]]) -> io::Result<Sent> {
+    /// through `headers` and one call each elsewhere, and says how many the socket took
+    /// whole. `Err` is the operating system's refusal of the first datagram, with
+    /// nothing sent.
+    pub(crate) fn send_burst(
+        &self,
+        headers: &mut Headers,
+        datagrams: &[[IoSlice<'_>; 1]],
+    ) -> io::Result<Sent> {
         let count = datagrams.len().min(DATAGRAMS_PER_BURST);
         let datagrams = &datagrams[..count];
         if count == 0 {
@@ -105,7 +135,7 @@ impl SendSocket {
             const NO_ADDRESS: [Option<()>; DATAGRAMS_PER_BURST] = [None; DATAGRAMS_PER_BURST];
             let results = sendmmsg(
                 self.socket.as_raw_fd(),
-                &mut self.send_headers,
+                &mut headers.send,
                 datagrams,
                 &NO_ADDRESS[..count],
                 &[],
@@ -124,6 +154,9 @@ impl SendSocket {
         }
         #[cfg(not(target_os = "linux"))]
         {
+            // Per datagram, each call's header on the stack: the preallocated ones are
+            // Linux's.
+            let _ = headers;
             let mut sent = Sent::default();
             for datagram in datagrams {
                 match sendmsg::<()>(
@@ -151,17 +184,18 @@ impl SendSocket {
 
     /// Sends one datagram, a control frame; `Ok(false)` when the socket took only part
     /// of it, `Err` when it refused it.
-    pub(crate) fn send_one(&mut self, bytes: &[u8]) -> io::Result<bool> {
+    pub(crate) fn send_one(&self, headers: &mut Headers, bytes: &[u8]) -> io::Result<bool> {
         let datagram = [[IoSlice::new(bytes)]];
-        let sent = self.send_burst(&datagram)?;
+        let sent = self.send_burst(headers, &datagram)?;
         Ok(sent.whole == 1)
     }
 
     /// Receives up to [`DATAGRAMS_PER_POLL`] datagrams into the endpoint's buffers, one
-    /// call on Linux and one per datagram elsewhere, and returns how many arrived, 0 when
-    /// none waited; [`SendSocket::datagram`] reads each. `Err` is a refusal other than
-    /// "nothing to read", which the sender counts in `receiver.receive_failed`.
-    pub(crate) fn receive(&mut self) -> io::Result<usize> {
+    /// call on Linux through `headers` and one per datagram elsewhere, and returns how
+    /// many arrived, 0 when none waited; [`SendSocket::datagram`] reads each. `Err` is a
+    /// refusal other than "nothing to read", which the sender counts in
+    /// `receiver.receive_failed`.
+    pub(crate) fn receive(&mut self, headers: &mut Headers) -> io::Result<usize> {
         self.received = [0; DATAGRAMS_PER_POLL];
         #[cfg(target_os = "linux")]
         {
@@ -175,10 +209,11 @@ impl SendSocket {
                     }
                     None => [IoSliceMut::new(&mut [])],
                 });
+            // `recvmmsg` takes each datagram's slices as `&mut`, one item per header.
             let results = match recvmmsg(
                 self.socket.as_raw_fd(),
-                &mut self.receive_headers,
-                slices.iter_mut().map(|slice| &*slice),
+                &mut headers.receive,
+                slices.iter_mut(),
                 MsgFlags::MSG_DONTWAIT,
                 None,
             ) {
@@ -195,6 +230,9 @@ impl SendSocket {
         }
         #[cfg(not(target_os = "linux"))]
         {
+            // Per datagram, each call's header on the stack: the preallocated ones are
+            // Linux's.
+            let _ = headers;
             let mut count = 0;
             while count < DATAGRAMS_PER_POLL {
                 let Some(buffer) = self.receive_buffers.get_mut(count) else {

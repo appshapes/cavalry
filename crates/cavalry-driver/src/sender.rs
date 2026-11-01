@@ -11,7 +11,9 @@
 //! sender position up to the sender limit in one socket call, a heartbeat when nothing
 //! was sent for the heartbeat interval, the connection timeout, and the end of the
 //! linger. Nothing here allocates per cycle, locks, logs or reads the clock per message;
-//! the syscalls are the endpoint's own sends and receives, one per burst on Linux.
+//! the syscalls are the endpoint's own sends and receives, one per burst on Linux. The
+//! sender is built on its own thread, since the headers its batched calls fill
+//! ([`Headers`]) hold raw pointers and cannot be sent to it (ADR 0041, acceptance).
 
 use std::collections::VecDeque;
 use std::io::IoSlice;
@@ -38,7 +40,7 @@ use cavalry_shm::spsc::{Consumer, Producer};
 
 use crate::conductor::now_nanos;
 use crate::idle::{IdleStrategy, Idler};
-use crate::socket::SendSocket;
+use crate::socket::{Headers, SendSocket};
 use crate::spec;
 
 /// A heartbeat's flags: BEGIN and END (`spec/udp.md`, "Heartbeat"; `spec/frame.md`,
@@ -347,7 +349,10 @@ impl<'a> Burst<'a> {
     }
 }
 
-/// The sender's state: the queues, the endpoints, the publications and the counters.
+/// The sender's state: the queues, the endpoints, the publications, the counters and
+/// the headers every endpoint's batched calls fill. Not `Send`, because of the headers:
+/// [`Sender::new`] runs on the sender's own thread, and the tests that drive a sender
+/// by hand build it on theirs.
 pub(crate) struct Sender {
     requests: Consumer<Request>,
     replies: Producer<Reply>,
@@ -356,11 +361,16 @@ pub(crate) struct Sender {
     endpoints: Vec<Endpoint>,
     live: Vec<Live>,
     statics: Statics,
+    /// The headers `sendmmsg` and `recvmmsg` fill, lent to every endpoint's call: the
+    /// sender uses one socket at a time.
+    headers: Headers,
     idler: Idler,
 }
 
 impl Sender {
-    /// A sender over the queues to and from the conductor, with its counters.
+    /// A sender over the queues to and from the conductor, with its counters; the
+    /// headers for a burst and a poll are preallocated here, on the thread that calls
+    /// this, which must be the one that runs the sender.
     pub(crate) fn new(
         requests: Consumer<Request>,
         replies: Producer<Reply>,
@@ -374,6 +384,7 @@ impl Sender {
             endpoints: Vec::with_capacity(spec::MAX_SEND_ENDPOINTS),
             live: Vec::with_capacity(spec::MAX_PUBLICATIONS),
             statics,
+            headers: Headers::preallocate(),
             idler: Idler::new(idle),
         }
     }
@@ -526,13 +537,20 @@ impl Sender {
                 registration_id,
                 end_of_stream_position,
             } => {
-                if let Some(live) = self
+                match self
                     .live
                     .iter_mut()
                     .find(|live| live.registration_id == registration_id)
-                    && live.closing.is_none()
                 {
-                    live.closing = Some((end_of_stream_position, now));
+                    Some(live) => {
+                        if live.closing.is_none() {
+                            live.closing = Some((end_of_stream_position, now));
+                        }
+                    }
+                    // A publication this sender never held, or one whose linger already
+                    // ended: closed at once, so the conductor's close completes, as a
+                    // remove of an endpoint it does not hold is answered.
+                    None => self.reply(Reply::Closed { registration_id }),
                 }
             }
         }
@@ -540,7 +558,7 @@ impl Sender {
 
     /// Takes every control frame that arrived at the endpoint and acts on it.
     fn poll_endpoint(&mut self, index: usize, now: i64) -> usize {
-        let count = match self.endpoints[index].socket.receive() {
+        let count = match self.endpoints[index].socket.receive(&mut self.headers) {
             Ok(count) => count,
             Err(_) => {
                 self.statics.receive_failed.increment();
@@ -685,7 +703,9 @@ impl Sender {
             return;
         }
         let bytes = measurement.answer().to_bytes();
-        let sent = self.endpoints[endpoint_index].socket.send_one(&bytes);
+        let sent = self.endpoints[endpoint_index]
+            .socket
+            .send_one(&mut self.headers, &bytes);
         self.statics.count_one(sent, &self.statics.rtt_replies_sent);
     }
 
@@ -702,8 +722,9 @@ impl Sender {
             return (0, false);
         };
         let live = &mut self.live[index];
-        let endpoint = &mut self.endpoints[endpoint_index];
+        let endpoint = &self.endpoints[endpoint_index];
         let statics = &self.statics;
+        let headers = &mut self.headers;
         let mut work = 0;
 
         // 1. A retransmit in progress, or one whose linger ended.
@@ -722,7 +743,10 @@ impl Sender {
                     // Cleaned, or nothing there: the range is answered as far as it can be.
                     retransmit.end - retransmit.next
                 } else {
-                    match endpoint.socket.send_burst(&burst.datagrams[..burst.count]) {
+                    match endpoint
+                        .socket
+                        .send_burst(headers, &burst.datagrams[..burst.count])
+                    {
                         Ok(sent) => {
                             if sent.short {
                                 statics.short_sends.increment();
@@ -770,7 +794,7 @@ impl Sender {
                 mtu_length: live.mtu_length as i32,
                 ttl: 0,
             };
-            let sent = endpoint.socket.send_one(&frame.to_bytes());
+            let sent = endpoint.socket.send_one(headers, &frame.to_bytes());
             statics.count_one(sent, &statics.setups_sent);
             live.last_setup_at = now;
             live.elicited = false;
@@ -790,7 +814,10 @@ impl Sender {
         );
         let mut limited = burst.limited;
         if burst.count > 0 {
-            match endpoint.socket.send_burst(&burst.datagrams[..burst.count]) {
+            match endpoint
+                .socket
+                .send_burst(headers, &burst.datagrams[..burst.count])
+            {
                 Ok(sent) => {
                     if sent.short {
                         statics.short_sends.increment();
@@ -848,7 +875,7 @@ impl Sender {
                 term_id: live.positions.term_id_of(live.sender_position),
                 reserved_value: 0,
             };
-            let sent = endpoint.socket.send_one(&frame.to_bytes());
+            let sent = endpoint.socket.send_one(headers, &frame.to_bytes());
             statics.count_one(sent, &statics.heartbeats_sent);
             live.last_sent_at = now;
             work += 1;
