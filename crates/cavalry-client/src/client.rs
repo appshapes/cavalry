@@ -528,9 +528,12 @@ impl Cavalry {
     /// channel the replay's publication is put on the wire by the driver's sender as a
     /// client's `cavalry:udp` publication is, with the recording's term length and MTU,
     /// and its subscriber is a `cavalry:udp` subscription on that channel's endpoint,
-    /// on this host or another, whose image's positions are the recording's; a
-    /// receiver answering is what connects it, and a `cavalry:ipc` subscription on the
-    /// replay stream gets no image of it (ADR 0043). Waits for `replay ready`
+    /// on this host or another, whose image's positions are the recording's; for the
+    /// replay connect timeout it has a subscriber while its publication is connected,
+    /// from the receiver's first status message until the connection timeout passes
+    /// without one, and no subscription on this driver gets an `available image` of it
+    /// but a `cavalry:udp` one on the same endpoint, through the receiver (ADR 0043).
+    /// Waits for `replay ready`
     /// up to the response timeout and returns the [`Replay`], whose
     /// [`position`](Replay::position) reads the replayer's counter and whose
     /// [`ended`](Replay::ended) says how it ended once it has. The replay belongs to the
