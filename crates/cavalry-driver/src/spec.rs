@@ -179,8 +179,11 @@ pub const PENDING_SETUP_TIMEOUT: Duration = Duration::from_secs(1);
 pub const IMAGE_COOL_DOWN: Duration = cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT;
 
 /// How many bytes of an image's term the receiver's rebuild scan reads per image per
-/// duty cycle, 1 MiB (`spec/udp.md`, "The receiver", step 3; ADR 0042).
+/// duty cycle, 1 MiB (`spec/udp.md`, "The receiver", step 3; ADR 0042). At least a
+/// frame's alignment, since a scan bounded below 32 bytes reads no word and a receiver
+/// that continued from where it stopped would never move.
 pub const REBUILD_SCAN_LIMIT: u32 = 1024 * 1024;
+const _: () = assert!(REBUILD_SCAN_LIMIT >= cavalry_proto::frame::FRAME_ALIGNMENT as u32);
 
 /// How often the receiver sweeps its session table for pending setups and cool-downs
 /// that expired, so that the table is not walked on every cycle (ADR 0042).
