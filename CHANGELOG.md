@@ -919,11 +919,21 @@ user-visible change, added in the same commit as the change. The format follows
   the frame length word, 1 MiB of term per image per cycle, NAKs the gap they find, keeps
   its readers, every subscription's position and a recording's, to set the status
   message's consumption position and to clean a term behind the slowest, and finds a
-  datagram's session in a hash table of 4096 records. `spec/udp.md` is amended within
-  version 0 on five points: a status message whose frame length is 44 in a datagram
-  shorter than 44 bytes is `length`, with a vector; a committed frame the window does
-  not cover whole counts `sender.flow_control_limited`; a recording of an image is one
-  of its readers; an interface keys a receive endpoint's channel and binds nothing; an
-  RTT measurement for another receiver counts `receiver.dropped_unwanted`. `start
-  replay` over UDP stays code 11 and is a card of its own
+  datagram's session in a hash table of 4096 records. Three spec pages are amended
+  within their versions, none changing a byte on the wire: `spec/udp.md`, where a
+  status message whose frame length is 44 in a datagram shorter than 44 bytes is
+  `length`, with a vector; a committed frame the window does not cover whole counts
+  `sender.flow_control_limited`; an interface keys a receive endpoint's channel and
+  binds nothing; the rebuild scan runs on every cycle on which the high-water mark is
+  past the rebuild position, bounded at 1 MiB of term per image; a recording of an
+  image is one of its readers, for the status message's trigger and consumption
+  position and for the cleaning; an RTT measurement for another receiver counts
+  `receiver.dropped_unwanted`; `start recording` records one log per command, a
+  publication or an image, the lowest registration id first; and a recording of an
+  image stops when the image is retired, before its log is removed.
+  `spec/log-buffer.md`, where the receiver window and the cleaning of an image read the
+  slowest reader's position, a subscription's or a recording's. `spec/client-protocol.md`,
+  where `add subscription` over UDP is code 10 when the receiver's request queue has no
+  room, `start recording` over UDP answers 20 and 22 counting images, and `start replay`
+  over UDP stays code 11 and is a card of its own
   ([ADR 0042](docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md); card 181).

@@ -3,8 +3,10 @@
 - **Status:** Accepted
 - **Date:** 2026-11-02
 - **Invariants affected:** 1, 2, 3, 4
-- **Supersedes:** none; amends `spec/udp.md` on five points named under Decision, each
-  within version 0 of the transport, since none changes a byte on the wire
+- **Supersedes:** none; amends `spec/udp.md` within version 0, `spec/log-buffer.md`
+  within version 1 and `spec/client-protocol.md` within version 4, on the points listed
+  page by page at the end of Decision, since none changes a byte on the wire or in a
+  file
 
 ## Context
 
@@ -113,10 +115,12 @@ conductor has freed. The slowest reader's position is the status message's consu
 position, the fastest's is where the rebuild scan starts, and before a status message
 raises that position the receiver cleans the image's log from its clean position to the
 slowest reader's position less the term length, whole terms at a time, so that a term is
-zero before a frame lands in it; this amends "The receiver" and "Counters" of
-`spec/udp.md`, where the slowest subscriber's position stood alone, to count a
-recording of the image among the readers, which is what keeps a recorded byte from being
-cleaned before the recorder has written it (invariant 1). A reader's position outside
+zero before a frame lands in it; this amends step 4 of "The receiver" in `spec/udp.md`
+and "Header" and "The receiver" of `spec/log-buffer.md`, where the slowest subscriber's
+position stood alone for the status message's trigger, its consumption position, the
+receiver window and the cleaning, to count a recording of the image among the readers
+in every one of those places, so that the trigger and the message read one position and
+no recorded byte is cleaned before the recorder has written it (invariant 1). A reader's position outside
 its bound, below the image's start, above the largest position or not a multiple of 32,
 is not used, counts `log_buffer.rejected_position` and is reported once to the
 conductor, which evicts the client as it evicts one on a publication (ADR 0010).
@@ -127,8 +131,8 @@ backward-shift deletion, so that a datagram's session is found in a bounded numb
 probes with no allocation and no list walk; a datagram for a session with no record
 when the table is full is dropped and counted in `receiver.sessions_full`. Pending
 records and cool-downs expire on a sweep the receiver runs once every 100 ms, a bound of
-its own, so that the table is not walked on every cycle. The receiver's id is an i64
-drawn from the clock and the process id when it starts. An RTT measurement for an image's
+its own, so that the table is not walked on every cycle. The receiver's id is the random
+i64 of the status message's field, drawn once when the receiver starts. An RTT measurement for an image's
 session whose receiver id is neither this driver's nor 0 is dropped and counted in
 `receiver.dropped_unwanted`, which amends step 6 of "The receiver", where it had no
 counter. The receive socket's datagram buffers, 16 of 65536 bytes so that a sender of
@@ -138,21 +142,65 @@ control frame the receiver sends goes to the source address of the setup frame t
 created the image, through one `sendmsg` with that address and no control message,
 which allocates nothing (ADR 0041, Evidence).
 
-`start recording` on a `cavalry:udp` channel records a log whose channel and stream id
-match, a publication sending on the resolved channel or an image received on it, one
-recording per command and the lowest registration id not yet recorded first, as the
-command's rule is over `cavalry:ipc`; the recorder reads an image's log through the same
-reader it reads a publication's with, which stops at a frame length of 0, a gap the wire
-has not filled, until it is filled, and the recording's start position is the image's
-rebuild position when the command is handled. `start replay` on a `cavalry:udp` channel,
-a replay's publication put on the wire by the sender, is not this card's: it stays error
-code 11 with a message naming the card that brings it, since a replay's publication
-takes the sender's path, not the receiver's, and this change is already the size of the
-sender's. Two notes the reviews of pull requests 94 and 95 left for this card are
-taken: a status message whose frame length is 44 in a datagram of 40 to 43 bytes is
-reported as `length`, which "What a reader rejects" now says with a vector for it; and
-step 2 of "The sender" names a committed frame the window does not cover whole as an
-entry into the flow-control-limited state, which the sender counts.
+`start recording` on a `cavalry:udp` channel records one log per command: of the live
+publications sending on the resolved channel and the images received on it whose
+stream id matches, the one with the lowest registration id not yet being recorded, as
+the command's rule is over `cavalry:ipc`, so that a second command records the next;
+the codes are the command's own, 20 when there is neither a publication nor an image
+and 22 when every one is being recorded, which amends the `start recording` bullet of
+`spec/client-protocol.md`, "Commands", its "Error codes" 20 and 22 and "What the driver
+rejects", which spoke of publications alone. The recorder reads an image's log through
+the same reader it reads a publication's with, which stops at a frame length of 0, a
+gap the wire has not filled, until it is filled; the recording's start position is the
+image's rebuild position when the command is handled, loaded from
+`image.rebuild_position` as a publication's producer position is loaded afresh (ADR
+0022), and the recording's position is one of the image's readers from then on. A
+recording of an image stops on every retire, as a publication's stops when its
+publication closes: the receiver scans the image to its first gap or the high-water
+mark before it reports the retire, the recording stops at the rebuild position once the
+recorder has written up to it, which is the end of stream position when the stream
+ended, and the image's log is removed only once the recording has stopped, as a recorded
+publication's log waits (`spec/log-buffer.md`, "Closing"); step 5 of "The receiver" and
+the recording paragraph of `spec/udp.md`, "The receiver" of `spec/log-buffer.md` and the
+paragraph of `spec/client-protocol.md` on the stops the driver makes by itself say so.
+`start replay` on a `cavalry:udp` channel, a replay's publication put on the wire by the
+sender, is not this card's: it stays error code 11 with a message naming the card that
+brings it, since a replay's publication takes the sender's path, not the receiver's, and
+this change is already the size of the sender's; the `start replay` bullet of
+`spec/client-protocol.md`, which said code 1 for any channel but `cavalry:ipc` while the
+field table accepted a `cavalry:udp` replay channel, now says so. Two notes earlier
+reviews left for this card are taken: the approval of pull request 91 found that a
+status message whose frame length is 44 in a datagram of 40 to 43 bytes is reported as
+`length`, which "What a reader rejects" now says with a vector for it; and the approval
+of pull request 94 asked that step 2 of "The sender" name a committed frame the window
+does not cover whole as an entry into the flow-control-limited state, which the sender
+counts.
+
+The amendments, page by page, each within its page's version. `spec/udp.md`: "The
+sender", step 2, the flow-control-limited entry; "The receiver", its opening, the
+interface keys the channel and binds nothing on a receive endpoint; step 3, the rebuild
+scan on every cycle on which the high-water mark is past the rebuild position, from the
+fastest reader's position, bounded at 1 MiB of term per image per cycle; step 4, the
+slowest reader's position, a subscription's or a recording's, for the status message's
+trigger, its consumption position and the cleaning, and a reader's rejected position;
+step 5, a recording's stop on every retire and the log's removal waiting for it; step 6
+and "Counters", an RTT measurement for another receiver counted in
+`receiver.dropped_unwanted`; the recording paragraph, one recording per command, a
+publication or an image, the lowest registration id first, the start position and the
+stop; "What a reader rejects", the `length` row and the vector
+`length-status-message-tagged-short`. `spec/log-buffer.md`: "Header", the receiver
+window length row, and "The receiver", the cleaning, both behind the slowest reader
+rather than the slowest subscriber, and the image's log removed once its recording has
+stopped. `spec/client-protocol.md`: "Commands", `add subscription` on a `cavalry:udp`
+channel is error code 10 when the receiver's request queue has no room for the endpoint
+and the subscription or holds a request still waiting for room, as `add publication` is
+(ADR 0041); `start recording` on a `cavalry:udp` channel, a publication or an image,
+with codes 20 and 22; `start replay` on a `cavalry:udp` channel, code 11; the driver's
+stop of a recording when its image is retired, and the log's removal after it;
+"Events", `recording ready`'s session id, a publication's or an image's; "Error codes"
+20 and 22; "Sizes", one recording per publication or image at most; "What the driver
+rejects", codes 20 and 22. `docs/glossary.md`'s `receiver window` row moves with step
+4.
 
 ## Alternatives considered
 
@@ -185,6 +233,13 @@ entry into the flow-control-limited state, which the sender counts.
 - **`start replay` over UDP in this change.** Lost: it is the sender's path, a replay's
   publication opened on a send endpoint with its reader, and this change is already the
   size of the sender's; it is a card of its own, refused with code 11 until then.
+- **A recording that keeps an image alive after its last subscription goes, as a
+  recording alone connects a publication.** Lost: an image exists because a
+  subscription on the endpoint and stream wanted its setup, the endpoint closes with
+  its last subscription and image, and a recording alone would hold both open with
+  status messages whose only reader is the recorder; the recording stops with the
+  retire instead, at the end of the image's contiguous frames, which the Revisit clause
+  below keeps open.
 
 ## Evidence
 
@@ -194,7 +249,11 @@ as ADR 0039 says. The allocation audit of ADR 0041, read at `nix` v0.31.3 on
 2026-10-31, covers every `nix` call on the receiver's duty cycle: `recvmmsg` and
 `recvmsg` perform no allocation, and `sendmsg` with no control message allocates
 nothing; `MultiHeaders::preallocate` allocates once, on the receiver's start. The
-`net` feature those address types need has been on since ADR 0041. What the change
+`net` feature those address types need has been on since ADR 0041. The one change this
+ADR implies under `cavalry-shm`, the two readers of the frame length word on the image
+writer that the rebuild scan runs, is the card's first commit, with its unit tests over
+a term with no gap, a gap and a gap longer than the scan bound, and a `loom` model if
+it adds `unsafe` (`CLAUDE.md`, Unsafe). What the change
 that implements this ADR proves goes in its commit messages: the fault-injection gate
 of `CLAUDE.md`'s gate 3 for the wire, a loopback shim in the client's tests that
 drops, reorders and duplicates datagrams with every message delivered once and in order
@@ -216,19 +275,26 @@ the bench's `DriverPins` and the host set-up page follow; the conductor's `add
 subscription` gains the endpoint path `add publication` has, and `remove subscription`,
 `client close` and `client timeout` reach the receiver through the queue, so a
 subscription's counters are freed one reply later than an IPC subscription's; a
-recording of an image is held back by the image's gaps, as its subscribers are.
+recording of an image is held back by the image's gaps, as its subscribers are, and
+stops when the image is retired, where a recording alone keeps a publication connected
+(`spec/log-buffer.md`, "The driver"), so recording a stream over UDP on a host needs a
+subscription on it for as long as the recording runs.
 
 Revisit: when multicast binds the interface (ADR 0039); when a gate host shows the 1 MiB
 scan bound on a cycle's tail; when `start replay` over UDP lands, for the sender's side
 of a replay; when a session table of 4096 is not enough for a host that receives from
-many senders, which a rising `receiver.sessions_full` shows.
+many senders, which a rising `receiver.sessions_full` shows; when a recording should
+keep an image alive without a subscription, as a recording alone connects a
+publication.
 
 ## References
 
 - ADR 0010, ADR 0013, ADR 0025, ADR 0039, ADR 0040, ADR 0041
-- `spec/udp.md`, "The receiver", "Counters", "Values", "What a reader rejects";
-  `spec/log-buffer.md`, "The receiver"; `spec/client-protocol.md`, "Commands" (add
-  subscription, remove subscription, start recording on a `cavalry:udp` channel)
+- `spec/udp.md`, "The sender", "The receiver", "Counters", "Values", "What a reader
+  rejects"; `spec/log-buffer.md`, "Header", "The receiver", "The driver";
+  `spec/client-protocol.md`, "Commands" (add subscription, remove subscription, start
+  recording and start replay on a `cavalry:udp` channel, the stops the driver makes by
+  itself), "Events", "Error codes", "Sizes", "What the driver rejects"
 - `CLAUDE.md`: invariants 1 to 4; Data plane; `.claude/rules/data-plane.md`
 - `crates/cavalry-driver/src/lib.rs` (`DriverThread`, `start_with_threads`),
   `src/spec.rs`, `src/conductor.rs` (`SenderLink`, `add_udp_publication`),
