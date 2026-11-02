@@ -8731,6 +8731,118 @@ mod replay {
         drop(appender);
     }
 
+    /// The counters file at its capacity (invariant 3; ADR 0043), the one bound a
+    /// replay over `cavalry:udp` meets after its endpoint is opened: with seven records
+    /// free, the endpoint takes its five and the publication's third is refused, so the
+    /// replay fails with code 10 when the replayer answers ready and `undo_replay_ready`
+    /// abandons the new endpoint with the log it made, the endpoint's five and the
+    /// publication's two freed, the socket dropped, nothing handed to the sender, the
+    /// log file gone, `channel.opened` unmoved, the replay gone, `driver.registry_full`
+    /// one more and `replay.started` unmoved. Then, the records returned, a replay on
+    /// the same channel opens a fresh endpoint and goes live.
+    #[test]
+    fn a_replay_over_udp_the_counters_file_refuses_abandons_its_new_endpoint() {
+        let (mut h, mut appender) = recorded("replay-udp-counters-full");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+
+        // Every free record taken, then seven returned, reusable at once: five for
+        // the endpoint and two of the publication's five.
+        let mut filler: Vec<Counter> = Vec::new();
+        while let Ok(counter) = h
+            .conductor
+            .counters
+            .allocate(RECORDING_POSITION, &[0; 8], "filler")
+        {
+            filler.push(counter);
+        }
+        assert!(filler.len() > 7, "the counters file had free records");
+        for counter in filler.split_off(filler.len() - 7) {
+            h.conductor
+                .counters
+                .free(counter.id(), 0)
+                .expect("the filler is freed");
+        }
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        let freed = h.counter(COUNTERS_FREED);
+        let registry_full = h.counter(DRIVER_REGISTRY_FULL);
+
+        // Code 10 from the replayer's ready reply, the endpoint abandoned with its
+        // five records and the publication's two, nothing left.
+        start_udp_replay(
+            &mut h,
+            604,
+            NULL_POSITION,
+            b"cavalry:udp?endpoint=127.0.0.1:40997",
+        );
+        let got = events(&mut h);
+        let error = errors(&got)
+            .into_iter()
+            .find(|(id, _, _)| *id == 604)
+            .expect("the replay was refused");
+        assert_eq!(error.1, 10, "{}", error.2);
+        assert!(error.2.contains("records is in use"), "{}", error.2);
+        assert!(replay_ready(&got, 604).is_none());
+        assert!(h.conductor.replays.is_empty(), "the replay is gone");
+        assert!(
+            h.conductor.send_endpoints.is_empty(),
+            "the new endpoint is abandoned"
+        );
+        assert!(
+            h.conductor.sender.requests.is_empty(),
+            "nothing is handed to the sender"
+        );
+        assert_eq!(h.conductor.publications.len(), 1, "no publication");
+        assert!(!h.dir.path().join("publications/604.logbuffer").exists());
+        assert_eq!(
+            h.counter(COUNTERS_ALLOCATED),
+            allocated,
+            "every record the command took is back"
+        );
+        assert_eq!(
+            h.counter(COUNTERS_FREED),
+            freed + 7,
+            "the endpoint's five and the publication's two"
+        );
+        assert_eq!(h.counter(CHANNEL_OPENED), 0);
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), registry_full + 1);
+        assert_eq!(h.counter(REPLAY_STARTED), 0);
+
+        // The records returned: a replay on the same channel opens a fresh endpoint,
+        // its five and the publication's five allocated, and goes live.
+        for counter in filler {
+            h.conductor
+                .counters
+                .free(counter.id(), 0)
+                .expect("the filler is freed");
+        }
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        start_udp_replay(
+            &mut h,
+            605,
+            NULL_POSITION,
+            b"cavalry:udp?endpoint=127.0.0.1:40997",
+        );
+        let got = events(&mut h);
+        assert_eq!(errors(&got), Vec::new());
+        assert!(replay_ready(&got, 605).is_some());
+        assert_eq!(h.conductor.replays.len(), 1);
+        assert_eq!(h.conductor.replays[0].state, ReplayState::Live);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].registration_id, 605);
+        assert_eq!(h.conductor.send_endpoints[0].publications.get(), 1);
+        assert_eq!(
+            h.counter(COUNTERS_ALLOCATED),
+            allocated + 10,
+            "five and five"
+        );
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+        assert_eq!(h.counter(REPLAY_STARTED), 1);
+        drop(appender);
+    }
+
     /// The happy path (invariant 1; ADR 0043): a replay over `cavalry:udp` from a
     /// position inside the recording. The conductor opens the channel's endpoint with
     /// its five counters and the publication's five, keyed by the replay session id,
