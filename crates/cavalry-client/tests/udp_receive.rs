@@ -177,12 +177,12 @@ impl Shim {
                         continue;
                     }
                     data_count += 1;
-                    if faults.drop_every > 0 && data_count % faults.drop_every == 0 {
+                    if faults.drop_every > 0 && data_count.is_multiple_of(faults.drop_every) {
                         dropped.fetch_add(1, Ordering::AcqRel);
                         continue;
                     }
                     if faults.hold_every > 0
-                        && data_count % faults.hold_every == 0
+                        && data_count.is_multiple_of(faults.hold_every)
                         && holding.is_none()
                     {
                         holding = Some(datagram.to_vec());
@@ -191,7 +191,9 @@ impl Shim {
                     }
                     send(datagram);
                     forwarded.fetch_add(1, Ordering::AcqRel);
-                    if faults.duplicate_every > 0 && data_count % faults.duplicate_every == 0 {
+                    if faults.duplicate_every > 0
+                        && data_count.is_multiple_of(faults.duplicate_every)
+                    {
                         send(datagram);
                         duplicated.fetch_add(1, Ordering::AcqRel);
                     }
