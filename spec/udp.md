@@ -283,8 +283,8 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    the same gap persists; a gap that changes restarts the delay. A subscriber reads the
    image's log as "Reading" in `spec/log-buffer.md` says and stops at the gap itself, so
    that nothing is delivered from beyond a gap before it is filled.
-4. **Status messages.** One at creation, then whenever the slowest subscriber's position
-   is at least the status message threshold past s, when the receiver window length
+4. **Status messages.** One at creation, then whenever the slowest reader's position is
+   at least the status message threshold past s, when the receiver window length
    changes, or when the status message interval has passed since the last: it carries the
    slowest reader's position as consumption term id and offset, the receiver window
    length, the receiver id, and the end-of-stream flag once the stream has ended. A
@@ -292,12 +292,13 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    (`spec/log-buffer.md`, "Counters"), or a recording of the image, through its
    `recording.position`, which stands at the recording's start position until the
    recorder has attached the counter (ADR 0025, ADR 0042); the slowest reader's position
-   is the least of them, and a reader's position outside its bound is not used, counts
-   `log_buffer.rejected_position` and evicts its client (ADR 0010). Before s rises, the
-   receiver cleans the image's log from its clean position to the slowest reader's
-   position less the term length, as the driver cleans a publication's log, so that a
-   term is zero before a frame lands in it and no recorded byte is cleaned before the
-   recorder has written it.
+   is the least of them, so that the trigger, the consumption position and the cleaning
+   below read one position, and a reader's position outside its bound is not used,
+   counts `log_buffer.rejected_position` and evicts its client (ADR 0010). Before s
+   rises, the receiver cleans the image's log from its clean position to the slowest
+   reader's position less the term length, as the driver cleans a publication's log, so
+   that a term is zero before a frame lands in it and no recorded byte is cleaned before
+   the recorder has written it.
 5. **End.** A subscription removed while others remain on the endpoint and stream, by
    `remove subscription`, `client close` or `client timeout`, frees its
    `subscription.position` and the image goes on with the slowest of the rest; when the
@@ -310,9 +311,10 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    at or above the last status message's position less a term, count as activity; an
    under-run and an over-run do not; so a sender that pauses its data while
    heartbeating keeps its image. Retiring is `unavailable image` to its subscriptions
-   that remain, its counters
+   that remain, the stop of its recording when it has one (below), its counters
    freed after the counter reuse timeout, its log removed once every subscription has
-   released it, and its session record put **on cool-down** for the image cool-down, a
+   released it and its recording has stopped, as a recorded publication's log waits
+   (`spec/log-buffer.md`, "Closing"), and its session record put **on cool-down** for the image cool-down, a
    bound of this page's own on every retire, during which a setup, data datagram or heartbeat for the
    session is dropped and counted in `receiver.dropped_cool_down` with no status message
    sent, so that a late retransmit or heartbeat for a retired session creates no second
@@ -329,7 +331,14 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    of stream position in the log, sends the status message with the end-of-stream flag
    five times at the status message interval, a bound of this page's own, and the image
    is retired the same way once every subscriber has reached that position or the
-   liveness timeout passes.
+   liveness timeout passes. A recording of the image stops on every retire, as a
+   recording stops when its publication closes (`spec/client-protocol.md`, "Commands"):
+   the receiver scans the image to its first gap or the high-water mark before it
+   reports the retire, nothing is inserted after it, and the recording stops at the
+   rebuild position once the recorder has written up to it, which is the end of stream
+   position when the stream ended; the stop adds one to `recording.stopped` and is
+   announced with `recording stopped` as every stop is, and the image's log is removed
+   only after it (ADR 0042).
 6. **RTT.** An RTT measurement with the reply flag for the image's session and stream
    is answered as the sender answers one, when its receiver id is this driver's or 0;
    one whose receiver id is another driver's is dropped and counted in
@@ -374,11 +383,18 @@ Errored, −1, is reserved for a later version that re-resolves names; a client 
 reads −1 from the indicator in this version.
 
 `start recording` on a `cavalry:udp` channel (`spec/client-protocol.md`, "Commands")
-records every live log on this host whose channel and stream id match, publications and
-images alike, one recording per log, each `recording ready` naming its session id, the
-lowest registration id not yet recorded first (`spec/client-protocol.md`, "Commands");
-the recorder reads an image's log as it reads a publication's and stops at a gap until it
-is filled, and its position is one of the image's readers (step 4).
+records one log per command: of the live publications sending on the resolved channel
+and the images received on it whose stream id matches, the one with the lowest
+registration id that is not yet being recorded, as the command's rule is over
+`cavalry:ipc`, so that a second command records the next; none is error code 20, every
+one being recorded is code 22 with the message naming the recording id, and `recording
+ready` names the log's session id. A recording of a publication starts at its producer
+position, as over `cavalry:ipc`. A recording of an image starts at the image's rebuild
+position when the command is handled, loaded from `image.rebuild_position`; from then
+on its position is one of the image's readers (step 4); the recorder reads the image's
+log as it reads a publication's and stops at a gap until it is filled; and the
+recording stops when the image is retired, at the position step 5 names, before the
+image's log is removed (ADR 0042).
 
 ## Counters
 
