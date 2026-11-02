@@ -232,6 +232,7 @@ VECTORS = [
     bad_frame("type-twelve", "type", setup(type_=12)[2]),
     bad_frame("length-setup-36", "length", setup(frame_length=36)[2]),
     bad_frame("length-status-message-40", "length", status(frame_length=40)[2] + b"\x00" * 4),
+    bad_frame("length-status-message-tagged-short", "length", status(group_tag=-1)[2][:40]),
     bad_frame("length-nak-32", "length", nak(frame_length=32)[2] + b"\x00" * 4),
     bad_frame("length-heartbeat-not-32", "length", heartbeat()[2] + b"\x00" * 32),
     bad_frame("term-length-not-power-of-two", "term-length", setup(term_length=100000)[2]),

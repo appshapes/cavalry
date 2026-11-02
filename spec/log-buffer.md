@@ -52,7 +52,7 @@ treats a difference as `changed` (ADR 0010).
 | 28 | 4 | term length | i32 | the creator | everyone | a power of two from 65536 to 1073741824 |
 | 32 | 4 | MTU length | i32 | the creator | publishers | a multiple of 32 from 64 to 65504; the longest frame a message is split into |
 | 36 | 4 | publication window length | i32 | the creator | the driver | 1 to term length ÷ 2; how far the publisher may run ahead of the slowest subscriber; in an image, written as term length ÷ 2 and read by nobody |
-| 40 | 4 | receiver window length | i32 | the creator | the receiver, `doctor` | in an image, 1 to term length ÷ 2: how far past the slowest subscriber's position the sender may send (`spec/udp.md`, "The receiver"); 0 in a publication's log, and in every version 0 file |
+| 40 | 4 | receiver window length | i32 | the creator | the receiver, `doctor` | in an image, 1 to term length ÷ 2: how far past the slowest reader's position, a subscription's or a recording's, the sender may send (`spec/udp.md`, "The receiver"); 0 in a publication's log, and in every version 0 file |
 | 44 | 20 | reserved | bytes | the creator | nobody | written as 0, never read |
 | 64 | 32 | default frame header | bytes | the creator | publishers, the driver | a data frame header (`spec/frame.md`) with frame length 0, version 0, flags `C0`, type 1, term offset 0, the publication's session id and stream id, term id equal to the initial term id, and reserved value 0 |
 | 96 | 32 | reserved | bytes | the creator | nobody | written as 0, never read |
@@ -199,9 +199,13 @@ not apply. A subscriber reads an image as "Reading" says and stops at the first 
 length of 0, which is a gap the wire has not filled yet; the receiver's rebuild position
 and high-water mark are counters in the counters file, `image.rebuild_position` and
 `image.hwm_position`. The receiver cleans the image's terms as the driver cleans a
-publication's, from the clean position to the slowest subscriber's position less the
-term length, before the status message's position rises; it stores the end of stream
-position when the stream ends, and is connected is 1 while the image is live.
+publication's, from the clean position to the slowest reader's position less the term
+length, a reader being one of the image's subscriptions or a recording of it
+(`spec/udp.md`, "The receiver", step 4), before the status message's position rises, so
+that no recorded byte is cleaned before the recorder has written it (ADR 0042); it
+stores the end of stream position when the stream ends, and is connected is 1 while the
+image is live. A recorded image's log is removed only once its recording has stopped,
+as "Closing" says of a publication's.
 
 ## The driver
 
