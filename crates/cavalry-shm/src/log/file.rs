@@ -1571,16 +1571,28 @@ impl ImageWriter {
 
     /// The receiver's rebuild scan (`spec/udp.md`, "The receiver", step 3; ADR 0042):
     /// from `from`, a multiple of 32, reads the frame length word of each frame with an
-    /// acquire load and walks the contiguous committed frames to their end, the rebuild
-    /// position, then on from there in 32-byte steps over the words of 0 until the first
-    /// frame with a length, the end of the gap a NAK names, or `to`, the high-water mark.
-    /// `limit` bounds the bytes of term the two walks read together, so that one call
-    /// is bounded work on the receiver's cycle; [`ImageScan::scanned_to`] says where the
-    /// walk ended, and a scan that ended at the bound is continued by the next call from
-    /// where this one left off. Nothing is checked on the scan: the frames were checked
-    /// as their datagrams were and inserted whole ([`ImageWriter::insert`]), and a
-    /// subscriber checks what it reads. `from` above `to`, either not a multiple of 32,
-    /// below 0 or above the largest position is [`LogError::Position`].
+    /// acquire load and walks the contiguous committed frames to their end, then on from
+    /// there in 32-byte steps over the words of 0 until the first frame with a length,
+    /// the end of the gap a NAK names, or `to`, the high-water mark. `limit` bounds the
+    /// bytes of term the two walks read together, so that one call is bounded work on
+    /// the receiver's cycle. Nothing is checked on the scan: the frames were checked as
+    /// their datagrams were and inserted whole ([`ImageWriter::insert`]), and a
+    /// subscriber checks what it reads.
+    ///
+    /// What the result means depends on where the scan started. From the greater of the
+    /// image's rebuild position and the fastest reader's position, the start step 3
+    /// names, [`ImageScan::rebuild_position`] is where the image's rebuild position
+    /// moves to, and a gap runs from it to [`ImageScan::next_frame`], or as far as
+    /// [`ImageScan::scanned_to`] when no frame was found before the bound or `to`. A
+    /// scan the bound ended inside a gap, `next_frame` `None` and `scanned_to` below
+    /// `to`, is continued by a call from `scanned_to`, and a continuation's result is
+    /// read differently: its `rebuild_position` is the end of the contiguous frames
+    /// from its own `from`, `from` itself while the gap is still open there, and never
+    /// the image's rebuild position, which the caller leaves where the scan from it put
+    /// it; its `next_frame`, or its `scanned_to` when it found none, ends the gap that
+    /// began at the earlier call's `rebuild_position`, as far as it looked. The image's
+    /// rebuild position moves only on a scan from it. `from` above `to`, either not a
+    /// multiple of 32, below 0 or above the largest position is [`LogError::Position`].
     pub fn scan(&self, from: i64, to: i64, limit: u32) -> Result<ImageScan, LogError> {
         let positions = self.mapped.positions;
         let align = i64::from(FRAME_ALIGNMENT);
@@ -1645,16 +1657,23 @@ impl ImageWriter {
 /// What [`ImageWriter::scan`] found between a position and the high-water mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageScan {
-    /// The end of the contiguous committed frames from the scan's start: where the
-    /// rebuild position moves to.
+    /// The end of the contiguous committed frames the scan walked from its `from`, as
+    /// far as the bound let it. It is the image's rebuild position, where that moves
+    /// to, only when `from` was the greater of the rebuild position and the fastest
+    /// reader's position; a continuation from an earlier scan's `scanned_to` inside a
+    /// gap starts on a word of 0, so its `rebuild_position` is its own `from`, a
+    /// position inside the gap, which the caller does not store
+    /// ([`ImageWriter::scan`]).
     pub rebuild_position: i64,
     /// The first position past the rebuild position with a frame, when the scan found
     /// one before its bound and below `to`: the end of the gap. `None` when the frames
     /// ran to `to`, when the words of 0 ran to `to`, or when the bound ended the scan.
     pub next_frame: Option<i64>,
-    /// The position after the last word the scan read: `to` when the scan reached it,
-    /// below it when the bound ended the scan, and the rebuild position itself when
-    /// the bound ended it among the frames.
+    /// Where the scan stopped, and where a continuation starts: `to` when the scan
+    /// reached it; `next_frame` itself, the position of the last word read, when a
+    /// frame ended the gap; the position after the last word of 0 read when the bound
+    /// ended the scan inside the gap; and the rebuild position itself when the bound
+    /// ended it among the frames.
     pub scanned_to: i64,
 }
 

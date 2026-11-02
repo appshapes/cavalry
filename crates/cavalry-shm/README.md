@@ -25,9 +25,11 @@ the two crates where `unsafe` is permitted.
   a subscriber's reader stops at a gap until it is filled
   ([`spec/log-buffer.md`](../../spec/log-buffer.md), version 1, "The receiver"; ADR
   0040); `ImageWriter::scan` reads the frame length words from a position to the
-  high-water mark, bounded in bytes per call, for the end of the contiguous frames, the
-  rebuild position, and the next frame after a gap, which is what the receiver's NAK
-  names ([ADR 0042](../../docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md)).
+  high-water mark, bounded in bytes per call, for the end of the contiguous frames from
+  it, the image's rebuild position when the scan starts at that, and the next frame
+  after a gap, which is what the receiver's NAK names; a call that continues a scan the
+  bound ended inside a gap extends the gap and moves no rebuild position
+  ([ADR 0042](../../docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md)).
   An image lives under `images/`, and a reader of version 1 reads a version 0 log as one
   whose receiver window length is 0.
 - Pre-touches every mapping it makes: in `create` and `open`, every page of a log buffer,

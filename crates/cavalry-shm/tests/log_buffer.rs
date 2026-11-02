@@ -1691,7 +1691,8 @@ fn a_scan_stops_at_its_bound_and_the_next_one_continues() {
         }
     );
     // The next call walks the last frame, then 64 bytes of the gap, and reports the gap
-    // as far as it looked.
+    // as far as it looked: the image's rebuild position moves to 192, and the gap is
+    // open from there to at least 256.
     assert_eq!(
         writer.scan(128, 1088, 128).unwrap(),
         ImageScan {
@@ -1700,13 +1701,53 @@ fn a_scan_stops_at_its_bound_and_the_next_one_continues() {
             scanned_to: 256,
         }
     );
-    // Unbounded, the whole gap and the frame after it.
+    // The documented continuation, from `scanned_to`: it starts on a word of 0, so its
+    // `rebuild_position` is its own start, 256, a position inside the gap, which the
+    // caller does not store; the image's rebuild position stays 192. Bounded, it
+    // extends the gap by another 128 bytes; unbounded, it finds the frame that ends it.
+    assert_eq!(
+        writer.scan(256, 1088, 128).unwrap(),
+        ImageScan {
+            rebuild_position: 256,
+            next_frame: None,
+            scanned_to: 384,
+        }
+    );
+    assert_eq!(
+        writer.scan(256, 1088, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 256,
+            next_frame: Some(1024),
+            scanned_to: 1024,
+        }
+    );
+    // From the rebuild position, unbounded: the whole gap and the frame after it.
     assert_eq!(
         writer.scan(192, 1088, 1 << 20).unwrap(),
         ImageScan {
             rebuild_position: 192,
             next_frame: Some(1024),
             scanned_to: 1024,
+        }
+    );
+    // A retransmit that lands at a continuation's start is walked as any frame is: the
+    // continuation's `rebuild_position` is then the end of those frames, and still not
+    // the image's, which a scan from 192 leaves at 192 while the frame at 192 is lost.
+    insert_at(&mut writer, -5, 256);
+    assert_eq!(
+        writer.scan(256, 1088, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 320,
+            next_frame: Some(1024),
+            scanned_to: 1024,
+        }
+    );
+    assert_eq!(
+        writer.scan(192, 1088, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 192,
+            next_frame: Some(256),
+            scanned_to: 256,
         }
     );
 }
