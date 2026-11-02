@@ -226,3 +226,7 @@ its send endpoint stays open for the publication linger after it
 - `time index refused (io)` or `rejected (empty)` on `--from <instant>`: the recording's
   index is missing, unreadable or has no entry yet; pass a position, or `--log-dir` the
   directory the driver uses.
+- `replay --channel with a channel other than cavalry:ipc needs --stream <id>`, exit
+  2, before anything is sent: the subscriber on that channel's endpoint reads the
+  stream it chose, and the command cannot pick one of its own. Pass `--stream` with the
+  stream id the program on the other host subscribed on.

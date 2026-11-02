@@ -332,7 +332,8 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 Invocation::Wrong(
                     "replay --channel with a channel other than cavalry:ipc needs --stream <id>: \
                      the subscriber on that channel's endpoint reads the stream it chose, and \
-                     the command cannot pick one of its own"
+                     the command cannot pick one of its own; see \
+                     docs/how-to/replay-a-recording.md#when-it-does-not-work"
                         .to_string(),
                 )
             }
