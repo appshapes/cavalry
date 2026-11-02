@@ -1787,13 +1787,25 @@ fn a_scan_refuses_a_bad_range() {
     let dir = Dir::new("scan-range");
     let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
     let writer = log.image_writer().unwrap();
-    assert_eq!(writer.scan(48, 192, 64).unwrap_err().reason(), "position");
-    assert_eq!(writer.scan(0, 40, 64).unwrap_err().reason(), "position");
-    assert_eq!(writer.scan(192, 64, 64).unwrap_err().reason(), "position");
-    assert_eq!(writer.scan(-32, 64, 64).unwrap_err().reason(), "position");
     let max = log.positions().max_position();
-    assert_eq!(
-        writer.scan(0, max + 32, 64).unwrap_err().reason(),
-        "position"
-    );
+    assert_eq!(writer.scan(0, 40, 64).unwrap_err().reason(), "position");
+    // The refusal names the argument at fault as `found`, and the other as `current`
+    // when `to` is at fault, so that its message reads true.
+    let refused = |from: i64, to: i64| match writer.scan(from, to, 64).unwrap_err() {
+        LogError::Position {
+            found,
+            current,
+            limit,
+        } => {
+            assert_eq!(limit, max);
+            (found, current)
+        }
+        other => panic!("expected a position refusal, got {other:?}"),
+    };
+    assert_eq!(refused(48, 192), (48, 0));
+    assert_eq!(refused(-32, 64), (-32, 0));
+    assert_eq!(refused(max + 32, max + 64), (max + 32, 0));
+    assert_eq!(refused(0, 40), (40, 0));
+    assert_eq!(refused(192, 64), (64, 192));
+    assert_eq!(refused(0, max + 32), (max + 32, 0));
 }

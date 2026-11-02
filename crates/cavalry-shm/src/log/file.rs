@@ -1591,21 +1591,28 @@ impl ImageWriter {
     /// the image's rebuild position, which the caller leaves where the scan from it put
     /// it; its `next_frame`, or its `scanned_to` when it found none, ends the gap that
     /// began at the earlier call's `rebuild_position`, as far as it looked. The image's
-    /// rebuild position moves only on a scan from it. `from` above `to`, either not a
-    /// multiple of 32, below 0 or above the largest position is [`LogError::Position`].
+    /// rebuild position moves only on a scan from it. `from` below 0, above the largest
+    /// position or not a multiple of 32, and `to` below `from`, above the largest
+    /// position or not a multiple of 32, are [`LogError::Position`] with the argument at
+    /// fault as its `found`.
     pub fn scan(&self, from: i64, to: i64, limit: u32) -> Result<ImageScan, LogError> {
         let positions = self.mapped.positions;
         let align = i64::from(FRAME_ALIGNMENT);
-        if from < 0
-            || to < from
-            || to > positions.max_position()
-            || from % align != 0
-            || to % align != 0
-        {
+        let max_position = positions.max_position();
+        // The refusal names the argument at fault: `from` on its own, then `to` against
+        // it, so that the message reads true.
+        if from < 0 || from > max_position || from % align != 0 {
             return Err(LogError::Position {
                 found: from,
-                current: to,
-                limit: positions.max_position(),
+                current: 0,
+                limit: max_position,
+            });
+        }
+        if to < from || to > max_position || to % align != 0 {
+            return Err(LogError::Position {
+                found: to,
+                current: from,
+                limit: max_position,
             });
         }
         let term_length = self.mapped.term_length();
