@@ -142,7 +142,9 @@ not resolve is code 9.
 
 The driver's sender is one dedicated thread per driver with the driver's idle strategy.
 A `cavalry:udp` publication has a log buffer of type 0 or 1 (`spec/log-buffer.md`) with
-the UDP term length and MTU of "Values", and a send endpoint per resolved channel: one
+the UDP term length and MTU of "Values", or, for a replay's publication, its recording's
+term length and MTU, which its setup frame carries (`spec/client-protocol.md`,
+"Commands", start replay; ADR 0043), and a send endpoint per resolved channel: one
 socket, shared by the publications on that channel, connected to the endpoint and bound
 to the interface when one is named, with the operating system's send buffer. Per
 publication, on every duty cycle, with p the sender position and L the sender limit:
@@ -186,7 +188,12 @@ max(L, position + receiver window length) on every status message without the
 send-setup flag whose position, consumption term id and offset as `spec/log-buffer.md`
 computes a position, lies within [p − term length ÷ 2, p + term length + term length
 ÷ 2]; such a status message outside that window is counted in
-`sender.status_messages_rejected` and ignored. The publication is connected from the
+`sender.status_messages_rejected` and ignored, and so is one whose consumption term
+offset is not below the publication's own term length, as a NAK with such an offset is
+dropped and counted in `sender.naks_ignored`: the sender reads a control frame's shape
+against the largest term this version allows and its offset against the publication's
+term, since a replay's publication keeps its recording's (ADR 0043). The publication is
+connected from the
 first such status message until the connection timeout passes without one. The conductor keeps `publication.limit` at the sender position plus the publication
 window while the publication is connected and at the sender position otherwise, so that
 the publisher reads `not connected` (`spec/log-buffer.md`, "Claim, commit and abort"),

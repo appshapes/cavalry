@@ -113,7 +113,7 @@ pub const REPLAY_STOPPED: CounterId = CounterId(34);
 /// `replay.ended`, a static counter: Replays that reached their end position or their recording's stop position, reason 0 of replay stopped: the subscriber saw everything it asked for.
 pub const REPLAY_ENDED: CounterId = CounterId(35);
 
-/// `replay.not_connected`, a static counter: Replays the driver ended, reason 2 of replay stopped, because their publication had no subscriber for the replay connect timeout, from the start or from the moment the last subscriber went (spec/client-protocol.md, Liveness and timeouts).
+/// `replay.not_connected`, a static counter: Replays the driver ended, reason 2 of replay stopped, because their publication had no subscriber for the replay connect timeout, from the start or from the moment the last subscriber went; over cavalry:udp, a receiver answering the publication's setup frames is its subscriber (spec/client-protocol.md, Liveness and timeouts).
 pub const REPLAY_NOT_CONNECTED: CounterId = CounterId(36);
 
 /// `replay.failed`, a static counter: Replays that ended on a failure, reason 3 of replay stopped: a segment file of the recording could not be read, or a frame in it failed a check, which log_buffer.rejected_frame counts as well; the position in the event is the last frame delivered.
@@ -173,13 +173,13 @@ pub const SENDER_FLOW_CONTROL_LIMITED: CounterId = CounterId(54);
 /// `sender.naks_received`, a static counter: NAKs that arrived at a send endpoint for a publication it carries.
 pub const SENDER_NAKS_RECEIVED: CounterId = CounterId(55);
 
-/// `sender.naks_ignored`, a static counter: NAKs whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, dropped (spec/udp.md, The sender).
+/// `sender.naks_ignored`, a static counter: NAKs dropped: one whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, or one whose term offset or length the publication's own term does not hold, which a replay's publication keeps from its recording (spec/udp.md, The sender; ADR 0043).
 pub const SENDER_NAKS_IGNORED: CounterId = CounterId(56);
 
 /// `sender.status_messages_received`, a static counter: Status messages that arrived at a send endpoint for a publication it carries, with or without the send-setup flag.
 pub const SENDER_STATUS_MESSAGES_RECEIVED: CounterId = CounterId(57);
 
-/// `sender.status_messages_rejected`, a static counter: Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, or one with it that asks a publication at its end of stream for a setup (spec/udp.md, The sender).
+/// `sender.status_messages_rejected`, a static counter: Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, one whose consumption term offset the publication's own term does not hold, which a replay's publication keeps from its recording (ADR 0043), or one with the flag that asks a publication at its end of stream for a setup (spec/udp.md, The sender).
 pub const SENDER_STATUS_MESSAGES_REJECTED: CounterId = CounterId(58);
 
 /// `sender.rtt_replies_sent`, a static counter: RTT measurements with the reply flag answered: the same frame without the flag, the echo timestamp and the receiver id unchanged (spec/udp.md, The sender).
@@ -594,8 +594,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "replay.not_connected",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Replays the driver ended, reason 2 of replay stopped, because their publication had no subscriber for the replay connect timeout, from the start or from the moment the last subscriber went (spec/client-protocol.md, Liveness and timeouts).",
-        doctor: "A replay was started with no subscription on its replay stream id and channel, or the subscriber closed before the replay ended: add the subscription before the start replay command, or keep it until replay stopped arrives; the replay ended at the position it had reached and can be started again from there.",
+        doc: "Replays the driver ended, reason 2 of replay stopped, because their publication had no subscriber for the replay connect timeout, from the start or from the moment the last subscriber went; over cavalry:udp, a receiver answering the publication's setup frames is its subscriber (spec/client-protocol.md, Liveness and timeouts).",
+        doctor: "A replay was started with no subscription on its replay stream id and channel, or the subscriber closed before the replay ended, or, over cavalry:udp, no receiver answered the replay's setup frames at the channel's endpoint: add the subscription before the start replay command, or keep it until replay stopped arrives, or check that a driver on the receiving host subscribes on that endpoint and port; the replay ended at the position it had reached and can be started again from there.",
     },
     CounterDef {
         id: REPLAY_FAILED,
@@ -754,8 +754,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.naks_ignored",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "NAKs whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, dropped (spec/udp.md, The sender).",
-        doctor: "A receiver asking for frames the sender no longer holds has fallen more than half a term behind: the receiving host is too slow for the stream, or was away longer than the link can bridge; its image times out and a new one starts from the setup.",
+        doc: "NAKs dropped: one whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, or one whose term offset or length the publication's own term does not hold, which a replay's publication keeps from its recording (spec/udp.md, The sender; ADR 0043).",
+        doctor: "A receiver asking for frames the sender no longer holds has fallen more than half a term behind: the receiving host is too slow for the stream, or was away longer than the link can bridge; its image times out and a new one starts from the setup. A receiver naming an offset past the publication's term is reading another stream's term on the same session and stream, or a stale image: its driver's receiver.dropped_* counters say which.",
     },
     CounterDef {
         id: SENDER_STATUS_MESSAGES_RECEIVED,
@@ -770,7 +770,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.status_messages_rejected",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, or one with it that asks a publication at its end of stream for a setup (spec/udp.md, The sender).",
+        doc: "Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, one whose consumption term offset the publication's own term does not hold, which a replay's publication keeps from its recording (ADR 0043), or one with the flag that asks a publication at its end of stream for a setup (spec/udp.md, The sender).",
         doctor: "A receiver reporting a position the sender cannot place is a receiver of another stream's term ids on the same session and stream, or a stale image: its driver's receiver.dropped_* counters say which.",
     },
     CounterDef {
