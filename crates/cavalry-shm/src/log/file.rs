@@ -1563,6 +1563,99 @@ impl ImageWriter {
         cells.publish(u64::from_ne_bytes(word));
         Ok(true)
     }
+
+    /// The log's positions: term ids, offsets and partitions from positions.
+    pub fn positions(&self) -> Positions {
+        self.mapped.positions
+    }
+
+    /// The receiver's rebuild scan (`spec/udp.md`, "The receiver", step 3; ADR 0042):
+    /// from `from`, a multiple of 32, reads the frame length word of each frame with an
+    /// acquire load and walks the contiguous committed frames to their end, the rebuild
+    /// position, then on from there in 32-byte steps over the words of 0 until the first
+    /// frame with a length, the end of the gap a NAK names, or `to`, the high-water mark.
+    /// `limit` bounds the bytes of term the two walks read together, so that one call
+    /// is bounded work on the receiver's cycle; [`ImageScan::scanned_to`] says where the
+    /// walk ended, and a scan that ended at the bound is continued by the next call from
+    /// where this one left off. Nothing is checked on the scan: the frames were checked
+    /// as their datagrams were and inserted whole ([`ImageWriter::insert`]), and a
+    /// subscriber checks what it reads. `from` above `to`, either not a multiple of 32,
+    /// below 0 or above the largest position is [`LogError::Position`].
+    pub fn scan(&self, from: i64, to: i64, limit: u32) -> Result<ImageScan, LogError> {
+        let positions = self.mapped.positions;
+        let align = i64::from(FRAME_ALIGNMENT);
+        if from < 0
+            || to < from
+            || to > positions.max_position()
+            || from % align != 0
+            || to % align != 0
+        {
+            return Err(LogError::Position {
+                found: from,
+                current: to,
+                limit: positions.max_position(),
+            });
+        }
+        let term_length = self.mapped.term_length();
+        let end = to.min(from.saturating_add(i64::from(limit)));
+        // The contiguous frames: each word's length, 0 at a gap, else the aligned
+        // length to the next frame, which never runs past the term since the writer
+        // inserted it within the term; a length past it is clamped to the term's end so
+        // that a corrupt word cannot move the scan outside the mapping.
+        let mut position = from;
+        while position < end {
+            let offset = positions.term_offset_of(position);
+            let word = self
+                .mapped
+                .frame(positions.partition_of(position), offset)
+                .word();
+            let length = layout::frame_word_length(word);
+            if length <= 0 {
+                break;
+            }
+            let aligned = aligned_length(length as u32).min(term_length - offset);
+            position = position.saturating_add(i64::from(aligned));
+        }
+        let rebuild_position = position.min(to);
+        // The gap: words of 0 from the rebuild position to the next frame, the bound or
+        // `to`.
+        let mut next_frame = None;
+        while position < end {
+            let word = self
+                .mapped
+                .frame(
+                    positions.partition_of(position),
+                    positions.term_offset_of(position),
+                )
+                .word();
+            if layout::frame_word_length(word) != 0 {
+                next_frame = Some(position);
+                break;
+            }
+            position += align;
+        }
+        Ok(ImageScan {
+            rebuild_position,
+            next_frame,
+            scanned_to: position.min(to),
+        })
+    }
+}
+
+/// What [`ImageWriter::scan`] found between a position and the high-water mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageScan {
+    /// The end of the contiguous committed frames from the scan's start: where the
+    /// rebuild position moves to.
+    pub rebuild_position: i64,
+    /// The first position past the rebuild position with a frame, when the scan found
+    /// one before its bound and below `to`: the end of the gap. `None` when the frames
+    /// ran to `to`, when the words of 0 ran to `to`, or when the bound ended the scan.
+    pub next_frame: Option<i64>,
+    /// The position after the last word the scan read: `to` when the scan reached it,
+    /// below it when the bound ended the scan, and the rebuild position itself when
+    /// the bound ended it among the frames.
+    pub scanned_to: i64,
 }
 
 impl fmt::Debug for ImageWriter {

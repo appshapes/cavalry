@@ -913,3 +913,8 @@ user-visible change, added in the same commit as the change. The format follows
   file alone
   ([ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md),
   [ADR 0041](docs/decisions/0041-send-from-a-sender-thread-through-nix.md); card 180).
+- `cavalry-shm`: `ImageWriter::scan` walks an image's frame length words from a
+  position to the high-water mark, bounded in bytes per call, and reports the rebuild
+  position, the next frame after a gap and where it stopped, so that the driver's
+  receiver finds the gap a NAK names in bounded work per cycle
+  ([ADR 0042](docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md); card 181).
