@@ -441,6 +441,7 @@ struct DriverPins {
     recorder: AtomicUsize,
     replayer: AtomicUsize,
     sender: AtomicUsize,
+    receiver: AtomicUsize,
 }
 
 impl DriverPins {
@@ -450,6 +451,7 @@ impl DriverPins {
             recorder: AtomicUsize::new(0),
             replayer: AtomicUsize::new(0),
             sender: AtomicUsize::new(0),
+            receiver: AtomicUsize::new(0),
         }
     }
 
@@ -460,6 +462,7 @@ impl DriverPins {
             DriverThread::Recorder => &self.recorder,
             DriverThread::Replayer => &self.replayer,
             DriverThread::Sender => &self.sender,
+            DriverThread::Receiver => &self.receiver,
         }
     }
 
@@ -478,6 +481,7 @@ impl DriverPins {
                     DriverThread::Recorder => "recorder",
                     DriverThread::Replayer => "replayer",
                     DriverThread::Sender => "sender",
+                    DriverThread::Receiver => "receiver",
                 },
                 failed - 1
             )),
@@ -883,13 +887,15 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     let on_thread_start: ThreadStart = {
         let pins = Arc::clone(&pins);
         Arc::new(move |thread| {
-            // The sender goes with the housekeeping threads until the UDP rows give it
-            // a core of its own (card 182): no row of this version sends a datagram.
+            // The sender and the receiver go with the housekeeping threads until the
+            // UDP rows give each a core of its own (card 182): no row of this version
+            // sends a datagram.
             let cpu = match thread {
                 DriverThread::Conductor => conductor_cpu,
-                DriverThread::Recorder | DriverThread::Replayer | DriverThread::Sender => {
-                    housekeeping
-                }
+                DriverThread::Recorder
+                | DriverThread::Replayer
+                | DriverThread::Sender
+                | DriverThread::Receiver => housekeeping,
             };
             if pin_to(cpu).is_err() {
                 pins.slot(thread)

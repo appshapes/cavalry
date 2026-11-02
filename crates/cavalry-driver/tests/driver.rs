@@ -310,6 +310,7 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
     const RECORDER: usize = 1;
     const REPLAYER: usize = 2;
     const SENDER: usize = 3;
+    const RECEIVER: usize = 4;
     // Per thread: how many times the hook ran, and how many of those on the thread of
     // the expected name. Atomics, not a mutex: the lock ban covers the test target.
     let runs = Arc::new([
@@ -317,8 +318,10 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
         AtomicUsize::new(0),
         AtomicUsize::new(0),
         AtomicUsize::new(0),
+        AtomicUsize::new(0),
     ]);
     let named = Arc::new([
+        AtomicUsize::new(0),
         AtomicUsize::new(0),
         AtomicUsize::new(0),
         AtomicUsize::new(0),
@@ -335,6 +338,7 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
                 DriverThread::Recorder => (RECORDER, "cavalry-recorder"),
                 DriverThread::Replayer => (REPLAYER, "cavalry-replayer"),
                 DriverThread::Sender => (SENDER, "cavalry-sender"),
+                DriverThread::Receiver => (RECEIVER, "cavalry-receiver"),
             };
             runs[index].fetch_add(1, Ordering::AcqRel);
             if std::thread::current().name() == Some(expected) {
@@ -396,6 +400,7 @@ fn the_thread_start_hook_runs_once_on_each_named_driver_thread_before_its_loop()
         (RECORDER, "recorder"),
         (REPLAYER, "replayer"),
         (SENDER, "sender"),
+        (RECEIVER, "receiver"),
     ] {
         assert_eq!(
             runs[index].load(Ordering::Acquire),
@@ -553,18 +558,22 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     assert_eq!(client.wait_error(unknown_type).0, 6);
 
     // A cavalry:udp channel parses in version 4: a publication sends on one (ADR
-    // 0041), and a subscription is refused with code 11 until the receiver lands (card
-    // 181); a channel that fails the grammar is code 1 (ADR 0040).
+    // 0041) and a subscription receives on one (ADR 0042), while a replay on one is
+    // refused with code 11 until card 192 brings it; a channel that fails the grammar
+    // is code 1 (ADR 0040).
     let bad_channel = client.correlation_id();
-    client.send(&Command::AddSubscription {
+    client.send(&Command::StartReplay {
         client_id: client.id,
         correlation_id: bad_channel,
-        stream_id: 7,
-        channel: b"cavalry:udp?endpoint=localhost:40123",
+        recording_id: 0,
+        position: -1,
+        length: -1,
+        replay_stream_id: 7,
+        replay_channel: b"cavalry:udp?endpoint=localhost:40123",
     });
     let (code, message) = client.wait_error(bad_channel);
     assert_eq!(code, 11, "{message}");
-    assert!(message.contains("card 181"), "{message}");
+    assert!(message.contains("card 192"), "{message}");
     let bad_grammar = client.correlation_id();
     client.send(&Command::AddPublication {
         client_id: client.id,
@@ -1271,6 +1280,8 @@ fn recording_commands_get_the_spec_error_codes() {
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
 
+    // A cavalry:udp channel records what sends or is received on it (ADR 0042):
+    // nothing is, so code 20.
     let other_channel = client.correlation_id();
     client.send(&Command::StartRecording {
         client_id: client.id,
@@ -1279,7 +1290,7 @@ fn recording_commands_get_the_spec_error_codes() {
         channel: b"cavalry:udp?endpoint=localhost:40123",
     });
     let (code, message) = client.wait_error(other_channel);
-    assert_eq!(code, 11, "{message}");
+    assert_eq!(code, 20, "{message}");
 
     let no_publication = client.correlation_id();
     client.send(&Command::StartRecording {

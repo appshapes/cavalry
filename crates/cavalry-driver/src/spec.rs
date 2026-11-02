@@ -159,6 +159,50 @@ pub(crate) const SENDER_QUEUE_CAPACITY: usize = 2 * (MAX_PUBLICATIONS + MAX_SEND
 /// endpoints and the publications.
 pub(crate) const SENDER_REQUESTS_PER_CYCLE: usize = 16;
 
+/// How many receive endpoints the driver holds: every resolved `cavalry:udp` channel a
+/// subscription receives on; the one definition is `cavalry_proto`'s (`spec/udp.md`,
+/// "Values"; ADR 0040).
+pub const MAX_RECEIVE_ENDPOINTS: usize = cavalry_proto::udp::MAX_RECEIVE_ENDPOINTS;
+
+/// How many session records the receiver keeps, twice the images registry: a datagram
+/// for a session past them is dropped and counted in `receiver.sessions_full`
+/// (`spec/udp.md`, "Values"; ADR 0042).
+pub const MAX_SESSION_RECORDS: usize = 2 * MAX_IMAGES;
+
+/// How long a session record waits for the setup frame a status message asked for
+/// before the next datagram asks again (`spec/udp.md`, "Values": pending setup timeout).
+pub const PENDING_SETUP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long a retired image's session record stays on cool-down, during which a setup,
+/// data datagram or heartbeat for the session creates no second image: the image
+/// liveness timeout (`spec/udp.md`, "Values").
+pub const IMAGE_COOL_DOWN: Duration = cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT;
+
+/// How many bytes of an image's term the receiver's rebuild scan reads per image per
+/// duty cycle, 1 MiB (`spec/udp.md`, "The receiver", step 3; ADR 0042).
+pub const REBUILD_SCAN_LIMIT: u32 = 1024 * 1024;
+
+/// How often the receiver sweeps its session table for pending setups and cool-downs
+/// that expired, so that the table is not walked on every cycle (ADR 0042).
+pub(crate) const SESSION_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How many status messages with the end-of-stream flag the receiver sends once an
+/// image's stream has ended, at the status message interval (`spec/udp.md`, "The
+/// receiver", step 5).
+pub(crate) const END_OF_STREAM_STATUS_MESSAGES: u8 = 5;
+
+/// The capacity of each queue between the conductor and the receiver, in requests or
+/// replies: two per subscription, two per endpoint, two per image and one per reader;
+/// an `add subscription` that finds the request queue full is answered with error code
+/// 10, and the receiver keeps a reply the reply queue has no room for until it has
+/// (ADR 0042).
+pub(crate) const RECEIVER_QUEUE_CAPACITY: usize =
+    2 * (MAX_SUBSCRIPTIONS + MAX_RECEIVE_ENDPOINTS + MAX_IMAGES) + MAX_IMAGES + MAX_RECORDINGS;
+
+/// How many requests the receiver handles per duty cycle before it turns to the
+/// endpoints and the images.
+pub(crate) const RECEIVER_REQUESTS_PER_CYCLE: usize = 16;
+
 /// A duration as the nanoseconds the driver's clock counts in.
 pub(crate) const fn nanos(duration: Duration) -> i64 {
     let nanos = duration.as_nanos();
