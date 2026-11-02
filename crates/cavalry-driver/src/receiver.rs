@@ -1933,16 +1933,13 @@ impl Receiver {
     }
 }
 
-/// This driver's receiver id: an i64 drawn from the clock and the process id when the
-/// receiver starts, mixed so that two drivers started in the same instant differ.
+/// This driver's receiver id: a random i64 drawn when the receiver starts, as
+/// `spec/udp.md`, "The receiver" says, through the standard library's `RandomState`,
+/// whose keys come from the operating system, hashing the clock; no dependency, and
+/// two receivers started in one instant, in one process or two, differ.
 fn receiver_id(now: i64) -> i64 {
-    let mut x = (now as u64) ^ (u64::from(std::process::id()) << 40);
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^= x >> 31;
-    x as i64
+    use std::hash::{BuildHasher, RandomState};
+    RandomState::new().hash_one(now) as i64
 }
 
 /// The `std` address of a datagram's source, for the image's source identity.
@@ -2030,7 +2027,8 @@ mod tests {
     }
 
     #[test]
-    fn the_receiver_id_differs_by_instant() {
+    fn two_receiver_ids_drawn_in_one_instant_differ() {
+        assert_ne!(receiver_id(1), receiver_id(1));
         assert_ne!(receiver_id(1), receiver_id(2));
     }
 }

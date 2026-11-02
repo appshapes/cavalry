@@ -129,14 +129,25 @@ reports it running with a new pid.
   (`image.timed_out`). Look at the link and at the socket buffers on both hosts, the
   `udp-socket-buffers` entries above
   ([the receiver](../reference/udp.md#the-receiver)).
-- **`WARN udp-subscription-no-image`.** An active receive endpoint with no image: no
-  sender's setup frame has reached the port for a stream a subscription on it wants,
-  so the subscriptions read nothing. Check that the sender's channel names this host
-  and port and its stream id matches the subscription's, that the port is open
-  between the hosts, and that both drivers run the same version. Two counters tell
-  the causes apart: a rising `receiver.setups_unwanted` is a sender on another stream
-  id, and a rising `receiver.dropped_frames` is a peer of another version
-  ([the receiver](../reference/udp.md#the-receiver)).
+- **`WARN udp-subscription-no-image`.** An active receive endpoint with no image, so
+  the subscriptions on it read nothing. Either no sender's setup frame has reached the
+  port for a stream a subscription wants, or the stream it had ended and its image
+  went while the subscription stayed. The finding prints `image.created` and
+  `image.ended`, which are driver-wide: they count every receive endpoint's images
+  since the driver started, and the counters file holds no count per endpoint.
+  `image.created` 0 is a stream that has reached no receive endpoint on this driver.
+  `image.created` above 0 with `image.ended` at it is a stream that came and ended on
+  a receive endpoint here, the next stream from its sender creating a new image by
+  itself; which endpoint it was, the file does not say. So with more than one receive
+  endpoint, or a stream that ended before, the checks for a stream that never came
+  still apply to this endpoint: that the sender's channel names this host and port
+  and its stream id matches the subscription's, that the port is open between the
+  hosts, and that both drivers run the same version; a rising
+  `receiver.setups_unwanted` is a sender on another stream id, and a rising
+  `receiver.dropped_frames` is a peer of another version
+  ([the receiver](../reference/udp.md#the-receiver)). `note udp-endpoint` calls an
+  endpoint that is closing with nothing on it an endpoint, since it could have been
+  either kind.
 - **The directory vanished under a running driver.** `doctor` reports `FAIL
   driver-directory ... no driver directory` while the driver and its clients run on,
   since their mappings outlive the unlink, and a new client is refused with `no driver
