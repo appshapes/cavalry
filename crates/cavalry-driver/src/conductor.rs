@@ -8886,12 +8886,13 @@ mod receiving {
     };
     use cavalry_shm::counters::generated::{
         CHANNEL_CLOSED, CHANNEL_OPENED, COUNTERS_ALLOCATED, IMAGE_CREATED, IMAGE_ENDED,
-        IMAGE_REMOVED, IMAGE_TIMED_OUT, IMAGE_UNSUBSCRIBED, RECEIVER_DROPPED_COOL_DOWN,
-        RECEIVER_DROPPED_IN_PROGRESS, RECEIVER_DROPPED_PENDING, RECEIVER_DROPPED_UNWANTED,
-        RECEIVER_FRAMES_RECEIVED, RECEIVER_GAPS_DETECTED, RECEIVER_HEARTBEATS_RECEIVED,
-        RECEIVER_NAKS_SENT, RECEIVER_OVER_RUNS, RECEIVER_RTT_REPLIES_SENT,
-        RECEIVER_SETUPS_ELICITED, RECEIVER_SETUPS_RECEIVED, RECEIVER_SETUPS_UNWANTED,
-        RECEIVER_STATUS_MESSAGES_SENT, RECEIVER_UNDER_RUNS, RECORDING_STARTED, RECORDING_STOPPED,
+        IMAGE_REMOVED, IMAGE_TIMED_OUT, IMAGE_UNSUBSCRIBED, LOG_BUFFER_REJECTED_POSITION,
+        RECEIVER_DROPPED_COOL_DOWN, RECEIVER_DROPPED_IN_PROGRESS, RECEIVER_DROPPED_PENDING,
+        RECEIVER_DROPPED_UNWANTED, RECEIVER_FRAMES_RECEIVED, RECEIVER_GAPS_DETECTED,
+        RECEIVER_HEARTBEATS_RECEIVED, RECEIVER_NAKS_SENT, RECEIVER_OVER_RUNS,
+        RECEIVER_RTT_REPLIES_SENT, RECEIVER_SETUPS_ELICITED, RECEIVER_SETUPS_RECEIVED,
+        RECEIVER_SETUPS_UNWANTED, RECEIVER_STATUS_MESSAGES_SENT, RECEIVER_UNDER_RUNS,
+        RECORDING_STARTED, RECORDING_STOPPED,
     };
     use cavalry_shm::log::LogBuffers;
 
@@ -9130,6 +9131,21 @@ mod receiving {
     /// position of the image, as the receiver holds them.
     fn positions(h: &Harness, image_id: i64) -> Option<(i64, i64, i64)> {
         h.udp_receiver.positions_of(image_id)
+    }
+
+    /// The `client timeout` events among the events not yet read, as client ids.
+    fn client_timeouts(h: &mut Harness) -> Vec<i64> {
+        let mut found = Vec::new();
+        while h
+            .receiver
+            .receive(|type_id, message| {
+                if let Ok(Event::ClientTimeout { client_id }) = Event::parse(type_id, message) {
+                    found.push(client_id);
+                }
+            })
+            .expect("the receiver reads")
+        {}
+        found
     }
 
     /// Adds a subscription on a fresh port, gives the receiver its endpoint, sends the
@@ -9472,6 +9488,97 @@ mod receiving {
             allocated,
             "every record is freed"
         );
+        drop(sender);
+    }
+
+    /// Two readers whose positions fail their bound in one cycle are both reported:
+    /// each counts `log_buffer.rejected_position`, and each client is evicted with
+    /// `client timeout`, so that no subscription is left whose position is ignored
+    /// (ADR 0010).
+    #[test]
+    fn every_reader_with_a_rejected_position_evicts_its_client() {
+        let mut h = Harness::new("udp-rejected");
+        let (sender, image_id, first) = subscribe_and_connect(&mut h, 2);
+        let port = h.conductor.receive_endpoints[0].endpoint.port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(2, 3, STREAM, channel.as_bytes());
+        let (joined, position_id, _, _) = last_available_image(&mut h, 3).expect("joins the image");
+        assert_eq!(joined, image_id);
+        let second = h
+            .conductor
+            .counters
+            .counter(u32::try_from(position_id).expect("a counter id"))
+            .expect("the second subscriber's counter");
+        h.cycle();
+        assert_eq!(h.conductor.subscriptions.len(), 2);
+        // Both positions off the frame alignment in the same cycle.
+        first.store_release(1);
+        second.store_release(1);
+        assert!(h.cycle_until(|h| h.counter(LOG_BUFFER_REJECTED_POSITION) == 2));
+        assert!(
+            h.cycle_until(|h| h.conductor.subscriptions.is_empty()),
+            "both clients evicted"
+        );
+        let mut timed_out = client_timeouts(&mut h);
+        timed_out.sort_unstable();
+        assert_eq!(timed_out, vec![1, 2]);
+        assert!(h.cycle_until(|h| h.counter(IMAGE_UNSUBSCRIBED) == 1));
+        drop(sender);
+    }
+
+    /// A retire the pending replies' bound put off is tried again every cycle: with the
+    /// replies one short of their bound, the last subscription's removal takes the last
+    /// slot and leaves the image live; once the conductor has taken the replies, the
+    /// image is retired as unsubscribed and the endpoint closes (invariant 3).
+    #[test]
+    fn a_retire_put_off_by_the_pending_replies_bound_is_tried_again() {
+        let mut h = Harness::new("udp-retire-retry");
+        let (sender, _image_id, _position) = subscribe_and_connect(&mut h, 2);
+        // The receiver alone, its replies untaken: a close for an endpoint it never held
+        // is a reply each, until the reply queue is full and the pending replies are
+        // one short of their bound.
+        let to_fill = spec::RECEIVER_QUEUE_CAPACITY + receiver::PENDING_REPLIES - 1;
+        let mut offered = 0usize;
+        while h.udp_receiver.pending_replies() < receiver::PENDING_REPLIES - 1 {
+            while offered < to_fill
+                && h.conductor
+                    .receiver
+                    .requests
+                    .offer(receiver::Request::RemoveEndpoint {
+                        registration_id: -1 - offered as i64,
+                    })
+                    .is_ok()
+            {
+                offered += 1;
+            }
+            h.now += MS;
+            let now = h.now;
+            h.udp_receiver.duty_cycle(now);
+        }
+        assert_eq!(
+            h.udp_receiver.pending_replies(),
+            receiver::PENDING_REPLIES - 1
+        );
+        // The last subscription goes: its reader's removal takes the last slot, and
+        // the retire finds no room.
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        h.now += MS;
+        let now = h.now;
+        h.udp_receiver.duty_cycle(now);
+        assert_eq!(h.udp_receiver.pending_replies(), receiver::PENDING_REPLIES);
+        assert_eq!(
+            h.counter(IMAGE_UNSUBSCRIBED),
+            0,
+            "the retire waits for room"
+        );
+        assert_eq!(h.conductor.udp_images.len(), 1);
+        // The conductor takes the replies: the retire goes on the next cycle.
+        assert!(h.cycle_until(|h| h.counter(IMAGE_UNSUBSCRIBED) == 1));
+        assert!(h.cycle_until(|h| h.counter(IMAGE_REMOVED) == 1));
+        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
+        assert_eq!(h.counter(CHANNEL_CLOSED), 1);
         drop(sender);
     }
 

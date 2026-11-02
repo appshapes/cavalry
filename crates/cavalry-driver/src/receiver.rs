@@ -262,7 +262,7 @@ pub(crate) enum Reply {
         key: ReaderKey,
     },
     /// A reader's position was outside its bound; it is not used again, and the
-    /// conductor evicts its client (ADR 0010).
+    /// conductor evicts its client (ADR 0010). One per rejected reader.
     ReaderRejected {
         /// The image.
         registration_id: i64,
@@ -579,6 +579,9 @@ struct Live {
     slowest: i64,
     fastest: i64,
     reader_count: usize,
+    /// How many of the readers are subscriptions, rejected or not: an image with none
+    /// is retired as unsubscribed, checked every cycle (`serve`).
+    subscriber_count: usize,
 }
 
 /// One reader of an image.
@@ -679,6 +682,12 @@ impl Receiver {
             .iter()
             .find(|live| live.registration_id == registration_id)
             .and_then(|live| live.gap.map(|gap| (gap.start, gap.length)))
+    }
+
+    /// How many replies the receiver holds back for the reply queue, for the tests.
+    #[cfg(test)]
+    pub(crate) fn pending_replies(&self) -> usize {
+        self.pending.len()
     }
 
     /// How many session records the table holds, for the tests.
@@ -856,7 +865,7 @@ impl Receiver {
                         }
                     }
                 }
-                self.remove_readers(ReaderKey::Subscription(subscription_id), None, now);
+                self.remove_readers(ReaderKey::Subscription(subscription_id), None);
             }
             Request::AddImage(add) => self.add_image(add, now),
             Request::RefuseImage {
@@ -912,14 +921,15 @@ impl Receiver {
                 key,
             } => {
                 let image_index = self.live_index(registration_id);
-                self.remove_readers(key, image_index, now);
+                self.remove_readers(key, image_index);
             }
         }
     }
 
     /// Removes every reader with `key`, on one image or on all, answering each with
-    /// [`Reply::ReaderRemoved`], and retires an image left with no reader.
-    fn remove_readers(&mut self, key: ReaderKey, image_index: Option<usize>, now: i64) {
+    /// [`Reply::ReaderRemoved`]. An image left with no subscription reader is retired
+    /// by `serve` on this cycle, or on the first with room for the reply.
+    fn remove_readers(&mut self, key: ReaderKey, image_index: Option<usize>) {
         let mut index = 0;
         while index < self.readers.len() {
             let reader = &self.readers[index];
@@ -931,23 +941,6 @@ impl Receiver {
                     registration_id,
                     key,
                 });
-            } else {
-                index += 1;
-            }
-        }
-        // An image whose last subscription went is retired; one with a recording alone
-        // too, since a recording is not a subscriber (`spec/udp.md`, "The receiver",
-        // step 5).
-        let mut index = 0;
-        while index < self.live.len() {
-            let subscribed = self.readers.iter().any(|reader| {
-                reader.image_index == index && matches!(reader.key, ReaderKey::Subscription(_))
-            });
-            if !subscribed
-                && self.live[index].state == ImageState::Live
-                && self.pending.len() < PENDING_REPLIES
-            {
-                self.retire(index, ImageState::Unsubscribed, now);
             } else {
                 index += 1;
             }
@@ -975,6 +968,10 @@ impl Receiver {
             .readers
             .iter()
             .any(|(key, _, _)| matches!(key, ReaderKey::Subscription(_)));
+        // Kept, or retired at once: an image retired on arrival takes no reader, so
+        // that `serve` retries the retire when the pending replies' bound puts it off
+        // here; the conductor frees the readers' records on the retire's reply.
+        let kept = in_progress && wanted && subscribed;
         let positions = add.log.positions();
         let term_length = i64::from(positions.term_length());
         let window = i32::try_from(add.log.header().receiver_window_length()).unwrap_or(i32::MAX);
@@ -1005,20 +1002,30 @@ impl Receiver {
             state: ImageState::Pending,
             slowest: add.start_position,
             fastest: add.start_position,
-            reader_count: add.readers.len(),
+            reader_count: if kept { add.readers.len() } else { 0 },
+            subscriber_count: if kept {
+                add.readers
+                    .iter()
+                    .filter(|(key, _, _)| matches!(key, ReaderKey::Subscription(_)))
+                    .count()
+            } else {
+                0
+            },
         };
         debug_assert!(self.live.len() < spec::MAX_IMAGES);
         let index = self.live.len();
         self.live.push(live);
-        for (key, counter, floor) in add.readers {
-            if self.readers.len() < MAX_READERS {
-                self.readers.push(Reader {
-                    image_index: index,
-                    key,
-                    counter,
-                    floor,
-                    rejected: false,
-                });
+        if kept {
+            for (key, counter, floor) in add.readers {
+                if self.readers.len() < MAX_READERS {
+                    self.readers.push(Reader {
+                        image_index: index,
+                        key,
+                        counter,
+                        floor,
+                        rejected: false,
+                    });
+                }
             }
         }
         self.live[index].state = ImageState::Live;
@@ -1029,7 +1036,7 @@ impl Receiver {
         self.live[index]
             .rebuild
             .store_release(self.live[index].rebuild_position);
-        if in_progress && wanted && subscribed {
+        if kept {
             if let Some(record) = self.sessions.get(key) {
                 self.sessions.records[record].session = Session::Image { index };
             }
@@ -1037,7 +1044,9 @@ impl Receiver {
             return;
         }
         // Not wanted any more, or the record went with its endpoint: retired as step 5
-        // says, which frees the readers and puts the record on cool-down.
+        // says, which frees the readers and puts the record on cool-down. A retire the
+        // pending replies' bound puts off here is tried again by `serve` every cycle,
+        // since the image has no subscription reader.
         if self.sessions.get(key).is_none() {
             let _ = self.sessions.insert(key, Session::InProgress);
         }
@@ -1503,31 +1512,47 @@ impl Receiver {
     }
 
     /// Loads every reader's position once per cycle into its image's slowest and
-    /// fastest, each checked against its bound (ADR 0010): one outside it is reported
-    /// to the conductor once and not read again.
+    /// fastest, each checked against its bound (ADR 0010): one outside it is not used,
+    /// counts `log_buffer.rejected_position` and is reported to the conductor, which
+    /// evicts its client, with a reply of its own for every rejected reader; one whose
+    /// reply finds the pending replies at their bound is checked again next cycle, and
+    /// counted and reported then. Each image's subscription readers are counted too,
+    /// rejected or not, since a subscription holds its image until the conductor removes
+    /// it (`serve`).
     fn load_readers(&mut self) {
         for live in &mut self.live {
             live.slowest = i64::MAX;
             live.fastest = i64::MIN;
             live.reader_count = 0;
+            live.subscriber_count = 0;
         }
-        let mut rejected: Option<(usize, ReaderKey)> = None;
-        for reader in &mut self.readers {
-            if reader.rejected {
-                continue;
-            }
-            let Some(live) = self.live.get_mut(reader.image_index) else {
+        for index in 0..self.readers.len() {
+            let (image_index, key, rejected) = {
+                let reader = &self.readers[index];
+                (reader.image_index, reader.key, reader.rejected)
+            };
+            let Some(live) = self.live.get_mut(image_index) else {
                 continue;
             };
-            let position = reader.position();
+            if matches!(key, ReaderKey::Subscription(_)) {
+                live.subscriber_count += 1;
+            }
+            if rejected {
+                continue;
+            }
+            let position = self.readers[index].position();
             if position < live.start_position
                 || position > live.positions.max_position()
                 || position % ALIGN != 0
             {
-                reader.rejected = true;
-                self.statics.rejected_position.increment();
-                if rejected.is_none() {
-                    rejected = Some((reader.image_index, reader.key));
+                if self.pending.len() < PENDING_REPLIES {
+                    let registration_id = live.registration_id;
+                    self.readers[index].rejected = true;
+                    self.statics.rejected_position.increment();
+                    self.reply(Reply::ReaderRejected {
+                        registration_id,
+                        key,
+                    });
                 }
                 continue;
             }
@@ -1535,20 +1560,23 @@ impl Receiver {
             live.fastest = live.fastest.max(position);
             live.reader_count += 1;
         }
-        if let Some((image_index, key)) = rejected
-            && self.pending.len() < PENDING_REPLIES
-        {
-            let registration_id = self.live[image_index].registration_id;
-            self.reply(Reply::ReaderRejected {
-                registration_id,
-                key,
-            });
-        }
     }
 
     /// One image's duties for this cycle (`spec/udp.md`, "The receiver", steps 3 to 5);
     /// returns how much work they were and whether the image left the list.
     fn serve(&mut self, index: usize, now: i64) -> (usize, bool) {
+        // 5, first: an image whose last subscription left is retired as unsubscribed,
+        // and one with a recording alone too, since a recording is not a subscriber.
+        // Checked every cycle from the readers loaded, so that a retire the pending
+        // replies' bound put off, on the request that removed the last reader or on the
+        // image's arrival, is tried again until there is room (invariant 3).
+        if self.live[index].state == ImageState::Live
+            && self.live[index].subscriber_count == 0
+            && self.pending.len() < PENDING_REPLIES
+        {
+            self.retire(index, ImageState::Unsubscribed, now);
+            return (1, true);
+        }
         let mut work = 0;
         // 3. The rebuild scan and the NAK for the gap it finds.
         work += self.rebuild(index, now);
