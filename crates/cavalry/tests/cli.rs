@@ -429,11 +429,6 @@ fn replay_exits_1_and_names_the_positions_not_printed_when_its_log_goes_first() 
     driver.close().expect("closes");
 }
 
-/// `cavalry record --truncate`, `--purge` and `--delete` against a stopped recording in
-/// this process's driver: each prints its line and exit 0; an instant for `--before`
-/// resolves through the time index and rounds down to a segment base, here the start,
-/// which is nothing to purge, so the driver refuses it with code 23 and the message
-/// names the retained position (ADR 0031).
 /// `cavalry replay --channel <a cavalry:udp channel> --stream <id>` plays the recording
 /// to the channel's endpoint and prints the summary alone (ADR 0043): a subscription on
 /// that endpoint in this process, on that stream, reads every message in order, and the
@@ -488,6 +483,11 @@ fn replay_on_a_udp_channel_plays_to_the_endpoints_subscriber_and_prints_the_summ
     driver.close().expect("the driver closes");
 }
 
+/// `cavalry record --truncate`, `--purge` and `--delete` against a stopped recording in
+/// this process's driver: each prints its line and exit 0; an instant for `--before`
+/// resolves through the time index and rounds down to a segment base, here the start,
+/// which is nothing to purge, so the driver refuses it with code 23 and the message
+/// names the retained position (ADR 0031).
 #[test]
 fn record_truncates_purges_and_deletes_a_stopped_recording() {
     let dir = TestDir::new("retention");
