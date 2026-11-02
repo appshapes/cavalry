@@ -1061,27 +1061,33 @@ impl Receiver {
     /// Retires the image at `index` in `state`: its readers go, its record goes on
     /// cool-down, the transition counts, and the conductor is told; the log, the writer
     /// and the counters drop with it (`spec/udp.md`, "The receiver", step 5). The caller
-    /// checked the pending replies' bound.
+    /// checked the pending replies' bound. The log's end of stream position is the
+    /// stream's own, stored when the stream ended, or not ended at all: a retire for
+    /// the liveness timeout or the last subscription's removal is not an end, and a
+    /// subscriber that read one as an end would be told a lie (invariant 1).
     fn retire(&mut self, index: usize, state: ImageState, now: i64) {
-        // A last scan to the first gap or the high-water mark, and the end of stream
-        // stored at the rebuild position unless the stream named its own: nothing is
-        // inserted after this, and a recording of the image stops there by itself once
-        // the recorder has written up to it (`spec/udp.md`, "The receiver", step 5).
+        // A last scan to the first gap or the high-water mark, whatever a cycle's bound,
+        // in calls of the bound each, at most the window's worth and once per image:
+        // nothing is inserted after this, the reply's rebuild position is the end of
+        // the contiguous frames, and the conductor stops a recording of the image
+        // there once the recorder has written up to it.
         {
             let live = &mut self.live[index];
-            if live.hwm_position > live.rebuild_position
-                && let Ok(scan) = live.writer.scan(
+            let mut calls = live.term_length / i64::from(spec::REBUILD_SCAN_LIMIT) + 2;
+            while live.hwm_position > live.rebuild_position && calls > 0 {
+                calls -= 1;
+                let Ok(scan) = live.writer.scan(
                     live.rebuild_position,
                     live.hwm_position,
                     spec::REBUILD_SCAN_LIMIT,
-                )
-                && scan.rebuild_position > live.rebuild_position
-            {
+                ) else {
+                    break;
+                };
+                if scan.rebuild_position <= live.rebuild_position {
+                    break;
+                }
                 live.rebuild_position = scan.rebuild_position;
                 live.rebuild.store_release(scan.rebuild_position);
-            }
-            if !live.ended {
-                let _ = live.log.set_end_of_stream_position(live.rebuild_position);
             }
         }
         let last = self.live.len() - 1;

@@ -844,6 +844,9 @@ impl Conductor {
             work += self.take_receiver_replies(now);
         }
         work += self.flush_receiver_deferred();
+        if !self.udp_images.is_empty() {
+            work += self.stop_recordings_of_retired_images();
+        }
         work += self.flush_commands();
         work += self.keep_replays(now);
         work += self.keep_publications(now);
@@ -2588,10 +2591,10 @@ impl Conductor {
 
     /// The receiver retired an image (`spec/udp.md`, "The receiver", step 5):
     /// `unavailable image` to the subscriptions that remain and their position records
-    /// freed at once; then, once a recording of the image has stopped, which the
-    /// recorder does by itself at the end of stream the receiver stored, the image's
-    /// two counters freed, its log unlinked, `image.removed`, and the endpoint closed
-    /// when nothing holds it (`remove_udp_image`).
+    /// freed at once; then, once a recording of the image has stopped, at the rebuild
+    /// position the retire left (`stop_recordings_of_retired_images`), the image's two
+    /// counters freed, its log unlinked, `image.removed`, and the endpoint closed when
+    /// nothing holds it (`remove_udp_image`).
     fn on_image_retired(&mut self, registration_id: i64, state: ImageState, now: i64) {
         let Some(index) = self
             .udp_images
@@ -2624,8 +2627,9 @@ impl Conductor {
             self.udp_pairs = self.udp_pairs.saturating_sub(1);
         }
         // A recorded image's log waits for its recording to stop, as a recorded
-        // publication's does (`spec/log-buffer.md`, "Closing"): the recorder reaches the
-        // end of stream the receiver stored and stops there; `on_stopped` finishes.
+        // publication's does (`spec/log-buffer.md`, "Closing"): the stop goes to the
+        // recorder once it has written up to the rebuild position
+        // (`stop_recordings_of_retired_images`), and `on_stopped` finishes.
         let recorded = self
             .recordings
             .iter()
@@ -2633,6 +2637,61 @@ impl Conductor {
         if !recorded {
             self.remove_udp_image(registration_id, now);
         }
+    }
+
+    /// A recording of a retired image stops at the image's rebuild position, where the
+    /// receiver's last scan left it and nothing is inserted after, once the recorder
+    /// has written up to it (`spec/udp.md`, "The receiver", step 5; ADR 0042): each
+    /// cycle, a retired image with a live recording whose position has reached the
+    /// rebuild position hands the recorder a stop with no correlation id, which stops
+    /// at the position written, the rebuild position itself, since the recorder's
+    /// reader stops at the gap or the high-water mark there; the log stays until the
+    /// stop's reply (`on_stopped`, `drop_recording_reader`). The log's end of stream
+    /// position is not written for it: a retire for the liveness timeout or the last
+    /// subscription's removal is not the stream's end, and a subscriber reading the
+    /// log must not be told one (invariant 1). An image whose stream ended has its end
+    /// of stream position stored, where the recorder stops by itself; a stop asked
+    /// here that finds it stopped is answered with `StopIgnored` and nothing follows.
+    /// A recording still starting waits for its id. Returns how many stops went.
+    fn stop_recordings_of_retired_images(&mut self) -> usize {
+        let mut stops = 0;
+        for index in 0..self.udp_images.len() {
+            let (registration_id, rebuild) = {
+                let image = &self.udp_images[index];
+                if image.state == ImageState::Live {
+                    continue;
+                }
+                (image.registration_id, image.rebuild.load_acquire())
+            };
+            let Some(recording) = self
+                .recordings
+                .iter()
+                .position(|recording| recording.publication_id == registration_id)
+            else {
+                continue;
+            };
+            let entry = &self.recordings[recording];
+            if entry.stop_requested || entry.state != RecordingState::Live {
+                continue;
+            }
+            let Some(recording_id) = entry.recording_id else {
+                continue;
+            };
+            let position = entry
+                .position
+                .as_ref()
+                .map_or(entry.start_position, Counter::load_acquire);
+            if position < rebuild {
+                continue;
+            }
+            self.recordings[recording].stop_requested = true;
+            self.request(Request::Stop {
+                recording_id,
+                correlation_id: None,
+            });
+            stops += 1;
+        }
+        stops
     }
 
     /// Finishes a retired image: its two counters freed after the reuse timeout, its
@@ -8895,6 +8954,7 @@ mod receiving {
         RECORDING_STARTED, RECORDING_STOPPED,
     };
     use cavalry_shm::log::LogBuffers;
+    use cavalry_shm::log::layout::NOT_ENDED;
 
     use super::recording::Harness;
     use super::*;
@@ -9450,14 +9510,26 @@ mod receiving {
     }
 
     /// An image with no accepted datagram or heartbeat for the liveness timeout is
-    /// retired as timed out, with `unavailable image`.
+    /// retired as timed out, with `unavailable image`; its log's end of stream position
+    /// stays not ended, since a sender that went quiet did not end its stream, and the
+    /// subscription that holds the log until `unavailable image` reaches it must not
+    /// read an end there (invariant 1).
     #[test]
     fn an_image_with_no_activity_for_the_liveness_timeout_is_retired() {
         let mut h = Harness::new("udp-liveness");
         let (sender, image_id, _position) = subscribe_and_connect(&mut h, 2);
+        sender.send_frames(SESSION, 0, 4);
+        assert!(h.cycle_until(|h| positions(h, image_id) == Some((256, 256, 0))));
+        let log = LogBuffers::open_image(h.dir.path(), image_id, false).expect("the image opens");
         h.now += spec::nanos(cavalry_proto::udp::IMAGE_LIVENESS_TIMEOUT);
+        assert!(h.cycle_until(|h| h.counter(IMAGE_TIMED_OUT) == 1));
+        assert_eq!(
+            log.end_of_stream_position(),
+            NOT_ENDED,
+            "a timed-out stream has no end of stream position"
+        );
         assert!(h.cycle_until(|h| h.counter(IMAGE_REMOVED) == 1));
-        assert_eq!(h.counter(IMAGE_TIMED_OUT), 1);
+        assert_eq!(log.end_of_stream_position(), NOT_ENDED);
         assert_eq!(unavailable_images(&mut h, 2), vec![image_id]);
         assert!(h.conductor.udp_images.is_empty());
         drop(sender);
@@ -9820,9 +9892,11 @@ mod receiving {
     }
 
     /// A recorded image that is retired keeps its log until the recording has stopped:
-    /// the receiver stores the end of stream at the rebuild position, the recorder
-    /// reaches it and stops there, `recording stopped` goes out, and only then is the
-    /// log unlinked and the image removed (`spec/udp.md`, "The receiver", step 5).
+    /// the receiver's last scan leaves the rebuild position at the end of the contiguous
+    /// frames, the conductor hands the recorder the stop once it has written up to it,
+    /// `recording stopped` names that position, and only then is the log unlinked and
+    /// the image removed (`spec/udp.md`, "The receiver", step 5). The log's end of
+    /// stream position stays not ended throughout: the stream did not end.
     #[test]
     fn a_retired_recorded_image_keeps_its_log_until_the_recording_stops() {
         let mut h = Harness::new("udp-record-retire");
@@ -9839,8 +9913,10 @@ mod receiving {
         sender.send_frames(SESSION, 256, 3);
         sender.send_frames(SESSION, 512, 1);
         assert!(h.cycle_until(|h| positions(h, image_id) == Some((576, 448, 0))));
+        let log = LogBuffers::open_image(h.dir.path(), image_id, false).expect("the image opens");
         // The last subscription goes: the image is retired, but its log stays while the
-        // recording runs, and the recording stops at the rebuild position by itself.
+        // recording runs, and the recording is stopped at the rebuild position once the
+        // recorder has written up to it.
         let now = h.now;
         h.conductor.remove_subscription(1, 3, 2, now);
         assert!(h.cycle_until(|h| h.counter(IMAGE_UNSUBSCRIBED) == 1));
@@ -9855,8 +9931,14 @@ mod receiving {
                 .join(format!("images/{image_id}.logbuffer"))
                 .is_file()
         );
+        assert_eq!(
+            log.end_of_stream_position(),
+            NOT_ENDED,
+            "an unsubscribed stream has no end of stream position"
+        );
         assert!(h.cycle_until(|h| h.counter(RECORDING_STOPPED) == 1));
         assert!(h.cycle_until(|h| h.counter(IMAGE_REMOVED) == 1));
+        assert_eq!(log.end_of_stream_position(), NOT_ENDED);
         assert!(
             !h.dir
                 .path()
