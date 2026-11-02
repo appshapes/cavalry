@@ -257,7 +257,7 @@ pub const RECEIVER_OVER_RUNS: CounterId = CounterId(82);
 /// `receiver.rejected_datagrams`, a static counter: Data datagrams that failed the datagram check, dropped whole: a length not a multiple of 32, a frame that fails spec/frame.md's checks, a term offset that is not the running one, or frames past the end of the term (spec/udp.md, What a reader rejects).
 pub const RECEIVER_REJECTED_DATAGRAMS: CounterId = CounterId(83);
 
-/// `receiver.dropped_frames`, a static counter: Control frames and heartbeats a receive endpoint dropped because their version or type is not one this version reads, or they are too short (spec/udp.md, The datagram).
+/// `receiver.dropped_frames`, a static counter: Control frames and heartbeats a receive endpoint dropped because their version or type is not one this version reads, or they are too short (spec/udp.md, The datagram), and heartbeats whose term offset is not below their image's term length (spec/udp.md, What a reader rejects, term-offset).
 pub const RECEIVER_DROPPED_FRAMES: CounterId = CounterId(84);
 
 /// `receiver.dropped_pending`, a static counter: Setup frames, data datagrams and heartbeats dropped for a session pending a setup, the datagram that elicited the setup among them, with no status message sent for them (spec/udp.md, The receiver, step 1).
@@ -978,8 +978,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "receiver.dropped_frames",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Control frames and heartbeats a receive endpoint dropped because their version or type is not one this version reads, or they are too short (spec/udp.md, The datagram).",
-        doctor: "A peer of another version, or something that is not Cavalry, sends to this endpoint's port: check the peer's version and the port.",
+        doc: "Control frames and heartbeats a receive endpoint dropped because their version or type is not one this version reads, or they are too short (spec/udp.md, The datagram), and heartbeats whose term offset is not below their image's term length (spec/udp.md, What a reader rejects, term-offset).",
+        doctor: "A peer of another version, or something that is not Cavalry, sends to this endpoint's port, or a sender's heartbeats name a term offset past its image's term: check the peer's version and the port.",
     },
     CounterDef {
         id: RECEIVER_DROPPED_PENDING,

@@ -8971,12 +8971,12 @@ mod receiving {
     use cavalry_shm::counters::generated::{
         CHANNEL_CLOSED, CHANNEL_OPENED, COUNTERS_ALLOCATED, IMAGE_CREATED, IMAGE_ENDED,
         IMAGE_REMOVED, IMAGE_TIMED_OUT, IMAGE_UNSUBSCRIBED, LOG_BUFFER_REJECTED_POSITION,
-        RECEIVER_DROPPED_COOL_DOWN, RECEIVER_DROPPED_IN_PROGRESS, RECEIVER_DROPPED_PENDING,
-        RECEIVER_DROPPED_UNWANTED, RECEIVER_FRAMES_RECEIVED, RECEIVER_GAPS_DETECTED,
-        RECEIVER_HEARTBEATS_RECEIVED, RECEIVER_NAKS_SENT, RECEIVER_OVER_RUNS,
-        RECEIVER_RTT_REPLIES_SENT, RECEIVER_SETUPS_ELICITED, RECEIVER_SETUPS_RECEIVED,
-        RECEIVER_SETUPS_UNWANTED, RECEIVER_STATUS_MESSAGES_SENT, RECEIVER_UNDER_RUNS,
-        RECORDING_STARTED, RECORDING_STOPPED,
+        RECEIVER_DROPPED_COOL_DOWN, RECEIVER_DROPPED_FRAMES, RECEIVER_DROPPED_IN_PROGRESS,
+        RECEIVER_DROPPED_PENDING, RECEIVER_DROPPED_UNWANTED, RECEIVER_FRAMES_RECEIVED,
+        RECEIVER_GAPS_DETECTED, RECEIVER_HEARTBEATS_RECEIVED, RECEIVER_NAKS_SENT,
+        RECEIVER_OVER_RUNS, RECEIVER_RTT_REPLIES_SENT, RECEIVER_SETUPS_ELICITED,
+        RECEIVER_SETUPS_RECEIVED, RECEIVER_SETUPS_UNWANTED, RECEIVER_STATUS_MESSAGES_SENT,
+        RECEIVER_UNDER_RUNS, RECORDING_STARTED, RECORDING_STOPPED,
     };
     use cavalry_shm::log::LogBuffers;
     use cavalry_shm::log::layout::NOT_ENDED;
@@ -9045,7 +9045,19 @@ mod receiving {
             self.send(&frames(session_id, STREAM, term_offset, count));
         }
 
+        /// A heartbeat at `term_offset` of the initial term.
         fn send_heartbeat(&self, session_id: i32, term_offset: i32, eos: bool) {
+            self.send_heartbeat_in_term(session_id, INITIAL_TERM_ID, term_offset, eos);
+        }
+
+        /// A heartbeat at `term_offset` of the term `term_id`.
+        fn send_heartbeat_in_term(
+            &self,
+            session_id: i32,
+            term_id: i32,
+            term_offset: i32,
+            eos: bool,
+        ) {
             let mut flags = Flags::UNFRAGMENTED.bits();
             if eos {
                 flags |= Flags::EOS.bits();
@@ -9056,7 +9068,7 @@ mod receiving {
                     term_offset,
                     session_id,
                     stream_id: STREAM,
-                    term_id: INITIAL_TERM_ID,
+                    term_id,
                     reserved_value: 0,
                 }
                 .to_bytes(),
@@ -9248,6 +9260,18 @@ mod receiving {
         subscription_id: i64,
         term: u32,
     ) -> (TestSender, i64, Counter) {
+        subscribe_and_connect_at(h, subscription_id, term, 0)
+    }
+
+    /// [`subscribe_and_connect_with_term`] with the setup frame's term offset chosen
+    /// too: the image starts at that position of the initial term, and the first
+    /// status message names it.
+    fn subscribe_and_connect_at(
+        h: &mut Harness,
+        subscription_id: i64,
+        term: u32,
+        term_offset: i32,
+    ) -> (TestSender, i64, Counter) {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
@@ -9256,7 +9280,7 @@ mod receiving {
         h.cycle();
         let mut sender = TestSender::bind(port);
         sender.term = term;
-        sender.send_setup(SESSION, 0);
+        sender.send_setup(SESSION, term_offset);
         assert!(
             h.cycle_until(|h| h.conductor.udp_images.len() == 1),
             "the setup frame created the image"
@@ -9276,7 +9300,7 @@ mod receiving {
                 first.consumption_term_id,
                 first.consumption_term_offset
             ),
-            (SESSION, STREAM, INITIAL_TERM_ID, 0)
+            (SESSION, STREAM, INITIAL_TERM_ID, term_offset)
         );
         assert_eq!(
             first.receiver_window_length,
@@ -9532,6 +9556,46 @@ mod receiving {
         assert_ne!(second, image_id);
         // The endpoint stayed open through it all: one subscription holds it.
         assert_eq!(h.counter(CHANNEL_CLOSED), 0);
+    }
+
+    /// A heartbeat's term offset is checked against its image's term, not the driver's:
+    /// an image whose setup frame named a term longer than the driver's 16 MiB keeps
+    /// the heartbeats past 16 MiB that a sender idle there sends, and one whose term
+    /// offset is not below the image's term is dropped and counted in
+    /// `receiver.dropped_frames` (`spec/udp.md`, "What a reader rejects",
+    /// `term-offset`). One that over-runs the window is dropped before
+    /// `receiver.heartbeats_received` counts it, as the two counters' docs say.
+    #[test]
+    fn a_heartbeat_is_checked_against_the_image_term_not_the_driver_term() {
+        const BIG_TERM: u32 = 32 * 1024 * 1024;
+        const START: i32 = 16 * 1024 * 1024;
+        let mut h = Harness::new("udp-heartbeat-term");
+        let (sender, image_id, _position) = subscribe_and_connect_at(&mut h, 2, BIG_TERM, START);
+        let start = i64::from(START);
+        assert_eq!(positions(&h, image_id), Some((start, start, start)));
+        // Past the driver's term, within the image's: accepted, and the high-water
+        // mark follows it.
+        sender.send_heartbeat(SESSION, START + 64, false);
+        assert!(h.cycle_until(|h| h.counter(RECEIVER_HEARTBEATS_RECEIVED) == 1));
+        assert_eq!(
+            positions(&h, image_id),
+            Some((start + 64, start, start)),
+            "the high-water mark moved"
+        );
+        assert_eq!(h.counter(RECEIVER_DROPPED_FRAMES), 0);
+        // At the image's term, not below it: dropped and counted, nothing moves.
+        sender.send_heartbeat(SESSION, BIG_TERM as i32, false);
+        assert!(h.cycle_until(|h| h.counter(RECEIVER_DROPPED_FRAMES) == 1));
+        assert_eq!(h.counter(RECEIVER_HEARTBEATS_RECEIVED), 1);
+        assert_eq!(h.counter(RECEIVER_OVER_RUNS), 0);
+        assert_eq!(positions(&h, image_id), Some((start + 64, start, start)));
+        // Beyond half a term past the last status message, in the next term: an
+        // over-run, dropped before it is counted as received.
+        sender.send_heartbeat_in_term(SESSION, INITIAL_TERM_ID + 1, 64, false);
+        assert!(h.cycle_until(|h| h.counter(RECEIVER_OVER_RUNS) == 1));
+        assert_eq!(h.counter(RECEIVER_HEARTBEATS_RECEIVED), 1);
+        assert_eq!(h.counter(RECEIVER_DROPPED_FRAMES), 1);
+        assert_eq!(positions(&h, image_id), Some((start + 64, start, start)));
     }
 
     /// An image with no accepted datagram or heartbeat for the liveness timeout is

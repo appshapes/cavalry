@@ -25,9 +25,10 @@ use std::time::Duration;
 
 use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 use cavalry_proto::udp::{
-    ControlFrame, Datagram, IMAGE_LIVENESS_TIMEOUT, NAK_DELAY, NAK_RETRY, Nak, RttMeasurement,
-    STATUS_MESSAGE_END_OF_STREAM, STATUS_MESSAGE_INTERVAL, STATUS_MESSAGE_SEND_SETUP, SetupFrame,
-    StatusMessage, parse, receiver_bounds, status_message_threshold,
+    ControlFrame, Datagram, IMAGE_LIVENESS_TIMEOUT, MAX_TERM_LENGTH, NAK_DELAY, NAK_RETRY, Nak,
+    RttMeasurement, STATUS_MESSAGE_END_OF_STREAM, STATUS_MESSAGE_INTERVAL,
+    STATUS_MESSAGE_SEND_SETUP, SetupFrame, StatusMessage, parse, receiver_bounds,
+    status_message_threshold,
 };
 use cavalry_shm::counters::generated::{
     IMAGE_CREATED, IMAGE_ENDED, IMAGE_TIMED_OUT, IMAGE_UNSUBSCRIBED, LOG_BUFFER_REJECTED_POSITION,
@@ -1170,9 +1171,14 @@ impl Receiver {
             self.on_data(endpoint_index, endpoint_id, datagram, source, now);
             return;
         }
-        // A control frame or a heartbeat: every log of this version has the UDP term
-        // length (`spec/udp.md`, "Values"), so the term offsets are checked against it.
-        let frame = match parse(bytes, spec::UDP_TERM_LENGTH) {
+        // A control frame or a heartbeat, parsed against the longest term the spec
+        // admits, so that only its shape is checked here: a heartbeat's term offset is
+        // held against its image's own term in `on_heartbeat`, once the session has an
+        // image, since a setup frame may name a term longer than the driver's own
+        // (`spec/udp.md`, "What a reader rejects", `term-offset`); a setup frame checks
+        // its offset against the term it carries, and a status message or a NAK at a
+        // receive endpoint is not read.
+        let frame = match parse(bytes, MAX_TERM_LENGTH) {
             Ok(frame) => frame,
             Err(_) => {
                 self.statics.dropped_frames.increment();
@@ -1409,9 +1415,10 @@ impl Receiver {
         });
     }
 
-    /// A heartbeat (`spec/udp.md`, "Heartbeat"; "The receiver", step 2): moves the
-    /// high-water mark, counts as activity at or above the last status message's
-    /// position less a term, and with EOS names the end of stream.
+    /// A heartbeat (`spec/udp.md`, "Heartbeat"; "The receiver", step 2): its term offset
+    /// checked against the image's term, it moves the high-water mark, counts as
+    /// activity at or above the last status message's position less a term, and with
+    /// EOS names the end of stream.
     fn on_heartbeat(
         &mut self,
         endpoint_index: usize,
@@ -1454,8 +1461,15 @@ impl Receiver {
                 return;
             }
         };
-        self.statics.heartbeats_received.increment();
         let image = &mut self.live[index];
+        // The term offset against the image's term, the one its setup frame named, which
+        // may be longer than the driver's own: one not below it is the spec's
+        // `term-offset` rejection, dropped and counted (`spec/udp.md`, "What a reader
+        // rejects"). `parse` checked the rest of the offset's shape.
+        if i64::from(heartbeat.term_offset) >= image.term_length {
+            self.statics.dropped_frames.increment();
+            return;
+        }
         let position = image
             .positions
             .position(heartbeat.term_id, heartbeat.term_offset as u32);
@@ -1464,6 +1478,9 @@ impl Receiver {
             self.statics.over_runs.increment();
             return;
         }
+        // Accepted: counted only now, so that `receiver.heartbeats_received` and
+        // `receiver.over_runs` read as their docs say, one or the other per heartbeat.
+        self.statics.heartbeats_received.increment();
         if position > image.hwm_position {
             image.hwm_position = position;
             image.hwm.store_release(position);

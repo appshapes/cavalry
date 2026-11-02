@@ -870,8 +870,8 @@ id = 84
 name = "receiver.dropped_frames"
 kind = "counter"
 scope = "static"
-doc = "Control frames and heartbeats a receive endpoint dropped because their version or type is not one this version reads, or they are too short (spec/udp.md, The datagram)."
-doctor = "A peer of another version, or something that is not Cavalry, sends to this endpoint's port: check the peer's version and the port."
+doc = "Control frames and heartbeats a receive endpoint dropped because their version or type is not one this version reads, or they are too short (spec/udp.md, The datagram), and heartbeats whose term offset is not below their image's term length (spec/udp.md, What a reader rejects, term-offset)."
+doctor = "A peer of another version, or something that is not Cavalry, sends to this endpoint's port, or a sender's heartbeats name a term offset past its image's term: check the peer's version and the port."
 
 [[counter]]
 id = 85
