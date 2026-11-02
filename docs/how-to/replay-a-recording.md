@@ -79,10 +79,10 @@ In Aeron, this is Archive's `startReplay` ([glossary](../glossary.md)).
    ```
 
    The subscriber goes first, on the other host, on its own address and that port, on
-   the stream the command names: `client.add_subscription("cavalry:udp?endpoint=
-   192.0.2.10:40123", 7)?` in a program there. The command then subscribes to nothing
-   and prints no message, since the messages go to the other host; it ends with the
-   replay and prints the summary alone:
+   the stream the command names, in a program there:
+   `client.add_subscription("cavalry:udp?endpoint=192.0.2.10:40123", 7)?`. The command
+   then subscribes to nothing and prints no message, since the messages go to the
+   other host; it ends with the replay and prints the summary alone:
 
    ```text
    replay 7 of recording 0 ended at position 128: 128 bytes from position 0 on cavalry:udp?endpoint=192.0.2.10:40123
