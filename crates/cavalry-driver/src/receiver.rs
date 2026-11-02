@@ -700,6 +700,22 @@ impl Receiver {
         self.sessions.records.len()
     }
 
+    /// How many readers the receiver holds, leaving or not, for the tests.
+    #[cfg(test)]
+    pub(crate) fn reader_count(&self) -> usize {
+        self.readers.len()
+    }
+
+    /// How many subscription readers an image counted on the last cycle, none of them
+    /// leaving, for the tests.
+    #[cfg(test)]
+    pub(crate) fn subscriber_count_of(&self, registration_id: i64) -> Option<usize> {
+        self.live
+            .iter()
+            .find(|live| live.registration_id == registration_id)
+            .map(|live| live.subscriber_count)
+    }
+
     /// The receiver's loop: duty cycles until `stop`, idling with the strategy while it
     /// holds an endpoint and parked while it holds none. The sockets close with the
     /// receiver; a sender sees its status messages stop and disconnects.
