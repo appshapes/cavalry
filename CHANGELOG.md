@@ -996,14 +996,17 @@ user-visible change, added in the same commit as the change. The format follows
   card 181's pull requests; card 195).
 - ADR 0043: `start replay` takes a `cavalry:udp` replay channel, the replay's
   publication put on the wire by the driver's sender as a client's `cavalry:udp`
-  publication is, with the recording's term length and MTU; a receiver answering its
-  setup frames is the replay's subscriber for the replay connect timeout; the sender
-  holds a status message's and a NAK's term offset against the publication's own term,
-  since a replay's keeps its recording's, which `sender.status_messages_rejected` and
-  `sender.naks_ignored` now name; and the sender's bounds count a replay's publication
-  beside a client's. `spec/client-protocol.md`, "Commands", "Events"
-  and "Liveness and timeouts", and `spec/udp.md`, "The sender", say so, and error code
-  11 for a `cavalry:udp` replay channel, ADR 0042's one open point, is withdrawn; the
-  implementation follows in its own change
+  publication is, with the recording's term length and MTU; for the replay connect
+  timeout the replay has a subscriber while its publication is connected, as
+  `spec/udp.md`, "The sender", defines it; the sender holds a status message's term
+  offset, and a NAK's term offset and range, against the publication's own term, since
+  a replay's keeps its recording's, which `sender.status_messages_rejected` and
+  `sender.naks_ignored` now name; `replay.position` and `replay.not_connected` explain
+  the UDP case from `sender.position`, `sender.limit` and the publication's connection;
+  and the sender's bounds count a replay's publication beside a client's, four counters
+  per replay publication. `spec/client-protocol.md`, "Commands", "Events", "Liveness and
+  timeouts" and "Sizes", and `spec/udp.md`, "The sender" and "Counters", say so, and
+  error code 11 for a `cavalry:udp` replay channel, ADR 0042's one open point, is
+  withdrawn; the implementation follows in its own change
   ([ADR 0043](docs/decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md);
   card 192).

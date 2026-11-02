@@ -62,11 +62,17 @@ endpoint from the counters file alone; hands the sender the socket when the endp
 new and the publication with a reader at the replay's start position; and keeps the
 publication's limit from the sender position as it keeps a publication's, so that the
 replayer, which paces against that limit as it does today, goes no faster than the
-receivers' window and does not move until a receiver answers. No `available image` goes
-to a `cavalry:ipc` subscription on the replay stream: the image is the receiving driver's,
-created from the sender's setup frame. The replay connect timeout counts a receiver
-answering the publication's setup frames as the replay's subscriber, so that a replay
-nobody receives ends with reason 2 as one nobody subscribes to does. The replay's end
+receivers' window and does not move until the publication is connected. No `available
+image` goes to any subscription on this driver for the replay stream: the image is the
+receiving driver's, created from the sender's setup frame, and a `cavalry:udp`
+subscription on this driver on the same resolved channel gets its image from the
+receiver as under `add publication`. For the replay connect timeout the replay has a
+subscriber while its publication is connected as `spec/udp.md`, "The sender", says, from
+the first status message without the send-setup flag until the connection timeout
+passes without one; a status message with the flag answers a setup frame but does not
+connect the publication. So a replay nobody receives ends with reason 2 after the replay
+connect timeout from its start, as one nobody subscribes to does, and one whose receiver
+went ends after the connection timeout and then the replay connect timeout. The replay's end
 closes the publication at the position reached as over `cavalry:ipc`, and the close goes
 to the sender, which lingers it; the conductor frees the publication's five counters and
 releases the endpoint when the sender has replied, as for any publication. The refusals
@@ -81,10 +87,11 @@ client's is: the publications it holds, its pending replies, its queues and the
 conductor's deferred requests for it are sized from `MAX_PUBLICATIONS` plus
 `MAX_REPLAY_PUBLICATIONS` (`spec.rs`, `MAX_SENDER_PUBLICATIONS`), where ADR 0041 sized
 them from the first alone. The sender parses every control frame it receives
-against `MAX_TERM_LENGTH` and holds a status message's and a NAK's term offset against
-the publication's own term length, rejecting one past it as it rejects a status message
-outside the window, counted in `sender.status_messages_rejected` and
-`sender.naks_ignored`, and `counters.toml` names the reason on both. `cavalry replay`
+against `MAX_TERM_LENGTH` and holds a status message's term offset, and a NAK's term
+offset and range, against the publication's own term length, rejecting one past it as
+it rejects a status message outside the window, counted in
+`sender.status_messages_rejected` and `sender.naks_ignored`, and `counters.toml` and
+the "Counters" table of `spec/udp.md` name the reason on both. `cavalry replay`
 takes `--channel <uri>`, `cavalry:ipc` when absent, in the `cavalry` crate's own change
 after the driver's: with a `cavalry:udp` channel the command subscribes to nothing,
 since the subscriber is on the other host, starts the replay, waits for its end and
@@ -93,12 +100,20 @@ its contract says what a `cavalry:udp` one does.
 
 The amendments, page by page, each within its page's version. `spec/client-protocol.md`:
 "Commands", the `start replay` bullet, which said code 11 for a `cavalry:udp` channel,
-now says what the driver does with one and the codes above; "Events", `replay stopped`
-reason 2 and "Liveness and timeouts", the replay connect timeout, count a receiver
-answering the setup frames as the subscriber. `spec/udp.md`: "The sender", a replay's
-publication keeps its recording's term length and MTU, which its setup frame carries,
-and the sender holds a status message's and a NAK's term offset against the
-publication's own term length.
+now says what the driver does with one and the codes above, and that no `available
+image` goes to any subscription on this driver for the replay stream; "Events", `replay
+stopped` reason 2, the paragraph on the stops the driver makes by itself, and "Liveness
+and timeouts", the replay connect timeout, count the replay as having a subscriber over
+`cavalry:udp` while its publication is connected as `spec/udp.md`, "The sender", says;
+the stops paragraph frees the publication's four counters with its log and releases its
+endpoint once the sender has replied to the close; "Sizes" counts four counters per
+replay publication, 512 for the registry, so that the counters file, 14,610 of 16384
+with every registry full, still fills after the registries. `spec/udp.md`: "The
+sender", a replay's publication keeps its recording's term length and MTU, which its
+setup frame carries, and the sender holds a status message's term offset, and a NAK's
+term offset and range, against the publication's own term length; "Counters", the term
+reason beside the window reason on `sender.status_messages_rejected` and
+`sender.naks_ignored`.
 
 ## Alternatives considered
 
@@ -165,9 +180,11 @@ on the receiving host, three partitions made resident when the image is created 
 UDP prints no message, so a person checking what arrived reads it on the receiving host.
 
 Revisit: when card 182's rows measure the sender's path, for the term check's cost if any
-shows; when a replay over UDP should carry the recording's MTU rather than its own
-publication's, which this version has no way to set; when multicast binds the interface
-(ADR 0039), for a replay to many receivers.
+shows; when a recording's MTU can differ from the UDP path's, which no key sets in this
+version, so that every log carries the 1408 bytes of `spec/client-protocol.md`, "Sizes",
+for whether a replay's publication keeps the recording's MTU, as decided here, or takes
+the channel's, since a datagram longer than the path's MTU is dropped on the wire; when
+multicast binds the interface (ADR 0039), for a replay to many receivers.
 
 ## References
 
