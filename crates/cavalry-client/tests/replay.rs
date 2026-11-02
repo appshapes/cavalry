@@ -3,9 +3,12 @@
 //! recording made and stopped, then played into a subscription whose image's positions
 //! are the recording's; a frame's position from its header across a padding frame; the
 //! handle's position and end; a replay following a live recording; a stop from the
-//! client; dropping the handle stopping nothing; and every error code
-//! (`spec/client-protocol.md`, "Commands"; ADR 0030). The full cases come first.
+//! client; dropping the handle stopping nothing; a replay over a `cavalry:udp` channel
+//! into a subscription on that channel's endpoint on the same driver (ADR 0043); and
+//! every error code (`spec/client-protocol.md`, "Commands"; ADR 0030). The full cases
+//! come first.
 
+use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -431,6 +434,68 @@ fn a_replay_stops_on_request_at_the_position_reached() {
 /// Every error code of `start replay` through the client: a recording the catalog
 /// does not hold (21), a position out of range (23), a length below −1 (7), and a
 /// channel that is not `cavalry:ipc` (1).
+/// A replay over a `cavalry:udp` channel (ADR 0043; invariant 1): the replay's
+/// publication goes on the wire from this driver's sender to a `cavalry:udp`
+/// subscription on the channel's endpoint, received by the same driver's receiver; the
+/// image carries the sender's address, every frame arrives in order at the recording's
+/// positions, the replay ends at the recording's extent, and the image ends with the
+/// stream and goes.
+#[test]
+fn a_replay_plays_a_recording_to_a_udp_subscription_on_the_same_driver() {
+    let dir = TestDir::new("udp");
+    let (driver, mut client, end) = recorded(&dir, 100);
+    let port = UdpSocket::bind("127.0.0.1:0")
+        .expect("a loopback socket")
+        .local_addr()
+        .expect("bound")
+        .port();
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+    let mut subscription = client
+        .add_subscription(&channel, 72)
+        .expect("a subscription on the channel's endpoint");
+    let replay = client
+        .start_replay(0, NULL_POSITION, NULL_LENGTH, 72, &channel)
+        .expect("a replay over UDP");
+    assert_eq!(replay.channel(), channel);
+    assert_eq!(replay.start_position(), 0);
+    wait("the sender's setup frame creates the image", || {
+        subscription.poll(|_, _| {}, 0).expect("the poll applies");
+        subscription
+            .images()
+            .iter()
+            .any(|image| image.session_id() == replay.session_id())
+    });
+    let source = subscription.images()[0].source_identity().to_string();
+    assert!(source.starts_with("127.0.0.1:"), "{source}");
+    let (frames, ended_at, reason) = drain(&mut subscription, &replay);
+    assert_eq!(frames.len(), 100);
+    for (n, (position, body)) in frames.iter().enumerate() {
+        assert_eq!(
+            *position,
+            n as i64 * 64,
+            "frame {n}: the recording's position"
+        );
+        assert_eq!(&body[..8], &(n as i64).to_le_bytes(), "frame {n}: body");
+    }
+    assert_eq!((ended_at, reason), (end, Some(ReplayStopReason::Ended)));
+    // The stream ends with the replay: the image's end of stream is the end position,
+    // and the image goes.
+    wait("the image ends", || {
+        subscription.poll(|_, _| {}, 0).expect("the poll applies");
+        match subscription.images().first() {
+            Some(image) if image.is_end_of_stream() => {
+                assert_eq!(image.position(), end);
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
+    });
+    subscription.close().expect("closes");
+    client.close().expect("closes");
+    driver.close().expect("the driver closes");
+}
+
 #[test]
 fn start_replay_errors_carry_the_drivers_codes() {
     let dir = TestDir::new("errors");

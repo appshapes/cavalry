@@ -259,27 +259,27 @@ fn a_refused_command_carries_the_drivers_code_and_message() {
     let dir = TestDir::new("refused");
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
-    // A publication sends on a cavalry:udp channel (ADR 0041) and a subscription
-    // receives on one (ADR 0042); a replay on one is refused with code 11 until card 192
-    // brings it.
+    // A publication sends on a cavalry:udp channel (ADR 0041), a subscription
+    // receives on one (ADR 0042) and a replay plays on one (ADR 0043): a replay of a
+    // recording the catalog does not hold passes the channel check and is refused by
+    // the replayer with code 21, the message naming the recording.
     let error = client
         .start_replay(0, -1, -1, 1004, "cavalry:udp?endpoint=localhost:40123")
-        .expect_err("not this driver's transport to replay on yet");
+        .expect_err("no recording 0 to replay");
     match &error {
         ClientError::Refused {
             code,
             raw_code,
             message,
         } => {
-            assert_eq!(*code, Some(ErrorCode::GenericError));
-            assert_eq!(*raw_code, 11);
-            assert!(message.contains("cavalry:udp"), "{message}");
-            assert!(message.contains("card 192"), "{message}");
+            assert_eq!(*code, Some(ErrorCode::UnknownRecording));
+            assert_eq!(*raw_code, 21);
+            assert!(message.contains('0'), "{message}");
         }
         other => panic!("{other}"),
     }
     assert_eq!(error.reason(), "refused");
-    assert!(error.to_string().contains("error code 1"), "{error}");
+    assert!(error.to_string().contains("error code 21"), "{error}");
     // The client is still fine after a refusal.
     let publication = client
         .add_publication("cavalry:ipc", 1004)

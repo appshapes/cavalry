@@ -23,8 +23,8 @@ use std::time::Duration;
 use cavalry_proto::frame::Flags;
 use cavalry_proto::udp::{
     CONNECTION_TIMEOUT, ControlFrame, DATAGRAMS_PER_BURST, HEARTBEAT_INTERVAL, Heartbeat, LINGER,
-    Nak, RETRANSMIT_LINGER, RttMeasurement, SETUP_INTERVAL, SetupFrame, StatusMessage, parse,
-    retransmit_window, sender_limit,
+    MAX_TERM_LENGTH, Nak, RETRANSMIT_LINGER, RttMeasurement, SETUP_INTERVAL, SetupFrame,
+    StatusMessage, parse, retransmit_window, sender_limit,
 };
 use cavalry_shm::counters::generated::{
     LOG_BUFFER_REJECTED_FRAME, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
@@ -57,12 +57,13 @@ const END_OF_STREAM_FLAG: u8 = Flags::EOS.bits();
 const IDLE_PARK: Duration = Duration::from_secs(1);
 
 /// How many replies the sender holds back when the reply queue is full: a connection
-/// change and a close per publication, a close per endpoint, and one per request
-/// handled in a cycle. With the pending replies at this bound the sender handles no
-/// request and moves no publication's connection state until the conductor takes
-/// replies again; it keeps sending (ADR 0041).
+/// change and a close per publication it may hold, a client's or a replay's
+/// (`spec::MAX_SENDER_PUBLICATIONS`; ADR 0043), a close per endpoint, and one per
+/// request handled in a cycle. With the pending replies at this bound the sender
+/// handles no request and moves no publication's connection state until the conductor
+/// takes replies again; it keeps sending (ADR 0041).
 pub(crate) const PENDING_REPLIES: usize =
-    2 * spec::MAX_PUBLICATIONS + spec::MAX_SEND_ENDPOINTS + spec::SENDER_REQUESTS_PER_CYCLE;
+    2 * spec::MAX_SENDER_PUBLICATIONS + spec::MAX_SEND_ENDPOINTS + spec::SENDER_REQUESTS_PER_CYCLE;
 
 /// What `add publication` on a `cavalry:udp` channel fixed about the publication,
 /// carried to the sender once: the log's sizes, a reader on it at the sender position,
@@ -388,7 +389,7 @@ impl Sender {
             replies,
             pending: VecDeque::with_capacity(PENDING_REPLIES),
             endpoints: Vec::with_capacity(spec::MAX_SEND_ENDPOINTS),
-            live: Vec::with_capacity(spec::MAX_PUBLICATIONS),
+            live: Vec::with_capacity(spec::MAX_SENDER_PUBLICATIONS),
             statics,
             headers: Headers::preallocate(),
             idler: Idler::new(idle),
@@ -516,7 +517,7 @@ impl Sender {
                 self.reply(Reply::EndpointClosed { registration_id });
             }
             Request::AddPublication(add) => {
-                debug_assert!(self.live.len() < spec::MAX_PUBLICATIONS);
+                debug_assert!(self.live.len() < spec::MAX_SENDER_PUBLICATIONS);
                 let sender_position = add.reader.position();
                 add.position.store_release(sender_position);
                 add.limit.store_release(0);
@@ -582,10 +583,13 @@ impl Sender {
             }
         };
         for datagram in 0..count {
-            // Every log of this version has the UDP term length (`spec/udp.md`, "Values").
+            // The frame's shape against the largest term this version allows; its offset
+            // is held against the publication's own term once the frame has found one,
+            // since a replay's publication keeps its recording's term (ADR 0043), as the
+            // receiver holds a heartbeat's against the image's (ADR 0042).
             let frame = parse(
                 self.endpoints[index].socket.datagram(datagram),
-                spec::UDP_TERM_LENGTH,
+                MAX_TERM_LENGTH,
             );
             match frame {
                 Ok(ControlFrame::StatusMessage(message)) => {
@@ -623,6 +627,12 @@ impl Sender {
         };
         self.statics.status_messages_received.increment();
         let live = &mut self.live[index];
+        // An offset the publication's term does not hold: rejected as one outside the
+        // window is (`spec/udp.md`, "The sender"; ADR 0043).
+        if message.check(live.positions.term_length()).is_err() {
+            self.statics.status_messages_rejected.increment();
+            return;
+        }
         if message.asks_for_setup() {
             if live
                 .closing
@@ -674,6 +684,12 @@ impl Sender {
         };
         self.statics.naks_received.increment();
         let live = &mut self.live[index];
+        // An offset or a length the publication's term does not hold: dropped and
+        // counted as a NAK outside the resend window is (ADR 0043).
+        if nak.check(live.positions.term_length()).is_err() {
+            self.statics.naks_ignored.increment();
+            return;
+        }
         let window = retransmit_window(
             live.sender_position,
             nak.term_id,

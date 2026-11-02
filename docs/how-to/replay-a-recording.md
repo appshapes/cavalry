@@ -93,6 +93,22 @@ from any client. The client follows the end of every replay it started while the
 handle lives, as many as the driver allows live at once, 64; one more is
 `replays-full`, and stopped again.
 
+To play a recording to a subscriber on another host, pass a `cavalry:udp` channel:
+`client.start_replay(recording_id, position, length, stream_id,
+"cavalry:udp?endpoint=<host>:<port>")?`, where the host and port are the ones a
+program on the other host subscribed on with
+`client.add_subscription("cavalry:udp?endpoint=<its address>:<port>", stream_id)?`.
+The driver's sender puts the replay's publication on the wire as it puts a client's
+`cavalry:udp` publication, with the recording's term length and MTU, so the
+subscriber's image carries the recording's positions as over `cavalry:ipc`; the
+subscriber's driver creates the image from the sender's setup frame, and a
+`cavalry:ipc` subscription on the replay stream sees nothing of it. Subscribe on the
+other host first: a replay no receiver answers ends after the replay connect timeout,
+5 s, with `ended for want of a subscriber`, and `cavalry doctor` on the replaying host
+names `replay.not_connected`. The replay ends and lingers as over `cavalry:ipc`, and
+its send endpoint stays open for the publication linger after it
+([ADR 0043](../decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md)).
+
 ## How to verify it worked
 
 - The lines' positions start at the position the last line reports and rise by each
@@ -133,8 +149,13 @@ handle lives, as many as the driver allows live at once, 64; one more is
 - `error 10 (resource temporarily unavailable)`: the replays registry (64), the replay
   publications (128: every replay's publication, live or lingering after its replay
   ended until its subscribers read to the end or five seconds pass), the replayer's
-  queue or the counters file is full; the message names which. Stop replays that are
-  not needed, or wait for the lingering ones to close.
+  queue or the counters file is full, or, on a `cavalry:udp` channel, the send
+  endpoints registry (64) or the sender's request queue; the message names which. Stop
+  replays that are not needed, or wait for the lingering ones to close.
+- `error 9 (unknown host)` or `error 4 (channel endpoint error)` on a `cavalry:udp`
+  channel: the endpoint's host does not resolve, or its socket could not be opened,
+  bound or connected; the message names the host or the operating system's reason.
+  Check the name, or pass an address, and that an `interface` named is this host's.
 - The replay prints nothing and ends after five seconds with `ended for want of a
   subscriber`: a program started the replay before adding its subscription. Subscribe
   first, as the command does.

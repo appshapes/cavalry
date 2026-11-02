@@ -86,10 +86,11 @@ const DEFERRED_CAPACITY: usize = 2 * spec::MAX_RECORDINGS;
 /// plays and a recording stops once.
 const REPLAYER_DEFERRED_CAPACITY: usize = 3 * spec::MAX_REPLAYS;
 
-/// The sender's deferred requests' bound: one close per publication and one remove per
+/// The sender's deferred requests' bound: one close per publication the sender may
+/// hold, a client's or a replay's over `cavalry:udp` (ADR 0043), and one remove per
 /// endpoint, since an add that finds no room in the sender's queue is refused with code
 /// 10 and never deferred (ADR 0041).
-const SENDER_DEFERRED_CAPACITY: usize = spec::MAX_PUBLICATIONS + spec::MAX_SEND_ENDPOINTS;
+const SENDER_DEFERRED_CAPACITY: usize = spec::MAX_SENDER_PUBLICATIONS + spec::MAX_SEND_ENDPOINTS;
 
 /// The receiver's deferred requests' bound: a remove per subscription and per endpoint,
 /// an image or a refusal per session record in progress, and a reader's attach or
@@ -412,10 +413,18 @@ struct ReplayEntry {
     replay_stream_id: i32,
     state: ReplayState,
     position: Option<Counter>,
-    /// Since when the replay's publication has had no image, for the connect timeout.
+    /// Since when the replay's publication has had no image, or over UDP no receiver
+    /// answering, for the connect timeout.
     unconnected_since: Option<i64>,
     /// A stop is with the replayer; a second `stop replay` is answered at once.
     stop_requested: bool,
+    /// The resolved endpoint and interface of a `cavalry:udp` replay channel, kept from
+    /// the command for the publication the replayer's reply creates (ADR 0043); `None`
+    /// for `cavalry:ipc`.
+    udp: Option<(SocketAddr, Option<SocketAddr>)>,
+    /// Over `cavalry:udp`, whether a receiver answers the publication's setup frames,
+    /// as the sender last said: the replay's subscriber for the connect timeout.
+    connected: bool,
 }
 
 /// One recording the conductor registers: its publication, the command that started
@@ -1073,7 +1082,7 @@ impl Conductor {
         exclusive: bool,
         now: i64,
     ) {
-        let Some(channel) = self.check_channel(correlation_id, channel, "the channel", true) else {
+        let Some(channel) = self.check_channel(correlation_id, channel, "the channel") else {
             return;
         };
         if let Channel::Udp(udp) = channel {
@@ -1313,13 +1322,10 @@ impl Conductor {
             client_id,
             correlation_id,
         };
-        let open = self.send_endpoints.iter().position(|entry| {
-            entry.endpoint == endpoint
-                && entry.interface == interface
-                && entry.state == ChannelState::Active
-        });
         // A shared publication on the same stream and resolved channel joins the first.
-        if !exclusive && let Some(endpoint_index) = open {
+        if !exclusive
+            && let Some(endpoint_index) = self.open_send_endpoint_index(endpoint, interface)
+        {
             let endpoint_id = self.send_endpoints[endpoint_index].registration_id;
             let live = self.publications.iter().position(|publication| {
                 !publication.exclusive
@@ -1355,103 +1361,20 @@ impl Conductor {
             }
         }
         // Room in the sender's queue for an endpoint and a publication, else code 10.
-        if !self.sender_deferred.is_empty()
-            || self.sender.requests.capacity() - self.sender.requests.len() < 2
-        {
+        if !self.sender_has_room() {
             self.sender_queue_full(correlation_id);
             return;
         }
-        // The endpoint: the open one on the resolved channel, or a new one.
-        let (endpoint_index, socket) = match open {
-            Some(index) => (index, None),
-            None => {
-                if self.send_endpoints.len() >= spec::MAX_SEND_ENDPOINTS {
-                    self.registry_full(correlation_id, "send endpoints", spec::MAX_SEND_ENDPOINTS);
+        // The endpoint: the open one on the resolved channel, or a new one, through the
+        // path a replay's publication takes too (ADR 0043).
+        let (endpoint_index, socket) =
+            match self.open_send_endpoint(correlation_id, endpoint, interface, now) {
+                Ok(opened) => opened,
+                Err((code, message)) => {
+                    self.send_error(correlation_id, code, &message);
                     return;
                 }
-                let socket = match SendSocket::open(endpoint, interface) {
-                    Ok(socket) => socket,
-                    Err(error) => {
-                        self.send_error(
-                            correlation_id,
-                            ErrorCode::ChannelEndpointError,
-                            &format!(
-                                "the channel's endpoint {endpoint}{}: the socket could not be \
-                                 opened, bound or connected: {error}; check that the interface \
-                                 is this host's and its port is free; see {ERRORS_DOC}",
-                                interface.map_or(String::new(), |i| format!(" from interface {i}"))
-                            ),
-                        );
-                        return;
-                    }
-                };
-                let resolved = match interface {
-                    Some(interface) => {
-                        format!("cavalry:udp?endpoint={endpoint}|interface={interface}")
-                    }
-                    None => format!("cavalry:udp?endpoint={endpoint}"),
-                };
-                let key = correlation_id.to_le_bytes();
-                let label = |name: &str| format!("{name} {resolved}");
-                let mut allocated: Vec<Counter> = Vec::with_capacity(5);
-                for (id, name) in [
-                    (CHANNEL_STATUS, "channel.status"),
-                    (CHANNEL_SOCKET_RCVBUF, "channel.socket_rcvbuf"),
-                    (CHANNEL_SOCKET_SNDBUF, "channel.socket_sndbuf"),
-                    (CHANNEL_IMAGES, "channel.images"),
-                    (CHANNEL_PUBLICATIONS, "channel.publications"),
-                ] {
-                    match self.counters.allocate(id, &key, &label(name)) {
-                        Ok(counter) => allocated.push(counter),
-                        Err(error) => {
-                            let reuse =
-                                now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-                            for counter in allocated {
-                                let _ = self.counters.free(counter.id(), reuse);
-                            }
-                            self.counters_full(correlation_id, &error);
-                            return;
-                        }
-                    }
-                }
-                let mut counters = allocated.into_iter();
-                let (
-                    Some(status),
-                    Some(socket_rcvbuf),
-                    Some(socket_sndbuf),
-                    Some(images),
-                    Some(publications),
-                ) = (
-                    counters.next(),
-                    counters.next(),
-                    counters.next(),
-                    counters.next(),
-                    counters.next(),
-                )
-                else {
-                    return;
-                };
-                let (rcvbuf, sndbuf) = socket.buffer_lengths();
-                status.set(0);
-                socket_rcvbuf.set(rcvbuf);
-                socket_sndbuf.set(sndbuf);
-                images.set(0);
-                publications.set(0);
-                self.send_endpoints.push(SendEndpoint {
-                    registration_id: correlation_id,
-                    endpoint,
-                    interface,
-                    state: ChannelState::Initializing,
-                    status,
-                    socket_rcvbuf,
-                    socket_sndbuf,
-                    images,
-                    publications,
-                    publication_count: 0,
-                });
-                (self.send_endpoints.len() - 1, Some(socket))
-            }
-        };
+            };
         let endpoint_id = self.send_endpoints[endpoint_index].registration_id;
         // The log, with the UDP sizes, and the four counters.
         let session_id = self.advance_session_id(stream_id);
@@ -1463,11 +1386,12 @@ impl Conductor {
             LogType::Concurrent
         };
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-        // The spec's UDP term, or the smaller one a test at a registry's capacity set,
-        // since every log is made resident when it is created (ADR 0027). The sender
-        // reads the control frames it receives with `spec::UDP_TERM_LENGTH` itself, so
-        // the two agree only while nothing overrides the field: the one test that does
-        // has no receiver, and sends no control frame.
+        // The spec's UDP term, or the smaller one a test at a registry's capacity sets,
+        // since every log is made resident when it is created (ADR 0027). Nothing
+        // depends on the log's term matching what the sender parses a frame against:
+        // the sender holds a status message's and a NAK's offsets against the
+        // publication's own term, as it must for a replay's publication, whose log
+        // keeps its recording's term (ADR 0043).
         let term_length = self.term_length.min(spec::UDP_TERM_LENGTH);
         let fields = HeaderFields::new(
             log_type,
@@ -1575,25 +1499,6 @@ impl Conductor {
                 sender_closed: false,
             }),
         };
-        // To the sender: the endpoint first when it is new, then the publication; the
-        // room was checked above, so neither offer fails.
-        if let Some(socket) = socket {
-            if self
-                .sender
-                .requests
-                .offer(sender::Request::AddEndpoint {
-                    registration_id: endpoint_id,
-                    socket,
-                })
-                .is_err()
-            {
-                self.statics.registry_full.increment();
-            }
-            let entry = &mut self.send_endpoints[endpoint_index];
-            entry.state = ChannelState::Active;
-            entry.status.set(1);
-            self.statics.channel_opened.increment();
-        }
         let add = sender::AddPublication {
             registration_id: correlation_id,
             endpoint_id,
@@ -1606,21 +1511,8 @@ impl Conductor {
             position: sender_position,
             limit: sender_limit,
         };
-        if self
-            .sender
-            .requests
-            .offer(sender::Request::AddPublication(add))
-            .is_err()
-        {
-            self.statics.registry_full.increment();
-        }
-        self.wake_sender();
-        let entry = &mut self.send_endpoints[endpoint_index];
-        entry.publication_count += 1;
-        entry
-            .publications
-            .set(i64::try_from(entry.publication_count).unwrap_or(i64::MAX));
-        let status_id = counter_id(&entry.status);
+        self.hand_to_sender(endpoint_index, socket, add);
+        let status_id = counter_id(&self.send_endpoints[endpoint_index].status);
         self.registration_count += 1;
         let ready = Event::PublicationReady {
             correlation_id,
@@ -1663,6 +1555,181 @@ impl Conductor {
         }
     }
 
+    /// The index of the open send endpoint on the resolved channel, if any.
+    fn open_send_endpoint_index(
+        &self,
+        endpoint: SocketAddr,
+        interface: Option<SocketAddr>,
+    ) -> Option<usize> {
+        self.send_endpoints.iter().position(|entry| {
+            entry.endpoint == endpoint
+                && entry.interface == interface
+                && entry.state == ChannelState::Active
+        })
+    }
+
+    /// Whether the sender's request queue has room for an endpoint and a publication,
+    /// with no request still waiting for it: an add that finds none is code 10, and
+    /// never deferred (ADR 0041).
+    fn sender_has_room(&self) -> bool {
+        self.sender_deferred.is_empty()
+            && self.sender.requests.capacity() - self.sender.requests.len() >= 2
+    }
+
+    /// The send endpoint a `cavalry:udp` publication sends on (`spec/udp.md`, "The
+    /// sender"; ADR 0041): the open one on the resolved channel, or a new one, its
+    /// socket opened, bound and connected here, its five counters allocated and
+    /// `channel.status` at 0 until `hand_to_sender` gives the sender the socket.
+    /// `correlation_id` names the command that opens it, a client's `add publication`
+    /// or a replay's `start replay` (ADR 0043), and keys `channel.status`. Returns the
+    /// endpoint's index and the socket when it is new, or the code and message for the
+    /// caller to answer with, the refusal counted here: the registry at capacity or the
+    /// counters file with no free record is code 10, a socket the operating system
+    /// refused code 4. The caller checks the sender's room first (`sender_has_room`).
+    fn open_send_endpoint(
+        &mut self,
+        correlation_id: i64,
+        endpoint: SocketAddr,
+        interface: Option<SocketAddr>,
+        now: i64,
+    ) -> Result<(usize, Option<SendSocket>), (ErrorCode, String)> {
+        if let Some(index) = self.open_send_endpoint_index(endpoint, interface) {
+            return Ok((index, None));
+        }
+        if self.send_endpoints.len() >= spec::MAX_SEND_ENDPOINTS {
+            self.statics.registry_full.increment();
+            return Err((
+                ErrorCode::ResourceTemporarilyUnavailable,
+                registry_full_message("send endpoints", spec::MAX_SEND_ENDPOINTS),
+            ));
+        }
+        let socket = match SendSocket::open(endpoint, interface) {
+            Ok(socket) => socket,
+            Err(error) => {
+                return Err((
+                    ErrorCode::ChannelEndpointError,
+                    format!(
+                        "the channel's endpoint {endpoint}{}: the socket could not be opened, \
+                         bound or connected: {error}; check that the interface is this host's \
+                         and its port is free; see {ERRORS_DOC}",
+                        interface.map_or(String::new(), |i| format!(" from interface {i}"))
+                    ),
+                ));
+            }
+        };
+        let resolved = match interface {
+            Some(interface) => {
+                format!("cavalry:udp?endpoint={endpoint}|interface={interface}")
+            }
+            None => format!("cavalry:udp?endpoint={endpoint}"),
+        };
+        let key = correlation_id.to_le_bytes();
+        let label = |name: &str| format!("{name} {resolved}");
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        let mut allocated: Vec<Counter> = Vec::with_capacity(5);
+        for (id, name) in [
+            (CHANNEL_STATUS, "channel.status"),
+            (CHANNEL_SOCKET_RCVBUF, "channel.socket_rcvbuf"),
+            (CHANNEL_SOCKET_SNDBUF, "channel.socket_sndbuf"),
+            (CHANNEL_IMAGES, "channel.images"),
+            (CHANNEL_PUBLICATIONS, "channel.publications"),
+        ] {
+            match self.counters.allocate(id, &key, &label(name)) {
+                Ok(counter) => allocated.push(counter),
+                Err(error) => {
+                    for counter in allocated {
+                        let _ = self.counters.free(counter.id(), reuse);
+                    }
+                    self.statics.registry_full.increment();
+                    return Err((
+                        ErrorCode::ResourceTemporarilyUnavailable,
+                        format!("{error}"),
+                    ));
+                }
+            }
+        }
+        // One record per name above; a count that does not match cannot happen, and is
+        // freed and refused like a full counters file rather than left behind.
+        let [status, socket_rcvbuf, socket_sndbuf, images, publications] =
+            match <[Counter; 5]>::try_from(allocated) {
+                Ok(five) => five,
+                Err(held) => {
+                    for counter in held {
+                        let _ = self.counters.free(counter.id(), reuse);
+                    }
+                    self.statics.registry_full.increment();
+                    return Err((
+                        ErrorCode::ResourceTemporarilyUnavailable,
+                        counters_miscounted_message(),
+                    ));
+                }
+            };
+        let (rcvbuf, sndbuf) = socket.buffer_lengths();
+        status.set(0);
+        socket_rcvbuf.set(rcvbuf);
+        socket_sndbuf.set(sndbuf);
+        images.set(0);
+        publications.set(0);
+        self.send_endpoints.push(SendEndpoint {
+            registration_id: correlation_id,
+            endpoint,
+            interface,
+            state: ChannelState::Initializing,
+            status,
+            socket_rcvbuf,
+            socket_sndbuf,
+            images,
+            publications,
+            publication_count: 0,
+        });
+        Ok((self.send_endpoints.len() - 1, Some(socket)))
+    }
+
+    /// Hands the sender a publication to put on the wire, and its endpoint first when
+    /// `socket` is a new endpoint's (`spec/udp.md`, "The sender"; ADR 0041): the room
+    /// was checked by the caller, so neither offer fails; a new endpoint becomes active
+    /// with `channel.status` 1 and `channel.opened`, and the endpoint counts one more
+    /// publication.
+    fn hand_to_sender(
+        &mut self,
+        endpoint_index: usize,
+        socket: Option<SendSocket>,
+        add: sender::AddPublication,
+    ) {
+        let endpoint_id = add.endpoint_id;
+        if let Some(socket) = socket {
+            if self
+                .sender
+                .requests
+                .offer(sender::Request::AddEndpoint {
+                    registration_id: endpoint_id,
+                    socket,
+                })
+                .is_err()
+            {
+                self.statics.registry_full.increment();
+            }
+            let entry = &mut self.send_endpoints[endpoint_index];
+            entry.state = ChannelState::Active;
+            entry.status.set(1);
+            self.statics.channel_opened.increment();
+        }
+        if self
+            .sender
+            .requests
+            .offer(sender::Request::AddPublication(add))
+            .is_err()
+        {
+            self.statics.registry_full.increment();
+        }
+        self.wake_sender();
+        let entry = &mut self.send_endpoints[endpoint_index];
+        entry.publication_count += 1;
+        entry
+            .publications
+            .set(i64::try_from(entry.publication_count).unwrap_or(i64::MAX));
+    }
+
     /// Answers `add publication` with error code 10 when the sender's request queue has
     /// no room for an endpoint and a publication, or requests are still waiting for it.
     fn sender_queue_full(&mut self, correlation_id: i64) {
@@ -1670,11 +1737,7 @@ impl Conductor {
         self.send_error(
             correlation_id,
             ErrorCode::ResourceTemporarilyUnavailable,
-            &format!(
-                "the sender's request queue holds {} and is full; try again once the sender \
-                 has caught up; see {ERRORS_DOC}",
-                spec::SENDER_QUEUE_CAPACITY
-            ),
+            &sender_queue_full_message(),
         );
     }
 
@@ -1777,6 +1840,15 @@ impl Conductor {
         {
             udp.connected = connected;
             let _ = publication.log.set_connected(connected);
+        }
+        // A replay's publication: the replay's entry keeps the fact for the connect
+        // timeout, so that `keep_replays` reads one bool and scans nothing (ADR 0043).
+        if let Some(replay) = self
+            .replays
+            .iter_mut()
+            .find(|replay| replay.replay_session_id == registration_id)
+        {
+            replay.connected = connected;
         }
     }
 
@@ -1926,7 +1998,7 @@ impl Conductor {
         stream_id: i32,
         channel: &[u8],
     ) {
-        let Some(channel) = self.check_channel(correlation_id, channel, "the channel", true) else {
+        let Some(channel) = self.check_channel(correlation_id, channel, "the channel") else {
             return;
         };
         if let Channel::Udp(udp) = channel {
@@ -3194,45 +3266,21 @@ impl Conductor {
         });
     }
 
-    /// `start recording` (`spec/client-protocol.md`, "Commands"): of the live
-    /// publications on the stream, the one with the lowest registration id that is not
-    /// yet being recorded; none live is code 20, every one recorded is code 22, the
-    /// registry or the recorder's queue full is code 10. The recording starts at the
-    /// producer position loaded afresh, the limit respects it from now on, and the
-    /// recorder is asked for the catalog slot; `recording ready` follows its reply.
     /// The channel check every command that carries one runs first (`spec/udp.md`,
     /// "What a reader rejects"; ADR 0040): `cavalry:ipc` passes; a `cavalry:udp` channel
-    /// that parses passes where `udp` says the command takes one, every command but
-    /// `start replay` in this version (ADR 0041, ADR 0042), and is refused there with
-    /// code 11 and a message naming the card that brings it (card 192), the refusal
-    /// counted in `client_protocol.errors` alone, as a well-formed command's is; a
-    /// channel that fails the grammar, names a parameter this version does not, has a
-    /// bad endpoint or a multicast address is code 1 with the reason, counted in
-    /// `client_protocol.rejected_command`. Returns the channel when the command goes
-    /// on.
+    /// that parses passes, every command taking one since `start replay` does (ADR
+    /// 0041, ADR 0042, ADR 0043); a channel that fails the grammar, names a parameter
+    /// this version does not, has a bad endpoint or a multicast address is code 1 with
+    /// the reason, counted in `client_protocol.rejected_command`. Returns the channel
+    /// when the command goes on.
     fn check_channel<'a>(
         &mut self,
         correlation_id: i64,
         channel: &'a [u8],
         what: &str,
-        udp: bool,
     ) -> Option<Channel<'a>> {
         match Channel::parse(channel) {
-            Ok(Channel::Ipc) => Some(Channel::Ipc),
-            Ok(Channel::Udp(parsed)) if udp => Some(Channel::Udp(parsed)),
-            Ok(Channel::Udp(_)) => {
-                self.send_error(
-                    correlation_id,
-                    ErrorCode::GenericError,
-                    &format!(
-                        "{what} names cavalry:udp, which this driver does not replay on yet: a \
-                         replay over UDP follows (card 192); use cavalry:ipc for the replay \
-                         channel, or upgrade the driver to a release that replays over UDP; \
-                         see {ERRORS_DOC}"
-                    ),
-                );
-                None
-            }
+            Ok(channel) => Some(channel),
             Err(error) => {
                 self.statics.rejected_command.increment();
                 let message = if let ChannelError::Key { .. } = error {
@@ -3249,8 +3297,14 @@ impl Conductor {
         }
     }
 
+    /// `start recording` (`spec/client-protocol.md`, "Commands"): of the live
+    /// publications on the stream, the one with the lowest registration id that is not
+    /// yet being recorded; none live is code 20, every one recorded is code 22, the
+    /// registry or the recorder's queue full is code 10. The recording starts at the
+    /// producer position loaded afresh, the limit respects it from now on, and the
+    /// recorder is asked for the catalog slot; `recording ready` follows its reply.
     fn start_recording(&mut self, correlation_id: i64, stream_id: i32, channel: &[u8], now: i64) {
-        let Some(parsed) = self.check_channel(correlation_id, channel, "the channel", true) else {
+        let Some(parsed) = self.check_channel(correlation_id, channel, "the channel") else {
             return;
         };
         // Over UDP the logs that match are the publications sending on the resolved
@@ -3991,12 +4045,19 @@ impl Conductor {
         replay_stream_id: i32,
         channel: &[u8],
     ) {
-        if self
-            .check_channel(correlation_id, channel, "the replay channel", false)
-            .is_none()
-        {
+        let Some(channel) = self.check_channel(correlation_id, channel, "the replay channel")
+        else {
             return;
-        }
+        };
+        // A `cavalry:udp` replay channel is resolved once, here, and kept for the
+        // publication the replayer's reply creates (ADR 0043).
+        let udp = match channel {
+            Channel::Ipc => None,
+            Channel::Udp(udp) => match self.resolve_channel(correlation_id, &udp) {
+                Some(resolved) => Some(resolved),
+                None => return,
+            },
+        };
         if length < NULL_LENGTH {
             self.statics.rejected_command.increment();
             self.send_error(
@@ -4092,6 +4153,8 @@ impl Conductor {
             position: None,
             unconnected_since: None,
             stop_requested: false,
+            udp,
+            connected: false,
         });
     }
 
@@ -4218,8 +4281,16 @@ impl Conductor {
     /// is created at the start position with the recording's term, a new session id and
     /// the replay stream id, its three counters allocated, the replayer's writer
     /// attached, `replay ready` sent, and an image given to every subscription on the
-    /// stream (`spec/client-protocol.md`, "Commands"). A log that cannot be created is
-    /// code 12, a counters file with no free record code 10; either removes the replay.
+    /// stream (`spec/client-protocol.md`, "Commands"). Over a `cavalry:udp` replay
+    /// channel the publication takes the sender's path as a client's does (ADR 0043):
+    /// the sender's room and the send endpoint first, opened or shared as `add
+    /// publication` opens it, `sender.position` and `sender.limit` beside the three,
+    /// the socket when new and the publication with a reader at the start position
+    /// handed to the sender, and no image, since the images are the receiving driver's.
+    /// A log that cannot be created is code 12, a counters file with no free record
+    /// code 10, and over UDP the sender's queue or the endpoints registry with no room
+    /// code 10 and a socket the operating system refused code 4; each removes the
+    /// replay with nothing of it left.
     fn on_replay_ready(
         &mut self,
         replay_session_id: i64,
@@ -4237,14 +4308,43 @@ impl Conductor {
         debug_assert_eq!(self.replays[index].recording_id, recording_id);
         let recording_id = self.replays[index].recording_id;
         let stream_id = self.replays[index].replay_stream_id;
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        // Over UDP, the sender's room and the endpoint before anything is made, in the
+        // order `add publication` keeps; a new endpoint is abandoned on any failure
+        // below, as a client's is.
+        let endpoint = match self.replays[index].udp {
+            None => None,
+            Some((endpoint, interface)) => {
+                if !self.sender_has_room() {
+                    self.statics.registry_full.increment();
+                    self.fail_replay(
+                        index,
+                        ErrorCode::ResourceTemporarilyUnavailable,
+                        &sender_queue_full_message(),
+                    );
+                    return;
+                }
+                match self.open_send_endpoint(replay_session_id, endpoint, interface, now) {
+                    Ok(opened) => Some(opened),
+                    Err((code, message)) => {
+                        self.fail_replay(index, code, &message);
+                        return;
+                    }
+                }
+            }
+        };
+        let endpoint_id = endpoint
+            .as_ref()
+            .map(|(endpoint_index, _)| self.send_endpoints[*endpoint_index].registration_id);
         let session_id = self.advance_session_id(stream_id);
         let term_length = u32::try_from(term_length).unwrap_or(0);
+        let mtu_length = u32::try_from(mtu_length).unwrap_or(0);
         let fields = HeaderFields::new(
             LogType::Exclusive,
             replay_session_id,
             initial_term_id,
             term_length,
-            u32::try_from(mtu_length).unwrap_or(0),
+            mtu_length,
             term_length / 2,
             session_id,
             stream_id,
@@ -4254,84 +4354,178 @@ impl Conductor {
         let log = match log {
             Ok(log) => log,
             Err(error) => {
-                remove_log(&self.dir, replay_session_id);
                 self.statics.log_create_failed.increment();
-                self.fail_replay(index, ErrorCode::StorageSpace, &format!("{error}"));
+                self.undo_replay_ready(
+                    index,
+                    Vec::new(),
+                    None,
+                    endpoint,
+                    reuse,
+                    (ErrorCode::StorageSpace, &format!("{error}")),
+                );
                 return;
             }
         };
+        // The counters: the publication's two and `replay.position`, and over UDP the
+        // sender's two, labelled as a publication's with the endpoint's registration id
+        // last, so that `doctor` names the endpoint from the counters file alone; one
+        // the counters file refuses frees the ones before it.
         let key = position_key(replay_session_id, session_id, stream_id);
+        let replay_key = replay_session_id.to_le_bytes();
         let label = |name: &str| format!("{name} {replay_session_id} {session_id} {stream_id}");
-        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-        let position =
-            match self
-                .counters
-                .allocate(PUBLICATION_POSITION, &key, &label("publication.position"))
-            {
-                Ok(counter) => counter,
+        let mut wanted: Vec<(CounterId, &[u8], String)> = vec![
+            (PUBLICATION_POSITION, &key, label("publication.position")),
+            (PUBLICATION_LIMIT, &key, label("publication.limit")),
+            (
+                REPLAY_POSITION,
+                &replay_key,
+                format!(
+                    "replay.position {replay_session_id} {recording_id} {session_id} {stream_id}"
+                ),
+            ),
+        ];
+        if let Some(endpoint_id) = endpoint_id {
+            for (id, name) in [
+                (SENDER_POSITION, "sender.position"),
+                (SENDER_LIMIT, "sender.limit"),
+            ] {
+                wanted.push((id, &key, format!("{} {endpoint_id}", label(name))));
+            }
+        }
+        let mut allocated: Vec<Counter> = Vec::with_capacity(wanted.len());
+        for (id, key, label) in &wanted {
+            match self.counters.allocate(*id, key, label) {
+                Ok(counter) => allocated.push(counter),
                 Err(error) => {
-                    drop(log);
-                    remove_log(&self.dir, replay_session_id);
                     self.statics.registry_full.increment();
-                    self.fail_replay(
+                    self.undo_replay_ready(
                         index,
-                        ErrorCode::ResourceTemporarilyUnavailable,
-                        &format!("{error}"),
+                        allocated,
+                        Some(log),
+                        endpoint,
+                        reuse,
+                        (
+                            ErrorCode::ResourceTemporarilyUnavailable,
+                            &format!("{error}"),
+                        ),
                     );
                     return;
                 }
-            };
-        let limit =
-            match self
-                .counters
-                .allocate(PUBLICATION_LIMIT, &key, &label("publication.limit"))
-            {
-                Ok(counter) => counter,
-                Err(error) => {
-                    let _ = self.counters.free(position.id(), reuse);
-                    drop(log);
-                    remove_log(&self.dir, replay_session_id);
-                    self.statics.registry_full.increment();
-                    self.fail_replay(
+            }
+        }
+        // One counter per entry of `wanted`, in its order; a count that does not match
+        // cannot happen, and is undone like a refusal rather than left behind.
+        let (position, limit, replay_position, sender) = if endpoint_id.is_some() {
+            match <[Counter; 5]>::try_from(allocated) {
+                Ok(
+                    [
+                        position,
+                        limit,
+                        replay_position,
+                        sender_position,
+                        sender_limit,
+                    ],
+                ) => (
+                    position,
+                    limit,
+                    replay_position,
+                    Some((sender_position, sender_limit)),
+                ),
+                Err(held) => {
+                    self.undo_replay_ready(
                         index,
-                        ErrorCode::ResourceTemporarilyUnavailable,
-                        &format!("{error}"),
+                        held,
+                        Some(log),
+                        endpoint,
+                        reuse,
+                        (
+                            ErrorCode::ResourceTemporarilyUnavailable,
+                            &counters_miscounted_message(),
+                        ),
                     );
                     return;
                 }
-            };
-        let replay_label =
-            format!("replay.position {replay_session_id} {recording_id} {session_id} {stream_id}");
-        let replay_position = match self.counters.allocate(
-            REPLAY_POSITION,
-            &replay_session_id.to_le_bytes(),
-            &replay_label,
-        ) {
-            Ok(counter) => counter,
-            Err(error) => {
-                let _ = self.counters.free(position.id(), reuse);
-                let _ = self.counters.free(limit.id(), reuse);
-                drop(log);
-                remove_log(&self.dir, replay_session_id);
-                self.statics.registry_full.increment();
-                self.fail_replay(
-                    index,
-                    ErrorCode::ResourceTemporarilyUnavailable,
-                    &format!("{error}"),
-                );
-                return;
+            }
+        } else {
+            match <[Counter; 3]>::try_from(allocated) {
+                Ok([position, limit, replay_position]) => (position, limit, replay_position, None),
+                Err(held) => {
+                    self.undo_replay_ready(
+                        index,
+                        held,
+                        Some(log),
+                        endpoint,
+                        reuse,
+                        (
+                            ErrorCode::ResourceTemporarilyUnavailable,
+                            &counters_miscounted_message(),
+                        ),
+                    );
+                    return;
+                }
             }
         };
         let writer = match log.writer(recorded_session_id, recorded_stream_id) {
             Ok(writer) => writer,
             Err(error) => {
-                let _ = self.counters.free(position.id(), reuse);
-                let _ = self.counters.free(limit.id(), reuse);
-                let _ = self.counters.free(replay_position.id(), reuse);
-                drop(log);
-                remove_log(&self.dir, replay_session_id);
                 self.statics.log_create_failed.increment();
-                self.fail_replay(index, ErrorCode::StorageSpace, &format!("{error}"));
+                self.undo_replay_ready(
+                    index,
+                    replay_counters(&position, &limit, &replay_position, sender.as_ref()),
+                    Some(log),
+                    endpoint,
+                    reuse,
+                    (ErrorCode::StorageSpace, &format!("{error}")),
+                );
+                return;
+            }
+        };
+        // Over UDP: the sender's reader at the replay's start position, where its sender
+        // position begins. The endpoint and the sender's counters go together, both from
+        // the resolved channel; a pair that does not match cannot happen, and is undone
+        // like a refusal rather than left behind.
+        let udp_start = match (endpoint, sender) {
+            (None, None) => None,
+            (Some((endpoint_index, socket)), Some((sender_position, sender_limit))) => {
+                match log.reader(start_position) {
+                    Ok(reader) => Some((
+                        endpoint_index,
+                        socket,
+                        sender_position,
+                        sender_limit,
+                        reader,
+                    )),
+                    Err(error) => {
+                        self.statics.log_create_failed.increment();
+                        self.undo_replay_ready(
+                            index,
+                            replay_counters(
+                                &position,
+                                &limit,
+                                &replay_position,
+                                Some(&(sender_position, sender_limit)),
+                            ),
+                            Some(log),
+                            Some((endpoint_index, socket)),
+                            reuse,
+                            (ErrorCode::StorageSpace, &format!("{error}")),
+                        );
+                        return;
+                    }
+                }
+            }
+            (endpoint, sender) => {
+                self.undo_replay_ready(
+                    index,
+                    replay_counters(&position, &limit, &replay_position, sender.as_ref()),
+                    Some(log),
+                    endpoint,
+                    reuse,
+                    (
+                        ErrorCode::ResourceTemporarilyUnavailable,
+                        &counters_miscounted_message(),
+                    ),
+                );
                 return;
             }
         };
@@ -4342,6 +4536,38 @@ impl Conductor {
             .to_string_lossy()
             .into_owned();
         let limit_handle = limit.clone();
+        // Over UDP: the publication's sender side, and the hand-off to the sender.
+        let mut udp = None;
+        if let Some((endpoint_index, socket, sender_position, sender_limit, reader)) = udp_start {
+            let endpoint_id = self.send_endpoints[endpoint_index].registration_id;
+            // The sender position starts where the replay does, before the sender's
+            // first cycle stores it from its reader, so that the limit the conductor
+            // keeps from it never reads below the start.
+            sender_position.store_release(start_position);
+            udp = Some(UdpPublication {
+                endpoint_id,
+                sender_position: sender_position.clone(),
+                sender_limit_id: sender_limit.id(),
+                term_length: i64::from(term_length),
+                connected: false,
+                close_sent: false,
+                sender_closed: false,
+            });
+            let add = sender::AddPublication {
+                registration_id: replay_session_id,
+                endpoint_id,
+                session_id,
+                stream_id,
+                initial_term_id,
+                term_length,
+                mtu_length,
+                reader,
+                position: sender_position,
+                limit: sender_limit,
+            };
+            self.hand_to_sender(endpoint_index, socket, add);
+        }
+        let over_udp = udp.is_some();
         self.publications.push(Publication {
             registration_id: replay_session_id,
             session_id,
@@ -4360,7 +4586,7 @@ impl Conductor {
             stalled: None,
             closing: None,
             log_file_name,
-            udp: None,
+            udp,
         });
         let publication_index = self.publications.len() - 1;
         {
@@ -4384,6 +4610,11 @@ impl Conductor {
             session_id,
             stream_id,
         });
+        // The images over `cavalry:ipc`; over UDP they are the receiving driver's, and a
+        // receiver answering connects the publication through the sender's reply.
+        if over_udp {
+            return;
+        }
         let matching: Vec<i64> = self
             .subscriptions
             .iter()
@@ -4400,6 +4631,29 @@ impl Conductor {
         {
             self.replays[index].unconnected_since = None;
         }
+    }
+
+    /// Undoes what `on_replay_ready` made before a step failed: the counters freed, the
+    /// log dropped and its file removed, a send endpoint opened for the replay
+    /// abandoned, and the replay failed with `code` (ADR 0030, ADR 0043).
+    fn undo_replay_ready(
+        &mut self,
+        index: usize,
+        counters: Vec<Counter>,
+        log: Option<LogBuffers>,
+        endpoint: Option<(usize, Option<SendSocket>)>,
+        reuse: i64,
+        (code, message): (ErrorCode, &str),
+    ) {
+        for counter in counters {
+            let _ = self.counters.free(counter.id(), reuse);
+        }
+        drop(log);
+        remove_log(&self.dir, self.replays[index].replay_session_id);
+        if let Some((endpoint_index, socket)) = endpoint {
+            self.abandon_send_endpoint(endpoint_index, socket.is_some(), reuse);
+        }
+        self.fail_replay(index, code, message);
     }
 
     /// A start that failed after the replayer took it: the client gets `code`, the
@@ -4485,6 +4739,7 @@ impl Conductor {
             let _ = self.counters.free(counter.id(), reuse);
         }
         let mut end = position;
+        let mut close = None;
         if let Some(publication) = self
             .publications
             .iter_mut()
@@ -4494,6 +4749,21 @@ impl Conductor {
             end = publication.log.producer_position().unwrap_or(position);
             let _ = publication.log.set_end_of_stream_position(end);
             publication.closing = Some((end, now));
+            if let Some(udp) = &mut publication.udp
+                && !udp.close_sent
+            {
+                udp.close_sent = true;
+                close = Some((publication.registration_id, end));
+            }
+        }
+        // Over UDP the sender lingers the replay's publication as it lingers any: what
+        // is left goes, heartbeats carry EOS, NAKs are answered, and its reply ends the
+        // close (ADR 0041, ADR 0043).
+        if let Some((registration_id, end_of_stream_position)) = close {
+            self.sender_request(sender::Request::Close {
+                registration_id,
+                end_of_stream_position,
+            });
         }
         self.statics.replay_stopped.increment();
         match reason {
@@ -4520,7 +4790,12 @@ impl Conductor {
                 continue;
             }
             let id = entry.replay_session_id;
-            let connected = self.images.iter().any(|image| image.publication_id == id);
+            // Over UDP the subscriber is a receiver answering the publication's setup
+            // frames, as the sender last said (ADR 0043); over IPC, an image.
+            let connected = match entry.udp {
+                Some(_) => entry.connected,
+                None => self.images.iter().any(|image| image.publication_id == id),
+            };
             if connected {
                 entry.unconnected_since = None;
                 continue;
@@ -4565,10 +4840,7 @@ impl Conductor {
         self.send_error(
             correlation_id,
             ErrorCode::ResourceTemporarilyUnavailable,
-            &format!(
-                "the driver's {registry} registry holds {capacity} and is full; remove what is not \
-                 used; see {ERRORS_DOC}"
-            ),
+            &registry_full_message(registry, capacity),
         );
     }
 
@@ -5117,6 +5389,49 @@ fn resolve(host: &str, port: u16) -> Result<SocketAddr, String> {
     }
 }
 
+/// The message of error code 10 for a registry at capacity.
+fn registry_full_message(registry: &str, capacity: usize) -> String {
+    format!(
+        "the driver's {registry} registry holds {capacity} and is full; remove what is not \
+         used; see {ERRORS_DOC}"
+    )
+}
+
+/// The message of error code 10 for a counters file that gave fewer records than it
+/// was asked for: a case that cannot happen, answered rather than left behind.
+fn counters_miscounted_message() -> String {
+    format!(
+        "the counters file gave fewer records than were asked for; try the command again, \
+         and report it; see {ERRORS_DOC}"
+    )
+}
+
+/// A replay's counters as `undo_replay_ready` takes them, cloned: the publication's
+/// two, `replay.position`, and over UDP the sender's two.
+fn replay_counters(
+    position: &Counter,
+    limit: &Counter,
+    replay_position: &Counter,
+    sender: Option<&(Counter, Counter)>,
+) -> Vec<Counter> {
+    let mut held = vec![position.clone(), limit.clone(), replay_position.clone()];
+    if let Some((sender_position, sender_limit)) = sender {
+        held.push(sender_position.clone());
+        held.push(sender_limit.clone());
+    }
+    held
+}
+
+/// The message of error code 10 for the sender's request queue with no room, or with
+/// requests still waiting for it (ADR 0041).
+fn sender_queue_full_message() -> String {
+    format!(
+        "the sender's request queue holds {} and is full; try again once the sender has \
+         caught up; see {ERRORS_DOC}",
+        spec::SENDER_QUEUE_CAPACITY
+    )
+}
+
 fn position_key(correlation_id: i64, session_id: i32, stream_id: i32) -> [u8; 16] {
     let mut key = [0u8; 16];
     key[..8].copy_from_slice(&correlation_id.to_le_bytes());
@@ -5473,8 +5788,8 @@ mod recording {
     use std::time::Instant;
 
     use cavalry_proto::udp::{
-        CONNECTION_TIMEOUT, ControlFrame, STATUS_MESSAGE_END_OF_STREAM, SetupFrame, StatusMessage,
-        parse as parse_udp,
+        CONNECTION_TIMEOUT, ControlFrame, Datagram, MAX_TERM_LENGTH, STATUS_MESSAGE_END_OF_STREAM,
+        SetupFrame, StatusMessage, parse as parse_udp,
     };
     use cavalry_shm::counters::generated::{
         COUNTERS_ALLOCATED, COUNTERS_FREED, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
@@ -5482,15 +5797,16 @@ mod recording {
     };
 
     /// A receiver by hand: a socket of its own that reads what the sender puts on the
-    /// wire and answers as `spec/udp.md`, "The receiver" says a receiver answers.
-    struct TestReceiver {
+    /// wire and answers as `spec/udp.md`, "The receiver" says a receiver answers. The
+    /// replay module's tests drive a replay over UDP against it too.
+    pub(super) struct TestReceiver {
         socket: std::net::UdpSocket,
         buffer: Vec<u8>,
         peer: Option<std::net::SocketAddr>,
     }
 
     impl TestReceiver {
-        fn bind() -> Self {
+        pub(super) fn bind() -> Self {
             let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
             socket
                 .set_read_timeout(Some(Duration::from_millis(500)))
@@ -5502,7 +5818,7 @@ mod recording {
             }
         }
 
-        fn channel(&self) -> Vec<u8> {
+        pub(super) fn channel(&self) -> Vec<u8> {
             format!(
                 "cavalry:udp?endpoint={}",
                 self.socket.local_addr().expect("bound")
@@ -5511,13 +5827,13 @@ mod recording {
         }
 
         /// The next datagram as a control frame, or `None` at the read timeout.
-        fn next_control(&mut self) -> Option<ControlFrame> {
+        pub(super) fn next_control(&mut self) -> Option<ControlFrame> {
             let (length, from) = self.socket.recv_from(&mut self.buffer).ok()?;
             self.peer = Some(from);
             parse_udp(&self.buffer[..length], spec::UDP_TERM_LENGTH).ok()
         }
 
-        fn send_status_message(&self, message: &StatusMessage) {
+        pub(super) fn send_status_message(&self, message: &StatusMessage) {
             let bytes = message.to_bytes();
             self.socket
                 .send_to(
@@ -5525,6 +5841,39 @@ mod recording {
                     self.peer.expect("a setup frame arrived first"),
                 )
                 .expect("the status message is sent");
+        }
+
+        /// The next datagram as its data frames, (header, body) in order, checked
+        /// against `term_length`; an empty list for a control frame or a heartbeat;
+        /// `None` at the read timeout.
+        pub(super) fn next_data(
+            &mut self,
+            term_length: u32,
+        ) -> Option<Vec<(DataFrameHeader, Vec<u8>)>> {
+            let (length, from) = self.socket.recv_from(&mut self.buffer).ok()?;
+            self.peer = Some(from);
+            let bytes = &self.buffer[..length];
+            if !matches!(parse_udp(bytes, MAX_TERM_LENGTH), Ok(ControlFrame::Data)) {
+                return Some(Vec::new());
+            }
+            let datagram = Datagram::check(bytes, term_length).expect("the datagram checks");
+            Some(
+                datagram
+                    .frames()
+                    .map(|frame| {
+                        let body = frame.bytes[FRAME_HEADER..frame.header.frame_length() as usize]
+                            .to_vec();
+                        (frame.header, body)
+                    })
+                    .collect(),
+            )
+        }
+
+        /// How long a read waits for a datagram.
+        pub(super) fn set_read_timeout(&self, timeout: Duration) {
+            self.socket
+                .set_read_timeout(Some(timeout))
+                .expect("a read timeout");
         }
     }
 
@@ -5788,6 +6137,20 @@ mod recording {
         let (code, message) = h.last_error(5).expect("an error");
         assert_eq!(code, 20, "{message}");
         assert!(message.contains("127.0.0.1:40123"), "{message}");
+        // A replay channel's host is resolved as the command is handled (ADR 0043): code
+        // 9, and no replay registered.
+        h.conductor.start_replay(
+            6,
+            0,
+            -1,
+            -1,
+            7,
+            b"cavalry:udp?endpoint=no-such-host.invalid:40123",
+        );
+        let (code, message) = h.last_error(6).expect("an error");
+        assert_eq!(code, 9, "{message}");
+        assert!(message.contains("no-such-host.invalid"), "{message}");
+        assert!(h.conductor.replays.is_empty());
     }
 
     /// The send endpoints registry holds 64: the 65th resolved channel is code 10
@@ -6015,8 +6378,9 @@ mod recording {
         }
         assert_eq!(
             h.conductor.sender_deferred.len(),
-            SENDER_DEFERRED_CAPACITY,
-            "and one remove per endpoint"
+            SENDER_DEFERRED_CAPACITY - spec::MAX_REPLAY_PUBLICATIONS,
+            "and one remove per endpoint; the rest of the bound is a close per replay \
+             publication over cavalry:udp (ADR 0043)"
         );
         assert_eq!(
             h.conductor.sender_deferred.capacity(),
@@ -6967,16 +7331,21 @@ mod replay {
 
     use std::fs::OpenOptions;
     use std::os::unix::fs::FileExt;
+    use std::time::Instant;
 
     use cavalry_proto::client_protocol::{FOLLOW_LENGTH, NULL_LENGTH, NULL_POSITION};
+    use cavalry_proto::frame::DataFrameHeader;
+    use cavalry_proto::udp::{ControlFrame, STATUS_MESSAGE_END_OF_STREAM, StatusMessage};
     use cavalry_shm::counters::generated::{
-        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, RECORDING_DELETED,
-        RECORDING_RETENTION_FAILED, RECORDING_SEGMENTS_PURGED, RECORDING_TRUNCATED, REPLAY_ENDED,
-        REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
+        COUNTERS_ALLOCATED, COUNTERS_FREED, DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME,
+        PUBLICATION_CONNECTED, RECORDING_DELETED, RECORDING_RETENTION_FAILED,
+        RECORDING_SEGMENTS_PURGED, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
+        REPLAY_NOT_CONNECTED, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
+        SENDER_FRAMES_SENT, SENDER_STATUS_MESSAGES_RECEIVED, SENDER_STATUS_MESSAGES_REJECTED,
     };
     use cavalry_shm::log::ClaimError;
 
-    use super::recording::Harness;
+    use super::recording::{Harness, TestReceiver};
     use super::*;
 
     const MS: i64 = 1_000_000;
@@ -8140,6 +8509,571 @@ mod replay {
         drop(appender);
     }
 
+    // ---- replay over a cavalry:udp channel: the sender's path (ADR 0043) ---------------
+
+    /// `start replay` with a `cavalry:udp` channel, cycled until the replay is live or
+    /// failed, as `start_replay` does for `cavalry:ipc`.
+    fn start_udp_replay(h: &mut Harness, correlation_id: i64, position: i64, channel: &[u8]) {
+        h.conductor.start_replay(
+            correlation_id,
+            0,
+            position,
+            NULL_LENGTH,
+            REPLAY_STREAM,
+            channel,
+        );
+        for _ in 0..10 {
+            h.cycle();
+            let starting = h.conductor.replays.iter().any(|replay| {
+                replay.replay_session_id == correlation_id && replay.state == ReplayState::Starting
+            });
+            if !starting {
+                return;
+            }
+        }
+        panic!("the replay is still starting");
+    }
+
+    /// One cycle of the sender, the conductor and the replayer on the real clock: the
+    /// sender's timers run on it, and the replayer paces against the limit alone.
+    fn cycle_with_sender(h: &mut Harness) {
+        let now = now_nanos();
+        h.sender.duty_cycle(now);
+        h.conductor.duty_cycle(now);
+        h.replayer.duty_cycle(now);
+        h.conductor.duty_cycle(now);
+    }
+
+    /// The full cases first (invariant 3): a replay over `cavalry:udp` refused at the
+    /// sender's bounds leaves nothing of itself behind. The send endpoints registry
+    /// full of a client's publications: a replay on a 65th channel fails with code 10
+    /// naming the registry when the replayer answers ready, with no endpoint, no
+    /// publication, no log and no counter left, the replay gone and `replay.started`
+    /// unmoved. The sender's request queue full: a replay on an open channel, which
+    /// shares the endpoint and needs the publication's request alone, fails with code
+    /// 10 naming the queue the same way. Before either, a channel whose interface is
+    /// not this host's: the socket is refused with code 4 at the same point, no
+    /// endpoint opened. And once the sender has drained its queue, a replay on the open
+    /// channel goes live and shares its endpoint.
+    #[test]
+    fn a_replay_over_udp_refused_at_the_senders_bounds_leaves_nothing_behind() {
+        let (mut h, mut appender) = recorded("replay-udp-bounds");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+
+        // The socket refused: code 4 from the replayer's ready reply, nothing left.
+        start_udp_replay(
+            &mut h,
+            601,
+            NULL_POSITION,
+            b"cavalry:udp?endpoint=127.0.0.1:40998|interface=203.0.113.9",
+        );
+        let got = events(&mut h);
+        let error = errors(&got)
+            .into_iter()
+            .find(|(id, _, _)| *id == 601)
+            .expect("the replay was refused");
+        assert_eq!(error.1, 4, "{}", error.2);
+        assert!(error.2.contains("203.0.113.9"), "{}", error.2);
+        assert!(replay_ready(&got, 601).is_none());
+        assert!(h.conductor.replays.is_empty(), "the replay is gone");
+        assert!(h.conductor.send_endpoints.is_empty(), "no endpoint");
+        assert_eq!(h.conductor.publications.len(), 1, "no publication");
+        assert!(!h.dir.path().join("publications/601.logbuffer").exists());
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated, "no counter");
+        assert_eq!(h.counter(CHANNEL_OPENED), 0);
+        assert_eq!(h.counter(REPLAY_STARTED), 0);
+
+        let now = h.now;
+        for i in 0..spec::MAX_SEND_ENDPOINTS {
+            let correlation_id = 10 + i as i64;
+            let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", 40_200 + i);
+            h.conductor.add_publication(
+                CLIENT,
+                correlation_id,
+                STREAM,
+                channel.as_bytes(),
+                false,
+                now,
+            );
+            assert_eq!(h.last_error(correlation_id), None, "endpoint {i}");
+        }
+        assert_eq!(h.conductor.send_endpoints.len(), spec::MAX_SEND_ENDPOINTS);
+        let publications = h.conductor.publications.len();
+        let _ = events(&mut h);
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        let registry_full = h.counter(DRIVER_REGISTRY_FULL);
+
+        // The registry full: code 10 naming it, from the replayer's ready reply.
+        start_udp_replay(
+            &mut h,
+            600,
+            NULL_POSITION,
+            b"cavalry:udp?endpoint=127.0.0.1:40999",
+        );
+        let got = events(&mut h);
+        let error = errors(&got)
+            .into_iter()
+            .find(|(id, _, _)| *id == 600)
+            .expect("the replay was refused");
+        assert_eq!(error.1, 10, "{}", error.2);
+        assert!(error.2.contains("send endpoints"), "{}", error.2);
+        assert!(replay_ready(&got, 600).is_none());
+        assert!(h.conductor.replays.is_empty(), "the replay is gone");
+        assert_eq!(h.conductor.send_endpoints.len(), spec::MAX_SEND_ENDPOINTS);
+        assert_eq!(
+            h.conductor.publications.len(),
+            publications,
+            "no publication"
+        );
+        assert!(!h.dir.path().join("publications/600.logbuffer").exists());
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated, "no counter");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), registry_full + 1);
+        assert_eq!(h.counter(REPLAY_STARTED), 0);
+
+        // The sender's request queue full: a replay on the open channel shares its
+        // endpoint and is refused for the queue, nothing left.
+        h.now = now_nanos();
+        for _ in 0..10 {
+            h.sender.duty_cycle(h.now);
+            h.conductor.duty_cycle(h.now);
+        }
+        assert!(h.conductor.sender.requests.is_empty());
+        let mut filler = 0;
+        while h
+            .conductor
+            .sender
+            .requests
+            .offer(sender::Request::RemoveEndpoint {
+                registration_id: 1_000_000 + filler,
+            })
+            .is_ok()
+        {
+            filler += 1;
+        }
+        assert_eq!(filler, spec::SENDER_QUEUE_CAPACITY as i64);
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        let registry_full = h.counter(DRIVER_REGISTRY_FULL);
+        start_udp_replay(
+            &mut h,
+            602,
+            NULL_POSITION,
+            b"cavalry:udp?endpoint=127.0.0.1:40200",
+        );
+        let got = events(&mut h);
+        let error = errors(&got)
+            .into_iter()
+            .find(|(id, _, _)| *id == 602)
+            .expect("the replay was refused");
+        assert_eq!(error.1, 10, "{}", error.2);
+        assert!(error.2.contains("request queue"), "{}", error.2);
+        assert!(h.conductor.replays.is_empty());
+        assert_eq!(h.conductor.publications.len(), publications);
+        assert_eq!(
+            h.conductor.send_endpoints[0].publications.get(),
+            1,
+            "not shared"
+        );
+        assert!(!h.dir.path().join("publications/602.logbuffer").exists());
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated);
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), registry_full + 1);
+        assert_eq!(h.counter(REPLAY_STARTED), 0);
+
+        // The sender drains the queue; a replay on the open channel then goes live,
+        // shares the endpoint, and its five counters are allocated.
+        for _ in 0..10_000 {
+            h.now += MS;
+            h.sender.duty_cycle(h.now);
+            h.conductor.duty_cycle(h.now);
+            if h.conductor.sender.requests.is_empty() {
+                break;
+            }
+        }
+        assert!(h.conductor.sender.requests.is_empty());
+        let shared = h
+            .conductor
+            .send_endpoints
+            .iter()
+            .position(|endpoint| endpoint.endpoint.port() == 40_200)
+            .expect("the first endpoint");
+        start_udp_replay(
+            &mut h,
+            603,
+            NULL_POSITION,
+            b"cavalry:udp?endpoint=127.0.0.1:40200",
+        );
+        let got = events(&mut h);
+        assert_eq!(errors(&got), Vec::new());
+        assert!(replay_ready(&got, 603).is_some());
+        assert_eq!(h.conductor.replays.len(), 1);
+        assert_eq!(h.conductor.replays[0].state, ReplayState::Live);
+        assert_eq!(
+            h.conductor.send_endpoints.len(),
+            spec::MAX_SEND_ENDPOINTS,
+            "shared"
+        );
+        assert_eq!(h.conductor.send_endpoints[shared].publications.get(), 2);
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated + 5);
+        assert_eq!(h.counter(REPLAY_STARTED), 1);
+        let publication = h
+            .conductor
+            .publications
+            .iter()
+            .find(|publication| publication.registration_id == 603)
+            .expect("the replay's publication");
+        assert_eq!(
+            publication.udp.as_ref().map(|udp| udp.endpoint_id),
+            Some(h.conductor.send_endpoints[shared].registration_id)
+        );
+        drop(appender);
+    }
+
+    /// The counters file at its capacity (invariant 3; ADR 0043), the one bound a
+    /// replay over `cavalry:udp` meets after its endpoint is opened: with seven records
+    /// free, the endpoint takes its five and the publication's third is refused, so the
+    /// replay fails with code 10 when the replayer answers ready and `undo_replay_ready`
+    /// abandons the new endpoint with the log it made, the endpoint's five and the
+    /// publication's two freed, the socket dropped, nothing handed to the sender, the
+    /// log file gone, `channel.opened` unmoved, the replay gone, `driver.registry_full`
+    /// one more and `replay.started` unmoved. Then, the records returned, a replay on
+    /// the same channel opens a fresh endpoint and goes live.
+    #[test]
+    fn a_replay_over_udp_the_counters_file_refuses_abandons_its_new_endpoint() {
+        let (mut h, mut appender) = recorded("replay-udp-counters-full");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        let _ = events(&mut h);
+
+        // Every free record taken, then seven returned, reusable at once: five for
+        // the endpoint and two of the publication's five.
+        let mut filler: Vec<Counter> = Vec::new();
+        while let Ok(counter) = h
+            .conductor
+            .counters
+            .allocate(RECORDING_POSITION, &[0; 8], "filler")
+        {
+            filler.push(counter);
+        }
+        assert!(filler.len() > 7, "the counters file had free records");
+        for counter in filler.split_off(filler.len() - 7) {
+            h.conductor
+                .counters
+                .free(counter.id(), 0)
+                .expect("the filler is freed");
+        }
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        let freed = h.counter(COUNTERS_FREED);
+        let registry_full = h.counter(DRIVER_REGISTRY_FULL);
+
+        // Code 10 from the replayer's ready reply, the endpoint abandoned with its
+        // five records and the publication's two, nothing left.
+        start_udp_replay(
+            &mut h,
+            604,
+            NULL_POSITION,
+            b"cavalry:udp?endpoint=127.0.0.1:40997",
+        );
+        let got = events(&mut h);
+        let error = errors(&got)
+            .into_iter()
+            .find(|(id, _, _)| *id == 604)
+            .expect("the replay was refused");
+        assert_eq!(error.1, 10, "{}", error.2);
+        assert!(error.2.contains("records is in use"), "{}", error.2);
+        assert!(replay_ready(&got, 604).is_none());
+        assert!(h.conductor.replays.is_empty(), "the replay is gone");
+        assert!(
+            h.conductor.send_endpoints.is_empty(),
+            "the new endpoint is abandoned"
+        );
+        assert!(
+            h.conductor.sender.requests.is_empty(),
+            "nothing is handed to the sender"
+        );
+        assert_eq!(h.conductor.publications.len(), 1, "no publication");
+        assert!(!h.dir.path().join("publications/604.logbuffer").exists());
+        assert_eq!(
+            h.counter(COUNTERS_ALLOCATED),
+            allocated,
+            "every record the command took is back"
+        );
+        assert_eq!(
+            h.counter(COUNTERS_FREED),
+            freed + 7,
+            "the endpoint's five and the publication's two"
+        );
+        assert_eq!(h.counter(CHANNEL_OPENED), 0);
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), registry_full + 1);
+        assert_eq!(h.counter(REPLAY_STARTED), 0);
+
+        // The records returned: a replay on the same channel opens a fresh endpoint,
+        // its five and the publication's five allocated, and goes live.
+        for counter in filler {
+            h.conductor
+                .counters
+                .free(counter.id(), 0)
+                .expect("the filler is freed");
+        }
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        start_udp_replay(
+            &mut h,
+            605,
+            NULL_POSITION,
+            b"cavalry:udp?endpoint=127.0.0.1:40997",
+        );
+        let got = events(&mut h);
+        assert_eq!(errors(&got), Vec::new());
+        assert!(replay_ready(&got, 605).is_some());
+        assert_eq!(h.conductor.replays.len(), 1);
+        assert_eq!(h.conductor.replays[0].state, ReplayState::Live);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].registration_id, 605);
+        assert_eq!(h.conductor.send_endpoints[0].publications.get(), 1);
+        assert_eq!(
+            h.counter(COUNTERS_ALLOCATED),
+            allocated + 10,
+            "five and five"
+        );
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+        assert_eq!(h.counter(REPLAY_STARTED), 1);
+        drop(appender);
+    }
+
+    /// The happy path (invariant 1; ADR 0043): a replay over `cavalry:udp` from a
+    /// position inside the recording. The conductor opens the channel's endpoint with
+    /// its five counters and the publication's five, keyed by the replay session id,
+    /// answers `replay ready`, gives a `cavalry:ipc` subscription on the replay stream
+    /// no image, and holds the limit at the start position; the sender's setup frame
+    /// carries the recording's term and the start position's term offset; a status
+    /// message whose offset the replay's 64 KiB term does not hold is rejected where
+    /// the 16 MiB UDP term would have passed it; the status message that connects the
+    /// publication lets the replayer move, and every frame reaches the receiver by hand
+    /// in order at the recording's positions with the replay's session id; the replay
+    /// ends at the recording's stop, the publication lingers with the sender, a
+    /// heartbeat carries EOS at the end position, and the receiver's end-of-stream
+    /// status message closes the publication and its endpoint, every record freed.
+    #[test]
+    fn a_replay_over_a_udp_channel_is_sent_by_the_sender_in_order_and_lingers() {
+        let (mut h, mut appender) = recorded("replay-udp");
+        let end = offer(&mut h, &mut appender, 0, 100);
+        assert_eq!(end, 6400);
+        sync(&mut h);
+        stop_recording(&mut h, 4);
+        h.conductor
+            .add_subscription(CLIENT, 5, REPLAY_STREAM, IPC_CHANNEL);
+        let _ = events(&mut h);
+        let term = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let mut receiver = TestReceiver::bind();
+        let allocated = h.counter(COUNTERS_ALLOCATED);
+        start_udp_replay(&mut h, 6, 3200, &receiver.channel());
+        assert_eq!(h.conductor.replays.len(), 1);
+        assert_eq!(h.conductor.replays[0].state, ReplayState::Live);
+        assert!(h.conductor.replays[0].udp.is_some());
+        let replay_position = h.conductor.replays[0].position.clone().expect("allocated");
+        let got = events(&mut h);
+        assert_eq!(errors(&got), Vec::new());
+        let (replay_session_id, recording_id, start, session_id, stream_id) =
+            replay_ready(&got, 6).expect("replay ready");
+        assert_eq!(
+            (replay_session_id, recording_id, start, stream_id),
+            (6, 0, 3200, REPLAY_STREAM)
+        );
+        let image = got.iter().any(|(type_id, message)| {
+            matches!(
+                Event::parse(*type_id, message),
+                Ok(Event::AvailableImage { .. })
+            )
+        });
+        assert!(
+            !image,
+            "a cavalry:ipc subscription gets no image of a UDP replay"
+        );
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].registration_id, 6);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Active);
+        assert_eq!(h.conductor.send_endpoints[0].status.get(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].publications.get(), 1);
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+        assert_eq!(
+            h.counter(COUNTERS_ALLOCATED),
+            allocated + 10,
+            "five and five"
+        );
+        assert_eq!(h.counter(REPLAY_STARTED), 1);
+        {
+            let publication = h
+                .conductor
+                .publications
+                .iter()
+                .find(|publication| publication.registration_id == 6)
+                .expect("the replay's publication");
+            let udp = publication.udp.as_ref().expect("over UDP");
+            assert_eq!(udp.endpoint_id, 6);
+            assert!(!udp.connected);
+            assert_eq!(
+                publication.limit.get(),
+                3200,
+                "the limit stands at the start"
+            );
+            assert_eq!(publication.log.header().term_length(), term);
+        }
+
+        // The sender's first cycle: the setup frame carries the replay's session id, the
+        // recording's term and the start position's term offset.
+        h.sender.duty_cycle(now_nanos());
+        let setup = match receiver.next_control() {
+            Some(ControlFrame::Setup(setup)) => setup,
+            other => panic!("expected a setup frame, got {other:?}"),
+        };
+        assert_eq!(setup.session_id, session_id);
+        assert_eq!(setup.stream_id, REPLAY_STREAM);
+        assert_eq!(setup.term_length as u32, term);
+        assert_eq!(setup.term_offset, 3200);
+        assert_eq!(h.sender.positions_of(6), Some((3200, 0)));
+
+        // A status message whose offset the replay's term does not hold: rejected.
+        let status = |offset: i32, flags: u8| StatusMessage {
+            flags,
+            session_id,
+            stream_id: REPLAY_STREAM,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: offset,
+            receiver_window_length: 131072,
+            receiver_id: 9,
+            group_tag: None,
+        };
+        receiver.send_status_message(&status(term as i32, 0));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while h.counter(SENDER_STATUS_MESSAGES_REJECTED) == 0 {
+            cycle_with_sender(&mut h);
+            assert!(
+                Instant::now() < deadline,
+                "the status message was not rejected"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(h.counter(SENDER_STATUS_MESSAGES_RECEIVED), 1);
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 0, "not connected by it");
+        assert_eq!(
+            h.sender.positions_of(6),
+            Some((3200, 0)),
+            "the limit stands"
+        );
+
+        // The status message at the start position connects the publication; the
+        // replayer moves, and the frames arrive in order at the recording's positions.
+        receiver.send_status_message(&status(3200, 0));
+        receiver.set_read_timeout(Duration::from_millis(10));
+        let mut frames: Vec<(DataFrameHeader, Vec<u8>)> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while frames.len() < 50 {
+            cycle_with_sender(&mut h);
+            if let Some(batch) = receiver.next_data(term) {
+                frames.extend(batch);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} of 50 frames arrived",
+                frames.len()
+            );
+        }
+        assert_eq!(frames.len(), 50);
+        for (i, (header, body)) in frames.iter().enumerate() {
+            let n = 50 + i as i64;
+            assert_eq!(&body[..8], &n.to_le_bytes(), "frame {n}: body");
+            assert_eq!(header.term_offset(), n as i32 * 64, "frame {n}: position");
+            assert_eq!(header.reserved_value(), n * 7, "frame {n}: reserved value");
+            assert_eq!(header.session_id(), session_id, "frame {n}: session");
+            assert_eq!(header.stream_id(), REPLAY_STREAM, "frame {n}: stream");
+        }
+        assert_eq!(h.counter(PUBLICATION_CONNECTED), 1);
+        assert_eq!(h.counter(SENDER_FRAMES_SENT), 50);
+
+        // The replay ends at the recording's stop: `replay stopped` with reason 0, the
+        // publication closing at 6400 and lingering with the sender.
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while replay_stopped(&got, 6).is_none() {
+            cycle_with_sender(&mut h);
+            got.extend(events(&mut h));
+            assert!(Instant::now() < deadline, "the replay did not end");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(replay_stopped(&got, 6), Some((6400, 0)));
+        assert_eq!(replay_position.load_acquire(), 6400);
+        assert_eq!(h.counter(REPLAY_STOPPED), 1);
+        assert_eq!(h.counter(REPLAY_ENDED), 1);
+        assert!(h.conductor.replays.is_empty());
+        {
+            let publication = h
+                .conductor
+                .publications
+                .iter()
+                .find(|publication| publication.registration_id == 6)
+                .expect("the publication lingers");
+            assert_eq!(publication.closing.map(|(end, _)| end), Some(6400));
+            assert_eq!(publication.log.end_of_stream_position(), 6400);
+            let udp = publication.udp.as_ref().expect("over UDP");
+            assert!(udp.close_sent && !udp.sender_closed);
+        }
+        h.conductor
+            .duty_cycle(now_nanos() + spec::nanos(spec::PUBLICATION_LINGER) * 2);
+        assert_eq!(
+            h.conductor.publications.len(),
+            2,
+            "the conductor waits for the sender's reply, whatever its clock says"
+        );
+
+        // A heartbeat after the interval carries EOS at the end position.
+        receiver.set_read_timeout(Duration::from_millis(500));
+        let heartbeat = loop {
+            h.sender
+                .duty_cycle(now_nanos() + spec::nanos(Duration::from_millis(200)));
+            match receiver.next_control() {
+                Some(ControlFrame::Heartbeat(heartbeat)) if heartbeat.is_end_of_stream() => {
+                    break heartbeat;
+                }
+                Some(_) => {}
+                None => panic!("no heartbeat with EOS"),
+            }
+        };
+        assert_eq!(heartbeat.session_id, session_id);
+        assert_eq!(heartbeat.term_offset, 6400);
+
+        // The receiver acknowledges with the end-of-stream flag: the sender replies
+        // closed, the conductor removes the log and closes the endpoint, the sender
+        // drops the socket, and the endpoint's and the publication's records are freed.
+        let freed = h.counter(COUNTERS_FREED);
+        receiver.send_status_message(&status(6400, STATUS_MESSAGE_END_OF_STREAM));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !h.conductor.send_endpoints.is_empty() {
+            let now = now_nanos();
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            assert!(Instant::now() < deadline, "the endpoint did not close");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            h.conductor
+                .publications
+                .iter()
+                .all(|publication| publication.registration_id != 6)
+        );
+        assert!(!h.dir.path().join("publications/6.logbuffer").exists());
+        assert_eq!(h.counter(CHANNEL_CLOSED), 1);
+        assert_eq!(
+            h.counter(COUNTERS_FREED),
+            freed + 9,
+            "the endpoint's five and the publication's four; replay.position went at the stop"
+        );
+        assert_eq!(h.sender.positions_of(6), None, "the sender dropped it");
+        drop(appender);
+    }
+
     /// The replayer's request queue full, and its deferred requests ahead of a start
     /// (invariant 3; spec, "start replay"): a start that finds the queue full is code
     /// 10, counted, and registers nothing; a stop that finds it full waits in the
@@ -8266,6 +9200,8 @@ mod replay {
                 position: None,
                 unconnected_since: None,
                 stop_requested: false,
+                udp: None,
+                connected: false,
             });
         }
         let term = cavalry_shm::log::layout::MIN_TERM_LENGTH as i32;

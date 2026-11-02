@@ -93,6 +93,13 @@ pub const MAX_REPLAYS: usize = cavalry_proto::client_protocol::MAX_REPLAYS;
 /// starting replays and the replay publications together have reached it (ADR 0036).
 pub const MAX_REPLAY_PUBLICATIONS: usize = 2 * MAX_REPLAYS;
 
+/// Every publication the sender may hold at once: a client's `cavalry:udp`
+/// publications and a replay's over a `cavalry:udp` channel, which is closed through
+/// the sender as a client's is (ADR 0041, ADR 0043). The sender's lists, its queues and
+/// the conductor's deferred requests for it are sized from this, not from
+/// [`MAX_PUBLICATIONS`] alone.
+pub const MAX_SENDER_PUBLICATIONS: usize = MAX_PUBLICATIONS + MAX_REPLAY_PUBLICATIONS;
+
 /// How many retention commands the driver holds in progress at once: truncate recording,
 /// purge segments and purge recording, from admission to the answer, the replays
 /// registry's capacity (`spec/client-protocol.md`, "Sizes"; ADR 0031).
@@ -150,10 +157,11 @@ pub const UDP_MTU_LENGTH: u32 = cavalry_proto::udp::MTU_LENGTH_DEFAULT;
 pub const UDP_PUBLICATION_WINDOW: u32 = UDP_TERM_LENGTH / 2;
 
 /// The capacity of each queue between the conductor and the sender, in requests or
-/// replies: two per publication and two per endpoint, an add and a remove each; an add
-/// that finds the request queue full is answered with error code 10, and the sender
-/// keeps a reply the reply queue has no room for until it has (ADR 0041).
-pub(crate) const SENDER_QUEUE_CAPACITY: usize = 2 * (MAX_PUBLICATIONS + MAX_SEND_ENDPOINTS);
+/// replies: two per publication the sender may hold, a client's or a replay's
+/// ([`MAX_SENDER_PUBLICATIONS`]), and two per endpoint, an add and a remove each; an
+/// add that finds the request queue full is answered with error code 10, and the
+/// sender keeps a reply the reply queue has no room for until it has (ADR 0041).
+pub(crate) const SENDER_QUEUE_CAPACITY: usize = 2 * (MAX_SENDER_PUBLICATIONS + MAX_SEND_ENDPOINTS);
 
 /// How many requests the sender handles per duty cycle before it turns to the
 /// endpoints and the publications.
