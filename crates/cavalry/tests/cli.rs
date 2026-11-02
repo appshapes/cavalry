@@ -434,6 +434,60 @@ fn replay_exits_1_and_names_the_positions_not_printed_when_its_log_goes_first() 
 /// resolves through the time index and rounds down to a segment base, here the start,
 /// which is nothing to purge, so the driver refuses it with code 23 and the message
 /// names the retained position (ADR 0031).
+/// `cavalry replay --channel <a cavalry:udp channel> --stream <id>` plays the recording
+/// to the channel's endpoint and prints the summary alone (ADR 0043): a subscription on
+/// that endpoint in this process, on that stream, reads every message in order, and the
+/// summary says the bytes, the positions and the channel.
+#[test]
+fn replay_on_a_udp_channel_plays_to_the_endpoints_subscriber_and_prints_the_summary() {
+    let dir = TestDir::new("replay-udp");
+    let (driver, mut client, end) = recorded(&dir, 9, 20, false);
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .expect("a loopback socket")
+        .local_addr()
+        .expect("bound")
+        .port();
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+    let mut subscription = client
+        .add_subscription(&channel, 9)
+        .expect("a subscription on the endpoint");
+    let output = replay(&dir)
+        .args(["--channel", &channel, "--stream", "9"])
+        .output()
+        .expect("replay runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stdout {stdout}; stderr {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "the summary alone: {stdout}");
+    assert!(lines[0].starts_with("replay "), "{stdout}");
+    assert!(
+        lines[0].ends_with(&format!(
+            " of recording 0 ended at position {end}: {end} bytes from position 0 on {channel}"
+        )),
+        "{stdout}"
+    );
+    // The subscriber reads every message in order; the messages went to the wire, not
+    // to the command's stdout.
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    wait("the subscriber reads the recording", || {
+        subscription
+            .poll(|body, _| bodies.push(body.to_vec()), 64)
+            .expect("the poll reads");
+        bodies.len() >= 20
+    });
+    assert_eq!(bodies.len(), 20);
+    for (n, body) in bodies.iter().enumerate() {
+        assert_eq!(body, &[b'a' + (n % 26) as u8; 32], "message {n}");
+    }
+    subscription.close().expect("closes");
+    client.close().expect("closes");
+    driver.close().expect("the driver closes");
+}
+
 #[test]
 fn record_truncates_purges_and_deletes_a_stopped_recording() {
     let dir = TestDir::new("retention");

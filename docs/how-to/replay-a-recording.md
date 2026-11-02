@@ -71,6 +71,30 @@ In Aeron, this is Archive's `startReplay` ([glossary](../glossary.md)).
    the recording's extent as it was when the replay started: its stop position, or the
    synced position of a live one.
 
+4. Play a recording to a subscriber on another host:
+
+   ```sh
+   cargo run --release -p cavalry -- replay --recording 0 --from start \
+       --channel cavalry:udp?endpoint=192.0.2.10:40123 --stream 7
+   ```
+
+   The subscriber goes first, on the other host, on its own address and that port, on
+   the stream the command names: `client.add_subscription("cavalry:udp?endpoint=
+   192.0.2.10:40123", 7)?` in a program there. The command then subscribes to nothing
+   and prints no message, since the messages go to the other host; it ends with the
+   replay and prints the summary alone:
+
+   ```text
+   replay 7 of recording 0 ended at position 128: 128 bytes from position 0 on cavalry:udp?endpoint=192.0.2.10:40123
+   ```
+
+   `--stream` is required with a channel other than `cavalry:ipc`: the subscriber reads
+   the stream it chose, and the command cannot pick one of its own. The replay's
+   publication goes on the wire from the driver's sender as a `cavalry:udp` publication
+   does, with the recording's term length and MTU, so the subscriber's image carries the
+   recording's positions
+   ([ADR 0043](../decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md)).
+
 From a program, the same is `client.add_subscription("cavalry:ipc", stream_id)?`
 first, then `client.start_replay(recording_id, position, length, stream_id,
 "cavalry:ipc")?`, which returns a `Replay` with `start_position()`, `position()` from
@@ -117,6 +141,9 @@ its send endpoint stays open for the publication linger after it
   `ended`, with no `read to position` after the count.
 - `just doctor` after the replay reports no `replay-*` finding; the `replay.ended`
   counter grew by one.
+- Over a `cavalry:udp` channel, the summary line's byte count is the end position less
+  the start, and on the receiving host `image.created` grew by one and the
+  subscription's image reached that end position.
 - Running the command twice prints the same lines: a replay of the same bytes is the
   same stream (invariant 1). `just replay-check` is that check as a gate: a recording
   of 100,000 hash-chained messages with a padding frame a quarter of the way, the live
@@ -158,7 +185,11 @@ its send endpoint stays open for the publication linger after it
   Check the name, or pass an address, and that an `interface` named is this host's.
 - The replay prints nothing and ends after five seconds with `ended for want of a
   subscriber`: a program started the replay before adding its subscription. Subscribe
-  first, as the command does.
+  first, as the command does. Over a `cavalry:udp` channel it means no receiver
+  answered the replay's setup frames at the endpoint: check that a driver on the
+  receiving host has a subscription on that address, port and stream, and that the port
+  is open between the hosts; `cavalry doctor` there reports `udp-subscription-no-image`
+  while the subscription waits.
 - The replay stops early with `failed`: a frame in a segment file failed a check, or the
   file could not be read; what was printed is whole, and `replay.failed` in `doctor`
   names the recording. The segment file needs restoring from a backup.

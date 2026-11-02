@@ -25,7 +25,10 @@ binary's `main`.
   one line per message, the position from the frame's header and the body, from a
   position or an instant the time index resolves, to `--to` or the recording's extent,
   or `--follow`ing a live recording to its stop, and exits 1 naming the positions it did
-  not print when the replay's log went before it had read to the end (ADR 0030);
+  not print when the replay's log went before it had read to the end (ADR 0030), or,
+  with `--channel <uri>` naming a `cavalry:udp` channel and `--stream <id>`, plays it to
+  a subscriber on that channel's endpoint, on this host or another, and prints the
+  summary alone (ADR 0043);
   `cavalry::index` is the lookup behind an instant; `console` arrives with its feature.
 - Control-plane and command-line dependencies sit behind the `cli` feature, on by
   default so that `cargo install cavalry` needs no flag. `cargo add cavalry --no-

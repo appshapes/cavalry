@@ -4,7 +4,9 @@
 //! --stop <recording id>` stops it (ADR 0025), `--truncate <id> --to <point>`, `--purge <id>
 //! --before <point>` and `--delete <id>` cut, purge and delete a stopped one (ADR 0031);
 //! `cavalry replay --recording <id> --from
-//! <position, instant or start>` plays a recording back and prints every message (ADR 0030).
+//! <position, instant or start>` plays a recording back and prints every message (ADR 0030),
+//! or, with `--channel <a cavalry:udp channel>`, plays it to a subscriber on that
+//! channel's endpoint and prints the summary alone (ADR 0043).
 //! `console` arrives with its feature. No arguments and no configuration are the primary way to run it (CLAUDE.md,
 //! invariant 5): the directory is `spec/client-protocol.md`'s default and the log
 //! directory `Driver::default_log_dir()`'s. The keys of `config.toml` are read from the
@@ -39,7 +41,7 @@ const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
   record --delete <id>     remove every file of that stopped recording; its id is never
                            reused
   replay --recording <id> --from <position, instant or start> [--to <position or instant>]
-         [--stream <id>] [--follow]
+         [--stream <id>] [--follow] [--channel <uri>]
                            play that recording back from the position, or from the
                            instant resolved through its time index, and print one line
                            per message, the position and the body, until the replay
@@ -49,7 +51,11 @@ const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
                            epoch>; --from start is the recording's start position,
                            whatever it is, alone or with --follow, not with --to, whose
                            length needs the position; --stream names the replay stream
-                           id, else one of the command's own
+                           id, else one of the command's own; --channel plays it to
+                           that channel instead of cavalry:ipc: on a cavalry:udp
+                           channel the recording goes to a subscriber on that endpoint,
+                           on this host or another, which needs --stream, and the
+                           command prints the summary alone when the replay ends
   --version                print the version
 
   --dir <path>      the driver directory, for every command; the default is
@@ -63,6 +69,9 @@ Every configuration key is read from its environment variable, CAVALRY_DIR,
 CAVALRY_LOG_DIR and CAVALRY_CONDUCTOR_IDLE_STRATEGY in this version; a flag wins over
 its variable (docs/reference/config.md). The command console is not built yet; see
 crates/cavalry/README.md.";
+
+/// The channel `replay` plays to unless `--channel` names another.
+const IPC_CHANNEL: &str = "cavalry:ipc";
 
 /// The flags every command takes.
 #[derive(Default)]
@@ -100,6 +109,8 @@ struct ReplayRequest {
     to: Option<Point>,
     stream_id: Option<i32>,
     follow: bool,
+    /// The replay channel: `cavalry:ipc` unless `--channel` named another.
+    channel: String,
 }
 
 /// What the command line asked for.
@@ -118,7 +129,8 @@ enum Invocation {
 /// `cavalry <command> [--dir <path> | --dir=<path>] [--log-dir <path> | --log-dir=<path>]`,
 /// `record` with its stream id and `--channel <uri>`, or `--stop <id>`, `--truncate <id>
 /// --to <point>`, `--purge <id> --before <point>` or `--delete <id>`, `replay` with its
-/// `--recording`, `--from`, `--to`, `--stream` and `--follow`, and nothing else.
+/// `--recording`, `--from`, `--to`, `--stream`, `--follow` and `--channel`, and nothing
+/// else.
 fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut args = args.peekable();
     let Some(command) = args.next() else {
@@ -143,7 +155,7 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
         }
         "replay" => {
             "--dir <path>, --log-dir <path>, --recording <id>, --from <position, instant or start>, \
-             --to <position or instant>, --stream <id> and --follow"
+             --to <position or instant>, --stream <id>, --follow and --channel <uri>"
         }
         _ => "--dir <path> and --log-dir <path>",
     };
@@ -233,7 +245,7 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
                     Err(why) => return Invocation::Wrong(format!("{name}: {why}")),
                 }
             }
-            "--channel" if command == "record" => {
+            "--channel" if command == "record" || command == "replay" => {
                 if channel.is_some() {
                     return twice(&name);
                 }
@@ -305,6 +317,21 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 let _ = (recording_id, from);
                 Invocation::Wrong("replay takes --to or --follow, not both".to_string())
             }
+            // Over another channel than cavalry:ipc the subscriber is elsewhere and
+            // reads a stream it chose, so the command cannot pick one of its own.
+            (Some(_), Some(_))
+                if channel
+                    .as_deref()
+                    .is_some_and(|channel| channel != IPC_CHANNEL)
+                    && stream_id.is_none() =>
+            {
+                Invocation::Wrong(
+                    "replay --channel with a channel other than cavalry:ipc needs --stream <id>: \
+                     the subscriber on that channel's endpoint reads the stream it chose, and \
+                     the command cannot pick one of its own"
+                        .to_string(),
+                )
+            }
             (Some(recording_id), Some(from)) => Invocation::Replay(
                 flags,
                 ReplayRequest {
@@ -313,6 +340,7 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation {
                     to,
                     stream_id,
                     follow,
+                    channel: channel.unwrap_or_else(|| IPC_CHANNEL.to_string()),
                 },
             ),
             (None, _) => Invocation::Wrong("replay needs --recording <id>".to_string()),
@@ -923,9 +951,11 @@ fn replay_to_stdout(
     stream_id: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write as _;
-    let mut subscription = client.add_subscription("cavalry:ipc", stream_id)?;
-    let replay =
-        client.start_replay(request.recording_id, from, length, stream_id, "cavalry:ipc")?;
+    if request.channel != IPC_CHANNEL {
+        return replay_to_channel(client, request, from, length, stream_id);
+    }
+    let mut subscription = client.add_subscription(IPC_CHANNEL, stream_id)?;
+    let replay = client.start_replay(request.recording_id, from, length, stream_id, IPC_CHANNEL)?;
     let session_id = replay.session_id();
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
@@ -983,15 +1013,7 @@ fn replay_to_stdout(
     };
     out.flush()?;
     let (end, reason) = ended;
-    let said = match reason {
-        Some(cavalry::ReplayStopReason::Ended) => "ended".to_string(),
-        Some(cavalry::ReplayStopReason::Stopped) => "stopped by command".to_string(),
-        Some(cavalry::ReplayStopReason::NotConnected) => {
-            "ended for want of a subscriber".to_string()
-        }
-        Some(cavalry::ReplayStopReason::Failed) => "failed".to_string(),
-        None => "ended with a reason this version does not know".to_string(),
-    };
+    let said = ended_as(reason);
     let unread = read_to < end;
     println!(
         "replay {} of recording {} {said} at position {end}: {messages} messages from position {}{}",
@@ -1016,14 +1038,71 @@ fn replay_to_stdout(
         .into());
     }
     if reason == Some(cavalry::ReplayStopReason::Failed) {
-        return Err(format!(
-            "the replay failed at position {end}: a segment file could not be read or a frame \
-             failed a check; `cavalry doctor` names the recording (replay.failed); see \
-             docs/reference/client-protocol.md#events"
-        )
-        .into());
+        return Err(failed_at(end).into());
     }
     Ok(())
+}
+
+/// `cavalry replay --channel <uri>` with a channel other than `cavalry:ipc`: the replay's
+/// publication goes to the channel's endpoint, where a subscription on another host or
+/// this one reads it (ADR 0043), so the command subscribes to nothing, starts the
+/// replay, waits for its end and prints the summary line alone: where it started and
+/// ended, the bytes between, the channel, and how it ended. A replay no receiver
+/// answers ends after the replay connect timeout, 5 s, `for want of a subscriber`:
+/// subscribe on the endpoint first, on the stream `--stream` names.
+fn replay_to_channel(
+    client: &mut Cavalry,
+    request: &ReplayRequest,
+    from: i64,
+    length: i64,
+    stream_id: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let replay = client.start_replay(
+        request.recording_id,
+        from,
+        length,
+        stream_id,
+        &request.channel,
+    )?;
+    let (end, reason) = loop {
+        if let Some(ended) = replay.ended() {
+            break ended;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    println!(
+        "replay {} of recording {} {} at position {end}: {} bytes from position {} on {}",
+        replay.replay_session_id(),
+        request.recording_id,
+        ended_as(reason),
+        end - replay.start_position(),
+        replay.start_position(),
+        request.channel
+    );
+    if reason == Some(cavalry::ReplayStopReason::Failed) {
+        return Err(failed_at(end).into());
+    }
+    Ok(())
+}
+
+/// How the summary line says a replay ended, from `replay stopped`'s reason.
+fn ended_as(reason: Option<cavalry::ReplayStopReason>) -> &'static str {
+    match reason {
+        Some(cavalry::ReplayStopReason::Ended) => "ended",
+        Some(cavalry::ReplayStopReason::Stopped) => "stopped by command",
+        Some(cavalry::ReplayStopReason::NotConnected) => "ended for want of a subscriber",
+        Some(cavalry::ReplayStopReason::Failed) => "failed",
+        None => "ended with a reason this version does not know",
+    }
+}
+
+/// The error of a replay that ended with reason 3, for the exit code and stderr.
+fn failed_at(end: i64) -> String {
+    format!(
+        "the replay failed at position {end}: a segment file could not be read or a frame \
+         failed a check; `cavalry doctor` names the recording (replay.failed); see \
+         docs/reference/client-protocol.md#events"
+    )
 }
 
 /// One line: the frame's position, `fragment begin|fragment|fragment end` for a
@@ -1209,6 +1288,73 @@ mod tests {
         }
     }
 
+    /// `--channel` names the replay channel, `cavalry:ipc` when absent; with any other
+    /// channel the subscriber is elsewhere and `--stream` is required, refused before
+    /// anything is sent (ADR 0043).
+    #[test]
+    fn replay_takes_a_channel_and_another_than_ipc_needs_a_stream() {
+        match parsed(&["replay", "--recording", "3", "--from", "0"]) {
+            Invocation::Replay(_, request) => assert_eq!(request.channel, IPC_CHANNEL),
+            _ => panic!("not a replay invocation"),
+        }
+        let udp = "cavalry:udp?endpoint=192.0.2.10:40123";
+        match parsed(&[
+            "replay",
+            "--recording",
+            "3",
+            "--from",
+            "start",
+            "--stream",
+            "7",
+            "--channel",
+            udp,
+        ]) {
+            Invocation::Replay(_, request) => {
+                assert_eq!(request.channel, udp);
+                assert_eq!(request.stream_id, Some(7));
+            }
+            _ => panic!("not a replay invocation"),
+        }
+        match parsed(&[
+            "replay",
+            "--recording",
+            "3",
+            "--from",
+            "0",
+            "--channel",
+            udp,
+        ]) {
+            Invocation::Wrong(why) => assert!(why.contains("needs --stream"), "{why}"),
+            _ => panic!("a udp channel with no stream is refused"),
+        }
+        match parsed(&[
+            "replay",
+            "--recording",
+            "3",
+            "--from",
+            "0",
+            "--channel",
+            "cavalry:ipc",
+        ]) {
+            Invocation::Replay(_, request) => assert_eq!(request.stream_id, None),
+            _ => panic!("cavalry:ipc named is the default"),
+        }
+        match parsed(&[
+            "replay",
+            "--recording",
+            "3",
+            "--from",
+            "0",
+            "--channel",
+            udp,
+            "--channel",
+            udp,
+        ]) {
+            Invocation::Wrong(why) => assert!(why.contains("twice"), "{why}"),
+            _ => panic!("twice is refused"),
+        }
+    }
+
     /// `--from start` names the recording's start position without knowing it: the
     /// request carries `Point::Start`, which `replay_range` sends as the null position;
     /// the parser passes `start` through as any point, and what may go with it is
@@ -1241,6 +1387,7 @@ mod tests {
             to,
             stream_id: None,
             follow,
+            channel: IPC_CHANNEL.to_string(),
         };
         let range = |from, to, follow| replay_range(&request(from, to, follow), None);
         assert_eq!(
@@ -1315,6 +1462,7 @@ mod tests {
                         to: Some(Point::Position(8192)),
                         stream_id: None,
                         follow: false,
+                        channel: IPC_CHANNEL.to_string(),
                     }
                 );
             }
