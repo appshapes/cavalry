@@ -74,8 +74,9 @@ connect the publication. So a replay nobody receives ends with reason 2 after th
 connect timeout from its start, as one nobody subscribes to does, and one whose receiver
 went ends after the connection timeout and then the replay connect timeout. The replay's end
 closes the publication at the position reached as over `cavalry:ipc`, and the close goes
-to the sender, which lingers it; the conductor frees the publication's five counters and
-releases the endpoint when the sender has replied, as for any publication. The refusals
+to the sender, which lingers it; the conductor frees the replay's `replay.position` at
+the stop as over `cavalry:ipc`, and the publication's four counters with its log, and
+releases the endpoint, when the sender has replied, as for any publication. The refusals
 are the path's own, each leaving nothing of the replay behind: the send endpoints
 registry at capacity, a counters file with no free record, or the sender's request
 queue with no room for the endpoint and the publication, or holding a request still
