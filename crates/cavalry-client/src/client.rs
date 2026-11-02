@@ -170,8 +170,10 @@ impl Cavalry {
     /// Adds a subscription on `channel` and `stream_id`: one image per publication on
     /// them, joining at the publisher's position, now and as publications come and go
     /// (`spec/client-protocol.md`, "Commands"). Waits for the driver's answer up to the
-    /// response timeout. The channel must be `cavalry:ipc` in this version. A client
-    /// that already holds the driver's bound of subscriptions is
+    /// response timeout. The channel is `cavalry:ipc`, or a `cavalry:udp` channel, on
+    /// which the driver binds the endpoint and an image arrives with the sender's setup
+    /// frame, its source identity the sender's address (`spec/udp.md`, "The receiver";
+    /// ADR 0042). A client that already holds the driver's bound of subscriptions is
     /// [`ClientError::SubscriptionsFull`], and the new one is removed again.
     pub fn add_subscription(
         &mut self,
@@ -252,8 +254,10 @@ impl Cavalry {
     /// Adds a publication on `channel` and `stream_id`, shared with every other
     /// publication of this driver on the same channel and stream: they write one log
     /// under one session (`spec/client-protocol.md`, "Commands"). Waits for the driver's
-    /// answer up to the response timeout. The channel must be `cavalry:ipc` in this
-    /// version; another is [`ClientError::Refused`] with error code 1.
+    /// answer up to the response timeout. The channel is `cavalry:ipc`, or a
+    /// `cavalry:udp` channel the driver's sender puts on the wire (`spec/udp.md`, "The
+    /// sender"; ADR 0041); any other string is [`ClientError::Refused`] with error code
+    /// 1.
     pub fn add_publication(
         &mut self,
         channel: &str,
@@ -358,8 +362,10 @@ impl Cavalry {
     /// belongs to the driver: it outlives this client, dropping the handle stops nothing,
     /// and [`Cavalry::stop_recording`] from any client stops it. No live publication is
     /// [`ClientError::Refused`] with error code 20, every one already recorded code 22, a
-    /// channel other than `cavalry:ipc` code 1, and a catalog, registry or counters file
-    /// at capacity code 10.
+    /// channel that is neither `cavalry:ipc` nor a `cavalry:udp` channel code 1, and a
+    /// catalog, registry or counters file at capacity code 10. On a `cavalry:udp`
+    /// channel the logs that match are the publications sending on it and the images
+    /// received on it (ADR 0042).
     pub fn start_recording(
         &mut self,
         channel: &str,

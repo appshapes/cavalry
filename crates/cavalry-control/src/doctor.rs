@@ -32,10 +32,11 @@ use cavalry_proto::udp::DATAGRAMS_PER_BURST;
 use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
-    CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF, CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS,
-    CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
-    COUNTERS_ALLOCATION_FAILED, PUBLICATION_POSITION, RECORDING_BYTES, RECORDING_INVALIDATED,
-    RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED, SENDER_LIMIT,
+    CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF, CHANNEL_SOCKET_SNDBUF,
+    CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
+    COUNTERS_ALLOCATION_FAILED, IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_POSITION,
+    RECORDING_BYTES, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION,
+    RECORDING_WRITE_FAILED, SENDER_LIMIT,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -97,6 +98,7 @@ const SEGMENTS_PER_PURGE: i64 = 10_000;
 const DOC_DURABLE_LOG_DRIVER: &str = "docs/reference/durable-log.md#the-driver";
 const DOC_RECORDING_COMMANDS: &str = "docs/reference/client-protocol.md#commands";
 const DOC_UDP_SENDER: &str = "docs/reference/udp.md#the-sender";
+const DOC_UDP_RECEIVER: &str = "docs/reference/udp.md#the-receiver";
 const DOC_UDP_VALUES: &str = "docs/reference/udp.md#values";
 
 /// The least send buffer a send endpoint's socket needs: one datagram of the MTU,
@@ -933,8 +935,10 @@ fn counters_checks(
     checks
 }
 
-/// One send endpoint as the counters file shows it: the `channel.status` record's key
-/// and label, and the endpoint's other counters joined by the key.
+/// One endpoint, send or receive, as the counters file shows it: the `channel.status`
+/// record's key and label, and the endpoint's other counters joined by the key. A send
+/// endpoint carries publications and no image, a receive endpoint images and no
+/// publication (`spec/udp.md`, "Counters").
 struct EndpointCounters {
     id: i64,
     channel: String,
@@ -942,15 +946,29 @@ struct EndpointCounters {
     sndbuf: Option<i64>,
     rcvbuf: Option<i64>,
     publications: Option<i64>,
+    images: Option<i64>,
 }
 
-/// The `cavalry:udp` checks ADR 0039 names, from the counters file alone (ADR 0041):
-/// a publication no receiver has answered, whose `sender.limit` is 0 while the driver
-/// runs, and a send endpoint's socket buffer the host capped, a send buffer below
+/// One image as the counters file shows it: the key of its `image.hwm_position` record,
+/// its label's three ids, and the two positions joined by the key.
+struct ImageCounters {
+    key: [u8; 16],
+    registration_id: i64,
+    session_id: i32,
+    stream_id: i32,
+    hwm: Option<i64>,
+    rebuild: Option<i64>,
+}
+
+/// The `cavalry:udp` checks ADR 0039 names, from the counters file alone (ADR 0041,
+/// ADR 0042): a publication no receiver has answered, whose `sender.limit` is 0 while
+/// the driver runs; an endpoint's socket buffer the host capped, a send buffer below
 /// [`SNDBUF_LEAST`] or a receive buffer below [`RCVBUF_EXPECTED`], each finding naming
-/// the sysctl of the platform `doctor` runs on, which is the driver's host. Every send
-/// endpoint is listed as a note, as recordings are, with its status, its publications
-/// and its buffers.
+/// the sysctl of the platform `doctor` runs on, which is the driver's host; loss on an
+/// image, whose `image.hwm_position` runs ahead of its `image.rebuild_position`; and a
+/// receive endpoint with no image, whose subscriptions wait for a setup frame that has
+/// not come. Every endpoint is listed as a note, as recordings are, with its status, its
+/// publications or images and its buffers.
 fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
     if !running {
         return 0;
@@ -959,6 +977,8 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
     let mut endpoints: Vec<EndpointCounters> = Vec::new();
     let mut buffers: Vec<(i64, i32, i64)> = Vec::new();
     let mut unanswered: Vec<(i64, i32, i32, i64)> = Vec::new();
+    let mut images: Vec<ImageCounters> = Vec::new();
+    let mut positions: Vec<([u8; 16], i32, i64)> = Vec::new();
     let endpoint_id = |key: &[u8]| {
         let mut bytes = [0u8; 8];
         if let Some(head) = key.get(..8) {
@@ -986,12 +1006,44 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                 sndbuf: None,
                 rcvbuf: None,
                 publications: None,
+                images: None,
             });
         } else if type_id == CHANNEL_SOCKET_SNDBUF.0
             || type_id == CHANNEL_SOCKET_RCVBUF.0
             || type_id == CHANNEL_PUBLICATIONS.0
+            || type_id == CHANNEL_IMAGES.0
         {
             buffers.push((endpoint_id(fields.key()), type_id, value));
+        } else if type_id == IMAGE_HWM_POSITION.0 || type_id == IMAGE_REBUILD_POSITION.0 {
+            let mut key = [0u8; 16];
+            if let Some(head) = fields.key().get(..16) {
+                key.copy_from_slice(head);
+            }
+            positions.push((key, type_id, value));
+            if type_id == IMAGE_HWM_POSITION.0 {
+                // The label: the name, the registration id, the session id, the stream id.
+                let mut words = fields.label().split_whitespace().skip(1);
+                let (Some(registration), Some(session), Some(stream)) =
+                    (words.next(), words.next(), words.next())
+                else {
+                    continue;
+                };
+                let (Ok(registration_id), Ok(session_id), Ok(stream_id)) = (
+                    registration.parse::<i64>(),
+                    session.parse::<i32>(),
+                    stream.parse::<i32>(),
+                ) else {
+                    continue;
+                };
+                images.push(ImageCounters {
+                    key,
+                    registration_id,
+                    session_id,
+                    stream_id,
+                    hwm: None,
+                    rebuild: None,
+                });
+            }
         } else if type_id == SENDER_LIMIT.0 && value == 0 {
             // The label: the name, the correlation id, the session id, the stream id
             // and the endpoint's registration id.
@@ -1018,8 +1070,19 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                 endpoint.sndbuf = Some(value);
             } else if type_id == CHANNEL_SOCKET_RCVBUF.0 {
                 endpoint.rcvbuf = Some(value);
-            } else {
+            } else if type_id == CHANNEL_PUBLICATIONS.0 {
                 endpoint.publications = Some(value);
+            } else {
+                endpoint.images = Some(value);
+            }
+        }
+    }
+    for (key, type_id, value) in positions {
+        if let Some(image) = images.iter_mut().find(|image| image.key == key) {
+            if type_id == IMAGE_HWM_POSITION.0 {
+                image.hwm = Some(value);
+            } else {
+                image.rebuild = Some(value);
             }
         }
     }
@@ -1058,8 +1121,16 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
         LINGER.as_secs()
     );
     for endpoint in &endpoints {
+        let kind = if endpoint.publications.unwrap_or(0) > 0 {
+            "send endpoint"
+        } else if endpoint.images.is_some() || endpoint.publications == Some(0) {
+            "receive endpoint"
+        } else {
+            "endpoint"
+        };
         if let Some(sndbuf) = endpoint.sndbuf
             && sndbuf < SNDBUF_LEAST
+            && kind != "receive endpoint"
         {
             findings.push(Finding {
                 check: "udp-socket-buffers",
@@ -1078,25 +1149,49 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
         if let Some(rcvbuf) = endpoint.rcvbuf
             && rcvbuf < RCVBUF_EXPECTED
         {
+            let cost = if kind == "receive endpoint" {
+                "data datagrams dropped under load, each a gap to NAK"
+            } else {
+                "status messages and NAKs dropped under load"
+            };
             findings.push(Finding {
                 check: "udp-socket-buffers",
                 level: Level::Warn,
                 message: format!(
-                    "send endpoint {}: the socket's receive buffer reads back {rcvbuf} bytes, \
+                    "{kind} {}: the socket's receive buffer reads back {rcvbuf} bytes, \
                      below the {RCVBUF_EXPECTED} a host that granted the {SOCKET_RCVBUF_LENGTH} \
                      asked reads back, so the host capped the ask: {RCVBUF_REMEDY}, {reopen}; \
-                     until then expect status messages and NAKs dropped under load",
+                     until then expect {cost}",
                     endpoint.channel
                 ),
                 doc: DOC_UDP_VALUES,
+            });
+        }
+        // A receive endpoint whose subscriptions have no image: no sender's setup
+        // frame has reached this port for a stream they want (ADR 0042).
+        if kind == "receive endpoint" && endpoint.status == 1 && endpoint.images == Some(0) {
+            findings.push(Finding {
+                check: "udp-subscription-no-image",
+                level: Level::Warn,
+                message: format!(
+                    "receive endpoint {}: no image has arrived: no sender's setup frame has \
+                     reached this port for a stream a subscription here wants, so the \
+                     subscriptions read nothing; check that the sender's channel names this \
+                     host and port and its stream id matches, that the port is open between \
+                     the hosts, and that both drivers run the same version; a rising \
+                     receiver.setups_unwanted is a sender on another stream id, and a rising \
+                     receiver.dropped_frames a peer of another version",
+                    endpoint.channel
+                ),
+                doc: DOC_UDP_RECEIVER,
             });
         }
         findings.push(Finding {
             check: "udp-endpoint",
             level: Level::Note,
             message: format!(
-                "send endpoint {}: status {}, {} publication(s), send buffer {} bytes, receive \
-                 buffer {} bytes",
+                "{kind} {}: status {}, {} publication(s), {} image(s), send buffer {} bytes, \
+                 receive buffer {} bytes",
                 endpoint.channel,
                 match endpoint.status {
                     0 => "initializing".to_string(),
@@ -1106,13 +1201,40 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                     other => other.to_string(),
                 },
                 endpoint.publications.unwrap_or(0),
+                endpoint.images.unwrap_or(0),
                 endpoint.sndbuf.unwrap_or(0),
                 endpoint.rcvbuf.unwrap_or(0)
             ),
             doc: DOC_UDP_VALUES,
         });
     }
-    2
+    // Loss on an image: the high-water mark past the rebuild position is a gap the
+    // receiver is NAKing, or one the sender no longer answers (ADR 0042).
+    for image in &images {
+        if let (Some(hwm), Some(rebuild)) = (image.hwm, image.rebuild)
+            && hwm > rebuild
+        {
+            findings.push(Finding {
+                check: "udp-image-loss",
+                level: Level::Warn,
+                message: format!(
+                    "image {} on stream {} (session {}): its high-water mark {hwm} is {} bytes \
+                     past its rebuild position {rebuild}: a gap on the wire the receiver NAKs \
+                     every 100 µs until the sender mends it (receiver.gaps_detected, \
+                     receiver.naks_sent here; sender.retransmits_sent on the sending host); a \
+                     rebuild position that stands still is a gap the sender no longer holds \
+                     (sender.naks_ignored there), and the image times out after 10 s; look at \
+                     the link and at the socket buffers on both hosts",
+                    image.registration_id,
+                    image.stream_id,
+                    image.session_id,
+                    hwm - rebuild
+                ),
+                doc: DOC_UDP_RECEIVER,
+            });
+        }
+    }
+    4
 }
 
 /// A static counter's value, or a finding: a counter that cannot be read is never a
@@ -1779,6 +1901,145 @@ mod tests {
             "{report}"
         );
         assert!(report.findings.iter().any(|f| f.check == "udp-endpoint"));
+    }
+
+    /// ADR 0042's two `cavalry:udp` checks for the receiving side, from the counters
+    /// file alone: a receive endpoint, one with images and no publication, that is
+    /// active with no image is a subscription waiting for a setup frame that has not
+    /// come; an image whose high-water mark is past its rebuild position is loss on the
+    /// wire, named with the gap's bytes; neither fires once the image is there and
+    /// whole. The receive endpoint's note says what it is and the capped receive buffer
+    /// names the receive endpoint's cost.
+    #[test]
+    fn a_receive_endpoint_with_no_image_and_an_image_with_a_gap_are_warnings() {
+        let dir = TestDir::new("udp-receive");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let endpoint_id = 11i64;
+        let channel = "cavalry:udp?endpoint=0.0.0.0:40123";
+        let endpoint_key = endpoint_id.to_le_bytes();
+        let allocate = |counters: &mut CountersFile, id, name: &str| {
+            counters
+                .allocate(id, &endpoint_key, &format!("{name} {channel}"))
+                .expect("room")
+        };
+        let status = allocate(&mut counters, CHANNEL_STATUS, "channel.status");
+        status.set(1);
+        let sndbuf = allocate(
+            &mut counters,
+            CHANNEL_SOCKET_SNDBUF,
+            "channel.socket_sndbuf",
+        );
+        sndbuf.set(1024);
+        let rcvbuf = allocate(
+            &mut counters,
+            CHANNEL_SOCKET_RCVBUF,
+            "channel.socket_rcvbuf",
+        );
+        rcvbuf.set(RCVBUF_EXPECTED - 1);
+        let publications = allocate(&mut counters, CHANNEL_PUBLICATIONS, "channel.publications");
+        publications.set(0);
+        let images = allocate(&mut counters, CHANNEL_IMAGES, "channel.images");
+        images.set(0);
+
+        // No image yet: the warning names the endpoint; the capped receive buffer names
+        // the receive endpoint's cost; the send buffer, which a receive endpoint never
+        // uses, raises nothing; the note says receive endpoint.
+        let report = examine(&dir.0);
+        let found = finding(&report, "udp-subscription-no-image");
+        assert_eq!(found.level, Level::Warn);
+        assert!(found.message.contains(channel), "{}", found.message);
+        assert!(found.message.contains("setup frame"), "{}", found.message);
+        assert_eq!(found.doc, "docs/reference/udp.md#the-receiver");
+        let buffers: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.check == "udp-socket-buffers")
+            .collect();
+        assert_eq!(buffers.len(), 1, "{report}");
+        assert!(
+            buffers[0].message.starts_with("receive endpoint"),
+            "{}",
+            buffers[0].message
+        );
+        assert!(
+            buffers[0].message.contains("data datagrams dropped"),
+            "{}",
+            buffers[0].message
+        );
+        let note = finding(&report, "udp-endpoint");
+        assert!(
+            note.message.starts_with("receive endpoint"),
+            "{}",
+            note.message
+        );
+        assert!(note.message.contains("0 image(s)"), "{}", note.message);
+        assert!(
+            !report.findings.iter().any(|f| f.check == "udp-image-loss"),
+            "{report}"
+        );
+
+        // An image with a gap: its high-water mark past its rebuild position.
+        images.set(1);
+        rcvbuf.set(RCVBUF_EXPECTED);
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&42i64.to_le_bytes());
+        key[8..12].copy_from_slice(&5i32.to_le_bytes());
+        key[12..].copy_from_slice(&1001i32.to_le_bytes());
+        let hwm = counters
+            .allocate(IMAGE_HWM_POSITION, &key, "image.hwm_position 42 5 1001")
+            .expect("room");
+        let rebuild = counters
+            .allocate(
+                IMAGE_REBUILD_POSITION,
+                &key,
+                "image.rebuild_position 42 5 1001",
+            )
+            .expect("room");
+        hwm.set(8192);
+        rebuild.set(4096);
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "udp-subscription-no-image"),
+            "{report}"
+        );
+        let found = finding(&report, "udp-image-loss");
+        assert_eq!(found.level, Level::Warn);
+        assert!(
+            found
+                .message
+                .contains("image 42 on stream 1001 (session 5)"),
+            "{}",
+            found.message
+        );
+        assert!(
+            found.message.contains("4096 bytes past"),
+            "{}",
+            found.message
+        );
+        assert_eq!(found.doc, "docs/reference/udp.md#the-receiver");
+        assert!(report.ok(), "warnings do not fail: {report}");
+
+        // The gap mended: nothing but the note.
+        rebuild.set(8192);
+        let report = examine(&dir.0);
+        assert!(
+            !report.findings.iter().any(|f| {
+                f.check == "udp-image-loss"
+                    || f.check == "udp-subscription-no-image"
+                    || f.check == "udp-socket-buffers"
+            }),
+            "{report}"
+        );
+        assert!(
+            finding(&report, "udp-endpoint")
+                .message
+                .contains("1 image(s)")
+        );
     }
 
     #[test]
