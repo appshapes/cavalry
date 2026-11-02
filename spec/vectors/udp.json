@@ -367,6 +367,13 @@
       "error": "length"
     },
     {
+      "name": "length-status-message-tagged-short",
+      "kind": "frame",
+      "term_length": 65536,
+      "bytes": "2c0000000000030007000000e9030000fbffffff00000000000002008877665544332211ffffffff",
+      "error": "length"
+    },
+    {
       "name": "length-nak-32",
       "kind": "frame",
       "term_length": 65536,

@@ -913,3 +913,17 @@ user-visible change, added in the same commit as the change. The format follows
   file alone
   ([ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md),
   [ADR 0041](docs/decisions/0041-send-from-a-sender-thread-through-nix.md); card 180).
+- ADR 0042 Accepted: the UDP receiver is the driver's fifth dedicated thread,
+  `DriverThread::Receiver`, linked to the conductor by two bounded queues as the sender
+  is; it rebuilds an image through `cavalry-shm`'s image writer and two bounded scans of
+  the frame length word, 1 MiB of term per image per cycle, NAKs the gap they find, keeps
+  its readers, every subscription's position and a recording's, to set the status
+  message's consumption position and to clean a term behind the slowest, and finds a
+  datagram's session in a hash table of 4096 records. `spec/udp.md` is amended within
+  version 0 on five points: a status message whose frame length is 44 in a datagram
+  shorter than 44 bytes is `length`, with a vector; a committed frame the window does
+  not cover whole counts `sender.flow_control_limited`; a recording of an image is one
+  of its readers; an interface keys a receive endpoint's channel and binds nothing; an
+  RTT measurement for another receiver counts `receiver.dropped_unwanted`. `start
+  replay` over UDP stays code 11 and is a card of its own
+  ([ADR 0042](docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md); card 181).
