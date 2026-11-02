@@ -130,9 +130,11 @@ fn a_recording_follows_the_publisher_and_stops_on_request() {
         client.start_recording("cavalry:ipc", 72),
         ErrorCode::NoPublicationToRecord,
     );
+    // A cavalry:udp channel records what sends or is received on it (ADR 0042):
+    // nothing does, so code 20.
     refused(
         client.start_recording("cavalry:udp?endpoint=localhost:40123", 71),
-        ErrorCode::GenericError,
+        ErrorCode::NoPublicationToRecord,
     );
     refused(
         client.start_recording("cavalry:udp?endpoint=localhost", 71),
