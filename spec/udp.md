@@ -158,8 +158,9 @@ publication, on every duty cycle, with p the sender position and L the sender li
    advances by what was sent, a padding frame counted as sent whether or not it was
    put on the wire. A datagram the socket did not take whole leaves p at its first
    frame and counts `sender.short_sends`; a send the socket refused counts
-   `sender.send_failed`. A cycle with a frame to send and L − p ≤ 0 counts
-   `sender.flow_control_limited` once, on entry into that state.
+   `sender.send_failed`. A cycle with a frame to send and L − p ≤ 0, or with a committed
+   frame that L − p does not cover whole, counts `sender.flow_control_limited` once, on
+   entry into that state.
 3. **Heartbeat.** Once the first status message without the send-setup flag has
    arrived, after a heartbeat interval without a data frame sent, a heartbeat; before
    it, only setup frames go, so that a receiver's ask for a setup is answered by a setup
@@ -207,9 +208,11 @@ it, a closed publication answers one as step 1 says, since frames are still to b
 
 The driver's receiver is one dedicated thread per driver with the driver's idle
 strategy. A `cavalry:udp` subscription has a receive endpoint per resolved channel: one
-socket bound to the endpoint, and to the interface when one is named, shared by the
-subscriptions on that channel, with the receive buffer of "Values" asked of the socket
-and the length the socket holds stored in `channel.socket_rcvbuf`. The receiver drains
+socket bound to the endpoint, shared by the subscriptions on that channel, with the
+receive buffer of "Values" asked of the socket and the length the socket holds stored
+in `channel.socket_rcvbuf`; an interface, when one is named, keys the channel and binds
+nothing on a receive endpoint in this version, since a unicast receive endpoint's
+address is the endpoint's (ADR 0042). The receiver drains
 each socket in batches of at most one poll's worth of datagrams ("Values"). The driver's
 receiver id is a random i64 chosen when it starts. On a datagram from a source address:
 
@@ -269,24 +272,33 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    mark the same way and, with EOS, records its position as the image's end of stream
    position once the rebuild position reaches it.
 3. **Rebuild and NAK.** The rebuild position, `image.rebuild_position`, is the end of the
-   contiguous frames from the greater of itself and the fastest subscriber's position,
-   up to the high-water mark, scanned on every slow cycle. A gap between it and the next
-   frame with a length, or the high-water mark, is a loss, counted in
+   contiguous frames from the greater of itself and the fastest reader's position, up to
+   the high-water mark, scanned on every cycle on which the high-water mark is past it,
+   at most 1 MiB of term per image per cycle, a bound of this page's own: a gap longer
+   than the bound is reported as the bound and NAKed for that length, and the next cycle
+   scans on from where the last stopped (ADR 0042). A gap between the rebuild position
+   and the next frame with a length, or the high-water mark, is a loss, counted in
    `receiver.gaps_detected` when it is first seen: after the NAK delay the receiver
    sends a NAK for its term id, term offset and length, and again every NAK retry while
    the same gap persists; a gap that changes restarts the delay. A subscriber reads the
    image's log as "Reading" in `spec/log-buffer.md` says and stops at the gap itself, so
    that nothing is delivered from beyond a gap before it is filled.
-4. **Status messages.** One at creation, then whenever the slowest subscriber's position
-   is at least the status message threshold past s, when the receiver window length
+4. **Status messages.** One at creation, then whenever the slowest reader's position is
+   at least the status message threshold past s, when the receiver window length
    changes, or when the status message interval has passed since the last: it carries the
-   slowest subscriber's position as consumption term id and offset, the receiver window
-   length, the receiver id, and the end-of-stream flag once the stream has ended. The
-   slowest subscriber's position is the least `subscription.position` of the image's
-   subscriptions (`spec/log-buffer.md`, "Counters"). Before s rises, the receiver cleans
-   the image's log from its clean position to the slowest subscriber's position less the
-   term length, as the driver cleans a publication's log, so that a term is zero before a
-   frame lands in it.
+   slowest reader's position as consumption term id and offset, the receiver window
+   length, the receiver id, and the end-of-stream flag once the stream has ended. A
+   reader of the image is one of its subscriptions, through its `subscription.position`
+   (`spec/log-buffer.md`, "Counters"), or a recording of the image, through its
+   `recording.position`, which stands at the recording's start position until the
+   recorder has attached the counter (ADR 0025, ADR 0042); the slowest reader's position
+   is the least of them, so that the trigger, the consumption position and the cleaning
+   below read one position, and a reader's position outside its bound is not used,
+   counts `log_buffer.rejected_position` and evicts its client (ADR 0010). Before s
+   rises, the receiver cleans the image's log from its clean position to the slowest
+   reader's position less the term length, as the driver cleans a publication's log, so
+   that a term is zero before a frame lands in it and no recorded byte is cleaned before
+   the recorder has written it.
 5. **End.** A subscription removed while others remain on the endpoint and stream, by
    `remove subscription`, `client close` or `client timeout`, frees its
    `subscription.position` and the image goes on with the slowest of the rest; when the
@@ -299,9 +311,10 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    at or above the last status message's position less a term, count as activity; an
    under-run and an over-run do not; so a sender that pauses its data while
    heartbeating keeps its image. Retiring is `unavailable image` to its subscriptions
-   that remain, its counters
+   that remain, the stop of its recording when it has one (below), its counters
    freed after the counter reuse timeout, its log removed once every subscription has
-   released it, and its session record put **on cool-down** for the image cool-down, a
+   released it and its recording has stopped, as a recorded publication's log waits
+   (`spec/log-buffer.md`, "Closing"), and its session record put **on cool-down** for the image cool-down, a
    bound of this page's own on every retire, during which a setup, data datagram or heartbeat for the
    session is dropped and counted in `receiver.dropped_cool_down` with no status message
    sent, so that a late retransmit or heartbeat for a retired session creates no second
@@ -318,9 +331,18 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    of stream position in the log, sends the status message with the end-of-stream flag
    five times at the status message interval, a bound of this page's own, and the image
    is retired the same way once every subscriber has reached that position or the
-   liveness timeout passes.
+   liveness timeout passes. A recording of the image stops on every retire, as a
+   recording stops when its publication closes (`spec/client-protocol.md`, "Commands"):
+   the receiver scans the image to its first gap or the high-water mark before it
+   reports the retire, nothing is inserted after it, and the recording stops at the
+   rebuild position once the recorder has written up to it, which is the end of stream
+   position when the stream ended; the stop adds one to `recording.stopped` and is
+   announced with `recording stopped` as every stop is, and the image's log is removed
+   only after it (ADR 0042).
 6. **RTT.** An RTT measurement with the reply flag for the image's session and stream
-   is answered as the sender answers one, when its receiver id is this driver's or 0.
+   is answered as the sender answers one, when its receiver id is this driver's or 0;
+   one whose receiver id is another driver's is dropped and counted in
+   `receiver.dropped_unwanted` (ADR 0042).
 
 The receiver keeps one table of session records for the driver, its size under
 "Values", keyed by endpoint, stream id and session id, each record in one of four
@@ -361,10 +383,18 @@ Errored, −1, is reserved for a later version that re-resolves names; a client 
 reads −1 from the indicator in this version.
 
 `start recording` on a `cavalry:udp` channel (`spec/client-protocol.md`, "Commands")
-records every live log on this host whose channel and stream id match, publications and
-images alike, one recording per log, each `recording ready` naming its session id; the
-recorder reads an image's log as it reads a publication's and stops at a gap until it is
-filled.
+records one log per command: of the live publications sending on the resolved channel
+and the images received on it whose stream id matches, the one with the lowest
+registration id that is not yet being recorded, as the command's rule is over
+`cavalry:ipc`, so that a second command records the next; none is error code 20, every
+one being recorded is code 22 with the message naming the recording id, and `recording
+ready` names the log's session id. A recording of a publication starts at its producer
+position, as over `cavalry:ipc`. A recording of an image starts at the image's rebuild
+position when the command is handled, loaded from `image.rebuild_position`; from then
+on its position is one of the image's readers (step 4); the recorder reads the image's
+log as it reads a publication's and stops at a gap until it is filled; and the
+recording stops when the image is retired, at the position step 5 names, before the
+image's log is removed (ADR 0042).
 
 ## Counters
 
@@ -393,7 +423,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `receiver.receive_failed` | a receive the operating system refused; the poll is retried |
 | `receiver.dropped_frames` | a frame of a version or type this reader does not handle |
 | `receiver.dropped_pending`, `receiver.dropped_in_progress`, `receiver.dropped_cool_down` | a setup, data datagram or heartbeat for a session with no image, by the session's state: the in-progress and cool-down counts are the ones an operator asks about |
-| `receiver.dropped_unwanted` | a data datagram, heartbeat or RTT measurement for a stream no subscription on the endpoint wants, or an RTT measurement for a session with no image |
+| `receiver.dropped_unwanted` | a data datagram, heartbeat or RTT measurement for a stream no subscription on the endpoint wants, an RTT measurement for a session with no image, or one whose receiver id is another driver's |
 | `receiver.sessions_full` | a datagram for a new session found the session table full |
 | `receiver.rtt_replies_sent` | an RTT measurement is answered |
 | `image.hwm_position`, `image.rebuild_position` | keyed as `subscription.position` is, with the image's registration id: the high-water mark and the rebuild position of one image |
@@ -450,7 +480,7 @@ and nothing from a rejected datagram is delivered.
 | `too-short` | fewer than 8 bytes, or fewer than the type's length (40, 36, 28, 40) |
 | `version` | the version byte is not 0 |
 | `type` | the type is not 0, 1, 2, 3, 5 or 6 |
-| `length` | the frame length is not the type's length, or for a status message neither 36 nor 44; for a data datagram, the datagram's length is not a multiple of 32, or a heartbeat is not exactly 32 bytes |
+| `length` | the frame length is not the type's length, or for a status message neither 36 nor 44, or 44 in a datagram shorter than 44 bytes; for a data datagram, the datagram's length is not a multiple of 32, or a heartbeat is not exactly 32 bytes |
 | `term-length` | a setup frame's term length is not a power of two from 65536 to 1073741824 |
 | `mtu` | a setup frame's MTU length is not a multiple of 32 from 64 to 65504 |
 | `term-offset` | a term offset is negative, not a multiple of 32, or not below the term length |

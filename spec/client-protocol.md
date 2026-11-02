@@ -179,8 +179,10 @@ What the driver does with each, after the checks of "What the driver rejects":
   event names; an image is created when a setup frame for the stream arrives, with a
   registration id of its own, and `available image` then carries that id, the image's
   log under `images/` and the sender's address as the source identity (`spec/udp.md`,
-  "The receiver"). A registry at capacity, or a counters file with no free record, is
-  error code 10; a socket that cannot be opened or bound is code 4; a host that does
+  "The receiver"). A registry at capacity, a counters file with no free record, or the
+  receiver's request queue with no room for the endpoint and the subscription, or with
+  a request still waiting for room (ADR 0042), is error code 10, as it is for an `add
+  publication`; a socket that cannot be opened or bound is code 4; a host that does
   not resolve is code 9.
 - **remove subscription.** The driver removes the subscription and every image it has,
   frees their position counters, and answers `operation success`; an image over UDP
@@ -219,6 +221,13 @@ What the driver does with each, after the checks of "What the driver rejects":
   announced to every client with `recording stopped`, for an id the starting client was
   never given; the catalog keeps the stopped recording. A recording belongs to the driver,
   not to the client that started it: it outlives that client, and any client may stop it.
+  On a `cavalry:udp` channel the logs that match are the live publications sending on
+  the resolved channel and the images received on it with the stream id, and the rule
+  and the codes are the same across both: one recording per command, the lowest
+  registration id not yet being recorded, code 20 when there is neither a publication
+  nor an image, code 22 when every one is being recorded; a recording of an image starts
+  at the image's rebuild position when the command is handled and stops when the image
+  is retired (`spec/udp.md`, "The receiver", step 5; ADR 0042).
 - **stop recording.** The driver stops the recording at the position the recorder has
   written and answers `operation success` once the catalog's stop fields are written and
   synced (`spec/durable-log.md`, "The driver"); then every client gets `recording
@@ -226,7 +235,11 @@ What the driver does with each, after the checks of "What the driver rejects":
   slots the catalog holds, is error code 21; one below the next id that no live recording
   holds is already stopped, and the answer is `operation success` with nothing written,
   since a recording id is never reused.
-- **start replay.** A channel other than `cavalry:ipc` is error code 1; a length below
+- **start replay.** A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
+  channel this version accepts is error code 1; a `cavalry:udp` replay channel is error
+  code 11 in this version, the message naming the card that brings a replay over UDP,
+  since a replay's publication takes the sender's path and this version puts none on
+  the wire (ADR 0042); a length below
   −1 is code 7; the replays registry at capacity, the replay publications at their
   bound (the publications of every replay, live or lingering after its end, with the
   replays still starting; "Sizes"), or the replayer's request queue full or holding
@@ -401,15 +414,16 @@ and it is the correlation id of the publication's images in `available image` an
 registration, the two are the same number.
 
 The driver stops a recording by itself when its publication closes: at the end of stream
-position, once the recorder has written up to it. It also stops a recording whose write
+position, once the recorder has written up to it; and when its image is retired, at the
+position `spec/udp.md`, "The receiver", step 5 names. It also stops a recording whose write
 failed, at the position written, adding one to `recording.write_failed`; and one whose
 block scan found a committed frame that fails a check of `spec/frame.md`, at that frame,
 adding one to `log_buffer.rejected_frame`, as a subscriber that found it would stop
 delivering, so the recording ends at the last frame that checked. Every stop, by command,
 by close or by failure, adds one to `recording.stopped`, is announced to every client with
 `recording stopped`, and frees the recording's two counters after the counter reuse
-timeout; the log of a recorded publication is removed only once its recording is stopped
-(`spec/log-buffer.md`, "Closing"). The recorder's lag behind the publisher is bounded by
+timeout; the log of a recorded publication or image is removed only once its recording is
+stopped (`spec/log-buffer.md`, "Closing", "The receiver"). The recorder's lag behind the publisher is bounded by
 the publication window, since the limit respects its position.
 
 ## Events
@@ -469,7 +483,7 @@ answered with code 6 and keeps running.
 | client timeout | 0 | 8 | client id | i64 | 0 or more: the client the driver timed out |
 | recording ready | 0 | 8 | correlation id | i64 | 0 or more: the start recording command's |
 | recording ready | 8 | 8 | recording id | i64 | 0 or more: the recording's slot in the catalog (`spec/durable-log.md`) |
-| recording ready | 16 | 4 | session id | i32 | any: the session of the publication being recorded |
+| recording ready | 16 | 4 | session id | i32 | any: the session of the publication or image being recorded |
 | recording ready | 20 | 4 | recording position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.position` counter, what the operating system holds |
 | recording ready | 24 | 4 | recording synced position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.synced_position` counter, what a sync has made durable |
 | recording stopped | 0 | 8 | recording id | i64 | 0 or more |
@@ -509,9 +523,9 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
 | 11 | generic error | anything else; the message says what |
 | 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended |
-| 20 | no publication to record | start recording names a stream id and channel no live publication has |
+| 20 | no publication to record | start recording names a stream id and channel no live publication has, nor, over UDP, any image |
 | 21 | unknown recording | stop recording, start replay or a retention command names a recording id the catalog does not hold as a valid recording |
-| 22 | already recording | start recording names a stream whose live publications are all being recorded; the message names the recording id |
+| 22 | already recording | start recording names a stream whose live publications, and over UDP images, are all being recorded; the message names the recording id |
 | 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's retained position or above its extent; truncate recording names one that is not a multiple of 32 from the retained position to the stop position or at which no frame begins; purge segments names one that is not a segment base above the retained position and at most the stop position; the message names the bounds |
 | 24 | recording busy | truncate recording, purge segments, purge recording or start replay names a recording that is live or stopping, that a replay is reading, or that a retention command is working on; the message says which and what to do |
 
@@ -560,7 +574,7 @@ with error code 10 and registers nothing:
 | publications | 1024 | every registration of a publication, shared or not |
 | subscriptions | 1024 | every registration of a subscription |
 | images | 2048 | every pair of a subscription and a publication, or a subscription and an image over UDP, that match: an image over UDP shared by several subscriptions on its endpoint and stream counts once per subscription, with a `subscription.position` per pair, so that the counters bound below holds |
-| recordings | 1024 | every recording that is starting or live, one per publication at most |
+| recordings | 1024 | every recording that is starting or live, one per publication or image at most |
 | replays | 64 | every replay that is starting or live |
 | replay publications | 128 | every replay's publication, live or lingering after the replay ended, with the replays still starting |
 | commands in progress | 64 | every truncate recording, purge segments or purge recording the driver is working on |
@@ -598,8 +612,8 @@ codes are the ones "Commands" and "Error codes" name: a channel that is neither
 an unknown or another client's registration is code 2 or 3; a registry or the counters
 file at capacity is code 10 and adds one to `driver.registry_full`; a log that could not
 be created or sized is code 12 and adds one to `driver.log_create_failed`; a stream id and
-channel no live publication has is code 20; a stream whose live publications are all being
-recorded is code 22; a recording id the catalog does not hold is code 21; the catalog's
+channel no live publication or image has is code 20; a stream whose live publications and
+images are all being recorded is code 22; a recording id the catalog does not hold is code 21; the catalog's
 slots used up is code 10 and adds one to `recording.catalog_full`; a recording's files
 that could not be created is code 12 and adds one to `recording.start_failed`; a replay
 length below −1 is code 7 and adds one to `client_protocol.rejected_command`; a replay
