@@ -1010,3 +1010,18 @@ user-visible change, added in the same commit as the change. The format follows
   withdrawn; the implementation follows in its own change
   ([ADR 0043](docs/decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md);
   card 192).
+- `start replay` takes a `cavalry:udp` replay channel: the replay's publication is put
+  on the wire by the driver's sender as a client's `cavalry:udp` publication is, from
+  the recording's start position or a position inside it, with the recording's term
+  length and MTU, so that a subscription on that channel's endpoint on another host
+  reads the recording in order at the recording's positions; the replay ends and
+  lingers as over `cavalry:ipc`, it has a subscriber for the connect timeout while its
+  publication is connected, and the send endpoints registry, the counters file and the
+  sender's queue refuse it with code 10, a refused socket with code 4, each leaving
+  nothing behind. The sender now checks a control frame's shape against the largest
+  term and its offsets against the publication's own term, as the receiver does, since
+  a replay's publication keeps its recording's term, and its bounds count a replay's
+  publication beside a client's. Error code 11 for a `cavalry:udp` replay channel is
+  gone, and so is the last command that refused the transport
+  ([ADR 0043](docs/decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md);
+  card 192).
