@@ -236,10 +236,9 @@ What the driver does with each, after the checks of "What the driver rejects":
   holds is already stopped, and the answer is `operation success` with nothing written,
   since a recording id is never reused.
 - **start replay.** A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
-  channel this version accepts is error code 1; a `cavalry:udp` replay channel is error
-  code 11 in this version, the message naming the card that brings a replay over UDP,
-  since a replay's publication takes the sender's path and this version puts none on
-  the wire (ADR 0042); a length below
+  channel this version accepts is error code 1; a `cavalry:udp` replay channel's host is
+  resolved once as the command is handled, as every command's is (`spec/udp.md`, "The
+  channel URI"; ADR 0043), code 9 when it does not resolve; a length below
   −1 is code 7; the replays registry at capacity, the replay publications at their
   bound (the publications of every replay, live or lingering after its end, with the
   replays still starting; "Sizes"), or the replayer's request queue full or holding
@@ -285,15 +284,36 @@ What the driver does with each, after the checks of "What the driver rejects":
   for one added later, which joins there and sees nothing before it. A log
   that cannot be created or sized is code 12, adding one to `driver.log_create_failed`;
   a counters file with no free record is code 10, adding one to `driver.registry_full`;
-  either leaves nothing of the replay behind. The replay publication is the driver's:
+  either leaves nothing of the replay behind. Over a `cavalry:udp` replay channel the
+  publication is put on the wire by the sender as a client's `cavalry:udp` publication
+  is (`spec/udp.md`, "The sender"; ADR 0043): the driver opens the resolved channel's
+  send endpoint when no publication sends on it or shares the open one, allocates the
+  publication's `sender.position` and `sender.limit` beside its two, labelled as a
+  publication's with the endpoint's registration id last, hands the sender the
+  endpoint's socket when new and the publication with a reader at the replay's start
+  position, and keeps the publication's limit at the sender position plus the
+  publication window while the publication is connected and at the sender position
+  otherwise, so that the replay goes no faster than the receivers' window and does not
+  move until the publication is connected; no `available image` goes to any
+  subscription on this driver for the replay stream, since the image is the receiving
+  driver's, created from the sender's setup frame, and a `cavalry:udp` subscription on
+  this driver on the same resolved channel gets its image from the receiver when that
+  setup frame arrives at its endpoint, as it does for a client's `cavalry:udp`
+  publication under add publication. The send endpoints registry at capacity, or the sender's request queue
+  with no room for the endpoint and the publication or holding a request still waiting
+  for room, is code 10, adding one to `driver.registry_full`; a socket that cannot be
+  opened, bound or connected is code 4; each leaves nothing of the replay behind. The
+  replay publication is the driver's:
   no client holds a registration of it, `remove publication` cannot name it, and the
   driver's duties on it are a publication's (`spec/log-buffer.md`, "The driver"), and
   so is every other command's view of it: `start recording` on the replay stream records
   it as any publication, from the position the replay has reached, into a recording
   whose positions are the recording's played, since the log carries its initial term id.
-  Its limit is the publication window past the slowest subscriber's position, and the
-  replay goes no faster; with no subscriber the limit is the position reached, and the
-  replay does not move. A start adds one to `replay.started`.
+  Its limit is the publication window past the slowest subscriber's position over
+  `cavalry:ipc`, and past the sender position over `cavalry:udp` while the publication
+  is connected (`spec/udp.md`, "The sender"), and the replay goes no faster; with no
+  subscriber, or the publication not connected, the limit is the position reached, and
+  the replay does not move. A start adds one to `replay.started`.
 - **stop replay.** A replay session id a live replay holds: the driver stops the replay
   at the position reached, answers `operation success` once the replayer has written
   its last frame, and sends `replay stopped` with reason 1 to every client; a second
@@ -397,10 +417,19 @@ as a closed publication's do, once every subscriber has reached the end of strea
 position or the linger has passed, and then the log. `stop replay` ends a replay at the
 position reached, with reason 1. A replay whose publication has had no subscriber for
 the replay connect timeout, from its start or from the moment its last subscriber went,
-ends with reason 2. Every end adds one to `replay.stopped`, and reasons 0, 2 and 3 add
-one to `replay.ended`, `replay.not_connected` and `replay.failed`; the replay's
-`replay.position` counter is freed after the counter reuse timeout, and its publication's
-two with its log.
+ends with reason 2; over `cavalry:udp` the replay has a subscriber while its
+publication is connected as `spec/udp.md`, "The sender", says, from the first status
+message without the send-setup flag until the connection timeout passes without one,
+so that a replay nobody answers ends after the replay connect timeout from its start,
+and one whose receiver went ends after the connection timeout and then the replay
+connect timeout; and the publication's close goes to the sender, which lingers it as it
+lingers any publication (`spec/udp.md`, "The sender"; ADR 0043). Every end adds one to
+`replay.stopped`, and reasons 0, 2 and 3 add one to `replay.ended`,
+`replay.not_connected` and `replay.failed`; the replay's `replay.position` counter is
+freed after the counter reuse timeout, and its publication's two with its log; over
+`cavalry:udp` the publication's four go with its log, its sender position and sender
+limit among them, and its send endpoint is released, once the sender has replied to the
+close, as for any publication.
 
 Session ids are the driver's to choose: it starts at a random i32 and adds 1 per new
 publication, skipping any id a live publication of the same stream id holds, as Aeron's
@@ -496,7 +525,7 @@ answered with code 6 and keeps running.
 | replay ready | 36 | 4 | stream id | i32 | any: the replay stream id |
 | replay stopped | 0 | 8 | replay session id | i64 | 0 or more |
 | replay stopped | 8 | 8 | position | i64 | 0 or more, a multiple of 32: the position after the last frame written, where the replay's images end |
-| replay stopped | 16 | 4 | reason | i32 | 0 ended, the end position or the recording's stop position reached; 1 stopped by `stop replay`; 2 no subscriber for the replay connect timeout; 3 failed, a segment file could not be read or a frame failed a check |
+| replay stopped | 16 | 4 | reason | i32 | 0 ended, the end position or the recording's stop position reached; 1 stopped by `stop replay`; 2 no subscriber, or over `cavalry:udp` the publication not connected (`spec/udp.md`, "The sender"), for the replay connect timeout; 3 failed, a segment file could not be read or a frame failed a check |
 
 The driver sends `unavailable image` for an image once the publication's end of stream
 position is stored and every subscriber of the image has reached it or the linger has
@@ -546,7 +575,7 @@ from 20.
 | publication unblock timeout | 15 s | the driver | `spec/log-buffer.md`, "Unblocking" |
 | publication linger | 5 s | the driver | `spec/log-buffer.md`, "Closing" |
 | counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`) |
-| replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber for this long ends with reason 2 |
+| replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber, or over `cavalry:udp` has not been connected as `spec/udp.md`, "The sender", defines it, for this long ends with reason 2: measured from the replay's start, from the moment its last subscriber went, or over `cavalry:udp` from the moment the connection timeout passed |
 
 These are Aeron's values, and they are the driver's in this version. Each timeout is
 measured on the clock the driver stores in the consumer heartbeat, nanoseconds since the
@@ -585,8 +614,10 @@ The counters file is sized so that the registries fill before it does: the stati
 counters of `counters.toml`, 82 once the sender and the receiver land their 44 (`spec/udp.md`,
 "Counters"), four per publication (4096: its position, its limit, the sender position and
 the sender limit), three per image (6144: the subscriber's position, the rebuild position
-and the high-water mark), three per recording (3072), one per replay (64), two per replay
-publication (256) and five per endpoint (640) come to 14,354, fewer than 16384.
+and the high-water mark), three per recording (3072), one per replay (64), four per replay
+publication (512: its position and its limit, and over `cavalry:udp` the sender position
+and the sender limit beside them; ADR 0043) and five per endpoint (640) come to 14,610,
+fewer than 16384.
 
 ## What the driver rejects
 

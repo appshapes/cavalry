@@ -142,7 +142,9 @@ not resolve is code 9.
 
 The driver's sender is one dedicated thread per driver with the driver's idle strategy.
 A `cavalry:udp` publication has a log buffer of type 0 or 1 (`spec/log-buffer.md`) with
-the UDP term length and MTU of "Values", and a send endpoint per resolved channel: one
+the UDP term length and MTU of "Values", or, for a replay's publication, its recording's
+term length and MTU, which its setup frame carries (`spec/client-protocol.md`,
+"Commands", start replay; ADR 0043), and a send endpoint per resolved channel: one
 socket, shared by the publications on that channel, connected to the endpoint and bound
 to the interface when one is named, with the operating system's send buffer. Per
 publication, on every duty cycle, with p the sender position and L the sender limit:
@@ -176,7 +178,8 @@ publication, on every duty cycle, with p the sender position and L the sender li
    lies inside the outstanding range is dropped silently, since the answer is on its
    way; one for another range while a retransmit is outstanding is dropped and counted
    in `sender.retransmit_overflow`, the recovery stall `doctor` explains from it; and a
-   NAK outside the resend window is dropped and counted in `sender.naks_ignored`. A
+   NAK outside the resend window, or past the publication's term as the paragraph
+   below says, is dropped and counted in `sender.naks_ignored`. A
    retransmit never moves the sender position.
 5. **RTT.** An RTT measurement with the reply flag is answered: the same frame without
    the flag, the echo timestamp and receiver id unchanged, a reception delta of 0.
@@ -186,7 +189,16 @@ max(L, position + receiver window length) on every status message without the
 send-setup flag whose position, consumption term id and offset as `spec/log-buffer.md`
 computes a position, lies within [p − term length ÷ 2, p + term length + term length
 ÷ 2]; such a status message outside that window is counted in
-`sender.status_messages_rejected` and ignored. The publication is connected from the
+`sender.status_messages_rejected` and ignored, and so is one whose consumption term
+offset is not below the publication's own term length; a NAK whose term offset is not
+below the publication's term length, or whose range, the offset plus the length, runs
+past it, is dropped and counted in `sender.naks_ignored`: the sender reads a control
+frame's shape against the largest term this version allows, so that "What a reader
+rejects" holds `term-offset` and `nak-length` against that term alone for a frame the
+sender reads, and holds a status message's offset, and a NAK's offset and range,
+against the publication's own term itself, since a replay's publication keeps its
+recording's (ADR 0043). The publication is
+connected from the
 first such status message until the connection timeout passes without one. The conductor keeps `publication.limit` at the sender position plus the publication
 window while the publication is connected and at the sender position otherwise, so that
 the publisher reads `not connected` (`spec/log-buffer.md`, "Claim, commit and abort"),
@@ -410,8 +422,8 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.retransmit_overflow` | a NAK for another range arrives while a retransmit is outstanding |
 | `sender.short_sends`, `sender.send_failed` | the socket took part of a datagram, or refused one |
 | `sender.flow_control_limited` | a publication enters the state of having a frame to send and no window |
-| `sender.naks_received`, `sender.naks_ignored` | a NAK arrives; one lies outside the resend window |
-| `sender.status_messages_received`, `sender.status_messages_rejected` | a status message arrives; one without the send-setup flag lies outside the window, or one with it asks a publication at its end of stream for a setup; an elicit the sender answers with a setup frame is not rejected |
+| `sender.naks_received`, `sender.naks_ignored` | a NAK arrives; one lies outside the resend window, or its term offset is not below the publication's term length or its range runs past it (ADR 0043) |
+| `sender.status_messages_received`, `sender.status_messages_rejected` | a status message arrives; one without the send-setup flag lies outside the window or its consumption term offset is not below the publication's term length (ADR 0043), or one with the flag asks a publication at its end of stream for a setup; an elicit the sender answers with a setup frame is not rejected |
 | `sender.rtt_replies_sent` | an RTT measurement is answered |
 | `sender.position`, `sender.limit` | keyed as `publication.position` is: the sender position and the sender limit of one publication |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted |
