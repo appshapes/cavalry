@@ -20,11 +20,16 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::fd::AsRawFd;
 
 use cavalry_proto::udp::{DATAGRAMS_PER_BURST, DATAGRAMS_PER_POLL, SOCKET_RCVBUF_LENGTH};
-use nix::sys::socket::{MsgFlags, getsockopt, setsockopt, sockopt};
+#[cfg(not(target_os = "linux"))]
+use nix::sys::socket::recvmsg;
+use nix::sys::socket::{MsgFlags, SockaddrStorage, getsockopt, sendmsg, setsockopt, sockopt};
 #[cfg(target_os = "linux")]
 use nix::sys::socket::{MultiHeaders, recvmmsg, sendmmsg};
-#[cfg(not(target_os = "linux"))]
-use nix::sys::socket::{recvmsg, sendmsg};
+
+/// The longest datagram a receive endpoint reads whole: the largest MTU a setup frame
+/// may name, 65504 bytes (`spec/udp.md`, "Setup frame"), rounded to the page, so that a
+/// sender of any MTU this version accepts is never truncated.
+pub(crate) const MAX_DATAGRAM_LENGTH: usize = 65536;
 
 /// The longest datagram a send endpoint reads: a control frame is at most 44 bytes, and
 /// a longer datagram is of another kind, read this far and then dropped by its type.
@@ -265,6 +270,176 @@ impl SendSocket {
             (Some(buffer), Some(&length)) => &buffer[..length.min(CONTROL_DATAGRAM_LENGTH)],
             _ => &[],
         }
+    }
+}
+
+/// The buffers a receive endpoint's poll fills, one set for the receiver thread and lent
+/// to every endpoint's poll, as the sender lends its [`Headers`]: [`DATAGRAMS_PER_POLL`]
+/// datagrams of [`MAX_DATAGRAM_LENGTH`] bytes with each one's length and source address,
+/// and on Linux the headers `recvmmsg` fills, which hold raw pointers and are not `Send`,
+/// so the receiver preallocates them as it is built on its own thread (ADR 0042).
+pub(crate) struct ReceiveBuffers {
+    data: Box<[[u8; MAX_DATAGRAM_LENGTH]; DATAGRAMS_PER_POLL]>,
+    lengths: [usize; DATAGRAMS_PER_POLL],
+    sources: [Option<SockaddrStorage>; DATAGRAMS_PER_POLL],
+    #[cfg(target_os = "linux")]
+    headers: MultiHeaders<SockaddrStorage>,
+}
+
+impl ReceiveBuffers {
+    /// Allocates the buffers and the headers once, with no control message buffer: the
+    /// one allocation of the receiver's life after its queues and tables.
+    pub(crate) fn preallocate() -> Self {
+        Self {
+            data: Box::new([[0u8; MAX_DATAGRAM_LENGTH]; DATAGRAMS_PER_POLL]),
+            lengths: [0; DATAGRAMS_PER_POLL],
+            sources: [None; DATAGRAMS_PER_POLL],
+            #[cfg(target_os = "linux")]
+            headers: MultiHeaders::preallocate(DATAGRAMS_PER_POLL, None),
+        }
+    }
+
+    /// The bytes and the source address of the `index`th datagram the last
+    /// [`ReceiveSocket::receive`] took; empty and `None` past what it took.
+    pub(crate) fn datagram(&self, index: usize) -> (&[u8], Option<&SockaddrStorage>) {
+        match (
+            self.data.get(index),
+            self.lengths.get(index),
+            self.sources.get(index),
+        ) {
+            (Some(buffer), Some(&length), Some(source)) => {
+                (&buffer[..length.min(MAX_DATAGRAM_LENGTH)], source.as_ref())
+            }
+            _ => (&[], None),
+        }
+    }
+}
+
+/// One receive endpoint's socket: a `std::net::UdpSocket` bound to the endpoint and set
+/// non-blocking on the control plane as the `add subscription` is handled, with the
+/// receive buffer asked for; `recvmmsg` on Linux and `recvmsg` elsewhere take the
+/// datagrams with their source addresses, and `sendmsg` with an address sends the
+/// receiver's status messages, NAKs and RTT answers to the source of the setup frame
+/// that created the image (`spec/udp.md`, "The receiver"; ADR 0042). An unconnected
+/// socket, since one endpoint receives from any sender.
+pub(crate) struct ReceiveSocket {
+    socket: UdpSocket,
+}
+
+impl ReceiveSocket {
+    /// Opens a socket bound to `endpoint` and set non-blocking, with the receive buffer
+    /// asked for at the 131072 bytes of `spec/udp.md`, "Values" (the host may give less,
+    /// which [`ReceiveSocket::buffer_lengths`] reads back); the operating system's reason
+    /// is the error, which the conductor answers with error code 4.
+    pub(crate) fn open(endpoint: SocketAddr) -> io::Result<Self> {
+        let socket = UdpSocket::bind(endpoint)?;
+        let _ = setsockopt(&socket, sockopt::RcvBuf, &(SOCKET_RCVBUF_LENGTH as usize));
+        socket.set_nonblocking(true)?;
+        Ok(Self { socket })
+    }
+
+    /// The receive and send buffer lengths the socket holds, as
+    /// [`SendSocket::buffer_lengths`] reads them.
+    pub(crate) fn buffer_lengths(&self) -> (i64, i64) {
+        let read =
+            |value: nix::Result<usize>| value.map_or(0, |n| i64::try_from(n).unwrap_or(i64::MAX));
+        (
+            read(getsockopt(&self.socket, sockopt::RcvBuf)),
+            read(getsockopt(&self.socket, sockopt::SndBuf)),
+        )
+    }
+
+    /// Receives up to [`DATAGRAMS_PER_POLL`] datagrams into `buffers`, one call on Linux
+    /// and one per datagram elsewhere, each with its source address, and returns how
+    /// many arrived, 0 when none waited; [`ReceiveBuffers::datagram`] reads each. `Err`
+    /// is a refusal other than "nothing to read", counted in `receiver.receive_failed`.
+    pub(crate) fn receive(&self, buffers: &mut ReceiveBuffers) -> io::Result<usize> {
+        buffers.lengths = [0; DATAGRAMS_PER_POLL];
+        buffers.sources = [None; DATAGRAMS_PER_POLL];
+        #[cfg(target_os = "linux")]
+        {
+            let data: &mut [[u8; MAX_DATAGRAM_LENGTH]] = &mut buffers.data[..];
+            let mut rest = data;
+            let mut slices: [[IoSliceMut<'_>; 1]; DATAGRAMS_PER_POLL] =
+                std::array::from_fn(|_| match std::mem::take(&mut rest).split_first_mut() {
+                    Some((head, tail)) => {
+                        rest = tail;
+                        [IoSliceMut::new(head)]
+                    }
+                    None => [IoSliceMut::new(&mut [])],
+                });
+            let results = match recvmmsg(
+                self.socket.as_raw_fd(),
+                &mut buffers.headers,
+                slices.iter_mut(),
+                MsgFlags::MSG_DONTWAIT,
+                None,
+            ) {
+                Ok(results) => results,
+                Err(nix::errno::Errno::EAGAIN) => return Ok(0),
+                Err(errno) => return Err(io::Error::from(errno)),
+            };
+            let mut count = 0;
+            for (result, (length, source)) in
+                results.zip(buffers.lengths.iter_mut().zip(buffers.sources.iter_mut()))
+            {
+                *length = result.bytes.min(MAX_DATAGRAM_LENGTH);
+                *source = result.address;
+                count += 1;
+            }
+            Ok(count)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mut count = 0;
+            while count < DATAGRAMS_PER_POLL {
+                let Some(buffer) = buffers.data.get_mut(count) else {
+                    break;
+                };
+                let mut slice = [IoSliceMut::new(buffer)];
+                match recvmsg::<SockaddrStorage>(
+                    self.socket.as_raw_fd(),
+                    &mut slice,
+                    None,
+                    MsgFlags::MSG_DONTWAIT,
+                ) {
+                    Ok(message) => {
+                        buffers.lengths[count] = message.bytes.min(MAX_DATAGRAM_LENGTH);
+                        buffers.sources[count] = message.address;
+                        count += 1;
+                    }
+                    Err(nix::errno::Errno::EAGAIN) => break,
+                    Err(errno) if count == 0 => return Err(io::Error::from(errno)),
+                    Err(_) => break,
+                }
+            }
+            Ok(count)
+        }
+    }
+
+    /// Sends one control frame to `to` in one `sendmsg` with no control message, which
+    /// allocates nothing (ADR 0041, Evidence); `Ok(false)` when the socket took only
+    /// part of it, `Err` when it refused it.
+    pub(crate) fn send_to(&self, bytes: &[u8], to: &SockaddrStorage) -> io::Result<bool> {
+        let iov = [IoSlice::new(bytes)];
+        match sendmsg(
+            self.socket.as_raw_fd(),
+            &iov,
+            &[],
+            MsgFlags::MSG_DONTWAIT,
+            Some(to),
+        ) {
+            Ok(sent) => Ok(sent >= bytes.len()),
+            Err(errno) => Err(io::Error::from(errno)),
+        }
+    }
+}
+
+impl std::fmt::Debug for ReceiveSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceiveSocket")
+            .field("local", &self.socket.local_addr().ok())
+            .finish()
     }
 }
 

@@ -164,7 +164,7 @@ pub const SENDER_RETRANSMIT_OVERFLOW: CounterId = CounterId(51);
 /// `sender.short_sends`, a static counter: Datagrams the socket took only part of; the sender position stays at the datagram's first frame and the burst is sent again on the next cycle.
 pub const SENDER_SHORT_SENDS: CounterId = CounterId(52);
 
-/// `sender.send_failed`, a static counter: Sends the operating system refused, EAGAIN, ENOBUFS, EINTR and ECONNREFUSED among them, counted and retried on the next cycle; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).
+/// `sender.send_failed`, a static counter: Sends the operating system refused, EAGAIN, ENOBUFS, EINTR and ECONNREFUSED among them, on a send endpoint, counted and retried on the next cycle, and on a receive endpoint, where the receiver's status messages, NAKs and RTT answers are sent once each; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).
 pub const SENDER_SEND_FAILED: CounterId = CounterId(53);
 
 /// `sender.flow_control_limited`, a static counter: Times a publication with a frame to send found its sender limit reached: the receiver's window is full, counted once on entry into that state (spec/udp.md, The sender).
@@ -218,8 +218,86 @@ pub const CHANNEL_IMAGES: CounterId = CounterId(69);
 /// `channel.publications`, a instance gauge: How many publications one send endpoint carries; 0 on a receive endpoint; the endpoint closes when it reaches 0 and the last linger ends; key and label as channel.status.
 pub const CHANNEL_PUBLICATIONS: CounterId = CounterId(70);
 
-/// `receiver.receive_failed`, a static counter: Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).
+/// `receiver.receive_failed`, a static counter: Receives the operating system refused on a send or a receive endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).
 pub const RECEIVER_RECEIVE_FAILED: CounterId = CounterId(71);
+
+/// `receiver.bytes_received`, a static counter: Bytes of data and padding frames the receiver accepted into an image, headers included (spec/udp.md, The receiver, step 2).
+pub const RECEIVER_BYTES_RECEIVED: CounterId = CounterId(72);
+
+/// `receiver.frames_received`, a static counter: Data and padding frames the receiver accepted into an image; a duplicate, which changes nothing, is not counted (spec/udp.md, The receiver, step 2).
+pub const RECEIVER_FRAMES_RECEIVED: CounterId = CounterId(73);
+
+/// `receiver.setups_received`, a static counter: Setup frames that arrived at a receive endpoint, wanted or not.
+pub const RECEIVER_SETUPS_RECEIVED: CounterId = CounterId(74);
+
+/// `receiver.setups_unwanted`, a static counter: Setup frames for a stream no subscription on the endpoint wants, dropped (spec/udp.md, The receiver, step 1).
+pub const RECEIVER_SETUPS_UNWANTED: CounterId = CounterId(75);
+
+/// `receiver.setups_elicited`, a static counter: Status messages with the send-setup flag sent for a session with no record, asking the sender for its setup frame: a data datagram or heartbeat arrived for a wanted stream from a sender whose setups stopped before this receiver had a subscription, once per pending setup timeout (spec/udp.md, The receiver, step 1).
+pub const RECEIVER_SETUPS_ELICITED: CounterId = CounterId(76);
+
+/// `receiver.heartbeats_received`, a static counter: Heartbeats accepted for an image: the high-water mark follows them, and with EOS they name the end of stream (spec/udp.md, Heartbeat).
+pub const RECEIVER_HEARTBEATS_RECEIVED: CounterId = CounterId(77);
+
+/// `receiver.status_messages_sent`, a static counter: Status messages sent for an image: one at its creation, then on the three triggers, the slowest reader a quarter window past the last, a window change, or the status message interval (spec/udp.md, The receiver, step 4).
+pub const RECEIVER_STATUS_MESSAGES_SENT: CounterId = CounterId(78);
+
+/// `receiver.naks_sent`, a static counter: NAKs sent for a gap: one after the NAK delay and one every NAK retry while the gap persists (spec/udp.md, The receiver, step 3).
+pub const RECEIVER_NAKS_SENT: CounterId = CounterId(79);
+
+/// `receiver.gaps_detected`, a static counter: Gaps first seen by the rebuild scan: a run of zero frame length words between the rebuild position and the next frame or the high-water mark, each a datagram lost or reordered on the wire (spec/udp.md, The receiver, step 3).
+pub const RECEIVER_GAPS_DETECTED: CounterId = CounterId(80);
+
+/// `receiver.under_runs`, a static counter: Data datagrams dropped because they began below the last status message's position: a late retransmit or a duplicate of what the subscribers have passed (spec/udp.md, The receiver, step 2).
+pub const RECEIVER_UNDER_RUNS: CounterId = CounterId(81);
+
+/// `receiver.over_runs`, a static counter: Data datagrams and heartbeats dropped because they ended more than half a term beyond the last status message's position: a sender past the window it was given (spec/udp.md, The receiver, step 2).
+pub const RECEIVER_OVER_RUNS: CounterId = CounterId(82);
+
+/// `receiver.rejected_datagrams`, a static counter: Data datagrams that failed the datagram check, dropped whole: a length not a multiple of 32, a frame that fails spec/frame.md's checks, a term offset that is not the running one, or frames past the end of the term (spec/udp.md, What a reader rejects).
+pub const RECEIVER_REJECTED_DATAGRAMS: CounterId = CounterId(83);
+
+/// `receiver.dropped_frames`, a static counter: Control frames and heartbeats a receive endpoint dropped because their version or type is not one this version reads, or they are too short (spec/udp.md, The datagram), and heartbeats whose term offset is not below their image's term length (spec/udp.md, What a reader rejects, term-offset).
+pub const RECEIVER_DROPPED_FRAMES: CounterId = CounterId(84);
+
+/// `receiver.dropped_pending`, a static counter: Setup frames, data datagrams and heartbeats dropped for a session pending a setup, the datagram that elicited the setup among them, with no status message sent for them (spec/udp.md, The receiver, step 1).
+pub const RECEIVER_DROPPED_PENDING: CounterId = CounterId(85);
+
+/// `receiver.dropped_in_progress`, a static counter: Setup frames, data datagrams and heartbeats dropped for a session in progress, between the setup handed to the conductor and its image, or because the queue to the conductor had no room for the setup (spec/udp.md, The receiver, step 1).
+pub const RECEIVER_DROPPED_IN_PROGRESS: CounterId = CounterId(86);
+
+/// `receiver.dropped_cool_down`, a static counter: Setup frames, data datagrams and heartbeats dropped for a session on cool-down, the 10 s after its image was retired, so that a late frame creates no second image (spec/udp.md, The receiver, step 5).
+pub const RECEIVER_DROPPED_COOL_DOWN: CounterId = CounterId(87);
+
+/// `receiver.dropped_unwanted`, a static counter: Data datagrams, heartbeats and RTT measurements dropped for a stream no subscription on the endpoint wants, a datagram with EOS for a session with no record, an RTT measurement for a session with no image, or one for another receiver (spec/udp.md, The receiver, steps 1 and 6).
+pub const RECEIVER_DROPPED_UNWANTED: CounterId = CounterId(88);
+
+/// `receiver.sessions_full`, a static counter: Datagrams for a session with no record dropped because the session table held 4096 records, with no status message sent (spec/udp.md, The receiver).
+pub const RECEIVER_SESSIONS_FULL: CounterId = CounterId(89);
+
+/// `receiver.rtt_replies_sent`, a static counter: RTT measurements with the reply flag answered for an image: the same frame without the flag, the echo timestamp and the receiver id unchanged (spec/udp.md, The receiver, step 6).
+pub const RECEIVER_RTT_REPLIES_SENT: CounterId = CounterId(90);
+
+/// `image.hwm_position`, a instance gauge: The high-water mark of one image: the highest position any accepted datagram or heartbeat reached, stored by the receiver with a release store; key: the image's registration id (i64), session id (i32), stream id (i32), little-endian, as subscription.position; label text: the three in decimal, space-separated.
+pub const IMAGE_HWM_POSITION: CounterId = CounterId(91);
+
+/// `image.rebuild_position`, a instance gauge: The rebuild position of one image: the end of the contiguous frames from its start, the furthest a subscriber can read, stored by the receiver with a release store; key and label as image.hwm_position.
+pub const IMAGE_REBUILD_POSITION: CounterId = CounterId(92);
+
+/// `image.created`, a static counter: Images created from a setup frame: the conductor made the log, allocated the counters and announced the image, and the receiver sent its first status message (spec/udp.md, The receiver, step 1).
+pub const IMAGE_CREATED: CounterId = CounterId(93);
+
+/// `image.ended`, a static counter: Images retired because their stream ended: a heartbeat with EOS named the end, the rebuild reached it, and every reader did too or the liveness timeout passed (spec/udp.md, The receiver, step 5).
+pub const IMAGE_ENDED: CounterId = CounterId(94);
+
+/// `image.timed_out`, a static counter: Images retired because no accepted datagram or heartbeat arrived for the image liveness timeout, 10 s (spec/udp.md, The receiver, step 5).
+pub const IMAGE_TIMED_OUT: CounterId = CounterId(95);
+
+/// `image.unsubscribed`, a static counter: Images retired because their last subscription on the endpoint and stream was removed, by remove subscription, client close or client timeout, with no unavailable image for a subscription its client removed (spec/udp.md, The receiver, step 5).
+pub const IMAGE_UNSUBSCRIBED: CounterId = CounterId(96);
+
+/// `image.removed`, a static counter: Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5).
+pub const IMAGE_REMOVED: CounterId = CounterId(97);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -652,7 +730,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.send_failed",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Sends the operating system refused, EAGAIN, ENOBUFS, EINTR and ECONNREFUSED among them, counted and retried on the next cycle; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).",
+        doc: "Sends the operating system refused, EAGAIN, ENOBUFS, EINTR and ECONNREFUSED among them, on a send endpoint, counted and retried on the next cycle, and on a receive endpoint, where the receiver's status messages, NAKs and RTT answers are sent once each; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).",
         doctor: "ECONNREFUSED is the normal case for a publisher started before its subscriber or whose subscriber's driver restarted; a count rising while a receiver is live is a send buffer the host capped or a link that is down.",
     },
     CounterDef {
@@ -796,7 +874,215 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "receiver.receive_failed",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Receives the operating system refused on an endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).",
+        doc: "Receives the operating system refused on a send or a receive endpoint's socket, EAGAIN aside, counted and the poll retried; no failure on a live socket errors the endpoint (spec/udp.md, The receiver).",
         doctor: "On a send endpoint whose publication no receiver has answered, this is the port unreachable the kernel reports for a port nobody listens on, one per setup frame and expected beside udp-publication-not-connected; a count that rises while a receiver is live is a socket the host is starving: look at the host's memory pressure and at dmesg.",
+    },
+    CounterDef {
+        id: RECEIVER_BYTES_RECEIVED,
+        name: "receiver.bytes_received",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Bytes of data and padding frames the receiver accepted into an image, headers included (spec/udp.md, The receiver, step 2).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_FRAMES_RECEIVED,
+        name: "receiver.frames_received",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Data and padding frames the receiver accepted into an image; a duplicate, which changes nothing, is not counted (spec/udp.md, The receiver, step 2).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_SETUPS_RECEIVED,
+        name: "receiver.setups_received",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Setup frames that arrived at a receive endpoint, wanted or not.",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_SETUPS_UNWANTED,
+        name: "receiver.setups_unwanted",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Setup frames for a stream no subscription on the endpoint wants, dropped (spec/udp.md, The receiver, step 1).",
+        doctor: "A sender publishes to this endpoint on a stream nobody here subscribes to: check the stream id on both sides; the setups stop when the sender's publication is removed or a subscription on the stream is added.",
+    },
+    CounterDef {
+        id: RECEIVER_SETUPS_ELICITED,
+        name: "receiver.setups_elicited",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Status messages with the send-setup flag sent for a session with no record, asking the sender for its setup frame: a data datagram or heartbeat arrived for a wanted stream from a sender whose setups stopped before this receiver had a subscription, once per pending setup timeout (spec/udp.md, The receiver, step 1).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_HEARTBEATS_RECEIVED,
+        name: "receiver.heartbeats_received",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Heartbeats accepted for an image: the high-water mark follows them, and with EOS they name the end of stream (spec/udp.md, Heartbeat).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_STATUS_MESSAGES_SENT,
+        name: "receiver.status_messages_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Status messages sent for an image: one at its creation, then on the three triggers, the slowest reader a quarter window past the last, a window change, or the status message interval (spec/udp.md, The receiver, step 4).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_NAKS_SENT,
+        name: "receiver.naks_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "NAKs sent for a gap: one after the NAK delay and one every NAK retry while the gap persists (spec/udp.md, The receiver, step 3).",
+        doctor: "NAKs are loss being mended: a steady count under load is the network, the socket buffers or a sender that cannot keep up; compare sender.retransmits_sent on the sending host, and receiver.gaps_detected here; `cavalry doctor` names the image whose high-water mark runs ahead of its rebuild position.",
+    },
+    CounterDef {
+        id: RECEIVER_GAPS_DETECTED,
+        name: "receiver.gaps_detected",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Gaps first seen by the rebuild scan: a run of zero frame length words between the rebuild position and the next frame or the high-water mark, each a datagram lost or reordered on the wire (spec/udp.md, The receiver, step 3).",
+        doctor: "Loss on the wire or in a socket buffer: a count that rises with receiver.naks_sent and sender.retransmits_sent is being mended; one that rises while image.rebuild_position stands still is a gap the sender no longer answers (sender.naks_ignored there) and the image will time out.",
+    },
+    CounterDef {
+        id: RECEIVER_UNDER_RUNS,
+        name: "receiver.under_runs",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Data datagrams dropped because they began below the last status message's position: a late retransmit or a duplicate of what the subscribers have passed (spec/udp.md, The receiver, step 2).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_OVER_RUNS,
+        name: "receiver.over_runs",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Data datagrams and heartbeats dropped because they ended more than half a term beyond the last status message's position: a sender past the window it was given (spec/udp.md, The receiver, step 2).",
+        doctor: "A sender that ran more than half a term past the receiver's last status message: its status messages are not reaching it (sender.status_messages_received there) or it ignores the window; the dropped frames are NAKed once the status messages get through.",
+    },
+    CounterDef {
+        id: RECEIVER_REJECTED_DATAGRAMS,
+        name: "receiver.rejected_datagrams",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Data datagrams that failed the datagram check, dropped whole: a length not a multiple of 32, a frame that fails spec/frame.md's checks, a term offset that is not the running one, or frames past the end of the term (spec/udp.md, What a reader rejects).",
+        doctor: "A peer sending datagrams this version cannot read: check that both drivers run the same version; nothing of a rejected datagram is delivered.",
+    },
+    CounterDef {
+        id: RECEIVER_DROPPED_FRAMES,
+        name: "receiver.dropped_frames",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Control frames and heartbeats a receive endpoint dropped because their version or type is not one this version reads, or they are too short (spec/udp.md, The datagram), and heartbeats whose term offset is not below their image's term length (spec/udp.md, What a reader rejects, term-offset).",
+        doctor: "A peer of another version, or something that is not Cavalry, sends to this endpoint's port, or a sender's heartbeats name a term offset past its image's term: check the peer's version and the port.",
+    },
+    CounterDef {
+        id: RECEIVER_DROPPED_PENDING,
+        name: "receiver.dropped_pending",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Setup frames, data datagrams and heartbeats dropped for a session pending a setup, the datagram that elicited the setup among them, with no status message sent for them (spec/udp.md, The receiver, step 1).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_DROPPED_IN_PROGRESS,
+        name: "receiver.dropped_in_progress",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Setup frames, data datagrams and heartbeats dropped for a session in progress, between the setup handed to the conductor and its image, or because the queue to the conductor had no room for the setup (spec/udp.md, The receiver, step 1).",
+        doctor: "A conductor slow to create an image, under CPU throttling or a full counters file: a count that keeps rising for one session means the image is never created; look at driver.registry_full and driver.log_create_failed.",
+    },
+    CounterDef {
+        id: RECEIVER_DROPPED_COOL_DOWN,
+        name: "receiver.dropped_cool_down",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Setup frames, data datagrams and heartbeats dropped for a session on cool-down, the 10 s after its image was retired, so that a late frame creates no second image (spec/udp.md, The receiver, step 5).",
+        doctor: "A sender that resumed after a pause of the liveness timeout, or a subscription added back on an endpoint that stayed open, waits up to one cool-down before the stream is received again; nothing to do unless the count keeps rising, which is a sender that paused for the timeout again.",
+    },
+    CounterDef {
+        id: RECEIVER_DROPPED_UNWANTED,
+        name: "receiver.dropped_unwanted",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Data datagrams, heartbeats and RTT measurements dropped for a stream no subscription on the endpoint wants, a datagram with EOS for a session with no record, an RTT measurement for a session with no image, or one for another receiver (spec/udp.md, The receiver, steps 1 and 6).",
+        doctor: "",
+    },
+    CounterDef {
+        id: RECEIVER_SESSIONS_FULL,
+        name: "receiver.sessions_full",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Datagrams for a session with no record dropped because the session table held 4096 records, with no status message sent (spec/udp.md, The receiver).",
+        doctor: "More sessions than the table holds reach this driver, or senders that open a session per datagram: a record is freed when a pending setup expires, an image is refused or a cool-down ends, so the count stops once the senders do.",
+    },
+    CounterDef {
+        id: RECEIVER_RTT_REPLIES_SENT,
+        name: "receiver.rtt_replies_sent",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "RTT measurements with the reply flag answered for an image: the same frame without the flag, the echo timestamp and the receiver id unchanged (spec/udp.md, The receiver, step 6).",
+        doctor: "",
+    },
+    CounterDef {
+        id: IMAGE_HWM_POSITION,
+        name: "image.hwm_position",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The high-water mark of one image: the highest position any accepted datagram or heartbeat reached, stored by the receiver with a release store; key: the image's registration id (i64), session id (i32), stream id (i32), little-endian, as subscription.position; label text: the three in decimal, space-separated.",
+        doctor: "An image.hwm_position that runs ahead of image.rebuild_position is a gap: receiver.gaps_detected and receiver.naks_sent say whether it is being mended; one that stands still while the sender's sender.position moves is a link that dropped everything.",
+    },
+    CounterDef {
+        id: IMAGE_REBUILD_POSITION,
+        name: "image.rebuild_position",
+        kind: Kind::Gauge,
+        scope: Scope::Instance,
+        doc: "The rebuild position of one image: the end of the contiguous frames from its start, the furthest a subscriber can read, stored by the receiver with a release store; key and label as image.hwm_position.",
+        doctor: "A rebuild position that stands still below the high-water mark is a gap the sender is not mending: sender.naks_ignored on the sending host says it fell outside the resend window; the image times out after the liveness timeout.",
+    },
+    CounterDef {
+        id: IMAGE_CREATED,
+        name: "image.created",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Images created from a setup frame: the conductor made the log, allocated the counters and announced the image, and the receiver sent its first status message (spec/udp.md, The receiver, step 1).",
+        doctor: "",
+    },
+    CounterDef {
+        id: IMAGE_ENDED,
+        name: "image.ended",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Images retired because their stream ended: a heartbeat with EOS named the end, the rebuild reached it, and every reader did too or the liveness timeout passed (spec/udp.md, The receiver, step 5).",
+        doctor: "",
+    },
+    CounterDef {
+        id: IMAGE_TIMED_OUT,
+        name: "image.timed_out",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Images retired because no accepted datagram or heartbeat arrived for the image liveness timeout, 10 s (spec/udp.md, The receiver, step 5).",
+        doctor: "The sender stopped, its host went away, or the link dropped everything for 10 s: the subscribers got unavailable image; a sender that comes back creates a new image after the cool-down.",
+    },
+    CounterDef {
+        id: IMAGE_UNSUBSCRIBED,
+        name: "image.unsubscribed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Images retired because their last subscription on the endpoint and stream was removed, by remove subscription, client close or client timeout, with no unavailable image for a subscription its client removed (spec/udp.md, The receiver, step 5).",
+        doctor: "",
+    },
+    CounterDef {
+        id: IMAGE_REMOVED,
+        name: "image.removed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5).",
+        doctor: "",
     },
 ];

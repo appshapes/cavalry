@@ -68,8 +68,8 @@ struct Options {
     profile_suffix: String,
     out: Option<PathBuf>,
     /// The CPUs of the publisher, the subscriber and the driver's conductor, from
-    /// `--pin`; the driver's recorder and replayer and the client's conductor run on
-    /// the lowest CPU outside them.
+    /// `--pin`; the driver's recorder, replayer, sender and receiver and the client's
+    /// conductor run on the lowest CPU outside them.
     pin: Option<[usize; 3]>,
     /// That lowest CPU outside the pins, from the process's allowed set as it was before
     /// this thread pinned itself: the affinity a thread reads is its own.
@@ -197,9 +197,9 @@ Options:
   --profile-suffix S  appended to the profile; `just bench-unchecked` passes -unchecked
   --out DIR         where the result JSON goes (default bench/results); --no-write writes none
   --pin P,S,C       pin the publisher, the subscriber and the driver's conductor to CPUs P,
-                    S and C, three distinct CPUs, Linux only, and the driver's recorder and
-                    replayer and the client's conductor to the lowest CPU outside them; the
-                    bench host passes 8,10,12 (ADR 0016)
+                    S and C, three distinct CPUs, Linux only, and the driver's recorder,
+                    replayer, sender and receiver and the client's conductor to the lowest
+                    CPU outside them; the bench host passes 8,10,12 (ADR 0016)
   --repeat N        run every benchmark N times, report each one's median run by p99.99,
                     and list every run's p99.99 in the result (default 1; CI passes 21)
   --only NAME       run only the benchmarks whose name contains NAME, for a profile of
@@ -410,8 +410,8 @@ fn histogram() -> Histogram<u64> {
 }
 
 /// The lowest CPU in the calling thread's allowed set outside the three pins: where the
-/// driver's recorder and replayer and the client's conductor run under `--pin`, so that
-/// the third pin holds the driver's conductor alone (card 136). Read before any thread pins
+/// driver's recorder, replayer, sender and receiver and the client's conductor run under
+/// `--pin`, so that the third pin holds the driver's conductor alone (card 136). Read before any thread pins
 /// itself: the bench host's shells and runner start with the housekeeping CPUs alone
 /// in their set, and a thread already pinned to one CPU reads a set of one.
 fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
@@ -424,7 +424,8 @@ fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
         .ok_or_else(|| {
             format!(
                 "--pin: no CPU outside {},{},{} in the process's allowed set for the \
-                 driver's recorder and replayer and the client's conductor; run the harness from a shell \
+                 driver's recorder, replayer, sender and receiver and the client's conductor; \
+                 run the harness from a shell \
                  whose allowed set holds a housekeeping CPU as well: `taskset -cp $$` prints \
                  the shell's, and `taskset -c 0-7 just bench --pin 8,10,12` runs with CPUs 0 \
                  to 7 in it (docs/how-to/run-the-bench.md#when-it-does-not-work)",
@@ -441,6 +442,7 @@ struct DriverPins {
     recorder: AtomicUsize,
     replayer: AtomicUsize,
     sender: AtomicUsize,
+    receiver: AtomicUsize,
 }
 
 impl DriverPins {
@@ -450,6 +452,7 @@ impl DriverPins {
             recorder: AtomicUsize::new(0),
             replayer: AtomicUsize::new(0),
             sender: AtomicUsize::new(0),
+            receiver: AtomicUsize::new(0),
         }
     }
 
@@ -460,6 +463,7 @@ impl DriverPins {
             DriverThread::Recorder => &self.recorder,
             DriverThread::Replayer => &self.replayer,
             DriverThread::Sender => &self.sender,
+            DriverThread::Receiver => &self.receiver,
         }
     }
 
@@ -478,6 +482,7 @@ impl DriverPins {
                     DriverThread::Recorder => "recorder",
                     DriverThread::Replayer => "replayer",
                     DriverThread::Sender => "sender",
+                    DriverThread::Receiver => "receiver",
                 },
                 failed - 1
             )),
@@ -841,8 +846,8 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 /// subscription on one stream, the publisher on this thread and the subscriber on its
 /// own, each message claimed, written in place and committed, then delivered to the
 /// subscription's handler (ADR 0021). Under `--pin` the driver's conductor pins itself
-/// to the third CPU and the driver's recorder and replayer and the client's conductor
-/// run on the lowest CPU outside the pins, as `run_client` says and does; a thread inherits the
+/// to the third CPU and the driver's recorder, replayer, sender and receiver and the
+/// client's conductor run on the lowest CPU outside the pins, as `run_client` says and does; a thread inherits the
 /// affinity of the thread that spawns it, which is what the placement arranges. The log
 /// is the driver's, 64 MiB terms (`spec/client-protocol.md`,
 /// "Sizes"), so the warm-up is one rotation of that log, not of `--term-length`'s, for the
@@ -861,10 +866,11 @@ fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
 /// the stream to the log directory under the bench directory (ADR 0025): the recorder is
 /// one more reader of the log, whose position the publisher's limit respects, and its
 /// writes run on the driver's recorder thread. Under `--pin` the driver's conductor has
-/// the third CPU to itself, and the recorder, the replayer and the client's conductor
-/// run on the lowest CPU outside the pins: three threads on one pinned CPU kept it
-/// ticking and waking within itself (card 136); the replayer holds no replay in any row
-/// and stays parked. The recording must reach the publisher's final
+/// the third CPU to itself, and the recorder, the replayer, the sender, the receiver
+/// and the client's conductor run on the lowest CPU outside the pins: the threads on
+/// one pinned CPU kept it ticking and waking within itself (card 136); the replayer
+/// holds no replay in any row and stays parked, and the sender and the receiver hold
+/// no endpoint and park too. The recording must reach the publisher's final
 /// position before the run counts, so a recorder that lost a byte or fell behind fails
 /// the run, never a row.
 fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Result<LogRun, String> {
@@ -883,13 +889,15 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     let on_thread_start: ThreadStart = {
         let pins = Arc::clone(&pins);
         Arc::new(move |thread| {
-            // The sender goes with the housekeeping threads until the UDP rows give it
-            // a core of its own (card 182): no row of this version sends a datagram.
+            // The sender and the receiver go with the housekeeping threads until the
+            // UDP rows give each a core of its own (card 182): no row of this version
+            // sends a datagram.
             let cpu = match thread {
                 DriverThread::Conductor => conductor_cpu,
-                DriverThread::Recorder | DriverThread::Replayer | DriverThread::Sender => {
-                    housekeeping
-                }
+                DriverThread::Recorder
+                | DriverThread::Replayer
+                | DriverThread::Sender
+                | DriverThread::Receiver => housekeeping,
             };
             if pin_to(cpu).is_err() {
                 pins.slot(thread)

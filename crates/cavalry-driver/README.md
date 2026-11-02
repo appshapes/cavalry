@@ -21,9 +21,9 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
   `Driver::start_with_threads` takes a hook each thread runs first, named the thread it
   is on, where a caller that owns the host's CPUs pins the conductor to a CPU of its own
-  and leaves the recorder, the replayer and the sender on the housekeeping CPUs, as the
-  bench does under `--pin`; otherwise every thread keeps the affinity of the thread
-  that started the driver.
+  and leaves the recorder, the replayer, the sender and the receiver on the housekeeping
+  CPUs, as the bench does under `--pin`; otherwise every thread keeps the affinity of
+  the thread that started the driver.
 - Records a stream to the durable log on a second thread, the recorder, with the same
   idle strategy: `start recording` and `stop recording` (`spec/client-protocol.md`,
   "Commands") name a stream, the conductor hands the recorder each start and stop
@@ -78,9 +78,29 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `channel.*`, and the socket calls `std` lacks come through `nix`. The sender idles
   with the driver's strategy while it holds an endpoint or a publication and parks
   while it holds none, unparked by the conductor's next request, so a driver that
-  sends nothing wakes no CPU for it, as it wakes none for the replayer. The receiver, the
-  image and `start recording` on a `cavalry:udp` channel follow (card 181): a
-  subscription on one is refused with code 11 until then.
+  sends nothing wakes no CPU for it, as it wakes none for the replayer.
+- Receives a `cavalry:udp` stream into an image on a fifth thread, the receiver, by the
+  rules of `spec/udp.md`, "The receiver" (ADR 0040, ADR 0042): `add subscription` on
+  `cavalry:udp?endpoint=<host>:<port>` resolves the host once, binds the channel's
+  receive endpoint, one socket shared by the subscriptions on it, and hands the receiver
+  the socket and the stream wanted; a setup frame for that stream goes back to the
+  conductor, which creates the image, a log of type 2 under `images/` at the position
+  the setup names with a registration id of its own, allocates its two counters and a
+  `subscription.position` per subscription, announces it with `available image` and the
+  sender's address as the source identity, and hands the receiver the log, its writer
+  and the readers; the receiver inserts each frame at its term offset within the bounds
+  of its last status message, scans the rebuild and the gap in bounded work per cycle,
+  NAKs the gap after the NAK delay and every NAK retry, sends status messages on the
+  three triggers with the slowest reader's position, cleans the log a term behind it,
+  and retires an image its stream ended, that went quiet for the liveness timeout or
+  whose last subscription left, which the conductor finishes with `unavailable image`
+  and the log unlinked. A session record in one of four states keeps a second setup or
+  a late retransmit from creating a second image, in a table of 4096. Every step has its
+  counter, `receiver.*`, `image.*` and `channel.*`. `start recording` on a
+  `cavalry:udp` channel records a publication sending on it or an image received on it,
+  the recording one of the image's readers. The receiver idles with the driver's
+  strategy while it holds an endpoint and parks while it holds none. `start replay` on
+  a `cavalry:udp` channel is refused with code 11 until card 192 brings it.
 - Degrades under cgroup CPU throttling, shared-memory pressure or packet loss. It does
   not fall over, and every state transition increments a counter.
 
@@ -175,3 +195,8 @@ driver refused (driver-active): /tmp/cavalry-driver-readme-4242 holds a driver w
 - [ADR 0030](../../docs/decisions/0030-replay-a-recording-into-a-subscription.md), the
   replayer thread, the replay's publication, the pacing and the end rules;
   `src/replayer.rs`.
+- [`spec/udp.md`](../../spec/udp.md), "The sender" and "The receiver", and
+  [ADR 0041](../../docs/decisions/0041-send-from-a-sender-thread-through-nix.md) and
+  [ADR 0042](../../docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md), the
+  sender and the receiver threads, their queues to the conductor and their counters;
+  `src/sender.rs`, `src/receiver.rs`, `src/socket.rs`.

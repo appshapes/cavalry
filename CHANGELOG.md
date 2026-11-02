@@ -942,3 +942,29 @@ user-visible change, added in the same commit as the change. The format follows
   position, the next frame after a gap and where it stopped, so that the driver's
   receiver finds the gap a NAK names in bounded work per cycle
   ([ADR 0042](docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md); card 181).
+- A `cavalry:udp` subscription receives its stream. `add subscription` on
+  `cavalry:udp?endpoint=<host>:<port>` resolves the host once (code 9 when it does
+  not), binds the channel's receive endpoint (code 4 when the socket cannot be opened or
+  bound, and code 4 saying so when the channel's previous endpoint is still closing with
+  the receiver; 64 endpoints, code 10 past them, and code 10 when the receiver's queue
+  has no room) and answers `subscription ready` with the endpoint's `channel.status`; a setup
+  frame from a sender creates an image under `images/` with a registration id of its
+  own, announced with `available image` and the sender's address as the source
+  identity, which a subscriber reads as any log while the driver's fifth thread, the
+  receiver, fills it: frames inserted by term offset within the window the last status
+  message set, duplicates changing nothing, a gap NAKed after the NAK delay and every
+  NAK retry and nothing delivered past it until it is filled, status messages on the
+  three triggers, a heartbeat with EOS ending the stream, and an image retired when its
+  stream ends, when it goes quiet for the liveness timeout or when its last subscription
+  leaves, with `unavailable image` and the log unlinked; a session record in one of four
+  states, pending, in progress, with an image or on cool-down, in a table of 4096, keeps
+  a second setup or a late retransmit from creating a second image. The 20 `receiver.*`
+  counters, `image.hwm_position` and `image.rebuild_position` per image, and the image's
+  state machine, `image.created`, `image.ended`, `image.timed_out`, `image.unsubscribed`
+  and `image.removed`, in `counters.toml`. `start recording` on a `cavalry:udp` channel
+  records a publication sending on it or an image received on it, the recording one of
+  the image's readers. `start replay` on a `cavalry:udp` channel stays code 11, naming
+  card 192 ([ADR 0042](docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md);
+  card 181).
+- `DriverThread::Receiver` names the fifth thread to the `start_with_threads` hook; the
+  bench places it with the housekeeping threads until card 182's rows give it a core.
