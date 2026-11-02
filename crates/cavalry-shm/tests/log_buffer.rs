@@ -15,7 +15,8 @@ use cavalry_shm::log::layout::{
     file_name,
 };
 use cavalry_shm::log::{
-    ClaimError, HeaderFields, LogBuffers, LogDirectory, LogError, LogType, Tail, UnblockOutcome,
+    ClaimError, HeaderFields, ImageScan, LogBuffers, LogDirectory, LogError, LogType, Tail,
+    UnblockOutcome,
 };
 
 struct Dir(PathBuf);
@@ -1577,4 +1578,234 @@ fn an_image_in_a_later_term_lands_in_its_partition() {
     );
     assert_eq!(drain(&mut reader), vec![b"third term".to_vec()]);
     assert_eq!(reader.position(), position + 64);
+}
+
+// ---- the rebuild scan: `spec/udp.md`, "The receiver", step 3 (ADR 0042) ----
+
+/// A 64-byte frame at `term_offset` of term `term_id`, inserted.
+fn insert_at(writer: &mut cavalry_shm::log::ImageWriter, term_id: i32, term_offset: u32) {
+    assert!(
+        writer
+            .insert(
+                term_id,
+                term_offset,
+                &wire_frame(term_offset as i32, term_id, b"body")
+            )
+            .unwrap()
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_scan_walks_the_contiguous_frames_to_the_high_water_mark() {
+    let dir = Dir::new("scan-contiguous");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    for offset in [0, 64, 128] {
+        insert_at(&mut writer, -5, offset);
+    }
+    assert_eq!(
+        writer.scan(0, 192, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 192,
+            next_frame: None,
+            scanned_to: 192,
+        }
+    );
+    // From a later position, and from the high-water mark itself: nothing to walk.
+    assert_eq!(writer.scan(64, 192, 1 << 20).unwrap().rebuild_position, 192);
+    assert_eq!(
+        writer.scan(192, 192, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 192,
+            next_frame: None,
+            scanned_to: 192,
+        }
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_scan_finds_the_gap_and_the_frame_after_it() {
+    let dir = Dir::new("scan-gap");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    insert_at(&mut writer, -5, 0);
+    insert_at(&mut writer, -5, 128);
+    // The frame at 64 is lost: the gap is 64 bytes from 64, and the next frame is at 128.
+    assert_eq!(
+        writer.scan(0, 192, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 64,
+            next_frame: Some(128),
+            scanned_to: 128,
+        }
+    );
+    // The retransmit fills it: the frames run to the high-water mark.
+    insert_at(&mut writer, -5, 64);
+    assert_eq!(
+        writer.scan(64, 192, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 192,
+            next_frame: None,
+            scanned_to: 192,
+        }
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_scan_with_zeros_to_the_high_water_mark_names_the_gap_to_it() {
+    let dir = Dir::new("scan-tail-gap");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    insert_at(&mut writer, -5, 0);
+    // A heartbeat moved the high-water mark to 256; nothing after 64 arrived.
+    assert_eq!(
+        writer.scan(0, 256, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 64,
+            next_frame: None,
+            scanned_to: 256,
+        }
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_scan_stops_at_its_bound_and_the_next_one_continues() {
+    let dir = Dir::new("scan-bound");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    for offset in [0, 64, 128] {
+        insert_at(&mut writer, -5, offset);
+    }
+    insert_at(&mut writer, -5, 1024);
+    // 128 bytes of bound among the frames: the scan ends there, with no gap known yet.
+    assert_eq!(
+        writer.scan(0, 1088, 128).unwrap(),
+        ImageScan {
+            rebuild_position: 128,
+            next_frame: None,
+            scanned_to: 128,
+        }
+    );
+    // The next call walks the last frame, then 64 bytes of the gap, and reports the gap
+    // as far as it looked: the image's rebuild position moves to 192, and the gap is
+    // open from there to at least 256.
+    assert_eq!(
+        writer.scan(128, 1088, 128).unwrap(),
+        ImageScan {
+            rebuild_position: 192,
+            next_frame: None,
+            scanned_to: 256,
+        }
+    );
+    // The documented continuation, from `scanned_to`: it starts on a word of 0, so its
+    // `rebuild_position` is its own start, 256, a position inside the gap, which the
+    // caller does not store; the image's rebuild position stays 192. Bounded, it
+    // extends the gap by another 128 bytes; unbounded, it finds the frame that ends it.
+    assert_eq!(
+        writer.scan(256, 1088, 128).unwrap(),
+        ImageScan {
+            rebuild_position: 256,
+            next_frame: None,
+            scanned_to: 384,
+        }
+    );
+    assert_eq!(
+        writer.scan(256, 1088, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 256,
+            next_frame: Some(1024),
+            scanned_to: 1024,
+        }
+    );
+    // From the rebuild position, unbounded: the whole gap and the frame after it.
+    assert_eq!(
+        writer.scan(192, 1088, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 192,
+            next_frame: Some(1024),
+            scanned_to: 1024,
+        }
+    );
+    // A retransmit that lands at a continuation's start is walked as any frame is: the
+    // continuation's `rebuild_position` is then the end of those frames, and still not
+    // the image's, which a scan from 192 leaves at 192 while the frame at 192 is lost.
+    insert_at(&mut writer, -5, 256);
+    assert_eq!(
+        writer.scan(256, 1088, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 320,
+            next_frame: Some(1024),
+            scanned_to: 1024,
+        }
+    );
+    assert_eq!(
+        writer.scan(192, 1088, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: 192,
+            next_frame: Some(256),
+            scanned_to: 256,
+        }
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_scan_crosses_a_term_boundary() {
+    let dir = Dir::new("scan-term");
+    let position = i64::from(T) - 64;
+    let log = LogBuffers::create_at(dir.path(), &image_fields(), position).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    insert_at(&mut writer, -5, T - 64);
+    insert_at(&mut writer, -4, 0);
+    assert_eq!(
+        writer.scan(position, i64::from(T) + 64, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: i64::from(T) + 64,
+            next_frame: None,
+            scanned_to: i64::from(T) + 64,
+        }
+    );
+    // A gap that begins in the next term is found there.
+    insert_at(&mut writer, -4, 128);
+    assert_eq!(
+        writer.scan(position, i64::from(T) + 192, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: i64::from(T) + 64,
+            next_frame: Some(i64::from(T) + 128),
+            scanned_to: i64::from(T) + 128,
+        }
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_scan_refuses_a_bad_range() {
+    let dir = Dir::new("scan-range");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let writer = log.image_writer().unwrap();
+    let max = log.positions().max_position();
+    assert_eq!(writer.scan(0, 40, 64).unwrap_err().reason(), "position");
+    // The refusal names the argument at fault as `found`, and the other as `current`
+    // when `to` is at fault, so that its message reads true.
+    let refused = |from: i64, to: i64| match writer.scan(from, to, 64).unwrap_err() {
+        LogError::Position {
+            found,
+            current,
+            limit,
+        } => {
+            assert_eq!(limit, max);
+            (found, current)
+        }
+        other => panic!("expected a position refusal, got {other:?}"),
+    };
+    assert_eq!(refused(48, 192), (48, 0));
+    assert_eq!(refused(-32, 64), (-32, 0));
+    assert_eq!(refused(max + 32, max + 64), (max + 32, 0));
+    assert_eq!(refused(0, 40), (40, 0));
+    assert_eq!(refused(192, 64), (64, 192));
+    assert_eq!(refused(0, max + 32), (max + 32, 0));
 }

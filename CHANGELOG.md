@@ -937,3 +937,8 @@ user-visible change, added in the same commit as the change. The format follows
   room, `start recording` over UDP answers 20 and 22 counting images, and `start replay`
   over UDP stays code 11 and is a card of its own
   ([ADR 0042](docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md); card 181).
+- `cavalry-shm`: `ImageWriter::scan` walks an image's frame length words from a
+  position to the high-water mark, bounded in bytes per call, and reports the rebuild
+  position, the next frame after a gap and where it stopped, so that the driver's
+  receiver finds the gap a NAK names in bounded work per cycle
+  ([ADR 0042](docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md); card 181).

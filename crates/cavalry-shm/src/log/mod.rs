@@ -29,8 +29,8 @@ pub mod layout;
 
 #[cfg(not(loom))]
 pub use file::{
-    Block, BufferClaim, ClaimError, ImageWriter, LogBuffers, Poll, TermAppender, TermReader,
-    TermWriter, UnblockOutcome,
+    Block, BufferClaim, ClaimError, ImageScan, ImageWriter, LogBuffers, Poll, TermAppender,
+    TermReader, TermWriter, UnblockOutcome,
 };
 pub use layout::{ClaimRefused, HeaderFields, LogDirectory, LogType, Positions, Tail};
 
