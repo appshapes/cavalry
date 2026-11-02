@@ -200,6 +200,13 @@ its send endpoint stays open for the publication linger after it
   longer: a pager, or a pipe into a slow program. What was printed is whole and ends at
   that position. Read faster, into a file for instance, or run the command again with
   `--from` at that position for the rest.
+- `client closed (driver-closed)`, or `closed` with another reason, no summary line,
+  and the exit code is 1, over a `cavalry:udp` channel: the driver went, or the
+  command's client timed out, was lapped or read a corrupt event, before the replay's
+  `replay stopped` arrived, so the command does not know where the replay ended and
+  names no end. What reached the subscriber is whole up to the position its image
+  reports. Run `cavalry doctor` on this host, start the driver if it went, and run the
+  command again with `--from` at that position.
 - `command refused (replays-full)` from a program: this client has 64 replays live at
   once, the driver's bound, and the new one was stopped again; wait for one to end, or
   stop one.

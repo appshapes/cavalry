@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use cavalry::{Cavalry, Driver, Offer};
+use cavalry::{Cavalry, Driver, Offer, Publication, Recording};
 
 fn cavalry() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cavalry"));
@@ -285,16 +285,17 @@ fn wait(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 /// A driver in this process on `dir`'s `driver` and `log` directories, a client, and
-/// recording 0 of `messages` messages of 32 letters each on stream `stream_id`, the
-/// letters `a`, `b` and on, with a padding frame of 64 bytes after the first message
-/// when `padding` is set, which an aborted claim leaves (`spec/log-buffer.md`, "Claim,
-/// commit and abort"); the recording is stopped at its end, which is returned.
-fn recorded(
+/// recording 0, live, of `messages` messages of 32 letters each on stream `stream_id`,
+/// the letters `a`, `b` and on, with a padding frame of 64 bytes after the first
+/// message when `padding` is set, which an aborted claim leaves (`spec/log-buffer.md`,
+/// "Claim, commit and abort"); the recording is synced to its end, which is returned
+/// with the publication and the recording's handle, for a test that follows it live.
+fn recording(
     dir: &TestDir,
     stream_id: i32,
     messages: usize,
     padding: bool,
-) -> (Driver, Cavalry, i64) {
+) -> (Driver, Cavalry, Publication, Recording, i64) {
     let driver = Driver::start(dir.0.join("driver"), dir.0.join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.0.join("driver")).expect("connects");
     let mut publication = client
@@ -328,6 +329,18 @@ fn recorded(
     wait("the recording is synced", || {
         recording.synced_position() == after
     });
+    (driver, client, publication, recording, after)
+}
+
+/// [`recording`], stopped at its end, which is returned.
+fn recorded(
+    dir: &TestDir,
+    stream_id: i32,
+    messages: usize,
+    padding: bool,
+) -> (Driver, Cavalry, i64) {
+    let (driver, mut client, publication, _recording, after) =
+        recording(dir, stream_id, messages, padding);
     client.stop_recording(0).expect("stops");
     publication.close().expect("closes");
     (driver, client, after)
@@ -481,6 +494,82 @@ fn replay_on_a_udp_channel_plays_to_the_endpoints_subscriber_and_prints_the_summ
     subscription.close().expect("closes");
     client.close().expect("closes");
     driver.close().expect("the driver closes");
+}
+
+/// A `--follow` replay over a `cavalry:udp` channel whose driver goes before the
+/// recording stops: no `replay stopped` comes, the command's client closes with the
+/// driver, and the command exits 1 naming the reason and what to do, with no summary
+/// line, since where the replay ended is unknown to it (invariant 1); it never waits
+/// for an end that cannot come.
+#[test]
+fn replay_on_a_udp_channel_exits_1_when_the_driver_goes_before_the_replay_ends() {
+    let dir = TestDir::new("replay-udp-driver-gone");
+    let (driver, mut client, publication, recording, end) = recording(&dir, 10, 4, false);
+    assert_eq!(end, 4 * 64);
+    let port = std::net::UdpSocket::bind("127.0.0.1:0")
+        .expect("a loopback socket")
+        .local_addr()
+        .expect("bound")
+        .port();
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+    let mut subscription = client
+        .add_subscription(&channel, 10)
+        .expect("a subscription on the endpoint");
+    let mut child = replay(&dir)
+        .args(["--follow", "--channel", &channel, "--stream", "10"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("replay starts");
+    // The replay is live and connected once the subscriber has read what was recorded,
+    // and the recording is live, so the replay follows it and does not end.
+    let mut read = 0;
+    wait("the subscriber reads the recording", || {
+        subscription
+            .poll(|_, _| read += 1, 64)
+            .expect("the poll reads");
+        read >= 4
+    });
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "the command follows the live recording"
+    );
+    driver.close().expect("the driver closes");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().expect("try_wait").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the command did not exit within 10 s of the driver closing");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().expect("the pipes drain");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "no summary names an end the command does not know: {stdout}"
+    );
+    assert!(
+        stderr.starts_with("cavalry replay: client closed (driver-closed)")
+            && stderr.contains("of recording 0 from position 0 on ")
+            && stderr.contains("had not ended when the client closed")
+            && stderr.contains("`cavalry doctor`")
+            && stderr.contains("docs/how-to/replay-a-recording.md#when-it-does-not-work"),
+        "{stderr}"
+    );
+    // The test's own client closed with the driver too; a driver that is gone cannot be
+    // told, and that is not an error.
+    drop(subscription);
+    drop(publication);
+    drop(recording);
+    client.close().expect("closes");
 }
 
 /// `cavalry record --truncate`, `--purge` and `--delete` against a stopped recording in

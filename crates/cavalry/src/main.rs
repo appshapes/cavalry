@@ -18,8 +18,8 @@ use std::process::ExitCode;
 
 use cavalry::config::Config;
 use cavalry::{
-    Cavalry, Driver, FOLLOW_LENGTH, Image, NULL_LENGTH, NULL_POSITION, Positions, Subscription,
-    doctor, index,
+    Cavalry, ClientError, Driver, FOLLOW_LENGTH, Image, NULL_LENGTH, NULL_POSITION, Positions,
+    Subscription, doctor, index,
 };
 
 const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
@@ -1049,7 +1049,11 @@ fn replay_to_stdout(
 /// replay, waits for its end and prints the summary line alone: where it started and
 /// ended, the bytes between, the channel, and how it ended. A replay no receiver
 /// answers ends after the replay connect timeout, 5 s, `for want of a subscriber`:
-/// subscribe on the endpoint first, on the stream `--stream` names.
+/// subscribe on the endpoint first, on the stream `--stream` names. The end comes from
+/// `replay stopped`, which the client's conductor stores; a client that closes before
+/// it arrives, because the driver went, this client timed out, the broadcast buffer
+/// lapped it or an event was corrupt, stores no end, so the wait is `Err` with the
+/// reason then, where the `cavalry:ipc` path's poll is `Fault::Closed`.
 fn replay_to_channel(
     client: &mut Cavalry,
     request: &ReplayRequest,
@@ -1065,8 +1069,15 @@ fn replay_to_channel(
         &request.channel,
     )?;
     let (end, reason) = loop {
+        // The close is read before the end: a conductor that stores the end and then
+        // closes has both visible once the close is, so a close seen with no end is a
+        // close that came with no `replay stopped`, and no end will come.
+        let closed = client.closed();
         if let Some(ended) = replay.ended() {
             break ended;
+        }
+        if let Some(why) = closed {
+            return Err(closed_before_the_end(&replay, request, why).into());
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     };
@@ -1094,6 +1105,29 @@ fn ended_as(reason: Option<cavalry::ReplayStopReason>) -> &'static str {
         Some(cavalry::ReplayStopReason::Failed) => "failed",
         None => "ended with a reason this version does not know",
     }
+}
+
+/// The error of a replay over a channel whose client closed before `replay stopped`
+/// arrived, for the exit code and stderr: [`ClientError::Closed`]'s own words, which
+/// name the reason and what it means, then the replay, whose end is unknown here, so
+/// no summary line names one (invariant 1), and what to do next.
+fn closed_before_the_end(
+    replay: &cavalry::Replay,
+    request: &ReplayRequest,
+    why: cavalry::Closed,
+) -> String {
+    format!(
+        "{}; replay {} of recording {} from position {} on {} had not ended when the client \
+         closed, so where it ended is unknown here; what reached the subscriber is whole up \
+         to the position its image reports; run `cavalry doctor` on this host, start the \
+         driver if it went, then run the command again with --from at that position; see \
+         docs/how-to/replay-a-recording.md#when-it-does-not-work",
+        ClientError::Closed(why),
+        replay.replay_session_id(),
+        request.recording_id,
+        replay.start_position(),
+        request.channel
+    )
 }
 
 /// The error of a replay that ended with reason 3, for the exit code and stderr.
