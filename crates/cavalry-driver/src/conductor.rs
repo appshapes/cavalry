@@ -9468,13 +9468,16 @@ mod receiving {
             (128, (limit + 64) as i32),
             "the NAK names the gap whole"
         );
-        // The retransmit, a datagram's worth per cycle: the rebuild reaches the
-        // high-water mark and the gap is gone.
+        // The retransmit, a datagram per cycle of at most 128 frames, 8192 bytes: below
+        // macOS's default of 9216 bytes for a datagram (`net.inet.udp.maxdgram`,
+        // docs/how-to/run-the-driver.md), so that the test reads the same on every
+        // platform and needs no sysctl. The rebuild reaches the high-water mark and
+        // the gap is gone.
         let mut offset = 128;
         while offset < beyond {
             let count = usize::try_from((beyond - offset) / 64)
                 .expect("a count")
-                .min(512);
+                .min(128);
             sender.send_frames(SESSION, offset as u32, count);
             offset += 64 * count as i64;
             assert!(h.cycle_until(|h| {
