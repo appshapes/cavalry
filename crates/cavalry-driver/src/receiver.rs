@@ -471,12 +471,14 @@ impl SessionTable {
             return;
         };
         let index = self.slots[slot] as usize;
-        // The last record moves into the hole; its slot follows it.
+        // The last record moves into the hole; its slot follows it. Its slot is found
+        // before the swap, while the slot's entry still names a record with its key.
         let last = self.records.len() - 1;
         if index != last {
             let moved = self.records[last].key;
+            let moved_slot = self.slot_of(moved);
             self.records.swap(index, last);
-            if let Some(moved_slot) = self.slot_of(moved) {
+            if let Some(moved_slot) = moved_slot {
                 self.slots[moved_slot] = index as u32;
             }
         }
