@@ -8920,6 +8920,9 @@ mod receiving {
         socket: UdpSocket,
         buffer: Vec<u8>,
         target: SocketAddr,
+        /// The term length its setup frames name and its control frames are parsed
+        /// against: [`TERM`] unless a test sets another.
+        term: u32,
     }
 
     impl TestSender {
@@ -8932,6 +8935,7 @@ mod receiving {
                 socket,
                 buffer: vec![0u8; 2048],
                 target: SocketAddr::from(([127, 0, 0, 1], port)),
+                term: TERM,
             }
         }
 
@@ -8946,7 +8950,7 @@ mod receiving {
         }
 
         fn send_setup(&self, session_id: i32, term_offset: i32) {
-            self.send(&setup(session_id, STREAM, term_offset).to_bytes());
+            self.send(&setup_with_term(session_id, STREAM, term_offset, self.term).to_bytes());
         }
 
         /// One datagram of 64-byte data frames, each with a 32-byte body, at
@@ -8976,7 +8980,7 @@ mod receiving {
         /// The next control frame the receiver sent, or `None` at the read timeout.
         fn next_control(&mut self) -> Option<ControlFrame> {
             let (length, _) = self.socket.recv_from(&mut self.buffer).ok()?;
-            parse_udp(&self.buffer[..length], TERM).ok()
+            parse_udp(&self.buffer[..length], self.term).ok()
         }
 
         /// The next status message, skipping anything else, or `None` at the timeout.
@@ -9025,6 +9029,16 @@ mod receiving {
     }
 
     fn setup(session_id: i32, stream_id: i32, term_offset: i32) -> SetupFrame {
+        setup_with_term(session_id, stream_id, term_offset, TERM)
+    }
+
+    /// A setup frame naming `term_length` as the stream's term.
+    fn setup_with_term(
+        session_id: i32,
+        stream_id: i32,
+        term_offset: i32,
+        term_length: u32,
+    ) -> SetupFrame {
         SetupFrame {
             flags: 0,
             term_offset,
@@ -9032,7 +9046,7 @@ mod receiving {
             stream_id,
             initial_term_id: INITIAL_TERM_ID,
             active_term_id: INITIAL_TERM_ID,
-            term_length: TERM as i32,
+            term_length: term_length as i32,
             mtu_length: 1408,
             ttl: 0,
         }
@@ -9123,6 +9137,16 @@ mod receiving {
     /// arrived. Returns the sender, the image's registration id and the subscriber's
     /// position counter.
     fn subscribe_and_connect(h: &mut Harness, subscription_id: i64) -> (TestSender, i64, Counter) {
+        subscribe_and_connect_with_term(h, subscription_id, TERM)
+    }
+
+    /// [`subscribe_and_connect`] with the stream's term length chosen: the image's log
+    /// has that term, and the first status message's window follows it.
+    fn subscribe_and_connect_with_term(
+        h: &mut Harness,
+        subscription_id: i64,
+        term: u32,
+    ) -> (TestSender, i64, Counter) {
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
         h.conductor
@@ -9130,6 +9154,7 @@ mod receiving {
         assert_eq!(h.last_error(subscription_id), None);
         h.cycle();
         let mut sender = TestSender::bind(port);
+        sender.term = term;
         sender.send_setup(SESSION, 0);
         assert!(
             h.cycle_until(|h| h.conductor.udp_images.len() == 1),
@@ -9152,7 +9177,10 @@ mod receiving {
             ),
             (SESSION, STREAM, INITIAL_TERM_ID, 0)
         );
-        assert_eq!(first.receiver_window_length, (TERM / 2) as i32);
+        assert_eq!(
+            first.receiver_window_length,
+            cavalry_proto::udp::receiver_window_length(term) as i32
+        );
         assert_eq!(first.receiver_id, h.udp_receiver.receiver_id());
         let position = h
             .conductor
@@ -9267,6 +9295,80 @@ mod receiving {
             h.counter(RECEIVER_UNDER_RUNS) == 1 && h.counter(RECEIVER_OVER_RUNS) == 1
         }));
         assert_eq!(h.counter(RECEIVER_FRAMES_RECEIVED), 4);
+    }
+
+    /// A gap longer than the scan bound is reported as the bound on the cycle that finds
+    /// it; the next cycle scans on from where the last stopped, within the same bound,
+    /// and finds the frame beyond, so that the NAK that follows names the gap whole, and
+    /// the retransmit closes it (`spec/udp.md`, "The receiver", step 3; ADR 0042).
+    #[test]
+    fn a_gap_longer_than_the_scan_bound_is_walked_on_from_where_the_last_scan_stopped() {
+        const BIG_TERM: u32 = 4 * 1024 * 1024;
+        let limit = i64::from(spec::REBUILD_SCAN_LIMIT);
+        let mut h = Harness::new("udp-long-gap");
+        let (mut sender, image_id, _position) =
+            subscribe_and_connect_with_term(&mut h, 2, BIG_TERM);
+        sender.send_frames(SESSION, 0, 2);
+        assert!(h.cycle_until(|h| positions(h, image_id) == Some((128, 128, 0))));
+        assert_eq!(h.udp_receiver.gap_of(image_id), None);
+        // A frame beyond the bound from the rebuild position: the gap is longer than
+        // the bound, and the scan that finds it stops at the bound inside it.
+        let beyond = 128 + limit + 64;
+        sender.send_frames(SESSION, beyond as u32, 1);
+        assert!(h.cycle_until(|h| positions(h, image_id) == Some((beyond + 64, 128, 0))));
+        assert_eq!(
+            h.udp_receiver.gap_of(image_id),
+            Some((128, limit)),
+            "the first scan's gap is the bound"
+        );
+        assert_eq!(h.counter(RECEIVER_GAPS_DETECTED), 1);
+        sender.drain();
+        // The next cycle scans on from the bound and finds the frame beyond.
+        h.cycle();
+        assert_eq!(
+            h.udp_receiver.gap_of(image_id),
+            Some((128, limit + 64)),
+            "the gap ends at the frame beyond the bound"
+        );
+        assert_eq!(
+            h.counter(RECEIVER_GAPS_DETECTED),
+            1,
+            "the same gap, known further"
+        );
+        // The NAK, after the delay, names the gap whole.
+        h.cycle();
+        let nak = sender.next_nak().expect("a NAK");
+        assert_eq!(
+            (nak.term_offset, nak.length),
+            (128, (limit + 64) as i32),
+            "the NAK names the gap whole"
+        );
+        // The retransmit, a datagram's worth per cycle: the rebuild reaches the
+        // high-water mark and the gap is gone.
+        let mut offset = 128;
+        while offset < beyond {
+            let count = usize::try_from((beyond - offset) / 64)
+                .expect("a count")
+                .min(512);
+            sender.send_frames(SESSION, offset as u32, count);
+            offset += 64 * count as i64;
+            assert!(h.cycle_until(|h| {
+                positions(h, image_id).is_some_and(|(_, rebuild, _)| rebuild >= offset)
+            }));
+        }
+        assert!(h.cycle_until(|h| positions(h, image_id) == Some((beyond + 64, beyond + 64, 0))));
+        assert_eq!(h.udp_receiver.gap_of(image_id), None);
+        let log = LogBuffers::open_image(h.dir.path(), image_id, false).expect("the image opens");
+        let mut reader = log.reader(0).expect("a reader");
+        let mut frames = 0;
+        loop {
+            let before = reader.position();
+            let _ = reader.poll(1024, |_body, _header| frames += 1);
+            if reader.position() == before {
+                break;
+            }
+        }
+        assert_eq!(frames, (beyond + 64) / 64, "every frame once, in order");
     }
 
     /// A heartbeat moves the high-water mark; one with EOS names the end of stream,

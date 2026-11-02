@@ -40,7 +40,7 @@ use cavalry_shm::counters::generated::{
     RECEIVER_UNDER_RUNS, SENDER_SEND_FAILED,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError};
-use cavalry_shm::log::{ImageWriter, LogBuffers, Positions};
+use cavalry_shm::log::{ImageScan, ImageWriter, LogBuffers, Positions};
 use cavalry_shm::spsc::{Consumer, Producer};
 use nix::sys::socket::SockaddrStorage;
 
@@ -563,7 +563,9 @@ struct Live {
     last_sm_at: i64,
     clean_position: i64,
     gap: Option<Gap>,
-    /// Where a scan that ended at its bound among the zeros goes on from.
+    /// Where the next cycle's scan goes on from: set when a scan ended at its bound
+    /// inside the gap at the rebuild position, so that the gap's end is found a bound of
+    /// term per cycle, not the same words again ([`Receiver::rebuild`]).
     gap_cursor: Option<i64>,
     last_activity_at: i64,
     /// The end of stream position a heartbeat with EOS named.
@@ -667,6 +669,16 @@ impl Receiver {
                     live.last_sm_position,
                 )
             })
+    }
+
+    /// The gap of an image as the receiver knows it, its start and its length, for the
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn gap_of(&self, registration_id: i64) -> Option<(i64, i64)> {
+        self.live
+            .iter()
+            .find(|live| live.registration_id == registration_id)
+            .and_then(|live| live.gap.map(|gap| (gap.start, gap.length)))
     }
 
     /// How many session records the table holds, for the tests.
@@ -1594,7 +1606,11 @@ impl Receiver {
 
     /// The rebuild scan of the image at `index`: the contiguous frames from the greater
     /// of the rebuild position and the fastest reader, the gap after them, and the NAK
-    /// the gap is due (`spec/udp.md`, "The receiver", step 3; ADR 0042).
+    /// the gap is due (`spec/udp.md`, "The receiver", step 3; ADR 0042). A cycle reads
+    /// at most [`spec::REBUILD_SCAN_LIMIT`] bytes of the image's term, in one scan: from
+    /// the rebuild position, or, when the last scan ended at its bound inside the gap
+    /// there, on from where it stopped, so that a gap longer than the bound is walked
+    /// once, a bound of term per cycle, and the NAK that follows names it whole.
     fn rebuild(&mut self, index: usize, now: i64) -> usize {
         let endpoint = self.endpoint_index(self.live[index].key.endpoint_id);
         let live = &mut self.live[index];
@@ -1609,62 +1625,102 @@ impl Receiver {
             live.rebuild_position
         };
         let hwm = live.hwm_position;
-        let Ok(mut scan) = live.writer.scan(from, hwm, spec::REBUILD_SCAN_LIMIT) else {
-            return 0;
-        };
         let mut work = 0;
-        if scan.rebuild_position > live.rebuild_position {
-            live.rebuild_position = scan.rebuild_position;
-            live.rebuild.store_release(scan.rebuild_position);
-            work += 1;
-        }
-        // A scan that ended at its bound among the zeros goes on from where the last
-        // one stopped, so that a long gap is walked once, not from its start each cycle.
-        let at_bound =
-            scan.rebuild_position == from && scan.next_frame.is_none() && scan.scanned_to < hwm;
-        if at_bound {
-            if let Some(cursor) = live.gap_cursor
-                && cursor > scan.scanned_to
-                && cursor < hwm
-                && let Ok(more) = live.writer.scan(cursor, hwm, spec::REBUILD_SCAN_LIMIT)
-                && more.rebuild_position == cursor
+        // The continuation: the last scan stopped at its bound inside the gap at the
+        // rebuild position, so this cycle scans on from there instead of over the same
+        // words again. The rebuild position stays where that scan left it: a retransmit
+        // that lands at it is found by the scan from it, on the cycle after the
+        // continuation finds the gap's end. A frame at the cursor itself ends the gap
+        // there. A cursor that no longer names the gap at the rebuild position, because
+        // a reader moved past it, is dropped for a scan from the rebuild position.
+        let continued = match live.gap_cursor {
+            Some(cursor)
+                if cursor > from
+                    && cursor < hwm
+                    && live.gap.is_some_and(|gap| gap.start == from) =>
             {
-                scan.next_frame = more.next_frame;
-                scan.scanned_to = more.scanned_to;
+                match live.writer.scan(cursor, hwm, spec::REBUILD_SCAN_LIMIT) {
+                    Ok(more) if more.rebuild_position > cursor => Some(ImageScan {
+                        rebuild_position: from,
+                        next_frame: Some(cursor),
+                        scanned_to: cursor,
+                    }),
+                    Ok(more) => Some(ImageScan {
+                        rebuild_position: from,
+                        next_frame: more.next_frame,
+                        scanned_to: more.scanned_to,
+                    }),
+                    Err(_) => None,
+                }
             }
-            live.gap_cursor = Some(scan.scanned_to);
-        } else {
-            live.gap_cursor = None;
-        }
+            _ => None,
+        };
+        let scan = match continued {
+            Some(scan) => scan,
+            None => {
+                let Ok(scan) = live.writer.scan(from, hwm, spec::REBUILD_SCAN_LIMIT) else {
+                    live.gap_cursor = None;
+                    return 0;
+                };
+                if scan.rebuild_position > live.rebuild_position {
+                    live.rebuild_position = scan.rebuild_position;
+                    live.rebuild.store_release(scan.rebuild_position);
+                    work += 1;
+                }
+                scan
+            }
+        };
         if live.rebuild_position >= hwm {
             live.gap = None;
+            live.gap_cursor = None;
             return work;
         }
         // The gap: from the rebuild position to the next frame, or as far as the scan
-        // looked; a scan that stopped at its bound among the frames knows no gap yet.
-        let gap_end = match scan.next_frame {
-            Some(next) => next,
-            None if scan.scanned_to > live.rebuild_position => scan.scanned_to,
+        // looked. Its end is known when a frame or the high-water mark ended the scan,
+        // and open when the bound did, in which case the next cycle scans on from there.
+        // A scan the bound ended among the frames knows no gap yet.
+        let (gap_end, end_known) = match scan.next_frame {
+            Some(next) => (next, true),
+            None if scan.scanned_to > live.rebuild_position => {
+                (scan.scanned_to, scan.scanned_to >= hwm)
+            }
             None => {
+                live.gap = None;
+                live.gap_cursor = None;
                 return work;
             }
         };
+        live.gap_cursor = if end_known {
+            None
+        } else {
+            Some(scan.scanned_to)
+        };
         let start = live.rebuild_position;
         let length = gap_end - start;
-        let changed = live
-            .gap
-            .is_none_or(|gap| gap.start != start || gap.length != length);
-        if changed {
-            if live.gap.is_none_or(|gap| gap.start != start) {
-                self.statics.gaps_detected.increment();
+        // A gap first seen counts; one that changes restarts the NAK delay: its end
+        // moves out as a scan looks further or the high-water mark rises, or a frame
+        // landed inside it and its end came in. A scan the bound ended inside a gap
+        // already known further says nothing new, and the gap stays as it is, so that
+        // the delay runs on and the NAK names what is known.
+        match &mut live.gap {
+            Some(gap) if gap.start == start => {
+                if length > gap.length || (end_known && length < gap.length) {
+                    gap.length = length;
+                    gap.seen_at = now;
+                    gap.last_nak_at = None;
+                    work += 1;
+                }
             }
-            live.gap = Some(Gap {
-                start,
-                length,
-                seen_at: now,
-                last_nak_at: None,
-            });
-            work += 1;
+            _ => {
+                self.statics.gaps_detected.increment();
+                live.gap = Some(Gap {
+                    start,
+                    length,
+                    seen_at: now,
+                    last_nak_at: None,
+                });
+                work += 1;
+            }
         }
         let Some(gap) = live.gap else {
             return work;
