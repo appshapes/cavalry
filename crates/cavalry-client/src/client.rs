@@ -524,16 +524,25 @@ impl Cavalry {
     /// start position; `length` is a byte count, [`NULL_LENGTH`] for everything up to
     /// the extent when the replay starts, or [`FOLLOW_LENGTH`] to follow a live
     /// recording until it stops. Add the subscription first: a replay with no subscriber
-    /// does not move and ends after the replay connect timeout. Waits for `replay ready`
+    /// does not move and ends after the replay connect timeout. On a `cavalry:udp`
+    /// channel the replay's publication is put on the wire by the driver's sender as a
+    /// client's `cavalry:udp` publication is, with the recording's term length and MTU,
+    /// and its subscriber is a `cavalry:udp` subscription on that channel's endpoint,
+    /// on this host or another, whose image's positions are the recording's; a
+    /// receiver answering is what connects it, and a `cavalry:ipc` subscription on the
+    /// replay stream gets no image of it (ADR 0043). Waits for `replay ready`
     /// up to the response timeout and returns the [`Replay`], whose
     /// [`position`](Replay::position) reads the replayer's counter and whose
     /// [`ended`](Replay::ended) says how it ended once it has. The replay belongs to the
     /// driver: dropping the handle stops nothing, and [`Cavalry::stop_replay`] from any
     /// client stops it. A recording the catalog does not hold is
     /// [`ClientError::Refused`] with error code 21, a position out of range code 23, a
-    /// length below −1 code 7, a channel other than `cavalry:ipc` code 1, a segment file
-    /// that cannot be opened or a log that cannot be created code 12, and a registry or
-    /// the counters file at capacity code 10. The client follows the end of every
+    /// length below −1 code 7, a channel that is neither `cavalry:ipc` nor a
+    /// `cavalry:udp` channel code 1, a `cavalry:udp` host that does not resolve code 9
+    /// and an endpoint whose socket the operating system refuses code 4, a segment file
+    /// that cannot be opened or a log that cannot be created code 12, and a registry,
+    /// the counters file or the sender's queue at capacity code 10. The client follows
+    /// the end of every
     /// replay it started while the handle lives and the replay has not ended, as many
     /// as the driver allows at once; a client that holds the driver's bound of live
     /// replays and starts another is [`ClientError::ReplaysFull`], and the new one is

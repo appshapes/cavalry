@@ -558,22 +558,22 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     assert_eq!(client.wait_error(unknown_type).0, 6);
 
     // A cavalry:udp channel parses in version 4: a publication sends on one (ADR
-    // 0041) and a subscription receives on one (ADR 0042), while a replay on one is
-    // refused with code 11 until card 192 brings it; a channel that fails the grammar
-    // is code 1 (ADR 0040).
-    let bad_channel = client.correlation_id();
+    // 0041), a subscription receives on one (ADR 0042) and a replay plays on one (ADR
+    // 0043), so a replay on one of a recording the catalog does not hold gets the
+    // replayer's code 21, past the channel check; a channel that fails the grammar is
+    // code 1 (ADR 0040).
+    let udp_replay = client.correlation_id();
     client.send(&Command::StartReplay {
         client_id: client.id,
-        correlation_id: bad_channel,
+        correlation_id: udp_replay,
         recording_id: 0,
         position: -1,
         length: -1,
         replay_stream_id: 7,
         replay_channel: b"cavalry:udp?endpoint=localhost:40123",
     });
-    let (code, message) = client.wait_error(bad_channel);
-    assert_eq!(code, 11, "{message}");
-    assert!(message.contains("card 192"), "{message}");
+    let (code, message) = client.wait_error(udp_replay);
+    assert_eq!(code, 21, "{message}");
     let bad_grammar = client.correlation_id();
     client.send(&Command::AddPublication {
         client_id: client.id,
@@ -642,8 +642,8 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     }
     assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 7);
     // One more error than rejected commands less the two decoding refusals: the
-    // cavalry:udp channel is a well-formed command answered with code 11 and counted
-    // in errors alone (ADR 0040), as the retention refusals were before card 95.
+    // replay on a cavalry:udp channel is a well-formed command answered with code 21
+    // and counted in errors alone, as the retention refusals were before card 95.
     assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 7);
     driver.close().expect("closes");
 }

@@ -100,7 +100,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `cavalry:udp` channel records a publication sending on it or an image received on it,
   the recording one of the image's readers. The receiver idles with the driver's
   strategy while it holds an endpoint and parks while it holds none. `start replay` on
-  a `cavalry:udp` channel is refused with code 11 until card 192 brings it.
+  a `cavalry:udp` channel plays the recording to that channel's endpoint: the replay's
+  publication takes the sender's path as a client's does, with the recording's term
+  length and MTU, and a receiver answering its setup frames is its subscriber for the
+  connect timeout (ADR 0043).
 - Degrades under cgroup CPU throttling, shared-memory pressure or packet loss. It does
   not fall over, and every state transition increments a counter.
 
