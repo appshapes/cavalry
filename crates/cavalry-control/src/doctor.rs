@@ -34,9 +34,9 @@ use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CL
 use cavalry_shm::counters::generated::{
     CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF, CHANNEL_SOCKET_SNDBUF,
     CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
-    COUNTERS_ALLOCATION_FAILED, IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_POSITION,
-    RECORDING_BYTES, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION,
-    RECORDING_WRITE_FAILED, SENDER_LIMIT,
+    COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED, IMAGE_HWM_POSITION,
+    IMAGE_REBUILD_POSITION, PUBLICATION_POSITION, RECORDING_BYTES, RECORDING_INVALIDATED,
+    RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED, SENDER_LIMIT,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -1121,9 +1121,15 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
         LINGER.as_secs()
     );
     for endpoint in &endpoints {
+        // A send endpoint carries publications and closes when it has none; a receive
+        // endpoint carries images, or none while it waits for a setup frame, and is the
+        // only kind that is active with nothing on it. One that is closing with nothing
+        // on it could be either, and is called an endpoint.
         let kind = if endpoint.publications.unwrap_or(0) > 0 {
             "send endpoint"
-        } else if endpoint.images.is_some() || endpoint.publications == Some(0) {
+        } else if endpoint.images.unwrap_or(0) > 0
+            || (endpoint.status == 1 && endpoint.images.is_some())
+        {
             "receive endpoint"
         } else {
             "endpoint"
@@ -1168,19 +1174,28 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             });
         }
         // A receive endpoint whose subscriptions have no image: no sender's setup
-        // frame has reached this port for a stream they want (ADR 0042).
+        // frame has reached this port for a stream they want, or the stream they had
+        // ended and its image went while they stayed (ADR 0042); image.created and
+        // image.ended tell the two apart.
         if kind == "receive endpoint" && endpoint.status == 1 && endpoint.images == Some(0) {
+            let created =
+                read_static(reader, "image.created", IMAGE_CREATED, findings).unwrap_or(0);
+            let ended = read_static(reader, "image.ended", IMAGE_ENDED, findings).unwrap_or(0);
             findings.push(Finding {
                 check: "udp-subscription-no-image",
                 level: Level::Warn,
                 message: format!(
-                    "receive endpoint {}: no image has arrived: no sender's setup frame has \
-                     reached this port for a stream a subscription here wants, so the \
-                     subscriptions read nothing; check that the sender's channel names this \
-                     host and port and its stream id matches, that the port is open between \
-                     the hosts, and that both drivers run the same version; a rising \
-                     receiver.setups_unwanted is a sender on another stream id, and a rising \
-                     receiver.dropped_frames a peer of another version",
+                    "receive endpoint {}: no image: either no sender's setup frame has reached \
+                     this port for a stream a subscription here wants, or the stream it had \
+                     ended and its image went while the subscription stayed, so the \
+                     subscriptions read nothing; image.created {created} and image.ended \
+                     {ended} tell the two apart (an image that came and ended is the sender's \
+                     stream over, and the next stream creates a new image); for a stream that \
+                     never came, check that the sender's channel names this host and port and \
+                     its stream id matches, that the port is open between the hosts, and that \
+                     both drivers run the same version; a rising receiver.setups_unwanted is a \
+                     sender on another stream id, and a rising receiver.dropped_frames a peer \
+                     of another version",
                     endpoint.channel
                 ),
                 doc: DOC_UDP_RECEIVER,
@@ -1968,6 +1983,11 @@ mod tests {
             "{}",
             buffers[0].message
         );
+        assert!(
+            found.message.contains("image.created 0 and image.ended 0"),
+            "{}",
+            found.message
+        );
         let note = finding(&report, "udp-endpoint");
         assert!(
             note.message.starts_with("receive endpoint"),
@@ -2039,6 +2059,22 @@ mod tests {
             finding(&report, "udp-endpoint")
                 .message
                 .contains("1 image(s)")
+        );
+
+        // Closing with nothing on it, a send endpoint after its last linger or a
+        // receive endpoint after its last image: the note calls it an endpoint, and
+        // no warning fires for it.
+        status.set(2);
+        images.set(0);
+        let report = examine(&dir.0);
+        let note = finding(&report, "udp-endpoint");
+        assert!(note.message.starts_with("endpoint "), "{}", note.message);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "udp-subscription-no-image"),
+            "{report}"
         );
     }
 
