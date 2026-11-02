@@ -945,8 +945,9 @@ user-visible change, added in the same commit as the change. The format follows
 - A `cavalry:udp` subscription receives its stream. `add subscription` on
   `cavalry:udp?endpoint=<host>:<port>` resolves the host once (code 9 when it does
   not), binds the channel's receive endpoint (code 4 when the socket cannot be opened or
-  bound; 64 endpoints, code 10 past them, and code 10 when the receiver's queue has no
-  room) and answers `subscription ready` with the endpoint's `channel.status`; a setup
+  bound, and code 4 saying so when the channel's previous endpoint is still closing with
+  the receiver; 64 endpoints, code 10 past them, and code 10 when the receiver's queue
+  has no room) and answers `subscription ready` with the endpoint's `channel.status`; a setup
   frame from a sender creates an image under `images/` with a registration id of its
   own, announced with `available image` and the sender's address as the source
   identity, which a subscriber reads as any log while the driver's fifth thread, the

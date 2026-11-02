@@ -2038,6 +2038,31 @@ impl Conductor {
                 && entry.interface == interface
                 && entry.state == ChannelState::Active
         });
+        // The channel's previous endpoint, closed with its last subscription and image,
+        // still holds the socket while the receiver drops it: the bind below would fail
+        // on the port in use with a message that blames the operator's port, so the
+        // refusal says what is happening and what to do instead (invariant 6); removing
+        // and adding a subscription on one channel is an ordinary sequence, and code 4
+        // is the code for a socket that cannot be bound.
+        if open.is_none()
+            && self.receive_endpoints.iter().any(|entry| {
+                entry.endpoint == endpoint
+                    && entry.interface == interface
+                    && entry.state == ChannelState::Closing
+            })
+        {
+            self.send_error(
+                correlation_id,
+                ErrorCode::ChannelEndpointError,
+                &format!(
+                    "the channel's endpoint {endpoint}: the previous endpoint on it is still \
+                     closing, its socket with the receiver, so a new one cannot be bound yet; \
+                     add the subscription again after a moment, once the receiver has closed \
+                     it; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        }
         // Room in the receiver's queue for an endpoint, an interest and a reader per
         // live image on the stream, else code 10.
         let joins = match open {
@@ -9963,6 +9988,46 @@ mod receiving {
             .expect("the receiver reads")
         {}
         assert_eq!(stopped, Some(448));
+    }
+
+    /// `add subscription` on a channel whose previous endpoint is still closing, its
+    /// socket with the receiver, is code 4 with a message that says so and what to do,
+    /// not one that blames the operator's port; once the receiver has closed it, the
+    /// add succeeds and opens the endpoint again.
+    #[test]
+    fn a_subscription_on_a_channel_whose_endpoint_is_still_closing_is_told_to_add_again() {
+        let mut h = Harness::new("udp-closing");
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 2, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        assert_eq!(
+            h.conductor.receive_endpoints[0].state,
+            ChannelState::Closing
+        );
+        // Before the receiver's next cycle: the socket is still bound.
+        h.conductor
+            .add_subscription(1, 4, STREAM, channel.as_bytes());
+        let (code, message) = h.last_error(4).expect("refused");
+        assert_eq!(code, 4, "{message}");
+        assert!(message.contains("still closing"), "{message}");
+        assert!(message.contains("add the subscription again"), "{message}");
+        assert!(h.conductor.subscriptions.is_empty(), "nothing registered");
+        assert_eq!(h.conductor.receive_endpoints.len(), 1);
+        // The receiver closes the socket and the conductor frees the entry: the add
+        // succeeds.
+        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
+        h.conductor
+            .add_subscription(1, 5, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(5), None);
+        assert_eq!(h.conductor.receive_endpoints.len(), 1);
+        assert_eq!(h.conductor.subscriptions.len(), 1);
+        assert_eq!(h.counter(CHANNEL_OPENED), 2);
+        assert_eq!(h.counter(CHANNEL_CLOSED), 1);
     }
 
     /// The receive endpoints registry fills at its capacity, and a 65th is code 10
