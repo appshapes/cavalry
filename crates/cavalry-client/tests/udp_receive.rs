@@ -366,17 +366,22 @@ fn every_message_arrives_once_and_in_order_through_a_lossy_reordering_shim() {
         "a duplicate is not a frame received"
     );
 
-    // Closed: the heartbeats carry EOS, the image ends at the last message, and the
-    // subscription sees the image go.
+    // Closed: the heartbeats carry EOS, the image ends at the last message, where the
+    // subscriber already stands, and the subscription sees the image go. The image
+    // may go before this thread looks, since the subscriber is at the end already;
+    // when it is still there, its end of stream is the position the stream reached.
     let end = subscription.images()[0].position();
     publication.close().expect("closes");
     assert!(wait_until(Duration::from_secs(10), || {
         subscription.poll(|_, _| {}, 0).expect("the poll applies");
-        subscription
-            .images()
-            .first()
-            .is_some_and(|image| image.is_end_of_stream())
-            || subscription.image_count() == 0
+        match subscription.images().first() {
+            Some(image) if image.is_end_of_stream() => {
+                assert_eq!(image.position(), end, "the stream ends where it stopped");
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
     }));
     assert!(wait_until(Duration::from_secs(10), || {
         subscription.poll(|_, _| {}, 0).expect("the poll applies");
@@ -387,7 +392,6 @@ fn every_message_arrives_once_and_in_order_through_a_lossy_reordering_shim() {
     let (forwarded, dropped, duplicated, held) = shim.stop();
     assert!(dropped > 0 && duplicated > 0 && held > 0, "the faults ran");
     assert!(forwarded > 0);
-    let _ = end;
     subscription.close().expect("closes");
     client.close().expect("closes");
     driver.close().expect("the driver closes");
