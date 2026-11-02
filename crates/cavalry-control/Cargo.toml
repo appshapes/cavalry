@@ -21,6 +21,10 @@ cavalry-driver = { path = "../cavalry-driver" }
 # `doctor` names the catalog slots recovery set to invalid, read through the durable
 # log's read-only catalog reader (spec/durable-log.md; ADR 0025).
 cavalry-log = { path = "../cavalry-log" }
+# `doctor`'s `cavalry:udp` checks compare a send endpoint's socket buffers with the
+# values of spec/udp.md, "Values", named once in `cavalry_proto::udp` (the MTU, the
+# datagrams per burst, the receive buffer asked, the linger), not repeated as literals.
+cavalry-proto = { path = "../cavalry-proto" }
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]
