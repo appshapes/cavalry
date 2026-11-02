@@ -1025,3 +1025,10 @@ user-visible change, added in the same commit as the change. The format follows
   gone, and so is the last command that refused the transport
   ([ADR 0043](docs/decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md);
   card 192).
+- `cavalry replay --channel <uri>` plays a recording to a `cavalry:udp` channel's
+  endpoint, on this host or another, and prints the summary alone; it needs `--stream`,
+  the stream the subscriber there reads. `just replay-check` no longer fails when the
+  time index resolves its instant to the padding frame's own position, where the first
+  line is 64 bytes past it
+  ([ADR 0043](docs/decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md);
+  card 192).
