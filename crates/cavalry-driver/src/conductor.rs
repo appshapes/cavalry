@@ -1386,11 +1386,12 @@ impl Conductor {
             LogType::Concurrent
         };
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-        // The spec's UDP term, or the smaller one a test at a registry's capacity set,
-        // since every log is made resident when it is created (ADR 0027). The sender
-        // reads the control frames it receives with `spec::UDP_TERM_LENGTH` itself, so
-        // the two agree only while nothing overrides the field: the one test that does
-        // has no receiver, and sends no control frame.
+        // The spec's UDP term, or the smaller one a test at a registry's capacity sets,
+        // since every log is made resident when it is created (ADR 0027). Nothing
+        // depends on the log's term matching what the sender parses a frame against:
+        // the sender holds a status message's and a NAK's offsets against the
+        // publication's own term, as it must for a replay's publication, whose log
+        // keeps its recording's term (ADR 0043).
         let term_length = self.term_length.min(spec::UDP_TERM_LENGTH);
         let fields = HeaderFields::new(
             log_type,
