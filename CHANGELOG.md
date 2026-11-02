@@ -1027,9 +1027,11 @@ user-visible change, added in the same commit as the change. The format follows
   card 192).
 - `cavalry replay --channel <uri>` plays a recording to a `cavalry:udp` channel's
   endpoint, on this host or another, and prints the summary alone; it needs `--stream`,
-  the stream the subscriber there reads, and exits 1 naming the reason, with no
-  summary, when its client closes before the replay ends, the driver gone among the
-  reasons. `just replay-check` no longer fails when the
+  the stream the subscriber there reads. It exits 1 after the summary line when no
+  subscriber on the endpoint answered the replay within the replay connect timeout,
+  5 s, so a script sees a replay that delivered nothing fail, and exits 1 naming the
+  reason, with no summary, when its client closes before the replay ends, the driver
+  gone among the reasons. `just replay-check` no longer fails when the
   time index resolves its instant to the padding frame's own position, where the first
   line is 64 bytes past it
   ([ADR 0043](docs/decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md);

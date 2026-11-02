@@ -6,7 +6,8 @@
 //! `cavalry replay --recording <id> --from
 //! <position, instant or start>` plays a recording back and prints every message (ADR 0030),
 //! or, with `--channel <a cavalry:udp channel>`, plays it to a subscriber on that
-//! channel's endpoint and prints the summary alone (ADR 0043).
+//! channel's endpoint and prints the summary alone, exit 1 when no subscriber answered
+//! or the driver went before the end (ADR 0043).
 //! `console` arrives with its feature. No arguments and no configuration are the primary way to run it (CLAUDE.md,
 //! invariant 5): the directory is `spec/client-protocol.md`'s default and the log
 //! directory `Driver::default_log_dir()`'s. The keys of `config.toml` are read from the
@@ -55,7 +56,10 @@ const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
                            that channel instead of cavalry:ipc: on a cavalry:udp
                            channel the recording goes to a subscriber on that endpoint,
                            on this host or another, which needs --stream, and the
-                           command prints the summary alone when the replay ends
+                           command prints the summary alone when the replay ends, exit
+                           1 when no subscriber on the endpoint answered it within the
+                           replay connect timeout, 5 s, or the driver went before the
+                           end
   --version                print the version
 
   --dir <path>      the driver directory, for every command; the default is
@@ -822,10 +826,14 @@ fn record(config: &Config, action: RecordAction) -> ExitCode {
 /// command is sent: an instant is resolved through the recording's time index in the
 /// log directory (`spec/durable-log.md`, "Time index"), `--to` becomes the length,
 /// `--follow` follows a live recording, and neither plays to the recording's extent.
+/// With `--channel` naming another channel than `cavalry:ipc`, `replay_to_channel`
+/// instead: no subscription, no lines, the summary alone once the replay ends.
 /// Exit 1 with the driver's message when the command is refused,
 /// when the replay failed (`spec/client-protocol.md`, "Error codes" and `replay
-/// stopped`), and when the replay's log went before the command had read it to the end,
-/// with the positions it did not print (invariant 1).
+/// stopped`), when the replay's log went before the command had read it to the end,
+/// with the positions it did not print, and, over another channel, when no subscriber
+/// on the endpoint answered the replay or the client closed before its end
+/// (invariant 1).
 fn replay(config: &Config, request: ReplayRequest) -> ExitCode {
     let fail = |error: &dyn std::fmt::Display| {
         eprintln!("cavalry replay: {error}");
@@ -942,7 +950,8 @@ fn replay_image(subscription: &Subscription, session_id: i32) -> Option<&Image> 
 /// end is `Err`, with the positions not printed: the driver keeps an ended replay's log
 /// for its subscribers for the publication linger, 5 s (`spec/log-buffer.md`,
 /// "Closing"), and a command held up on its stdout for longer loses the rest, which a
-/// summary that read as complete would hide (invariant 1).
+/// summary that read as complete would hide (invariant 1). A channel other than
+/// `cavalry:ipc` is `replay_to_channel`'s: no subscription and no lines.
 fn replay_to_stdout(
     client: &mut Cavalry,
     request: &ReplayRequest,
@@ -1090,10 +1099,47 @@ fn replay_to_channel(
         replay.start_position(),
         request.channel
     );
-    if reason == Some(cavalry::ReplayStopReason::Failed) {
-        return Err(failed_at(end).into());
+    match reason {
+        Some(cavalry::ReplayStopReason::Failed) => Err(failed_at(end).into()),
+        // Over `cavalry:ipc` the command subscribes itself, so reason 2 cannot reach
+        // `replay_to_stdout`; over another channel it is the ordinary failure, the wrong
+        // port, a closed firewall or a subscriber not up yet, and a script that read
+        // exit 0 for it would read success for a replay that delivered nothing
+        // (invariant 1).
+        Some(cavalry::ReplayStopReason::NotConnected) => {
+            Err(not_connected_on(&request.channel, stream_id, replay.start_position(), end).into())
+        }
+        _ => Ok(()),
     }
-    Ok(())
+}
+
+/// The error of a replay over a channel other than `cavalry:ipc` that ended with
+/// reason 2, for the exit code and stderr: no receiver on the endpoint answered its
+/// publication for the replay connect timeout, 5 s, from its start, so nothing was
+/// played, or from the moment the last one went (ADR 0043), so what was played is
+/// whole as far as that receiver's image read; the message says which, what to do
+/// next, and what `cavalry doctor` names on each host.
+fn not_connected_on(channel: &str, stream_id: i32, start: i64, end: i64) -> String {
+    let what = if end > start {
+        format!(
+            "the subscriber went, and the {} bytes from position {start} to position {end} \
+             are whole as far as its image read; run the command again with --from at the \
+             position that image reached",
+            end - start
+        )
+    } else {
+        format!(
+            "nothing was played; subscribe on that endpoint first, on stream {stream_id}, \
+             then run the command again"
+        )
+    };
+    format!(
+        "no subscriber on {channel}, stream {stream_id}, answered the replay within the \
+         replay connect timeout, 5 s: {what}; `cavalry doctor` on this host names \
+         replay.not_connected, and on the receiving host udp-subscription-no-image while \
+         its subscription waits for the replay's setup frame; see \
+         docs/how-to/replay-a-recording.md#when-it-does-not-work"
+    )
 }
 
 /// How the summary line says a replay ended, from `replay stopped`'s reason.

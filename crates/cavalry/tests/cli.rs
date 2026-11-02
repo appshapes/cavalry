@@ -496,6 +496,60 @@ fn replay_on_a_udp_channel_plays_to_the_endpoints_subscriber_and_prints_the_summ
     driver.close().expect("the driver closes");
 }
 
+/// A replay over a `cavalry:udp` channel that no subscriber answers: the port is a
+/// bound socket nobody reads, so the setup frames land and nothing answers them, the
+/// replay ends after the replay connect timeout, 5 s, `for want of a subscriber`, and
+/// the command prints the summary with `0 bytes` and exits 1 naming the endpoint, the
+/// stream and what to do, never success for a replay that delivered nothing
+/// (invariant 1).
+#[test]
+fn replay_on_a_udp_channel_exits_1_when_no_subscriber_answers() {
+    let dir = TestDir::new("replay-udp-nobody");
+    let (driver, client, _end) = recorded(&dir, 11, 4, false);
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket");
+    let port = socket.local_addr().expect("bound").port();
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+    let started = Instant::now();
+    let output = replay(&dir)
+        .args(["--channel", &channel, "--stream", "11"])
+        .output()
+        .expect("replay runs");
+    let waited = started.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        waited >= Duration::from_secs(4),
+        "the replay connect timeout passed first: {waited:?}"
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "the summary alone: {stdout}");
+    assert!(
+        lines[0].starts_with("replay ")
+            && lines[0].ends_with(&format!(
+                " of recording 0 ended for want of a subscriber at position 0: 0 bytes from \
+                 position 0 on {channel}"
+            )),
+        "{stdout}"
+    );
+    assert!(
+        stderr.starts_with("cavalry replay: no subscriber on ")
+            && stderr.contains(&format!("{channel}, stream 11,"))
+            && stderr.contains("nothing was played")
+            && stderr.contains("replay.not_connected")
+            && stderr.contains("udp-subscription-no-image")
+            && stderr.contains("docs/how-to/replay-a-recording.md#when-it-does-not-work"),
+        "{stderr}"
+    );
+    drop(socket);
+    client.close().expect("closes");
+    driver.close().expect("the driver closes");
+}
+
 /// A `--follow` replay over a `cavalry:udp` channel whose driver goes before the
 /// recording stops: no `replay stopped` comes, the command's client closes with the
 /// driver, and the command exits 1 naming the reason and what to do, with no summary
