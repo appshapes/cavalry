@@ -5743,9 +5743,9 @@ mod recording {
         assert_eq!(h.conductor.registration_count, 4);
     }
 
-    /// The refusals: a host that does not resolve is code 9, an interface that is not
-    /// this host's is code 4 with nothing registered, and the commands that take no
-    /// `cavalry:udp` channel yet refuse it with code 11 naming card 181.
+    /// The refusals: a host that does not resolve is code 9 for a publication and a
+    /// subscription alike, an interface that is not this host's is code 4 with nothing
+    /// registered, and a recording on a channel with nothing live on it is code 20.
     #[test]
     fn a_udp_channel_is_refused_with_the_spec_error_codes_and_nothing_registered() {
         let mut h = Harness::new("udp-refusals");
