@@ -987,8 +987,10 @@ user-visible change, added in the same commit as the change. The format follows
 - The receiver's id in every status message is drawn through the standard library's
   `RandomState`, seeded from the operating system, as the spec's "random i64" says,
   where it mixed the clock and the process id; `cavalry doctor`'s
-  `udp-subscription-no-image` names `image.created` and `image.ended` to tell a stream
-  that never came from one that ended while the subscription stayed, and its endpoint
-  note calls an endpoint that is closing with nothing on it an endpoint; the shim test
+  `udp-subscription-no-image` prints the driver-wide `image.created` and `image.ended`
+  and says what they settle, a stream that never came told from one that ended while
+  the subscription stayed on a driver with one receive endpoint and no earlier stream,
+  the checks for a stream that never came kept on any other, and its endpoint note
+  calls an endpoint that is closing with nothing on it an endpoint; the shim test
   asserts the image's end of stream lands where the stream stopped (the review notes of
   card 181's pull requests; card 195).

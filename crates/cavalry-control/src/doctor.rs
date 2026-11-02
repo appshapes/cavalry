@@ -1175,12 +1175,29 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
         }
         // A receive endpoint whose subscriptions have no image: no sender's setup
         // frame has reached this port for a stream they want, or the stream they had
-        // ended and its image went while they stayed (ADR 0042); image.created and
-        // image.ended tell the two apart.
+        // ended and its image went while they stayed (ADR 0042). image.created and
+        // image.ended are driver-wide, every receive endpoint's images since the
+        // driver started, and the file holds no count per endpoint, so they settle
+        // the cause on a driver with one receive endpoint and no earlier stream alone;
+        // the finding says so and keeps the checks for a stream that never came.
         if kind == "receive endpoint" && endpoint.status == 1 && endpoint.images == Some(0) {
-            let created =
-                read_static(reader, "image.created", IMAGE_CREATED, findings).unwrap_or(0);
-            let ended = read_static(reader, "image.ended", IMAGE_ENDED, findings).unwrap_or(0);
+            let created = read_static(reader, "image.created", IMAGE_CREATED, findings);
+            let ended = read_static(reader, "image.ended", IMAGE_ENDED, findings);
+            // A count read_static could not read has its own Note or Fail, and is
+            // never printed as 0.
+            let tell = match (created, ended) {
+                (Some(created), Some(ended)) => format!(
+                    "image.created {created} and image.ended {ended} are driver-wide, every \
+                     receive endpoint's images since the driver started: image.created 0 is a \
+                     stream that has reached no receive endpoint on this driver, and \
+                     image.created above 0 with image.ended at it is a stream that came and \
+                     ended on a receive endpoint here, which one the counters file does not say"
+                ),
+                _ => "image.created and image.ended, the driver-wide counts of every receive \
+                      endpoint's images that would say which, cannot be read from this file, \
+                      as their own finding says"
+                    .to_string(),
+            };
             findings.push(Finding {
                 check: "udp-subscription-no-image",
                 level: Level::Warn,
@@ -1188,14 +1205,13 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                     "receive endpoint {}: no image: either no sender's setup frame has reached \
                      this port for a stream a subscription here wants, or the stream it had \
                      ended and its image went while the subscription stayed, so the \
-                     subscriptions read nothing; image.created {created} and image.ended \
-                     {ended} tell the two apart (an image that came and ended is the sender's \
-                     stream over, and the next stream creates a new image); for a stream that \
-                     never came, check that the sender's channel names this host and port and \
-                     its stream id matches, that the port is open between the hosts, and that \
-                     both drivers run the same version; a rising receiver.setups_unwanted is a \
-                     sender on another stream id, and a rising receiver.dropped_frames a peer \
-                     of another version",
+                     subscriptions read nothing; {tell}; with more than one receive endpoint, \
+                     or a stream that ended before, the checks for a stream that never came \
+                     still apply to this endpoint: that the sender's channel names this host \
+                     and port and its stream id matches, that the port is open between the \
+                     hosts, and that both drivers run the same version; a rising \
+                     receiver.setups_unwanted is a sender on another stream id, and a rising \
+                     receiver.dropped_frames a peer of another version",
                     endpoint.channel
                 ),
                 doc: DOC_UDP_RECEIVER,
@@ -1984,7 +2000,14 @@ mod tests {
             buffers[0].message
         );
         assert!(
-            found.message.contains("image.created 0 and image.ended 0"),
+            found
+                .message
+                .contains("image.created 0 and image.ended 0 are driver-wide"),
+            "{}",
+            found.message
+        );
+        assert!(
+            found.message.contains("still apply to this endpoint"),
             "{}",
             found.message
         );
@@ -1999,6 +2022,42 @@ mod tests {
             !report.findings.iter().any(|f| f.check == "udp-image-loss"),
             "{report}"
         );
+
+        // A stream that came and ended on a receive endpoint of this driver, this one
+        // or another: the two counts are driver-wide, so the finding prints them, says
+        // the file does not name the endpoint, and keeps the checks for a stream that
+        // never came.
+        let created = counters
+            .counter(IMAGE_CREATED.record())
+            .expect("a static counter");
+        let ended = counters
+            .counter(IMAGE_ENDED.record())
+            .expect("a static counter");
+        created.set(1);
+        ended.set(1);
+        let report = examine(&dir.0);
+        let found = finding(&report, "udp-subscription-no-image");
+        assert_eq!(found.level, Level::Warn);
+        assert!(
+            found
+                .message
+                .contains("image.created 1 and image.ended 1 are driver-wide"),
+            "{}",
+            found.message
+        );
+        assert!(
+            found
+                .message
+                .contains("which one the counters file does not say"),
+            "{}",
+            found.message
+        );
+        assert!(
+            found.message.contains("still apply to this endpoint"),
+            "{}",
+            found.message
+        );
+        assert!(found.message.contains("setup frame"), "{}", found.message);
 
         // An image with a gap: its high-water mark past its rebuild position.
         images.set(1);
