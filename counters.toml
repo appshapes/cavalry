@@ -307,8 +307,8 @@ id = 36
 name = "replay.not_connected"
 kind = "counter"
 scope = "static"
-doc = "Replays the driver ended, reason 2 of replay stopped, because their publication had no subscriber for the replay connect timeout, from the start or from the moment the last subscriber went (spec/client-protocol.md, Liveness and timeouts)."
-doctor = "A replay was started with no subscription on its replay stream id and channel, or the subscriber closed before the replay ended: add the subscription before the start replay command, or keep it until replay stopped arrives; the replay ended at the position it had reached and can be started again from there."
+doc = "Replays the driver ended, reason 2 of replay stopped, because their publication had no subscriber for the replay connect timeout, from the start or from the moment the last subscriber went; over cavalry:udp the replay has a subscriber while its publication is connected, from the first status message without the send-setup flag until the connection timeout passes without one (spec/udp.md, The sender), so a replay nobody answers ends after the replay connect timeout from its start, and one whose receiver went after the connection timeout and then the replay connect timeout (spec/client-protocol.md, Liveness and timeouts; ADR 0043)."
+doctor = "A replay was started with no subscription on its replay stream id and channel, or the subscriber closed before the replay ended, or, over cavalry:udp, the replay's publication was never connected, no status message without the send-setup flag having arrived from the channel's endpoint, or its receiver went and the connection timeout passed, which publication.connected and publication.disconnected count: add the subscription before the start replay command, or keep it until replay stopped arrives, or check that a driver on the receiving host subscribes on that endpoint and port; the replay ended at the position it had reached and can be started again from there."
 
 [[counter]]
 id = 37
@@ -331,8 +331,8 @@ id = 39
 name = "replay.position"
 kind = "gauge"
 scope = "instance"
-doc = "The position of one replay up to which the replayer has written the recording's frames into the replay's log, stored with a release store after each block; it moves no faster than the slowest subscriber's position plus the publication window, and not at all with no subscriber (spec/client-protocol.md, Commands); key: replay session id (i64), little-endian; label text: the replay session id, the recording id, the replay publication's session id and its stream id in decimal, space-separated."
-doctor = "A replay.position that does not move while the replay has a subscriber is a subscriber that stopped polling: compare the subscription.position counters of the replay stream; one with no subscriber waits, and ends with reason 2 after the replay connect timeout."
+doc = "The position of one replay up to which the replayer has written the recording's frames into the replay's log, stored with a release store after each block; it moves no faster than the slowest subscriber's position plus the publication window over cavalry:ipc, or over cavalry:udp the replay publication's sender.position plus the publication window, paced by its sender.limit, which the receivers' status messages raise, and not at all with no subscriber or while the publication is not connected (spec/client-protocol.md, Commands; spec/udp.md, The sender; ADR 0043); key: replay session id (i64), little-endian; label text: the replay session id, the recording id, the replay publication's session id and its stream id in decimal, space-separated."
+doctor = "A replay.position that does not move while the replay has a subscriber is a subscriber that stopped polling: over cavalry:ipc compare the subscription.position counters of the replay stream; over cavalry:udp compare the replay publication's sender.position and sender.limit, keyed by its session id and stream id, a sender position at its limit being a receiver whose status messages stopped raising the window, its subscriber on the receiving host having stopped polling, and a sender position below its limit being the sender not sending, which sender.send_failed and sender.short_sends count; one with no subscriber, or over cavalry:udp whose publication is not connected, waits, and ends with reason 2 after the replay connect timeout."
 
 # The state machines (CLAUDE.md, invariant 4): the counters file's metadata record, the
 # recording catalog's descriptor, the driver's view of a recording and of a replay. A catalog slot
@@ -646,8 +646,8 @@ id = 56
 name = "sender.naks_ignored"
 kind = "counter"
 scope = "static"
-doc = "NAKs whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, dropped (spec/udp.md, The sender)."
-doctor = "A receiver asking for frames the sender no longer holds has fallen more than half a term behind: the receiving host is too slow for the stream, or was away longer than the link can bridge; its image times out and a new one starts from the setup."
+doc = "NAKs dropped: one whose position lies outside the resend window, from the sender position less half a term and the longest message up to the sender position, or one whose term offset is not below the publication's own term length or whose range runs past it, the term a replay's publication keeps from its recording (spec/udp.md, The sender; ADR 0043)."
+doctor = "A receiver asking for frames the sender no longer holds has fallen more than half a term behind: the receiving host is too slow for the stream, or was away longer than the link can bridge; its image times out and a new one starts from the setup. A receiver naming an offset past the publication's term is reading another stream's term on the same session and stream, or a stale image: its driver's receiver.dropped_* counters say which."
 
 [[counter]]
 id = 57
@@ -662,7 +662,7 @@ id = 58
 name = "sender.status_messages_rejected"
 kind = "counter"
 scope = "static"
-doc = "Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, or one with it that asks a publication at its end of stream for a setup (spec/udp.md, The sender)."
+doc = "Status messages ignored: one without the send-setup flag whose consumption position lies outside the window around the sender position, one whose consumption term offset the publication's own term does not hold, which a replay's publication keeps from its recording (ADR 0043), or one with the flag that asks a publication at its end of stream for a setup (spec/udp.md, The sender)."
 doctor = "A receiver reporting a position the sender cannot place is a receiver of another stream's term ids on the same session and stream, or a stale image: its driver's receiver.dropped_* counters say which."
 
 [[counter]]

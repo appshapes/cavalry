@@ -83,3 +83,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0040. Adopt Aeron's control frames and rules as the UDP transport, version 0, with log buffer version 1 and client protocol version 4](decisions/0040-adopt-aerons-transport-frames-as-the-udp-transport.md)
 - [0041. Send a UDP publication from a dedicated sender thread through nix's socket calls](decisions/0041-send-from-a-sender-thread-through-nix.md)
 - [0042. Rebuild an image on a dedicated receiver thread with a bounded session table](decisions/0042-rebuild-an-image-on-a-receiver-thread.md)
+- [0043. Replay a recording over a `cavalry:udp` channel through the sender](decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md)
