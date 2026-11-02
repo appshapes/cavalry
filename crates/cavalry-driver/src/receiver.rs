@@ -593,6 +593,9 @@ struct Reader {
     floor: i64,
     /// Its position failed its bound: not read again until it is removed.
     rejected: bool,
+    /// It was removed while the pending replies were at their bound: read no more,
+    /// counted no more, and dropped with its reply once there is room (`flush_leaving`).
+    leaving: bool,
 }
 
 impl Reader {
@@ -695,6 +698,22 @@ impl Receiver {
     #[cfg(test)]
     pub(crate) fn session_records(&self) -> usize {
         self.sessions.records.len()
+    }
+
+    /// How many readers the receiver holds, leaving or not, for the tests.
+    #[cfg(test)]
+    pub(crate) fn reader_count(&self) -> usize {
+        self.readers.len()
+    }
+
+    /// How many subscription readers an image counted on the last cycle, none of them
+    /// leaving, for the tests.
+    #[cfg(test)]
+    pub(crate) fn subscriber_count_of(&self, registration_id: i64) -> Option<usize> {
+        self.live
+            .iter()
+            .find(|live| live.registration_id == registration_id)
+            .map(|live| live.subscriber_count)
     }
 
     /// The receiver's loop: duty cycles until `stop`, idling with the strategy while it
@@ -900,6 +919,7 @@ impl Receiver {
                         counter,
                         floor,
                         rejected: false,
+                        leaving: false,
                     });
                 }
             }
@@ -931,20 +951,39 @@ impl Receiver {
     /// [`Reply::ReaderRemoved`]. An image left with no subscription reader is retired
     /// by `serve` on this cycle, or on the first with room for the reply.
     fn remove_readers(&mut self, key: ReaderKey, image_index: Option<usize>) {
+        for reader in &mut self.readers {
+            if reader.key == key && image_index.is_none_or(|image| image == reader.image_index) {
+                reader.leaving = true;
+            }
+        }
+        self.flush_leaving();
+    }
+
+    /// Drops every reader marked as leaving whose reply fits the pending replies'
+    /// bound, answering each with [`Reply::ReaderRemoved`]; the rest wait, read and
+    /// counted no more, for the next cycle, so that a remove handled with the pending
+    /// replies just under their bound cannot push them past it (invariant 3).
+    fn flush_leaving(&mut self) {
         let mut index = 0;
         while index < self.readers.len() {
             let reader = &self.readers[index];
-            if reader.key == key && image_index.is_none_or(|image| image == reader.image_index) {
-                let image_index = reader.image_index;
-                let registration_id = self.live[image_index].registration_id;
-                drop(self.readers.swap_remove(index));
-                self.reply(Reply::ReaderRemoved {
-                    registration_id,
-                    key,
-                });
-            } else {
+            if !reader.leaving {
                 index += 1;
+                continue;
             }
+            if self.pending.len() >= PENDING_REPLIES {
+                break;
+            }
+            let key = reader.key;
+            let registration_id = self
+                .live
+                .get(reader.image_index)
+                .map_or(0, |live| live.registration_id);
+            drop(self.readers.swap_remove(index));
+            self.reply(Reply::ReaderRemoved {
+                registration_id,
+                key,
+            });
         }
     }
 
@@ -1025,6 +1064,7 @@ impl Receiver {
                         counter,
                         floor,
                         rejected: false,
+                        leaving: false,
                     });
                 }
             }
@@ -1195,9 +1235,13 @@ impl Receiver {
             ControlFrame::RttMeasurement(measurement) => {
                 self.on_rtt_measurement(endpoint_index, endpoint_id, measurement);
             }
-            // A status message or a NAK at a receive endpoint: nothing of it is a
-            // receiver's business; data was dispatched above.
-            ControlFrame::StatusMessage(_) | ControlFrame::Nak(_) | ControlFrame::Data => {}
+            // A status message or a NAK at a receive endpoint is a frame this side does
+            // not handle, dropped and counted as "The datagram" says; data was
+            // dispatched above.
+            ControlFrame::StatusMessage(_) | ControlFrame::Nak(_) => {
+                self.statics.dropped_frames.increment();
+            }
+            ControlFrame::Data => {}
         }
     }
 
@@ -1543,6 +1587,7 @@ impl Receiver {
     /// rejected or not, since a subscription holds its image until the conductor removes
     /// it (`serve`).
     fn load_readers(&mut self) {
+        self.flush_leaving();
         for live in &mut self.live {
             live.slowest = i64::MAX;
             live.fastest = i64::MIN;
@@ -1550,10 +1595,18 @@ impl Receiver {
             live.subscriber_count = 0;
         }
         for index in 0..self.readers.len() {
-            let (image_index, key, rejected) = {
+            let (image_index, key, rejected, leaving) = {
                 let reader = &self.readers[index];
-                (reader.image_index, reader.key, reader.rejected)
+                (
+                    reader.image_index,
+                    reader.key,
+                    reader.rejected,
+                    reader.leaving,
+                )
             };
+            if leaving {
+                continue;
+            }
             let Some(live) = self.live.get_mut(image_index) else {
                 continue;
             };

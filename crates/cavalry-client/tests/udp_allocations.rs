@@ -1,5 +1,5 @@
 //! The allocation gate over the UDP send path (CLAUDE.md, invariant 2 and gate 2; ADR
-//! 0041): the publisher, the driver's four threads and a receiver by hand in this
+//! 0041): the publisher, the driver's five threads and a receiver by hand in this
 //! process, under the counting allocator the bench uses, with ten thousand messages
 //! crossing the loopback and no allocation at all. Alone in its binary, so that no other
 //! test's threads are counted (`cargo test` runs a binary's tests in parallel).
@@ -250,7 +250,7 @@ fn status_message(setup: &SetupFrame, offset: i32, window: i32, flags: u8) -> St
 }
 
 /// Nothing on the send path allocates (CLAUDE.md, invariant 2): with the publisher, the
-/// driver's four threads and the receiver in this process, ten thousand messages cross
+/// driver's five threads and the receiver in this process, ten thousand messages cross
 /// the loopback under the counting allocator with no allocation at all.
 #[test]
 fn the_send_path_allocates_nothing_per_message() {

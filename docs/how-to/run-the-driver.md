@@ -111,8 +111,32 @@ reports it running with a new pid.
   Linux, whose `getsockopt` returns twice what `setsockopt` set, and 131072 elsewhere.
   The host capped the ask: raise `net.core.rmem_max` with `sysctl` on Linux,
   `kern.ipc.maxsockbuf` on macOS, then remove the channel's publications, wait the
-  linger and add them again, as for the send buffer. `note udp-endpoint` lists every
-  send endpoint with its status, its publications and its two buffers.
+  linger and add them again, as for the send buffer; on a receive endpoint, whose
+  socket a subscription opens, remove the channel's subscriptions and add them again
+  instead. `note udp-endpoint` lists every send or receive endpoint with its status,
+  its publications or its images, and its two buffers.
+- **`WARN udp-image-loss`.** An image whose `image.hwm_position` is past its
+  `image.rebuild_position`. The high-water mark is the furthest byte a datagram or a
+  heartbeat has named; the rebuild position is the end of the frames that are all
+  there behind it; the bytes between the two, which the finding counts, are a gap on
+  the wire, and the image's subscribers stop at it. The receiver sends a NAK for the
+  gap every 100 µs until the sender mends it: `receiver.gaps_detected` and
+  `receiver.naks_sent` rise on this host, `sender.retransmits_sent` on the sending
+  one, and the finding goes once the rebuild position reaches the high-water mark. A
+  rebuild position that stands still while the NAKs go on is a gap the sender no
+  longer holds, outside its resend window: `sender.naks_ignored` rises there, and the
+  image times out after 10 s without an accepted datagram or heartbeat
+  (`image.timed_out`). Look at the link and at the socket buffers on both hosts, the
+  `udp-socket-buffers` entries above
+  ([the receiver](../reference/udp.md#the-receiver)).
+- **`WARN udp-subscription-no-image`.** An active receive endpoint with no image: no
+  sender's setup frame has reached the port for a stream a subscription on it wants,
+  so the subscriptions read nothing. Check that the sender's channel names this host
+  and port and its stream id matches the subscription's, that the port is open
+  between the hosts, and that both drivers run the same version. Two counters tell
+  the causes apart: a rising `receiver.setups_unwanted` is a sender on another stream
+  id, and a rising `receiver.dropped_frames` is a peer of another version
+  ([the receiver](../reference/udp.md#the-receiver)).
 - **The directory vanished under a running driver.** `doctor` reports `FAIL
   driver-directory ... no driver directory` while the driver and its clients run on,
   since their mappings outlive the unlink, and a new client is refused with `no driver

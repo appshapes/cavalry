@@ -968,3 +968,19 @@ user-visible change, added in the same commit as the change. The format follows
   card 181).
 - `DriverThread::Receiver` names the fifth thread to the `start_with_threads` hook; the
   bench places it with the housekeeping threads until card 182's rows give it a core.
+- The client's tests drive a `cavalry:udp` subscription against a real driver through a
+  shim on the loopback that drops every seventh data datagram, duplicates every fifth
+  and holds every third until the next has gone: four thousand messages arrive once and
+  in order, the gaps NAKed and mended, and the close delivers EOS and the image's end;
+  a late subscription elicits the setup; a recording of an image on a second driver
+  replays byte for byte; and an allocation gate holds the receive path at zero
+  allocations per message under the counting allocator, alone in its process (CLAUDE.md,
+  gate 3 for the wire; card 181).
+- `cavalry doctor` reads two more `cavalry:udp` findings from the counters file alone:
+  loss on an image (`udp-image-loss`: `image.hwm_position` past `image.rebuild_position`,
+  the gap's bytes and the counters that say whether it is being mended) and a receive
+  endpoint with no image (`udp-subscription-no-image`: no sender's setup frame reached
+  the port for a stream a subscription wants, with what to check); the endpoint note
+  and the capped receive buffer's finding say send or receive endpoint and the receive
+  endpoint's cost ([ADR 0042](docs/decisions/0042-rebuild-an-image-on-a-receiver-thread.md);
+  card 181).
