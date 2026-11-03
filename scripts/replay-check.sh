@@ -53,6 +53,7 @@ recording=$(sed -n 's/.*recording=\([0-9]*\).*/\1/p' "$work/info.txt")
 end=$(sed -n 's/.*end=\([0-9]*\).*/\1/p' "$work/info.txt")
 instant=$(sed -n 's/.*instant=\(@[0-9]*\).*/\1/p' "$work/info.txt")
 instant_position=$(sed -n 's/.*instant_position=\([0-9]*\).*/\1/p' "$work/info.txt")
+padding_position=$(sed -n 's/.*padding_position=\([0-9]*\).*/\1/p' "$work/info.txt")
 lines=$(wc -l < "$work/live.txt" | tr -d ' ')
 [ "$lines" = 100000 ] || { echo "replay-check: the live subscriber printed $lines lines, not 100000" >&2; exit 1; }
 
@@ -73,8 +74,12 @@ step "5. replay from the instant $instant, which the index resolves to $instant_
 tail -1 "$work/replay3.txt"
 grep -q "ended at position $end: .* messages from position $instant_position\$" "$work/replay3.txt" || {
     echo "replay-check: the replay from the instant did not start at $instant_position" >&2; exit 1; }
+# The first line is at the position the index gave, unless that is the padding frame's
+# own position: the padding prints no line, so the first line is then 64 bytes past it.
+expected=$instant_position
+[ "$instant_position" = "$padding_position" ] && expected=$((instant_position + 64))
 first=$(head -1 "$work/replay3.txt" | cut -d' ' -f1)
-[ "$first" = "$instant_position" ] || { echo "replay-check: the first line is at $first, not $instant_position" >&2; exit 1; }
+[ "$first" = "$expected" ] || { echo "replay-check: the first line is at $first, not $expected" >&2; exit 1; }
 grep -F "$(head -1 "$work/replay3.txt")" "$work/live.txt" >/dev/null || {
     echo "replay-check: the first line of the replay from the instant is not a line the live subscriber saw" >&2; exit 1; }
 

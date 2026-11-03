@@ -134,6 +134,7 @@ fn run(messages: u64) -> Result<(), Box<dyn std::error::Error>> {
     let mut chain: u64 = 0xcbf2_9ce4_8422_2325;
     let mut instant = 0i64;
     let mut half_position = 0i64;
+    let mut padding_position = 0i64;
     for n in 0..messages {
         let mut body = [0u8; 16];
         body[..8].copy_from_slice(&n.to_le_bytes());
@@ -154,7 +155,10 @@ fn run(messages: u64) -> Result<(), Box<dyn std::error::Error>> {
             // (`spec/log-buffer.md`, "Claim, commit and abort"), which the replayer
             // plays as padding and no handler sees, so every line after it is 64 bytes
             // past where a sum of the lines' lengths would put it; step 5 of the script
-            // checks the first line's position against the time index's.
+            // checks the first line's position against the time index's, and the
+            // index may resolve the instant to this very position, since its entries
+            // are sparser than the messages, so the script is told where the padding is.
+            padding_position = after;
             loop {
                 match publication.try_claim(32) {
                     Ok(claim) => {
@@ -207,7 +211,8 @@ fn run(messages: u64) -> Result<(), Box<dyn std::error::Error>> {
     let instant_position = index::position_at(&log_dir, recording.recording_id(), instant)?;
     eprintln!(
         "recording={} end={end} instant=@{instant} instant_position={instant_position} \
-         half_position={half_position} messages={messages} seconds={}",
+         half_position={half_position} padding_position={padding_position} \
+         messages={messages} seconds={}",
         recording.recording_id(),
         started.elapsed().as_secs_f64()
     );

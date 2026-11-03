@@ -71,6 +71,33 @@ In Aeron, this is Archive's `startReplay` ([glossary](../glossary.md)).
    the recording's extent as it was when the replay started: its stop position, or the
    synced position of a live one.
 
+4. Play a recording to a subscriber on another host:
+
+   ```sh
+   cargo run --release -p cavalry -- replay --recording 0 --from start \
+       --channel cavalry:udp?endpoint=192.0.2.10:40123 --stream 7
+   ```
+
+   The subscriber goes first, on the other host, on its own address and that port, on
+   the stream the command names, in a program there:
+   `client.add_subscription("cavalry:udp?endpoint=192.0.2.10:40123", 7)?`. The command
+   then subscribes to nothing and prints no message, since the messages go to the
+   other host; it ends with the replay and prints the summary alone:
+
+   ```text
+   replay 7 of recording 0 ended at position 128: 128 bytes from position 0 on cavalry:udp?endpoint=192.0.2.10:40123
+   ```
+
+   The exit code is 0 when the replay `ended`, and 1 when it `ended for want of a
+   subscriber`, with `0 bytes` when nothing was played, so a script sees a replay that
+   delivered nothing fail; the bullet under "When it does not work" says what to check.
+   `--stream` is required with a channel other than `cavalry:ipc`: the subscriber reads
+   the stream it chose, and the command cannot pick one of its own. The replay's
+   publication goes on the wire from the driver's sender as a `cavalry:udp` publication
+   does, with the recording's term length and MTU, so the subscriber's image carries the
+   recording's positions
+   ([ADR 0043](../decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md)).
+
 From a program, the same is `client.add_subscription("cavalry:ipc", stream_id)?`
 first, then `client.start_replay(recording_id, position, length, stream_id,
 "cavalry:ipc")?`, which returns a `Replay` with `start_position()`, `position()` from
@@ -117,6 +144,9 @@ its send endpoint stays open for the publication linger after it
   `ended`, with no `read to position` after the count.
 - `just doctor` after the replay reports no `replay-*` finding; the `replay.ended`
   counter grew by one.
+- Over a `cavalry:udp` channel, the summary line's byte count is the end position less
+  the start, and on the receiving host `image.created` grew by one and the
+  subscription's image reached that end position.
 - Running the command twice prints the same lines: a replay of the same bytes is the
   same stream (invariant 1). `just replay-check` is that check as a gate: a recording
   of 100,000 hash-chained messages with a padding frame a quarter of the way, the live
@@ -158,7 +188,16 @@ its send endpoint stays open for the publication linger after it
   Check the name, or pass an address, and that an `interface` named is this host's.
 - The replay prints nothing and ends after five seconds with `ended for want of a
   subscriber`: a program started the replay before adding its subscription. Subscribe
-  first, as the command does.
+  first, as the command does. Over a `cavalry:udp` channel the command prints the
+  summary line, `0 bytes` when nothing was played, exits 1, and stderr names the
+  endpoint and the stream: no receiver answered the replay's setup frames at the
+  endpoint. Check that a driver on the receiving host has a subscription on that
+  address, port and stream, and that the port is open between the hosts; `cavalry
+  doctor` on this host names `replay.not_connected`, and on the receiving host reports
+  `udp-subscription-no-image` while the subscription waits. A subscriber that went
+  during the replay ends it the same way, after the connection timeout and then the
+  replay connect timeout, with the bytes played in the summary: its image is whole as
+  far as it read, and the command again with `--from` at that position plays the rest.
 - The replay stops early with `failed`: a frame in a segment file failed a check, or the
   file could not be read; what was printed is whole, and `replay.failed` in `doctor`
   names the recording. The segment file needs restoring from a backup.
@@ -169,6 +208,13 @@ its send endpoint stays open for the publication linger after it
   longer: a pager, or a pipe into a slow program. What was printed is whole and ends at
   that position. Read faster, into a file for instance, or run the command again with
   `--from` at that position for the rest.
+- `client closed (driver-closed)`, or `closed` with another reason, no summary line,
+  and the exit code is 1, over a `cavalry:udp` channel: the driver went, or the
+  command's client timed out, was lapped or read a corrupt event, before the replay's
+  `replay stopped` arrived, so the command does not know where the replay ended and
+  names no end. What reached the subscriber is whole up to the position its image
+  reports. Run `cavalry doctor` on this host, start the driver if it went, and run the
+  command again with `--from` at that position.
 - `command refused (replays-full)` from a program: this client has 64 replays live at
   once, the driver's bound, and the new one was stopped again; wait for one to end, or
   stop one.
@@ -180,3 +226,7 @@ its send endpoint stays open for the publication linger after it
 - `time index refused (io)` or `rejected (empty)` on `--from <instant>`: the recording's
   index is missing, unreadable or has no entry yet; pass a position, or `--log-dir` the
   directory the driver uses.
+- `replay --channel with a channel other than cavalry:ipc needs --stream <id>`, exit
+  2, before anything is sent: the subscriber on that channel's endpoint reads the
+  stream it chose, and the command cannot pick one of its own. Pass `--stream` with the
+  stream id the program on the other host subscribed on.
