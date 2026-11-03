@@ -137,7 +137,9 @@ impl Replay {
         self.stream_id
     }
 
-    /// The replay publication's channel, `cavalry:ipc` in this version.
+    /// The replay publication's channel as `start_replay` was given it: `cavalry:ipc`,
+    /// or a `cavalry:udp` channel whose endpoint the driver's sender plays the
+    /// recording to (ADR 0043).
     pub fn channel(&self) -> &str {
         &self.channel
     }
