@@ -1475,7 +1475,8 @@ fn wait_publications_lingered(dir: &std::path::Path) -> Result<(), String> {
         if Instant::now() > deadline {
             return Err(format!(
                 "a send endpoint still carried a publication {} s past the publication linger: \
-                 the driver did not remove the closed publication when its linger ended",
+                 the driver did not remove the closed publication when its linger ended; see \
+                 docs/how-to/run-the-bench.md#when-it-does-not-work",
                 LINGER_MARGIN.as_secs()
             ));
         }
@@ -1933,7 +1934,8 @@ fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), Str
         if span_ns(last, tick()) > LINK_TIMEOUT.as_nanos() as u64 {
             return Err(format!(
                 "no message for {} s after {echoed} echoed from {source}: the other host's run \
-                 stopped without ending the stream",
+                 stopped without ending the stream; see \
+                 docs/how-to/run-the-bench.md#when-it-does-not-work",
                 LINK_TIMEOUT.as_secs()
             ));
         }
@@ -1961,7 +1963,8 @@ fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), Str
         return Err(format!(
             "the stream from {source} went after {echoed} messages without its end: the other \
              host's harness stopped, or its image timed out here after 10 s without a datagram \
-             (image.ended {image_ended}, image.timed_out {image_timed_out})"
+             (image.ended {image_ended}, image.timed_out {image_timed_out}); see \
+             docs/how-to/run-the-bench.md#when-it-does-not-work"
         ));
     }
     println!(
@@ -2505,7 +2508,16 @@ fn main() -> ExitCode {
     );
     let _ = writeln!(out, "  \"messages\": {},", options.messages);
     let _ = writeln!(out, "  \"repeat\": {},", options.repeat);
-    let _ = writeln!(out, "  \"warmup\": {},", options.warmup());
+    // The warm-up the run used: the UDP rows' alone in link mode, where no other row ran.
+    let _ = writeln!(
+        out,
+        "  \"warmup\": {},",
+        if options.link.is_some() {
+            options.udp_warmup()
+        } else {
+            options.warmup()
+        }
+    );
     let _ = writeln!(out, "  \"body\": {},", options.body);
     let _ = writeln!(out, "  \"term_length\": {},", options.term_length);
     let _ = writeln!(

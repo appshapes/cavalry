@@ -429,7 +429,15 @@ shared runner is
 - The peer's `the stream from <address> went after N messages without its end`: the
   measuring side's harness stopped before it closed its publication, or the image timed
   out on the peer after 10 s without a datagram; the measuring side's own error says
-  which. A peer that ends this way exits 1, so the pair's run is red on both sides.
+  which, and the line's `image.ended` and `image.timed_out` counts say which the peer
+  saw. A peer that ends this way exits 1, so the pair's run is red on both sides.
+- The peer's `no message for 600 s after N echoed`: the measuring side stopped sending
+  without ending the stream and its driver kept the image alive with heartbeats, a
+  harness stalled on the other host; its own log says where.
+- `a send endpoint still carried a publication 3 s past the publication linger`: the
+  driver did not remove the closed publication once its linger ended, five seconds
+  after the close at most; `cavalry doctor` on the host lists the endpoint with its
+  count, and the driver's sender is the thread to look at.
 - `the client benchmark failed: the client subscriber failed: ...`: the subscriber of the
   client rows got an error from `Subscription::poll`, and the rest of the line is that
   error, which says what to do. The publisher stops as soon as its subscriber has
