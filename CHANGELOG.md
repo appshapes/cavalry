@@ -1051,6 +1051,21 @@ user-visible change, added in the same commit as the change. The format follows
   offset, a standard deviation of 51 ns on 2026-11-04 against 863 ns while the pools
   steered the clock; the set-up page's clock step has the line (ADR 0044's Revisit;
   card 182).
+- The bench gains the UDP rows: `claim_commit_32_udp` and `one_way_32_udp` take the
+  client rows' path over `cavalry:udp` on the loopback through the driver's sender and
+  receiver, one message in flight, a tenth of `--messages` per run, on both bench
+  hosts, whose jobs now pin four CPUs, `--pin 8,10,12,14` and `4,5,6,7`, the fourth for
+  the receiver; and `udp_round_trip_32` and `udp_one_way_32` cross the direct cable
+  between `bench` and `grip` with `--link-here` and `--link-peer` to a peer running
+  `--echo`, the new `bench (udp)` job and its `bench (udp peer)`, the round trip held
+  to `bench-linux-link` and the one-way reported beside the clock offset the peer job
+  prints. The new rows and the new profile gate once their baselines are recorded from
+  three of the jobs' processes at one tree, and read `no baseline` until then. The
+  harness keeps each benchmark's allocations under its name, prints them under the
+  table as `allocations by benchmark`, writes them to the result as
+  `allocations_by_benchmark` and names the benchmarks that allocated in the failure
+  it exits with, so a run that fails the allocation gate says which row to look at
+  ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
 - ADR 0045 is accepted: a padding frame crosses the wire as its 32-byte header alone,
   the last frame of its datagram, its length checked against the term and counted by
   its aligned length, and the receiver writes the header and nothing after it. Before

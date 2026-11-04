@@ -5,7 +5,7 @@
 # lost its tuning fails before it produces a number.
 #
 #     bench/host/check.sh            print the state
-#     bench/host/check.sh 8,10,12    print it and fail unless those CPUs are isolated and
+#     bench/host/check.sh 8,10,12,14 print it and fail unless those CPUs are isolated and
 #                                    tickless, SMT is off, the governor is performance,
 #                                    turbo is off (cpufreq boost, or intel_pstate's
 #                                    no_turbo), no idle state deeper than C1 is enabled
