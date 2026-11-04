@@ -1383,7 +1383,8 @@ fn endpoint_addresses(channel: &str) -> Option<(Ipv4Addr, Option<Ipv4Addr>)> {
     let address = ipv4(parameters.next()?).filter(|address| !address.is_unspecified())?;
     let interface = parameters
         .find_map(|parameter| parameter.strip_prefix("interface="))
-        .and_then(ipv4);
+        .and_then(ipv4)
+        .filter(|interface| !interface.is_unspecified());
     Some((address, interface))
 }
 
@@ -3313,6 +3314,11 @@ mod tests {
         assert_eq!(
             endpoint_addresses("cavalry:udp?endpoint=10.0.0.2:40123|interface=10.0.0.1:40000"),
             Some((Ipv4Addr::new(10, 0, 0, 2), Some(Ipv4Addr::new(10, 0, 0, 1))))
+        );
+        assert_eq!(
+            endpoint_addresses("cavalry:udp?endpoint=10.0.0.2:40123|interface=0.0.0.0"),
+            Some((Ipv4Addr::new(10, 0, 0, 2), None)),
+            "an unspecified interface address names no interface"
         );
         assert_eq!(endpoint_addresses("cavalry:udp?endpoint=[::1]:40123"), None);
         assert_eq!(

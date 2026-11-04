@@ -3,8 +3,8 @@
 A how-to page: one task, a publisher on one host and a subscriber on another, over
 UDP, with a driver on each host and nothing configured but the channel. What goes on
 the wire is [`spec/udp.md`](../reference/udp.md); what a stream looks like from a
-program is [the tutorial](../tutorials/publish-and-subscribe.md), whose fourth line is
-this task on one host. In Aeron, this is a publication and a subscription on an
+program is [the tutorial](../tutorials/publish-and-subscribe.md), whose program with
+the channel changed is this task on one host. In Aeron, this is a publication and a subscription on an
 `aeron:udp` channel ([glossary](../glossary.md)).
 
 ## Prerequisites

@@ -9,12 +9,16 @@ replication, written in Rust. One daemon per host; clients map shared-memory log
 buffers; IPC and UDP share one API. Encrypted, observable and highly available in the
 open core, with first-class clients in every language.
 
-**Status:** the first slice works on one host. `cavalry run` starts a driver, a Rust
-client publishes and subscribes over shared memory with back-pressure returned to the
-caller, `cavalry doctor` explains the driver from its counters, and the ten-minute path
-below runs in CI on Linux and macOS. Not yet: UDP, the durable log, Raft, the C ABI and
-the language clients, and a release on crates.io
-([ADR 0007](docs/decisions/0007-build-ipc-pub-sub-first.md)).
+**Status:** the first three slices work. `cavalry run` starts a driver; a Rust client
+publishes and subscribes over shared memory on one host and over UDP between hosts,
+on one API, with back-pressure returned to the caller; the driver records a stream to
+the durable log and replays it; `cavalry doctor` explains the driver from its
+counters; the ten-minute path below runs in CI on Linux and macOS, and the latency
+gate runs on two dedicated hosts and across the cable between them. Not yet: Raft,
+the C ABI and the language clients, and a release on crates.io
+([ADR 0007](docs/decisions/0007-build-ipc-pub-sub-first.md),
+[ADR 0023](docs/decisions/0023-build-the-durable-log-second.md),
+[ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md)).
 
 ## Start here
 
@@ -41,18 +45,21 @@ same six in CI on Linux and macOS, and
 ```sh
 cargo build --release -p cavalry --bin cavalry --example quickstart
 target/release/cavalry run &            # one driver per host; Ctrl-C or SIGTERM stops it
-target/release/examples/quickstart      # records the stream, publishes 1,000 messages and reads them back
+target/release/examples/quickstart      # records the stream, publishes 1,000 messages and reads them back, then the same over UDP
 target/release/cavalry replay --recording 0 --from 0 | tail -2   # the id the program printed; the last message and the summary
 target/release/cavalry doctor           # explains the driver from its counters; exit 0
 kill -TERM %1                           # the driver closes and leaves its directory for doctor
 ```
 
 The program is [`crates/cavalry/examples/quickstart.rs`](crates/cavalry/examples/quickstart.rs),
-fifty lines with `cavalry::Cavalry`: connect, add a subscription and a publication on a
-stream, start a recording of the stream, claim a frame and write in place, poll the
+a page with `cavalry::Cavalry`: connect, add a subscription and a publication on
+a stream, start a recording of the stream, claim a frame and write in place, poll the
 subscription, every message once and in order, wait until the recorder has written up
-to the publication's position, stop the recording. The replay plays the recording back
-from the durable log and prints each message's position and body. No
+to the publication's position, stop the recording; then add a subscription and a
+publication on `cavalry:udp?endpoint=127.0.0.1:40123`, the same stream over UDP on this
+host, and publish and read the 1,000 messages again through the driver's sender and
+receiver, with nothing in the program changed but the channel. The replay plays the
+recording back from the durable log and prints each message's position and body. No
 configuration: the driver's directory is `/dev/shm/cavalry-<user>` on Linux and
 under the temporary directory elsewhere, and `CAVALRY_DIR` moves it
 ([configuration](docs/reference/config.md)).
