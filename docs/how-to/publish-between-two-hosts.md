@@ -108,7 +108,8 @@ doctor](run-the-driver.md#when-it-does-not-work) explains each in full.
   finding names the interface. The check reads IPv4 endpoints with an address of their
   own on Linux; for an IPv6 endpoint, a receive endpoint bound to every address, or
   another operating system, read the interface's MTU yourself, `ip link` on Linux and
-  `ifconfig` elsewhere, and hold it to 1436.
+  `ifconfig` elsewhere, and hold it to the datagram with its IP and UDP headers: 1436
+  for IPv4, whose header is 20 bytes, and 1456 for IPv6, whose header is 40 bytes.
 - **`WARN udp-image-loss`** on the subscriber's host: a gap on the wire the receiver is
   NAKing, with `receiver.gaps_detected` rising there and `sender.retransmits_sent` on
   the publisher's host while it is mended; a rebuild position that stands still is a
