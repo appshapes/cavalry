@@ -205,8 +205,10 @@ jobs:
 
   # The link rows (ADR 0039, ADR 0044): udp_round_trip_32, measured on bench's clock
   # alone and gated against its own profile, bench-linux-link, and udp_one_way_32,
-  # reported beside it with the offset between the two hosts' clocks that the peer job
-  # prints. The harness on bench publishes across the direct cable to a peer mode of the
+  # reported beside it with the offset between the two hosts' clocks, which this job
+  # prints after the run from `chronyc tracking` on bench, since bench serves its cooked
+  # time and grip stands at bench's raw clock plus that line. The harness on bench
+  # publishes across the direct cable to a peer mode of the
   # harness on grip, the job below, which echoes every message back; the two jobs are
   # one pair, started together once both single-host bench jobs are done, so that
   # neither host runs a bench while the other measures the link, and each waits up to
