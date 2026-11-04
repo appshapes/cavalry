@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, Offer, Publication, Subscription};
 use cavalry_driver::{Driver, spec};
-use cavalry_proto::frame::FrameType;
+use cavalry_proto::frame::{FrameType, is_padding_header};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     IMAGE_CREATED, IMAGE_ENDED, IMAGE_REMOVED, RECEIVER_FRAMES_RECEIVED, RECEIVER_GAPS_DETECTED,
@@ -182,9 +182,9 @@ impl Shim {
                         send(datagram);
                         continue;
                     }
-                    let is_padding =
-                        u16::from_le_bytes([datagram[6], datagram[7]]) == FrameType::Pad as u16;
-                    if is_padding && padding_dropped.load(Ordering::Acquire) < faults.drop_padding {
+                    if is_padding_header(datagram)
+                        && padding_dropped.load(Ordering::Acquire) < faults.drop_padding
+                    {
                         padding_dropped.fetch_add(1, Ordering::AcqRel);
                         continue;
                     }
