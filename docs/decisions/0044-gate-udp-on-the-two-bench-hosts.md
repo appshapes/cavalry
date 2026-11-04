@@ -129,8 +129,8 @@ link. Four rows and one peer:
    blocks every merge.
 3. **The ten-minute path** gains the UDP step inside the program it already runs: after
    the recording stops, `quickstart` publishes the same 1,000 messages again on
-   `cavalry:udp?endpoint=127.0.0.1:40123`, the port the repository's own tests use, on
-   the same stream through the same client and reads them back once and in order through a
+   `cavalry:udp?endpoint=127.0.0.1:40123`, a fixed port of this host, on the same
+   stream through the same client and reads them back once and in order through a
    subscription on that channel, every message through the driver's sender and
    receiver, and prints one more line; `scripts/quickstart.sh` checks the line on
    Linux and macOS, the README's six commands stay six, and the tutorial says what the
@@ -182,7 +182,10 @@ link. Four rows and one peer:
   sees it in the program they already ran; the README's six commands stay six.
 - **An ephemeral port in the ten-minute path.** Lost: a reader copies a channel from
   the page, and `127.0.0.1:40123` is one they can type; a port in use refuses the
-  subscription with error code 4 and the message names the port.
+  subscription with error code 4 and the message names the port, and another port in
+  the channel is the whole fix. Nothing in the repository binds the port but the
+  program; two runs of the path at once on one host would collide, which the script
+  does not do and the tutorial's reader does not either.
 - **The link rows named by what they cross, `round_trip_32_link` and
   `one_way_32_link`.** Lost: ADR 0039 and card 182's "Done when" name them
   `udp_round_trip_32` and `udp_one_way_32`, and a reader of the gate's rule finds
