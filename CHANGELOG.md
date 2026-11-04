@@ -1044,6 +1044,7 @@ user-visible change, added in the same commit as the change. The format follows
   MTU check, each in its own change. The set-up page's "Further hosts" now describes
   `bench` and `grip` with the link's record, and its firewall step the reply path a
   stateless ruleset must open
+  ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
 - The bench gains the UDP rows: `claim_commit_32_udp` and `one_way_32_udp` take the
   client rows' path over `cavalry:udp` on the loopback through the driver's sender and
   receiver, one message in flight, a tenth of `--messages` per run, on both bench
