@@ -97,14 +97,17 @@ fn offer(publication: &mut Publication, message: &[u8]) {
 /// What the shim does to the data datagrams it forwards, by their count: every
 /// `drop_every`th is dropped, every `duplicate_every`th is sent twice, and every
 /// `hold_every`th is held and sent after the next one, so that datagrams arrive out of
-/// order. Control frames, setup frames and heartbeats go through untouched, so that the
-/// stream connects and ends as it would on a clean wire; what the faults cost is mended
-/// by the NAKs.
+/// order; and the first `drop_padding` datagrams that carry a padding frame, a 32-byte
+/// header alone (`spec/udp.md`, "The datagram"; ADR 0045), are dropped, so that a
+/// padding frame is NAKed and resent too. Control frames, setup frames and heartbeats go
+/// through untouched, so that the stream connects and ends as it would on a clean wire;
+/// what the faults cost is mended by the NAKs.
 #[derive(Clone, Copy)]
 struct Faults {
     drop_every: usize,
     duplicate_every: usize,
     hold_every: usize,
+    drop_padding: usize,
 }
 
 /// A shim between the sender and the receiver on the loopback: the publication sends
@@ -119,6 +122,7 @@ struct Shim {
     dropped: Arc<AtomicUsize>,
     duplicated: Arc<AtomicUsize>,
     held: Arc<AtomicUsize>,
+    padding_dropped: Arc<AtomicUsize>,
     threads: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -136,6 +140,7 @@ impl Shim {
         let dropped = Arc::new(AtomicUsize::new(0));
         let duplicated = Arc::new(AtomicUsize::new(0));
         let held = Arc::new(AtomicUsize::new(0));
+        let padding_dropped = Arc::new(AtomicUsize::new(0));
         // The sender's address, learned from its first datagram and shared with the
         // thread that forwards the receiver's answers back.
         let sender_address: Arc<std::sync::atomic::AtomicU64> =
@@ -148,6 +153,7 @@ impl Shim {
             let dropped = Arc::clone(&dropped);
             let duplicated = Arc::clone(&duplicated);
             let held = Arc::clone(&held);
+            let padding_dropped = Arc::clone(&padding_dropped);
             let sender_address = Arc::clone(&sender_address);
             std::thread::spawn(move || {
                 let mut buffer = vec![0u8; 65536];
@@ -174,6 +180,12 @@ impl Shim {
                     };
                     if !is_data {
                         send(datagram);
+                        continue;
+                    }
+                    let is_padding =
+                        u16::from_le_bytes([datagram[6], datagram[7]]) == FrameType::Pad as u16;
+                    if is_padding && padding_dropped.load(Ordering::Acquire) < faults.drop_padding {
+                        padding_dropped.fetch_add(1, Ordering::AcqRel);
                         continue;
                     }
                     data_count += 1;
@@ -233,6 +245,7 @@ impl Shim {
             dropped,
             duplicated,
             held,
+            padding_dropped,
             threads: vec![forward, backward],
         }
     }
@@ -245,7 +258,9 @@ impl Shim {
         )
     }
 
-    fn stop(mut self) -> (usize, usize, usize, usize) {
+    /// Stops the shim: how many data datagrams it forwarded, dropped, duplicated, held,
+    /// and how many padding datagrams it dropped.
+    fn stop(mut self) -> (usize, usize, usize, usize, usize) {
         self.stop.store(true, Ordering::Release);
         for thread in self.threads.drain(..) {
             let _ = thread.join();
@@ -255,13 +270,14 @@ impl Shim {
             self.dropped.load(Ordering::Acquire),
             self.duplicated.load(Ordering::Acquire),
             self.held.load(Ordering::Acquire),
+            self.padding_dropped.load(Ordering::Acquire),
         )
     }
 }
 
-/// Polls `subscription` until `count` messages have been delivered, each a 32-byte body
-/// whose first eight bytes are its sequence number, checking that every one arrives
-/// once and in order; returns how many were delivered.
+/// Polls `subscription` until `count` messages have been delivered, each a body of at
+/// least eight bytes whose first eight are its sequence number, checking that every one
+/// arrives once and in order; returns how many were delivered.
 fn drain_in_order(subscription: &mut Subscription, count: u64, timeout: Duration) -> u64 {
     let deadline = Instant::now() + timeout;
     let mut next = 0u64;
@@ -307,6 +323,7 @@ fn every_message_arrives_once_and_in_order_through_a_lossy_reordering_shim() {
             drop_every: 7,
             duplicate_every: 5,
             hold_every: 3,
+            drop_padding: 0,
         },
     );
     let mut subscription = client
@@ -389,9 +406,111 @@ fn every_message_arrives_once_and_in_order_through_a_lossy_reordering_shim() {
     }));
     assert_eq!(read_counter(dir.path(), IMAGE_ENDED), 1);
     assert_eq!(read_counter(dir.path(), IMAGE_REMOVED), 1);
-    let (forwarded, dropped, duplicated, held) = shim.stop();
+    let (forwarded, dropped, duplicated, held, _) = shim.stop();
     assert!(dropped > 0 && duplicated > 0 && held > 0, "the faults ran");
     assert!(forwarded > 0);
+    subscription.close().expect("closes");
+    client.close().expect("closes");
+    driver.close().expect("the driver closes");
+}
+
+/// Card 196: a body whose aligned frame does not divide the 16 MiB term leaves a padding
+/// frame at the end of every term, which the sender carries as its 32-byte header
+/// alone (`spec/udp.md`, "The datagram"; ADR 0045). A 100-byte body, 160-byte frames,
+/// crosses two term ends through the lossy shim, which also drops the first padding
+/// datagram it sees, so that the padding is NAKed and resent as any frame; every message
+/// arrives once and in order, and the image's position is the stream's (invariant 1).
+/// Before ADR 0045 the receiver rejected the padding header at the first term end,
+/// message 104,857, and the stream stayed there.
+#[test]
+fn a_stream_whose_frames_do_not_divide_the_term_crosses_two_term_ends_through_the_shim() {
+    const BODY: usize = 100;
+    const FRAME: u64 = 160;
+    const TERM: u64 = 16 * 1024 * 1024;
+    // 104,857 frames fill a term, with 96 bytes of padding at its end; two term ends,
+    // then a thousand more messages into the third term.
+    const FRAMES_PER_TERM: u64 = TERM / FRAME;
+    const MESSAGES: u64 = 2 * FRAMES_PER_TERM + 1000;
+    let dir = TestDir::new("shim-padding");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    let mut client = Cavalry::connect_to(dir.path()).expect("connects");
+    let receive_port = free_port();
+    let receive_channel = format!("cavalry:udp?endpoint=127.0.0.1:{receive_port}");
+    let shim = Shim::start(
+        SocketAddr::from(([127, 0, 0, 1], receive_port)),
+        // Lighter faults than the four-thousand-message case: a retransmit lingers
+        // 10 ms, during which a NAK for another range is dropped (`spec/udp.md`, "The
+        // sender", step 4), so a drop every seventh datagram paces two hundred thousand
+        // messages to a minute; every seven-hundred-and-first keeps the test to seconds
+        // and the faults still run.
+        Faults {
+            drop_every: 701,
+            duplicate_every: 503,
+            hold_every: 307,
+            drop_padding: 1,
+        },
+    );
+    let mut subscription = client
+        .add_subscription(&receive_channel, 7)
+        .expect("a subscription");
+    let mut publication = client
+        .add_publication(&shim.channel(), 7)
+        .expect("a publication");
+    assert!(
+        wait_until(Duration::from_secs(5), || publication.is_connected()),
+        "the receiver's status message connected the publication"
+    );
+    assert!(wait_until(Duration::from_secs(5), || {
+        subscription.poll(|_, _| {}, 0).expect("the poll applies");
+        subscription.image_count() == 1
+    }));
+    let publisher = std::thread::spawn(move || {
+        for i in 0..MESSAGES {
+            let mut message = [0u8; BODY];
+            message[..8].copy_from_slice(&i.to_le_bytes());
+            offer(&mut publication, &message);
+        }
+        publication
+    });
+    assert_eq!(
+        drain_in_order(&mut subscription, MESSAGES, Duration::from_secs(180)),
+        MESSAGES
+    );
+    let publication = publisher.join().expect("the publisher");
+    assert_eq!(
+        read_counter(dir.path(), RECEIVER_FRAMES_RECEIVED),
+        MESSAGES as i64 + 2,
+        "every message once, and the two padding frames, one per term end"
+    );
+    assert!(
+        read_counter(dir.path(), RECEIVER_GAPS_DETECTED) > 0,
+        "loss was seen"
+    );
+    assert!(
+        read_counter(dir.path(), SENDER_RETRANSMITS_SENT) > 0,
+        "and mended"
+    );
+    // The image stands where the stream does: two terms and a thousand frames in, the
+    // padding counted by its aligned length.
+    let frames_in_third_term = MESSAGES - 2 * FRAMES_PER_TERM;
+    let stream_position = publication.position().expect("the position");
+    assert_eq!(
+        subscription.images()[0].position(),
+        stream_position,
+        "the subscriber reached the publication's position"
+    );
+    assert_eq!(
+        stream_position,
+        (2 * TERM + frames_in_third_term * FRAME) as i64,
+        "two terms of padding frames at their ends, then the third term"
+    );
+    let (forwarded, dropped, _, _, padding_dropped) = shim.stop();
+    assert!(forwarded > 0 && dropped > 0);
+    assert_eq!(
+        padding_dropped, 1,
+        "the first padding frame was lost and resent"
+    );
+    publication.close().expect("closes");
     subscription.close().expect("closes");
     client.close().expect("closes");
     driver.close().expect("the driver closes");
