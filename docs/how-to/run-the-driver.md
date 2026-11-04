@@ -115,6 +115,16 @@ reports it running with a new pid.
   socket a subscription opens, remove the channel's subscriptions and add them again
   instead. `note udp-endpoint` lists every send or receive endpoint with its status,
   its publications or its images, and its two buffers.
+- **`WARN udp-interface-mtu`.** On Linux, an endpoint whose address routes over an
+  interface with an MTU below 1436 bytes, the stream's datagram of 1408 bytes with its
+  IPv4 and UDP headers: the kernel fragments a datagram longer than the interface's
+  MTU, and one lost fragment loses the whole datagram, or drops it where fragmentation
+  is off, so a stream over a tunnel or a link at 1280 loses frames the receiver then
+  NAKs for ever. The finding names the interface and its MTU, read from the main
+  routing table and the interface's `mtu` file. Raise the interface's MTU to 1436 or
+  more, or route the endpoint over an interface that carries the stream; the stream's
+  MTU has no key in this version ([values](../reference/udp.md#values);
+  [Publish between two hosts](publish-between-two-hosts.md)).
 - **`WARN udp-image-loss`.** An image whose `image.hwm_position` is past its
   `image.rebuild_position`. The high-water mark is the furthest byte a datagram or a
   heartbeat has named; the rebuild position is the end of the frames that are all

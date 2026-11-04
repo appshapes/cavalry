@@ -20,6 +20,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Run a driver and read doctor](how-to/run-the-driver.md)
 - [Record a stream to the durable log](how-to/record-a-stream.md)
 - [Replay a recording into a subscription](how-to/replay-a-recording.md)
+- [Publish between two hosts](how-to/publish-between-two-hosts.md)
 - [Set up a bench host for the latency gate](how-to/set-up-a-bench-host.md)
 - [Set up a soak host](how-to/set-up-a-soak-host.md)
 - [Send the weekly release-notes email](how-to/send-the-release-notes.md)
