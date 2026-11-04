@@ -1121,3 +1121,29 @@ user-visible change, added in the same commit as the change. The format follows
   and `cavalry doctor` prints none of the four counters the page names while the stream
   is healthy, so they are read from the counters file by its layout until the console
   exists, with the values the tutorial's 1,000 messages give (card 182).
+- `grip`'s two bench profiles, `grip-linux` and `grip-linux-unchecked`, are re-recorded
+  at the tree of 7248621 from its thirteen processes, pull request 109's two runs,
+  master's five, pull request 111's three, pull request 113's two and pull request
+  114's own, with every gated row's slowest run before and after in the commit and
+  the process behind each row that loosened. The unchecked `claim_commit_32_client`
+  row had turned `bench (grip)` red on pull requests 102, 103, 106 and 111 at 120 to
+  132 ns against a slowest run of 119 ns recorded on 2026-10-31, while the checked
+  build did not move and master's own runs at the tree passed. Those reds are not one
+  slow run: a whole process sits higher, as pull request 111's first attempt did, all
+  twenty-one runs at 119 to 134 ns, where its rerun read 113 to 117. In master's run
+  at a718d63 two checked rows stepped up partway through the process and set their new
+  slowest runs: `claim_commit_32_recorded` from 126 to 133 ns over its first eleven
+  runs to 160 to 171 over the last ten, and `claim_commit_32_client` from 107 to 111
+  over its first twelve to 132 to 134 over the last nine. The other seven rows that
+  loosened by more than 5 percent did so on one run of one process, 1.3 to 2.3 times
+  the median of the row's 273 runs. The host's journal holds nothing in any of the
+  thirteen processes' windows but the runner's own line, and its kernel log's only
+  events of the afternoon, a snap refresh at 17:14:41 UTC and a packet capture's
+  promiscuous mode on the link port at 17:37 to 17:41, fall outside every window;
+  card 198 holds all three effects. The trigger in
+  [ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md),
+  master's own run failing or brushing the gate, did not fire, and a process of a new
+  tree never joins an older tree's entry, so the re-record is a person's commit under
+  [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
+  made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
+  tree while master is green is card 199's (card 182).
