@@ -3,7 +3,7 @@ name: reviewer
 description: Reviews Cavalry pull requests against CLAUDE.md's invariants and gates, and either
   approves or requests changes with specific, actionable blockers. Runs through the review pr
   workflow, read-only.
-model: fable
+model: opus
 color: red
 tools: Read, Bash, Grep, Glob
 ---

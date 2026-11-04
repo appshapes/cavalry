@@ -1089,6 +1089,12 @@ user-visible change, added in the same commit as the change. The format follows
   a publisher on one host and a subscriber on another, with the channel, the firewall
   and every line `doctor` says when the stream does not connect
   ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
+- The fixer and the reviewer of the pull-request workflows run on Opus 5.5 at xhigh
+  effort, in `claude.yml`, `review-pull-request.yml` and their briefs' frontmatter: the
+  account behind the workflows' token reached its Fable usage limit on 2026-11-04 and
+  every reviewer and fixer session died at its first call, while the implementation
+  sessions still need Fable; a reviewer from another lab would need API billing to run
+  headless, so the loop stays on one action and one token.
 - The UDP rows gate on both bench hosts and across the cable: `claim_commit_32_udp`
   and `one_way_32_udp` are recorded in `bench-linux`, `bench-linux-unchecked`,
   `grip-linux` and `grip-linux-unchecked`, and `bench-linux-link` is recorded for
