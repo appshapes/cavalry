@@ -185,29 +185,36 @@ widens its own band; why `grip` took the role from `kip`, with the measurement, 
 the soak host, where a driver records for days (card 159): a soak host is not tuned,
 so any machine serves it, and the gate gets the host that holds still.
 
-The UDP rows, when they come, need a sender and a receiver on two tuned hosts, and a
-one-way number across hosts is only as good as the clock offset between them. The steps
-below joined `bench` and `kip` on 2026-10-26 and are the record to repeat between
-`bench` and `grip`, whose wired port `eno2`, an Intel I219-LM, has hardware timestamps
-and no cable yet.
+The link rows of the bench, `udp_round_trip_32` and `udp_one_way_32`, run across a
+direct cable between the two tuned hosts, the harness on `bench` and its echo peer on
+`grip` ([Run the bench](run-the-bench.md), step 5;
+[ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)), and a one-way
+number across hosts is only as good as the clock offset between them. The steps below
+joined `bench` and `grip` on 2026-10-31, when the cable moved from `kip`'s `enp87s0`,
+which had carried the first link since 2026-10-26, and were checked again on
+2026-11-02 with no job on either host; the numbers are that record, and the full
+record is on card 182.
 
 1. One straight patch cable from a wired port with hardware timestamps on each host,
    port to port, with nothing between them. `ethtool -T <port>` lists
-   `hardware-transmit` and `hardware-receive` on a port that qualifies; gigabit ports
-   swap the pairs themselves, so no crossover cable is needed. Each host keeps its other
-   link for SSH, CI and packages. On `bench` the port is `enp5s0` (Intel I211) and on
-   `kip` `enp87s0` (Intel I226-V).
+   `hardware-transmit`, `hardware-receive` and `hardware-raw-clock` on a port that
+   qualifies, as it does on both of these; gigabit ports swap the pairs themselves, so
+   no crossover cable is needed. Each host keeps its other link for SSH, CI and
+   packages. On `bench` the port is `enp5s0` (Intel I211) and on `grip` `eno2` (Intel
+   I219-LM); the link is 1000 Mb/s full duplex at both ends with an MTU of 1500, and
+   `eno2`'s interrupt is bound to `grip`'s housekeeping CPUs by the set-up script's
+   interrupt service, as every driver-bound interrupt is.
 
 2. Static addresses on the link, no gateway, as a netplan drop-in on each host, applied
    to that port alone so the other link is not touched:
 
    ```sh
-   # ignore: run on each host with its own port and address (bench: enp5s0 10.0.0.1/30; kip: enp87s0 10.0.0.2/30)
+   # ignore: run on each host with its own port and address (bench: enp5s0 10.0.0.1/30; grip: eno2 10.0.0.2/30)
    sudo tee /etc/netplan/90-cavalry-link.yaml >/dev/null <<'YAML'
    network:
      version: 2
      ethernets:
-       enp87s0:
+       eno2:
          dhcp4: false
          dhcp6: false
          accept-ra: false
@@ -215,13 +222,16 @@ and no cable yet.
          optional: true
    YAML
    sudo chmod 0600 /etc/netplan/90-cavalry-link.yaml
-   sudo netplan generate && sudo networkctl reload && sudo networkctl reconfigure enp87s0
+   sudo netplan generate && sudo networkctl reload && sudo networkctl reconfigure eno2
    ```
 
    `ping` from each end confirms the link, and `/etc/hosts` on both hosts names the
-   ends `bench-link` and `kip-link`.
+   ends `bench-link` (10.0.0.1) and `grip-link` (10.0.0.2), the names the bench's link
+   jobs and the commands on this page use. On 2026-11-02, 100 pings each way lost none:
+   `bench` to `grip` 0.089 ms at least, 0.123 ms on average and 0.213 ms at most, with
+   a deviation of 0.023 ms; `grip` to `bench` 0.095, 0.117, 0.181 and 0.012 ms.
 
-3. The clock. `bench` serves it and `kip` follows it over the link, both with hardware
+3. The clock. `bench` serves it and `grip` follows it over the link, both with hardware
    timestamps on the port, so the offset between the two hosts is bounded by the link
    and not by the internet:
 
@@ -232,22 +242,36 @@ and no cable yet.
    ```
 
    ```sh
-   # ignore: run on kip, the host that follows it
-   printf 'server 10.0.0.1 iburst minpoll 0 maxpoll 2 prefer\nhwtimestamp enp87s0\n' | sudo tee /etc/chrony/conf.d/90-cavalry-link.conf
+   # ignore: run on grip, the host that follows it
+   printf 'server 10.0.0.1 iburst minpoll 0 maxpoll 2 prefer trust\nhwtimestamp eno2\n' | sudo tee /etc/chrony/conf.d/90-cavalry-link.conf
    sudo systemctl restart chrony
    ```
 
-   On `kip`, `chronyc sources` marks `bench` with `^*` once selected, `chronyc
-   sourcestats` gives the offset's standard deviation against it, and `chronyc tracking`
-   the offset and the root distance; `chronyc clients` on `bench` lists `kip`. It
-   worked when the standard deviation against `bench` is under 1 µs and the last offset
-   is within a few microseconds: over this cable with hardware timestamps `kip` reads
-   186 ns and a last offset of 1 ns. An offset of milliseconds means the host still
-   follows the internet pools, which `trust` on the `server` line fixes; the root
-   distance of tens of milliseconds is `bench`'s own distance to UTC and does not enter
-   a number between the two hosts. The link's record on the host's card holds those
-   numbers with `ping -c 100` in each direction while both hosts are idle, the MTU, and
-   `ethtool -T` on both ports.
+   On `grip`, `chronyc sources` marks `bench-link` with `^*` once selected and `^+`
+   while it is combined with other sources, `chronyc sourcestats` gives the offset and
+   its standard deviation against it, and `chronyc tracking` the offset and the root
+   distance of the selected source; `chronyc clients` on `bench` lists `grip-link`. It
+   worked when the standard deviation against `bench-link` is under 1 µs and the last
+   offset is within a few microseconds: over this cable with hardware timestamps
+   `grip` read 37 ns and a last offset of +2.0 µs fifty minutes after `trust` went on
+   the `server` line, and 20 ns on 2026-11-02, with 245,499 NTP packets in `bench`'s
+   `chronyc clients`. Without `trust` the host kept the internet pools, 3.3 µs and an
+   offset of −852 µs, which is why the line carries it; the root distance of tens of
+   milliseconds is `bench`'s own distance to UTC and does not enter a number between
+   the two hosts. `tracking` reports the selected source, and on 2026-11-02 `grip` had
+   selected a public pool server with `bench-link` combined, so the offset the bench's
+   one-way row carries is read from `sourcestats`' `bench-link` line, which the
+   `bench (udp peer)` job prints after its echo; `noselect` on the pool lines in
+   `grip`'s chrony configuration would make `bench-link` the selected source, a change
+   ADR 0044's Revisit names.
+
+4. The firewall and the ports. `ufw` is inactive and no nftables ruleset is loaded on
+   either host, so nothing is opened for the link. A host that enables one opens UDP
+   40182 on `bench` and 40183 on `grip` on the link's interface, the ports the link
+   jobs bind; a port a firewall drops shows as the harness waiting ten minutes for the
+   stream to connect, and `cavalry doctor` on the publishing host saying
+   `udp-publication-not-connected` ([Run a driver and read
+   doctor](run-the-driver.md#when-it-does-not-work)).
 
 ## Access to the host
 
