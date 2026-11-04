@@ -1583,7 +1583,8 @@ fn an_image_insert_writes_a_padding_frame_from_its_header_alone() {
     assert_eq!(reader.position(), 160 + 64);
 
     // A padding frame that would run past the term, or a data frame carried short, is
-    // refused as before.
+    // refused as before; a padding frame carried whole, bytes after its header, is not
+    // the wire's shape and is refused too.
     assert_eq!(
         writer
             .insert(-5, T - 32, &wire_padding((T - 32) as i32, -5, 64))
@@ -1591,6 +1592,16 @@ fn an_image_insert_writes_a_padding_frame_from_its_header_alone() {
             .reason(),
         "position"
     );
+    let mut whole = wire_padding(320, -5, 64);
+    whole.resize(64, 0);
+    assert!(matches!(
+        writer.insert(-5, 320, &whole).unwrap_err(),
+        cavalry_shm::log::LogError::Mismatch {
+            field: "padding frame bytes",
+            found: 64,
+            expected: 32
+        }
+    ));
     assert_eq!(
         writer
             .insert(

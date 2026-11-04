@@ -1505,8 +1505,9 @@ impl ImageWriter {
     /// term, and `frame` at least a header long with, for a data frame, a frame length
     /// that fits it; otherwise [`LogError::Position`] or [`LogError::Frame`], with
     /// nothing written, as is a header whose term id or term offset is not the one
-    /// given, [`LogError::Mismatch`], so that a frame never lands at an offset its
-    /// header does not name. The caller keeps the receiver's bounds
+    /// given, or a padding frame carried with bytes after its header, the one shape
+    /// the wire has, [`LogError::Mismatch`], so that a frame never lands at an offset
+    /// its header does not name. The caller keeps the receiver's bounds
     /// (`cavalry_proto::udp::receiver_bounds`): this writer trusts that the term is the
     /// stream's current one, as the datagram check trusted its term offset.
     pub fn insert(
@@ -1519,16 +1520,16 @@ impl ImageWriter {
         let Some(head) = frame.get(..FRAME_HEADER_LENGTH) else {
             return Err(LogError::Frame(FrameError::TooShort { given: frame.len() }));
         };
-        // A padding frame's length is the padding's, bounded by the term below and not
-        // by the bytes given; the type is read ahead only to choose the bound.
-        let padding =
-            head[4] == 0 && u16::from_le_bytes([head[6], head[7]]) == FrameType::Pad as u16;
-        let available = if padding {
-            term_length as usize
-        } else {
-            frame.len()
-        };
-        let header = DataFrameHeader::parse_within(head, available)?;
+        // A data frame's length is held to the bytes given, a padding frame's to the
+        // term, and the position check below holds it to the term's end.
+        let header = DataFrameHeader::parse_on_wire(head, frame.len(), term_length)?;
+        if header.frame_type() == FrameType::Pad && frame.len() != FRAME_HEADER_LENGTH {
+            return Err(LogError::Mismatch {
+                field: "padding frame bytes",
+                found: frame.len() as i64,
+                expected: FRAME_HEADER_LENGTH as i64,
+            });
+        }
         if header.term_id() != term_id {
             return Err(LogError::Mismatch {
                 field: "term id",
