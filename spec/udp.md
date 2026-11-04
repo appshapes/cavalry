@@ -16,7 +16,15 @@ explain them.
 A UDP datagram carries either one control frame or one or more data or padding frames
 (`spec/frame.md`) taken whole and in order from one term of the sender's log, the first
 at a term offset that is a multiple of 32, so that every frame in it begins at a multiple
-of 32 from the datagram's start. No frame spans two datagrams. A datagram is at most the
+of 32 from the datagram's start. No frame spans two datagrams. A data frame is carried
+whole, its alignment padding included. A padding frame (`spec/frame.md`, "Padding
+frame") is carried as its 32-byte header alone and is the last frame of its datagram:
+its frame length is the padding's, checked against the term and not against the bytes
+present, and the frame counts its aligned length in the term, so a datagram that ends
+with one ends where the padding ends, the end of the term when the padding fills it. A
+padding frame's body is zeros a reader never reads, and a term is zero before a frame
+lands in it, so nothing of it need cross the wire, which is Aeron's rule (ADR 0045). A
+datagram is at most the
 publication's MTU length, 1408 bytes in this version (`spec/log-buffer.md`, "Header").
 Integers are little-endian (`spec/README.md`). Every frame begins with the data frame
 header's first eight bytes: frame length (i32), version (i8), flags (u8) and type (u16).
@@ -279,8 +287,12 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    `receiver.rejected_datagrams`. Otherwise each frame is written at its term offset in
    the image's log, the bytes after the first eight with plain stores and then the first
    eight with a release store, and only where the frame length there is 0, so that a
-   duplicate changes nothing; the high-water mark, `image.hwm_position`, becomes the
-   greater of itself and the datagram's end position. A heartbeat moves the high-water
+   duplicate changes nothing; a padding frame's header is written the same way and
+   nothing after it, its body being the zeros already there, and the image's readers
+   skip it by its aligned length as a log's reader does (`spec/log-buffer.md`,
+   "Reading"; ADR 0045); the high-water mark, `image.hwm_position`, becomes the
+   greater of itself and the datagram's end position, a padding frame counting its
+   aligned length ("The datagram"). A heartbeat moves the high-water
    mark the same way and, with EOS, records its position as the image's end of stream
    position once the rebuild position reaches it.
 3. **Rebuild and NAK.** The rebuild position, `image.rebuild_position`, is the end of the
@@ -416,7 +428,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 
 | Counter | Moves when |
 | --- | --- |
-| `sender.bytes_sent`, `sender.frames_sent` | a data or padding frame is sent |
+| `sender.bytes_sent`, `sender.frames_sent` | a data or padding frame is sent: the bytes put on the wire, 32 for a padding frame, and one frame each |
 | `sender.setups_sent`, `sender.heartbeats_sent` | a setup frame or a heartbeat is sent |
 | `sender.retransmits_sent`, `sender.retransmitted_bytes` | a NAK is answered |
 | `sender.retransmit_overflow` | a NAK for another range arrives while a retransmit is outstanding |
@@ -426,7 +438,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.status_messages_received`, `sender.status_messages_rejected` | a status message arrives; one without the send-setup flag lies outside the window or its consumption term offset is not below the publication's term length (ADR 0043), or one with the flag asks a publication at its end of stream for a setup; an elicit the sender answers with a setup frame is not rejected |
 | `sender.rtt_replies_sent` | an RTT measurement is answered |
 | `sender.position`, `sender.limit` | keyed as `publication.position` is: the sender position and the sender limit of one publication |
-| `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted |
+| `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
 | `receiver.setups_received`, `receiver.setups_unwanted`, `receiver.setups_elicited` | a setup frame arrives; one names a stream nobody wants; a status message asked a sender for one |
 | `receiver.heartbeats_received` | a heartbeat is accepted |
 | `receiver.status_messages_sent`, `receiver.naks_sent` | one is sent |
@@ -498,7 +510,7 @@ and nothing from a rejected datagram is delivered.
 | `term-offset` | a term offset is negative, not a multiple of 32, or not below the term length |
 | `window` | a receiver window length is negative |
 | `nak-length` | a NAK's length is not a positive multiple of 32, or runs past the end of the term |
-| `datagram` | a data datagram's frames fail `spec/frame.md`'s checks against the bytes left, a frame's term offset is not the running offset from the first, or the frames run past the end of the term |
+| `datagram` | a data datagram's frames fail `spec/frame.md`'s checks, a data frame against the bytes left and a padding frame's header against the term, its 32 bytes given; a frame's term offset is not the running offset from the first; the frames run past the end of the term; or a padding frame is not the last frame of the datagram, bytes following its header (ADR 0045) |
 
 A channel is checked in this order, each check over the whole string before the next:
 `grammar` (the scheme, the `?`, the `key=value` form of every parameter, a key outside
@@ -519,7 +531,8 @@ vector has a `kind`:
   with and without the group tag, a heartbeat with and without EOS, and one vector per
   rejection in the order the checks run.
 - `datagram`: the `bytes` of a data datagram with the `term_length`, and the `frames` a
-  reader walks (term offset and frame length of each) or the `error`.
+  reader walks (term offset and frame length of each) or the `error`; a padding frame
+  among them is its header alone, as "The datagram" carries it.
 - `channel`: a channel `string` and the `fields` it parses to (endpoint host and port,
   interface) or the `error` and its `code`.
 - `arithmetic`: `inputs` and the `fields` that follow: the sender limit from a status

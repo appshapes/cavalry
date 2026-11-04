@@ -1051,3 +1051,13 @@ user-visible change, added in the same commit as the change. The format follows
   offset, a standard deviation of 51 ns on 2026-11-04 against 863 ns while the pools
   steered the clock; the set-up page's clock step has the line (ADR 0044's Revisit;
   card 182).
+- ADR 0045 is accepted: a padding frame crosses the wire as its 32-byte header alone,
+  the last frame of its datagram, its length checked against the term and counted by
+  its aligned length, and the receiver writes the header and nothing after it. Before
+  it, a `cavalry:udp` stream whose frame length did not divide the 16 MiB term stalled
+  at the first term end, the receiver rejecting the padding header and NAKing it for
+  ever; every body of 32 or 8 bytes divided the term, so no test had met it. The spec
+  says the rule, the vectors carry it and `cavalry-proto`'s datagram check and
+  `cavalry-shm`'s image writer follow it
+  ([ADR 0045](docs/decisions/0045-carry-a-padding-frame-as-its-header-alone.md);
+  card 196).
