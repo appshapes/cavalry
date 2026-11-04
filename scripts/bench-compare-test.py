@@ -89,6 +89,20 @@ class Rule(unittest.TestCase):
                         baseline(step=10, one_way_32_client=row(300, runs=[290, 300, 320])))
         self.assertEqual(code, 0, out)  # 330 against 320 is +3.1%
 
+    def test_the_link_round_trip_is_gated_and_the_one_way_reported(self):
+        # The round trip across the link is measured on one clock and gated; the one-way
+        # carries the two hosts' clock offset and is reported (ADR 0039, ADR 0044).
+        code, out = run(result(10, udp_round_trip_32=row(60000), udp_one_way_32=row(40000)),
+                        baseline(step=10, udp_round_trip_32=row(50000), udp_one_way_32=row(20000)))
+        self.assertEqual(code, 1, out)
+        self.assertIn("udp_round_trip_32", out)
+        self.assertIn("+20.0% REGRESSION", out)
+        self.assertIn("+100.0% reported", out)
+        # The loopback UDP rows are message rows like the client rows.
+        code, out = run(result(10, one_way_32_udp=row(12000)), baseline(step=10, one_way_32_udp=row(10000)))
+        self.assertEqual(code, 1, out)
+        self.assertIn("+20.0% REGRESSION", out)
+
     def test_a_probe_row_is_reported_never_failed(self):
         code, out = run(result(10, timer=row(40)), baseline(step=10, timer=row(20)))
         self.assertEqual(code, 0, out)

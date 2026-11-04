@@ -11,11 +11,12 @@ shared runner is
 ## Prerequisites
 
 - A release build toolchain: `cargo` and `just`, as for every gate.
-- An idle machine with at least three free cores. The harness runs a publisher, a
-  subscriber and a conductor thread, each spinning; a browser or a build in the
-  background moves p99.99 by more than the 5 percent the gate allows. The numbers that
-  gate a commit come from the two bench hosts, `bench` and `grip`, each with three
-  cores isolated for this ([Set up a bench host](set-up-a-bench-host.md)).
+- An idle machine with at least three free cores, five for the UDP rows. The harness
+  runs a publisher, a subscriber and a conductor thread, each spinning, and the UDP rows
+  the driver's sender and receiver beside them; a browser or a build in the background
+  moves p99.99 by more than the 5 percent the gate allows. The numbers that gate a
+  commit come from the two bench hosts, `bench` and `grip`, each with four cores
+  isolated for this ([Set up a bench host](set-up-a-bench-host.md)).
 - Python 3 for `just bench-compare`.
 
 ## Steps
@@ -37,9 +38,12 @@ shared runner is
    `$CAVALRY_BENCH_PROFILE` when set, as CI sets `bench-linux`, `grip-linux`, `linux`
    or `macos`, and `local-<os>-<arch>` otherwise. Pass arguments after the recipe:
    `just bench --messages 5000000` runs longer and makes p99.99 steadier,
-   `just bench --pin 8,10,12` binds the publisher, the subscriber and the driver's
-   conductor to those CPUs, on Linux only, with the driver's recorder, replayer,
-   sender and receiver and the client's conductor on the lowest CPU outside them, so each pinned CPU runs one thread, and `just bench --repeat 21` runs every benchmark
+   `just bench --pin 8,10,12,14` binds the publisher, the subscriber and the driver's
+   conductor to the first three CPUs, on Linux only, with the driver's recorder and
+   replayer and the client's conductor on the lowest CPU outside them, so each pinned
+   CPU runs one thread; the UDP rows put the sender on the third CPU and the receiver
+   on the fourth, and the driver's conductor with the housekeeping threads, and three
+   CPUs refuse them. `just bench --repeat 21` runs every benchmark
    twenty-one times and reports each one's median run by p99.99, with every run's
    p99.99 in the last column and in the result file. The bench hosts run it with all
    three: on an isolated core, one run's 0.01 percent tail of a few hundred nanoseconds
@@ -66,6 +70,10 @@ shared runner is
    | `one_way_<body>_client` | From the publisher's timestamp to `Subscription::poll`'s handler, through a real driver and the client's conductor hand-off; the path a user's message takes (ADR 0021). |
    | `claim_commit_<body>_recorded` | The client row's claim, write and commit while the driver's recorder writes the same stream to the durable log under the bench directory (ADR 0025): what recording costs the publisher, whose limit respects the recorder's position. The run fails unless the recording reached the publisher's final position. |
    | `one_way_<body>_recorded` | The client row's publish to delivery with the recorder on: one more reader of the log, on the driver's recorder thread, which runs on a housekeeping CPU under `--pin` (the CPUs left to everything but the pinned threads, [the host's set](set-up-a-bench-host.md#steps)) (until card 136 it shared the conductor's CPU, where ADR 0025's cost of 80 ns at p99.99 was measured). |
+   | `claim_commit_<body>_udp` | The client row's claim, write and commit on a `cavalry:udp` publication whose endpoint is a port of `127.0.0.1`, with one message in flight: the publisher claims the next message once the subscriber's handler has had the last, so the window is never full and the row is the claim path, with the wait for a connection that dropped in it as in the other rows ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). Gated as the other message rows once the host's baseline holds it, `no baseline` until then. A tenth of `--messages` per run, after a warm-up of 10,000 messages rather than a rotation, since the driver pre-touches both logs when it makes them. |
+   | `one_way_<body>_udp` | From the publisher's timestamp to `Subscription::poll`'s handler through the driver's sender, the loopback and the driver's receiver, one message in flight, so a sample is the path's latency and not the depth of the sender's window, which a publisher that runs ahead fills to 8 MiB. Under `--pin` the sender has the third CPU and the receiver the fourth, and the driver's threads busy-spin; unpinned they back off, as a driver on a laptop does. |
+   | `udp_round_trip_<body>` | The link rows, run alone with `--link-here` and `--link-peer` (step 5): from the publisher's timestamp on `bench` to its subscriber's handler after the peer on `grip` has echoed the message across the direct cable, one message in flight, measured on one clock and gated against `bench-linux-link`. |
+   | `udp_one_way_<body>` | Beside it: from the publisher's wall-clock stamp on `bench` to the peer's handler's on `grip`, which carries the offset between the two hosts' clocks, so the row is reported with the offset the peer job prints and never gated; a sample below zero is recorded as 0 and counted under the table. |
    | `slot_padding_<spacing>_load` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
    | `slot_padding_<spacing>_store` | The other side of the same pair: one store while the other thread loads. |
    | `record_block_<body>` | The recorder's block path: one scan of a 1 MiB block of committed frames (`TermReader::block`) and its one positional write into a segment file under the bench directory (`RecordingWriter::write`), per block, under the counting allocator (ADR 0025). It runs last, so its writes reach no other row. Its change against the baseline is reported, not gated: it is not a row a message passes through (ADR 0017). The bench host's baseline for it was first recorded at 7f62673 (card 109). |
@@ -77,8 +85,13 @@ shared runner is
    two milliseconds of the run, the driver's cadence (ADR 0022, ADR 0032), written to the
    result as
    `producer_position_loads`, so each host's cadence is on record (card 161). The
+   `allocations by benchmark` line gives each benchmark's count, summed over the
+   runs, under the name the retries use and `record` for the recorder's block row,
+   written to the result as `allocations_by_benchmark`, so a count above 0 names the
+   loop to look at. The
    last line says how many allocations the measured loops made per message. It is 0
-   or the run has failed: the gate requires zero allocations per message. When no
+   or the run has failed: the gate requires zero allocations per message, and the
+   failure line repeats the benchmarks that allocated. When no
    message row ran, under `--only`, the line says so in place of the ratio and the
    result's `allocations_per_message` is `null`, the count is in the result as
    `allocations`, and any allocation still fails the run.
@@ -87,6 +100,11 @@ shared runner is
    under its own profile, `<profile>-unchecked`, and its own baseline: the difference
    between the two is what the checks cost (ADR 0010). Nothing else is ever built with
    that flag.
+
+   The `publisher retries` line under the table counts, for each message row, the most
+   times in any run the publisher's claim was refused and tried again: back pressure or
+   a rotation on the log rows, and on the UDP rows a `not connected` before the first
+   message as well.
 
 3. Compare with the baseline:
 
@@ -198,6 +216,41 @@ shared runner is
    the runs; `--update` rewrites the whole profile, which is for a host whose numbers
    moved, never for one new row.
 
+5. Measure the link between the two bench hosts, which the `bench (udp)` job does on
+   every push with its peer job `bench (udp peer)`
+   ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). On `grip`, the
+   peer, in one terminal:
+
+   ```sh
+   # ignore: run on grip, the host that echoes
+   just bench --echo --link-here grip-link:40183 --link-peer bench-link:40182 --pin 4,5,6,7
+   ```
+
+   On `bench`, in another:
+
+   ```sh
+   # ignore: run on bench, the host that measures
+   just bench --link-here bench-link:40182 --link-peer grip-link:40183 --messages 100000 --repeat 21 --pin 8,10,12,14
+   just bench-compare
+   ```
+
+   `bench-link` and `grip-link` are the cable's two ends in both hosts' `/etc/hosts`
+   ([Set up a bench host](set-up-a-bench-host.md#further-hosts-the-roles-the-direct-link-and-the-clock)).
+   Each side subscribes on its own end and publishes to the other's, and waits up to
+   ten minutes for the other to connect, so the order does not matter. The peer prints
+   `the stream from <address> is connected, echoing`, then, when `bench`'s run ends the
+   stream, `echoed N messages from <address> back to <host:port> in <s> s`, and exits 0;
+   it exits 1 when the stream goes without its end. The measuring side prints the two
+   link rows alone under the profile with `-link` appended, `bench-linux-link` in CI,
+   which `just bench-compare` holds to its own baseline once one is recorded from three
+   of the job's processes at one tree, as the host's are, and writes no other row.
+   `--messages` is the count per run as given, since every message waits for its echo:
+   100,000 at about 100 µs is ten seconds a run, after the UDP rows' warm-up of 10,000.
+   The one-way row needs the offset
+   between the two clocks to be read: on `grip`, `chronyc sourcestats -v` gives it on
+   the `bench-link` line, which the peer job prints after the echo. Under `--pin` the
+   echo runs on the first CPU, the sender on the third and the receiver on the fourth.
+
 ## How to verify it worked
 
 - `ls bench/results/` shows a new `.json` file whose `profile` field is the one you
@@ -245,8 +298,15 @@ shared runner is
 ## When it does not work
 
 - `allocations per message` is not 0: a measured loop allocated. The gate has done its
-  job; find the allocation with the counting allocator's report in the output and
-  remove it. Nothing on the per-message path may allocate (`.claude/rules/data-plane.md`).
+  job; the `allocations by benchmark` line above it names the benchmark whose run
+  allocated, with its count summed over the runs, and the failure line repeats it,
+  `the measured loops allocated 1 times, by benchmark udp 1`; the result keeps it as
+  `allocations_by_benchmark`. The harness's loops allocate on no path but their error
+  returns, so the allocation is in the crates the row runs: `cavalry-shm` for a log
+  row, `cavalry-client` and the driver's conductor for a client row, and the driver's
+  sender and receiver as well for a UDP or link row. A count far below the run's
+  messages is a rare event, not one per message. Find it and remove it: nothing on
+  the per-message path may allocate (`.claude/rules/data-plane.md`).
 - `reported` beside a `timer` or `slot_padding` row that moved: expected; those rows
   flip between two adjacent clock steps from run to run and never fail the gate.
 - `within a step` beside a gated row: the row is over 5 percent above the baseline's
@@ -328,7 +388,7 @@ shared runner is
   CPU from another CPU: a thread shares that CPU with a measured one; `ps -L -o
   tid,psr,comm` during the run shows where each thread sits, and under `--pin` the
   driver's recorder and replayer and the client's conductor belong on the lowest CPU
-  outside the pins. A p99.99 that a second host reads far above `bench`'s with the same p50 and
+  outside the pins, with the driver's conductor there too during the UDP rows. A p99.99 that a second host reads far above `bench`'s with the same p50 and
   none of the above is the host's own tail, and its profile's baseline is where it is
   held. The second bench host's 1.6 µs against `bench`'s 0.6 µs, with no fault and no
   wake-up in its loops, was the clock, the next bullet and
@@ -351,14 +411,45 @@ shared runner is
   threads' pins again once the driver has closed at the end of the row, which is where
   the recorder's is first known. A failed pin fails the run either way, and the row's
   numbers are never written.
-- `--pin: no CPU outside P,S,C in the process's allowed set`: the harness was started
-  from a shell or a cgroup whose allowed set lies inside the three pins, and the
-  driver's recorder and replayer and the client's conductor need one CPU outside them. `taskset -cp
+- `--pin: no CPU outside P,S,C,R in the process's allowed set`: the harness was started
+  from a shell or a cgroup whose allowed set lies inside the pins, and the driver's
+  recorder and replayer and the client's conductor need one CPU outside them. `taskset -cp
   $$` prints the shell's allowed set. Run the harness from a shell that holds a
-  housekeeping CPU too: `taskset -c 0-7 just bench --pin 8,10,12` runs it with CPUs 0 to
-  7 in the set, and the pins themselves need not be in it, since a thread may bind
+  housekeeping CPU too: `taskset -c 0-7 just bench --pin 8,10,12,14` runs it with CPUs 0
+  to 7 in the set, and the pins themselves need not be in it, since a thread may bind
   itself to any online CPU its cgroup allows, as the bench host's runner does from a set
   of housekeeping CPUs alone.
+- `--pin 8,10,12: the UDP rows need a fourth CPU for the receiver`: `--pin` named three
+  CPUs and a UDP row is to run. Pass four, `--pin 8,10,12,14` on `bench` and
+  `--pin 4,5,6,7` on `grip`, or `--only` a row without `udp` in its name; a receiver
+  sharing a measured thread's CPU, or running with the housekeeping threads, gives a
+  number the baseline cannot be compared with.
+- `the udp benchmark failed: the stream did not connect in 10 s`, or the link rows' or
+  the echo peer's `did not connect in 600 s`: the publication's setup frames were not
+  answered, or no setup frame reached the subscription's endpoint, and the message says
+  which. On the loopback that is a port another process took between the harness's
+  check and the driver's bind, so run again; across the link it is the other host's
+  harness not running, or running with the ends swapped, so that each host publishes
+  to a port nobody receives on: `--link-here` is this host's end and `--link-peer` the
+  other's, on both hosts, and `cavalry doctor` on either host says
+  `udp-publication-not-connected` or `udp-subscription-no-image` while the harness
+  waits ([Run a driver and read doctor](run-the-driver.md#when-it-does-not-work)).
+- `message N of M did not reach the subscriber in 10 s`: with one message in flight the
+  stream stopped. Across the link the peer stopped echoing, or the cable lost a datagram
+  the sender no longer holds; on the loopback the driver's sender or receiver stalled.
+  `cavalry doctor` on the host names the image's loss from its counters.
+- The peer's `the stream from <address> went after N messages without its end`: the
+  measuring side's harness stopped before it closed its publication, or the image timed
+  out on the peer after 10 s without a datagram; the measuring side's own error says
+  which, and the line's `image.ended` and `image.timed_out` counts say which the peer
+  saw. A peer that ends this way exits 1, so the pair's run is red on both sides.
+- The peer's `no message for 600 s after N echoed`: the measuring side stopped sending
+  without ending the stream and its driver kept the image alive with heartbeats, a
+  harness stalled on the other host; its own log says where.
+- `a send endpoint still carried a publication 3 s past the publication linger`: the
+  driver did not remove the closed publication once its linger ended, five seconds
+  after the close at most; `cavalry doctor` on the host lists the endpoint with its
+  count, and the driver's sender is the thread to look at.
 - `the client benchmark failed: the client subscriber failed: ...`: the subscriber of the
   client rows got an error from `Subscription::poll`, and the rest of the line is that
   error, which says what to do. The publisher stops as soon as its subscriber has
