@@ -6,6 +6,7 @@
 //! ADR 0040). `just conformance` runs this test alone; `just test` runs it with the rest.
 
 use cavalry_proto::channel::{Channel, ChannelError};
+use cavalry_proto::frame::{FrameType, HEADER_LENGTH};
 use cavalry_proto::udp::{
     ControlFrame, Datagram, Heartbeat, Nak, RttMeasurement, SetupFrame, StatusMessage, image_start,
     parse, receiver_bounds, retransmit_window, sender_limit, status_message_threshold,
@@ -173,11 +174,27 @@ fn datagram_vector(name: &str, vector: &Value) {
         i64::from(first.header.term_offset()),
         "{name}: first_term_offset"
     );
+    // The datagram ends where its last frame's aligned length ends in the term: a
+    // padding frame counts its aligned length and crosses the wire as its header alone,
+    // so the bytes present say nothing of it (`spec/udp.md`, "The datagram").
+    let last = expected.last().expect("frames");
+    let aligned = |length: i64| (length + 31) & !31;
     assert_eq!(
-        u64::from(datagram.end_term_offset()),
-        u64::from(datagram.first_term_offset()) + bytes.len() as u64,
+        i64::from(datagram.end_term_offset()),
+        int(last, "term_offset") + aligned(int(last, "frame_length")),
         "{name}: end_term_offset"
     );
+    for frame in &frames {
+        let on_wire = match frame.header.frame_type() {
+            FrameType::Pad => HEADER_LENGTH as i64,
+            FrameType::Data => aligned(i64::from(frame.header.frame_length())),
+        };
+        assert_eq!(
+            frame.bytes.len() as i64,
+            on_wire,
+            "{name}: bytes on the wire"
+        );
+    }
 }
 
 fn channel_vector(name: &str, vector: &Value) {
