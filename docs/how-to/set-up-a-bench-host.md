@@ -313,8 +313,8 @@ record is on card 182.
    chose, so a stateful firewall, `ufw` among them, lets the replies through by itself,
    and a stateless ruleset must open the reply path as well, or the stream never
    connects. A port a firewall drops shows as the publishing host's `cavalry doctor`
-   saying `udp-publication-not-connected` ([Run a driver and read
-   doctor](run-the-driver.md#when-it-does-not-work)).
+   saying `udp-publication-not-connected`
+   ([Publish between two hosts](publish-between-two-hosts.md)).
 
 ## Access to the host
 

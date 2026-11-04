@@ -441,7 +441,7 @@ shared runner is
   to a port nobody receives on: `--link-here` is this host's end and `--link-peer` the
   other's, on both hosts, and `cavalry doctor` on either host says
   `udp-publication-not-connected` or `udp-subscription-no-image` while the harness
-  waits ([Run a driver and read doctor](run-the-driver.md#when-it-does-not-work)).
+  waits ([Publish between two hosts](publish-between-two-hosts.md)).
 - `message N of M did not reach the subscriber in 10 s`: with one message in flight the
   stream stopped. Across the link the peer stopped echoing, or the cable lost a datagram
   the sender no longer holds; on the loopback the driver's sender or receiver stalled.
