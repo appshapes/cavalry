@@ -23,9 +23,14 @@ use cavalry::{Cavalry, Offer, Publication, Subscription};
 
 const STREAM_ID: i32 = 1001;
 const MESSAGES: u64 = 1_000;
-/// The UDP step's channel: a port of this host, the one the repository's tests use.
-/// Between two hosts only the host changes, to the subscriber's.
+/// The UDP step's channel: a fixed port of this host, which a reader can type (ADR
+/// 0044). A port in use is refused with error code 4 naming it, and another port here
+/// is the whole fix. Between two hosts only the host changes, to the subscriber's.
 const UDP_CHANNEL: &str = "cavalry:udp?endpoint=127.0.0.1:40123";
+/// How long each step waits for its messages to come back before the program stops
+/// with where it got to: a stream that never connects, or a loopback that is blocked,
+/// is a bounded wait and a line, never a spin (`CLAUDE.md`, invariant 3).
+const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() -> ExitCode {
     match run() {
@@ -108,14 +113,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Publishes `MESSAGES` messages on `publication`, each its number as eight bytes, and
 /// reads them back through `subscription`, each once and in order, polling between
-/// claims. Over `cavalry:ipc` and over `cavalry:udp` alike.
+/// claims, within [`STEP_TIMEOUT`]. Over `cavalry:ipc` and over `cavalry:udp` alike.
 fn publish_and_read(
     publication: &mut Publication,
     subscription: &mut Subscription,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + STEP_TIMEOUT;
     let mut sent: u64 = 0;
     let mut next: u64 = 0;
     while next < MESSAGES {
+        if Instant::now() > deadline {
+            return Err(format!(
+                "{sent} of {MESSAGES} messages published and {next} read back on {} in {} s: the \
+                 stream did not connect, or stopped; `cavalry doctor` says why",
+                publication.channel(),
+                STEP_TIMEOUT.as_secs()
+            )
+            .into());
+        }
         if sent < MESSAGES {
             // Claim a frame, write the message in place, commit: nothing is copied and
             // nothing is allocated. Until the subscription's image joins, the driver

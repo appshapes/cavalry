@@ -52,7 +52,7 @@ kill -TERM %1                           # the driver closes and leaves its direc
 ```
 
 The program is [`crates/cavalry/examples/quickstart.rs`](crates/cavalry/examples/quickstart.rs),
-ninety lines with `cavalry::Cavalry`: connect, add a subscription and a publication on
+a page with `cavalry::Cavalry`: connect, add a subscription and a publication on
 a stream, start a recording of the stream, claim a frame and write in place, poll the
 subscription, every message once and in order, wait until the recorder has written up
 to the publication's position, stop the recording; then add a subscription and a

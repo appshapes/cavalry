@@ -75,11 +75,14 @@ loop with nothing changed but the channel: a publication and a subscription on
 publication's log on the wire in datagrams, the driver's receiver rebuilt it from the
 wire into an image, and the subscription read the image as it read the log. The
 milliseconds include the sender's first setup frame and the receiver's answer, which
-connect the stream before the first message goes, as the first line's include the
+connect the stream before the first message goes, as the second line's include the
 recording's start. Between two hosts only the host in the channel changes, to the
 subscriber's; `cavalry doctor` on either host says why a stream does not connect. If
-the port is in use on your machine, the program stops with `channel endpoint error`
-naming it, and another port in the channel is the whole fix.
+the port is in use on your machine, the program stops with `quickstart: command
+refused (refused, error code 4, ChannelEndpointError): the channel's endpoint
+127.0.0.1:40123: the socket could not be opened, bound or connected`, and another port
+in the channel is the whole fix; a stream that does not connect within ten seconds
+stops it with how many messages went and came back.
 
 ## 4. Replay the recording
 
