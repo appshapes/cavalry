@@ -288,8 +288,17 @@ record is on card 182.
    `bench`'s raw clock plus that residual while its own view of `bench-link` reads
    zero. The harness stamps with the raw clock on each host, so the offset beside the
    one-way row is `bench`'s "System time" line at the run's time, which the `bench
-   (udp)` job prints after the run; it moves with the pools, so the row is read to a
-   hundred microseconds and not better. ADR 0044 named `grip`'s `sourcestats` line,
+   (udp)` job prints after the run, and the line's last words are its sign. "Slow of
+   NTP time", as that day: `bench`'s system clock is behind the time it serves, so
+   `grip` runs ahead of `bench`'s raw clock by the line, and the row is the path plus
+   the line. "Fast of NTP time": `bench`'s system clock is ahead of the time it
+   serves, so `grip` runs behind `bench`'s raw clock by the line, and the row is the
+   path minus the line; a line larger than the path then puts a sample below zero,
+   which the harness records as 0 and counts under the table, so a row of zeros on a
+   "fast" day is the clock and not the cable. The line moves with the pools, so the
+   row is read to a hundred microseconds and not better, and a reader correcting the
+   row takes the sign from the wording before the size from the number. ADR 0044
+   named `grip`'s `sourcestats` line,
    which is the link's own error and is read for that in the peer job's print. A
    one-way good to ten microseconds needs the two raw clocks locked, PTP over the cable
    through the ports' hardware clocks or `bench` off the pools, under the Revisit of
