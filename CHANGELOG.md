@@ -1118,6 +1118,6 @@ user-visible change, added in the same commit as the change. The format follows
   started over SSH on Linux loses its directory when the user's last session ends unless
   the user lingers, the logind default, so the page asks for a session that outlives the
   driver, through the checks that read its directory;
-  and `cavalry doctor` prints no counter's value on a healthy stream, so the counters the
-  page names are read from the counters file by its layout until the console exists,
-  with the values the tutorial's 1,000 messages give (card 182).
+  and `cavalry doctor` prints none of the four counters the page names while the stream
+  is healthy, so they are read from the counters file by its layout until the console
+  exists, with the values the tutorial's 1,000 messages give (card 182).

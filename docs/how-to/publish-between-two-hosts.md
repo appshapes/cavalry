@@ -94,10 +94,11 @@ the channel changed is this task on one host. In Aeron, this is a publication an
 - `receiver.frames_received` on the subscriber's host and `sender.frames_sent` on the
   publisher's rise together: with the tutorial's 1,000 messages, 1,000 each, with
   `image.created` 1 on the subscriber's host and `image.ended` 1 there once the
-  publication has closed. `cavalry doctor` prints no counter's value while a stream is
-  healthy, only inside a warning when one fires, and the console that will print them
-  is not built yet, so read them from the `counters` file in the driver's directory by
-  its layout ([the counters file](../reference/counters-file.md): the record's label
+  publication has closed. `cavalry doctor` prints none of these four while the stream
+  is healthy: `sender.frames_sent` and `receiver.frames_received` are in none of its
+  findings, and `image.created` and `image.ended` only in `udp-subscription-no-image`.
+  The console that will print them is not built yet, so read them from the `counters`
+  file in the driver's directory by its layout ([the counters file](../reference/counters-file.md): the record's label
   is the counter's name, the slot its value; [counters](../reference/counters.md) says
   what each means).
 
