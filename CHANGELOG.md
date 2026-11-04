@@ -1113,3 +1113,12 @@ user-visible change, added in the same commit as the change. The format follows
   reading the path plus the line on a "slow of NTP time" day and the path minus it on
   a "fast" one ([Run the bench](docs/how-to/run-the-bench.md), step 5;
   [Set up a bench host](docs/how-to/set-up-a-bench-host.md), the clock; card 182).
+- `grip`'s two bench profiles, `grip-linux` and `grip-linux-unchecked`, are re-recorded
+  at the tree of 7248621 from its nine processes, pull request 109's two runs, master's
+  four and pull request 111's three, with every gated row's slowest run before and after
+  in the commit: the unchecked `claim_commit_32_client` row had turned `bench (grip)`
+  red on pull requests 102, 103, 106 and 111 at 120 to 132 ns against a slowest run of
+  119 ns recorded on 2026-10-31, while the checked build did not move, the host's band
+  and not a change, the owner's call of 2026-11-04 under
+  [ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)
+  (card 182).
