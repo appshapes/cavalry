@@ -1082,3 +1082,10 @@ user-visible change, added in the same commit as the change. The format follows
   `cavalry-shm`'s image writer follow it
   ([ADR 0045](docs/decisions/0045-carry-a-padding-frame-as-its-header-alone.md);
   card 196).
+- `cavalry doctor` reports `udp-interface-mtu` on Linux when an endpoint's address
+  routes over an interface whose MTU is below 1436 bytes, the stream's datagram with
+  its headers, naming the interface and its MTU; and the new how-to
+  [Publish between two hosts](docs/how-to/publish-between-two-hosts.md) is the task of
+  a publisher on one host and a subscriber on another, with the channel, the firewall
+  and every line `doctor` says when the stream does not connect
+  ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).

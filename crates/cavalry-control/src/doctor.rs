@@ -21,6 +21,7 @@
 //! ```
 
 use std::fmt;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -100,6 +101,12 @@ const DOC_RECORDING_COMMANDS: &str = "docs/reference/client-protocol.md#commands
 const DOC_UDP_SENDER: &str = "docs/reference/udp.md#the-sender";
 const DOC_UDP_RECEIVER: &str = "docs/reference/udp.md#the-receiver";
 const DOC_UDP_VALUES: &str = "docs/reference/udp.md#values";
+
+/// The least MTU an interface needs to carry a datagram of the stream's MTU whole: the
+/// datagram and its IPv4 and UDP headers, 20 and 8 bytes (`spec/udp.md`, "Values"; ADR
+/// 0044). A datagram longer than the interface's MTU is fragmented by the kernel, and a
+/// lost fragment loses the whole datagram, or is dropped where fragmentation is off.
+const INTERFACE_MTU_LEAST: u32 = MTU_LENGTH_DEFAULT + 20 + 8;
 
 /// The least send buffer a send endpoint's socket needs: one datagram of the MTU,
 /// Aeron's rule (`UdpChannelTransport` refuses an `SO_SNDBUF` below the MTU), and on
@@ -949,6 +956,23 @@ struct EndpointCounters {
     images: Option<i64>,
 }
 
+impl EndpointCounters {
+    /// What the endpoint is, from its counts. A send endpoint carries publications and
+    /// closes when it has none; a receive endpoint carries images, or none while it
+    /// waits for a setup frame, and is the only kind that is active with nothing on it.
+    /// One that is closing with nothing on it could be either, and is called an
+    /// endpoint.
+    fn kind(&self) -> &'static str {
+        if self.publications.unwrap_or(0) > 0 {
+            "send endpoint"
+        } else if self.images.unwrap_or(0) > 0 || (self.status == 1 && self.images.is_some()) {
+            "receive endpoint"
+        } else {
+            "endpoint"
+        }
+    }
+}
+
 /// One image as the counters file shows it: the key of its `image.hwm_position` record,
 /// its label's three ids, and the two positions joined by the key.
 struct ImageCounters {
@@ -1121,19 +1145,7 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
         LINGER.as_secs()
     );
     for endpoint in &endpoints {
-        // A send endpoint carries publications and closes when it has none; a receive
-        // endpoint carries images, or none while it waits for a setup frame, and is the
-        // only kind that is active with nothing on it. One that is closing with nothing
-        // on it could be either, and is called an endpoint.
-        let kind = if endpoint.publications.unwrap_or(0) > 0 {
-            "send endpoint"
-        } else if endpoint.images.unwrap_or(0) > 0
-            || (endpoint.status == 1 && endpoint.images.is_some())
-        {
-            "receive endpoint"
-        } else {
-            "endpoint"
-        };
+        let kind = endpoint.kind();
         if let Some(sndbuf) = endpoint.sndbuf
             && sndbuf < SNDBUF_LEAST
             && kind != "receive endpoint"
@@ -1239,6 +1251,7 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             doc: DOC_UDP_VALUES,
         });
     }
+    let checks = 4 + interface_mtu_checks(&endpoints, findings);
     // Loss on an image: the high-water mark past the rebuild position is a gap the
     // receiver is NAKing, or one the sender no longer answers (ADR 0042).
     for image in &images {
@@ -1265,7 +1278,162 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             });
         }
     }
-    4
+    checks
+}
+
+/// The interface MTU check ADR 0039 names (ADR 0044), on Linux: every active endpoint
+/// whose address routes over an interface with an MTU below [`INTERFACE_MTU_LEAST`] is
+/// a warning, from the main routing table and the interface's `mtu` file. The check
+/// counts as run on Linux whether or not the table can be read, as the other host
+/// checks count theirs; elsewhere there is nothing to read, and the check does not run.
+fn interface_mtu_checks(endpoints: &[EndpointCounters], findings: &mut Vec<Finding>) -> usize {
+    if !cfg!(target_os = "linux") {
+        return 0;
+    }
+    if let Some(routes) = routing_table() {
+        interface_mtu_findings(endpoints, &routes, &interface_mtu, findings);
+    }
+    1
+}
+
+/// The main routing table of a Linux host as `/proc/net/route` prints it, one route per
+/// line after a header, the interface, the destination and the mask as hexadecimal words
+/// in the host's byte order, the flags with bit 0 for a route that is up and bit 9 for
+/// one that rejects, and the metric; `None` when it cannot be read or the host is not
+/// Linux.
+fn routing_table() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    std::fs::read_to_string("/proc/net/route").ok()
+}
+
+/// An interface's MTU on a Linux host, from its `mtu` file under `/sys/class/net`.
+fn interface_mtu(interface: &str) -> Option<u32> {
+    std::fs::read_to_string(format!("/sys/class/net/{interface}/mtu"))
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+}
+
+/// The findings of the interface MTU check over `routes`, the main routing table as
+/// Linux prints it, and `mtu_of`, an interface's MTU: for each active endpoint whose
+/// channel names an IPv4 address, the interface its datagrams go through, the one that
+/// holds the channel's `interface=` address when the channel names one and the one the
+/// endpoint's address routes over otherwise, and a warning when that interface's MTU is
+/// below [`INTERFACE_MTU_LEAST`]. An IPv6 endpoint, an endpoint bound to every address
+/// and one that is closing are left alone, and the pages say so. Pure over its inputs,
+/// so the tests hold a table of their own.
+fn interface_mtu_findings(
+    endpoints: &[EndpointCounters],
+    routes: &str,
+    mtu_of: &dyn Fn(&str) -> Option<u32>,
+    findings: &mut Vec<Finding>,
+) {
+    for endpoint in endpoints.iter().filter(|endpoint| endpoint.status == 1) {
+        let Some((address, interface_address)) = endpoint_addresses(&endpoint.channel) else {
+            continue;
+        };
+        let Some(interface) = route_interface(routes, interface_address.unwrap_or(address)) else {
+            continue;
+        };
+        let Some(mtu) = mtu_of(&interface) else {
+            continue;
+        };
+        if mtu < INTERFACE_MTU_LEAST {
+            let kind = endpoint.kind();
+            let direction = match kind {
+                "send endpoint" => "leave through",
+                "receive endpoint" => "arrive through",
+                _ => "go through",
+            };
+            findings.push(Finding {
+                check: "udp-interface-mtu",
+                level: Level::Warn,
+                message: format!(
+                    "{kind} {}: its datagrams {direction} {interface}, whose MTU is {mtu} bytes, \
+                     below the {INTERFACE_MTU_LEAST} a datagram of the stream's MTU, \
+                     {MTU_LENGTH_DEFAULT} bytes, needs with its IPv4 and UDP headers; a datagram \
+                     longer than the interface's MTU is fragmented by the kernel, and one lost \
+                     fragment loses the whole datagram, or it is dropped where fragmentation is \
+                     off; raise the interface's MTU to {INTERFACE_MTU_LEAST} or more, or route \
+                     the endpoint over an interface that carries it; the stream's MTU has no key \
+                     in this version",
+                    endpoint.channel
+                ),
+                doc: DOC_UDP_VALUES,
+            });
+        }
+    }
+}
+
+/// The IPv4 address a `cavalry:udp` channel's endpoint names, and the address of its
+/// `interface=` option when it has one, as the counters file's labels hold them: the
+/// driver resolves a name once, as the command is handled, and writes the resolved
+/// channel into the label (`spec/udp.md`, "The channel URI"), so no name is looked up
+/// here. `None` for an IPv6 endpoint or an unspecified address.
+fn endpoint_addresses(channel: &str) -> Option<(Ipv4Addr, Option<Ipv4Addr>)> {
+    let ipv4 = |text: &str| -> Option<Ipv4Addr> {
+        let host = match text.rsplit_once(':') {
+            Some((host, port)) if port.parse::<u16>().is_ok() => host,
+            _ => text,
+        };
+        host.parse::<Ipv4Addr>().ok()
+    };
+    let mut parameters = channel.strip_prefix("cavalry:udp?endpoint=")?.split('|');
+    let address = ipv4(parameters.next()?).filter(|address| !address.is_unspecified())?;
+    let interface = parameters
+        .find_map(|parameter| parameter.strip_prefix("interface="))
+        .and_then(ipv4)
+        .filter(|interface| !interface.is_unspecified());
+    Some((address, interface))
+}
+
+/// The interface a datagram to `destination` leaves through, from `routes`, the main
+/// routing table as `/proc/net/route` prints it: among the routes that are up and do
+/// not reject, the one with the longest mask that covers the destination, and the lowest
+/// metric among those of equal length. A loopback destination is `lo`, which the main
+/// table does not list.
+fn route_interface(routes: &str, destination: Ipv4Addr) -> Option<String> {
+    const UP: u32 = 0x1;
+    const REJECT: u32 = 0x200;
+    if destination.is_loopback() {
+        return Some("lo".to_string());
+    }
+    let word = |field: &str| u32::from_str_radix(field, 16).ok();
+    let mut best: Option<(u32, u32, String)> = None;
+    for line in routes.lines().skip(1) {
+        let mut fields = line.split_whitespace();
+        let (Some(interface), Some(dest), _gateway, Some(flags), _, _, Some(metric), Some(mask)) = (
+            fields.next(),
+            fields.next().and_then(word),
+            fields.next(),
+            fields.next().and_then(word),
+            fields.next(),
+            fields.next(),
+            fields.next().and_then(|field| field.parse::<u32>().ok()),
+            fields.next().and_then(word),
+        ) else {
+            continue;
+        };
+        if flags & UP == 0 || flags & REJECT != 0 {
+            continue;
+        }
+        // The words are the addresses as the host stores them, so their bytes in the
+        // host's order are the address in network order.
+        let dest = Ipv4Addr::from(dest.to_ne_bytes());
+        let mask = Ipv4Addr::from(mask.to_ne_bytes());
+        if u32::from(destination) & u32::from(mask) != u32::from(dest) {
+            continue;
+        }
+        let length = u32::from(mask).count_ones();
+        let better = best
+            .as_ref()
+            .is_none_or(|(bits, cost, _)| length > *bits || (length == *bits && metric < *cost));
+        if better {
+            best = Some((length, metric, interface.to_string()));
+        }
+    }
+    best.map(|(_, _, interface)| interface)
 }
 
 /// A static counter's value, or a finding: a counter that cannot be read is never a
@@ -3086,5 +3254,180 @@ mod tests {
         let filesystem = filesystem_bytes(&dir.0).expect("df runs here");
         assert!(filesystem.total >= filesystem.free, "{filesystem:?}");
         assert!(filesystem.total > 0, "{filesystem:?}");
+    }
+
+    /// A Linux routing table as `/proc/net/route` prints it: two default routes of
+    /// different metrics over two ports, the link's /30 over the cable, a /24 that is
+    /// down, a /16 that rejects, and a /24 over the wired port.
+    const ROUTES: &str = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+        wlan0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0\n\
+        enp3s0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n\
+        eno2\t0000000A\t00000000\t0001\t0\t0\t0\tFCFFFFFF\t0\t0\t0\n\
+        tun0\t0000000A\t00000000\t0000\t0\t0\t0\t00FFFFFF\t0\t0\t0\n\
+        *\t0000000A\t00000000\t0201\t0\t0\t0\t0000FFFF\t0\t0\t0\n\
+        enp3s0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n";
+
+    /// The route with the longest mask that is up and does not reject carries the
+    /// destination, the lowest metric among equals; the loopback is `lo`, which the main
+    /// table does not list.
+    #[test]
+    fn a_destination_routes_over_the_longest_mask_that_is_up() {
+        assert_eq!(
+            route_interface(ROUTES, Ipv4Addr::new(10, 0, 0, 2)).as_deref(),
+            Some("eno2"),
+            "the /30 over the cable, not the /24 that is down nor the /16 that rejects"
+        );
+        assert_eq!(
+            route_interface(ROUTES, Ipv4Addr::new(10, 0, 9, 9)).as_deref(),
+            Some("enp3s0"),
+            "past the /30, the /16 rejects and the default route carries it"
+        );
+        assert_eq!(
+            route_interface(ROUTES, Ipv4Addr::new(192, 168, 1, 7)).as_deref(),
+            Some("enp3s0")
+        );
+        assert_eq!(
+            route_interface(ROUTES, Ipv4Addr::new(8, 8, 8, 8)).as_deref(),
+            Some("enp3s0"),
+            "the default route with the lower metric, listed second"
+        );
+        assert_eq!(
+            route_interface(ROUTES, Ipv4Addr::new(127, 0, 0, 1)).as_deref(),
+            Some("lo")
+        );
+        assert_eq!(route_interface("", Ipv4Addr::new(10, 0, 0, 2)), None);
+    }
+
+    /// A channel's endpoint and its interface option are read as the labels hold them,
+    /// resolved by the driver, so no name is looked up; an IPv6 endpoint, an unspecified
+    /// one and a name give nothing, so the check says nothing of them.
+    #[test]
+    fn an_endpoints_addresses_are_read_from_its_channel() {
+        assert_eq!(
+            endpoint_addresses("cavalry:udp?endpoint=10.0.0.2:40123"),
+            Some((Ipv4Addr::new(10, 0, 0, 2), None))
+        );
+        assert_eq!(
+            endpoint_addresses("cavalry:udp?endpoint=10.0.0.2:40123|interface=10.0.0.1"),
+            Some((Ipv4Addr::new(10, 0, 0, 2), Some(Ipv4Addr::new(10, 0, 0, 1))))
+        );
+        assert_eq!(
+            endpoint_addresses("cavalry:udp?endpoint=10.0.0.2:40123|interface=10.0.0.1:40000"),
+            Some((Ipv4Addr::new(10, 0, 0, 2), Some(Ipv4Addr::new(10, 0, 0, 1))))
+        );
+        assert_eq!(
+            endpoint_addresses("cavalry:udp?endpoint=10.0.0.2:40123|interface=0.0.0.0"),
+            Some((Ipv4Addr::new(10, 0, 0, 2), None)),
+            "an unspecified interface address names no interface"
+        );
+        assert_eq!(endpoint_addresses("cavalry:udp?endpoint=[::1]:40123"), None);
+        assert_eq!(
+            endpoint_addresses("cavalry:udp?endpoint=0.0.0.0:40123"),
+            None
+        );
+        assert_eq!(endpoint_addresses("cavalry:ipc"), None);
+        assert_eq!(
+            endpoint_addresses("cavalry:udp?endpoint=grip-link:40123"),
+            None,
+            "a name is never in a label, and is not looked up"
+        );
+    }
+
+    /// The MTU check ADR 0039 names (ADR 0044): an active endpoint whose address routes
+    /// over an interface with an MTU below the stream's datagram and its headers is a
+    /// warning naming the interface, its MTU and the least that carries the stream, the
+    /// interface option choosing the interface when the channel names one; an endpoint
+    /// over an interface that carries it, one whose interface has no MTU to read, and
+    /// one that is closing are not.
+    #[test]
+    fn an_interface_mtu_below_the_streams_datagram_is_a_warning() {
+        let endpoint = |channel: &str, publications: i64, status: i64| EndpointCounters {
+            id: 1,
+            channel: channel.to_string(),
+            status,
+            sndbuf: None,
+            rcvbuf: None,
+            publications: Some(publications),
+            images: Some(0),
+        };
+        let narrow = |interface: &str| match interface {
+            "eno2" => Some(1280),
+            "enp3s0" => Some(1500),
+            _ => None,
+        };
+        let warnings = |endpoints: &[EndpointCounters]| {
+            let mut findings = Vec::new();
+            interface_mtu_findings(endpoints, ROUTES, &narrow, &mut findings);
+            findings
+        };
+        let found = warnings(&[
+            endpoint("cavalry:udp?endpoint=10.0.0.2:40183", 1, 1),
+            endpoint("cavalry:udp?endpoint=192.168.1.7:40182", 0, 1),
+            endpoint("cavalry:udp?endpoint=127.0.0.1:40123", 1, 1),
+        ]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let found = &found[0];
+        assert_eq!(found.check, "udp-interface-mtu");
+        assert_eq!(found.level, Level::Warn);
+        assert_eq!(found.doc, DOC_UDP_VALUES);
+        assert!(
+            found
+                .message
+                .starts_with("send endpoint cavalry:udp?endpoint=10.0.0.2:40183: its datagrams leave through eno2,"),
+            "{}",
+            found.message
+        );
+        for word in [
+            "1280 bytes",
+            "below the 1436",
+            "1408 bytes",
+            "raise the interface's MTU to 1436",
+        ] {
+            assert!(found.message.contains(word), "{word} in {}", found.message);
+        }
+        // A receive endpoint on the narrow interface, with the direction of its datagrams.
+        let found = warnings(&[endpoint("cavalry:udp?endpoint=10.0.0.1:40182", 0, 1)]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].message.starts_with("receive endpoint cavalry:udp?endpoint=10.0.0.1:40182: its datagrams arrive through eno2,"),
+            "{}",
+            found[0].message
+        );
+        // The interface option chooses the interface: a destination the table sends over
+        // the wide port, bound to the narrow one, and the converse.
+        let found = warnings(&[endpoint(
+            "cavalry:udp?endpoint=192.168.1.7:40183|interface=10.0.0.1",
+            1,
+            1,
+        )]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].message.contains("leave through eno2,"),
+            "{}",
+            found[0].message
+        );
+        let found = warnings(&[endpoint(
+            "cavalry:udp?endpoint=10.0.0.2:40183|interface=192.168.1.5",
+            1,
+            1,
+        )]);
+        assert!(found.is_empty(), "{found:?}");
+        // A closing endpoint is left alone, and so is every endpoint over a wide interface.
+        let found = warnings(&[endpoint("cavalry:udp?endpoint=10.0.0.2:40183", 0, 2)]);
+        assert!(found.is_empty(), "{found:?}");
+        let wide = |_: &str| Some(1500);
+        let mut findings = Vec::new();
+        interface_mtu_findings(
+            &[endpoint("cavalry:udp?endpoint=10.0.0.2:40183", 1, 1)],
+            ROUTES,
+            &wide,
+            &mut findings,
+        );
+        assert!(findings.is_empty(), "{findings:?}");
+        // The check runs on Linux alone and counts as run there, table or no table.
+        let mut findings = Vec::new();
+        let counted = interface_mtu_checks(&[], &mut findings);
+        assert_eq!(counted, usize::from(cfg!(target_os = "linux")));
+        assert!(findings.is_empty());
     }
 }
