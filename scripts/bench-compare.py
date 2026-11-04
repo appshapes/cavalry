@@ -68,9 +68,12 @@ TOLERANCE = 0.05
 STEP_FIELD = "clock_step_ns"
 GATED = "p99_99_ns"
 SHOWN = ("p50_ns", "p99_ns", "p99_99_ns", "max_ns")
-# The rows a message passes through; every other row is a probe of the host (ADR 0017),
-# or the one-way row across the link, which carries the two hosts' clock offset and is
-# reported beside the round trip (ADR 0039, ADR 0044).
+# The rows that are reported and never gated, read before the gated prefixes: the
+# one-way row across the link carries the two hosts' clock offset and is reported beside
+# the round trip (ADR 0039, ADR 0044). Named in full here, so that which row gates is
+# this list and not the order of the words in a name.
+REPORTED_ROWS = ("udp_one_way_",)
+# The rows a message passes through; every other row is a probe of the host (ADR 0017).
 GATED_ROWS = ("claim_commit_", "one_way_", "udp_round_trip_")
 
 
@@ -135,7 +138,7 @@ def compare(result: dict, baseline: dict) -> int:
             slowest = max(then.get("p99_99_ns_runs") or [then[GATED]])
             ratio = now[GATED] / slowest - 1
             verdict = f"{ratio:+.1%}"
-            if not name.startswith(GATED_ROWS):
+            if name.startswith(REPORTED_ROWS) or not name.startswith(GATED_ROWS):
                 verdict += " reported"
             elif ratio > TOLERANCE and now[GATED] - slowest > floor:
                 verdict += " REGRESSION"

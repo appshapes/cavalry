@@ -62,13 +62,19 @@ const MTU: u32 = 1408;
 /// The histogram's range: 1 ns to 60 s, three significant figures. A value past the
 /// range saturates rather than resizing, so recording never allocates.
 const MAX_NS: u64 = 60_000_000_000;
-/// The share of `--messages`, and of a rotation's warm-up, the UDP rows run: one in ten.
-/// The rows keep one message in flight, so a message is the path's latency, about ten
-/// microseconds on the loopback of a bench host against a tenth of one through shared
-/// memory for the client rows, and a tenth of the messages measures the same percentile
-/// in the same time (ADR 0044). The link rows take `--messages` as given, since they run
-/// alone.
+/// The share of `--messages` the UDP rows run: one in ten. The rows keep one message in
+/// flight, so a message is the path's latency, about ten microseconds on the loopback
+/// of a bench host against a tenth of one through shared memory for the client rows,
+/// and a tenth of the messages measures the same percentile in the same time (ADR
+/// 0044). The link rows take `--messages` as given, since they run alone.
 const UDP_SHARE: u64 = 10;
+/// The warm-up of every UDP row, on the loopback and across the link, in place of the
+/// rotation the shared-memory rows warm up with: a rotation's warm-up is so that no
+/// measured message first-touches a page, and the driver pre-touches the publication's
+/// log and the image's when it makes them (ADR 0027), so this many messages warm the
+/// caches and the connection, a tenth of a second on the loopback and a second across
+/// the link, where a rotation's 786,432 messages would be most of a run (ADR 0044).
+const UDP_WARMUP: u64 = 10_000;
 /// How long the UDP rows wait for the loopback stream to connect, the receiver's status
 /// message answering the sender's setup frame, which goes every 100 ms.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -226,7 +232,8 @@ Options:
   --messages N      messages per benchmark after the warm-up (default 1000000)
   --warmup N        messages before recording starts; the default is one rotation through
                     all three terms, so no measured message first-touches a page (196608
-                    for the default body and term)
+                    for the default body and term), and 10000 for the UDP rows, whose
+                    logs the driver pre-touches
   --body N          body bytes per message, at least 8 for the timestamp (default 32)
   --term-length N   term length of the log buffer, a power of two from 65536 (default 4194304)
   --profile NAME    the baseline profile; default $CAVALRY_BENCH_PROFILE or local-<os>-<arch>
@@ -424,15 +431,9 @@ impl Options {
             .unwrap_or_else(|| DEFAULT.max(3 * u64::from(term_length) / frame.max(1)))
     }
 
-    /// The UDP rows' warm-up: `--warmup`, or a tenth of a rotation through the UDP log's
-    /// three terms, [`UDP_SHARE`]: the driver pre-touches the publication's log and the
-    /// image's when it makes them (ADR 0027), and at ten microseconds a message a whole
-    /// rotation is most of a run.
+    /// The UDP rows' warm-up: `--warmup`, or [`UDP_WARMUP`].
     fn udp_warmup(&self) -> u64 {
-        match self.warmup_option {
-            Some(warmup) => warmup,
-            None => (self.warmup_for(spec::UDP_TERM_LENGTH) / UDP_SHARE).max(1),
-        }
+        self.warmup_option.unwrap_or(UDP_WARMUP)
     }
 
     /// The UDP rows' messages per run: a tenth of `--messages`, [`UDP_SHARE`].
@@ -1690,8 +1691,8 @@ fn spawn_subscriber(
 /// milliseconds (ADR 0044). Under `--pin` the sender has the third CPU and the receiver
 /// the fourth, and the driver's conductor runs with the housekeeping threads, since a
 /// bench host has four isolated cores; the driver's threads busy-spin when each has a
-/// core and back off otherwise. The rows run a tenth of `--messages` after a tenth of a
-/// rotation's warm-up ([`UDP_SHARE`]).
+/// core and back off otherwise. The rows run a tenth of `--messages` ([`UDP_SHARE`])
+/// after [`UDP_WARMUP`] messages.
 fn bench_udp(options: &Options) -> Result<LogRun, String> {
     let dir = bench_dir().join(format!("cavalry-bench-{}-udp", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -2851,13 +2852,13 @@ mod tests {
         assert!(matches!(parsed(&short), Err(error) if error.contains("at least 24")));
     }
 
-    /// The UDP rows run a tenth of the messages and a tenth of a rotation's warm-up,
-    /// never none; `--warmup` sets theirs as it sets the others'.
+    /// The UDP rows run a tenth of the messages, never none, after their own warm-up;
+    /// `--warmup` sets theirs as it sets the others'.
     #[test]
     fn the_udp_rows_run_a_tenth() {
         let defaults = options(&[]);
         assert_eq!(defaults.udp_messages(), 100_000);
-        assert_eq!(defaults.udp_warmup(), 3 * 16 * 1024 * 1024 / 64 / 10);
+        assert_eq!(defaults.udp_warmup(), 10_000);
         assert_eq!(options(&["--messages", "5"]).udp_messages(), 1);
         assert_eq!(options(&["--warmup", "7"]).udp_warmup(), 7);
     }

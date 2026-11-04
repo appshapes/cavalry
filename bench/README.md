@@ -48,7 +48,8 @@ nothing depends on it.
   and `one_way_32_udp`: a publication and a subscription on one port of `127.0.0.1`
   through the driver's sender and receiver, with one message in flight at a time, so
   that a sample is the path's latency and not the depth of the sender's window; a tenth
-  of `--messages` per run, at ten microseconds a message. The driver's threads
+  of `--messages` per run, at ten microseconds a message, after a warm-up of 10,000
+  messages, since the driver pre-touches both logs. The driver's threads
   busy-spin under `--pin` and back off otherwise. With `--link-here <host>:<port>` and
   `--link-peer <host>:<port>` it runs the link rows alone instead, `udp_round_trip_32`
   and `udp_one_way_32`, across the direct cable between the two bench hosts to a peer
