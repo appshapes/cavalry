@@ -121,9 +121,13 @@ reports it running with a new pid.
   MTU, and one lost fragment loses the whole datagram, or drops it where fragmentation
   is off, so a stream over a tunnel or a link at 1280 loses frames the receiver then
   NAKs for ever. The finding names the interface and its MTU, read from the main
-  routing table and the interface's `mtu` file. Raise the interface's MTU to 1436 or
-  more, or route the endpoint over an interface that carries the stream; the stream's
-  MTU has no key in this version ([values](../reference/udp.md#values);
+  routing table and the interface's `mtu` file: the interface that holds the channel's
+  `interface=` address when it names one, and the one the endpoint's address routes
+  over otherwise. It covers active endpoints with an IPv4 address of their own; an
+  IPv6 endpoint and a receive endpoint bound to every address are not checked in this
+  version. Raise the interface's MTU to 1436 or more, or route the endpoint over an
+  interface that carries the stream; the stream's MTU has no key in this version
+  ([values](../reference/udp.md#values);
   [Publish between two hosts](publish-between-two-hosts.md)).
 - **`WARN udp-image-loss`.** An image whose `image.hwm_position` is past its
   `image.rebuild_position`. The high-water mark is the furthest byte a datagram or a
