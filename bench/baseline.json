@@ -3105,7 +3105,7 @@
         "claim_commit_32_udp": {
           "max_ns": 498,
           "p50_ns": 21,
-          "p99_99_ns": 88,
+          "p99_99_ns": 92,
           "p99_ns": 37
         },
         "one_way_32_client": {
@@ -3479,7 +3479,7 @@
         "one_way_32_udp": {
           "max_ns": 6455,
           "p50_ns": 2377,
-          "p99_99_ns": 5643,
+          "p99_99_ns": 5703,
           "p99_ns": 2667
         },
         "record_block_32": {
@@ -4602,7 +4602,7 @@
         "claim_commit_32_udp": {
           "max_ns": 482,
           "p50_ns": 21,
-          "p99_99_ns": 89,
+          "p99_99_ns": 92,
           "p99_ns": 39
         },
         "one_way_32_client": {
@@ -4976,7 +4976,7 @@
         "one_way_32_udp": {
           "max_ns": 6087,
           "p50_ns": 2207,
-          "p99_99_ns": 5623,
+          "p99_99_ns": 5679,
           "p99_ns": 2657
         },
         "record_block_32": {
