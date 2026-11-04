@@ -1053,5 +1053,9 @@ user-visible change, added in the same commit as the change. The format follows
   `--echo`, the new `bench (udp)` job and its `bench (udp peer)`, the round trip held
   to `bench-linux-link` and the one-way reported beside the clock offset the peer job
   prints. The new rows and the new profile gate once their baselines are recorded from
-  three of the jobs' processes at one tree, and read `no baseline` until then
+  three of the jobs' processes at one tree, and read `no baseline` until then. The
+  harness keeps each benchmark's allocations under its name, prints them under the
+  table as `allocations by benchmark`, writes them to the result as
+  `allocations_by_benchmark` and names the benchmarks that allocated in the failure
+  it exits with, so a run that fails the allocation gate says which row to look at
   ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).

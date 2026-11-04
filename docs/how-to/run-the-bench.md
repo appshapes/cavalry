@@ -85,8 +85,13 @@ shared runner is
    two milliseconds of the run, the driver's cadence (ADR 0022, ADR 0032), written to the
    result as
    `producer_position_loads`, so each host's cadence is on record (card 161). The
+   `allocations by benchmark` line gives each benchmark's count, summed over the
+   runs, under the name the retries use and `record` for the recorder's block row,
+   written to the result as `allocations_by_benchmark`, so a count above 0 names the
+   loop to look at. The
    last line says how many allocations the measured loops made per message. It is 0
-   or the run has failed: the gate requires zero allocations per message. When no
+   or the run has failed: the gate requires zero allocations per message, and the
+   failure line repeats the benchmarks that allocated. When no
    message row ran, under `--only`, the line says so in place of the ratio and the
    result's `allocations_per_message` is `null`, the count is in the result as
    `allocations`, and any allocation still fails the run.
@@ -293,8 +298,15 @@ shared runner is
 ## When it does not work
 
 - `allocations per message` is not 0: a measured loop allocated. The gate has done its
-  job; find the allocation with the counting allocator's report in the output and
-  remove it. Nothing on the per-message path may allocate (`.claude/rules/data-plane.md`).
+  job; the `allocations by benchmark` line above it names the benchmark whose run
+  allocated, with its count summed over the runs, and the failure line repeats it,
+  `the measured loops allocated 1 times, by benchmark udp 1`; the result keeps it as
+  `allocations_by_benchmark`. The harness's loops allocate on no path but their error
+  returns, so the allocation is in the crates the row runs: `cavalry-shm` for a log
+  row, `cavalry-client` and the driver's conductor for a client row, and the driver's
+  sender and receiver as well for a UDP or link row. A count far below the run's
+  messages is a rare event, not one per message. Find it and remove it: nothing on
+  the per-message path may allocate (`.claude/rules/data-plane.md`).
 - `reported` beside a `timer` or `slot_padding` row that moved: expected; those rows
   flip between two adjacent clock steps from run to run and never fail the gate.
 - `within a step` beside a gated row: the row is over 5 percent above the baseline's

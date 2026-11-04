@@ -10,7 +10,7 @@
 //! every message (ADR 0044). Every
 //! sample is one message, timed with the time stamp counter, calibrated once (ADR 0028),
 //! and every number reported is a percentile or a max of an HdrHistogram, never a mean. The measured loops run under a counting
-//! allocator and the run fails when they allocate.
+//! allocator and the run fails when they allocate, naming the benchmark whose loops did.
 //!
 //! `cavalry-bench --help` lists the options; `docs/how-to/run-the-bench.md` is the page.
 
@@ -1926,7 +1926,11 @@ fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), Str
             .iter()
             .any(|image| image.is_end_of_stream())
         {
+            // The image has read everything the stream wrote, so every echo is claimed:
+            // leave now, and not when the receiver retires the image, which it does in
+            // the same cycle, so that the exit does not wait on the retire.
             ended = true;
+            break;
         }
         if !subscription.is_connected() {
             break;
@@ -2070,6 +2074,51 @@ fn json_summary(out: &mut String, name: &str, s: &Summary, runs: &[u64]) {
     );
 }
 
+/// `name count, name count` over a map by name, for the lines under the table, or
+/// `empty` when nothing was kept.
+fn listed<T: std::fmt::Display>(by_name: &BTreeMap<String, T>, empty: &str) -> String {
+    if by_name.is_empty() {
+        return empty.to_string();
+    }
+    by_name
+        .iter()
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The members of a JSON object over a map by name, `"name": count, "name": count`.
+fn json_object<T: std::fmt::Display>(by_name: &BTreeMap<String, T>) -> String {
+    by_name
+        .iter()
+        .map(|(name, count)| format!("\"{name}\": {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The failure a run exits 1 with when a measured loop allocated: the count, the
+/// benchmarks whose loops made it, each under the name the lines under the table list
+/// it by, and the anchor that explains it; `None` when every benchmark's count is 0.
+/// A count of 1 in 20,500,000 messages, which `gates (macos)` read at cb2f538, could
+/// not be placed from the sum alone.
+fn allocation_failure(by_benchmark: &BTreeMap<String, usize>) -> Option<String> {
+    let allocations: usize = by_benchmark.values().sum();
+    if allocations == 0 {
+        return None;
+    }
+    let allocated: BTreeMap<String, usize> = by_benchmark
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(name, &count)| (name.clone(), count))
+        .collect();
+    Some(format!(
+        "the measured loops allocated {allocations} times, by benchmark {}; the gate requires \
+         zero allocations per message (CLAUDE.md, gate 2; .claude/rules/data-plane.md); see \
+         docs/how-to/run-the-bench.md#when-it-does-not-work",
+        listed(&allocated, "")
+    ))
+}
+
 /// What the record row produced.
 struct RecordRun {
     record_block: Summary,
@@ -2184,11 +2233,16 @@ fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, Str
 }
 
 /// What one pass over every benchmark produced.
+#[derive(Default)]
 struct Pass {
     benchmarks: BTreeMap<String, Summary>,
     retries: BTreeMap<String, u64>,
     producer_position_loads: BTreeMap<String, u64>,
-    allocations: usize,
+    /// The allocations each benchmark's measured loops made, under the name its retries
+    /// are kept under and `record` for the recorder's block row, so that a run which
+    /// fails the allocation gate names the loop to look at; the sum over the names is
+    /// the count the run is judged on.
+    allocations: BTreeMap<String, usize>,
     /// The messages the message rows measured, for the allocations per message:
     /// `--messages` for each of the two log rows and the two client rows in a full
     /// pass, a tenth of that for the UDP row ([`UDP_SHARE`]), fewer under `--only`.
@@ -2210,8 +2264,8 @@ impl Pass {
     }
 
     /// Records a message benchmark's run of `messages` messages, a log, a client or a
-    /// UDP one: its two rows, its retries and producer position loads under `name`, and
-    /// its allocations.
+    /// UDP one: its two rows, and its retries, producer position loads and allocations
+    /// under `name`.
     fn insert_message_run(
         &mut self,
         benchmark: Benchmark,
@@ -2225,7 +2279,7 @@ impl Pass {
         if let Some(loads) = run.producer_position_loads {
             self.producer_position_loads.insert(name.into(), loads);
         }
-        self.allocations += run.allocations;
+        self.allocations.insert(name.into(), run.allocations);
         self.messages_measured += messages;
     }
 }
@@ -2234,13 +2288,7 @@ impl Pass {
 /// log types, the client path with and without a recording on, the client path over
 /// UDP on the loopback, the three slot spacings, and last the recorder's block path.
 fn run_pass(options: &Options) -> Result<Pass, String> {
-    let mut pass = Pass {
-        benchmarks: BTreeMap::new(),
-        retries: BTreeMap::new(),
-        producer_position_loads: BTreeMap::new(),
-        allocations: 0,
-        messages_measured: 0,
-    };
+    let mut pass = Pass::default();
     for benchmark in options.benchmarks() {
         match benchmark {
             Benchmark::Timer => {
@@ -2277,7 +2325,7 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
                 let record = bench_record(options)
                     .map_err(|message| format!("the record benchmark failed: {message}"))?;
                 pass.insert_rows(benchmark, options.body, [record.record_block]);
-                pass.allocations += record.allocations;
+                pass.allocations.insert("record".into(), record.allocations);
             }
         }
     }
@@ -2363,7 +2411,9 @@ fn main() -> ExitCode {
     let mut passes: BTreeMap<String, Vec<Summary>> = BTreeMap::new();
     let mut retries: BTreeMap<String, u64> = BTreeMap::new();
     let mut producer_position_loads: BTreeMap<String, u64> = BTreeMap::new();
-    let mut allocations: usize = 0;
+    // Each benchmark's allocations under its name, summed over the runs, `link` for the
+    // link rows; the sum over the names is the count the exit code is decided on.
+    let mut allocations_by_benchmark: BTreeMap<String, usize> = BTreeMap::new();
     let mut messages_measured: u64 = 0;
     let mut below_zero: u64 = 0;
     if let Some(link) = &options.link {
@@ -2385,7 +2435,9 @@ fn main() -> ExitCode {
             passes.entry(one_way.clone()).or_default().push(run.one_way);
             let worst = retries.entry("link".to_string()).or_insert(0);
             *worst = (*worst).max(run.retries);
-            allocations += run.allocations;
+            *allocations_by_benchmark
+                .entry("link".to_string())
+                .or_insert(0) += run.allocations;
             messages_measured += options.messages;
             below_zero = below_zero.max(run.below_zero);
         }
@@ -2414,7 +2466,9 @@ fn main() -> ExitCode {
             let most = producer_position_loads.entry(name).or_insert(0);
             *most = (*most).max(count);
         }
-        allocations += pass.allocations;
+        for (name, count) in pass.allocations {
+            *allocations_by_benchmark.entry(name).or_insert(0) += count;
+        }
         messages_measured += pass.messages_measured;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
@@ -2436,6 +2490,7 @@ fn main() -> ExitCode {
     // timer, slot or record rows, where the ratio has no denominator and is left out of
     // the line and the result, while the count still decides the exit code. The
     // recorder's block row adds its allocations to the count and no messages.
+    let allocations: usize = allocations_by_benchmark.values().sum();
     let allocations_per_message =
         (messages_measured > 0).then(|| allocations as f64 / messages_measured as f64);
 
@@ -2454,29 +2509,20 @@ fn main() -> ExitCode {
         );
     }
     println!();
-    let retries_by_row = if retries.is_empty() {
-        "no message row ran".to_string()
-    } else {
-        retries
-            .iter()
-            .map(|(name, count)| format!("{name} {count}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
     println!(
-        "  publisher retries (back pressure, rotation or not connected), the most of any run: {retries_by_row}"
+        "  publisher retries (back pressure, rotation or not connected), the most of any run: {}",
+        listed(&retries, "no message row ran")
     );
     println!(
         "  producer position loads by the harness's conductor, at the driver's cadence by the clock, the most of any run: {}",
-        if producer_position_loads.is_empty() {
-            "no log row ran".to_string()
-        } else {
-            producer_position_loads
-                .iter()
-                .map(|(name, loads)| format!("{name} {loads}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
+        listed(&producer_position_loads, "no log row ran")
+    );
+    println!(
+        "  allocations by benchmark, summed over the runs: {}",
+        listed(
+            &allocations_by_benchmark,
+            "no row ran under the counting allocator"
+        )
     );
     match allocations_per_message {
         Some(ratio) => println!(
@@ -2523,11 +2569,7 @@ fn main() -> ExitCode {
     let _ = writeln!(
         out,
         "  \"publisher_retries\": {{{}}},",
-        retries
-            .iter()
-            .map(|(name, count)| format!("\"{name}\": {count}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        json_object(&retries)
     );
     if options.link.is_some() {
         let _ = writeln!(out, "  \"link_one_way_below_zero\": {below_zero},");
@@ -2535,14 +2577,17 @@ fn main() -> ExitCode {
     let _ = writeln!(
         out,
         "  \"producer_position_loads\": {{{}}},",
-        producer_position_loads
-            .iter()
-            .map(|(name, loads)| format!("\"{name}\": {loads}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        json_object(&producer_position_loads)
     );
-    // The count the exit code is decided on, beside the ratio: `bench-compare` judges
-    // the count when no message row ran and the ratio is `null` (card 161).
+    // Each benchmark's share of the count under its name, then the count the exit code
+    // is decided on, beside the ratio: `bench-compare` judges the count when no message
+    // row ran and the ratio is `null` (card 161), and reads neither the shares nor the
+    // names.
+    let _ = writeln!(
+        out,
+        "  \"allocations_by_benchmark\": {{{}}},",
+        json_object(&allocations_by_benchmark)
+    );
     let _ = writeln!(out, "  \"allocations\": {allocations},");
     let _ = writeln!(
         out,
@@ -2581,11 +2626,8 @@ fn main() -> ExitCode {
         println!("  written to {}", path.display());
     }
 
-    if allocations > 0 {
-        eprintln!(
-            "cavalry-bench: the measured loops allocated {allocations} times; the gate requires zero allocations \
-             per message (CLAUDE.md, gate 2; .claude/rules/data-plane.md)"
-        );
+    if let Some(message) = allocation_failure(&allocations_by_benchmark) {
+        eprintln!("cavalry-bench: {message}");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -2886,5 +2928,64 @@ mod tests {
         assert_eq!(defaults.udp_warmup(), 10_000);
         assert_eq!(options(&["--messages", "5"]).udp_messages(), 1);
         assert_eq!(options(&["--warmup", "7"]).udp_warmup(), 7);
+    }
+
+    /// A pass keeps each message benchmark's allocations under its name, so that the
+    /// failure can name the loop that allocated, and its messages in the sum.
+    #[test]
+    fn a_pass_keeps_allocations_by_benchmark() {
+        let run = |allocations| {
+            let empty = Summary {
+                count: 0,
+                p50_ns: 0,
+                p99_ns: 0,
+                p99_99_ns: 0,
+                max_ns: 0,
+                rate_per_s: 0.0,
+            };
+            LogRun {
+                claim_commit: empty.clone(),
+                one_way: empty,
+                retries: 0,
+                allocations,
+                producer_position_loads: None,
+            }
+        };
+        let mut pass = Pass::default();
+        pass.insert_message_run(Benchmark::Udp, "udp", 32, run(1), 10);
+        pass.insert_message_run(
+            Benchmark::Client {
+                recorded: false,
+                name: "client",
+            },
+            "client",
+            32,
+            run(0),
+            100,
+        );
+        assert_eq!(
+            pass.allocations,
+            BTreeMap::from([("client".to_string(), 0), ("udp".to_string(), 1)])
+        );
+        assert_eq!(pass.messages_measured, 110);
+        assert_eq!(pass.benchmarks.len(), 4);
+    }
+
+    /// A run whose loops allocated fails naming the count, the benchmarks that made it
+    /// and the anchor, and one whose every benchmark counted 0 does not fail.
+    #[test]
+    fn the_allocation_failure_names_the_benchmarks_that_allocated() {
+        let mut by_benchmark = BTreeMap::from([("client".to_string(), 0), ("udp".to_string(), 0)]);
+        assert_eq!(allocation_failure(&by_benchmark), None);
+        by_benchmark.insert("udp".to_string(), 1);
+        by_benchmark.insert("record".to_string(), 2);
+        let message = allocation_failure(&by_benchmark).expect("three allocations fail");
+        assert!(
+            message.contains("allocated 3 times")
+                && message.contains("by benchmark record 2, udp 1;")
+                && !message.contains("client")
+                && message.contains("docs/how-to/run-the-bench.md#when-it-does-not-work"),
+            "{message}"
+        );
     }
 }
