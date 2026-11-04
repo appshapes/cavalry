@@ -25,9 +25,11 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 
 1. Choose the CPUs. On the host, run `lscpu -e` and read the `L3` column: CPUs that
    share an L3 cache are one core complex, and a line moved between two complexes costs
-   about 100 ns more than one moved inside one. The harness needs three cores for its
-   three spinning threads. Isolate one whole complex and leave the other to everything
-   else. On the Ryzen 7 2700X, CPUs 0 to 7 are one complex and 8 to 15 the other, with
+   about 100 ns more than one moved inside one. The harness needs four cores: its
+   publisher, its subscriber and the driver's conductor in the shared-memory rows, and
+   the driver's sender and receiver in place of the conductor in the UDP rows
+   ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). Isolate one
+   whole complex and leave the other to everything else. On the Ryzen 7 2700X, CPUs 0 to 7 are one complex and 8 to 15 the other, with
    each core's two SMT threads numbered 2n and 2n+1; the isolated set is `8-15` and
    the housekeeping set `0-7`, which are the scripts' defaults.
 
@@ -37,12 +39,12 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    never carries a measured thread. On the i9-13900H the P-cores are CPUs 0 to 11 in
    sibling pairs 2n and 2n+1, the E-cores 12 to 19, with one L3 for all; the isolated
    set is `6-11`, the housekeeping set `0-5,12-19`, and `nosmt` leaves 6, 8 and 10
-   online for `--pin 6,8,10`.
+   online for `--pin 6,8,10`, three cores: `kip` ran the gate before the UDP rows.
 
    On the Intel Core i7-10700, eight cores under one L3 with each core's two SMT
    threads numbered n and n+8, there is no complex to choose: the isolated set is `4-7`,
    the housekeeping set `0-3`, and `nosmt` takes CPUs 8 to 15 offline, so the pins are
-   `4,5,6`, one core each.
+   `4,5,6,7`, one core each.
 
 2. Register the runner under a user of its own. A job on this host runs whatever a
    branch or a dependency bump compiles, build scripts included, as the runner's user,
@@ -109,11 +111,12 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 
    ```sh
    # ignore: run on the bench host, not in this repository
-   bash bench/host/check.sh 8,10,12
+   bash bench/host/check.sh 8,10,12,14
    ```
 
-   The three CPUs are the ones the bench job pins the publisher, the subscriber and the
-   conductor to: one per core, inside the isolated set, with the SMT siblings offline.
+   The four CPUs are the ones the bench job pins the publisher, the subscriber, the
+   conductor and, in the UDP rows, the sender and the receiver to: one per core, inside
+   the isolated set, with the SMT siblings offline.
    The script prints the host's state, including the turbo switch and the idle states
    the pinned CPUs may enter, how many timers are active and which interrupts a driver
    bound itself and where, and ends with `check.sh: ok`; it fails when turbo is on or
@@ -136,7 +139,7 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    `bench (linux)` to the required checks of `master` in the repository's branch
    protection, beside `gates (linux)` and `gates (macos)`. The second host, `grip`, has
    a job of its own in the same file, `bench (grip)`, on `[self-hosted, grip-linux]`
-   with its own lists, `4,5,6`, and its own profiles, `grip-linux` and
+   with its own lists, `4,5,6,7`, and its own profiles, `grip-linux` and
    `grip-linux-unchecked`, and is a required check too since ADR 0034's acceptance on
    2026-10-31, after it had been green over three pushes to `master` with its
    baselines in place; `bench (kip)`, the job of the host that left the gate, went
@@ -163,15 +166,17 @@ the harness and read its table is [Run the bench](run-the-bench.md).
 
 ## How to verify it worked
 
-- `bash bench/host/check.sh 8,10,12` on `bench`, or `check.sh 4,5,6` on `grip`, ends
-  with `check.sh: ok`.
+- `bash bench/host/check.sh 8,10,12,14` on `bench`, or `check.sh 4,5,6,7` on `grip`,
+  ends with `check.sh: ok`.
 - `cat /proc/interrupts` on the host shows the isolated CPUs' `LOC` column in the
   hundreds while the housekeeping CPUs' is in the hundreds of thousands.
 - The organization's runner page shows the runner Idle after a reboot of the host.
 - A push to `master` runs the host's job on it, `bench (linux)` on `bench` and
   `bench (grip)` on `grip`, and the run's log opens with the state `check.sh` printed,
-  then the harness's line `pinned to CPUs 8,10,12` on `bench` or
-  `pinned to CPUs 4,5,6` on `grip`.
+  then the harness's line `pinned to CPUs 8,10,12,14` on `bench` or
+  `pinned to CPUs 4,5,6,7` on `grip`. Once both are done, `bench (udp)` on `bench` and
+  `bench (udp peer)` on `grip` run the link rows across the cable
+  ([Run the bench](run-the-bench.md), step 5).
 
 ## Further hosts: the roles, the direct link and the clock
 

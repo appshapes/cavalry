@@ -22,9 +22,12 @@ nothing depends on it.
   thousand, below the percentile on both hosts (ADR 0032). The warm-up before recording is one rotation through
   all three terms, so no measured message first-touches a page, and every histogram's
   counts are written once before the loop, so no rare sample first-touches one either.
-  `--pin P,S,C` binds the three threads to those CPUs on Linux, with the driver's
-  recorder and replayer and the client's conductor on the lowest CPU outside them in
-  the client rows, so each pinned CPU runs one thread, and `--repeat N` runs everything N times and
+  `--pin P,S,C[,R]` binds the publisher, the subscriber and the driver's conductor to
+  the first three CPUs on Linux, with the driver's recorder and replayer and the
+  client's conductor on the lowest CPU outside them in the client rows, so each pinned
+  CPU runs one thread; in the UDP rows the sender takes the third CPU and the receiver
+  the fourth, and the driver's conductor goes with the housekeeping threads, since a
+  bench host has four isolated cores (ADR 0044). `--repeat N` runs everything N times and
   reports each benchmark's median run by p99.99, every run's on record; the bench host
   runs it with both (ADR 0016). `--only NAME` runs only the benchmarks with a row whose
   name contains NAME, for a profile of one row, and writes the result under the
@@ -40,7 +43,19 @@ nothing depends on it.
 - Measures the publisher's claim and commit, the one-way latency from the publisher's
   timestamp to the subscriber's handler, for the exclusive and the concurrent log type,
   and a slot-padding microbench that times a load of a word and a store to a word 0, 64
-  or 128 bytes away, from two threads (ADR 0011). `just bench-unchecked` runs it all
+  or 128 bytes away, from two threads (ADR 0011).
+- Measures the same two rows over `cavalry:udp` on the loopback, `claim_commit_32_udp`
+  and `one_way_32_udp`: a publication and a subscription on one port of `127.0.0.1`
+  through the driver's sender and receiver, with one message in flight at a time, so
+  that a sample is the path's latency and not the depth of the sender's window; a tenth
+  of `--messages` per run, at ten microseconds a message. The driver's threads
+  busy-spin under `--pin` and back off otherwise. With `--link-here <host>:<port>` and
+  `--link-peer <host>:<port>` it runs the link rows alone instead, `udp_round_trip_32`
+  and `udp_one_way_32`, across the direct cable between the two bench hosts to a peer
+  running `--echo`, the harness on the other host, which claims every message it
+  receives on a publication back; the round trip is one clock's and gated against the
+  profile with `-link` appended, the one-way carries the offset between the two hosts'
+  clocks and is reported beside it, never gated (ADR 0039, ADR 0044). `just bench-unchecked` runs it all
   again with the data-plane checks built out, under a profile of its own, to price
   ADR 0010's checks.
 - Runs the measured loops under a counting allocator and fails the run when they
@@ -48,13 +63,16 @@ nothing depends on it.
 - Writes `bench/results/<profile>-<unix time>.json`, the clock's step included;
   `scripts/bench-compare.py` fails a p99.99 regression over 5 percent and over one clock
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
-  for the profile, on the `claim_commit` and `one_way` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
-  probes and are reported, never failed (ADR 0017). The bench hosts' profiles have
+  for the profile, on the `claim_commit`, `one_way` and `udp_round_trip` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
+  probes and are reported, never failed (ADR 0017), and so is `udp_one_way`, which
+  carries two clocks' offset (ADR 0044). The bench hosts' profiles have
   baselines, `bench-linux` and `grip-linux` with their `-unchecked` twins, grip's
   recorded on 2026-10-31 at 0782ec5 from four of its job's processes at the tree, and
   CI runs the gate on each host, as `bench (linux)` and `bench (grip)`
   ([ADR 0034](../docs/decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md),
-  Accepted 2026-10-31); `kip-linux`'s pair stays in the file as the record of kip's
+  Accepted 2026-10-31), and the link rows as `bench (udp)` on `bench` with its peer
+  `bench (udp peer)` on `grip`, against `bench-linux-link`
+  ([ADR 0044](../docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md)); `kip-linux`'s pair stays in the file as the record of kip's
   run as the second host, 2026-10-29 to 2026-10-31, compared by nothing: a shared
   runner's run is a report. The `_recorded` rows repeat the client
   rows with the driver's recorder writing the stream to the durable log under the bench
