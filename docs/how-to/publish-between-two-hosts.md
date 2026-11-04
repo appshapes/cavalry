@@ -20,14 +20,15 @@ the channel changed is this task on one host. In Aeron, this is a publication an
   binds.
 - A firewall on the subscriber's host, when one is on, that admits UDP to that port
   and the replies to the publisher's socket (step 3).
-- A session that outlives the driver, on a host reached over SSH. When a user's last
-  session ends, logind removes the user's files under `/dev/shm` by default
+- On Linux, a session that outlives the driver, on a host reached over SSH. When a
+  user's last session ends, logind removes the user's files under `/dev/shm` by default
   (`RemoveIPC=yes`), the driver's directory among them, so a driver started in one SSH
   session loses its directory when that session closes, and `doctor` and new clients
   find no driver while the old ones run on ([Run a driver and read
   doctor](run-the-driver.md#when-it-does-not-work), "The directory vanished under a
-  running driver"). Keep one session open on each host until step 4 is done, or run
-  `sudo loginctl enable-linger <user>` there first.
+  running driver"). Keep one session open on each host for as long as its driver runs,
+  through "How to verify it worked", which reads the directory with `cavalry doctor`
+  and from the counters file, or run `sudo loginctl enable-linger <user>` there first.
 
 ## Steps
 
