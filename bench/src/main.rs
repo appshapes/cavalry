@@ -405,7 +405,8 @@ fn check_pins(pin: Pins, udp: bool) -> Result<(), String> {
     if udp && pin.receiver.is_none() {
         return Err(format!(
             "--pin {}: the UDP rows need a fourth CPU for the receiver, --pin P,S,C,R; pass four, \
-             or --only a row without udp in its name (ADR 0044)",
+             or --only a row without udp in its name (ADR 0044); see \
+             docs/how-to/run-the-bench.md#when-it-does-not-work",
             pin.list()
         ));
     }
@@ -1620,8 +1621,11 @@ fn publish_one_in_flight<T>(
 }
 
 /// What a subscriber thread hands back: its subscription, for the next run, the
-/// histogram of each row it measured, and how many one-way samples read below zero.
-type Received = Result<(Subscription, Vec<Histogram<u64>>, u64), String>;
+/// histogram of the row it timed from the harness's stamp, the one-way row's over the
+/// link, and how many one-way samples read below zero. A tuple and not a `Vec`: the
+/// thread returns as soon as it has handled the last message, when the publisher's
+/// counting region can still be open, so nothing on its way out may allocate.
+type Received = Result<(Subscription, Histogram<u64>, Option<Histogram<u64>>, u64), String>;
 
 /// The subscriber of a run with one message in flight, on its own thread: polls until
 /// `total` messages have come, times each from the harness's stamp in its first eight
@@ -1685,9 +1689,7 @@ fn spawn_subscriber(
                     std::hint::spin_loop();
                 }
             }
-            let mut rows = vec![first];
-            rows.extend(second);
-            Ok((subscription, rows, below_zero))
+            Ok((subscription, first, second, below_zero))
         })
         .map_err(|e| e.to_string())
 }
@@ -1734,11 +1736,10 @@ fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         run,
     )?;
     let published = publish_one_in_flight(&mut publication, &received, &subscriber, run)?;
-    let (subscription, mut rows, _) = match subscriber.join() {
+    let (subscription, one_way, _, _) = match subscriber.join() {
         Ok(Ok(received)) => received,
         failed => return Err(subscriber_failure(failed)),
     };
-    let one_way = rows.swap_remove(0);
     close_stream(dir, publication, subscription, client, driver, &pins, false)?;
     Ok(LogRun {
         claim_commit: summarize(&published.claim_commit, published.elapsed),
@@ -1808,13 +1809,13 @@ fn run_link(options: &Options, dir: &std::path::Path, link: &Link) -> Result<Vec
             run,
         )?;
         let published = publish_one_in_flight(&mut publication, &received, &subscriber, run)?;
-        let (returned, mut rows, below_zero) = match subscriber.join() {
+        let (returned, round_trip, one_way, below_zero) = match subscriber.join() {
             Ok(Ok(received)) => received,
             failed => return Err(subscriber_failure(failed)),
         };
         subscription = Some(returned);
-        let (Some(one_way), Some(round_trip)) = (rows.pop(), rows.pop()) else {
-            return Err("the link subscriber measured fewer than two rows".to_string());
+        let Some(one_way) = one_way else {
+            return Err("the link subscriber measured no one-way row".to_string());
         };
         runs.push(LinkRun {
             round_trip: summarize(&round_trip, published.elapsed),
@@ -2806,7 +2807,9 @@ mod tests {
         assert!(check_pins(three, false).is_ok());
         let error = check_pins(three, true).expect_err("a UDP row needs four");
         assert!(
-            error.contains("--pin 8,10,12") && error.contains("fourth"),
+            error.contains("--pin 8,10,12")
+                && error.contains("fourth")
+                && error.contains("docs/how-to/run-the-bench.md#when-it-does-not-work"),
             "{error}"
         );
         assert!(check_pins(four, true).is_ok());
