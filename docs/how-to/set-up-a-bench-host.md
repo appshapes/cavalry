@@ -286,9 +286,11 @@ record is on card 182.
    hundreds of microseconds (`chronyc tracking` on `bench` that day: "System time:
    0.000224 seconds slow of NTP time", RMS offset 113 µs), so `grip`'s clock stands at
    `bench`'s raw clock plus that residual while its own view of `bench-link` reads
-   zero. The harness stamps with the raw clock on each host, so the offset beside the
-   one-way row is `bench`'s "System time" line at the run's time, which the `bench
-   (udp)` job prints after the run, and the line's last words are its sign. "Slow of
+   zero. The harness stamps with the raw clock on each host, the system clock as
+   `SystemTime::now` reads it, `CLOCK_REALTIME` before chronyd's correction and not
+   `CLOCK_MONOTONIC_RAW`, so the offset beside the one-way row is `bench`'s "System
+   time" line at the run's time, which the `bench (udp)` job prints after the run, and
+   the line's last words are its sign. "Slow of
    NTP time", as that day: `bench`'s system clock is behind the time it serves, so
    `grip` runs ahead of `bench`'s raw clock by the line, and the row is the path plus
    the line. "Fast of NTP time": `bench`'s system clock is ahead of the time it
