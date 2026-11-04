@@ -1122,7 +1122,7 @@ user-visible change, added in the same commit as the change. The format follows
   is healthy, so they are read from the counters file by its layout until the console
   exists, with the values the tutorial's 1,000 messages give (card 182).
 - `grip`'s two bench profiles, `grip-linux` and `grip-linux-unchecked`, are re-recorded
-  at the tree of 7248621 from its nine processes, pull request 109's two runs, master's
+  at the tree of 7248621 from nine of its processes, pull request 109's two runs, master's
   four and pull request 111's three, with every gated row's slowest run before and after
   in the commit: the unchecked `claim_commit_32_client` row had turned `bench (grip)`
   red on pull requests 102, 103, 106 and 111 at 120 to 132 ns against a slowest run of
