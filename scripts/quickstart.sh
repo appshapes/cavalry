@@ -43,13 +43,17 @@ done
 running=$("$cavalry" doctor || true)
 grep -q 'is running' <<<"$running" || { echo "quickstart: the driver did not report running" >&2; exit 1; }
 
-step "3. the program: record the stream, publish 1,000 messages and read them back"
+step "3. the program: record the stream, publish 1,000 messages and read them back, then the same over UDP"
 program=$(target/release/examples/quickstart)
 printf '%s\n' "$program"
-grep -q 'received once, in order' <<<"$program" || {
+grep -q 'by session .* and received once, in order, in' <<<"$program" || {
     echo "quickstart: the program did not report every message once, in order" >&2; exit 1; }
 recording=$(sed -n 's/^quickstart: recording \([0-9]*\) of stream .* stopped;.*/\1/p' <<<"$program")
 [ -n "$recording" ] || { echo "quickstart: the program did not report its recording" >&2; exit 1; }
+# The third slice's acceptance test (ADR 0039, ADR 0044): the same stream over UDP on
+# this host, through the driver's sender and receiver.
+grep -q 'over cavalry:udp?endpoint=127.0.0.1:40123 by session .* received once, in order, through the driver' <<<"$program" || {
+    echo "quickstart: the program did not report every message once, in order, over UDP" >&2; exit 1; }
 
 step "4. cavalry replay: the recording played back from the durable log"
 replayed=$("$cavalry" replay --recording "$recording" --from 0)
