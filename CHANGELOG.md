@@ -1066,3 +1066,19 @@ user-visible change, added in the same commit as the change. The format follows
   `allocations_by_benchmark` and names the benchmarks that allocated in the failure
   it exits with, so a run that fails the allocation gate says which row to look at
   ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
+- The ten-minute path publishes over UDP: the quickstart program publishes its 1,000
+  messages again on `cavalry:udp?endpoint=127.0.0.1:40123`, the same stream through
+  the same API, reads them back through the driver's sender and receiver, and prints a
+  fourth line, which `just quickstart` checks on Linux and macOS, the third slice's
+  acceptance test; the README's status says the first three slices work
+  ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
+- ADR 0045 is accepted: a padding frame crosses the wire as its 32-byte header alone,
+  the last frame of its datagram, its length checked against the term and counted by
+  its aligned length, and the receiver writes the header and nothing after it. Before
+  it, a `cavalry:udp` stream whose frame length did not divide the 16 MiB term stalled
+  at the first term end, the receiver rejecting the padding header and NAKing it for
+  ever; every body of 32 or 8 bytes divided the term, so no test had met it. The spec
+  says the rule, the vectors carry it and `cavalry-proto`'s datagram check and
+  `cavalry-shm`'s image writer follow it
+  ([ADR 0045](docs/decisions/0045-carry-a-padding-frame-as-its-header-alone.md);
+  card 196).

@@ -14,7 +14,7 @@ use core::time::Duration;
 use zerocopy::little_endian::{I32, I64, U16};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
-use crate::frame::{DataFrameHeader, FRAME_ALIGNMENT, FrameError, HEADER_LENGTH};
+use crate::frame::{DataFrameHeader, FRAME_ALIGNMENT, FrameError, FrameType, HEADER_LENGTH};
 
 /// The version of `spec/udp.md` this crate reads and writes: the version byte of every
 /// frame on the wire.
@@ -190,6 +190,12 @@ pub enum DatagramCause {
         /// The term length.
         term_length: u32,
     },
+    /// A padding frame is not the last frame of the datagram: bytes follow its header,
+    /// which is all of it that crosses the wire (ADR 0045).
+    PaddingNotLast {
+        /// How many bytes follow the padding frame's header.
+        following: usize,
+    },
 }
 
 impl UdpError {
@@ -279,6 +285,12 @@ impl fmt::Display for UdpError {
                     f,
                     "datagram rejected (datagram): the frame at byte {at} would end at term \
                      offset {end}, past the term length {term_length}; see {DOC}"
+                ),
+                DatagramCause::PaddingNotLast { following } => write!(
+                    f,
+                    "datagram rejected (datagram): the padding frame at byte {at} is followed \
+                     by {following} bytes; a padding frame crosses the wire as its 32-byte \
+                     header alone and ends its datagram; see {DOC}"
                 ),
             },
         }
@@ -894,9 +906,12 @@ pub struct Datagram<'a> {
 
 impl<'a> Datagram<'a> {
     /// Checks `bytes` as a datagram of data frames against `term_length`, in the spec's
-    /// order: `length` (a multiple of 32), then for each frame `spec/frame.md`'s checks
-    /// against the bytes left, `term-offset` for the first frame's, and `datagram` for
-    /// a term offset that is not the running one or a frame past the end of the term.
+    /// order: `length` (a multiple of 32), then for each frame `spec/frame.md`'s checks,
+    /// a data frame's against the bytes left and a padding frame's against the term,
+    /// since a padding frame crosses the wire as its 32-byte header alone (`spec/udp.md`,
+    /// "The datagram"; ADR 0045), `term-offset` for the first frame's, and `datagram` for
+    /// a term offset that is not the running one, a frame past the end of the term, or a
+    /// padding frame that is not the last frame of the datagram.
     pub fn check(bytes: &'a [u8], term_length: u32) -> Result<Self, UdpError> {
         if bytes.is_empty() || !bytes.len().is_multiple_of(FRAME_ALIGNMENT) {
             return Err(UdpError::Length {
@@ -909,9 +924,11 @@ impl<'a> Datagram<'a> {
         let mut running: u32 = 0;
         let mut frames = 0usize;
         while at < bytes.len() {
-            let available = bytes.len() - at;
+            let rest = &bytes[at..];
+            // A data frame's length is held to the bytes present, a padding frame's to
+            // the term (`DataFrameHeader::parse_on_wire`).
             let header =
-                DataFrameHeader::parse_within(&bytes[at..], available).map_err(|error| {
+                DataFrameHeader::parse_on_wire(rest, rest.len(), term_length).map_err(|error| {
                     UdpError::Datagram {
                         at,
                         cause: DatagramCause::Frame(error),
@@ -947,8 +964,19 @@ impl<'a> Datagram<'a> {
                 });
             }
             running = end as u32;
-            at += aligned;
             frames += 1;
+            if header.frame_type() == FrameType::Pad {
+                let following = rest.len() - HEADER_LENGTH;
+                if following != 0 {
+                    return Err(UdpError::Datagram {
+                        at,
+                        cause: DatagramCause::PaddingNotLast { following },
+                    });
+                }
+                at += HEADER_LENGTH;
+            } else {
+                at += aligned;
+            }
         }
         Ok(Self {
             bytes,
@@ -989,10 +1017,13 @@ impl<'a> Datagram<'a> {
         self.bytes
     }
 
-    /// The frames in order, each with its bytes, header and alignment padding included.
+    /// The frames in order, each with its bytes, header and alignment padding included;
+    /// a padding frame's bytes are its 32-byte header, all of it that crossed the wire,
+    /// and its length in the term is its header's aligned length.
     pub fn frames(&self) -> DatagramFrames<'a> {
         DatagramFrames {
             bytes: self.bytes,
+            term_length: self.term_length,
             at: 0,
         }
     }
@@ -1012,6 +1043,9 @@ pub struct DatagramFrame<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct DatagramFrames<'a> {
     bytes: &'a [u8],
+    /// The term length the datagram was checked against: the bound a padding frame's
+    /// length is held to, the same one [`Datagram::check`] used.
+    term_length: u32,
     at: usize,
 }
 
@@ -1023,12 +1057,17 @@ impl<'a> Iterator for DatagramFrames<'a> {
         if rest.is_empty() {
             return None;
         }
-        // The datagram was checked, so the header parses and the frame fits; a failure
-        // here ends the walk rather than panicking.
-        let header = DataFrameHeader::parse_within(rest, rest.len()).ok()?;
-        let aligned = header.aligned_length().min(rest.len());
-        let bytes = &rest[..aligned];
-        self.at += aligned;
+        // The datagram was checked under this term length, so the header parses as it
+        // did there and the frame fits; a failure here ends the walk rather than
+        // panicking. A padding frame is its header alone.
+        let header = DataFrameHeader::parse_on_wire(rest, rest.len(), self.term_length).ok()?;
+        let on_wire = if header.frame_type() == FrameType::Pad {
+            HEADER_LENGTH.min(rest.len())
+        } else {
+            header.aligned_length().min(rest.len())
+        };
+        let bytes = &rest[..on_wire];
+        self.at += on_wire;
         Some(DatagramFrame { header, bytes })
     }
 }

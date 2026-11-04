@@ -1,10 +1,11 @@
 # Publish and subscribe in ten minutes
 
 A tutorial: in ten minutes, on a laptop or a cloud VM, start a driver, record a stream
-and publish 1,000 messages on it from a program that reads them back, replay the
-recording from the durable log, and read `doctor`. You type six commands and see a
-result after each. Nothing is configured. In Aeron, this is the media driver and Archive
-with a client that uses `tryClaim`, `poll` and `replay` ([glossary](../glossary.md)).
+and publish 1,000 messages on it from a program that reads them back, publish them
+again over UDP on the same host, replay the recording from the durable log, and read
+`doctor`. You type six commands and see a result after each. Nothing is configured. In
+Aeron, this is the media driver and Archive with a client that uses `tryClaim`, `poll`
+and `replay` over `aeron:ipc` and `aeron:udp` ([glossary](../glossary.md)).
 
 The same path is `just quickstart`, which CI runs on Linux and macOS on every commit, so
 what this page says happens is what the repository checks.
@@ -46,10 +47,13 @@ In a second terminal:
 target/release/examples/quickstart
 ```
 
-You will see three lines: `quickstart: client <id> attached to the driver at <directory>`,
+You will see four lines: `quickstart: client <id> attached to the driver at <directory>`,
 then `quickstart: 1000 messages published on stream 1001 by session <session> and
 received once, in order, in <n> ms`, then `quickstart: recording 0 of stream 1001
-stopped; cavalry replay --recording 0 --from 0 plays it back`. The program is
+stopped; cavalry replay --recording 0 --from 0 plays it back`, then `quickstart: 1000
+messages published on stream 1001 over cavalry:udp?endpoint=127.0.0.1:40123 by session
+<session> and received once, in order, through the driver's sender and receiver, in
+<n> ms`. The program is
 [`crates/cavalry/examples/quickstart.rs`](../../crates/cavalry/examples/quickstart.rs):
 it connects with `Cavalry::connect()`, adds a subscription and a publication on stream
 1001, starts a recording of the stream with `start_recording`, claims a frame per
@@ -64,6 +68,25 @@ when that variable is set and `~/.local/share/cavalry/log` otherwise
 ([`log.dir`](../reference/config.md#logdir)), and it outlived the program. The
 recording id is 0 on a fresh log directory; a directory that holds earlier recordings
 gives the next id, which is the one the program printed.
+
+The fourth line is the same stream over UDP, the same 1,000 messages through the same
+loop with nothing changed but the channel: a publication and a subscription on
+`cavalry:udp?endpoint=127.0.0.1:40123`, a port of this host. The driver's sender put the
+publication's log on the wire in datagrams, the driver's receiver rebuilt it from the
+wire into an image, and the subscription read the image as it read the log. The
+milliseconds include the sender's first setup frame and the receiver's answer, which
+connect the stream before the first message goes, as the second line's include the
+recording's start. Between two hosts only the host in the channel changes, to the
+subscriber's; `cavalry doctor` on either host says why a stream does not connect. If
+the port is in use on your machine, the program stops at the subscription, which it
+adds first and whose socket the driver's receiver binds, with `quickstart: command
+refused (refused, error code 4, ChannelEndpointError): the channel's endpoint
+127.0.0.1:40123: the socket could not be opened or bound: Address already in use (os
+error 98); check that the address is this host's and its port is free`, os error 48 on
+macOS, and the line ends by naming `docs/reference/client-protocol.md#error-codes`.
+Another port in the channel is the whole fix. A stream that does not connect within
+ten seconds stops the program with how many messages went and came back, and
+`cavalry doctor` says why.
 
 ## 4. Replay the recording
 
@@ -106,8 +129,10 @@ it got through a counter; the driver moves the publisher's limit behind the slow
 subscriber, so a publisher that gets ahead is told, never buffered; the driver's recorder
 wrote the stream to the durable log as one more reader, and its replayer played it back
 as one more publication, so the same subscription code read the live stream and the
-replay. Every refusal is a result the program decides on, and every state is a counter
-`doctor` reads.
+replay; and over UDP the driver's sender and receiver carried the same log between
+two sockets, with status messages holding the publisher to the receiver's window, so
+the same program published between hosts. Every refusal is a result the program
+decides on, and every state is a counter `doctor` reads.
 
 ## What to read next
 
@@ -117,8 +142,8 @@ replay. Every refusal is a result the program decides on, and every state is a c
   [Replay a recording](../how-to/replay-a-recording.md): the two commands from a shell,
   what the log directory holds, and replaying between two instants.
 - [`crates/cavalry-client/README.md`](../../crates/cavalry-client/README.md): the client
-  API, with the same program without the recording as its doctest, and what the crate
-  must never do.
+  API, with the same program without the recording and the UDP step as its doctest, and
+  what the crate must never do.
 - [`spec/client-protocol.md`](../../spec/client-protocol.md) and
   [`spec/log-buffer.md`](../../spec/log-buffer.md): what the client and the driver say to
   each other, and how a message gets from a claim to a handler.

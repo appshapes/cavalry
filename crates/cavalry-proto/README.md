@@ -12,7 +12,10 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   `spec/udp.md`: the setup frame, the status message (a receiver's position and window,
   which drive flow control), the NAK (a receiver's report of a gap), the RTT measurement
   and the heartbeat, in `udp`, with the spec's checks in the spec's order, a datagram
-  walker that checks a packet of data frames whole before any is read, and the
+  walker that checks a packet of data frames whole before any is read, holding a data
+  frame's length to the bytes present and a padding frame's to the term, since a
+  padding frame crosses the wire as its 32-byte header alone
+  (`DataFrameHeader::parse_on_wire`, `is_padding_header`; ADR 0045), and the
   arithmetic of the sender's and the receiver's rules. Every frame carries a version
   byte, and a reader drops a frame of a version or type it does not know, so that mixed
   versions run during an upgrade.

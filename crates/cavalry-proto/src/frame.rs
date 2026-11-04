@@ -305,6 +305,26 @@ impl DataFrameHeader {
         })
     }
 
+    /// [`DataFrameHeader::parse_within`] for a frame as the wire carries it
+    /// (`spec/udp.md`, "The datagram"; ADR 0045): a data frame's length is held to
+    /// `available`, the bytes present from the frame's start, and a padding frame's to
+    /// `term_length`, since a padding frame crosses the wire as its 32-byte header alone
+    /// with the padding's length in it. The type is read ahead of the checks only to
+    /// choose the bound ([`is_padding_header`]); the checks run in the spec's order on
+    /// the header itself, so a bad version or type is reported as such.
+    pub fn parse_on_wire(
+        bytes: &[u8],
+        available: usize,
+        term_length: u32,
+    ) -> Result<Self, FrameError> {
+        let bound = if is_padding_header(bytes) {
+            term_length as usize
+        } else {
+            available
+        };
+        Self::parse_within(bytes, bound)
+    }
+
     /// The header's fields read without the four checks, for one purpose: measuring what
     /// the checks cost (ADR 0010). It exists only in a build made with
     /// `--cfg cavalry_unchecked`, which `just bench-unchecked` sets and nothing else does;
@@ -418,6 +438,18 @@ impl DataFrameHeader {
     fn length(&self) -> usize {
         usize::try_from(self.frame_length).unwrap_or(0)
     }
+}
+
+/// Whether `bytes` begin with a padding frame's header: version 0 and type 0 in the
+/// header's first eight bytes, read before the checks run. A padding frame crosses the
+/// wire as its header alone with the padding's length (`spec/udp.md`, "The datagram";
+/// ADR 0045), so a reader that holds a frame's length to the bytes present holds a
+/// padding frame's to the term instead; [`DataFrameHeader::parse_on_wire`] does so.
+/// Fewer than eight bytes are not a padding header.
+pub fn is_padding_header(bytes: &[u8]) -> bool {
+    bytes.len() >= 8
+        && bytes[4] == VERSION as u8
+        && u16::from_le_bytes([bytes[6], bytes[7]]) == FrameType::Pad as u16
 }
 
 #[cfg(test)]
