@@ -185,11 +185,9 @@ widens its own band; why `grip` took the role from `kip`, with the measurement, 
 the soak host, where a driver records for days (card 159): a soak host is not tuned,
 so any machine serves it, and the gate gets the host that holds still.
 
-The link rows of the bench, `udp_round_trip_32` and `udp_one_way_32`, run across a
-direct cable between the two tuned hosts, the harness on `bench` and its echo peer on
-`grip` ([Run the bench](run-the-bench.md), step 5;
-[ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)), and a one-way
-number across hosts is only as good as the clock offset between them. The steps below
+A direct cable between the two tuned hosts carries the bench's link rows, which
+[ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md) decides, and a
+one-way number across hosts is only as good as the clock offset between them. The steps below
 joined `bench` and `grip` on 2026-10-31, when the cable moved from `kip`'s `enp87s0`,
 which had carried the first link since 2026-10-26, and were checked again on
 2026-11-02 with no job on either host; the numbers are that record, and the full
@@ -259,18 +257,21 @@ record is on card 182.
    offset of −852 µs, which is why the line carries it; the root distance of tens of
    milliseconds is `bench`'s own distance to UTC and does not enter a number between
    the two hosts. `tracking` reports the selected source, and on 2026-11-02 `grip` had
-   selected a public pool server with `bench-link` combined, so the offset the bench's
-   one-way row carries is read from `sourcestats`' `bench-link` line, which the
-   `bench (udp peer)` job prints after its echo; `noselect` on the pool lines in
-   `grip`'s chrony configuration would make `bench-link` the selected source, a change
-   ADR 0044's Revisit names.
+   selected a public pool server with `bench-link` combined, so the offset between
+   the two hosts is read from `sourcestats`' `bench-link` line, not from `tracking`;
+   `noselect` on the pool lines in `grip`'s chrony configuration would make
+   `bench-link` the selected source, a change ADR 0044's Revisit names.
 
 4. The firewall and the ports. `ufw` is inactive and no nftables ruleset is loaded on
-   either host, so nothing is opened for the link. A host that enables one opens UDP
-   40182 on `bench` and 40183 on `grip` on the link's interface, the ports the link
-   jobs bind; a port a firewall drops shows as the harness waiting ten minutes for the
-   stream to connect, and `cavalry doctor` on the publishing host saying
-   `udp-publication-not-connected` ([Run a driver and read
+   either host, so nothing is opened for the link. A host that enables one opens, on
+   the link's interface, the UDP port its receive endpoint binds, 40182 on `bench` and
+   40183 on `grip` for the link rows ADR 0044 decides, and admits the replies to the
+   other host's sender: a receiver answers every status message and NAK to the
+   datagram's source, which is the sender's own socket on a port the operating system
+   chose, so a stateful firewall, `ufw` among them, lets the replies through by itself,
+   and a stateless ruleset must open the reply path as well, or the stream never
+   connects. A port a firewall drops shows as the publishing host's `cavalry doctor`
+   saying `udp-publication-not-connected` ([Run a driver and read
    doctor](run-the-driver.md#when-it-does-not-work)).
 
 ## Access to the host

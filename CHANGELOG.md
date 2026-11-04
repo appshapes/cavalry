@@ -1036,10 +1036,12 @@ user-visible change, added in the same commit as the change. The format follows
   line is 64 bytes past it
   ([ADR 0043](docs/decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md);
   card 192).
-- ADR 0044: the bench measures UDP with one message in flight, on the loopback in the
-  rows every pass runs and across the direct cable between `bench` and `grip` in a pair
-  of jobs that meet over it, the round trip gated against `bench`'s baseline alone and
-  the one-way reported beside the clock offset; the ten-minute path's program gains a
-  UDP step on the same stream; `doctor` gains the interface MTU check; and the set-up
-  page's "Further hosts" is `bench` and `grip` with the link's record
+- ADR 0044 is accepted: the bench is to measure UDP with one message in flight, on the
+  loopback in rows every pass runs and across the direct cable between `bench` and
+  `grip` in a pair of jobs that meet over it, the round trip gated against `bench`'s
+  baseline alone and the one-way reported beside the clock offset; the ten-minute
+  path's program is to gain a UDP step on the same stream and `doctor` the interface
+  MTU check, each in its own change. The set-up page's "Further hosts" now describes
+  `bench` and `grip` with the link's record, and its firewall step the reply path a
+  stateless ruleset must open
   ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).

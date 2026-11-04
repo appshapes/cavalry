@@ -14,9 +14,9 @@ harness's UDP rows on each bench host, a cross-host row across the direct cable 
 `bench` and `grip`, the UDP step in the README's ten-minute path, a how-to for a
 publisher on one host and a subscriber on another, and `doctor`'s check for an
 interface whose MTU is below the stream's. The three features before it are on
-`master`: the transport's frames and rules (ADR 0040), the sender (ADR 0041), the
-receiver (ADR 0042) and a replay over the sender (ADR 0043). Nothing has measured the
-path yet; every commit under a data-plane crate since card 180 has quoted what the
+`master`, the transport's frames and rules (ADR 0040), the sender (ADR 0041) and the
+receiver (ADR 0042), and beside them card 192's replay over the sender (ADR 0043).
+Nothing has measured the path yet; every commit under a data-plane crate since card 180 has quoted what the
 existing rows show, as ADR 0039 said it would until this card.
 
 The harness measures the shared-memory rows with a publisher that runs free: it claims
@@ -70,18 +70,30 @@ link. Four rows and one peer:
    `127.0.0.1` through a real driver in the harness's process, the client rows' path
    through the driver's sender and receiver. They run in every pass of `just bench`,
    on the shared runners as a report and on both bench hosts gated against each host's
-   baselines, with a tenth of `--messages` per run after a tenth of a rotation's
-   warm-up: a message in flight is ten microseconds here against a tenth of one for the
-   client rows, and a tenth of the messages measures the same percentile in the same
-   time. `--pin` takes a fourth CPU, `P,S,C,R`: the publisher and the subscriber on
-   the first two as before, the sender on the third and the receiver on the fourth,
-   and the driver's conductor with the recorder, the replayer and the client's
-   conductor on the housekeeping CPU, as the recorder runs for the recorded rows; three
-   CPUs refuse a UDP row, since a receiver on a measured thread's CPU or with the
-   housekeeping threads gives a number the baseline cannot be compared with. The
-   driver's threads busy-spin under `--pin`, where each has a core, which is what
+   baselines, with a tenth of `--messages` per run: a message in flight is ten
+   microseconds here against a tenth of one for the client rows, and a tenth of the
+   messages measures the same percentile in the same time. Every UDP row, on the
+   loopback and across the link, warms up with 10,000 messages, or `--warmup`, in
+   place of the rotation the shared-memory rows warm up with: a rotation's warm-up
+   exists so that no measured message first-touches a page, and the driver pre-touches
+   the publication's log and the image's when it makes them (ADR 0027), so 10,000
+   messages warm the caches and the connection, a tenth of a second on the loopback
+   and a second across the link, where a rotation's 786,432 would be most of a run.
+   `--pin` takes a fourth CPU, `P,S,C,R`. In the shared-memory rows the placement is
+   what their baselines were recorded with: the publisher on the first CPU, the
+   subscriber on the second, the driver's conductor on the third, and the driver's
+   recorder, replayer, sender and receiver, the last two parked with no endpoint, with
+   the client's conductor on the housekeeping CPU, the lowest outside the pins. In the
+   UDP rows the publisher and the subscriber stay on the first two, the sender takes
+   the third CPU and the receiver the fourth, and the driver's conductor moves to the
+   housekeeping CPU beside the recorder, the replayer and the client's conductor, as
+   the recorder runs for the recorded rows, since a bench host has four isolated cores
+   and four threads are on the message path. Three CPUs refuse a UDP row, since a
+   receiver on a measured thread's CPU or with the housekeeping threads gives a number
+   the baseline cannot be compared with. The driver's threads busy-spin in the UDP rows
+   under `--pin`, where the sender and the receiver each have a core, which is what
    `doctor` recommends on isolated cores, and back off otherwise, as a driver on a
-   laptop does; the client rows keep backoff with the conductor pinned, as their
+   laptop does; the shared-memory rows keep backoff with the conductor pinned, as their
    baselines were recorded. The bench jobs pin `8,10,12,14` on `bench` and `4,5,6,7`
    on `grip` and run `check.sh` on the same four.
 2. **The link rows**, `udp_round_trip_<body>` and `udp_one_way_<body>`: the harness
@@ -101,20 +113,24 @@ link. Four rows and one peer:
    job prints after the echo, since `tracking` names whatever source `grip` selected
    at the moment; a one-way sample below zero, `grip`'s clock behind `bench`'s by
    more than the path, is recorded as 0 and counted under the table. The rows run
-   alone, with `--messages` as given per run, 100,000 times 21 runs in CI at about
-   100 µs a message, and each side waits up to ten minutes for the other, so the order
-   of the two commands does not matter. They are the pair of jobs ADR 0039 named,
-   `bench (udp)` on `bench` and `bench (udp peer)` on `grip`, started together once
-   both single-host bench jobs are done, so that neither host runs a bench while the
-   other measures the link, under the same guard that keeps a stranger's code off the
-   hosts. The gate's rule reads `udp_round_trip_` as a message row and `udp_one_way_`
-   as a report. `bench (udp)` joins `master`'s required checks by hand once it has run
-   green on `master` with its baseline, as `bench (grip)` did, since a required check
-   that has never run blocks every merge.
+   alone, with `--messages` as given per run after the 10,000-message warm-up,
+   100,000 times 21 runs in CI at about 100 µs a message, about four minutes, and each
+   side waits up to ten minutes for the other, so the order of the two commands does
+   not matter. They are the pair of jobs ADR 0039 named, `bench (udp)` on `bench` and
+   `bench (udp peer)` on `grip`, started together once both single-host bench jobs are
+   done, so that neither host runs a bench while the other measures the link, under
+   the same guard that keeps a stranger's code off the hosts. The rows keep the names
+   ADR 0039 gave them, and the gate's rule names them in full: `udp_one_way_` is on
+   its list of reported rows, read before the gated prefixes, and `udp_round_trip_` on
+   the gated ones beside `claim_commit_` and `one_way_`, so that which row gates is a
+   list in `scripts/bench-compare.py` and not the order of the words. `bench (udp)`
+   joins `master`'s required checks by hand once it has run green on `master` with
+   its baseline, as `bench (grip)` did, since a required check that has never run
+   blocks every merge.
 3. **The ten-minute path** gains the UDP step inside the program it already runs: after
    the recording stops, `quickstart` publishes the same 1,000 messages again on
-   `cavalry:udp?endpoint=127.0.0.1:40123`, Aeron's samples' port, on the same stream
-   through the same client and reads them back once and in order through a
+   `cavalry:udp?endpoint=127.0.0.1:40123`, the port the repository's own tests use, on
+   the same stream through the same client and reads them back once and in order through a
    subscription on that channel, every message through the driver's sender and
    receiver, and prints one more line; `scripts/quickstart.sh` checks the line on
    Linux and macOS, the README's six commands stay six, and the tutorial says what the
@@ -167,6 +183,14 @@ link. Four rows and one peer:
 - **An ephemeral port in the ten-minute path.** Lost: a reader copies a channel from
   the page, and `127.0.0.1:40123` is one they can type; a port in use refuses the
   subscription with error code 4 and the message names the port.
+- **The link rows named by what they cross, `round_trip_32_link` and
+  `one_way_32_link`.** Lost: ADR 0039 and card 182's "Done when" name them
+  `udp_round_trip_32` and `udp_one_way_32`, and a reader of the gate's rule finds
+  which row is reported in a list, not in the words' order.
+- **A rotation's warm-up for the UDP rows, as the shared-memory rows.** Lost: the
+  pages a rotation touches are touched when the driver makes the logs (ADR 0027), and
+  at a hundred microseconds a message across the link a rotation's 786,432 messages
+  are 79 seconds a run, more than the run itself.
 - **The `-unchecked` twin of the link rows in CI.** Lost for now: the pair's minutes
   on every push, for a difference the loopback rows measure on both hosts under both
   profiles; a Revisit clause.
@@ -174,8 +198,9 @@ link. Four rows and one peer:
 ## Evidence
 
 Laptop, 2026-11-04: Apple silicon, macOS, 18 cores, unpinned, clock step 41 ns, the
-harness at this change. The loopback rows with one message in flight, 100,000
-messages after 78,643 warm-up, p50 / p99 / p99.99 / max in µs:
+harness at this change, before the warm-up was fixed at 10,000. The loopback rows
+with one message in flight, 100,000 messages after 78,643 warm-up, p50 / p99 / p99.99
+/ max in µs:
 
 | Driver's idle strategy | `one_way_32_udp` | `claim_commit_32_udp` |
 | --- | --- | --- |
@@ -201,9 +226,11 @@ with a number that is the path's; a reader of the ten-minute path sees the same 
 publish over shared memory and over UDP; `doctor` names an interface that would
 fragment the stream before the stream is tried.
 
-Harder: the single-host bench jobs grow by the UDP rows, about a minute a profile at
-ten microseconds a message; a pair of jobs that must meet, and a stall on either host
-holds `master`, as a stall on one does today; every isolated core of both hosts is
+Harder: the single-host bench jobs grow by the UDP rows, 21 runs of 510,000 messages
+at about ten microseconds each, about two minutes a profile and four a job; the link
+pair adds about four more, 21 runs of 110,000 at about a hundred microseconds; a pair
+of jobs that must meet, and a stall on either host holds `master`, as a stall on one
+does today; every isolated core of both hosts is
 taken, so a fifth measured thread needs a host change; `--pin` with three CPUs refuses
 a UDP row, so a person's run on a three-core host passes `--only`; the ten-minute path
 binds a fixed port; the link job's baseline is `bench`'s own and `grip`'s part of the
