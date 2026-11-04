@@ -1513,6 +1513,97 @@ fn a_reader_stops_at_the_gap_until_the_receiver_fills_it() {
     );
 }
 
+/// A padding frame as the wire carries it: its 32-byte header alone, with the padding's
+/// length (`spec/udp.md`, "The datagram"; ADR 0045).
+fn wire_padding(term_offset: i32, term_id: i32, frame_length: usize) -> Vec<u8> {
+    let mut bytes = vec![0u8; 32];
+    DataFrameHeader::new(FrameType::Pad, Flags::NONE, frame_length)
+        .unwrap()
+        .with_term_offset(term_offset)
+        .with_session_id(7)
+        .with_stream_id(1001)
+        .with_term_id(term_id)
+        .write(&mut bytes)
+        .unwrap();
+    bytes
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_image_insert_writes_a_padding_frame_from_its_header_alone() {
+    // The tail of the term, from 64 to its end, is a padding frame the sender carried
+    // as its header: the reader skips it to the next term, and the scan reaches the
+    // term's end, with the same rule for a padding frame in the middle of a term, which
+    // an aborted claim leaves (`spec/log-buffer.md`, "Claim, commit and abort").
+    let dir = Dir::new("image-padding");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    let mut reader = log.reader(0).unwrap();
+    assert!(writer.insert(-5, 0, &wire_frame(0, -5, b"first")).unwrap());
+    let tail = (T - 64) as usize;
+    assert!(writer.insert(-5, 64, &wire_padding(64, -5, tail)).unwrap());
+    assert!(
+        !writer.insert(-5, 64, &wire_padding(64, -5, tail)).unwrap(),
+        "a duplicate changes nothing"
+    );
+    assert!(
+        writer
+            .insert(-4, 0, &wire_frame(0, -4, b"next term"))
+            .unwrap()
+    );
+    assert_eq!(
+        drain(&mut reader),
+        vec![b"first".to_vec(), b"next term".to_vec()],
+        "the reader skips the padding and follows into the next term"
+    );
+    assert_eq!(reader.position(), i64::from(T) + 64);
+    assert_eq!(
+        writer.scan(0, i64::from(T) + 64, 1 << 20).unwrap(),
+        ImageScan {
+            rebuild_position: i64::from(T) + 64,
+            next_frame: None,
+            scanned_to: i64::from(T) + 64,
+        },
+        "the scan walks the padding by its aligned length"
+    );
+
+    // An aborted claim's padding in the middle of a term: an unaligned length, skipped
+    // by its aligned length.
+    let dir = Dir::new("image-padding-mid-term");
+    let log = LogBuffers::create(dir.path(), &image_fields()).unwrap();
+    let mut writer = log.image_writer().unwrap();
+    let mut reader = log.reader(0).unwrap();
+    assert!(writer.insert(-5, 0, &wire_padding(0, -5, 132)).unwrap());
+    assert!(
+        writer
+            .insert(-5, 160, &wire_frame(160, -5, b"after"))
+            .unwrap()
+    );
+    assert_eq!(drain(&mut reader), vec![b"after".to_vec()]);
+    assert_eq!(reader.position(), 160 + 64);
+
+    // A padding frame that would run past the term, or a data frame carried short, is
+    // refused as before.
+    assert_eq!(
+        writer
+            .insert(-5, T - 32, &wire_padding((T - 32) as i32, -5, 64))
+            .unwrap_err()
+            .reason(),
+        "position"
+    );
+    assert_eq!(
+        writer
+            .insert(
+                -5,
+                256,
+                &wire_frame(256, -5, b"a body of some length")[..32]
+            )
+            .unwrap_err()
+            .reason(),
+        "frame"
+    );
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn an_image_insert_refuses_a_frame_outside_the_term_or_unaligned() {

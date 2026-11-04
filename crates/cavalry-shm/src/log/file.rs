@@ -1497,14 +1497,18 @@ impl ImageWriter {
     /// (`cavalry_proto::udp::Datagram::frames`), at `term_offset` of the term
     /// `term_id`: the bytes after the first eight with plain stores, then the first
     /// eight with a release store, and only where the frame length there is 0, so that a
-    /// duplicate changes nothing. Returns whether the frame was written. The term offset
-    /// must be a multiple of 32 with the frame within the term, and `frame` at least a
-    /// header long with a frame length that fits it; otherwise [`LogError::Position`]
-    /// or [`LogError::Frame`], with nothing written, as is a header whose term id or
-    /// term offset is not the one given, [`LogError::Mismatch`], so that a frame never
-    /// lands at an offset its header does not name. The caller keeps the receiver's
-    /// bounds (`cavalry_proto::udp::receiver_bounds`): this writer trusts that the term
-    /// is the stream's current one, as the datagram check trusted its term offset.
+    /// duplicate changes nothing. A padding frame comes as its 32-byte header alone
+    /// (`spec/udp.md`, "The datagram"; ADR 0045): its header is written the same way
+    /// and nothing after it, its body being the zeros the term holds before a frame
+    /// lands, and a reader skips it by its aligned length. Returns whether the frame
+    /// was written. The term offset must be a multiple of 32 with the frame within the
+    /// term, and `frame` at least a header long with, for a data frame, a frame length
+    /// that fits it; otherwise [`LogError::Position`] or [`LogError::Frame`], with
+    /// nothing written, as is a header whose term id or term offset is not the one
+    /// given, [`LogError::Mismatch`], so that a frame never lands at an offset its
+    /// header does not name. The caller keeps the receiver's bounds
+    /// (`cavalry_proto::udp::receiver_bounds`): this writer trusts that the term is the
+    /// stream's current one, as the datagram check trusted its term offset.
     pub fn insert(
         &mut self,
         term_id: i32,
@@ -1515,7 +1519,16 @@ impl ImageWriter {
         let Some(head) = frame.get(..FRAME_HEADER_LENGTH) else {
             return Err(LogError::Frame(FrameError::TooShort { given: frame.len() }));
         };
-        let header = DataFrameHeader::parse_within(head, frame.len())?;
+        // A padding frame's length is the padding's, bounded by the term below and not
+        // by the bytes given; the type is read ahead only to choose the bound.
+        let padding =
+            head[4] == 0 && u16::from_le_bytes([head[6], head[7]]) == FrameType::Pad as u16;
+        let available = if padding {
+            term_length as usize
+        } else {
+            frame.len()
+        };
+        let header = DataFrameHeader::parse_within(head, available)?;
         if header.term_id() != term_id {
             return Err(LogError::Mismatch {
                 field: "term id",
@@ -1552,7 +1565,9 @@ impl ImageWriter {
         let mut rest = [0u8; FRAME_HEADER_LENGTH - 8];
         rest.copy_from_slice(&head[8..]);
         cells.insert_rest(&rest);
-        if frame_length as usize > FRAME_HEADER_LENGTH {
+        // A data frame's body; a padding frame has none on the wire, and its zeros are
+        // already in the term.
+        if header.frame_type() == FrameType::Data && frame_length as usize > FRAME_HEADER_LENGTH {
             let body_end = (frame_length as usize).min(frame.len());
             self.mapped
                 .body_mut(partition, term_offset, frame_length)
