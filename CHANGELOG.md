@@ -1126,7 +1126,12 @@ user-visible change, added in the same commit as the change. The format follows
   four and pull request 111's three, with every gated row's slowest run before and after
   in the commit: the unchecked `claim_commit_32_client` row had turned `bench (grip)`
   red on pull requests 102, 103, 106 and 111 at 120 to 132 ns against a slowest run of
-  119 ns recorded on 2026-10-31, while the checked build did not move, the host's band
-  and not a change, the owner's call of 2026-11-04 under
-  [ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)
-  (card 182).
+  119 ns recorded on 2026-10-31, while the checked build did not move and master's own
+  runs at the tree passed. Those reds are not one slow run: a whole process sits higher,
+  as pull request 111's first attempt did, all twenty-one runs at 119 to 134 ns, where
+  its rerun read 113 to 117. The trigger in
+  [ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md),
+  master's own run failing or brushing the gate, did not fire, and a process of a new
+  tree never joins an older tree's entry, so the re-record is a person's commit under
+  [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
+  made by the owner on 2026-11-04 (card 182).
