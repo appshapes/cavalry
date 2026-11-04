@@ -1122,21 +1122,20 @@ user-visible change, added in the same commit as the change. The format follows
   is healthy, so they are read from the counters file by its layout until the console
   exists, with the values the tutorial's 1,000 messages give (card 182).
 - `grip`'s two bench profiles, `grip-linux` and `grip-linux-unchecked`, are re-recorded
-  at the tree of 7248621 from nine of its processes, pull request 109's two runs, master's
-  four and pull request 111's three, with every gated row's slowest run before and after
-  in the commit: the unchecked `claim_commit_32_client` row had turned `bench (grip)`
-  red on pull requests 102, 103, 106 and 111 at 120 to 132 ns against a slowest run of
-  119 ns recorded on 2026-10-31, while the checked build did not move and master's own
-  runs at the tree passed. Those reds are not one slow run: a whole process sits higher,
-  as pull request 111's first attempt did, all twenty-one runs at 119 to 134 ns, where
-  its rerun read 113 to 117. The trigger in
+  at the tree of 7248621 from its thirteen processes, pull request 109's two runs,
+  master's five, pull request 111's three, pull request 113's two and pull request
+  114's own, with every gated row's slowest run before and after in the commit and
+  the process behind each row that loosened. The unchecked `claim_commit_32_client`
+  row had turned `bench (grip)` red on pull requests 102, 103, 106 and 111 at 120 to
+  132 ns against a slowest run of 119 ns recorded on 2026-10-31, while the checked
+  build did not move and master's own runs at the tree passed. Those reds are not one
+  slow run: a whole process sits higher, as pull request 111's first attempt did, all
+  twenty-one runs at 119 to 134 ns, where its rerun read 113 to 117; the other rows
+  that loosened did so on one run of one process, 1.3 to 2.3 times the row's median,
+  with nothing in the host's journal, and card 198 is to find both. The trigger in
   [ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md),
   master's own run failing or brushing the gate, did not fire, and a process of a new
   tree never joins an older tree's entry, so the re-record is a person's commit under
   [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
-  made by the owner on 2026-11-04. Two checked rows lose most of their gate:
-  `one_way_32_client` now fails a median only at 1,173 ns and `one_way_32_recorded`
-  only at 1,210 ns, where the tree's medians are 479 to 493 and 497 to 521 ns, so a
-  regression of up to 2.4 times on either row passes `bench (grip)`. Each was loosened
-  by one run of pull request 111's first attempt, 1,117 and 1,152 ns, whose cause is
-  not known yet (card 182).
+  made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
+  tree while master is green is card 199's (card 182).
