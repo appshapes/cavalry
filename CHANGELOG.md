@@ -1113,3 +1113,10 @@ user-visible change, added in the same commit as the change. The format follows
   reading the path plus the line on a "slow of NTP time" day and the path minus it on
   a "fast" one ([Run the bench](docs/how-to/run-the-bench.md), step 5;
   [Set up a bench host](docs/how-to/set-up-a-bench-host.md), the clock; card 182).
+- [Publish between two hosts](docs/how-to/publish-between-two-hosts.md), followed once
+  between `bench` and `grip` on 2026-11-04, now says two things it did not: a driver
+  started over SSH loses its directory when the user's last session ends unless the user
+  lingers, the logind default, so the page asks for a session that outlives the driver;
+  and `cavalry doctor` prints no counter's value on a healthy stream, so the counters the
+  page names are read from the counters file by its layout until the console exists,
+  with the values the tutorial's 1,000 messages give (card 182).

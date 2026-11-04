@@ -20,6 +20,14 @@ the channel changed is this task on one host. In Aeron, this is a publication an
   binds.
 - A firewall on the subscriber's host, when one is on, that admits UDP to that port
   and the replies to the publisher's socket (step 3).
+- A session that outlives the driver, on a host reached over SSH. When a user's last
+  session ends, logind removes the user's files under `/dev/shm` by default
+  (`RemoveIPC=yes`), the driver's directory among them, so a driver started in one SSH
+  session loses its directory when that session closes, and `doctor` and new clients
+  find no driver while the old ones run on ([Run a driver and read
+  doctor](run-the-driver.md#when-it-does-not-work), "The directory vanished under a
+  running driver"). Keep one session open on each host until step 4 is done, or run
+  `sudo loginctl enable-linger <user>` there first.
 
 ## Steps
 
@@ -83,8 +91,14 @@ the channel changed is this task on one host. In Aeron, this is a publication an
   image(s)`, no `udp-subscription-no-image` and no `udp-image-loss`; `image.created`
   is 1, and the handler is called with every message once and in order.
 - `receiver.frames_received` on the subscriber's host and `sender.frames_sent` on the
-  publisher's rise together, read with `cavalry doctor` or from the counters file
-  ([counters](../reference/counters.md)).
+  publisher's rise together: with the tutorial's 1,000 messages, 1,000 each, with
+  `image.created` 1 on the subscriber's host and `image.ended` 1 there once the
+  publication has closed. `cavalry doctor` prints no counter's value while a stream is
+  healthy, only inside a warning when one fires, and the console that will print them
+  is not built yet, so read them from the `counters` file in the driver's directory by
+  its layout ([the counters file](../reference/counters-file.md): the record's label
+  is the counter's name, the slot its value; [counters](../reference/counters.md) says
+  what each means).
 
 ## When it does not work
 
