@@ -47,7 +47,9 @@ nothing depends on it.
 - Measures the same two rows over `cavalry:udp` on the loopback, `claim_commit_32_udp`
   and `one_way_32_udp`: a publication and a subscription on one port of `127.0.0.1`
   through the driver's sender and receiver, with one message in flight at a time, so
-  that a sample is the path's latency and not the depth of the sender's window; a tenth
+  that a sample is the path's latency and not the depth of the sender's window, gated
+  as the other message rows once a host's baseline holds them and `no baseline` until
+  then; a tenth
   of `--messages` per run, at ten microseconds a message, after a warm-up of 10,000
   messages, since the driver pre-touches both logs. The driver's threads
   busy-spin under `--pin` and back off otherwise. With `--link-here <host>:<port>` and
@@ -55,8 +57,9 @@ nothing depends on it.
   and `udp_one_way_32`, across the direct cable between the two bench hosts to a peer
   running `--echo`, the harness on the other host, which claims every message it
   receives on a publication back; the round trip is one clock's and gated against the
-  profile with `-link` appended, the one-way carries the offset between the two hosts'
-  clocks and is reported beside it, never gated (ADR 0039, ADR 0044). `just bench-unchecked` runs it all
+  profile with `-link` appended once that profile has a baseline, the one-way carries
+  the offset between the two hosts' clocks and is reported beside it, never gated (ADR
+  0039, ADR 0044). `just bench-unchecked` runs it all
   again with the data-plane checks built out, under a profile of its own, to price
   ADR 0010's checks.
 - Runs the measured loops under a counting allocator and fails the run when they

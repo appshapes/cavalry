@@ -1038,11 +1038,12 @@ user-visible change, added in the same commit as the change. The format follows
   card 192).
 - The bench gains the UDP rows: `claim_commit_32_udp` and `one_way_32_udp` take the
   client rows' path over `cavalry:udp` on the loopback through the driver's sender and
-  receiver, one message in flight, a tenth of `--messages` per run, gated on both bench
+  receiver, one message in flight, a tenth of `--messages` per run, on both bench
   hosts, whose jobs now pin four CPUs, `--pin 8,10,12,14` and `4,5,6,7`, the fourth for
   the receiver; and `udp_round_trip_32` and `udp_one_way_32` cross the direct cable
   between `bench` and `grip` with `--link-here` and `--link-peer` to a peer running
-  `--echo`, the new `bench (udp)` job and its `bench (udp peer)`, the round trip gated
-  against `bench-linux-link` and the one-way reported beside the clock offset the peer
-  job prints
+  `--echo`, the new `bench (udp)` job and its `bench (udp peer)`, the round trip held
+  to `bench-linux-link` and the one-way reported beside the clock offset the peer job
+  prints. The new rows and the new profile gate once their baselines are recorded from
+  three of the jobs' processes at one tree, and read `no baseline` until then
   ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).

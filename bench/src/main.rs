@@ -30,7 +30,8 @@ use cavalry_driver::{Driver, DriverThread, IdleStrategy, ThreadStart, spec};
 use cavalry_log::dir::LogDir;
 use cavalry_log::layout::Recording;
 use cavalry_shm::counters::generated::{
-    CHANNEL_STATUS, PUBLICATION_LIMIT, PUBLICATION_POSITION, SUBSCRIPTION_POSITION,
+    CHANNEL_PUBLICATIONS, IMAGE_ENDED, IMAGE_TIMED_OUT, PUBLICATION_LIMIT, PUBLICATION_POSITION,
+    SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{CountersFile, CountersReader};
 use cavalry_shm::log::{ClaimError, HeaderFields, LogBuffers, LogType};
@@ -843,16 +844,9 @@ struct LogRun {
 /// A publisher, a subscriber and a conductor over a real log buffer and counters file
 /// under the system's temporary directory.
 fn bench_log(options: &Options, log_type: LogType) -> Result<LogRun, String> {
-    let dir = bench_dir().join(format!(
-        "cavalry-bench-{}-{:?}",
-        std::process::id(),
-        log_type
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_log(options, log_type, &dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir(&format!("{log_type:?}"), |dir| {
+        run_log(options, log_type, dir)
+    })
 }
 
 fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Result<LogRun, String> {
@@ -1058,12 +1052,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 /// same reason as the log rows': no measured message first-touches a page.
 fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
     let name = if recorded { "recorded" } else { "client" };
-    let dir = bench_dir().join(format!("cavalry-bench-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_client(options, &dir, recorded);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir(name, |dir| run_client(options, dir, recorded))
 }
 
 /// The client rows, and with `recorded` the same rows while the driver's recorder writes
@@ -1375,9 +1364,14 @@ fn udp_stream(
         .add_publication(publish, STREAM_ID)
         .map_err(|e| e.to_string())?;
     pin_to(options.pin.map(|pin| pin.publisher))?;
+    // A poll with a fragment limit of 0 applies the subscription's events, the image
+    // joining among them, and delivers nothing: the other end of the link may start
+    // publishing the moment its own publication connects, which is before this end
+    // sees its publication connected, and a message delivered here would be lost to
+    // the echo.
     let deadline = Instant::now() + timeout;
     while !(publication.is_connected() && subscription.is_connected()) {
-        subscription.poll(|_, _| {}, 1).map_err(|e| e.to_string())?;
+        subscription.poll(|_, _| {}, 0).map_err(|e| e.to_string())?;
         if Instant::now() > deadline {
             return Err(format!(
                 "the stream did not connect in {} s: the publication on {publish} is {}, the \
@@ -1412,16 +1406,17 @@ fn udp_stream(
     })
 }
 
-/// Closes a stream's four handles in order, the subscription, whose receive endpoint
-/// closes with it, then the publication, so that the stream's end goes out, and reads
-/// every driver thread's pin, ordered by the driver's join. With `linger`, waits between
-/// the publication's close and the driver's until every endpoint has closed: a closed
-/// publication lingers with heartbeats carrying end of stream until a status message
-/// with the flag answers or the linger passes, and a driver closed before its first
-/// heartbeat went, within the heartbeat interval of the close, would leave the peer's
-/// image to time out after 10 s instead of ending (`spec/udp.md`, "The sender"). The
-/// loopback rows skip the wait: their own subscription goes with the publication, and
-/// nothing on the port answers.
+/// Closes a stream's four handles in order, the publication first, so that the stream's
+/// end goes out, and reads every driver thread's pin, ordered by the driver's join. With
+/// `linger`, waits after the publication's close until its linger has ended, with the
+/// subscription and its receive endpoint still open: a closed publication lingers with
+/// heartbeats carrying end of stream until a status message with the flag answers or
+/// the linger passes, and a driver closed before its first heartbeat went, within the
+/// heartbeat interval of the close, would leave the peer's image to time out after 10 s
+/// instead of ending (`spec/udp.md`, "The sender"); the receive endpoint stays open so
+/// that the peer's own end of stream, which it sends once its image has ended, is
+/// answered the same way and its linger ends early too. The loopback rows skip the
+/// wait: their own subscription goes with the publication, and nothing answers.
 fn close_stream(
     dir: &std::path::Path,
     publication: Publication,
@@ -1431,11 +1426,11 @@ fn close_stream(
     pins: &DriverPins,
     linger: bool,
 ) -> Result<(), String> {
-    subscription.close().map_err(|e| e.to_string())?;
     publication.close().map_err(|e| e.to_string())?;
     if linger {
-        wait_endpoints_closed(dir)?;
+        wait_publications_lingered(dir)?;
     }
+    subscription.close().map_err(|e| e.to_string())?;
     client.close().map_err(|e| e.to_string())?;
     driver.close().map_err(|e| e.to_string())?;
     for thread in [
@@ -1450,39 +1445,55 @@ fn close_stream(
     Ok(())
 }
 
-/// Waits until no endpoint of the driver in `dir` is initializing or active, reading
-/// `channel.status` of every endpoint from the counters file as `doctor` does, for up to
-/// the publication linger plus the counter reuse timeout, after which an endpoint still
-/// open is an error: the send endpoint closes when its last publication's linger ends,
-/// which a status message with the end-of-stream flag ends early (`spec/udp.md`, "The
-/// receiver"), and the receive endpoint when its last subscription is removed.
-fn wait_endpoints_closed(dir: &std::path::Path) -> Result<(), String> {
+/// The margin past the publication linger that [`wait_publications_lingered`] allows
+/// the driver to remove the publication and release its endpoint: a few conductor duty
+/// cycles, each at most a millisecond under backoff, and the counter reuse timeout.
+const LINGER_MARGIN: Duration = Duration::from_secs(3);
+
+/// Waits until no send endpoint of the driver in `dir` carries a publication, reading
+/// `channel.publications` of every endpoint from the counters file as `doctor` does: the
+/// count falls when a closed publication's linger has ended, which a status message
+/// with the end-of-stream flag ends early and the linger timeout ends otherwise
+/// (`spec/udp.md`, "The sender"). A receive endpoint's count is 0. After the linger and
+/// [`LINGER_MARGIN`] a publication still carried is an error.
+fn wait_publications_lingered(dir: &std::path::Path) -> Result<(), String> {
     let reader = CountersReader::open(dir).map_err(|e| e.to_string())?;
-    let deadline = Instant::now()
-        + spec::PUBLICATION_LINGER
-        + spec::COUNTER_REUSE_TIMEOUT
-        + Duration::from_secs(1);
+    let deadline = Instant::now() + spec::PUBLICATION_LINGER + LINGER_MARGIN;
     loop {
-        let open = (0..reader.capacity()).any(|id| {
+        let carried = (0..reader.capacity()).any(|id| {
             reader
                 .record(id)
                 .ok()
                 .flatten()
-                .is_some_and(|fields| fields.type_id() == CHANNEL_STATUS.0)
-                && matches!(reader.read_acquire(id), Ok(0 | 1))
+                .is_some_and(|fields| fields.type_id() == CHANNEL_PUBLICATIONS.0)
+                && reader.read_acquire(id).is_ok_and(|count| count > 0)
         });
-        if !open {
+        if !carried {
             return Ok(());
         }
         if Instant::now() > deadline {
             return Err(format!(
-                "an endpoint stayed open {} s past the publication linger: the driver did not \
-                 close it after the last publication's linger or the last subscription's removal",
-                spec::COUNTER_REUSE_TIMEOUT.as_secs() + 1
+                "a send endpoint still carried a publication {} s past the publication linger: \
+                 the driver did not remove the closed publication when its linger ended",
+                LINGER_MARGIN.as_secs()
             ));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Runs `benchmark` with a directory of its own under the bench directory, named by the
+/// process and `suffix`, made empty before and removed after, whatever the outcome.
+fn with_bench_dir<T>(
+    suffix: &str,
+    benchmark: impl FnOnce(&std::path::Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let dir = bench_dir().join(format!("cavalry-bench-{}-{suffix}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let result = benchmark(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 /// What a run with one message in flight produced on the publisher's side.
@@ -1694,12 +1705,7 @@ fn spawn_subscriber(
 /// core and back off otherwise. The rows run a tenth of `--messages` ([`UDP_SHARE`])
 /// after [`UDP_WARMUP`] messages.
 fn bench_udp(options: &Options) -> Result<LogRun, String> {
-    let dir = bench_dir().join(format!("cavalry-bench-{}-udp", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_udp(options, &dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir("udp", |dir| run_udp(options, dir))
 }
 
 fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
@@ -1762,12 +1768,7 @@ struct LinkRun {
 /// ADR 0044). The stream, the driver and the peer's image live across every run, so a
 /// run after the first starts connected; `--messages` is the count per run, as given.
 fn bench_link(options: &Options, link: &Link) -> Result<Vec<LinkRun>, String> {
-    let dir = bench_dir().join(format!("cavalry-bench-{}-link", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_link(options, &dir, link);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir("link", |dir| run_link(options, dir, link))
 }
 
 fn run_link(options: &Options, dir: &std::path::Path, link: &Link) -> Result<Vec<LinkRun>, String> {
@@ -1840,12 +1841,7 @@ fn run_link(options: &Options, dir: &std::path::Path, link: &Link) -> Result<Vec
 /// (ADR 0044). Under `--pin` the echo runs on the publisher's CPU, with the sender and
 /// the receiver on theirs.
 fn run_echo(options: &Options, link: &Link) -> Result<(), String> {
-    let dir = bench_dir().join(format!("cavalry-bench-{}-echo", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = echo(options, &dir, link);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir("echo", |dir| echo(options, dir, link))
 }
 
 fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), String> {
@@ -1942,11 +1938,29 @@ fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), Str
         }
         std::hint::spin_loop();
     }
+    // The image's end from the counters, as `doctor` would read it: the receiver
+    // retires an image that reached its end of stream in the same cycle it stores the
+    // end, when every reader is already there, and the client may apply the image's
+    // going before the loop above has looked at the flag; `image.ended` and
+    // `image.timed_out` say which it was (`spec/udp.md`, "The receiver", step 5).
+    let (image_ended, image_timed_out) = {
+        let reader = CountersReader::open(dir).map_err(|e| e.to_string())?;
+        (
+            reader
+                .read_acquire(IMAGE_ENDED.record())
+                .map_err(|e| e.to_string())?,
+            reader
+                .read_acquire(IMAGE_TIMED_OUT.record())
+                .map_err(|e| e.to_string())?,
+        )
+    };
+    let ended = ended || (image_ended > 0 && image_timed_out == 0);
     close_stream(dir, publication, subscription, client, driver, &pins, true)?;
     if !ended {
         return Err(format!(
             "the stream from {source} went after {echoed} messages without its end: the other \
-             host's harness stopped, or its image timed out here after 10 s without a datagram"
+             host's harness stopped, or its image timed out here after 10 s without a datagram \
+             (image.ended {image_ended}, image.timed_out {image_timed_out})"
         ));
     }
     println!(
@@ -2066,12 +2080,7 @@ struct RecordRun {
 /// three terms and the segment two, so the row records at most two terms less a block,
 /// whatever `--messages` says, and never rolls a segment.
 fn bench_record(options: &Options) -> Result<RecordRun, String> {
-    let dir = bench_dir().join(format!("cavalry-bench-{}-record", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_record(options, &dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir("record", |dir| run_record(options, dir))
 }
 
 fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, String> {
@@ -2377,11 +2386,12 @@ fn main() -> ExitCode {
             below_zero = below_zero.max(run.below_zero);
         }
     }
-    for _ in 0..if options.link.is_some() {
+    let passes_to_run = if options.link.is_some() {
         0
     } else {
         options.repeat
-    } {
+    };
+    for _ in 0..passes_to_run {
         let pass = match run_pass(&options) {
             Ok(pass) => pass,
             Err(message) => {

@@ -19,9 +19,11 @@
 # The link rows run across the direct cable between the two hosts as a pair of jobs that
 # meet over it once both single-host bench jobs are done (ADR 0039, ADR 0044).
 #
-# The job names are stable on purpose: "gates (linux)", "gates (macos)", "bench (linux)",
-# "bench (grip)" and "bench (udp)" are the checks branch protection on master requires,
-# so renaming a job means updating the protection rule in the same change.
+# The job names are stable on purpose: "gates (linux)", "gates (macos)", "bench (linux)"
+# and "bench (grip)" are the checks branch protection on master requires, and
+# "bench (udp)" joins them by hand once it has run green on master with its baseline
+# (its comment below); "bench (udp peer)" is never required, since bench (udp) fails
+# with it. Renaming a job means updating the protection rule in the same change.
 name: ci
 
 on:
