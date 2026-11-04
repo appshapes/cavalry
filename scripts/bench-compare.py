@@ -27,10 +27,12 @@ baseline with `--join`: on kip a row's median moves by a tenth, and by half on t
 exclusive claim row, between two processes of one tree, and a baseline from one process
 at the bottom of that band failed master's own next run with no change behind it (ADR
 0033). Only
-the rows a message passes through, claim_commit_* and one_way_*, can fail the gate; the
-timer and slot_padding_* rows hold no Cavalry code, they probe the host and the clock at
-30 to 60 ns, where one 10 ns step of the clock is 15 to 33 percent, and they are printed
-with their change marked "reported" (ADR 0017).
+the rows a message passes through, claim_commit_*, one_way_* and udp_round_trip_*, can
+fail the gate; the timer and slot_padding_* rows hold no Cavalry code, they probe the host
+and the clock at 30 to 60 ns, where one 10 ns step of the clock is 15 to 33 percent, and
+they are printed with their change marked "reported" (ADR 0017), as is udp_one_way_*, the
+one-way row across the two bench hosts, which carries the offset between their clocks
+(ADR 0039, ADR 0044).
 
     bench-compare.py                        compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>               compare that result file instead
@@ -66,8 +68,13 @@ TOLERANCE = 0.05
 STEP_FIELD = "clock_step_ns"
 GATED = "p99_99_ns"
 SHOWN = ("p50_ns", "p99_ns", "p99_99_ns", "max_ns")
+# The rows that are reported and never gated, read before the gated prefixes: the
+# one-way row across the link carries the two hosts' clock offset and is reported beside
+# the round trip (ADR 0039, ADR 0044). Named in full here, so that which row gates is
+# this list and not the order of the words in a name.
+REPORTED_ROWS = ("udp_one_way_",)
 # The rows a message passes through; every other row is a probe of the host (ADR 0017).
-GATED_ROWS = ("claim_commit_", "one_way_")
+GATED_ROWS = ("claim_commit_", "one_way_", "udp_round_trip_")
 
 
 def recorded_order(path: Path) -> tuple[int, str]:
@@ -131,7 +138,7 @@ def compare(result: dict, baseline: dict) -> int:
             slowest = max(then.get("p99_99_ns_runs") or [then[GATED]])
             ratio = now[GATED] / slowest - 1
             verdict = f"{ratio:+.1%}"
-            if not name.startswith(GATED_ROWS):
+            if name.startswith(REPORTED_ROWS) or not name.startswith(GATED_ROWS):
                 verdict += " reported"
             elif ratio > TOLERANCE and now[GATED] - slowest > floor:
                 verdict += " REGRESSION"
