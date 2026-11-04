@@ -1036,6 +1036,14 @@ user-visible change, added in the same commit as the change. The format follows
   line is 64 bytes past it
   ([ADR 0043](docs/decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md);
   card 192).
+- ADR 0044 is accepted: the bench is to measure UDP with one message in flight, on the
+  loopback in rows every pass runs and across the direct cable between `bench` and
+  `grip` in a pair of jobs that meet over it, the round trip gated against `bench`'s
+  baseline alone and the one-way reported beside the clock offset; the ten-minute
+  path's program is to gain a UDP step on the same stream and `doctor` the interface
+  MTU check, each in its own change. The set-up page's "Further hosts" now describes
+  `bench` and `grip` with the link's record, and its firewall step the reply path a
+  stateless ruleset must open
 - `cavalry doctor` reports `udp-interface-mtu` on Linux when an endpoint's address
   routes over an interface whose MTU is below 1436 bytes, the stream's datagram with
   its headers, naming the interface and its MTU; and the new how-to
