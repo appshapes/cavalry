@@ -1051,6 +1051,20 @@ user-visible change, added in the same commit as the change. The format follows
   offset, a standard deviation of 51 ns on 2026-11-04 against 863 ns while the pools
   steered the clock; the set-up page's clock step has the line (ADR 0044's Revisit;
   card 182).
+- The bench gains the UDP rows: `claim_commit_32_udp` and `one_way_32_udp` take the
+  client rows' path over `cavalry:udp` on the loopback through the driver's sender and
+  receiver, one message in flight, a tenth of `--messages` per run, on both bench
+  hosts, whose jobs now pin four CPUs, `--pin 8,10,12,14` and `4,5,6,7`, the fourth for
+  the receiver; and `udp_round_trip_32` and `udp_one_way_32` cross the direct cable
+  between `bench` and `grip` with `--link-here` and `--link-peer` to a peer running
+  `--echo`, the new `bench (udp)` job and its `bench (udp peer)`, the round trip held
+  to `bench-linux-link` and the one-way reported beside the clock offset the peer job
+  prints. The new rows and the new profile gate once their baselines are recorded from
+  three of the jobs' processes at one tree, and read `no baseline` until then. The
+  harness keeps each benchmark's allocations under its name, prints them under the
+  table as `allocations by benchmark`, writes them to the result as
+  `allocations_by_benchmark` and names the benchmarks that allocated in the failure
+  it exits with, so a run that fails the allocation gate says which row to look at
 - The ten-minute path publishes over UDP: the quickstart program publishes its 1,000
   messages again on `cavalry:udp?endpoint=127.0.0.1:40123`, the same stream through
   the same API, reads them back through the driver's sender and receiver, and prints a

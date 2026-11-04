@@ -3,31 +3,37 @@
 //! claims and commits into a real log buffer, a subscriber thread reads it, and a
 //! conductor thread does the driver's duties, the limit and the cleaning, through a real
 //! counters file. The client rows take the path a user takes: `cavalry-client` against a
-//! real `cavalry-driver` in this process, publication to subscription (ADR 0021). Every
+//! real `cavalry-driver` in this process, publication to subscription (ADR 0021). The
+//! UDP rows take the client rows' path over `cavalry:udp` on the loopback, through the
+//! driver's sender and receiver, one message in flight at a time; the link rows take it
+//! across the direct link between the two bench hosts to a peer, `--echo`, that echoes
+//! every message (ADR 0044). Every
 //! sample is one message, timed with the time stamp counter, calibrated once (ADR 0028),
 //! and every number reported is a percentile or a max of an HdrHistogram, never a mean. The measured loops run under a counting
-//! allocator and the run fails when they allocate.
+//! allocator and the run fails when they allocate, naming the benchmark whose loops did.
 //!
 //! `cavalry-bench --help` lists the options; `docs/how-to/run-the-bench.md` is the page.
 
 use std::alloc::System;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
-use std::thread;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cavalry_client::{Cavalry, Offer};
+use cavalry_client::{Cavalry, Offer, Publication, Subscription};
 use cavalry_driver::{Driver, DriverThread, IdleStrategy, ThreadStart, spec};
 use cavalry_log::dir::LogDir;
 use cavalry_log::layout::Recording;
-use cavalry_shm::counters::CountersFile;
 use cavalry_shm::counters::generated::{
-    PUBLICATION_LIMIT, PUBLICATION_POSITION, SUBSCRIPTION_POSITION,
+    CHANNEL_PUBLICATIONS, IMAGE_ENDED, IMAGE_TIMED_OUT, PUBLICATION_LIMIT, PUBLICATION_POSITION,
+    SUBSCRIPTION_POSITION,
 };
+use cavalry_shm::counters::{CountersFile, CountersReader};
 use cavalry_shm::log::{ClaimError, HeaderFields, LogBuffers, LogType};
 use hdrhistogram::Histogram;
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
@@ -57,6 +63,29 @@ const MTU: u32 = 1408;
 /// The histogram's range: 1 ns to 60 s, three significant figures. A value past the
 /// range saturates rather than resizing, so recording never allocates.
 const MAX_NS: u64 = 60_000_000_000;
+/// The share of `--messages` the UDP rows run: one in ten. The rows keep one message in
+/// flight, so a message is the path's latency, about ten microseconds on the loopback
+/// of a bench host against a tenth of one through shared memory for the client rows,
+/// and a tenth of the messages measures the same percentile in the same time (ADR
+/// 0044). The link rows take `--messages` as given, since they run alone.
+const UDP_SHARE: u64 = 10;
+/// The warm-up of every UDP row, on the loopback and across the link, in place of the
+/// rotation the shared-memory rows warm up with: a rotation's warm-up is so that no
+/// measured message first-touches a page, and the driver pre-touches the publication's
+/// log and the image's when it makes them (ADR 0027), so this many messages warm the
+/// caches and the connection, a tenth of a second on the loopback and a second across
+/// the link, where a rotation's 786,432 messages would be most of a run (ADR 0044).
+const UDP_WARMUP: u64 = 10_000;
+/// How long the UDP rows wait for the loopback stream to connect, the receiver's status
+/// message answering the sender's setup frame, which goes every 100 ms.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the link rows and the echo peer wait for each other: the two jobs of one
+/// workflow run start when the single-host bench jobs are done, within seconds of each
+/// other, and a person starting the two by hand types two commands (ADR 0044).
+const LINK_TIMEOUT: Duration = Duration::from_secs(600);
+/// The least body the link rows carry: this host's clock stamp, this host's wall-clock
+/// stamp and the peer's wall-clock stamp, eight bytes each.
+const LINK_BODY_LEAST: usize = 24;
 
 struct Options {
     messages: u64,
@@ -67,13 +96,18 @@ struct Options {
     profile: String,
     profile_suffix: String,
     out: Option<PathBuf>,
-    /// The CPUs of the publisher, the subscriber and the driver's conductor, from
-    /// `--pin`; the driver's recorder, replayer, sender and receiver and the client's
-    /// conductor run on the lowest CPU outside them.
-    pin: Option<[usize; 3]>,
+    /// The CPUs from `--pin`: the publisher's, the subscriber's, the driver's
+    /// conductor's in the IPC rows and the sender's in the UDP rows, and the receiver's
+    /// in the UDP rows when a fourth is given; the driver's recorder, replayer and
+    /// the client's conductor run on the lowest CPU outside them, with the sender and
+    /// the receiver in the IPC rows and the driver's conductor in the UDP rows.
+    pin: Option<Pins>,
     /// That lowest CPU outside the pins, from the process's allowed set as it was before
     /// this thread pinned itself: the affinity a thread reads is its own.
     housekeeping: Option<usize>,
+    /// `--link-here` and `--link-peer`: the link rows across the direct link in place
+    /// of every single-host row, or with `--echo` the peer that echoes them.
+    link: Option<Link>,
     /// How many times every benchmark runs; the reported run is the median by p99.99,
     /// and the result lists every run's.
     repeat: u32,
@@ -102,6 +136,9 @@ enum Benchmark {
     /// The client path through a real driver, with the recorder on when `recorded`:
     /// the same two rows under `name`, `client` or `recorded`.
     Client { recorded: bool, name: &'static str },
+    /// The client path over `cavalry:udp` on the loopback, through the driver's sender
+    /// and receiver, one message in flight (ADR 0044): the same two rows under `udp`.
+    Udp,
     /// A load and a store from two threads this many bytes apart (ADR 0011): the
     /// `slot_padding_<spacing>_load` and `slot_padding_<spacing>_store` rows.
     Slot { spacing: usize },
@@ -111,9 +148,10 @@ enum Benchmark {
 
 impl Benchmark {
     /// Every benchmark of a full pass, in the order they run: the timer, both log
-    /// types, the client path with and without a recording on, the three slot
-    /// spacings, and last the recorder's block path, so its writes reach no other row.
-    const ALL: [Benchmark; 9] = [
+    /// types, the client path with and without a recording on, the client path over
+    /// UDP on the loopback, the three slot spacings, and last the recorder's block
+    /// path, so its writes reach no other row.
+    const ALL: [Benchmark; 10] = [
         Benchmark::Timer,
         Benchmark::Log {
             log_type: LogType::Exclusive,
@@ -131,6 +169,7 @@ impl Benchmark {
             recorded: true,
             name: "recorded",
         },
+        Benchmark::Udp,
         Benchmark::Slot { spacing: 0 },
         Benchmark::Slot { spacing: 64 },
         Benchmark::Slot { spacing: 128 },
@@ -146,6 +185,10 @@ impl Benchmark {
             Benchmark::Log { name, .. } | Benchmark::Client { name, .. } => vec![
                 format!("claim_commit_{body}_{name}"),
                 format!("one_way_{body}_{name}"),
+            ],
+            Benchmark::Udp => vec![
+                format!("claim_commit_{body}_udp"),
+                format!("one_way_{body}_udp"),
             ],
             Benchmark::Slot { spacing } => vec![
                 format!("slot_padding_{spacing}_load"),
@@ -190,16 +233,28 @@ Options:
   --messages N      messages per benchmark after the warm-up (default 1000000)
   --warmup N        messages before recording starts; the default is one rotation through
                     all three terms, so no measured message first-touches a page (196608
-                    for the default body and term)
+                    for the default body and term), and 10000 for the UDP rows, whose
+                    logs the driver pre-touches
   --body N          body bytes per message, at least 8 for the timestamp (default 32)
   --term-length N   term length of the log buffer, a power of two from 65536 (default 4194304)
   --profile NAME    the baseline profile; default $CAVALRY_BENCH_PROFILE or local-<os>-<arch>
   --profile-suffix S  appended to the profile; `just bench-unchecked` passes -unchecked
   --out DIR         where the result JSON goes (default bench/results); --no-write writes none
-  --pin P,S,C       pin the publisher, the subscriber and the driver's conductor to CPUs P,
-                    S and C, three distinct CPUs, Linux only, and the driver's recorder,
-                    replayer, sender and receiver and the client's conductor to the lowest
-                    CPU outside them; the bench host passes 8,10,12 (ADR 0016)
+  --pin P,S,C[,R]   pin the publisher and the subscriber to CPUs P and S, the driver's
+                    conductor to C in the IPC rows, and in the UDP rows the sender to C
+                    and the receiver to R, distinct CPUs, Linux only; the driver's
+                    recorder and replayer and the client's conductor run on the lowest
+                    CPU outside them, the sender and the receiver with them in the IPC
+                    rows and the driver's conductor with them in the UDP rows; three CPUs
+                    refuse a UDP row; the bench host passes 8,10,12,14 (ADR 0016, ADR 0044)
+  --link-here H:P   with --link-peer: run the link rows alone, udp_round_trip_<body> and
+                    udp_one_way_<body>, across the direct link to a peer running --echo,
+                    this host's link address and port for the echo to come back to, and
+                    the peer's; the profile gets -link appended; --body is at least 24
+  --link-peer H:P   the peer's link address and the port its receive endpoint binds
+  --echo            with both link ends: be the peer, subscribing on --link-here and
+                    echoing every message to --link-peer until the stream ends, with no
+                    result written; the bench host runs it on grip (ADR 0044)
   --repeat N        run every benchmark N times, report each one's median run by p99.99,
                     and list every run's p99.99 in the result (default 1; CI passes 21)
   --only NAME       run only the benchmarks whose name contains NAME, for a profile of
@@ -222,9 +277,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
         out: Some(PathBuf::from("bench/results")),
         pin: None,
         housekeeping: None,
+        link: None,
         repeat: 1,
         only: None,
     };
+    let mut link_here: Option<String> = None;
+    let mut link_peer: Option<String> = None;
+    let mut echo = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         let mut value = |name: &str| {
@@ -265,6 +324,9 @@ fn parse(args: &[String]) -> Result<Options, String> {
                     .map_err(|e| format!("--repeat: {e}"))?
             }
             "--only" => options.only = Some(value("--only")?.clone()),
+            "--link-here" => link_here = Some(value("--link-here")?.clone()),
+            "--link-peer" => link_peer = Some(value("--link-peer")?.clone()),
+            "--echo" => echo = true,
             "--help" | "-h" => return Err(USAGE.to_string()),
             other => return Err(format!("unknown option {other}\n\n{USAGE}")),
         }
@@ -286,6 +348,35 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 .to_string(),
         );
     }
+    options.link = match (link_here, link_peer, echo) {
+        (None, None, false) => None,
+        (Some(here), Some(peer), echo) => Some(Link { here, peer, echo }),
+        _ => {
+            return Err(
+                "--link-here and --link-peer go together, each <host>:<port>, and --echo needs \
+                 both: the link rows run between this host and a peer running --echo (ADR 0044)"
+                    .to_string(),
+            );
+        }
+    };
+    if let Some(link) = &options.link {
+        if options.only.is_some() {
+            return Err(
+                "--only chooses among the single-host rows, and the link rows run alone: drop \
+                 --only, or the link ends"
+                    .to_string(),
+            );
+        }
+        if options.body < LINK_BODY_LEAST {
+            return Err(format!(
+                "--body must be at least {LINK_BODY_LEAST} for the link rows: this host's two \
+                 stamps and the peer's, eight bytes each"
+            ));
+        }
+        if !link.echo {
+            options.profile_suffix.push_str("-link");
+        }
+    }
     options.profile.push_str(&options.profile_suffix);
     if let Some(only) = &options.only {
         if options.benchmarks().is_empty() {
@@ -297,10 +388,29 @@ fn parse(args: &[String]) -> Result<Options, String> {
         }
         options.profile.push_str("-only");
     }
+    if let Some(pin) = options.pin {
+        let udp = options.link.is_some() || options.benchmarks().contains(&Benchmark::Udp);
+        check_pins(pin, udp)?;
+    }
     // Read here, before `main` pins this thread to the publisher's CPU, since the
     // allowed set a thread reads is its own.
     options.housekeeping = options.pin.map(housekeeping_cpu).transpose()?;
     Ok(options)
+}
+
+/// `--pin` with three CPUs and a UDP row to run is an error: the receiver would have
+/// to share a CPU with a measured thread or go with the housekeeping threads, and a
+/// number taken off an isolated core is not comparable with the baseline.
+fn check_pins(pin: Pins, udp: bool) -> Result<(), String> {
+    if udp && pin.receiver.is_none() {
+        return Err(format!(
+            "--pin {}: the UDP rows need a fourth CPU for the receiver, --pin P,S,C,R; pass four, \
+             or --only a row without udp in its name (ADR 0044); see \
+             docs/how-to/run-the-bench.md#when-it-does-not-work",
+            pin.list()
+        ));
+    }
+    Ok(())
 }
 
 impl Options {
@@ -322,6 +432,83 @@ impl Options {
         self.warmup_option
             .unwrap_or_else(|| DEFAULT.max(3 * u64::from(term_length) / frame.max(1)))
     }
+
+    /// The UDP rows' warm-up: `--warmup`, or [`UDP_WARMUP`].
+    fn udp_warmup(&self) -> u64 {
+        self.warmup_option.unwrap_or(UDP_WARMUP)
+    }
+
+    /// The UDP rows' messages per run: a tenth of `--messages`, [`UDP_SHARE`].
+    fn udp_messages(&self) -> u64 {
+        (self.messages / UDP_SHARE).max(1)
+    }
+}
+
+/// `--pin P,S,C[,R]`: where each measured thread runs (ADR 0016, ADR 0044).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pins {
+    publisher: usize,
+    subscriber: usize,
+    /// The driver's conductor in the IPC rows; the sender in the UDP rows, whose
+    /// conductor runs with the housekeeping threads, since a bench host has four
+    /// isolated cores and the publisher, the subscriber, the sender and the receiver
+    /// take them.
+    conductor: usize,
+    /// The receiver in the UDP rows; `None` for `--pin` with three CPUs, which refuses
+    /// a UDP row (`check_pins`).
+    receiver: Option<usize>,
+}
+
+impl Pins {
+    fn contains(self, id: usize) -> bool {
+        self.publisher == id
+            || self.subscriber == id
+            || self.conductor == id
+            || self.receiver == Some(id)
+    }
+
+    /// The CPUs as `--pin` spells them, `8,10,12,14`.
+    fn list(self) -> String {
+        let mut text = format!("{},{},{}", self.publisher, self.subscriber, self.conductor);
+        if let Some(receiver) = self.receiver {
+            let _ = write!(text, ",{receiver}");
+        }
+        text
+    }
+
+    /// The CPUs as the result writes them, `[8, 10, 12, 14]`.
+    fn json(self) -> String {
+        let mut text = format!(
+            "[{}, {}, {}",
+            self.publisher, self.subscriber, self.conductor
+        );
+        if let Some(receiver) = self.receiver {
+            let _ = write!(text, ", {receiver}");
+        }
+        text.push(']');
+        text
+    }
+}
+
+/// The two ends of the direct link, `--link-here` and `--link-peer`, each `<host>:<port>`
+/// as a `cavalry:udp` endpoint names them: this host's receive endpoint and the peer's.
+/// The link rows publish to the peer's and subscribe on this host's; the echo peer does
+/// the reverse (ADR 0044).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Link {
+    here: String,
+    peer: String,
+    echo: bool,
+}
+
+impl Link {
+    fn here_channel(&self) -> String {
+        format!("cavalry:udp?endpoint={}", self.here)
+    }
+
+    fn peer_channel(&self) -> String {
+        format!("cavalry:udp?endpoint={}", self.peer)
+    }
 }
 
 /// Where the log buffer and the counters file go: `/dev/shm` on Linux, the memory-backed
@@ -336,8 +523,8 @@ fn bench_dir() -> PathBuf {
     }
 }
 
-/// `--pin P,S,C`: three distinct CPU numbers.
-fn parse_pin(text: &str) -> Result<[usize; 3], String> {
+/// `--pin P,S,C[,R]`: three or four distinct CPU numbers.
+fn parse_pin(text: &str) -> Result<Pins, String> {
     let cpus: Vec<usize> = text
         .split(',')
         .map(|part| {
@@ -346,19 +533,36 @@ fn parse_pin(text: &str) -> Result<[usize; 3], String> {
                 .map_err(|e| format!("--pin: {part:?}: {e}"))
         })
         .collect::<Result<_, _>>()?;
-    let [publisher, subscriber, conductor] = cpus[..] else {
-        return Err(format!(
-            "--pin takes three CPUs, publisher,subscriber,conductor; got {}",
-            cpus.len()
-        ));
+    let pins = match cpus[..] {
+        [publisher, subscriber, conductor] => Pins {
+            publisher,
+            subscriber,
+            conductor,
+            receiver: None,
+        },
+        [publisher, subscriber, conductor, receiver] => Pins {
+            publisher,
+            subscriber,
+            conductor,
+            receiver: Some(receiver),
+        },
+        _ => {
+            return Err(format!(
+                "--pin takes three or four CPUs, publisher,subscriber,conductor[,receiver]; got {}",
+                cpus.len()
+            ));
+        }
     };
-    if publisher == subscriber || publisher == conductor || subscriber == conductor {
+    let distinct = cpus
+        .iter()
+        .all(|cpu| cpus.iter().filter(|other| *other == cpu).count() == 1);
+    if !distinct {
         return Err(
-            "--pin: the three CPUs must differ; two spinning threads on one CPU starve each other"
+            "--pin: the CPUs must differ; two spinning threads on one CPU starve each other"
                 .to_string(),
         );
     }
-    Ok([publisher, subscriber, conductor])
+    Ok(pins)
 }
 
 /// Binds the calling thread to one CPU when `--pin` named one, and does nothing
@@ -409,27 +613,29 @@ fn histogram() -> Histogram<u64> {
     hist
 }
 
-/// The lowest CPU in the calling thread's allowed set outside the three pins: where the
-/// driver's recorder, replayer, sender and receiver and the client's conductor run under
-/// `--pin`, so that the third pin holds the driver's conductor alone (card 136). Read before any thread pins
-/// itself: the bench host's shells and runner start with the housekeeping CPUs alone
-/// in their set, and a thread already pinned to one CPU reads a set of one.
-fn housekeeping_cpu(pin: [usize; 3]) -> Result<usize, String> {
+/// The lowest CPU in the calling thread's allowed set outside the pins: where the
+/// driver's recorder and replayer and the client's conductor run under `--pin`, with
+/// the sender and the receiver in the IPC rows and the driver's conductor in the UDP
+/// rows, so that a pinned CPU holds one measured thread alone (card 136, ADR 0044).
+/// Read before any thread pins itself: the bench host's shells and runner start with
+/// the housekeeping CPUs alone in their set, and a thread already pinned to one CPU
+/// reads a set of one.
+fn housekeeping_cpu(pin: Pins) -> Result<usize, String> {
     core_affinity::get_core_ids()
         .unwrap_or_default()
         .into_iter()
         .map(|core| core.id)
-        .filter(|id| !pin.contains(id))
+        .filter(|id| !pin.contains(*id))
         .min()
         .ok_or_else(|| {
             format!(
-                "--pin: no CPU outside {},{},{} in the process's allowed set for the \
-                 driver's recorder, replayer, sender and receiver and the client's conductor; \
+                "--pin: no CPU outside {} in the process's allowed set for the \
+                 driver's recorder and replayer and the client's conductor; \
                  run the harness from a shell \
                  whose allowed set holds a housekeeping CPU as well: `taskset -cp $$` prints \
-                 the shell's, and `taskset -c 0-7 just bench --pin 8,10,12` runs with CPUs 0 \
+                 the shell's, and `taskset -c 0-7 just bench --pin 8,10,12,14` runs with CPUs 0 \
                  to 7 in it (docs/how-to/run-the-bench.md#when-it-does-not-work)",
-                pin[0], pin[1], pin[2]
+                pin.list()
             )
         })
 }
@@ -639,16 +845,9 @@ struct LogRun {
 /// A publisher, a subscriber and a conductor over a real log buffer and counters file
 /// under the system's temporary directory.
 fn bench_log(options: &Options, log_type: LogType) -> Result<LogRun, String> {
-    let dir = bench_dir().join(format!(
-        "cavalry-bench-{}-{:?}",
-        std::process::id(),
-        log_type
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_log(options, log_type, &dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir(&format!("{log_type:?}"), |dir| {
+        run_log(options, log_type, dir)
+    })
 }
 
 fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Result<LogRun, String> {
@@ -701,7 +900,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     let subscriber = {
         let dir = dir.to_path_buf();
         let position = subscriber_position.clone();
-        let cpu = options.pin.map(|pin| pin[1]);
+        let cpu = options.pin.map(|pin| pin.subscriber);
         thread::Builder::new()
             .name("subscriber".into())
             .spawn(move || -> Result<Histogram<u64>, String> {
@@ -739,7 +938,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         let subscriber_position = subscriber_position.clone();
         let publisher_position = publisher_position.clone();
         let window = i64::from(window);
-        let cpu = options.pin.map(|pin| pin[2]);
+        let cpu = options.pin.map(|pin| pin.conductor);
         thread::Builder::new()
             .name("conductor".into())
             .spawn(move || -> Result<u64, String> {
@@ -854,12 +1053,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 /// same reason as the log rows': no measured message first-touches a page.
 fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
     let name = if recorded { "recorded" } else { "client" };
-    let dir = bench_dir().join(format!("cavalry-bench-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_client(options, &dir, recorded);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir(name, |dir| run_client(options, dir, recorded))
 }
 
 /// The client rows, and with `recorded` the same rows while the driver's recorder writes
@@ -875,7 +1069,7 @@ fn bench_client(options: &Options, recorded: bool) -> Result<LogRun, String> {
 /// the run, never a row.
 fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Result<LogRun, String> {
     let housekeeping = options.housekeeping;
-    let conductor_cpu = options.pin.map(|pin| pin[2]);
+    let conductor_cpu = options.pin.map(|pin| pin.conductor);
     // A pin a driver thread could not take is reported through `pins`, since the hook
     // returns nothing. `Driver::start_with_threads` returns as soon as its three threads
     // are spawned and `Cavalry::connect_to` waits for no answer, so a load here would
@@ -889,9 +1083,9 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     let on_thread_start: ThreadStart = {
         let pins = Arc::clone(&pins);
         Arc::new(move |thread| {
-            // The sender and the receiver go with the housekeeping threads until the
-            // UDP rows give each a core of its own (card 182): no row of this version
-            // sends a datagram.
+            // The sender and the receiver hold no endpoint in these rows and park, so
+            // they go with the housekeeping threads; the UDP rows give each a core of
+            // its own (`udp_thread_start`).
             let cpu = match thread {
                 DriverThread::Conductor => conductor_cpu,
                 DriverThread::Recorder
@@ -928,7 +1122,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     } else {
         None
     };
-    pin_to(options.pin.map(|pin| pin[0]))?;
+    pin_to(options.pin.map(|pin| pin.publisher))?;
     let deadline = Instant::now() + Duration::from_secs(10);
     while !subscription.is_connected() {
         subscription.poll(|_, _| {}, 1).map_err(|e| e.to_string())?;
@@ -942,7 +1136,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     let epoch = tick();
 
     let subscriber = {
-        let cpu = options.pin.map(|pin| pin[1]);
+        let cpu = options.pin.map(|pin| pin.subscriber);
         thread::Builder::new()
             .name("client-subscriber".into())
             .spawn(move || -> Result<Histogram<u64>, String> {
@@ -1065,12 +1259,725 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
 
 /// Why the client subscriber thread ended before the publisher was done: its own error,
 /// or its panic.
-fn subscriber_failure(joined: thread::Result<Result<Histogram<u64>, String>>) -> String {
+fn subscriber_failure<T>(joined: thread::Result<Result<T, String>>) -> String {
     match joined {
         Ok(Err(message)) => format!("the client subscriber failed: {message}"),
         Ok(Ok(_)) => "the client subscriber returned before the publisher was done".to_string(),
         Err(_) => "the client subscriber thread panicked".to_string(),
     }
+}
+
+/// A loopback port no socket holds at the moment it is read, bound and released: the
+/// UDP rows' channel is `cavalry:udp?endpoint=127.0.0.1:<port>`.
+fn free_port() -> Result<u16, String> {
+    UdpSocket::bind("127.0.0.1:0")
+        .and_then(|socket| socket.local_addr())
+        .map(|address| address.port())
+        .map_err(|e| format!("finding a free loopback port: {e}"))
+}
+
+/// The wall clock in nanoseconds since the Unix epoch, chrony's on the bench hosts: the
+/// one-way row's stamp, read on this host before the message goes and on the peer as it
+/// arrives (ADR 0044). A `clock_gettime` through the vDSO, with the tail ADR 0028 names,
+/// which the round trip, stamped by the harness's clock, does not carry.
+fn realtime_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos() as u64)
+}
+
+/// The driver's idle strategy for the UDP rows and the link rows: busy-spin under
+/// `--pin`, where the sender and the receiver each have a core and the conductor a
+/// housekeeping CPU, which is what `doctor` recommends on isolated cores; backoff
+/// otherwise, where five spinning driver and harness threads on a laptop's or a shared
+/// runner's cores would starve each other. The client rows keep backoff with the
+/// conductor pinned, as their baselines were recorded (ADR 0044).
+fn driver_idle(options: &Options) -> IdleStrategy {
+    if options.pin.is_some() {
+        IdleStrategy::BusySpin
+    } else {
+        IdleStrategy::Backoff
+    }
+}
+
+/// The hook that places the driver's threads for the UDP rows and the link rows: under
+/// `--pin` the sender on the third CPU, the receiver on the fourth, and the conductor
+/// with the recorder and the replayer on the housekeeping CPU, as the recorder runs for
+/// the recorded rows (ADR 0039, ADR 0044). A pin a thread could not take is reported
+/// through `pins`, as `run_client` does.
+fn udp_thread_start(options: &Options, pins: &Arc<DriverPins>) -> ThreadStart {
+    let housekeeping = options.housekeeping;
+    let sender_cpu = options.pin.map(|pin| pin.conductor);
+    let receiver_cpu = options.pin.and_then(|pin| pin.receiver);
+    let pins = Arc::clone(pins);
+    Arc::new(move |thread| {
+        let cpu = match thread {
+            DriverThread::Sender => sender_cpu,
+            DriverThread::Receiver => receiver_cpu,
+            DriverThread::Conductor | DriverThread::Recorder | DriverThread::Replayer => {
+                housekeeping
+            }
+        };
+        if pin_to(cpu).is_err() {
+            pins.slot(thread)
+                .store(cpu.map_or(0, |cpu| cpu + 1), Ordering::Release);
+        }
+    })
+}
+
+/// A driver, a client, a publication and a subscription for a `cavalry:udp` row, with
+/// the pins its driver threads reported.
+struct UdpStream {
+    driver: Driver,
+    client: Cavalry,
+    publication: Publication,
+    subscription: Subscription,
+    pins: Arc<DriverPins>,
+}
+
+/// A driver and a client in `dir`, a subscription on `subscribe` and a publication on
+/// `publish`, connected both ways within `timeout`: the publication once a receiver on
+/// `publish`'s endpoint has answered its setup frame, the subscription once a setup frame
+/// has reached `subscribe`'s endpoint and made its image. On the loopback both are this
+/// driver's; over the link the other end is the peer's, and the two wait for each other.
+/// This thread is on the housekeeping CPU while the driver and the client spawn, so
+/// their threads inherit it, and on the publisher's CPU when this returns.
+fn udp_stream(
+    options: &Options,
+    dir: &std::path::Path,
+    subscribe: &str,
+    publish: &str,
+    timeout: Duration,
+) -> Result<UdpStream, String> {
+    let pins = Arc::new(DriverPins::new());
+    let on_thread_start = udp_thread_start(options, &pins);
+    pin_to(options.housekeeping)?;
+    let driver =
+        Driver::start_with_threads(dir, dir.join("log"), driver_idle(options), on_thread_start)
+            .map_err(|e| e.to_string())?;
+    let mut client = Cavalry::connect_to(dir).map_err(|e| e.to_string())?;
+    let mut subscription = client
+        .add_subscription(subscribe, STREAM_ID)
+        .map_err(|e| e.to_string())?;
+    // The driver's conductor has answered, so its hook has run.
+    pins.check(DriverThread::Conductor)?;
+    let publication = client
+        .add_publication(publish, STREAM_ID)
+        .map_err(|e| e.to_string())?;
+    pin_to(options.pin.map(|pin| pin.publisher))?;
+    // A poll with a fragment limit of 0 applies the subscription's events, the image
+    // joining among them, and delivers nothing: the other end of the link may start
+    // publishing the moment its own publication connects, which is before this end
+    // sees its publication connected, and a message delivered here would be lost to
+    // the echo.
+    let deadline = Instant::now() + timeout;
+    while !(publication.is_connected() && subscription.is_connected()) {
+        subscription.poll(|_, _| {}, 0).map_err(|e| e.to_string())?;
+        if Instant::now() > deadline {
+            return Err(format!(
+                "the stream did not connect in {} s: the publication on {publish} is {}, the \
+                 subscription on {subscribe} {}; a setup frame goes every 100 ms, so a receiver \
+                 on the publication's endpoint whose subscription wants the stream answers within \
+                 one, and the subscription's image comes with the first setup frame on its \
+                 endpoint (docs/how-to/run-the-bench.md#when-it-does-not-work)",
+                timeout.as_secs(),
+                if publication.is_connected() {
+                    "connected"
+                } else {
+                    "not connected"
+                },
+                if subscription.is_connected() {
+                    "has its image"
+                } else {
+                    "has no image"
+                }
+            ));
+        }
+        std::thread::sleep(Duration::from_micros(100));
+    }
+    // The receiver answered a setup frame the sender sent, so both hooks have run.
+    pins.check(DriverThread::Sender)?;
+    pins.check(DriverThread::Receiver)?;
+    Ok(UdpStream {
+        driver,
+        client,
+        publication,
+        subscription,
+        pins,
+    })
+}
+
+/// Closes a stream's four handles in order, the publication first, so that the stream's
+/// end goes out, and reads every driver thread's pin, ordered by the driver's join. With
+/// `linger`, waits after the publication's close until its linger has ended, with the
+/// subscription and its receive endpoint still open: a closed publication lingers with
+/// heartbeats carrying end of stream until a status message with the flag answers or
+/// the linger passes, and a driver closed before its first heartbeat went, within the
+/// heartbeat interval of the close, would leave the peer's image to time out after 10 s
+/// instead of ending (`spec/udp.md`, "The sender"); the receive endpoint stays open so
+/// that the peer's own end of stream, which it sends once its image has ended, is
+/// answered the same way and its linger ends early too. The loopback rows skip the
+/// wait: their own subscription goes with the publication, and nothing answers.
+fn close_stream(
+    dir: &std::path::Path,
+    publication: Publication,
+    subscription: Subscription,
+    client: Cavalry,
+    driver: Driver,
+    pins: &DriverPins,
+    linger: bool,
+) -> Result<(), String> {
+    publication.close().map_err(|e| e.to_string())?;
+    if linger {
+        wait_publications_lingered(dir)?;
+    }
+    subscription.close().map_err(|e| e.to_string())?;
+    client.close().map_err(|e| e.to_string())?;
+    driver.close().map_err(|e| e.to_string())?;
+    for thread in [
+        DriverThread::Conductor,
+        DriverThread::Recorder,
+        DriverThread::Replayer,
+        DriverThread::Sender,
+        DriverThread::Receiver,
+    ] {
+        pins.check(thread)?;
+    }
+    Ok(())
+}
+
+/// The margin past the publication linger that [`wait_publications_lingered`] allows
+/// the driver to remove the publication and release its endpoint: a few conductor duty
+/// cycles, each at most a millisecond under backoff, and the counter reuse timeout.
+const LINGER_MARGIN: Duration = Duration::from_secs(3);
+
+/// Waits until no send endpoint of the driver in `dir` carries a publication, reading
+/// `channel.publications` of every endpoint from the counters file as `doctor` does: the
+/// count falls when a closed publication's linger has ended, which a status message
+/// with the end-of-stream flag ends early and the linger timeout ends otherwise
+/// (`spec/udp.md`, "The sender"). A receive endpoint's count is 0. After the linger and
+/// [`LINGER_MARGIN`] a publication still carried is an error.
+fn wait_publications_lingered(dir: &std::path::Path) -> Result<(), String> {
+    let reader = CountersReader::open(dir).map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + spec::PUBLICATION_LINGER + LINGER_MARGIN;
+    loop {
+        let carried = (0..reader.capacity()).any(|id| {
+            reader
+                .record(id)
+                .ok()
+                .flatten()
+                .is_some_and(|fields| fields.type_id() == CHANNEL_PUBLICATIONS.0)
+                && reader.read_acquire(id).is_ok_and(|count| count > 0)
+        });
+        if !carried {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "a send endpoint still carried a publication {} s past the publication linger: \
+                 the driver did not remove the closed publication when its linger ended; see \
+                 docs/how-to/run-the-bench.md#when-it-does-not-work",
+                LINGER_MARGIN.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Runs `benchmark` with a directory of its own under the bench directory, named by the
+/// process and `suffix`, made empty before and removed after, whatever the outcome.
+fn with_bench_dir<T>(
+    suffix: &str,
+    benchmark: impl FnOnce(&std::path::Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let dir = bench_dir().join(format!("cavalry-bench-{}-{suffix}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let result = benchmark(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// What a run with one message in flight produced on the publisher's side.
+struct Published {
+    claim_commit: Histogram<u64>,
+    elapsed: Duration,
+    retries: u64,
+    allocations: usize,
+}
+
+/// One run of a stream with one message in flight: its warm-up and its length, the
+/// body, the clock reading its stamps count from, and whether it crosses the link.
+#[derive(Clone, Copy)]
+struct Run {
+    warmup: u64,
+    total: u64,
+    body: usize,
+    epoch: u64,
+    link: bool,
+}
+
+/// One run with one message in flight: this thread, the publisher, claims message i
+/// once `received` says the subscriber's handler has had message i − 1, stamps it and
+/// commits it, timing the claim and the commit for the claim row; the subscriber thread
+/// times the rest. The first eight bytes of the body carry the harness's clock and, over
+/// the link, the next eight the wall clock, for the peer to answer beside. A subscriber
+/// that returned, or a message that does not come back for ten seconds, fails the run
+/// with the reason instead of hanging (invariant 3).
+fn publish_one_in_flight<T>(
+    publication: &mut Publication,
+    received: &AtomicU64,
+    subscriber: &JoinHandle<T>,
+    run: Run,
+) -> Result<Published, String> {
+    let Run {
+        warmup,
+        total,
+        body,
+        epoch,
+        link,
+    } = run;
+    const STALL_CHECK: u64 = 4096;
+    const STALL_LIMIT: Duration = Duration::from_secs(10);
+    let mut hist = histogram();
+    let mut retries: u64 = 0;
+    let mut region: Option<Region<'static, System>> = None;
+    let mut start = Instant::now();
+    for i in 0..total {
+        if i == warmup {
+            region = Some(Region::new(GLOBAL));
+            start = Instant::now();
+        }
+        // One in flight: the last message has reached the subscriber's handler.
+        let waited = tick();
+        let mut spins: u64 = 0;
+        while received.load(Ordering::Acquire) < i {
+            spins += 1;
+            if spins.is_multiple_of(STALL_CHECK) {
+                if subscriber.is_finished() {
+                    return Err("the subscriber returned before the publisher was done".to_string());
+                }
+                if span_ns(waited, tick()) > STALL_LIMIT.as_nanos() as u64 {
+                    return Err(format!(
+                        "message {} of {total} did not reach the subscriber in {} s: {}; see \
+                         docs/how-to/run-the-bench.md#when-it-does-not-work",
+                        i.saturating_sub(1),
+                        STALL_LIMIT.as_secs(),
+                        if link {
+                            "the peer stopped echoing, or the link lost a datagram the sender \
+                             no longer holds"
+                        } else {
+                            "the stream stopped on the loopback"
+                        }
+                    ));
+                }
+            }
+            std::hint::spin_loop();
+        }
+        let wall = if link { realtime_nanos() } else { 0 };
+        let stamp = nanos(epoch);
+        let t0 = tick();
+        let mut stalled: u64 = 0;
+        loop {
+            match publication.try_claim(body) {
+                Ok(mut claim) => {
+                    let out = claim.body();
+                    out[..8].copy_from_slice(&stamp.to_le_bytes());
+                    if link {
+                        out[8..16].copy_from_slice(&wall.to_le_bytes());
+                    }
+                    claim.commit();
+                    break;
+                }
+                Err(Offer::BackPressured | Offer::AdminAction | Offer::NotConnected) => {
+                    retries += 1;
+                    stalled += 1;
+                    if stalled.is_multiple_of(STALL_CHECK)
+                        && span_ns(t0, tick()) > STALL_LIMIT.as_nanos() as u64
+                    {
+                        return Err(format!(
+                            "the publisher was refused for over {} s at message {i} of {total} \
+                             with one message in flight: the publication lost its connection; \
+                             see docs/how-to/run-the-bench.md#when-it-does-not-work",
+                            STALL_LIMIT.as_secs()
+                        ));
+                    }
+                    std::hint::spin_loop();
+                }
+                Err(other) => return Err(other.to_string()),
+            }
+        }
+        if i >= warmup {
+            hist.saturating_record(span_ns(t0, tick()));
+        }
+    }
+    let elapsed = start.elapsed();
+    let allocations = region.as_ref().map_or(0, |r| r.change().allocations);
+    Ok(Published {
+        claim_commit: hist,
+        elapsed,
+        retries,
+        allocations,
+    })
+}
+
+/// What a subscriber thread hands back: its subscription, for the next run, the
+/// histogram of the row it timed from the harness's stamp, the one-way row's over the
+/// link, and how many one-way samples read below zero. A tuple and not a `Vec`: the
+/// thread returns as soon as it has handled the last message, when the publisher's
+/// counting region can still be open, so nothing on its way out may allocate.
+type Received = Result<(Subscription, Histogram<u64>, Option<Histogram<u64>>, u64), String>;
+
+/// The subscriber of a run with one message in flight, on its own thread: polls until
+/// `total` messages have come, times each from the harness's stamp in its first eight
+/// bytes, the one-way row on the loopback and the round trip over the link, and over the
+/// link times the peer's wall-clock stamp against this host's, the one-way row; then
+/// tells the publisher through `received` that the message has been handled. A one-way
+/// sample below zero, the peer's clock behind this host's by more than the path, is
+/// recorded as 0 and counted, so that the row is read beside the offset chrony gives.
+fn spawn_subscriber(
+    name: &'static str,
+    cpu: Option<usize>,
+    mut subscription: Subscription,
+    received: Arc<AtomicU64>,
+    run: Run,
+) -> Result<JoinHandle<Received>, String> {
+    let Run {
+        warmup,
+        total,
+        epoch,
+        link,
+        ..
+    } = run;
+    thread::Builder::new()
+        .name(name.into())
+        .spawn(move || -> Received {
+            pin_to(cpu)?;
+            let mut first = histogram();
+            let mut second = link.then(histogram);
+            let mut below_zero: u64 = 0;
+            let mut count: u64 = 0;
+            while count < total {
+                let delivered = subscription
+                    .poll(
+                        |body, _| {
+                            let stamp = u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
+                            if count >= warmup {
+                                first.saturating_record(nanos(epoch).saturating_sub(stamp));
+                                if let Some(second) = second.as_mut() {
+                                    let sent = u64::from_le_bytes(
+                                        body[8..16].try_into().expect("8 bytes"),
+                                    );
+                                    let peer = u64::from_le_bytes(
+                                        body[16..24].try_into().expect("8 bytes"),
+                                    );
+                                    match peer.checked_sub(sent) {
+                                        Some(one_way) => second.saturating_record(one_way),
+                                        None => {
+                                            second.saturating_record(0);
+                                            below_zero += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            count += 1;
+                            received.store(count, Ordering::Release);
+                        },
+                        1024,
+                    )
+                    .map_err(|e| e.to_string())?;
+                if delivered == 0 {
+                    std::hint::spin_loop();
+                }
+            }
+            Ok((subscription, first, second, below_zero))
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// The UDP rows: the client rows' path over `cavalry:udp` on the loopback, a
+/// publication and a subscription on one port through a real driver in this process,
+/// every message through the driver's sender and receiver, the publisher on this thread
+/// and the subscriber on its own, one message in flight at a time: the publisher claims
+/// the next once the subscriber's handler has had the last, so that a sample is the
+/// path's latency and not the depth of the sender's window, which a publisher that runs
+/// ahead fills, a publication window of 8 MiB a message then waits in for tens of
+/// milliseconds (ADR 0044). Under `--pin` the sender has the third CPU and the receiver
+/// the fourth, and the driver's conductor runs with the housekeeping threads, since a
+/// bench host has four isolated cores; the driver's threads busy-spin when each has a
+/// core and back off otherwise. The rows run a tenth of `--messages` ([`UDP_SHARE`])
+/// after [`UDP_WARMUP`] messages.
+fn bench_udp(options: &Options) -> Result<LogRun, String> {
+    with_bench_dir("udp", |dir| run_udp(options, dir))
+}
+
+fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
+    let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", free_port()?);
+    let UdpStream {
+        driver,
+        client,
+        mut publication,
+        subscription,
+        pins,
+    } = udp_stream(options, dir, &channel, &channel, CONNECT_TIMEOUT)?;
+    let warmup = options.udp_warmup();
+    let run = Run {
+        warmup,
+        total: warmup + options.udp_messages(),
+        body: options.body,
+        epoch: tick(),
+        link: false,
+    };
+    let received = Arc::new(AtomicU64::new(0));
+    let subscriber = spawn_subscriber(
+        "udp-subscriber",
+        options.pin.map(|pin| pin.subscriber),
+        subscription,
+        Arc::clone(&received),
+        run,
+    )?;
+    let published = publish_one_in_flight(&mut publication, &received, &subscriber, run)?;
+    let (subscription, one_way, _, _) = match subscriber.join() {
+        Ok(Ok(received)) => received,
+        failed => return Err(subscriber_failure(failed)),
+    };
+    close_stream(dir, publication, subscription, client, driver, &pins, false)?;
+    Ok(LogRun {
+        claim_commit: summarize(&published.claim_commit, published.elapsed),
+        one_way: summarize(&one_way, published.elapsed),
+        retries: published.retries,
+        allocations: published.allocations,
+        producer_position_loads: None,
+    })
+}
+
+/// What one run of the link rows produced.
+struct LinkRun {
+    round_trip: Summary,
+    one_way: Summary,
+    retries: u64,
+    allocations: usize,
+    below_zero: u64,
+}
+
+/// The link rows, `udp_round_trip_<body>` and `udp_one_way_<body>`: the UDP rows' path
+/// across the direct link to the peer running `--echo` on the other bench host, which
+/// claims every message it receives on a publication back to this host, so that the
+/// round trip is measured on this host's clock alone, publisher's stamp to subscriber's
+/// handler, and gated; and the one-way is this host's wall-clock stamp against the
+/// peer's at its handler, which carries the offset between the two hosts' clocks, so
+/// it is reported beside the offset chrony gives on the peer and never gated (ADR 0039,
+/// ADR 0044). The stream, the driver and the peer's image live across every run, so a
+/// run after the first starts connected; `--messages` is the count per run, as given.
+fn bench_link(options: &Options, link: &Link) -> Result<Vec<LinkRun>, String> {
+    with_bench_dir("link", |dir| run_link(options, dir, link))
+}
+
+fn run_link(options: &Options, dir: &std::path::Path, link: &Link) -> Result<Vec<LinkRun>, String> {
+    let UdpStream {
+        driver,
+        client,
+        mut publication,
+        subscription,
+        pins,
+    } = udp_stream(
+        options,
+        dir,
+        &link.here_channel(),
+        &link.peer_channel(),
+        LINK_TIMEOUT,
+    )?;
+    let warmup = options.udp_warmup();
+    let mut subscription = Some(subscription);
+    let mut runs = Vec::with_capacity(options.repeat as usize);
+    for _ in 0..options.repeat {
+        let run = Run {
+            warmup,
+            total: warmup + options.messages,
+            body: options.body,
+            epoch: tick(),
+            link: true,
+        };
+        let received = Arc::new(AtomicU64::new(0));
+        let held = subscription
+            .take()
+            .ok_or_else(|| "the subscription is held between runs".to_string())?;
+        let subscriber = spawn_subscriber(
+            "link-subscriber",
+            options.pin.map(|pin| pin.subscriber),
+            held,
+            Arc::clone(&received),
+            run,
+        )?;
+        let published = publish_one_in_flight(&mut publication, &received, &subscriber, run)?;
+        let (returned, round_trip, one_way, below_zero) = match subscriber.join() {
+            Ok(Ok(received)) => received,
+            failed => return Err(subscriber_failure(failed)),
+        };
+        subscription = Some(returned);
+        let Some(one_way) = one_way else {
+            return Err("the link subscriber measured no one-way row".to_string());
+        };
+        runs.push(LinkRun {
+            round_trip: summarize(&round_trip, published.elapsed),
+            one_way: summarize(&one_way, published.elapsed),
+            retries: published.retries,
+            allocations: published.allocations,
+            below_zero,
+        });
+    }
+    let subscription = subscription
+        .take()
+        .ok_or_else(|| "the subscription is held after the runs".to_string())?;
+    close_stream(dir, publication, subscription, client, driver, &pins, true)?;
+    Ok(runs)
+}
+
+/// The echo peer, `--echo`: the other end of the link rows, on the other bench host. A
+/// driver and a client, a subscription on this host's link endpoint and a publication to
+/// the peer's; every message the subscription delivers is claimed on the publication
+/// with the same body, this host's wall clock written at its third eight bytes, and
+/// committed, so that the other host times the round trip on its own clock and the
+/// one-way against this host's. The loop ends when the image ends with the stream's end,
+/// and fails when the image goes without one or no message comes for the link timeout
+/// (ADR 0044). Under `--pin` the echo runs on the publisher's CPU, with the sender and
+/// the receiver on theirs.
+fn run_echo(options: &Options, link: &Link) -> Result<(), String> {
+    with_bench_dir("echo", |dir| echo(options, dir, link))
+}
+
+fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), String> {
+    /// How long a claim is retried before the message is dropped from the echo: with
+    /// one message in flight the publication is never back-pressured, so a refusal that
+    /// lasts is a lost connection.
+    const CLAIM_LIMIT_NS: u64 = 1_000_000_000;
+    println!(
+        "cavalry-bench: echo peer on {}, answering to {}, waiting up to {} s for the stream",
+        link.here,
+        link.peer,
+        LINK_TIMEOUT.as_secs()
+    );
+    let UdpStream {
+        driver,
+        client,
+        mut publication,
+        mut subscription,
+        pins,
+    } = udp_stream(
+        options,
+        dir,
+        &link.here_channel(),
+        &link.peer_channel(),
+        LINK_TIMEOUT,
+    )?;
+    let source = subscription.images().first().map_or_else(
+        || link.peer.clone(),
+        |image| image.source_identity().to_string(),
+    );
+    println!("cavalry-bench: the stream from {source} is connected, echoing");
+    let started = Instant::now();
+    let mut echoed: u64 = 0;
+    let mut refused: u64 = 0;
+    let mut last = tick();
+    let mut ended = false;
+    loop {
+        let delivered = subscription
+            .poll(
+                |body, _| {
+                    let now = realtime_nanos();
+                    let t0 = tick();
+                    loop {
+                        match publication.try_claim(body.len()) {
+                            Ok(mut claim) => {
+                                let out = claim.body();
+                                out.copy_from_slice(body);
+                                if out.len() >= LINK_BODY_LEAST {
+                                    out[16..24].copy_from_slice(&now.to_le_bytes());
+                                }
+                                claim.commit();
+                                echoed += 1;
+                                break;
+                            }
+                            Err(
+                                Offer::BackPressured | Offer::AdminAction | Offer::NotConnected,
+                            ) => {
+                                if span_ns(t0, tick()) > CLAIM_LIMIT_NS {
+                                    refused += 1;
+                                    break;
+                                }
+                                std::hint::spin_loop();
+                            }
+                            Err(_) => {
+                                refused += 1;
+                                break;
+                            }
+                        }
+                    }
+                },
+                1,
+            )
+            .map_err(|e| e.to_string())?;
+        if delivered > 0 {
+            last = tick();
+            continue;
+        }
+        if subscription
+            .images()
+            .iter()
+            .any(|image| image.is_end_of_stream())
+        {
+            // The image has read everything the stream wrote, so every echo is claimed:
+            // leave now, and not when the receiver retires the image, which it does in
+            // the same cycle, so that the exit does not wait on the retire.
+            ended = true;
+            break;
+        }
+        if !subscription.is_connected() {
+            break;
+        }
+        if span_ns(last, tick()) > LINK_TIMEOUT.as_nanos() as u64 {
+            return Err(format!(
+                "no message for {} s after {echoed} echoed from {source}: the other host's run \
+                 stopped without ending the stream; see \
+                 docs/how-to/run-the-bench.md#when-it-does-not-work",
+                LINK_TIMEOUT.as_secs()
+            ));
+        }
+        std::hint::spin_loop();
+    }
+    // The image's end from the counters, as `doctor` would read it: the receiver
+    // retires an image that reached its end of stream in the same cycle it stores the
+    // end, when every reader is already there, and the client may apply the image's
+    // going before the loop above has looked at the flag; `image.ended` and
+    // `image.timed_out` say which it was (`spec/udp.md`, "The receiver", step 5).
+    let (image_ended, image_timed_out) = {
+        let reader = CountersReader::open(dir).map_err(|e| e.to_string())?;
+        (
+            reader
+                .read_acquire(IMAGE_ENDED.record())
+                .map_err(|e| e.to_string())?,
+            reader
+                .read_acquire(IMAGE_TIMED_OUT.record())
+                .map_err(|e| e.to_string())?,
+        )
+    };
+    let ended = ended || (image_ended > 0 && image_timed_out == 0);
+    close_stream(dir, publication, subscription, client, driver, &pins, true)?;
+    if !ended {
+        return Err(format!(
+            "the stream from {source} went after {echoed} messages without its end: the other \
+             host's harness stopped, or its image timed out here after 10 s without a datagram \
+             (image.ended {image_ended}, image.timed_out {image_timed_out}); see \
+             docs/how-to/run-the-bench.md#when-it-does-not-work"
+        ));
+    }
+    println!(
+        "cavalry-bench: echoed {echoed} messages from {source} back to {} in {:.1} s, {refused} \
+         claim(s) refused",
+        link.peer,
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
 }
 
 /// Thirty-two words, 256 bytes, so two of them can sit 0, 64 or 128 bytes apart.
@@ -1095,7 +2002,7 @@ fn bench_slot(options: &Options, spacing: usize) -> Result<(Summary, Summary), S
     let writer = {
         let words = Arc::clone(&words);
         let done = Arc::clone(&done);
-        let cpu = options.pin.map(|pin| pin[1]);
+        let cpu = options.pin.map(|pin| pin.subscriber);
         thread::spawn(move || -> Result<Summary, String> {
             pin_to(cpu)?;
             let mut hist = histogram();
@@ -1167,6 +2074,51 @@ fn json_summary(out: &mut String, name: &str, s: &Summary, runs: &[u64]) {
     );
 }
 
+/// `name count, name count` over a map by name, for the lines under the table, or
+/// `empty` when nothing was kept.
+fn listed<T: std::fmt::Display>(by_name: &BTreeMap<String, T>, empty: &str) -> String {
+    if by_name.is_empty() {
+        return empty.to_string();
+    }
+    by_name
+        .iter()
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The members of a JSON object over a map by name, `"name": count, "name": count`.
+fn json_object<T: std::fmt::Display>(by_name: &BTreeMap<String, T>) -> String {
+    by_name
+        .iter()
+        .map(|(name, count)| format!("\"{name}\": {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The failure a run exits 1 with when a measured loop allocated: the count, the
+/// benchmarks whose loops made it, each under the name the lines under the table list
+/// it by, and the anchor that explains it; `None` when every benchmark's count is 0.
+/// A count of 1 in 20,500,000 messages, which `gates (macos)` read at cb2f538, could
+/// not be placed from the sum alone.
+fn allocation_failure(by_benchmark: &BTreeMap<String, usize>) -> Option<String> {
+    let allocations: usize = by_benchmark.values().sum();
+    if allocations == 0 {
+        return None;
+    }
+    let allocated: BTreeMap<String, usize> = by_benchmark
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|(name, &count)| (name.clone(), count))
+        .collect();
+    Some(format!(
+        "the measured loops allocated {allocations} times, by benchmark {}; the gate requires \
+         zero allocations per message (CLAUDE.md, gate 2; .claude/rules/data-plane.md); see \
+         docs/how-to/run-the-bench.md#when-it-does-not-work",
+        listed(&allocated, "")
+    ))
+}
+
 /// What the record row produced.
 struct RecordRun {
     record_block: Summary,
@@ -1181,12 +2133,7 @@ struct RecordRun {
 /// three terms and the segment two, so the row records at most two terms less a block,
 /// whatever `--messages` says, and never rolls a segment.
 fn bench_record(options: &Options) -> Result<RecordRun, String> {
-    let dir = bench_dir().join(format!("cavalry-bench-{}-record", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let result = run_record(options, &dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    with_bench_dir("record", |dir| run_record(options, dir))
 }
 
 fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, String> {
@@ -1286,15 +2233,20 @@ fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, Str
 }
 
 /// What one pass over every benchmark produced.
+#[derive(Default)]
 struct Pass {
     benchmarks: BTreeMap<String, Summary>,
     retries: BTreeMap<String, u64>,
     producer_position_loads: BTreeMap<String, u64>,
-    allocations: usize,
-    /// How many message rows ran, each of `--messages` messages, for the allocations
-    /// per message: the two log rows and the two client rows in a full pass, fewer
-    /// under `--only`.
-    message_rows: u64,
+    /// The allocations each benchmark's measured loops made, under the name its retries
+    /// are kept under and `record` for the recorder's block row, so that a run which
+    /// fails the allocation gate names the loop to look at; the sum over the names is
+    /// the count the run is judged on.
+    allocations: BTreeMap<String, usize>,
+    /// The messages the message rows measured, for the allocations per message:
+    /// `--messages` for each of the two log rows and the two client rows in a full
+    /// pass, a tenth of that for the UDP row ([`UDP_SHARE`]), fewer under `--only`.
+    messages_measured: u64,
 }
 
 impl Pass {
@@ -1311,30 +2263,32 @@ impl Pass {
         }
     }
 
-    /// Records a message benchmark's run, a log or a client one: its two rows, its
-    /// retries and producer position loads under `name`, and its allocations.
-    fn insert_message_run(&mut self, benchmark: Benchmark, name: &str, body: usize, run: LogRun) {
+    /// Records a message benchmark's run of `messages` messages, a log, a client or a
+    /// UDP one: its two rows, and its retries, producer position loads and allocations
+    /// under `name`.
+    fn insert_message_run(
+        &mut self,
+        benchmark: Benchmark,
+        name: &str,
+        body: usize,
+        run: LogRun,
+        messages: u64,
+    ) {
         self.insert_rows(benchmark, body, [run.claim_commit, run.one_way]);
         self.retries.insert(name.into(), run.retries);
         if let Some(loads) = run.producer_position_loads {
             self.producer_position_loads.insert(name.into(), loads);
         }
-        self.allocations += run.allocations;
-        self.message_rows += 1;
+        self.allocations.insert(name.into(), run.allocations);
+        self.messages_measured += messages;
     }
 }
 
 /// Every benchmark `--only` admits once, in [`Benchmark::ALL`]'s order: the timer, both
-/// log types, the client path with and without a recording on, the three slot
-/// spacings, and last the recorder's block path.
+/// log types, the client path with and without a recording on, the client path over
+/// UDP on the loopback, the three slot spacings, and last the recorder's block path.
 fn run_pass(options: &Options) -> Result<Pass, String> {
-    let mut pass = Pass {
-        benchmarks: BTreeMap::new(),
-        retries: BTreeMap::new(),
-        producer_position_loads: BTreeMap::new(),
-        allocations: 0,
-        message_rows: 0,
-    };
+    let mut pass = Pass::default();
     for benchmark in options.benchmarks() {
         match benchmark {
             Benchmark::Timer => {
@@ -1343,12 +2297,23 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
             Benchmark::Log { log_type, name } => {
                 let run = bench_log(options, log_type)
                     .map_err(|message| format!("the {name} log benchmark failed: {message}"))?;
-                pass.insert_message_run(benchmark, name, options.body, run);
+                pass.insert_message_run(benchmark, name, options.body, run, options.messages);
             }
             Benchmark::Client { recorded, name } => {
                 let run = bench_client(options, recorded)
                     .map_err(|message| format!("the {name} benchmark failed: {message}"))?;
-                pass.insert_message_run(benchmark, name, options.body, run);
+                pass.insert_message_run(benchmark, name, options.body, run, options.messages);
+            }
+            Benchmark::Udp => {
+                let run = bench_udp(options)
+                    .map_err(|message| format!("the udp benchmark failed: {message}"))?;
+                pass.insert_message_run(
+                    benchmark,
+                    "udp",
+                    options.body,
+                    run,
+                    options.udp_messages(),
+                );
             }
             Benchmark::Slot { spacing } => {
                 let (loads, stores) = bench_slot(options, spacing).map_err(|message| {
@@ -1360,7 +2325,7 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
                 let record = bench_record(options)
                     .map_err(|message| format!("the record benchmark failed: {message}"))?;
                 pass.insert_rows(benchmark, options.body, [record.record_block]);
-                pass.allocations += record.allocations;
+                pass.allocations.insert("record".into(), record.allocations);
             }
         }
     }
@@ -1384,28 +2349,54 @@ fn main() -> ExitCode {
             "cavalry-bench: {cpus} cores available; the log benchmarks run three spinning threads and will be noisy"
         );
     }
-    // The publisher is this thread, and so are the timer and the slot-padding loads.
-    if let Err(message) = pin_to(options.pin.map(|pin| pin[0])) {
+    // The publisher is this thread, and so are the timer and the slot-padding loads,
+    // and the echo peer's loop.
+    if let Err(message) = pin_to(options.pin.map(|pin| pin.publisher)) {
         eprintln!("cavalry-bench: {message}");
         return ExitCode::FAILURE;
+    }
+    if let Some(link) = options.link.as_ref().filter(|link| link.echo) {
+        return match run_echo(&options, link) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("cavalry-bench: {message}");
+                ExitCode::FAILURE
+            }
+        };
     }
     // The clock's step, on the publisher's CPU now that it is pinned (ADR 0029).
     let (clock_step, clock_step_ticks) = clock_step();
     let pinned = options.pin.map_or_else(
         || "unpinned".to_string(),
-        |pin| format!("pinned to CPUs {},{},{}", pin[0], pin[1], pin[2]),
+        |pin| format!("pinned to CPUs {}", pin.list()),
+    );
+    let rows = options.link.as_ref().map_or_else(
+        || {
+            format!(
+                "{} messages after {} warm-up",
+                options.messages,
+                options.warmup()
+            )
+        },
+        |link| {
+            format!(
+                "the link rows alone from {} to the peer at {}, {} messages after {} warm-up",
+                link.here,
+                link.peer,
+                options.messages,
+                options.udp_warmup()
+            )
+        },
     );
     let sha = git_sha();
     let date_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     println!(
-        "cavalry-bench: profile {}, git {sha}, {} {}, {cpus} cores, {pinned}, clock step {clock_step} ns ({clock_step_ticks} ticks), {} messages after {} warm-up, body {} bytes, term {} bytes, files under {}, {} run(s) per benchmark",
+        "cavalry-bench: profile {}, git {sha}, {} {}, {cpus} cores, {pinned}, clock step {clock_step} ns ({clock_step_ticks} ticks), {rows}, body {} bytes, term {} bytes, files under {}, {} run(s) per benchmark",
         options.profile,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        options.messages,
-        options.warmup(),
         options.body,
         options.term_length,
         bench_dir().display(),
@@ -1420,9 +2411,43 @@ fn main() -> ExitCode {
     let mut passes: BTreeMap<String, Vec<Summary>> = BTreeMap::new();
     let mut retries: BTreeMap<String, u64> = BTreeMap::new();
     let mut producer_position_loads: BTreeMap<String, u64> = BTreeMap::new();
-    let mut allocations: usize = 0;
-    let mut message_rows: u64 = 0;
-    for _ in 0..options.repeat {
+    // Each benchmark's allocations under its name, summed over the runs, `link` for the
+    // link rows; the sum over the names is the count the exit code is decided on.
+    let mut allocations_by_benchmark: BTreeMap<String, usize> = BTreeMap::new();
+    let mut messages_measured: u64 = 0;
+    let mut below_zero: u64 = 0;
+    if let Some(link) = &options.link {
+        // The link rows alone, every run over one stream, so the runs are the pass.
+        let runs = match bench_link(&options, link) {
+            Ok(runs) => runs,
+            Err(message) => {
+                eprintln!("cavalry-bench: the link rows failed: {message}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let round_trip = format!("udp_round_trip_{}", options.body);
+        let one_way = format!("udp_one_way_{}", options.body);
+        for run in runs {
+            passes
+                .entry(round_trip.clone())
+                .or_default()
+                .push(run.round_trip);
+            passes.entry(one_way.clone()).or_default().push(run.one_way);
+            let worst = retries.entry("link".to_string()).or_insert(0);
+            *worst = (*worst).max(run.retries);
+            *allocations_by_benchmark
+                .entry("link".to_string())
+                .or_insert(0) += run.allocations;
+            messages_measured += options.messages;
+            below_zero = below_zero.max(run.below_zero);
+        }
+    }
+    let passes_to_run = if options.link.is_some() {
+        0
+    } else {
+        options.repeat
+    };
+    for _ in 0..passes_to_run {
         let pass = match run_pass(&options) {
             Ok(pass) => pass,
             Err(message) => {
@@ -1441,8 +2466,10 @@ fn main() -> ExitCode {
             let most = producer_position_loads.entry(name).or_insert(0);
             *most = (*most).max(count);
         }
-        allocations += pass.allocations;
-        message_rows += pass.message_rows;
+        for (name, count) in pass.allocations {
+            *allocations_by_benchmark.entry(name).or_insert(0) += count;
+        }
+        messages_measured += pass.messages_measured;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
     let mut runs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
@@ -1457,13 +2484,13 @@ fn main() -> ExitCode {
         benchmarks.insert(name, median);
     }
 
-    // The message rows that ran, times their messages: four rows in a full pass, the
-    // two log rows and the two client rows; fewer under `--only`, and none when it
-    // admitted only the timer, slot or record rows, where the ratio has no denominator
-    // and is left out of the line and the result, while the count still decides the
-    // exit code. The recorder's block row adds its allocations to the count and no
-    // messages.
-    let messages_measured = message_rows * options.messages;
+    // The messages the message rows measured: five rows in a full pass, the two log
+    // rows and the two client rows of `--messages` each and the UDP row of a tenth, or
+    // the link rows alone; fewer under `--only`, and none when it admitted only the
+    // timer, slot or record rows, where the ratio has no denominator and is left out of
+    // the line and the result, while the count still decides the exit code. The
+    // recorder's block row adds its allocations to the count and no messages.
+    let allocations: usize = allocations_by_benchmark.values().sum();
     let allocations_per_message =
         (messages_measured > 0).then(|| allocations as f64 / messages_measured as f64);
 
@@ -1483,22 +2510,19 @@ fn main() -> ExitCode {
     }
     println!();
     println!(
-        "  publisher retries (back pressure or rotation), the most of any run: exclusive {}, concurrent {}, client {}",
-        retries.get("exclusive").copied().unwrap_or(0),
-        retries.get("concurrent").copied().unwrap_or(0),
-        retries.get("client").copied().unwrap_or(0)
+        "  publisher retries (back pressure, rotation or not connected), the most of any run: {}",
+        listed(&retries, "no message row ran")
     );
     println!(
         "  producer position loads by the harness's conductor, at the driver's cadence by the clock, the most of any run: {}",
-        if producer_position_loads.is_empty() {
-            "no log row ran".to_string()
-        } else {
-            producer_position_loads
-                .iter()
-                .map(|(name, loads)| format!("{name} {loads}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
+        listed(&producer_position_loads, "no log row ran")
+    );
+    println!(
+        "  allocations by benchmark, summed over the runs: {}",
+        listed(
+            &allocations_by_benchmark,
+            "no row ran under the counting allocator"
+        )
     );
     match allocations_per_message {
         Some(ratio) => println!(
@@ -1507,6 +2531,11 @@ fn main() -> ExitCode {
         None => println!(
             "  allocations per message: no message row ran ({allocations} allocations in the measured loops)"
         ),
+    }
+    if options.link.is_some() {
+        println!(
+            "  one-way samples below zero, the peer's clock behind this host's by more than the path, recorded as 0, the most of any run: {below_zero}"
+        );
     }
 
     let mut out = String::new();
@@ -1521,34 +2550,44 @@ fn main() -> ExitCode {
     let _ = writeln!(
         out,
         "  \"pinned\": {},",
-        options.pin.map_or_else(
-            || "null".to_string(),
-            |pin| format!("[{}, {}, {}]", pin[0], pin[1], pin[2])
-        )
+        options.pin.map_or_else(|| "null".to_string(), Pins::json)
     );
     let _ = writeln!(out, "  \"messages\": {},", options.messages);
     let _ = writeln!(out, "  \"repeat\": {},", options.repeat);
-    let _ = writeln!(out, "  \"warmup\": {},", options.warmup());
+    // The warm-up the run used: the UDP rows' alone in link mode, where no other row ran.
+    let _ = writeln!(
+        out,
+        "  \"warmup\": {},",
+        if options.link.is_some() {
+            options.udp_warmup()
+        } else {
+            options.warmup()
+        }
+    );
     let _ = writeln!(out, "  \"body\": {},", options.body);
     let _ = writeln!(out, "  \"term_length\": {},", options.term_length);
     let _ = writeln!(
         out,
-        "  \"publisher_retries\": {{\"exclusive\": {}, \"concurrent\": {}, \"client\": {}}},",
-        retries.get("exclusive").copied().unwrap_or(0),
-        retries.get("concurrent").copied().unwrap_or(0),
-        retries.get("client").copied().unwrap_or(0)
+        "  \"publisher_retries\": {{{}}},",
+        json_object(&retries)
     );
+    if options.link.is_some() {
+        let _ = writeln!(out, "  \"link_one_way_below_zero\": {below_zero},");
+    }
     let _ = writeln!(
         out,
         "  \"producer_position_loads\": {{{}}},",
-        producer_position_loads
-            .iter()
-            .map(|(name, loads)| format!("\"{name}\": {loads}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        json_object(&producer_position_loads)
     );
-    // The count the exit code is decided on, beside the ratio: `bench-compare` judges
-    // the count when no message row ran and the ratio is `null` (card 161).
+    // Each benchmark's share of the count under its name, then the count the exit code
+    // is decided on, beside the ratio: `bench-compare` judges the count when no message
+    // row ran and the ratio is `null` (card 161), and reads neither the shares nor the
+    // names.
+    let _ = writeln!(
+        out,
+        "  \"allocations_by_benchmark\": {{{}}},",
+        json_object(&allocations_by_benchmark)
+    );
     let _ = writeln!(out, "  \"allocations\": {allocations},");
     let _ = writeln!(
         out,
@@ -1587,11 +2626,8 @@ fn main() -> ExitCode {
         println!("  written to {}", path.display());
     }
 
-    if allocations > 0 {
-        eprintln!(
-            "cavalry-bench: the measured loops allocated {allocations} times; the gate requires zero allocations \
-             per message (CLAUDE.md, gate 2; .claude/rules/data-plane.md)"
-        );
+    if let Some(message) = allocation_failure(&allocations_by_benchmark) {
+        eprintln!("cavalry-bench: {message}");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -1755,6 +2791,10 @@ mod tests {
             assert_eq!(options(&["--only", row]).benchmarks(), vec![exclusive]);
         }
         assert_eq!(
+            options(&["--only", "one_way_32_udp"]).benchmarks(),
+            vec![Benchmark::Udp]
+        );
+        assert_eq!(
             options(&["--only", "slot_padding"]).benchmarks(),
             vec![
                 Benchmark::Slot { spacing: 0 },
@@ -1778,12 +2818,174 @@ mod tests {
             panic!("--only slot_padding_96 parsed, and no row's name contains it");
         };
         assert!(error.starts_with("--only slot_padding_96:"), "{error}");
-        // The timer, two rows each of the four message benchmarks and the three slot
+        // The timer, two rows each of the five message benchmarks and the three slot
         // pairs, and the record row.
         let rows = options(&[]).rows();
-        assert_eq!(rows.len(), 16);
+        assert_eq!(rows.len(), 18);
         for row in rows {
             assert!(error.contains(&row), "{error} does not list {row}");
         }
+    }
+
+    /// `--pin` takes three CPUs, the receiver left out, or four, all distinct.
+    #[test]
+    fn pin_takes_three_or_four_distinct_cpus() {
+        let three = parse_pin("8,10,12").expect("three parse");
+        assert_eq!(
+            three,
+            Pins {
+                publisher: 8,
+                subscriber: 10,
+                conductor: 12,
+                receiver: None
+            }
+        );
+        assert_eq!(three.list(), "8,10,12");
+        assert_eq!(three.json(), "[8, 10, 12]");
+        let four = parse_pin("4,5,6,7").expect("four parse");
+        assert_eq!(four.receiver, Some(7));
+        assert_eq!(four.list(), "4,5,6,7");
+        assert_eq!(four.json(), "[4, 5, 6, 7]");
+        assert!(four.contains(7) && !four.contains(8));
+        for text in ["8,10", "8,10,12,14,16", "8,10,12,12", "8,10,8", "8,10,x"] {
+            assert!(parse_pin(text).is_err(), "{text} parsed");
+        }
+    }
+
+    /// Three pins refuse a UDP row, which needs the fourth for the receiver, and admit
+    /// a run without one; four admit both.
+    #[test]
+    fn three_pins_refuse_a_udp_row() {
+        let three = parse_pin("8,10,12").expect("three parse");
+        let four = parse_pin("8,10,12,14").expect("four parse");
+        assert!(check_pins(three, false).is_ok());
+        let error = check_pins(three, true).expect_err("a UDP row needs four");
+        assert!(
+            error.contains("--pin 8,10,12")
+                && error.contains("fourth")
+                && error.contains("docs/how-to/run-the-bench.md#when-it-does-not-work"),
+            "{error}"
+        );
+        assert!(check_pins(four, true).is_ok());
+    }
+
+    /// The link rows need both ends, the profile gets `-link`, `--only` and a short body
+    /// are refused, and `--echo` needs the ends too and leaves the profile alone.
+    #[test]
+    fn the_link_rows_need_both_ends() {
+        for args in [
+            ["--link-here", "bench-link:40182"].as_slice(),
+            ["--link-peer", "grip-link:40183"].as_slice(),
+            ["--echo"].as_slice(),
+        ] {
+            let Err(error) = parsed(args) else {
+                panic!("{args:?} parsed, and one end alone is refused");
+            };
+            assert!(
+                error.contains("--link-here and --link-peer go together"),
+                "{error}"
+            );
+        }
+        let both = [
+            "--link-here",
+            "bench-link:40182",
+            "--link-peer",
+            "grip-link:40183",
+        ];
+        let link = options(&both);
+        assert_eq!(
+            link.link,
+            Some(Link {
+                here: "bench-link:40182".into(),
+                peer: "grip-link:40183".into(),
+                echo: false
+            })
+        );
+        assert_eq!(link.profile, "p-link");
+        assert_eq!(
+            link.link.as_ref().map(Link::here_channel).as_deref(),
+            Some("cavalry:udp?endpoint=bench-link:40182")
+        );
+        let mut echo = both.to_vec();
+        echo.push("--echo");
+        let echo = options(&echo);
+        assert!(echo.link.as_ref().is_some_and(|link| link.echo));
+        assert_eq!(echo.profile, "p");
+        let mut only = both.to_vec();
+        only.extend(["--only", "udp"]);
+        assert!(matches!(parsed(&only), Err(error) if error.contains("--only chooses")));
+        let mut short = both.to_vec();
+        short.extend(["--body", "16"]);
+        assert!(matches!(parsed(&short), Err(error) if error.contains("at least 24")));
+    }
+
+    /// The UDP rows run a tenth of the messages, never none, after their own warm-up;
+    /// `--warmup` sets theirs as it sets the others'.
+    #[test]
+    fn the_udp_rows_run_a_tenth() {
+        let defaults = options(&[]);
+        assert_eq!(defaults.udp_messages(), 100_000);
+        assert_eq!(defaults.udp_warmup(), 10_000);
+        assert_eq!(options(&["--messages", "5"]).udp_messages(), 1);
+        assert_eq!(options(&["--warmup", "7"]).udp_warmup(), 7);
+    }
+
+    /// A pass keeps each message benchmark's allocations under its name, so that the
+    /// failure can name the loop that allocated, and its messages in the sum.
+    #[test]
+    fn a_pass_keeps_allocations_by_benchmark() {
+        let run = |allocations| {
+            let empty = Summary {
+                count: 0,
+                p50_ns: 0,
+                p99_ns: 0,
+                p99_99_ns: 0,
+                max_ns: 0,
+                rate_per_s: 0.0,
+            };
+            LogRun {
+                claim_commit: empty.clone(),
+                one_way: empty,
+                retries: 0,
+                allocations,
+                producer_position_loads: None,
+            }
+        };
+        let mut pass = Pass::default();
+        pass.insert_message_run(Benchmark::Udp, "udp", 32, run(1), 10);
+        pass.insert_message_run(
+            Benchmark::Client {
+                recorded: false,
+                name: "client",
+            },
+            "client",
+            32,
+            run(0),
+            100,
+        );
+        assert_eq!(
+            pass.allocations,
+            BTreeMap::from([("client".to_string(), 0), ("udp".to_string(), 1)])
+        );
+        assert_eq!(pass.messages_measured, 110);
+        assert_eq!(pass.benchmarks.len(), 4);
+    }
+
+    /// A run whose loops allocated fails naming the count, the benchmarks that made it
+    /// and the anchor, and one whose every benchmark counted 0 does not fail.
+    #[test]
+    fn the_allocation_failure_names_the_benchmarks_that_allocated() {
+        let mut by_benchmark = BTreeMap::from([("client".to_string(), 0), ("udp".to_string(), 0)]);
+        assert_eq!(allocation_failure(&by_benchmark), None);
+        by_benchmark.insert("udp".to_string(), 1);
+        by_benchmark.insert("record".to_string(), 2);
+        let message = allocation_failure(&by_benchmark).expect("three allocations fail");
+        assert!(
+            message.contains("allocated 3 times")
+                && message.contains("by benchmark record 2, udp 1;")
+                && !message.contains("client")
+                && message.contains("docs/how-to/run-the-bench.md#when-it-does-not-work"),
+            "{message}"
+        );
     }
 }
