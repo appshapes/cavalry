@@ -1089,3 +1089,8 @@ user-visible change, added in the same commit as the change. The format follows
   a publisher on one host and a subscriber on another, with the channel, the firewall
   and every line `doctor` says when the stream does not connect
   ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
+- The fixer of the pull-request workflow runs on Opus 5.5 at xhigh effort, in
+  `claude.yml` and the developer brief's frontmatter: it applies the reviewer's named
+  blockers, which needs the effort more than the model, and the account behind the
+  workflows' token reached its Fable usage limit on 2026-11-04 while the implementation
+  sessions still need Fable. The reviewer stays on Fable 5.1 for now.
