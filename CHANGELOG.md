@@ -1071,6 +1071,7 @@ user-visible change, added in the same commit as the change. The format follows
   the same API, reads them back through the driver's sender and receiver, and prints a
   fourth line, which `just quickstart` checks on Linux and macOS, the third slice's
   acceptance test; the README's status says the first three slices work
+  ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
 - `cavalry doctor` reports `udp-interface-mtu` on Linux when an endpoint's address
   routes over an interface whose MTU is below 1436 bytes, the stream's datagram with
   its headers, naming the interface and its MTU; and the new how-to
