@@ -86,3 +86,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0042. Rebuild an image on a dedicated receiver thread with a bounded session table](decisions/0042-rebuild-an-image-on-a-receiver-thread.md)
 - [0043. Replay a recording over a `cavalry:udp` channel through the sender](decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md)
 - [0044. Gate UDP on the two bench hosts with one message in flight, on the loopback and across the link](decisions/0044-gate-udp-on-the-two-bench-hosts.md)
+- [0045. Carry a padding frame on the wire as its 32-byte header alone](decisions/0045-carry-a-padding-frame-as-its-header-alone.md)

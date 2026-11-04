@@ -5861,8 +5861,13 @@ mod recording {
                 datagram
                     .frames()
                     .map(|frame| {
-                        let body = frame.bytes[FRAME_HEADER..frame.header.frame_length() as usize]
-                            .to_vec();
+                        // A padding frame is its header alone (ADR 0045): no body.
+                        let body = match frame.header.frame_type() {
+                            FrameType::Pad => Vec::new(),
+                            FrameType::Data => frame.bytes
+                                [FRAME_HEADER..frame.header.frame_length() as usize]
+                                .to_vec(),
+                        };
                         (frame.header, body)
                     })
                     .collect(),

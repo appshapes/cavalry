@@ -1072,6 +1072,16 @@ user-visible change, added in the same commit as the change. The format follows
   fourth line, which `just quickstart` checks on Linux and macOS, the third slice's
   acceptance test; the README's status says the first three slices work
   ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
+- ADR 0045 is accepted: a padding frame crosses the wire as its 32-byte header alone,
+  the last frame of its datagram, its length checked against the term and counted by
+  its aligned length, and the receiver writes the header and nothing after it. Before
+  it, a `cavalry:udp` stream whose frame length did not divide the 16 MiB term stalled
+  at the first term end, the receiver rejecting the padding header and NAKing it for
+  ever; every body of 32 or 8 bytes divided the term, so no test had met it. The spec
+  says the rule, the vectors carry it and `cavalry-proto`'s datagram check and
+  `cavalry-shm`'s image writer follow it
+  ([ADR 0045](docs/decisions/0045-carry-a-padding-frame-as-its-header-alone.md);
+  card 196).
 - `cavalry doctor` reports `udp-interface-mtu` on Linux when an endpoint's address
   routes over an interface whose MTU is below 1436 bytes, the stream's datagram with
   its headers, naming the interface and its MTU; and the new how-to

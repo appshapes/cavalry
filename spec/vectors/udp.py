@@ -124,6 +124,14 @@ def data_frame(term_offset, body, term_id=INITIAL_TERM_ID, flags=BEGIN | END, ty
     return raw + b"\x00" * (aligned - len(raw)), {"term_offset": term_offset, "frame_length": frame_length}
 
 
+def padding_frame(term_offset, frame_length, term_id=INITIAL_TERM_ID, version=0, session_id=SESSION_ID,
+                  stream_id=STREAM_ID):
+    """A padding frame as the wire carries it: its 32-byte header alone, the frame length the
+    padding's (spec/udp.md, "The datagram"; ADR 0045)."""
+    raw = DATA_HEADER.pack(frame_length, version, 0, PAD, term_offset, session_id, stream_id, term_id, 0)
+    return raw, {"term_offset": term_offset, "frame_length": frame_length}
+
+
 def datagram(name, frames, term_length=TERM_LENGTH, error=None):
     raw = b"".join(r for r, _ in frames)
     doc = {"name": name, "kind": "datagram", "term_length": term_length, "bytes": raw.hex()}
@@ -253,7 +261,14 @@ VECTORS = [
     bad_frame("length-before-term-length", "length", setup(frame_length=36, term_length=100)[2]),
     # Datagrams of data frames: the frames a reader walks, or the first check that fails.
     datagram("datagram-two-frames", [data_frame(0, b"cavalry!"), data_frame(64, b"\x42" * 40)]),
-    datagram("datagram-padding", [data_frame(65472, b"", flags=0, type_=PAD, frame_length=64)]),
+    datagram("datagram-padding", [padding_frame(65472, 64)]),
+    datagram("datagram-data-then-padding", [data_frame(65408, b"cavalry!"), padding_frame(65472, 64)]),
+    datagram("datagram-padding-mid-term", [padding_frame(1024, 132)]),
+    datagram("datagram-padding-whole", [data_frame(65472, b"", flags=0, type_=PAD, frame_length=64)],
+             error="datagram"),
+    datagram("datagram-padding-not-last", [padding_frame(0, 64), data_frame(64, b"cavalry!")],
+             error="datagram"),
+    datagram("datagram-padding-past-term", [padding_frame(65504, 64)], error="datagram"),
     datagram("datagram-one-frame-fragment", [data_frame(1024, b"\x01" * 100, flags=BEGIN)]),
     datagram("datagram-not-aligned", [(data_frame(0, b"cavalry!")[0][:40], None)], error="length"),
     datagram("datagram-frame-version", [data_frame(0, b"cavalry!", version=1)], error="datagram"),

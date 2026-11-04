@@ -40,4 +40,4 @@ Protocol).
 | `broadcast-buffer.md`, the broadcast buffer | 0 | ADR 0014 |
 | `client-protocol.md`, the client protocol | 4 | ADR 0019, ADR 0025, ADR 0030, ADR 0031, ADR 0040 |
 | `durable-log.md`, the durable log | 1 | ADR 0024, ADR 0031 |
-| `udp.md`, the UDP transport | 0 | ADR 0040 |
+| `udp.md`, the UDP transport | 0 | ADR 0040, ADR 0045 |
