@@ -1130,9 +1130,15 @@ user-visible change, added in the same commit as the change. The format follows
   132 ns against a slowest run of 119 ns recorded on 2026-10-31, while the checked
   build did not move and master's own runs at the tree passed. Those reds are not one
   slow run: a whole process sits higher, as pull request 111's first attempt did, all
-  twenty-one runs at 119 to 134 ns, where its rerun read 113 to 117; the other rows
-  that loosened did so on one run of one process, 1.3 to 2.3 times the row's median,
-  with nothing in the host's journal, and card 198 is to find both. The trigger in
+  twenty-one runs at 119 to 134 ns, where its rerun read 113 to 117. In master's run
+  at a718d63 two checked rows stepped up partway through the process and set their new
+  slowest runs: `claim_commit_32_recorded` from 126 to 133 ns over its first eleven
+  runs to 160 to 171 over the last ten, and `claim_commit_32_client` from 107 to 111
+  over its first twelve to 132 to 134 over the last nine. The other seven rows that
+  loosened did so on one run of one process, 1.3 to 2.3 times the row's median. The
+  host's journal holds nothing in the first nine processes' windows and is not on
+  record as read for the four later ones, the step's among them; card 198 is to find
+  all three effects. The trigger in
   [ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md),
   master's own run failing or brushing the gate, did not fire, and a process of a new
   tree never joins an older tree's entry, so the re-record is a person's commit under
