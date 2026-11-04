@@ -89,7 +89,8 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `subscription.position` per subscription, announces it with `available image` and the
   sender's address as the source identity, and hands the receiver the log, its writer
   and the readers; the receiver inserts each frame at its term offset within the bounds
-  of its last status message, scans the rebuild and the gap in bounded work per cycle,
+  of its last status message, a padding frame as the 32-byte header the sender carries
+  it as (ADR 0045), scans the rebuild and the gap in bounded work per cycle,
   NAKs the gap after the NAK delay and every NAK retry, sends status messages on the
   three triggers with the slowest reader's position, cleans the log a term behind it,
   and retires an image its stream ended, that went quiet for the liveness timeout or

@@ -22,9 +22,10 @@ the two crates where `unsafe` is permitted.
 - Writes an image, a log of type 2, for the driver's receiver: `ImageWriter::insert`
   puts a frame from the wire at its term offset, the first eight bytes last with a
   release store and only where the frame length is 0, so a duplicate changes nothing and
-  a subscriber's reader stops at a gap until it is filled
+  a subscriber's reader stops at a gap until it is filled, and a padding frame, which
+  crosses the wire as its 32-byte header alone, as that header and nothing after it
   ([`spec/log-buffer.md`](../../spec/log-buffer.md), version 1, "The receiver"; ADR
-  0040); `ImageWriter::scan` reads the frame length words from a position to the
+  0040; ADR 0045); `ImageWriter::scan` reads the frame length words from a position to the
   high-water mark, bounded in bytes per call, for the end of the contiguous frames from
   it, the image's rebuild position when the scan starts at that, and the next frame
   after a gap, which is what the receiver's NAK names; a call that continues a scan the

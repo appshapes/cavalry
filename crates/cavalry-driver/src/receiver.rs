@@ -1257,9 +1257,13 @@ impl Receiver {
         now: i64,
     ) {
         let (bytes, _) = self.buffers.datagram(datagram);
-        // The first frame's header, checked against the datagram as the datagram check
-        // will check it again: the session and stream it names pick the record.
-        let first = match DataFrameHeader::parse_within(bytes, bytes.len()) {
+        // The first frame's header, checked for its shape as the datagram check will
+        // check it again against the image's term: the session and stream it names
+        // pick the record. A padding frame comes as its header alone with the padding's
+        // length (`spec/udp.md`, "The datagram"; ADR 0045), held here against the
+        // longest term the spec admits, as a control frame's shape is, and against the
+        // image's own term in the datagram check.
+        let first = match DataFrameHeader::parse_on_wire(bytes, bytes.len(), MAX_TERM_LENGTH) {
             Ok(header) => header,
             Err(_) => {
                 self.statics.rejected_datagrams.increment();
@@ -1332,6 +1336,9 @@ impl Receiver {
         }
         let mut offset = datagram.first_term_offset();
         for frame in datagram.frames() {
+            // The bytes counted are the frame's on the wire: a padding frame's header
+            // alone, 32 bytes, while it advances the offset by its aligned length
+            // (`spec/udp.md`, "The datagram"; ADR 0045).
             match image.writer.insert(term_id, offset, frame.bytes) {
                 Ok(true) => {
                     statics.bytes_received.add(frame.bytes.len() as i64);
@@ -1342,7 +1349,7 @@ impl Receiver {
                 Ok(false) => {}
                 Err(_) => statics.rejected_datagrams.increment(),
             }
-            offset += frame.bytes.len() as u32;
+            offset += frame.header.aligned_length() as u32;
         }
         let end = position.saturating_add(i64::from(datagram.length()));
         if end > image.hwm_position {
