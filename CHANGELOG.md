@@ -1082,3 +1082,21 @@ user-visible change, added in the same commit as the change. The format follows
   `cavalry-shm`'s image writer follow it
   ([ADR 0045](docs/decisions/0045-carry-a-padding-frame-as-its-header-alone.md);
   card 196).
+- The UDP rows gate on both bench hosts and across the cable: `claim_commit_32_udp`
+  and `one_way_32_udp` are recorded in `bench-linux`, `bench-linux-unchecked`,
+  `grip-linux` and `grip-linux-unchecked`, and `bench-linux-link` is recorded for
+  `udp_round_trip_32`, gated, and `udp_one_way_32`, reported, each from the three
+  processes at the tree of 08ce56c, pull request 106's run and attempts 1 and 2 of
+  master's run 41830565569, every process the tree had
+  ([ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)),
+  so the rows and the profile that read `no baseline` above are judged from this
+  change on. The offset beside the one-way row moves from the peer job's print on
+  `grip`, whose `chronyc sourcestats` line is the link's own error, nanoseconds, to
+  the "System time" line of `chronyc tracking` on `bench`, the residual chronyd has
+  still to apply to `bench`'s clock against the public pools, hundreds of
+  microseconds, which the `bench (udp)` job prints after the run: `grip` follows the
+  time `bench` serves, the raw clock corrected by that residual, while the harness
+  stamps with the raw clock on each host, and the line's wording is its sign, the row
+  reading the path plus the line on a "slow of NTP time" day and the path minus it on
+  a "fast" one ([Run the bench](docs/how-to/run-the-bench.md), step 5;
+  [Set up a bench host](docs/how-to/set-up-a-bench-host.md), the clock; card 182).
