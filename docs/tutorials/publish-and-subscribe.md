@@ -78,11 +78,15 @@ milliseconds include the sender's first setup frame and the receiver's answer, w
 connect the stream before the first message goes, as the second line's include the
 recording's start. Between two hosts only the host in the channel changes, to the
 subscriber's; `cavalry doctor` on either host says why a stream does not connect. If
-the port is in use on your machine, the program stops with `quickstart: command
+the port is in use on your machine, the program stops at the subscription, which it
+adds first and whose socket the driver's receiver binds, with `quickstart: command
 refused (refused, error code 4, ChannelEndpointError): the channel's endpoint
-127.0.0.1:40123: the socket could not be opened, bound or connected`, and another port
-in the channel is the whole fix; a stream that does not connect within ten seconds
-stops it with how many messages went and came back.
+127.0.0.1:40123: the socket could not be opened or bound: Address already in use (os
+error 98); check that the address is this host's and its port is free`, os error 48 on
+macOS, and the line ends by naming `docs/reference/client-protocol.md#error-codes`.
+Another port in the channel is the whole fix. A stream that does not connect within
+ten seconds stops the program with how many messages went and came back, and
+`cavalry doctor` says why.
 
 ## 4. Replay the recording
 
@@ -138,8 +142,8 @@ decides on, and every state is a counter `doctor` reads.
   [Replay a recording](../how-to/replay-a-recording.md): the two commands from a shell,
   what the log directory holds, and replaying between two instants.
 - [`crates/cavalry-client/README.md`](../../crates/cavalry-client/README.md): the client
-  API, with the same program without the recording as its doctest, and what the crate
-  must never do.
+  API, with the same program without the recording and the UDP step as its doctest, and
+  what the crate must never do.
 - [`spec/client-protocol.md`](../../spec/client-protocol.md) and
   [`spec/log-buffer.md`](../../spec/log-buffer.md): what the client and the driver say to
   each other, and how a message gets from a claim to a handler.
