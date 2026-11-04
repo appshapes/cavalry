@@ -904,15 +904,6 @@ pub struct Datagram<'a> {
     frames: usize,
 }
 
-/// Whether `bytes` begin with a padding frame's header: version 0 and type 0 in the
-/// header's first eight bytes. Read ahead of the checks to choose the length bound a
-/// padding frame is held to; the checks themselves run on the header after it.
-fn is_padding_header(bytes: &[u8]) -> bool {
-    bytes.len() >= 8
-        && bytes[4] == 0
-        && u16::from_le_bytes([bytes[6], bytes[7]]) == FrameType::Pad as u16
-}
-
 impl<'a> Datagram<'a> {
     /// Checks `bytes` as a datagram of data frames against `term_length`, in the spec's
     /// order: `length` (a multiple of 32), then for each frame `spec/frame.md`'s checks,
@@ -934,20 +925,15 @@ impl<'a> Datagram<'a> {
         let mut frames = 0usize;
         while at < bytes.len() {
             let rest = &bytes[at..];
-            // A padding frame's length is the padding's, bounded by the term and not by
-            // the bytes present; the type is read ahead of the checks only to choose the
-            // bound, and the checks run in the spec's order on the header itself.
-            let available = if is_padding_header(rest) {
-                term_length as usize
-            } else {
-                rest.len()
-            };
-            let header = DataFrameHeader::parse_within(rest, available).map_err(|error| {
-                UdpError::Datagram {
-                    at,
-                    cause: DatagramCause::Frame(error),
-                }
-            })?;
+            // A data frame's length is held to the bytes present, a padding frame's to
+            // the term (`DataFrameHeader::parse_on_wire`).
+            let header =
+                DataFrameHeader::parse_on_wire(rest, rest.len(), term_length).map_err(|error| {
+                    UdpError::Datagram {
+                        at,
+                        cause: DatagramCause::Frame(error),
+                    }
+                })?;
             let term_offset = header.term_offset();
             match first {
                 None => {
@@ -1037,6 +1023,7 @@ impl<'a> Datagram<'a> {
     pub fn frames(&self) -> DatagramFrames<'a> {
         DatagramFrames {
             bytes: self.bytes,
+            term_length: self.term_length,
             at: 0,
         }
     }
@@ -1056,6 +1043,9 @@ pub struct DatagramFrame<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct DatagramFrames<'a> {
     bytes: &'a [u8],
+    /// The term length the datagram was checked against: the bound a padding frame's
+    /// length is held to, the same one [`Datagram::check`] used.
+    term_length: u32,
     at: usize,
 }
 
@@ -1067,14 +1057,10 @@ impl<'a> Iterator for DatagramFrames<'a> {
         if rest.is_empty() {
             return None;
         }
-        // The datagram was checked, so the header parses and the frame fits; a failure
-        // here ends the walk rather than panicking. A padding frame is its header alone.
-        let available = if is_padding_header(rest) {
-            usize::MAX
-        } else {
-            rest.len()
-        };
-        let header = DataFrameHeader::parse_within(rest, available).ok()?;
+        // The datagram was checked under this term length, so the header parses as it
+        // did there and the frame fits; a failure here ends the walk rather than
+        // panicking. A padding frame is its header alone.
+        let header = DataFrameHeader::parse_on_wire(rest, rest.len(), self.term_length).ok()?;
         let on_wire = if header.frame_type() == FrameType::Pad {
             HEADER_LENGTH.min(rest.len())
         } else {
