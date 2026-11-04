@@ -1260,18 +1260,10 @@ impl Receiver {
         // The first frame's header, checked for its shape as the datagram check will
         // check it again against the image's term: the session and stream it names
         // pick the record. A padding frame comes as its header alone with the padding's
-        // length (`spec/udp.md`, "The datagram"; ADR 0045), so its length is held
-        // against the longest term the spec admits here, and against the image's own
-        // term in the datagram check.
-        let is_padding = bytes.len() >= 8
-            && bytes[4] == 0
-            && u16::from_le_bytes([bytes[6], bytes[7]]) == FrameType::Pad as u16;
-        let available = if is_padding {
-            MAX_TERM_LENGTH as usize
-        } else {
-            bytes.len()
-        };
-        let first = match DataFrameHeader::parse_within(bytes, available) {
+        // length (`spec/udp.md`, "The datagram"; ADR 0045), held here against the
+        // longest term the spec admits, as a control frame's shape is, and against the
+        // image's own term in the datagram check.
+        let first = match DataFrameHeader::parse_on_wire(bytes, bytes.len(), MAX_TERM_LENGTH) {
             Ok(header) => header,
             Err(_) => {
                 self.statics.rejected_datagrams.increment();
@@ -1357,7 +1349,7 @@ impl Receiver {
                 Ok(false) => {}
                 Err(_) => statics.rejected_datagrams.increment(),
             }
-            offset += header_aligned_length(&frame.header);
+            offset += frame.header.aligned_length() as u32;
         }
         let end = position.saturating_add(i64::from(datagram.length()));
         if end > image.hwm_position {
@@ -1952,12 +1944,6 @@ impl Receiver {
 /// `spec/udp.md`, "The receiver" says, through the standard library's `RandomState`,
 /// whose keys come from the operating system, hashing the clock; no dependency, and
 /// two receivers started in one instant, in one process or two, differ.
-/// A frame's length in the term: its aligned length, which a padding frame carried as
-/// its header alone counts too.
-fn header_aligned_length(header: &DataFrameHeader) -> u32 {
-    header.aligned_length() as u32
-}
-
 fn receiver_id(now: i64) -> i64 {
     use std::hash::{BuildHasher, RandomState};
     RandomState::new().hash_one(now) as i64
