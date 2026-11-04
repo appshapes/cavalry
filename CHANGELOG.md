@@ -1045,6 +1045,12 @@ user-visible change, added in the same commit as the change. The format follows
   `bench` and `grip` with the link's record, and its firewall step the reply path a
   stateless ruleset must open
   ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
+- `grip` selects `bench-link` as its clock source: `noselect` on its Ubuntu pool
+  lines, which carried `prefer` too and outranked the link by stratum, so `chronyc
+  tracking` reads the link and the one-way row across the cable carries the link's
+  offset, a standard deviation of 51 ns on 2026-11-04 against 863 ns while the pools
+  steered the clock; the set-up page's clock step has the line (ADR 0044's Revisit;
+  card 182).
 - The bench gains the UDP rows: `claim_commit_32_udp` and `one_way_32_udp` take the
   client rows' path over `cavalry:udp` on the loopback through the driver's sender and
   receiver, one message in flight, a tenth of `--messages` per run, on both bench
