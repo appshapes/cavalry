@@ -242,6 +242,7 @@ record is on card 182.
    ```sh
    # ignore: run on grip, the host that follows it
    printf 'server 10.0.0.1 iburst minpoll 0 maxpoll 2 prefer trust\nhwtimestamp eno2\n' | sudo tee /etc/chrony/conf.d/90-cavalry-link.conf
+   sudo sed -E -i '/^pool /{s/ prefer$//; / noselect$/!s/$/ noselect/;}' /etc/chrony/sources.d/ubuntu-ntp-pools.sources
    sudo systemctl restart chrony
    ```
 
@@ -256,11 +257,21 @@ record is on card 182.
    `chronyc clients`. Without `trust` the host kept the internet pools, 3.3 µs and an
    offset of −852 µs, which is why the line carries it; the root distance of tens of
    milliseconds is `bench`'s own distance to UTC and does not enter a number between
-   the two hosts. `tracking` reports the selected source, and on 2026-11-02 `grip` had
-   selected a public pool server with `bench-link` combined, so the offset between
-   the two hosts is read from `sourcestats`' `bench-link` line, not from `tracking`;
-   `noselect` on the pool lines in `grip`'s chrony configuration would make
-   `bench-link` the selected source, a change ADR 0044's Revisit names.
+   the two hosts. `tracking` reports the selected source, and the `sed` line is what
+   makes that `bench-link`: Ubuntu's own pool lines carry `prefer` as well, and the
+   pools are stratum 2 against `bench-link`'s 3, so without it `grip` selects a public
+   pool server with `bench-link` combined, as it had on 2026-11-02, when the offset
+   between the two hosts was the `bench-link` line of `sourcestats` and not
+   `tracking`'s, and by 2026-11-04 that line read +388 µs with a standard deviation
+   of 863 ns, the public servers' jitter steering the clock against the cable. With
+   `noselect` on the five pool lines, which chrony keeps measuring and never follows,
+   `bench-link` is the one source it can select, the change ADR 0044's Revisit
+   names: a minute after `sudo chronyc reload sources` on 2026-11-04, `tracking` read
+   `bench-link` as the reference with a system time 27 ns slow and a last offset of
+   +50 ns, and `sourcestats` an offset of +2 ns with a standard deviation of 51 ns.
+   With the link down `grip`'s clock runs free, which `chronyc sources` shows as
+   `bench-link` unreachable; a host whose clock exists to be compared with `bench`'s
+   has no better source to fall back on.
 
 4. The firewall and the ports. `ufw` is inactive and no nftables ruleset is loaded on
    either host, so nothing is opened for the link. A host that enables one opens, on
