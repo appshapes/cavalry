@@ -1044,6 +1044,7 @@ user-visible change, added in the same commit as the change. The format follows
   MTU check, each in its own change. The set-up page's "Further hosts" now describes
   `bench` and `grip` with the link's record, and its firewall step the reply path a
   stateless ruleset must open
+  ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
 - `cavalry doctor` reports `udp-interface-mtu` on Linux when an endpoint's address
   routes over an interface whose MTU is below 1436 bytes, the stream's datagram with
   its headers, naming the interface and its MTU; and the new how-to
