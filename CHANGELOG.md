@@ -1135,11 +1135,12 @@ user-visible change, added in the same commit as the change. The format follows
   slowest runs: `claim_commit_32_recorded` from 126 to 133 ns over its first eleven
   runs to 160 to 171 over the last ten, and `claim_commit_32_client` from 107 to 111
   over its first twelve to 132 to 134 over the last nine. The other seven rows that
-  loosened did so on one run of one process, 1.3 to 2.3 times the row's median. The
-  host's journal holds nothing in any of the thirteen processes' windows but the
-  runner's own line, and its kernel log's only events of the afternoon, a snap refresh
-  at 17:14:41 UTC and a packet capture's promiscuous mode on the link port at 17:37
-  to 17:41, fall outside every window; card 198 holds all three effects. The trigger in
+  loosened by more than 5 percent did so on one run of one process, 1.3 to 2.3 times
+  the median of the row's 273 runs. The host's journal holds nothing in any of the
+  thirteen processes' windows but the runner's own line, and its kernel log's only
+  events of the afternoon, a snap refresh at 17:14:41 UTC and a packet capture's
+  promiscuous mode on the link port at 17:37 to 17:41, fall outside every window;
+  card 198 holds all three effects. The trigger in
   [ADR 0033](docs/decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md),
   master's own run failing or brushing the gate, did not fire, and a process of a new
   tree never joins an older tree's entry, so the re-record is a person's commit under
