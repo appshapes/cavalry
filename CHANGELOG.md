@@ -1113,6 +1113,14 @@ user-visible change, added in the same commit as the change. The format follows
   reading the path plus the line on a "slow of NTP time" day and the path minus it on
   a "fast" one ([Run the bench](docs/how-to/run-the-bench.md), step 5;
   [Set up a bench host](docs/how-to/set-up-a-bench-host.md), the clock; card 182).
+- [Publish between two hosts](docs/how-to/publish-between-two-hosts.md), followed once
+  between `bench` and `grip` on 2026-11-04, now says two things it did not: a driver
+  started over SSH on Linux loses its directory when the user's last session ends unless
+  the user lingers, the logind default, so the page asks for a session that outlives the
+  driver, through the checks that read its directory;
+  and `cavalry doctor` prints none of the four counters the page names while the stream
+  is healthy, so they are read from the counters file by its layout until the console
+  exists, with the values the tutorial's 1,000 messages give (card 182).
 - `grip`'s two bench profiles, `grip-linux` and `grip-linux-unchecked`, are re-recorded
   at the tree of 7248621 from its nine processes, pull request 109's two runs, master's
   four and pull request 111's three, with every gated row's slowest run before and after
