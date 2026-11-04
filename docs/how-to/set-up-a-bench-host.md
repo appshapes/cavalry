@@ -278,6 +278,23 @@ record is on card 182.
    `bench-link` unreachable; a host whose clock exists to be compared with `bench`'s
    has no better source to fall back on.
 
+   That is `grip`'s side of the clock, and the one-way row reads more than it: on
+   2026-11-04, with `grip` within nanoseconds of `bench-link`, `udp_one_way_32` read
+   300 µs at p50 against a round trip of 112 µs, steady across its 21 runs. chronyd
+   serves its cooked time, the system clock plus the residual it has still to apply
+   against its sources, and `bench` follows the public pools with a residual of
+   hundreds of microseconds (`chronyc tracking` on `bench` that day: "System time:
+   0.000224 seconds slow of NTP time", RMS offset 113 µs), so `grip`'s clock stands at
+   `bench`'s raw clock plus that residual while its own view of `bench-link` reads
+   zero. The harness stamps with the raw clock on each host, so the offset beside the
+   one-way row is `bench`'s "System time" line at the run's time, which the `bench
+   (udp)` job prints after the run; it moves with the pools, so the row is read to a
+   hundred microseconds and not better. ADR 0044 named `grip`'s `sourcestats` line,
+   which is the link's own error and is read for that in the peer job's print. A
+   one-way good to ten microseconds needs the two raw clocks locked, PTP over the cable
+   through the ports' hardware clocks or `bench` off the pools, under the Revisit of
+   ADR 0044 that names the clock.
+
 4. The firewall and the ports. `ufw` is inactive and no nftables ruleset is loaded on
    either host, so nothing is opened for the link. A host that enables one opens, on
    the link's interface, the UDP port its receive endpoint binds, 40182 on `bench` and

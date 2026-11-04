@@ -73,7 +73,7 @@ shared runner is
    | `claim_commit_<body>_udp` | The client row's claim, write and commit on a `cavalry:udp` publication whose endpoint is a port of `127.0.0.1`, with one message in flight: the publisher claims the next message once the subscriber's handler has had the last, so the window is never full and the row is the claim path, with the wait for a connection that dropped in it as in the other rows ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). Gated as the other message rows once the host's baseline holds it, `no baseline` until then. A tenth of `--messages` per run, after a warm-up of 10,000 messages rather than a rotation, since the driver pre-touches both logs when it makes them. |
    | `one_way_<body>_udp` | From the publisher's timestamp to `Subscription::poll`'s handler through the driver's sender, the loopback and the driver's receiver, one message in flight, so a sample is the path's latency and not the depth of the sender's window, which a publisher that runs ahead fills to 8 MiB. Under `--pin` the sender has the third CPU and the receiver the fourth, and the driver's threads busy-spin; unpinned they back off, as a driver on a laptop does. |
    | `udp_round_trip_<body>` | The link rows, run alone with `--link-here` and `--link-peer` (step 5): from the publisher's timestamp on `bench` to its subscriber's handler after the peer on `grip` has echoed the message across the direct cable, one message in flight, measured on one clock and gated against `bench-linux-link`. |
-   | `udp_one_way_<body>` | Beside it: from the publisher's wall-clock stamp on `bench` to the peer's handler's on `grip`, which carries the offset between the two hosts' clocks, so the row is reported with the offset the peer job prints and never gated; a sample below zero is recorded as 0 and counted under the table. |
+   | `udp_one_way_<body>` | Beside it: from the publisher's wall-clock stamp on `bench` to the peer's handler's on `grip`, which carries the offset between the two hosts' clocks: `bench` serves chrony's cooked time, its system clock plus the residual it has still to apply against its internet sources, and `grip` follows that, so the row is the path plus the "System time" line of `chronyc tracking` on `bench`, hundreds of microseconds that move with the pools, which the `bench (udp)` job prints after the run, while the peer job's print on `grip` shows the link's own error, nanoseconds ([Set up a bench host](set-up-a-bench-host.md#further-hosts-the-roles-the-direct-link-and-the-clock)); reported with that line and never gated; a sample below zero is recorded as 0 and counted under the table. |
    | `slot_padding_<spacing>_load` | A load of one word while another thread stores to a word that many bytes away: 0 shares the cache line, 64 shares the 128-byte pair, 128 shares nothing (ADR 0011). |
    | `slot_padding_<spacing>_store` | The other side of the same pair: one store while the other thread loads. |
    | `record_block_<body>` | The recorder's block path: one scan of a 1 MiB block of committed frames (`TermReader::block`) and its one positional write into a segment file under the bench directory (`RecordingWriter::write`), per block, under the counting allocator (ADR 0025). It runs last, so its writes reach no other row. Its change against the baseline is reported, not gated: it is not a row a message passes through (ADR 0017). The bench host's baseline for it was first recorded at 7f62673 (card 109). |
@@ -247,9 +247,15 @@ shared runner is
    `--messages` is the count per run as given, since every message waits for its echo:
    100,000 at about 100 µs is ten seconds a run, after the UDP rows' warm-up of 10,000.
    The one-way row needs the offset
-   between the two clocks to be read: on `grip`, `chronyc sourcestats -v` gives it on
-   the `bench-link` line, which the peer job prints after the echo. Under `--pin` the
-   echo runs on the first CPU, the sender on the third and the receiver on the fourth.
+   between the two clocks to be read, and it is `bench`'s: chronyd serves its cooked
+   time, the system clock plus the residual it has still to apply, and `grip` follows
+   that, so the row is the path plus the "System time" line of `chronyc tracking` on
+   `bench`, which the `bench (udp)` job prints after the run; `grip`'s
+   `chronyc sourcestats -v`, which the peer job prints after the echo, gives the link's
+   own error on the `bench-link` line, nanoseconds, and not the offset the row carries
+   ([Set up a bench host](set-up-a-bench-host.md#further-hosts-the-roles-the-direct-link-and-the-clock)).
+   Under `--pin` the echo runs on the first CPU, the sender on the third and the
+   receiver on the fourth.
 
 ## How to verify it worked
 

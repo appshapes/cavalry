@@ -235,6 +235,14 @@ jobs:
         env:
           CAVALRY_BENCH_PROFILE: bench-linux
       - run: just bench-compare
+      # The offset the one-way row carries is this host's: chronyd serves its cooked
+      # time, the system clock plus the residual it has still to apply against its
+      # internet sources, and grip follows that, so grip's clock stands at bench's raw
+      # clock plus the "System time" line below, hundreds of microseconds that move with
+      # the pools, while grip's own error against bench-link is nanoseconds
+      # (docs/how-to/set-up-a-bench-host.md, "Further hosts", the clock).
+      - run: chronyc tracking
+        if: always()
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -245,10 +253,12 @@ jobs:
   # The other end of the pair: the harness on grip in its echo mode, which subscribes on
   # grip's end of the cable, claims every message it receives on a publication back to
   # bench with grip's wall clock stamped in, and ends when the stream does. It writes no
-  # result; the one-way row is on bench's side. After it, the offset between grip's
-  # clock and bench's, which the one-way row carries: grip follows bench over the cable
-  # with hardware timestamps, and `chronyc sourcestats` names the offset against
-  # bench-link whatever source `chronyc tracking` selected at the moment (card 182).
+  # result; the one-way row is on bench's side. After it, grip's view of the clock: it
+  # follows bench over the cable with hardware timestamps, selecting bench-link alone,
+  # and `chronyc sourcestats` names its error against bench-link, nanoseconds; the
+  # offset the one-way row carries is on bench's side, printed by its own job, since
+  # bench serves its cooked time and grip stands at bench's raw clock plus bench's
+  # residual (card 182).
   bench-udp-peer:
     name: bench (udp peer)
     needs: [bench, bench-grip]
