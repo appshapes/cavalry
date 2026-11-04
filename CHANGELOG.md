@@ -1044,6 +1044,7 @@ user-visible change, added in the same commit as the change. The format follows
   MTU check, each in its own change. The set-up page's "Further hosts" now describes
   `bench` and `grip` with the link's record, and its firewall step the reply path a
   stateless ruleset must open
+  ([ADR 0044](docs/decisions/0044-gate-udp-on-the-two-bench-hosts.md); card 182).
 - The ten-minute path publishes over UDP: the quickstart program publishes its 1,000
   messages again on `cavalry:udp?endpoint=127.0.0.1:40123`, the same stream through
   the same API, reads them back through the driver's sender and receiver, and prints a
