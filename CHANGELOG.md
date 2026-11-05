@@ -1149,7 +1149,7 @@ user-visible change, added in the same commit as the change. The format follows
   tree while master is green is card 199's (card 182).
 - `just bench` names the frame when a measured loop allocates: the harness counts with
   an allocator hook that keeps the first allocation's backtrace and prints it under the
-  failure line, frame by frame from the allocation to the thread's entry, so a run that
+  failure line, frame by frame from the hook to the thread's start, so a run that
   fails the allocation gate says where and not only how many; `stats_alloc` gives way
   to `tracking-allocator` in the harness alone. The count now includes reallocations:
   a measured loop that grows a vector past a capacity it already had fails the gate,

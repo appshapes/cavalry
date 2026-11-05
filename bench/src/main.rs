@@ -2210,11 +2210,14 @@ fn allocation_failure(
         Some(backtrace) => {
             let _ = write!(
                 message,
-                "\n  the first allocation a measured loop saw, frame by frame from the allocation \
-                 to the thread's entry:\n{backtrace}"
+                "\n  the first allocation a measured loop saw, frame by frame from the \
+                 allocator's hook to the thread's start:\n{backtrace}"
             );
         }
-        None => message.push_str("\n  no backtrace was captured for the first allocation"),
+        None => message.push_str(
+            "\n  no backtrace was captured for the first allocation within five seconds of the \
+             last row; run the same command again, since each run captures afresh",
+        ),
     }
     Some(message)
 }

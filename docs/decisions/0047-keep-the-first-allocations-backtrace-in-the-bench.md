@@ -44,7 +44,10 @@ The two crates do not count the same calls. `stats_alloc` 0.1.10 counts `alloc` 
 `allocations` alone. A `Vec` or `String` grown past a capacity it already had grows
 through `realloc`, so the old count missed it, and counted only a growth from empty:
 "a vector past its capacity", one of card 176's four causes, was mostly invisible to
-the gate. `tracking-allocator` 0.4.0 implements `alloc` and `dealloc` and nothing
+the gate. So the one allocation card 176's runs counted was an allocation from empty,
+not the growth of a vector that already had a capacity, and the new count can read
+more than 1 on that runner if its loops also reallocate. `tracking-allocator` 0.4.0
+implements `alloc` and `dealloc` and nothing
 else of `GlobalAlloc`. The trait's default `realloc` allocates anew through `alloc`,
 copies and frees, so every reallocation reaches the hook, a grow or a shrink; its
 default `alloc_zeroed` is `alloc` and then a write of zeros, in place of `System`'s
@@ -62,13 +65,37 @@ one allocation, which it did not before: the gate's rule, zero allocations per
 message, is unchanged, and `.claude/rules/data-plane.md` names `Vec::push` among the
 allocations it forbids, so the count now sees the growth the rule always covered. A
 run whose loops reallocate and never allocate from empty passed the gate under
-`stats_alloc` and fails it now. On the first allocation
-the tracker counts, once per process, it captures `std::backtrace::Backtrace` and
-keeps it; the failure line that ends a run with a non-zero count is followed by that
-backtrace, frame by frame from the allocation to the thread's entry, so the next
-failing run names the frame and the thread. The release build keeps symbol names and
-not line numbers, which is enough to name the function. The backtrace is captured on
-the failure path alone: a run that counts zero captures none.
+`stats_alloc` and fails it now.
+
+On the first allocation the tracker counts, once per process, it captures
+`std::backtrace::Backtrace` and keeps it. The failure line that ends a run with a
+non-zero count is followed by that backtrace, frame by frame from the hook to the
+thread's start, so the next failing run names the function and the thread. The
+captures in Evidence show how the frames read on the release build:
+
+- The top two frames are the hook's, `CountingTracker::allocated`, and the
+  allocator's, `tracking_allocator`'s `alloc`, in every capture.
+- The frame under them is the allocation: `alloc::fmt::format::format_inner` for a
+  `format!`, `RawVecInner::finish_grow` over `RawVec<T>::grow_one` for a push past
+  capacity.
+- The first frame of a Cavalry crate under that is the function that allocated, or
+  the function the release build inlined it into: a `format!` in `run_log`'s loop
+  reads `cavalry_bench::run_pass`.
+- The frame `std::sys::backtrace::__rust_begin_short_backtrace` names the thread. On
+  the main thread, the frame above it is `cavalry_bench::main`. On a spawned thread,
+  its type parameters are the closure the thread was spawned with and what the
+  thread returns, `cavalry_bench::run_log::{closure#9}` and
+  `Result<Histogram<u64>, String>` for the log rows' subscriber. The frame above it
+  is the thread's loop when the build kept one, such as
+  `<cavalry_driver::conductor::Conductor>::run`.
+- The frames under it are the standard library's thread start and the C library's,
+  the same on every thread. The thread's name is not among them.
+
+The release build keeps symbol names and not line numbers, which is enough to name
+the function. The backtrace is captured on the failure path alone: a run that counts
+zero captures none. When the capture is not there by the time the harness reads it,
+after the last row and up to five seconds later, the failure line is followed by `no
+backtrace was captured for the first allocation` and says to run the command again.
 
 ## Alternatives considered
 
@@ -93,7 +120,14 @@ the failure path alone: a run that counts zero captures none.
   and a line is found from the name. Revisited if a name is not enough.
 - **A thread name beside the backtrace.** Lost: `std::thread::current()` inside an
   allocator hook can panic while a thread's own data is being destroyed, and a panic in
-  a hook aborts the run; the thread's entry is the backtrace's last frame.
+  a hook aborts the run. The frames name the thread without it: the
+  `__rust_begin_short_backtrace` frame carries the closure the thread was spawned
+  with, which names the function that spawned it, and what the thread returns, which
+  tells apart most threads one function spawns. Threads that return the same type
+  are told apart by the closure's number and by the thread's loop in the frame
+  above: the driver's conductor is `Driver::start_with_threads`'s `{closure#7}`,
+  returning `()`, over `<cavalry_driver::conductor::Conductor>::run`. Revisited if a
+  capture names a closure whose thread neither tells apart.
 
 ## Evidence
 
@@ -104,11 +138,63 @@ the failure path alone: a run that counts zero captures none.
   grows a vector of capacity 1 by one element 64 times inside a window, each grow a
   reallocation, and reads a count of at least 64. The two tests that open a window
   run one at a time, since tracking is process-wide.
-- On the release build, on Linux on 2026-11-05, a vector of capacity 1 holding one
-  element, pushed once inside the exclusive row's measured loop on the subscriber's
-  thread, failed the run with `allocations per message: 0.00001 (1 in 100000
-  messages)`, its frames going through `RawVecInner::finish_grow` to the hook;
-  `stats_alloc`'s count read 0 for it. The temporary push was then removed.
+- Three real failures on the release build, on a 4-core Linux x86_64 runner on
+  2026-11-05, each from a temporary allocation added for one run and then removed.
+  Each failed the gate, and each printed the frames below under the failure line.
+  - A `format!` once in the exclusive row's measured loop, on the publisher's thread,
+    which is the main thread; `just bench --only exclusive --messages 100000` read
+    `allocations per message: 0.00001 (1 in 100000 messages)`:
+
+    ```text
+       0: <cavalry_bench::CountingTracker as tracking_allocator::AllocationTracker>::allocated
+       1: <tracking_allocator::allocator::Allocator<std::alloc::System> as core::alloc::global::GlobalAlloc>::alloc
+       2: alloc::fmt::format::format_inner
+       3: cavalry_bench::run_pass
+       4: cavalry_bench::main
+       5: std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+       6: std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+       7: std::rt::lang_start_internal
+       8: main
+       9: <unknown>
+      10: __libc_start_main
+      11: _start
+    ```
+
+  - A push past capacity once on the same row's subscriber thread, a `Vec<u64>` of
+    capacity 1 that held one element: the same command read `1 in 100000 messages`.
+    `stats_alloc`'s count would have read 0 for it, a reallocation.
+
+    ```text
+       0: <cavalry_bench::CountingTracker as tracking_allocator::AllocationTracker>::allocated
+       1: <tracking_allocator::allocator::Allocator<std::alloc::System> as core::alloc::global::GlobalAlloc>::alloc
+       2: <alloc::raw_vec::RawVecInner>::finish_grow
+       3: <alloc::raw_vec::RawVec<u64>>::grow_one
+       4: std::sys::backtrace::__rust_begin_short_backtrace::<cavalry_bench::run_log::{closure#9}, core::result::Result<hdrhistogram::Histogram<u64>, alloc::string::String>>
+       5: <std::thread::lifecycle::spawn_unchecked<cavalry_bench::run_log::{closure#9}, core::result::Result<hdrhistogram::Histogram<u64>, alloc::string::String>>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+       6: <std::sys::thread::unix::Thread>::new::thread_start
+       7: <unknown>
+       8: <unknown>
+    ```
+
+  - A `Box::new` on every turn of the driver's conductor loop, in
+    `cavalry-driver/src/conductor.rs`; `just bench --only claim_commit_32_client
+    --messages 100000` read `12856 in 100000 messages`:
+
+    ```text
+       0: <cavalry_bench::CountingTracker as tracking_allocator::AllocationTracker>::allocated
+       1: <tracking_allocator::allocator::Allocator<std::alloc::System> as core::alloc::global::GlobalAlloc>::alloc
+       2: <cavalry_driver::conductor::Conductor>::run
+       3: std::sys::backtrace::__rust_begin_short_backtrace::<<cavalry_driver::Driver>::start_with_threads<&std::path::Path, std::path::PathBuf>::{closure#7}, ()>
+       4: <std::thread::lifecycle::spawn_unchecked<<cavalry_driver::Driver>::start_with_threads<&std::path::Path, std::path::PathBuf>::{closure#7}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+       5: <std::sys::thread::unix::Thread>::new::thread_start
+       6: <unknown>
+       7: <unknown>
+    ```
+
+  The `run_log` closures are counted in source order from 0, and `{closure#9}` is the
+  subscriber's `spawn` closure. The two runs that allocated once counted exactly 1 on
+  Linux. On macOS the C library's frames at the bottom may differ; the reading above
+  does not depend on them. No capture has been taken on macOS yet.
 - `just bench --messages 100000` on the laptop at this change reads `allocations per
   message: 0 (0 in 410000 messages)`, as before the change: one pass measures the two
   log rows and the two client rows of 100,000 each and the UDP row of a tenth of that,

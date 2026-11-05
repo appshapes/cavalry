@@ -316,19 +316,70 @@ shared runner is
   from empty does. Before
   [ADR 0047](../decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md)
   the count left reallocations out, so a loop that grows a vector which already has a
-  capacity fails the gate now where it passed before; size the vector at setup.
-  Under the failure line is the backtrace of the first
-  allocation a measured loop saw, captured once per process, frame by frame from the
-  allocation to the thread's entry, with the function names the release build keeps
-  and no line numbers
-  ([ADR 0047](../decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md)):
-  the top frames are the allocation and the call that made it, and the last frame
-  says which thread. The harness's loops allocate on no path but their error
-  returns, so the allocation is in the crates the row runs: `cavalry-shm` for a log
-  row, `cavalry-client` and the driver's conductor for a client row, and the driver's
-  sender and receiver as well for a UDP or link row. A count far below the run's
-  messages is a rare event, not one per message. Find it and remove it: nothing on
-  the per-message path may allocate (`.claude/rules/data-plane.md`).
+  capacity fails the gate now where it passed before; size the vector at setup. The
+  harness's loops allocate on no path but their error returns, so the allocation is
+  in the crates the row runs: `cavalry-shm` for a log row, `cavalry-client` and the
+  driver's conductor for a client row, and the driver's sender and receiver as well
+  for a UDP or link row. A count far below the run's messages is a rare event, not
+  one per message. The frames under the failure line say where it is (the next
+  entry). Find it and remove it: nothing on the per-message path may allocate
+  (`.claude/rules/data-plane.md`).
+- Frames under the failure line, after `the first allocation a measured loop saw`:
+  the backtrace of the first allocation any measured loop counted, captured once per
+  process inside the allocator's hook. It has the function names the release build
+  keeps and no line numbers. This is the capture of a `format!` added for one run to
+  the exclusive row's publisher loop, on the main thread, on Linux:
+
+  ```text
+     0: <cavalry_bench::CountingTracker as tracking_allocator::AllocationTracker>::allocated
+     1: <tracking_allocator::allocator::Allocator<std::alloc::System> as core::alloc::global::GlobalAlloc>::alloc
+     2: alloc::fmt::format::format_inner
+     3: cavalry_bench::run_pass
+     4: cavalry_bench::main
+     5: std::sys::backtrace::__rust_begin_short_backtrace::<fn() -> std::process::ExitCode, std::process::ExitCode>
+     6: std::rt::lang_start::<std::process::ExitCode>::{closure#0}
+     7: std::rt::lang_start_internal
+     8: main
+     9: <unknown>
+    10: __libc_start_main
+    11: _start
+  ```
+
+  Read it from the top:
+
+  - Frames 0 and 1 are the harness's hook and the allocator, in every capture.
+  - Frame 2 is the allocation: `alloc::fmt::format::format_inner` for a `format!`,
+    or `<alloc::raw_vec::RawVecInner>::finish_grow` over
+    `<alloc::raw_vec::RawVec<u64>>::grow_one` for a push past a vector's capacity.
+  - The first frame of a Cavalry crate under it is the function that allocated, or
+    the function the release build inlined it into. The `format!` above was in
+    `run_log`'s loop, which the build inlined into `cavalry_bench::run_pass`.
+  - The frame `std::sys::backtrace::__rust_begin_short_backtrace` names the thread.
+    On the main thread its type is `fn() -> std::process::ExitCode`, and the frame
+    above it, `cavalry_bench::main`, is the thread. On a spawned thread its two type
+    parameters are the closure the thread was spawned with and what the thread
+    returns: `cavalry_bench::run_log::{closure#9}` and
+    `Result<hdrhistogram::Histogram<u64>, String>` are the log rows' subscriber, and
+    `<cavalry_driver::Driver>::start_with_threads<…>::{closure#7}` and `()` are the
+    driver's conductor. `{closure#9}` is the tenth closure in `run_log`'s source,
+    counted from 0, the `map_err` closures included. The frame above it is the
+    thread's loop when the build did not inline it, such as
+    `<cavalry_driver::conductor::Conductor>::run`.
+  - The frames under it are the standard library's thread start and the C library's.
+    They are the same on every thread of a system, `<unknown>` where the C library
+    has no symbols, and may read differently on macOS.
+
+  [ADR 0047](../decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md)
+  has the captures from a spawned thread and from the driver's conductor.
+- `no backtrace was captured for the first allocation` under the failure line, in
+  place of the frames: the count and the benchmark in the failure line are right,
+  but the first allocation's capture was not there when the harness read it, after
+  the last row and for up to five seconds after. Every row joins the threads it
+  starts, and a thread finishes the capture before its allocation returns, so this
+  means a thread outlived its row or a capture stalled for five seconds. Run the same
+  `just bench` command again: each process captures afresh. If the line prints
+  again, look in the row the failure line names for a thread it starts and does not
+  join.
 - `reported` beside a `timer` or `slot_padding` row that moved: expected; those rows
   flip between two adjacent clock steps from run to run and never fail the gate.
 - `within a step` beside a gated row: the row is over 5 percent above the baseline's
