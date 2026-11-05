@@ -30,8 +30,10 @@ first one. Why the loop is built this way is in ADR 0004
      the Actions tab rather than among the pull request's checks because it runs on
      `master`, which either approves or requests changes;
    - on requested changes, a second `claude` run applies the blockers on the same
-     branch, one commit per blocker, pushed as each lands, then adds the `review`
-     label itself, because a push by the agent starts no review on its own; a blocker
+     branch, one commit per blocker, pushed as each lands; when it ends, the run
+     approves the `ci` run GitHub held on its last push, cancels the runs held on its
+     earlier pushes, and adds the `review` label itself, because a push by the agent
+     starts no review on its own; a blocker
      in the pull request body alone it fixes by editing the body, and asks for the
      review of the unchanged head the same way; the label starts one, up to three
      times;
@@ -88,7 +90,17 @@ branch locally; GitHub has already deleted it on origin.
   session did in its job summary. Add the `review` label to the pull request to run
   it again. Pull requests from forks are not reviewed by the agent, only by a person.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
-  label, or a required check failed. `gh pr checks <number>` shows which.
+  label, or a required check failed, or the branch moved after the approval, the next
+  entry. `gh pr checks <number>` shows a failed check; the `auto merge` run on the
+  Actions tab shows a moved head.
+- **The `auto merge` run failed: "nothing in the loop reviews the branch's tip".** The
+  branch moved after the reviewer's approval, and GitHub raised no run for the new
+  head: its pull request object still names the approved commit, and the loop reads
+  that object. Push a commit to the branch, `git pull --no-edit origin master` and
+  push when `master` has moved, or the next change: the push moves the object and
+  starts the review of the new head. The same run ending with a notice and a green
+  result is the other case: GitHub has the new head's runs, the loop reviews it, and
+  there is nothing to do.
 - **The pull request conflicts with `master`.** `gh pr view <number>` says
   `CONFLICTING`. Such a pull request has no merge ref, so GitHub starts no CI run and
   no fix run on it, whatever its labels, and the reviewer blocks on the missing CI. The
