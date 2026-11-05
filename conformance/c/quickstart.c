@@ -4,6 +4,9 @@
  * every message once and in order, and checks what spec/c-abi.md says a reader
  * rejects. conformance/c/run.sh builds, links and runs it; just conformance runs that.
  * A failed check prints the function, the code and cavalry_errmsg and exits 1. */
+/* clock_gettime and CLOCK_MONOTONIC are POSIX, not C11: glibc declares them under
+ * -std=c11 only with this defined before the first include; macOS does as well. */
+#define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <inttypes.h>
 #include <netinet/in.h>
