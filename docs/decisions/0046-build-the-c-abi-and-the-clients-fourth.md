@@ -174,9 +174,11 @@ slice. Six features make the slice, one Trello card each, in this order:
    claimed slice; its README answering the four questions with the ten-minute path's
    program in Python as the example; and `clients/README.md`, once, saying how a
    client is generated, what every client must pass, and that the clients are
-   released together. It builds the per-client runner shape, `conformance/python/`:
-   the README's example extended with the checks, publish and subscribe over both
-   channels, record and replay, every message once and in order, the handler's header
+   released together. It builds the check in `just lint` over the generated
+   per-message functions, with Python's forms (below). It builds the per-client
+   runner shape, `conformance/python/`: the README's example extended with the
+   checks, publish and subscribe over both channels, record and replay, every
+   message once and in order, the handler's header
    fields against `spec/frame.md`'s vectors, and a report printed and never gated: its
    one-way p50, p99.99 and max, and the allocations per message on its side of the
    boundary, the client's code and the runtime's together (below). The card records
@@ -185,30 +187,36 @@ slice. Six features make the slice, one Trello card each, in this order:
    objects on every call, which is the runtime's side; and whether the client's view
    over a claimed slice is one object reused across claims or a new one per claim;
    a new one per claim is an allocation of the client's own code, recorded with the
-   reason it could not be avoided (below). Python first because both runners have Python 3 for the scripts
-   (ADR 0003), `ctypes` is in its standard library so the client has no dependency,
-   and Aeron has no Python client.
+   reason it could not be avoided (below). Python first because both runners have
+   Python 3 for the scripts (ADR 0003), `ctypes` is in its standard library so the
+   client has no dependency, and Aeron has no Python client.
 3. **The Node client (card 206).** `clients/node/` with TypeScript types,
    `conformance/node/`, and Node on both runners through its set-up action pinned to
    a full commit SHA (ADR 0003). How the client reaches the header, a native addon
    over N-API that calls the header or a foreign-function package, is the card's
    decision, recorded in its commit with the reason, and under the allowlist rule if
    it is a dependency; napi-rs over the Rust crates is not one of the two
-   (Alternatives); the
-   card records how the fragment handler is called back and what that allocates per
-   message.
+   (Alternatives). The card extends card 205's check in `just lint` with
+   JavaScript's and TypeScript's forms, such as `async`, `await`, `Promise`, `.then`
+   and `throw`, and `Atomics.wait` for a blocking wait, and records how the fragment
+   handler is called back and what that allocates per message.
 4. **The Go client (card 207).** `clients/go/` over the header through cgo,
    `conformance/go/`, and Go on both runners the same way; cgo's pointer rules decide
-   what crosses the boundary, and the card records how the fragment handler is called
-   back and what that allocates per message.
+   what crosses the boundary. The card extends card 205's check with Go's forms, such
+   as `sync.Mutex` and `sync.RWMutex`, a `go` statement, a channel send or receive,
+   and `panic`, and records how the fragment handler is called back and what that
+   allocates per message.
 5. **The JVM client (card 208).** `clients/jvm/` through Java's foreign function and
-   memory API, no JNI, `conformance/jvm/`, and a JDK on both runners the same way;
-   the card records the Java release it needs, and how an upcall for the fragment
-   handler is made and what that allocates per message.
+   memory API, no JNI, `conformance/jvm/`, and a JDK on both runners the same way.
+   The card extends card 205's check with Java's forms, such as `synchronized`, the
+   locks of `java.util.concurrent.locks`, `CompletableFuture` and `throw`, and
+   records the Java release it needs, and how an upcall for the fragment handler is
+   made and what that allocates per message.
 6. **The .NET client (card 209).** `clients/dotnet/` through P/Invoke with the
    source-generated marshalling, `conformance/dotnet/`, and the .NET SDK on both
-   runners the same way; the card records how the handler delegate is called back
-   and what that allocates per message.
+   runners the same way. The card extends card 205's check with C#'s forms, such as
+   `lock`, `Monitor`, `async`, `await`, `Task`, `ValueTask` and `throw`, and records
+   how the handler delegate is called back and what that allocates per message.
 
 Each of the four runners after Python's has the shape card 205 builds, its report
 included.
@@ -231,25 +239,34 @@ code and the ABI, in both directions. It holds all five rules: four by a check a
 its card's record, and the fifth, no allocation, by its card's record and a count,
 without a gate. It calls the ABI on the caller's thread and returns when the ABI
 returns: one call per offer, per claim, per commit or abort and per poll, with no
-lock, no syscall, and no `await`,
-promise, future, task or coroutine around the call. A publication or a subscription
-is used from one thread at a time, as the Rust API's is (card 204's thread rules), so
-no client wraps an `offer` in a `lock` or `synchronized` block to share a publication
-across threads; a user who shares one arranges that in their own code. It returns
+lock, no syscall, and no `await`, promise, future, task or coroutine around the call.
+A publication or a subscription is used from one thread at a time, as the Rust API's
+is (card 204's thread rules), so no client wraps an `offer` in a `lock` or
+`synchronized` block to share a publication across threads; a user who shares one
+arranges that in their own code. It returns
 `Offer`'s codes as values, never raising them: a number, an enum member, or in Go an
 error value made once. That is the managed-language form of no panic path. An
 exception the user's handler raises never crosses the ABI, because the ABI's Rust
 frames between the poll and the handler do not allow an unwind: each client's
 trampoline stops it, and where the caller sees it is the card's decision (below).
 Card 205 builds the check in `just lint` that the per-message functions the generator
-writes for every client have no lock, no `await` and no raise, as the workspace lint
-denies `async` and `std::sync::Mutex` in data-plane crates, and each card records
-that its client holds the four rules, beside its allocation count. The client's code
-makes no heap allocation of its own per message beyond the objects its runtime makes
-for the crossing: where its runtime allows it, it reuses one view or wrapper per
-subscription, per publication or per claim instead of making a new one per message,
-and it never copies a fragment into a new array for the handler, as Aeron's Java
-client hands its `FragmentHandler` a buffer with an offset and a length (ADR 0021).
+writes have no lock, no `await` and no raise, as the workspace lint denies `async`
+and `std::sync::Mutex` in data-plane crates, with Python's forms, such as the locks
+of `threading`, `async def`, `await` and `raise`, and a test that the check fails on
+a generated function that holds each form. A raise of the user's own handler
+exception once the poll has returned, where a card decides on one (below), is the
+one raise the check allows. Each of cards 206 to 209 extends the check with its
+language's forms (items 3 to 6) and the same test, in the commit that adds its
+client's generated code. The check fails on generated code under `clients/` in a
+language it has no rules for, and on a client in whose generated code it finds none
+of the per-message functions, so a check that read nothing of a client cannot pass
+it. Each card records that its client holds the four rules, beside its allocation
+count. The client's code makes no heap allocation of its own per message beyond the
+objects its runtime makes for the crossing: where its runtime allows it, it reuses
+one view or wrapper per subscription, per publication or per claim instead of making
+a new one per message, and it never copies a fragment into a new array for the
+handler, as Aeron's Java client hands its `FragmentHandler` a buffer with an offset
+and a length (ADR 0021).
 An allocation its code cannot avoid, because its runtime offers no reusable form, is
 recorded on its card with the reason. That rule is measured on the client's code
 together with the runtime's side, because a runtime counts its own heap and cannot
@@ -476,13 +493,14 @@ both runners; `cavalry-ffi` is the second `unsafe` crate, and its lifetimes are 
 convention, so misuse must be loud; a callback into a managed runtime is the slowest
 path a message takes, each client's runner reports it and nothing gates it; invariant
 2's gate stops at the ABI, so the code each client's generator writes holds four of
-the per-message rules by card 205's check in `just lint` and its card's record, and
-the fifth, no allocation of its own beyond the objects its runtime makes for the
-crossing, by its card's record and a count it shares with the runtime's side, and
-not by a gate; and the runtime's side may allocate and take the runtime's own lock
-per message, as Python's `ctypes` does, which each client's card records and its
-runner reports, and nothing gates either; the bench hosts' baselines gain two rows per
-profile, recorded as ADR 0033 says; the ABI's ADR waits on Rjae, as the format ADRs
+the per-message rules by card 205's check in `just lint`, which each later card
+extends with its language's forms and which fails on a language it has no rules for,
+and by its card's record, and the fifth, no allocation of its own beyond the objects
+its runtime makes for the crossing, by its card's record and a count it shares with
+the runtime's side, and not by a gate; and the runtime's side may allocate and take
+the runtime's own lock per message, as Python's `ctypes` does, which each client's
+card records and its runner reports, and nothing gates either; the bench hosts'
+baselines gain two rows per profile, recorded as ADR 0033 says; the ABI's ADR waits on Rjae, as the format ADRs
 did, and a later client can send it back to a new version before the first release;
 a flake in the client's tests is met by six runners instead of one until it is fixed.
 
