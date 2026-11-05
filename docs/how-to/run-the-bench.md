@@ -239,21 +239,29 @@ shared runner is
    `bench-link` and `grip-link` are the cable's two ends in both hosts' `/etc/hosts`
    ([Set up a bench host](set-up-a-bench-host.md#further-hosts-the-roles-the-direct-link-and-the-clock)).
    Each side subscribes on its own end and publishes to the other's, and waits up to
-   ten minutes for the other to connect, so the order does not matter. In CI each job
-   first waits for the run's other job to be in progress
-   (`scripts/wait-for-partner-job.sh`, polling the run's jobs every 20 s for up to 45
-   minutes), because the partner can sit queued behind another run's job on its host
-   for longer than those ten minutes, and the end that started first died waiting;
-   a job whose partner completed before it started, or did not start within the 45
-   minutes, fails with a message that says so, and the pair is re-run when both hosts
-   are free. A partner name that is still not one of the run's jobs after a minute, and
-   an API that refuses the job's token or goes unanswered three times in a row, end the
-   wait at once with the reason. Each waiting job holds its host, so two runs' pairs
-   can hold one host each and wait on each other; while the partner is queued, the
-   wait looks every three minutes at the job that holds the partner's host, and when
-   that is the end of another run's pair whose own partner is queued behind this job,
-   the end in the newer run ends at once and names the older run, whose pair then meets
-   (card 212). The peer prints
+   ten minutes for the other to connect, so the order does not matter.
+
+   In CI each job first runs `scripts/wait-for-partner-job.sh`, which waits until the
+   run's other job is in progress, reading the run's jobs every 20 s for up to 45
+   minutes. Each host's runner takes jobs from its own queue, so without the wait the
+   two ends of one run started minutes apart: the harness's ten minutes ended one of
+   them, and the other could meet the end of another run, built from another tree.
+   With the wait, an end passes only while its own partner holds the other host, which
+   holds while `bench-linux` and `grip-linux` each name one runner. The log prints
+   `wait-for-partner-job: bench (udp peer) is in progress after <s> s` when the pair
+   meets. The wait fails with a message that names the reason and what to do: the
+   partner completed before this job reached it, or did not start within the 45
+   minutes, and the pair is re-run when both hosts are free; a partner name that is
+   still not one of the run's jobs after a minute; an API that refuses the job's token
+   or goes unanswered three times in a row. Each waiting job holds its host, so two
+   runs' pairs can hold one host each and wait on each other. While the partner is
+   queued, the wait looks every three minutes at the job that holds the partner's
+   host, and prints it. When that job is the end of another run's pair whose own
+   partner is queued behind this job, the end in the newer run fails at once and names
+   the older run, whose pair then meets. `scripts/wait-for-partner-job.py` lists the
+   runs that showed each hazard (card 212).
+
+   The peer prints
    `the stream from <address> is connected, echoing`, then, when `bench`'s run ends the
    stream, `echoed N messages from <address> back to <host:port> in <s> s`, and exits 0;
    it exits 1 when the stream goes without its end. The measuring side prints the two

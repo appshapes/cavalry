@@ -7,12 +7,31 @@
 `bench (udp)` and `bench (udp peer)` are the two ends of one measurement over the cable,
 each on its own host, and the harness on each end waits ten minutes for the other to
 connect (docs/how-to/run-the-bench.md, step 5). Both jobs queue once `bench` and
-`bench-grip` end, but each host's queue is its own: the partner can sit behind another
-run's job on its host for longer than those ten minutes, and the end that started first
-dies waiting, as runs 42017993331, 42051225401 and 42051752280 did on 2026-11-05. So each
-job runs this first, doing nothing until the run's other job is in progress, read from the
-run's jobs through the API every 20 s; then both reach the harness within one poll of each
-other, and the harness's own wait holds.
+`bench-grip` end, but each host's runner takes jobs from its own queue, so the two ends
+of one run can start minutes apart, and on 2026-11-05 that went wrong in two ways:
+
+- The harness's ten minutes ended one end of the run's pair. In runs 42017993331 (pull
+  request 120) and 42051225401 (master at 97d0412) the end that started first, the peer,
+  failed after 600 s, and the run's `bench (udp)` started minutes later. In runs
+  42025388898 (master at 34049ac) and 42051752280 (pull request 119) the peer started
+  first and passed against another run's `bench (udp)`, and the run's own `bench (udp)`
+  started after the peer ended and failed after 600 s.
+- The ends that passed had met the end of another run, built from another tree. Run
+  42051225401's `bench (udp)`, 15:23:48 to 15:28:40, measured against the peer of run
+  42051665137 (branch `204-c-abi-adr`), 15:23:52 to 15:28:40; run 42017993331's, 12:02:57
+  to 12:13:21, against the peer of run 42018433705, 12:08:37 to 12:13:20; and run
+  42051752280's peer, 15:28:41 to 15:33:32, echoed run 42051665137's `bench (udp)`,
+  15:28:41 to 15:33:33. So a green `udp_round_trip_32` could be round trips that were
+  half another tree's code.
+
+So each job runs this first, doing nothing until the run's other job is in progress, read
+from the run's jobs through the API every 20 s. Both ends then reach the harness within
+one poll of each other, so the harness's own wait holds, and each meets its own partner:
+an end passes the wait only while its own partner holds the other host. That rests on one
+runner per label: `bench-linux` names bench's one runner and `grip-linux` grip's
+(docs/how-to/set-up-a-bench-host.md). With a second runner under either label, another
+run's end could run beside this run's partner, and the look below could read the wrong
+job as the one that holds the partner's host.
 
 Each end holds its host while it waits, and each host's runner picks from its own queue,
 not in creation order (on 2026-11-05 grip started run 42017993331's `bench (udp peer)`

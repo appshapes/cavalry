@@ -1220,9 +1220,14 @@ user-visible change, added in the same commit as the change. The format follows
   how-to and the pull request skill say a review takes up to thirty minutes and
   when to add the `review` label (`.github/workflows/review-pull-request.yml`;
   card 213).
-- The `bench (udp)` and `bench (udp peer)` jobs each wait, before their run, for the
-  run's other job to be in progress, polling the run's jobs through the API every 20 s
-  for up to 45 minutes, so the pair meets however each host's queue stands; before,
-  the end that started first died after the harness's ten-minute wait whenever its
-  partner sat behind another run's job, three times on 2026-11-05, and master read red
-  (`scripts/wait-for-partner-job.sh`; `.github/workflows/ci.yml`; card 212).
+- The `bench (udp)` and `bench (udp peer)` jobs each wait, before their run, until the
+  run's other job is in progress, for up to 45 minutes, so the two ends of one run
+  meet each other. Before, each host started its end from its own queue: the harness's
+  ten-minute wait ended one end whenever the other started more than ten minutes
+  later, twice on master on 2026-11-05, and the end that passed had measured against
+  another run's end, built from another tree. When two runs' pairs each hold one host
+  and wait for each other, the newer run's end fails at once and names the older run;
+  a wrong job name, a refused token or an API that does not answer fails the wait at
+  once with its reason. Each of `bench-linux` and `grip-linux` names one runner
+  (`scripts/wait-for-partner-job.py`; `.github/workflows/ci.yml`;
+  [Run the bench](docs/how-to/run-the-bench.md), step 5; card 212).
