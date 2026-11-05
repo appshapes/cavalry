@@ -33,8 +33,8 @@ BENCH, GRIP = ["self-hosted", "bench-linux"], ["self-hosted", "grip-linux"]
 
 
 def job(id_, name, status, labels, runner=None):
-    return {"id": id_, "name": name, "status": status, "labels": labels,
-            "runner_name": runner if status != "queued" else None}
+    return {"id": id_, "name": name, "status": status, "conclusion": "success" if status == "completed" else None,
+            "labels": labels, "runner_name": runner if status != "queued" else None}
 
 
 def pair(run_id, udp, peer):
@@ -105,7 +105,7 @@ class FakeGitHub:
 
 
 class Base(unittest.TestCase):
-    RUN = 200
+    RUN, OLDER, WORKFLOW = 200, 150, 7
 
     def setUp(self):
         self.gh = FakeGitHub()
@@ -113,9 +113,17 @@ class Base(unittest.TestCase):
         self.clock = Clock()
         self.env = {"GH_TOKEN": FAKE_TOKEN, "GITHUB_API_URL": self.gh.url, "GITHUB_REPOSITORY": REPO,
                     "GITHUB_RUN_ID": str(self.RUN), "RUNNER_NAME": "bench"}
+        for run_id in (self.RUN, self.OLDER):
+            self.route(f"/actions/runs/{run_id}", {"id": run_id, "workflow_id": self.WORKFLOW})
+        self.in_progress(self.RUN)
 
     def route(self, path, body):
         self.gh.routes[f"/repos/{REPO}{path}"] = body
+
+    def in_progress(self, *run_ids):
+        """The workflow's runs in progress, newest first, as GitHub lists them."""
+        runs = [{"id": r, "html_url": f"https://github.example/{REPO}/actions/runs/{r}"} for r in sorted(run_ids, reverse=True)]
+        self.route(f"/actions/workflows/{self.WORKFLOW}/runs", {"total_count": len(runs), "workflow_runs": runs})
 
     def jobs(self, run_id, body):
         self.route(f"/actions/runs/{run_id}/jobs", body if callable(body) or isinstance(body, tuple) else {"jobs": body})
@@ -168,7 +176,7 @@ class Meets(Base):
 class Ends(Base):
     def test_a_completed_partner_cannot_meet(self):
         self.jobs(self.RUN, pair(self.RUN, "in_progress", "completed"))
-        self.fails(f"{PEER} completed before this job reached it", "re-run both jobs of the pair")
+        self.fails(f"{PEER} completed (success) before this job reached it", "re-run both jobs of the pair")
 
     def test_a_partner_that_never_starts_ends_at_the_bound(self):
         self.jobs(self.RUN, pair(self.RUN, "in_progress", "queued"))
@@ -207,6 +215,79 @@ class Ends(Base):
 
     def test_an_http_api_url_that_is_not_loopback_is_refused(self):
         self.fails("GITHUB_API_URL must use https", env={"GITHUB_API_URL": "http://api.example"})
+
+
+class Crossed(Base):
+    """Run 150's bench (udp) holds bench and waits for its peer, queued on grip; run 200's peer
+    holds grip and waits for its bench (udp), queued on bench behind 150's. Each end reads the
+    same two runs, so the newer, 200, ends and the older keeps waiting."""
+
+    def setUp(self):
+        super().setUp()
+        self.in_progress(self.RUN, self.OLDER)
+        self.jobs(self.OLDER, pair(self.OLDER, "in_progress", "queued"))
+        self.jobs(self.RUN, pair(self.RUN, "queued", "in_progress"))
+
+    def test_the_newer_end_ends_at_once_naming_the_older_run(self):
+        self.fails(f"{UDP} is queued, and its host runs {UDP} of run 150", f"waits for its own {PEER}, queued on this host",
+                   "Run 150 is the older, so this job ends", f"re-run this run's {PEER} and {UDP}",
+                   partner=UDP, env={"RUNNER_NAME": "grip"})
+        self.assertEqual(self.clock.slept, [])
+
+    def test_the_older_end_keeps_waiting_and_meets_its_own_partner(self):
+        crossed = pair(self.OLDER, "in_progress", "queued")
+        self.jobs(self.OLDER, then(crossed, crossed, pair(self.OLDER, "in_progress", "in_progress")))
+        self.jobs(self.RUN, pair(self.RUN, "queued", "in_progress"))
+        self.passes(f"{PEER}'s host runs {PEER} of run 200", "that run is the newer, so its end ends and this one keeps waiting",
+                    f"{PEER} is in progress after 40 s", env={"GITHUB_RUN_ID": str(self.OLDER)})
+
+    def test_the_newer_ends_other_end_then_finds_it_completed(self):
+        self.jobs(self.RUN, [{**j, "conclusion": "failure"} if j["name"] == PEER else j
+                             for j in pair(self.RUN, "in_progress", "completed")])
+        self.fails(f"{PEER} completed (failure) before this job reached it")
+
+    def test_a_holder_that_is_not_a_pair_end_is_waited_for(self):
+        self.jobs(self.OLDER, [j if j["name"] != "bench (grip)" else {**j, "status": "in_progress"}
+                               for j in pair(self.OLDER, "queued", "queued")])
+        self.jobs(self.RUN, then(pair(self.RUN, "in_progress", "queued"), pair(self.RUN, "in_progress", "in_progress")))
+        self.passes(f"{PEER}'s host runs bench (grip) of run 150", f"{PEER} is in progress after 20 s")
+
+    def test_a_holder_whose_own_partner_started_is_not_crossed(self):
+        for theirs in ("in_progress", "completed"):
+            with self.subTest(theirs):
+                self.jobs(self.OLDER, pair(self.OLDER, theirs, "in_progress"))
+                self.jobs(self.RUN, then(pair(self.RUN, "in_progress", "queued"), pair(self.RUN, "in_progress", "in_progress")))
+                self.gh.seen.clear()
+                self.passes(f"{PEER}'s host runs {PEER} of run 150", f"{PEER} is in progress", env={"RUNNER_NAME": "bench"})
+
+    def test_a_job_named_as_the_partner_on_another_host_does_not_hold_its_host(self):
+        self.jobs(self.OLDER, [{**j, "labels": ["self-hosted", "kip-linux"]} if j["name"] == PEER else j
+                               for j in pair(self.OLDER, "queued", "in_progress")])
+        self.jobs(self.RUN, then(pair(self.RUN, "in_progress", "queued"), pair(self.RUN, "in_progress", "in_progress")))
+        self.passes(f"no other run of this workflow is in progress on {PEER}'s host", f"{PEER} is in progress")
+
+    def test_it_looks_at_the_first_queued_poll_and_every_three_minutes(self):
+        queued = pair(self.RUN, "in_progress", "queued")
+        self.jobs(self.OLDER, pair(self.OLDER, "completed", "completed"))
+        self.jobs(self.RUN, lambda n: {"jobs": queued if n <= 20 else pair(self.RUN, "in_progress", "in_progress")})
+        self.passes(f"{PEER} is in progress after 400 s")
+        self.assertEqual(self.gh.count(f"/actions/workflows/{self.WORKFLOW}/runs"), 3)    # at 0, 180 and 360 s
+        self.assertEqual(self.gh.count(f"/actions/runs/{self.RUN}"), 1)
+
+    def test_a_run_without_a_workflow_id_is_not_read_as_waiting(self):
+        self.route(f"/actions/runs/{self.RUN}", {"id": self.RUN})
+        self.jobs(self.RUN, pair(self.RUN, "in_progress", "queued"))
+        self.fails(f"GET /actions/runs/{self.RUN} answered without a workflow_id")
+
+    def test_the_whole_wait_stays_inside_a_third_of_the_tokens_hour(self):
+        others = [101, 102, 103, 104, 105]
+        self.in_progress(self.RUN, *others)
+        for r in others:
+            self.jobs(r, pair(r, "completed", "completed"))
+        self.jobs(self.RUN, pair(self.RUN, "in_progress", "queued"))
+        self.fails("did not start within 45 minutes")
+        per_hour = len(self.gh.seen) / (wait.BOUND / 3600)
+        self.assertLessEqual(per_hour, 1000 / 3, f"{len(self.gh.seen)} requests in 45 minutes")
 
 
 class Refused(Base):
@@ -261,7 +342,7 @@ class Wrapper(Base):
         self.jobs(self.RUN, pair(self.RUN, "in_progress", "completed"))
         r = self.run_sh(PEER)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("completed before this job reached it", r.stderr)
+        self.assertIn(f"{PEER} completed (success) before this job reached it", r.stderr)
 
     def test_no_argument_is_a_usage_error(self):
         r = self.run_sh()

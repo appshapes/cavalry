@@ -14,10 +14,30 @@ job runs this first, doing nothing until the run's other job is in progress, rea
 run's jobs through the API every 20 s; then both reach the harness within one poll of each
 other, and the harness's own wait holds.
 
+Each end holds its host while it waits, and each host's runner picks from its own queue,
+not in creation order (on 2026-11-05 grip started run 42017993331's `bench (udp peer)`
+before run 42018433705's older `bench (grip)`). So two runs' pairs can hold one host each
+and wait on each other: bench runs run X's `bench (udp)`, waiting for X's peer, queued on
+grip behind run Y's peer, which grip runs, waiting for Y's `bench (udp)`, queued on bench
+behind X's. Neither queue moves until the bound, and both gate hosts stand idle. So while
+the partner is queued, at the first poll and every LOOK_EVERY after it, this reads the
+workflow's runs in progress for the job that holds the partner's host: a job in progress
+with the partner's labels. When that job is named as the partner and its own run's job
+named as this one is still queued, the pair is crossed, and the end in the newer run, the
+higher run id, ends at once, naming the older run; the older run's end keeps waiting. Both
+ends read the same two runs, so both decide the same, and the older pair meets once the
+newer end has freed its host. Its other end then finds it completed and ends too.
+
+The job token has 1,000 requests an hour for the repository. At most two ends wait at
+once, one on each host, and each makes 3 reads a minute, 180 an hour, plus 20 looks an
+hour at 1 + (the workflow's other runs in progress) reads each, stopping at the holder:
+with 5 other runs in progress, about 310 an hour for an end, and 620 for both.
+
 It exits 0 once the partner is in progress, and 1, with a message that says which reason
 ended the wait and what to do, when:
 
 - the partner completed before this job reached it, so the pair cannot meet;
+- the pair is crossed with another run's, as above, and this run is the newer;
 - the partner, or this job, is not listed in the run's jobs after LISTED_WITHIN: the two
   jobs of the pair are created together, the moment their `needs` end, so a name still
   missing after the first minute is a wrong name, not a wait;
@@ -46,6 +66,7 @@ import urllib.error
 import urllib.request
 
 POLL = 20               # s between reads of the run's jobs
+LOOK_EVERY = 180        # s between looks at what holds the partner's host, while it is queued
 LISTED_WITHIN = 60      # s for both jobs of the pair to be listed, since they are created together
 BOUND = 45 * 60         # s of wall clock for the partner to start
 TIMEOUT = 20            # s for one request
@@ -130,22 +151,72 @@ def environment(env):
         raise Fail(f"GITHUB_RUN_ID is not a run id: {env['GITHUB_RUN_ID']}")
 
 
+def labels(job):
+    return sorted(job.get("labels") or [])
+
+
+def started(job):
+    return job.get("status") in ("in_progress", "completed")
+
+
 class Wait:
     def __init__(self, partner, env, clock, sleep, say):
         self.partner, self.clock, self.sleep, self.say = partner, clock, sleep, say
         self.api = Api(env, sleep, say)
         self.run_id = int(env["GITHUB_RUN_ID"])
         self.runner = env["RUNNER_NAME"]
+        self.workflow = None
+
+    def listed(self, path, key):
+        body = self.api.get(path)
+        items = body.get(key) if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            raise Fail(f"GET {path.split('?')[0]} answered without a list of {key}: {str(body)[:200]}")
+        return items
 
     def jobs(self, run_id):
-        body = self.api.get(f"/actions/runs/{run_id}/jobs?per_page=100")
-        jobs = body.get("jobs") if isinstance(body, dict) else None
-        if not isinstance(jobs, list):
-            raise Fail(f"GET /actions/runs/{run_id}/jobs answered without a list of jobs: {str(body)[:200]}")
-        return jobs
+        return self.listed(f"/actions/runs/{run_id}/jobs?per_page=100", "jobs")
+
+    def look_across(self, me, partner):
+        """What holds the partner's host, and whether it is the end of another run's pair whose
+        own partner is queued on this host, behind this job. Then neither queue moves until the
+        bound, so the newer run's end ends and the older's keeps waiting: both ends read the
+        same two runs, so both decide the same. GitHub numbers runs as it creates them, so the
+        lower id is the older run."""
+        if self.workflow is None:
+            run = self.api.get(f"/actions/runs/{self.run_id}")
+            self.workflow = run.get("workflow_id") if isinstance(run, dict) else None
+            if not self.workflow:
+                raise Fail(f"GET /actions/runs/{self.run_id} answered without a workflow_id: {str(run)[:200]}")
+        runs = self.listed(f"/actions/workflows/{self.workflow}/runs?status=in_progress&per_page=100", "workflow_runs")
+        for run in runs:
+            if run.get("id") == self.run_id:
+                continue
+            jobs = self.jobs(run["id"])
+            holder = next((j for j in jobs if j.get("status") == "in_progress" and labels(j) == labels(partner)), None)
+            if holder is None:
+                continue
+            theirs = next((j for j in jobs if j.get("name") == me.get("name") and labels(j) == labels(me)), None)
+            where = f"run {run['id']} ({run.get('html_url', 'no address')})"
+            if holder.get("name") != partner.get("name") or theirs is None or started(theirs):
+                self.say(f"{self.partner}'s host runs {holder.get('name')} of {where}")
+                return
+            if self.run_id > run["id"]:
+                raise Fail(f"{self.partner} is queued, and its host runs {holder.get('name')} of {where}, which "
+                           f"waits for its own {me.get('name')}, queued on this host behind this job: each "
+                           f"end holds the host the other's partner needs. Run {run['id']} is the older, so this "
+                           f"job ends to free this host for it; re-run this run's {me.get('name')} and "
+                           f"{self.partner} when both hosts are free ({DOCS})")
+            self.say(f"{self.partner}'s host runs {holder.get('name')} of {where}, which waits for its own "
+                     f"{me.get('name')}, queued behind this job; that run is the newer, so its end ends and "
+                     f"this one keeps waiting")
+            return
+        self.say(f"no other run of this workflow is in progress on {self.partner}'s host; if that lasts, "
+                 f"is its runner online?")
 
     def run(self):
         start = self.clock()
+        next_look = start
         while True:
             jobs = self.jobs(self.run_id)
             waited = int(self.clock() - start)
@@ -161,10 +232,13 @@ class Wait:
                 self.say(f"{self.partner} is in progress after {waited} s")
                 return
             elif partner.get("status") == "completed":
-                raise Fail(f"{self.partner} completed before this job reached it, so the pair cannot meet; "
-                           f"re-run both jobs of the pair when both hosts are free ({DOCS})")
+                raise Fail(f"{self.partner} completed ({partner.get('conclusion')}) before this job reached it, "
+                           f"so the pair cannot meet; re-run both jobs of the pair when both hosts are free ({DOCS})")
             else:
                 self.say(f"{self.partner} is {partner.get('status')} after {waited} s")
+                if self.clock() >= next_look:
+                    next_look = self.clock() + LOOK_EVERY
+                    self.look_across(me, partner)
             if self.clock() - start >= BOUND:
                 raise Fail(f"{self.partner} did not start within {BOUND // 60} minutes; is its host's runner "
                            f"online, or its queue that long? ({DOCS})")

@@ -248,7 +248,12 @@ shared runner is
    minutes, fails with a message that says so, and the pair is re-run when both hosts
    are free. A partner name that is still not one of the run's jobs after a minute, and
    an API that refuses the job's token or goes unanswered three times in a row, end the
-   wait at once with the reason (card 212). The peer prints
+   wait at once with the reason. Each waiting job holds its host, so two runs' pairs
+   can hold one host each and wait on each other; while the partner is queued, the
+   wait looks every three minutes at the job that holds the partner's host, and when
+   that is the end of another run's pair whose own partner is queued behind this job,
+   the end in the newer run ends at once and names the older run, whose pair then meets
+   (card 212). The peer prints
    `the stream from <address> is connected, echoing`, then, when `bench`'s run ends the
    stream, `echoed N messages from <address> back to <host:port> in <s> s`, and exits 0;
    it exits 1 when the stream goes without its end. The measuring side prints the two
