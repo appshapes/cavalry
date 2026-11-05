@@ -31,7 +31,6 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::Write as _;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +39,7 @@ use std::time::Duration;
 use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::dir::{Recovery, SlotWrite};
 use cavalry_log::layout::{
-    Descriptor, FRAME_ALIGNMENT, SEGMENT_SUFFIX, State, locate, segment_file_name,
+    Descriptor, FRAME_ALIGNMENT, SEGMENT_NAME_CAPACITY, State, locate, segment_file_name_into,
 };
 use cavalry_proto::client_protocol::{NULL_LENGTH, NULL_POSITION, ReplayStopReason};
 use cavalry_proto::frame::FrameError;
@@ -60,10 +59,6 @@ const DOC: &str = "docs/reference/client-protocol.md#error-codes";
 /// replies again; it keeps writing.
 pub(crate) const PENDING_REPLIES: usize =
     spec::MAX_REPLAYS + spec::MAX_COMMANDS_IN_PROGRESS + spec::REPLAYER_REQUESTS_PER_CYCLE;
-
-/// The longest segment file name, with room to spare, so a roll formats the name on
-/// the stack (`cavalry_log::recorder`).
-const SEGMENT_NAME_CAPACITY: usize = 64;
 
 /// How long the replayer parks at a time while it holds no replay and no reply. The
 /// conductor unparks it with every request it offers and `Driver::close` when it
@@ -243,11 +238,11 @@ pub(crate) enum CheckFailure {
     Files(String),
 }
 
-/// What a command's file work left: for the catalog's last write and the counters.
+/// What a command's file work left: for a truncate's last catalog write. A purge's
+/// files are counted in `recording.segments_purged` as each goes, so nothing here
+/// carries a count (card 177).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileWorkDone {
-    /// Segment files removed, and for a delete the index too.
-    pub files_removed: u64,
     /// For a truncate, the timestamp of the last index entry left: the stop timestamp
     /// recovery would rebuild.
     pub stop_timestamp: i64,
@@ -364,7 +359,6 @@ struct Work {
     cut_due: bool,
     /// Whether the index still waits for its cut (a truncate) or removal (a delete).
     index_due: bool,
-    files_removed: u64,
     stop_timestamp: i64,
 }
 
@@ -457,21 +451,36 @@ pub(crate) struct Replayer {
     pending: VecDeque<Reply>,
     /// The block read from a segment file, sized once.
     buffer: Vec<u8>,
+    /// The path of the segment file a step of file work removes, kept with room for
+    /// the directory and the longest segment name: the name goes on the stack and into
+    /// this buffer, as the recorder's roll does. A segment file's removal then
+    /// allocates nothing while the directory's path is at most
+    /// `cavalry_log::recorder::LOG_DIR_PATH_LIMIT` bytes, which `cavalry doctor
+    /// --log-dir` checks; past it the standard library copies the path into a heap C
+    /// string for the system call. The listing when a command is admitted, a
+    /// truncate's cut and index truncation, and a delete's index removal build their
+    /// own paths and allocate a few times per command, never per file (card 177).
+    work_path: PathBuf,
     rejected_frame: Counter,
+    /// `recording.segments_purged`, one per file as a purge removes it.
+    segments_purged: Counter,
     idler: Idler,
 }
 
 impl Replayer {
     /// A replayer over the log directory at `dir`, whose catalog it opens read-only,
-    /// with the one static counter it moves: `log_buffer.rejected_frame`.
+    /// with the two static counters it moves: `log_buffer.rejected_frame` and
+    /// `recording.segments_purged`.
     pub(crate) fn new(
         dir: &Path,
         requests: Consumer<Request>,
         replies: Producer<Reply>,
         rejected_frame: Counter,
+        segments_purged: Counter,
         idle: IdleStrategy,
     ) -> Result<Self, CatalogError> {
         Ok(Self {
+            work_path: PathBuf::with_capacity(dir.as_os_str().len() + 1 + SEGMENT_NAME_CAPACITY),
             dir: dir.to_path_buf(),
             catalog: CatalogReader::open(dir)?,
             requests,
@@ -481,6 +490,7 @@ impl Replayer {
             pending: VecDeque::with_capacity(PENDING_REPLIES),
             buffer: vec![0u8; spec::REPLAYER_BLOCK_LIMIT],
             rejected_frame,
+            segments_purged,
             idler: Idler::new(idle),
         })
     }
@@ -1169,7 +1179,6 @@ impl Replayer {
             bases,
             cut_due,
             index_due,
-            files_removed: 0,
             stop_timestamp: 0,
         });
     }
@@ -1204,13 +1213,28 @@ impl Replayer {
     /// The next step of the work at `index`: `None` while more remains, else the
     /// outcome.
     fn file_work_step(&mut self, index: usize) -> Option<Result<FileWorkDone, String>> {
-        let work = &mut self.works[index];
-        let recording_id = work.descriptor.recording_id();
-        if let Some(base) = work.bases.pop() {
-            let path = self.dir.join(segment_file_name(recording_id, base));
-            return match std::fs::remove_file(&path) {
+        let recording_id = self.works[index].descriptor.recording_id();
+        if let Some(base) = self.works[index].bases.pop() {
+            // The file's name on the stack and its path in the buffer kept for it, as
+            // the recorder's roll does: within the log directory path limit a removal
+            // allocates nothing (`work_path`), so a purge running beside the recorded
+            // rows adds nothing to the allocation gate's count (card 177).
+            let mut name = [0u8; SEGMENT_NAME_CAPACITY];
+            let Some(file_name) = segment_file_name_into(recording_id, base, &mut name) else {
+                return Some(Err(format!(
+                    "recording {recording_id}'s segment name at {base} is not UTF-8, which is a bug"
+                )));
+            };
+            self.work_path.clear();
+            self.work_path.push(&self.dir);
+            self.work_path.push(file_name);
+            return match std::fs::remove_file(&self.work_path) {
                 Ok(()) => {
-                    work.files_removed += 1;
+                    if matches!(self.works[index].command, Retention::Purge { .. }) {
+                        // One per file as it goes, so the counter reads a purge's
+                        // progress (`counters.toml`, `recording.segments_purged`).
+                        self.segments_purged.increment();
+                    }
                     None
                 }
                 // A file already gone is a file removed: the work is idempotent, as
@@ -1218,10 +1242,11 @@ impl Replayer {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => Some(Err(format!(
                     "cannot remove the segment file {}: {error}",
-                    path.display()
+                    self.work_path.display()
                 ))),
             };
         }
+        let work = &mut self.works[index];
         if work.cut_due
             && let Retention::Truncate { position, .. } = work.command
         {
@@ -1258,10 +1283,7 @@ impl Replayer {
                         .dir
                         .join(cavalry_log::layout::index_file_name(recording_id));
                     return match std::fs::remove_file(&path) {
-                        Ok(()) => {
-                            work.files_removed += 1;
-                            None
-                        }
+                        Ok(()) => None,
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                         Err(error) => Some(Err(format!(
                             "cannot remove the time index {}: {error}",
@@ -1273,7 +1295,6 @@ impl Replayer {
             }
         }
         Some(Ok(FileWorkDone {
-            files_removed: work.files_removed,
             stop_timestamp: work.stop_timestamp,
         }))
     }
@@ -1319,14 +1340,8 @@ fn roll(dir: &Path, replay: &mut Replay, position: i64) -> Result<(), std::io::E
     let from_base = position - start_term_base;
     let base = start_term_base + from_base - from_base % segment_length;
     let mut name = [0u8; SEGMENT_NAME_CAPACITY];
-    let length = {
-        let mut cursor = std::io::Cursor::new(&mut name[..]);
-        // Two i64s in decimal and the suffix fit the buffer by construction.
-        let _ = write!(cursor, "{}-{}{}", replay.recording_id, base, SEGMENT_SUFFIX);
-        cursor.position() as usize
-    };
-    let file_name = std::str::from_utf8(&name[..length])
-        .map_err(|_| std::io::Error::other("a segment name that is not UTF-8"))?;
+    let file_name = segment_file_name_into(replay.recording_id, base, &mut name)
+        .ok_or_else(|| std::io::Error::other("a segment name that is not UTF-8"))?;
     replay.segment_path.clear();
     replay.segment_path.push(dir);
     replay.segment_path.push(file_name);

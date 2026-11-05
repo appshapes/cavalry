@@ -180,10 +180,12 @@ shared runner is
    change does; a run of master's job at the tree is a process of it, and so is a run
    of a pull request whose head is at the tree. A push gives the first run, and
    `gh run rerun <run id> --job <job id>`, or the job's re-run button on the run's
-   page, gives the next at the same commit whether the first passed or failed. Download
-   each attempt's artifact before the next re-run, `bench-results-bench-linux` from
-   `bench (linux)` for `bench` or `bench-results-grip-linux` from `bench (grip)` for
-   `grip`: a re-run replaces
+   page, gives the next at the same commit whether the first passed or failed; for the
+   link rows, whose two jobs re-run together only with the whole run, it is
+   `gh run rerun <run id>` (step 5). Download each attempt's artifact before the next
+   re-run, `bench-results-bench-linux` from `bench (linux)` for `bench`,
+   `bench-results-grip-linux` from `bench (grip)` for `grip` or
+   `bench-results-bench-linux-link` from `bench (udp)` for the link: a re-run replaces
    the run's artifact of the same name, and the run's page and the artifacts endpoint
    keep only the newest attempt's, so an attempt whose artifact was not saved first is
    a lost process (attempts 1 and 2 of run 41196273792 went that way on 2026-10-31).
@@ -207,8 +209,9 @@ shared runner is
    a pull request that changes the tree's paths is judged, and a red there is a
    change. Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
    with its p99.99 and its rate fell against the other processes at the tree, the
-   host was disturbed during the run (the troubleshooting list below); re-run the job
-   and name the disturbance where the host's journal shows it. A baseline is re-recorded at a new tree when master's own run fails or
+   host was disturbed during the run (the troubleshooting list below); re-run the job,
+   or for a link row the whole run (step 5), and name the disturbance where the host's
+   journal shows it. A baseline is re-recorded at a new tree when master's own run fails or
    brushes the gate there with no data-plane change behind it, from the tree's first
    three processes and every one after them; the commit lists every gated row's
    slowest run before and after and names the cause of every row that loosens by more
@@ -239,7 +242,56 @@ shared runner is
    `bench-link` and `grip-link` are the cable's two ends in both hosts' `/etc/hosts`
    ([Set up a bench host](set-up-a-bench-host.md#further-hosts-the-roles-the-direct-link-and-the-clock)).
    Each side subscribes on its own end and publishes to the other's, and waits up to
-   ten minutes for the other to connect, so the order does not matter. The peer prints
+   ten minutes for the other to connect, so the order does not matter.
+
+   In CI each job first runs `scripts/wait-for-partner-job.sh`, which waits until the
+   run's other job is in progress, reading the run's jobs every 20 s for up to 45
+   minutes. Each host's runner takes jobs from its own queue, so without the wait the
+   two ends of one run started minutes apart: the harness's ten minutes ended one of
+   them, and the other could meet the end of another run, built from another tree.
+   With the wait, an end passes only while its own partner holds the other host, which
+   holds while `bench-linux` and `grip-linux` each name one runner. The log prints
+   `wait-for-partner-job: bench (udp peer) is in progress after <s> s` when the pair
+   meets. The wait fails with a message that names the reason and the command to run
+   next: the partner completed before this job reached it, or before this job was
+   created, which is an attempt that re-ran this end alone; the partner did not start
+   within the 45 minutes; the partner is not one of the run's jobs after a minute, which
+   is a wrong name; an API that refuses the job's token or goes unanswered three times
+   in a row. Each waiting job holds its host, so two runs' pairs can hold one host each
+   and wait on each other. While the partner is queued, the wait looks every three
+   minutes at the job that holds the partner's host, and prints it. When that job is
+   the end of another run's pair whose own partner is queued behind this job, the end
+   in the newer run fails at once and names the older run, whose pair then meets.
+   `scripts/wait-for-partner-job.py` lists the runs that showed each hazard (card 212).
+
+   To re-run the pair, re-run both of its jobs in one attempt. GitHub re-runs one job
+   (`gh run rerun <run id> --job <job id>`, or the job's re-run button), the failed
+   jobs (`gh run rerun <run id> --failed`, or "Re-run failed jobs") or the whole run
+   (`gh run rerun <run id>`), each once the run has ended, and never two chosen jobs; a
+   job that an attempt does not re-run keeps its earlier result. The attempt lists that
+   job as a copy, with a new id and the attempt's number but the earlier times and
+   conclusion. Attempt 3 of run 42001521540 re-ran `bench (udp peer)` alone and lists
+   `bench (udp)` as completed at 09:58:08, before the attempt created the peer at
+   09:58:17; attempt 3 of run 41896534567, which re-ran `gates (linux)` alone, lists
+   every other job the same way. So `--job` on one end of the pair cannot work: that
+   end's wait finds its partner completed before this job was created, and fails at once
+   with `the attempt re-ran this end alone`.
+   - **Both ends failed.** The wait or the harness's ten minutes ended one end, and the
+     other then failed too. `gh run rerun <run id> --failed` re-runs both, with any
+     other job of the run that failed.
+   - **One end passed.** This is the likeliest red once the pair meets: `bench-compare`
+     fails a link row on `bench (udp)`, and `bench (udp peer)` passes. `--failed`
+     re-runs `bench (udp)` alone, and its wait fails as `--job` does. Only the whole run
+     re-runs both ends. It re-runs `bench (linux)` and `bench (grip)` too and replaces
+     every artifact of the run, so first download the attempt's artifacts as step 4
+     says, `bench-results-bench-linux-link` from `bench (udp)` among them. Then run
+     `gh run rerun <run id>`.
+
+   So the link baseline's next process at a tree (step 4) is a whole run, and each such
+   attempt is one process of `bench-linux-link` and one each of `bench-linux` and
+   `grip-linux`.
+
+   The peer prints
    `the stream from <address> is connected, echoing`, then, when `bench`'s run ends the
    stream, `echoed N messages from <address> back to <host:port> in <s> s`, and exits 0;
    it exits 1 when the stream goes without its end. The measuring side prints the two
@@ -427,7 +479,8 @@ shared runner is
   p99 120 and p99.99 170 at 8.17 million claims a second in one process, where the
   six other processes of the same tree read 80, 90 to 100 and 150 at 9.35 to 9.45
   million, and the next run read 80, 100 and 150 again. Re-run the job with
-  `gh run rerun <run id> --job <job id>`, read the host's journal for the bench's
+  `gh run rerun <run id> --job <job id>`, or for a link row the whole run with
+  `gh run rerun <run id>` (step 5), read the host's journal for the bench's
   window (`journalctl --since <start> --until <end>` on the host) and name what it
   shows in the re-run's record; such a process joins no baseline
   ([ADR 0033](../decisions/0033-record-a-bench-baseline-from-every-process-at-one-tree.md)).
