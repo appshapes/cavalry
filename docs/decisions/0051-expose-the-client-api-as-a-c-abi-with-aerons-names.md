@@ -44,14 +44,16 @@ stream_id)`, `stop_recording(id)`, `truncate_recording(id, position)`,
 `purge_segments(id, new_start_position)`, `purge_recording(id)` (ADR 0025, ADR 0031);
 `start_replay(recording_id, position, length, replay_stream_id, channel)` and
 `stop_replay(replay_session_id)` (ADR 0030); `close`, `closed() -> Option<Closed>` with
-seven reasons, `client_id`, `dir`. `Publication::try_claim(length) -> Result<BufferClaim,
-Offer>`, `offer(&[u8]) -> Result<i64, Offer>`, `position`, `limit`, `is_connected`,
+seven reasons, `client_id`, `dir`, `counters`, and `default_dir()`, which reads
+`DIR_ENV`. `Publication::try_claim(length) -> Result<BufferClaim, Offer>`,
+`offer(&[u8]) -> Result<i64, Offer>`, `position`, `limit`, `is_connected`,
 `max_payload_length`, `max_message_length`, `registration_id`, `session_id`,
 `stream_id`, `channel`, `is_exclusive`, `is_closed`, `close`; `BufferClaim::body`,
 `position_after`, `set_reserved_value`, `commit -> i64`, `abort -> i64`, and a dropped
 claim aborts. `Subscription::poll(handler, fragment_limit) -> Result<usize, Fault>` with
-`FnMut(&[u8], &DataFrameHeader)`, `image_count`, `images() -> &[Image]`, `is_connected`,
-`registration_id`, `stream_id`, `channel`, `is_closed`, `close`; `Image::correlation_id`,
+`FnMut(&[u8], &DataFrameHeader)`, `image_count`, `images() -> &[Image]` of at most
+`MAX_IMAGES`, `is_connected`, `registration_id`, `stream_id`, `channel`, `is_closed`,
+`close`; `Image::correlation_id`,
 `session_id`, `source_identity`, `position`, `is_end_of_stream`, `position_of(header)`,
 `positions() -> Positions`; `Recording::recording_id`, `session_id`, `stream_id`,
 `channel`, `position`, `synced_position`; `Replay::replay_session_id`, `recording_id`,
@@ -220,7 +222,7 @@ take no handle, `cavalry_errcode`, `cavalry_errmsg`, the version functions and
 
 | Group | Functions |
 | --- | --- |
-| context | `cavalry_context_init(&context)`, a macro in the header over `cavalry_context_init_v(cavalry_context_t **, int abi_version)` that passes the header's `CAVALRY_ABI_VERSION`: the library refuses a version other than its own with −1, `CAVALRY_ERR_ABI_VERSION` and a message that names both numbers, so a program built against another header stops at its first call (see "What a reader rejects"); `cavalry_context_set_dir(ctx, const char *)`, `cavalry_context_get_dir(ctx) -> const char *`, `cavalry_context_close(ctx)`. A context with no directory set uses `CAVALRY_DIR` or the default directory, as `Cavalry::connect()` does. |
+| context | `cavalry_context_init(&context)`, a macro in the header over `cavalry_context_init_v(cavalry_context_t **, int abi_version)` that passes the header's `CAVALRY_ABI_VERSION`: the library refuses a version other than its own with −1, `CAVALRY_ERR_ABI_VERSION` and a message that names both numbers, so a program built against another header stops at its first call (see "What a reader rejects"); `cavalry_context_set_dir(ctx, const char *)`, `cavalry_context_get_dir(ctx) -> const char *`, `cavalry_context_close(ctx)`. A context resolves its directory when it is made, as `Cavalry::default_dir()` does: `CAVALRY_DIR` when it is set and not empty, else the driver's default. `cavalry_context_set_dir` replaces it, and `cavalry_context_get_dir` returns the directory `cavalry_init` will use, never null for a context, valid until the next `set_dir` or the context's close. |
 | client | `cavalry_init(cavalry_t **, cavalry_context_t *)`: attaches and starts the client conductor in one call, since `Cavalry::connect` does both; `cavalry_close(cavalry_t *)`; `cavalry_is_closed(const cavalry_t *) -> bool`; `cavalry_closed(const cavalry_t *) -> int32_t`: 0 while open, else the reason, 1 by user, 2 driver closed, 3 driver timeout, 4 client timeout, 5 lapped, 6 corrupt, 7 overrun, `Closed`'s seven in order; `cavalry_client_id(const cavalry_t *) -> int64_t`; `cavalry_dir(const cavalry_t *) -> const char *`. |
 | adds and commands | `cavalry_add_publication(cavalry_publication_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_add_exclusive_publication(...)`, `cavalry_add_subscription(cavalry_subscription_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_start_recording(cavalry_recording_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_stop_recording(cavalry_t *, int64_t recording_id)`, `cavalry_truncate_recording(cavalry_t *, int64_t recording_id, int64_t position)`, `cavalry_purge_segments(cavalry_t *, int64_t recording_id, int64_t new_start_position)`, `cavalry_purge_recording(cavalry_t *, int64_t recording_id)`, `cavalry_start_replay(cavalry_replay_t **, cavalry_t *, int64_t recording_id, int64_t position, int64_t length, int32_t replay_stream_id, const char *channel)`, `cavalry_stop_replay(cavalry_t *, int64_t replay_session_id)`. Each is synchronous: it returns when the driver has answered or the 10 s response timeout has passed, as the Rust API does, with one operation in flight per client. |
 | publication | `cavalry_publication_try_claim(pub, size_t length, cavalry_buffer_claim_t *) -> int64_t`: the position after the frame, or a code below; `cavalry_buffer_claim_set_reserved_value(claim, int64_t)`; `cavalry_buffer_claim_commit(claim) -> int64_t` and `cavalry_buffer_claim_abort(claim) -> int64_t`: the position after the frame, or −1; `cavalry_publication_offer(pub, const uint8_t *, size_t length) -> int64_t`: the position after the message, or a code below; `cavalry_publication_position(pub) -> int64_t`, or −1; `cavalry_publication_position_limit(pub) -> int64_t`; `cavalry_publication_is_connected(pub) -> bool`; `cavalry_publication_is_closed(pub) -> bool`; `cavalry_publication_constants(pub, cavalry_publication_constants_t *)`; `cavalry_publication_close(pub)`. |
@@ -233,6 +235,20 @@ take no handle, `cavalry_errcode`, `cavalry_errmsg`, the version functions and
 size_t length, const cavalry_header_t *header)`: the body as a view into the log and
 the frame's header, valid for the call, as `Subscription::poll` hands them. Nothing is
 copied, and the ABI makes nothing new for the call.
+
+**Constants.** The header defines the Rust API's public constants and the values its
+enums carry across the boundary: `CAVALRY_DIR_ENV` `"CAVALRY_DIR"` (`DIR_ENV`),
+`CAVALRY_MAX_IMAGES` 256 (`MAX_IMAGES`), `CAVALRY_NULL_POSITION` −1,
+`CAVALRY_NULL_LENGTH` −1 and `CAVALRY_FOLLOW_LENGTH` `INT64_MAX` (`NULL_POSITION`,
+`NULL_LENGTH`, `FOLLOW_LENGTH`, for `cavalry_start_replay`); `CAVALRY_FLAGS_BEGIN`
+`0x80`, `CAVALRY_FLAGS_END` `0x40`, `CAVALRY_FLAGS_EOS` `0x20` and
+`CAVALRY_FLAGS_UNFRAGMENTED` `0xC0` (`Flags`), and `CAVALRY_FRAME_TYPE_PAD` 0 and
+`CAVALRY_FRAME_TYPE_DATA` 1 (`FrameType`), for the header's values; `CAVALRY_CLOSED_*`,
+1 to 7 in `Closed`'s order, for `cavalry_closed`; and `CAVALRY_REPLAY_STOP_*`, 0 to 3
+in `ReplayStopReason`'s order, for `cavalry_replay_ended`. `BufferClaim::body` is the
+claim struct's `data` and `length`, and `position_after` is what
+`cavalry_publication_try_claim` returns. `Recording::stop` and `Replay::stop` are
+`cavalry_stop_recording` and `cavalry_stop_replay` with the handle's id.
 
 **The codes.** `cavalry_publication_try_claim` and `cavalry_publication_offer` return
 the position after, or `CAVALRY_PUBLICATION_NOT_CONNECTED` −1,
@@ -461,8 +477,10 @@ Image handlers and the invoker mode (ADR 0021's Revisit); counters and `add coun
 `offerv`, the controlled and block polls and the fragment assemblers; destinations;
 `revoke` and `append_padding`; `local_sockaddrs`; `print_counters` and the `cnc`
 family, which `cavalry doctor` serves; `aeron_header_position` and the position context
-in the header's values, which the Rust handler's header does not carry (Context). Each
-arrives, if a client needs it, under a new
+in the header's values, which the Rust handler's header does not carry (Context);
+`Cavalry::counters()`, with the counters; and the `reason()` names of `Offer`,
+`Closed`, `Fault` and `ClientError`, which every message carries in its parentheses
+and the codes stand for. Each arrives, if a client needs it, under a new
 version of the page with its ADR. The first release, which freezes version 0, is ADR
 0003's Revisit.
 
