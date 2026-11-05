@@ -1232,7 +1232,13 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         let cpu = options.pin.map(|pin| pin.subscriber);
         thread::Builder::new()
             .name("client-subscriber".into())
-            .spawn(move || -> Result<Histogram<u64>, String> {
+            // The subscription comes back with the histogram and is closed by this
+            // thread after the counting window, as the UDP rows' is: dropped here, on
+            // the way out, it reached the driver's conductor as `remove subscription`
+            // while the publisher was still inside the window once in twenty million
+            // messages, and the conductor's `drop_subscription` allocates, which the
+            // window counted (card 176).
+            .spawn(move || -> Result<(Subscription, Histogram<u64>), String> {
                 pin_to(cpu)?;
                 let mut hist = histogram();
                 let mut received: u64 = 0;
@@ -1254,7 +1260,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
                         std::hint::spin_loop();
                     }
                 }
-                Ok(hist)
+                Ok((subscription, hist))
             })
             .map_err(|e| e.to_string())?
     };
@@ -1311,8 +1317,8 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     }
     let elapsed = start.elapsed();
     let allocations = counting.as_ref().map_or(0, Counting::close);
-    let one_way = match subscriber.join() {
-        Ok(Ok(hist)) => hist,
+    let (subscription, one_way) = match subscriber.join() {
+        Ok(Ok(returned)) => returned,
         failed => return Err(subscriber_failure(failed)),
     };
     if let Some(recording) = recording {
@@ -1334,6 +1340,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
             .stop_recording(recording.recording_id())
             .map_err(|e| e.to_string())?;
     }
+    subscription.close().map_err(|e| e.to_string())?;
     publication.close().map_err(|e| e.to_string())?;
     client.close().map_err(|e| e.to_string())?;
     driver.close().map_err(|e| e.to_string())?;

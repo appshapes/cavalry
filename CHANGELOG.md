@@ -1156,3 +1156,10 @@ user-visible change, added in the same commit as the change. The format follows
   where before it passed
   ([ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md);
   card 176).
+- The bench's client rows no longer count the driver's conductor retiring the
+  subscriber's subscription inside the measured loop: the subscriber thread hands its
+  subscription back with its histogram, as the UDP rows' does, and the publisher closes
+  it after the counting window, where dropping it on the thread's way out reached the
+  conductor's `drop_subscription`, which allocates, while the window was still open
+  once in twenty million messages on the macOS gate; the first backtrace the harness
+  printed named the frame ([Run the bench](docs/how-to/run-the-bench.md); card 176).
