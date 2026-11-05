@@ -17,8 +17,8 @@ watches it (section 2). `watch <number>` watches an open pull request. Empty: on
 with commits ahead of `origin/master` and no pull request, open; with an open pull
 request, watch; on `master`, stop and say that `/commit` is the path from `master`.
 
-Merges only. Never `rebase`, never `--force`. On a conflict outside the append files
-named below, stop and hand it back.
+Merges only. Never `rebase`, never `--force`, never `git merge --abort` to escape a
+conflict: a conflict is resolved in place, as step 4 says.
 
 ## 1. Open the pull request
 
@@ -78,7 +78,8 @@ named below, stop and hand it back.
    everyone appends to (`CHANGELOG.md`, `docs/SUMMARY.md`, `docs/glossary.md`,
    `spec/README.md`, `counters.toml`, a crate's `lib.rs`) is resolved by keeping both
    sides with `master`'s lines first (CLAUDE.md, Working rules for agents); any other
-   conflict is handed back. After a merge commit, run step 2 again.
+   conflict by keeping what both changes meant, with the files and the resolution named
+   in the pull request body (card 218). After a merge commit, run step 2 again.
 
 5. **Check what CI will check.** CI's `lint-docs` runs over `origin/master...HEAD`, the
    whole branch, while the laptop's checks the working tree or the last commit alone

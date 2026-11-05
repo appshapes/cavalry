@@ -1278,3 +1278,8 @@ user-visible change, added in the same commit as the change. The format follows
   one on the wire format, the on-disk log format or the C ABI included, lands Accepted
   on its evidence and names no person to accept it
   ([Implement a feature](docs/how-to/implement-a-feature.md), step 2; card 214).
+- A merge conflict anywhere is the session's to resolve: `CLAUDE.md`'s working rules,
+  the `pr` skill and the `commit` skill say to keep what both changes meant, run the
+  gates, and name the files and the resolution in the commit message or the pull
+  request body, where the two skills said to stop and hand it back; rebase, a force
+  push and `git merge --abort` as a way out stay out (card 218).
