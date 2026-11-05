@@ -23,7 +23,9 @@
 # and "bench (grip)" are the checks branch protection on master requires, and
 # "bench (udp)" joins them by hand once it has run green on master with its baseline
 # (its comment below); "bench (udp peer)" is never required, since bench (udp) fails
-# with it. Renaming a job means updating the protection rule in the same change.
+# with it. Renaming a job means updating the protection rule in the same change, and,
+# for `bench (udp)` and `bench (udp peer)`, the partner name the other job's wait is
+# given (card 212); the bench's `Workflow` test fails on a missed rename.
 name: ci
 
 on:
