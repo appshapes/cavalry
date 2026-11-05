@@ -1151,6 +1151,8 @@ user-visible change, added in the same commit as the change. The format follows
   an allocator hook that keeps the first allocation's backtrace and prints it under the
   failure line, frame by frame from the allocation to the thread's entry, so a run that
   fails the allocation gate says where and not only how many; `stats_alloc` gives way
-  to `tracking-allocator` in the harness alone
+  to `tracking-allocator` in the harness alone. The count now includes reallocations:
+  a measured loop that grows a vector past a capacity it already had fails the gate,
+  where before it passed
   ([ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md);
   card 176).

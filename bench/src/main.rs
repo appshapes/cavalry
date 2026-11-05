@@ -43,8 +43,8 @@ use tracking_allocator::{AllocationGroupId, AllocationRegistry, AllocationTracke
 static GLOBAL: Allocator<System> = Allocator::system();
 
 /// The allocations every thread of this process made while a [`Counting`] window was
-/// open, counted by the hook below; a window's count is the difference between its two
-/// readings.
+/// open, a reallocation counted as one, counted by the hook below; a window's count is
+/// the difference between its two readings.
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 /// The backtrace of the first allocation a window saw, once per process, captured in
 /// the hook, so that a run which fails the allocation gate names the frame that
@@ -56,7 +56,10 @@ static FIRST_ALLOCATION: OnceLock<String> = OnceLock::new();
 /// The hook the allocator calls for every allocation while tracking is enabled, which
 /// is only inside a [`Counting`] window: it counts, and on the first one it captures
 /// the backtrace. The allocator ignores the allocations the capture itself makes, so
-/// the capture neither recurses nor counts.
+/// the capture neither recurses nor counts. A reallocation reaches it too: the
+/// allocator keeps `GlobalAlloc`'s default `realloc`, which allocates anew through the
+/// hooked `alloc`, so a vector grown past its capacity counts, where `stats_alloc`'s
+/// count left it out (ADR 0047).
 struct CountingTracker;
 
 impl AllocationTracker for CountingTracker {
@@ -3110,10 +3113,23 @@ mod tests {
         assert!(message.contains("no backtrace was captured"), "{message}");
     }
 
+    /// The tests that open a counting window take this first, so they run one at a
+    /// time: tracking is process-wide, and one test's window closing would stop the
+    /// count inside another's. The tests that open none run beside them, and their
+    /// allocations count in an open window, so a window's count is a lower bound.
+    static ONE_WINDOW: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn one_window() -> std::sync::MutexGuard<'static, ()> {
+        ONE_WINDOW
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// A counting window counts the allocations made while it is open and keeps the
     /// first one's backtrace, captured inside the allocator's hook.
     #[test]
     fn a_counting_window_counts_and_keeps_the_first_backtrace() {
+        let _one = one_window();
         // The tracker is process-wide and set once; another test may have set it.
         let _ = AllocationRegistry::set_global_tracker(CountingTracker);
         let window = Counting::open();
@@ -3123,5 +3139,33 @@ mod tests {
         assert!(counted >= 1, "counted {counted}");
         let first = first_allocation().expect("the first allocation's backtrace");
         assert!(!first.is_empty());
+    }
+
+    /// A vector grown past a capacity it already had counts: the allocator keeps
+    /// `GlobalAlloc`'s default `realloc`, which allocates anew through the hooked
+    /// `alloc`, copies and frees. `stats_alloc` counted a reallocation apart from the
+    /// allocations the gate read, so before ADR 0047 none of these counted.
+    #[test]
+    fn a_counting_window_counts_a_vector_grown_past_its_capacity() {
+        // Each grow below is from a capacity of one or more, so each is a reallocation
+        // and none an allocation from empty; 64 of them, so that the count is the
+        // grows' and not the few allocations another test makes inside the window.
+        const GROWS: usize = 64;
+        let _one = one_window();
+        let _ = AllocationRegistry::set_global_tracker(CountingTracker);
+        let mut grown: Vec<u8> = Vec::with_capacity(1);
+        grown.push(0);
+        let window = Counting::open();
+        for _ in 0..GROWS {
+            grown.reserve_exact(1);
+            grown.push(7);
+            std::hint::black_box(&mut grown);
+        }
+        let counted = window.close();
+        assert_eq!(grown.len(), GROWS + 1);
+        assert!(
+            counted >= GROWS,
+            "counted {counted} in {GROWS} reallocations"
+        );
     }
 }
