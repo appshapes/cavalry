@@ -626,7 +626,7 @@ jobs:
             exit 0
           fi
           next="Run by hand: gh pr view ${PR_NUMBER} --json autoMergeRequest, then gh pr merge ${PR_NUMBER} --disable-auto if it is armed, then approve the held ci run of the branch's tip on the Actions tab and add the review label (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
-          if ! IFS=$'\t' read -r head branch < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.ref] | @tsv'); then
+          if ! IFS=$'\t' read -r _ branch < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.ref] | @tsv'); then
             echo "::error::pull request #${PR_NUMBER} could not be read (the line above), so whether a merge is armed on it is unknown and the held run below is not approved. ${next}"
             exit 1
           fi
@@ -638,7 +638,15 @@ jobs:
             echo "no merge is armed on #${PR_NUMBER}; nothing to disarm"
             exit 0
           fi
-          tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null || echo "$head")
+          # The branch's tip, never the pull request object's head, which lags a push
+          # (pull request 106): on a failed read the question stays open, so the job stops.
+          if ! tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha'); then
+            state=$(gh pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null || echo "unread")
+            case "$state" in
+              MERGED|CLOSED) echo "#${PR_NUMBER} is ${state} and its branch ${branch} is gone; nothing to disarm"; exit 0 ;;
+              *) echo "::error::the branch ${branch} of #${PR_NUMBER} (state ${state}) could not be read (the line above), so the merge armed at ${armed} may sit on a head nobody reviewed, and the held run below is not approved. ${next}"; exit 1 ;;
+            esac
+          fi
           # The reviewer's latest verdict on the tip, per account; its approval is what arms a
           # merge. Every page, oldest first, so the newest verdict is read last.
           approved() {

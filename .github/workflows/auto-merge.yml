@@ -215,14 +215,15 @@ jobs:
           # the merge is not armed under it (the header, "What disarms the merge"). The
           # latest verdict per account counts, so an account that asked for changes and
           # then approved has approved; every page, oldest first. Exits with a notice
-          # when one is open; returns otherwise. Called right before the arm, so that
-          # the window between the check and the arm is the one call.
+          # when one is open, and with a notice when the reviews cannot be read, since
+          # the question is open then too; returns otherwise. Called right before the
+          # arm, so that the window between the check and the arm is the one call.
           refuse_open_request() {
             local verdicts open
             if ! verdicts=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
               --jq ".[] | select(.commit_id == \"$tip\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\") and ((.user.login // \"\") == \"claude[bot]\" or .author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\")) | \"\(.submitted_at) \(.user.login) \(.state)\""); then
-              echo "::warning::the reviews of #$PR could not be listed (the line above); the merge is armed on the approval alone"
-              return 0
+              echo "::notice::No merge: the reviews of #$PR could not be listed (the line above), so whether a request for changes is open on $tip is unknown, and the approval does not arm the merge on its own. Add the review label to #$PR: the next approval tries again (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")."
+              exit 0
             fi
             open=$(printf '%s\n' "$verdicts" | sort | awk '{last[$2] = $3} END {for (u in last) if (last[u] == "CHANGES_REQUESTED") print u}' | tr '\n' ' ')
             if [ -n "$open" ]; then
