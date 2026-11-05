@@ -10,14 +10,38 @@ repository.workspace = true
 # until the first release (ADR 0003).
 publish = false
 
+# The shared library the generated clients load, the static library the C runner links,
+# and the rlib the bench and the doctest call (spec/c-abi.md; ADR 0051).
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# The one Rust core the ABI exposes: the client API as it stands (ADR 0051).
+cavalry-client = { path = "../cavalry-client" }
+# The data frame header the fragment handler is given, and the replay stop reasons.
+cavalry-proto = { path = "../cavalry-proto" }
+
+[dev-dependencies]
+# The tests and the README's doctest run a driver in the process (ADR 0007).
+cavalry-driver = { path = "../cavalry-driver" }
+# The allocation test counts across every per-message function, allocations and
+# reallocations both, as cavalry-client's tests do (CLAUDE.md, gate 2; ADR 0051).
+stats_alloc = "0.1"
+# The conformance test reads spec/vectors/c-abi.json, as cavalry-proto's reads its
+# page's vectors.
+serde_json = "1"
+
 # One of the two crates where `unsafe` is permitted (CLAUDE.md, "Unsafe"). It cannot
 # inherit the workspace table, which denies unsafe_code, so it carries its own. Every
 # `unsafe` block here needs a `// SAFETY:` comment; see .claude/rules/data-plane.md.
 [lints.rust]
 unsafe_code = "allow"
+# The handle and struct types carry the header's C names (spec/c-abi.md).
+non_camel_case_types = "allow"
 
 # Read by `just lint`. A data-plane crate gets the lock, async and dependency rules
 # from CLAUDE.md, "Data plane", and every dependency it takes must be listed here.
+# cbindgen is a tool `just lint` runs, not a dependency (ADR 0051).
 [package.metadata.cavalry]
 data_plane = true
 allowed-dependencies = []
