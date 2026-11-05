@@ -1039,8 +1039,10 @@ pub fn segment_file_name(recording_id: i64, segment_base_position: i64) -> Strin
 pub const SEGMENT_NAME_CAPACITY: usize = 64;
 
 /// [`segment_file_name`] written into `name` on the caller's stack, for a thread that
-/// must not allocate per file: the recorder's roll and the replayer's file work
-/// (ADR 0025; card 177). The digits, the dash and the suffix are ASCII and fit the
+/// must not allocate per file: the recorder's roll, and the driver's replayer, both
+/// its roll to the segment a replay reads next and its file work (ADR 0025; card 177).
+/// Every segment name formatted on the stack comes from here, so a change to the name
+/// is made in one place. The digits, the dash and the suffix are ASCII and fit the
 /// buffer by construction, so `None`, a name that is not UTF-8, is a bug.
 pub fn segment_file_name_into(
     recording_id: i64,

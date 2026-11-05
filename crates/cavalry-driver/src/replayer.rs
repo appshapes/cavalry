@@ -31,7 +31,6 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::Write as _;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,8 +39,7 @@ use std::time::Duration;
 use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::dir::{Recovery, SlotWrite};
 use cavalry_log::layout::{
-    Descriptor, FRAME_ALIGNMENT, SEGMENT_NAME_CAPACITY, SEGMENT_SUFFIX, State, locate,
-    segment_file_name_into,
+    Descriptor, FRAME_ALIGNMENT, SEGMENT_NAME_CAPACITY, State, locate, segment_file_name_into,
 };
 use cavalry_proto::client_protocol::{NULL_LENGTH, NULL_POSITION, ReplayStopReason};
 use cavalry_proto::frame::FrameError;
@@ -1345,14 +1343,8 @@ fn roll(dir: &Path, replay: &mut Replay, position: i64) -> Result<(), std::io::E
     let from_base = position - start_term_base;
     let base = start_term_base + from_base - from_base % segment_length;
     let mut name = [0u8; SEGMENT_NAME_CAPACITY];
-    let length = {
-        let mut cursor = std::io::Cursor::new(&mut name[..]);
-        // Two i64s in decimal and the suffix fit the buffer by construction.
-        let _ = write!(cursor, "{}-{}{}", replay.recording_id, base, SEGMENT_SUFFIX);
-        cursor.position() as usize
-    };
-    let file_name = std::str::from_utf8(&name[..length])
-        .map_err(|_| std::io::Error::other("a segment name that is not UTF-8"))?;
+    let file_name = segment_file_name_into(replay.recording_id, base, &mut name)
+        .ok_or_else(|| std::io::Error::other("a segment name that is not UTF-8"))?;
     replay.segment_path.clear();
     replay.segment_path.push(dir);
     replay.segment_path.push(file_name);

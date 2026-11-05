@@ -22,8 +22,9 @@ The durable log: recording and replay. Data plane.
   337 bytes (`recorder::LOG_DIR_PATH_LIMIT`): the standard library opens a path on its
   stack only under 384 bytes, the longest segment name is 45, and the next segment's
   name is formatted on the stack into a path the writer keeps
-  (`layout::segment_file_name_into`, which the driver's replayer uses for the file it
-  removes each duty cycle too); `cavalry doctor --log-dir`
+  (`layout::segment_file_name_into`, which the driver's replayer uses too, for the
+  segment a replay rolls to and for the file it removes each duty cycle, so every
+  stack-formatted segment name comes from one function); `cavalry doctor --log-dir`
   warns on a longer path. A roll that fails on a full disk
   is an `io` error and is retried at the next write, never a stuck writer. On any error
   from `write`, the block was taken exactly when `position()` moved. The delete of a
