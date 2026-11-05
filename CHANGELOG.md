@@ -1238,13 +1238,36 @@ user-visible change, added in the same commit as the change. The format follows
   the rows land with the acceptance
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).
+- The driver's replayer removes a purged, truncated or deleted recording's segment
+  files without allocating, while the log directory's path is at most 337 bytes, the
+  limit `cavalry doctor --log-dir` already checks for the recorder's roll: each file's
+  name is formatted on the stack, as the recorder's roll does. `recording.segments_purged`
+  now moves one per file as a purge removes it, not by the whole count when the purge
+  ends, so the counter reads a running purge's progress, and a purge beside the bench's
+  recorded rows adds nothing to the allocation gate's count. `cavalry-log` shares the
+  name formatting as `layout::segment_file_name_into` (card 177).
+- The `bench (udp)` and `bench (udp peer)` jobs each wait, before their run, until the
+  run's other job is in progress, for up to 45 minutes, so the two ends of one run
+  meet each other. Before, each host started its end from its own queue: the harness's
+  ten-minute wait ended one end whenever the other started more than ten minutes
+  later, twice on master on 2026-11-05, and the end that passed had measured against
+  another run's end, built from another tree. When two runs' pairs each hold one host
+  and wait for each other, the newer run's end fails at once and names the older run.
+  A refused token fails the wait at once, an API that does not answer after three
+  tries and a wrong job name after a minute, each with its reason. Each failure names
+  the re-run that brings both ends back, `gh run rerun <run id> --failed` when both
+  failed and the whole run when one passed, since a re-run of one end alone finds its
+  partner's earlier result and fails at once saying so. Each of `bench-linux` and
+  `grip-linux` names one runner
+  (`scripts/wait-for-partner-job.py`; `.github/workflows/ci.yml`;
+  [Run the bench](docs/how-to/run-the-bench.md), step 5; card 212).
 - ADR 0051 Accepted: Rjae accepted the C ABI as proposed on 2026-11-05, and
   `spec/c-abi.md`, version 0, is its page: eight opaque handles, nine caller-owned
   structs, 58 functions, the six result codes, one table of error codes with the
   driver's below 100, the string, lifetime and thread rules, which claim a struct
   names, a frame's position from its image's constants, and the version check a reader
-  runs first; `spec/vectors/c-abi.json`, written by `spec/vectors/c-abi.py`, holds the
-  committed header to the page. `spec/README.md` admits an ABI page and its kind of
+  runs first; `spec/vectors/c-abi.json`, written by `spec/vectors/c-abi.py`, will hold
+  the committed header to the page once `cavalry-ffi`'s test reads it. `spec/README.md` admits an ABI page and its kind of
   vector, and `spec/client-protocol.md` keeps its error codes below 100 for the ABI
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).

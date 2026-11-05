@@ -128,7 +128,7 @@ pub const REPLAY_POSITION: CounterId = CounterId(39);
 /// `recording.truncated`, a static counter: Stopped recordings truncated to a position by `truncate recording`: the segment files past the position removed, the one holding it cut, the time index shortened and the stop written again (spec/client-protocol.md, Commands; ADR 0031).
 pub const RECORDING_TRUNCATED: CounterId = CounterId(40);
 
-/// `recording.segments_purged`, a static counter: Segment files removed by `purge segments`, one per file, once the recording's retained position was written past them (spec/durable-log.md, The driver; ADR 0031).
+/// `recording.segments_purged`, a static counter: Segment files removed by `purge segments`, one per file as the replayer removes it, once the recording's retained position was written past them, so the counter reads a purge's progress while it runs (spec/durable-log.md, The driver; ADR 0031; card 177).
 pub const RECORDING_SEGMENTS_PURGED: CounterId = CounterId(41);
 
 /// `recording.deleted`, a static counter: Stopped recordings deleted by `purge recording`: the slot's state written as 3, then the segment files and the time index removed; the slot stays, so the id never names another recording (ADR 0024, ADR 0031).
@@ -634,7 +634,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "recording.segments_purged",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Segment files removed by `purge segments`, one per file, once the recording's retained position was written past them (spec/durable-log.md, The driver; ADR 0031).",
+        doc: "Segment files removed by `purge segments`, one per file as the replayer removes it, once the recording's retained position was written past them, so the counter reads a purge's progress while it runs (spec/durable-log.md, The driver; ADR 0031; card 177).",
         doctor: "",
     },
     CounterDef {
