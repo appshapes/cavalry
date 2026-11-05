@@ -84,7 +84,25 @@ quickstart:
 
 # clippy with workspace lints, fmt, the workspace lint, the counters lint and the
 # configuration lint below.
-lint: fmt-check clippy lint-workspace lint-counters lint-config
+lint: fmt-check clippy lint-workspace lint-counters lint-config lint-header
+
+# The committed C header is what cbindgen 0.29.4 writes from crates/cavalry-ffi, and
+# nothing else (spec/c-abi.md; ADR 0051): regenerate it to a temporary file and diff.
+# cbindgen is a tool, pinned, installed as mdbook is, not a dependency of the crate.
+lint-header:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v cbindgen >/dev/null || { echo "lint-header: cbindgen is not installed. cargo install --locked cbindgen@0.29.4" >&2; exit 1; }
+    version=$(cbindgen --version | awk '{print $2}')
+    [ "$version" = "0.29.4" ] || { echo "lint-header: cbindgen $version is installed and the header is written by 0.29.4; cargo install --locked cbindgen@0.29.4" >&2; exit 1; }
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' EXIT
+    cbindgen --config crates/cavalry-ffi/cbindgen.toml --crate cavalry-ffi --output "$tmp" 2>/dev/null
+    if ! diff -u crates/cavalry-ffi/include/cavalry.h "$tmp"; then
+        echo "lint-header: crates/cavalry-ffi/include/cavalry.h differs from what cbindgen writes; regenerate it with 'cbindgen --config crates/cavalry-ffi/cbindgen.toml --crate cavalry-ffi --output crates/cavalry-ffi/include/cavalry.h' and commit it with its ADR (spec/c-abi.md)" >&2
+        exit 1
+    fi
+    echo "lint-header: crates/cavalry-ffi/include/cavalry.h is what cbindgen 0.29.4 writes"
 
 # The CLAUDE.md rules rustc and clippy cannot see: data-plane flags, the dependency
 # allowlist, no async on the data plane, unsafe only in two crates, the lock ban's
