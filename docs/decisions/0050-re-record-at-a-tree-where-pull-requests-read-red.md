@@ -42,17 +42,28 @@ On 2026-11-04 the owner re-recorded `grip`'s two profiles from the thirteen proc
 at 7248621's tree, pull request 114 at 61fbfdd, which ADR 0032 allows as a person's
 commit; no rule triggered it, and the reviewer of that pull request asked for one
 (card 199). The rule below would not have triggered it either: `grip`'s one red at the
-tree is the first red, which this rule reruns, and the rerun passed. That re-record
-stays the owner's call. Whether a host's band at a new tree sits higher because of the
-change or because of the host is card 198's question; the rule here needs no answer to
-it, since master's own runs at the tree pass either way.
+tree is the first red, which this rule reruns, and the rerun passed. Nor would a
+second red there have re-recorded under it. Eighteen commits on the guard's paths lie
+between the entry's tree and 7248621's, pull request 102's change to
+`crates/cavalry-client/src/client.rs` among them, so a second red would have been
+their question. That re-record stays the owner's call.
+
+Whether a host's band at a new tree sits higher because of a change or because of the
+host is card 198's question, and master's own runs passing does not answer it. A
+change that moves a row's band up by less than the gate passes at its own tree, judged
+by one process, and it merges. Master's runs after it pass too. If two reds at a later
+tree then re-recorded the entry, the change's band would be in the entry with no
+named cause, and the next change would get its own 5 percent on top. ADR 0033 guards
+its own case against this with "no data-plane change behind it". This rule carries
+that guard.
 
 ## Decision
 
 ADR 0033's trigger gains a second case. A pull request at master's tree that reads red
 on a row, against an entry recorded at an older tree, while master's own runs at that
-tree pass, has measured the host's band at a tree the entry has not seen. Three rules
-decide which reds count:
+tree pass, has measured the host's band at a tree the entry has not seen, if no change
+that the gated rows run lies between the two trees. Three rules decide which reds
+count:
 
 - A pull request at master's tree is one that changes none of the tree's paths. A red
   at a pull request's own tree is a change under ADR 0033 and never counts.
@@ -64,17 +75,43 @@ decide which reds count:
 
 The first red that counts on a row at a tree is a rerun of the job, as a process of
 the baseline's tree reading high is under ADR 0033. The second on the same row of the
-same profile, on the same pull request or another, re-records that profile's entry at
-that tree in ADR 0033's form, from every process the host has run at the tree, master's
-runs and the pull requests' included, the two red runs among them and no disturbed run,
-with the commit naming the two reds by run, attempt and row, every gated row's slowest
-run before and after, and the cause of every row that loosens by more than 5 percent
-or the card that will find it. Once the entry is at the tree, a later red there is
-ADR 0033's join.
+same profile, on the same pull request or another, is not rerun. Where the guard below
+holds, it re-records that profile's entry at that tree in ADR 0033's form, from every
+process the host has run at the tree, master's runs and the pull requests' included,
+the two red runs among them and no disturbed run. The commit names the two reds by
+run, attempt and row, every gated row's slowest run before and after, and the cause of
+every row that loosens by more than 5 percent or the card that will find it. Once the
+entry is at the tree, a later red there is ADR 0033's join.
+
+The guard is ADR 0033's "no data-plane change behind it", read as any such change
+since the entry's tree, not only the change that began master's tree. A change behind
+the band is a commit on master after the entry's tree, up to master's commit at the
+second red, on any of the tree's paths except `crates/cavalry-control` and
+`crates/cavalry`. Those two crates are the ones CLAUDE.md does not mark data plane and
+the harness does not build. Every other path on the tree is a crate the gated rows
+run, the harness, its host check, or the manifests, lockfile and recipes that build
+them. The session that holds the second red lists those commits with one `git log`
+(`docs/how-to/run-the-bench.md`, step 4), and its record of the red carries the list.
+
+- **The list is empty.** The guard holds, and the second red re-records as above.
+- **The list names a commit.** The second red re-records nothing under this rule. The
+  band may have risen with the listed changes rather than with the host, and one
+  process at each change's own tree could not tell the two apart. So the red is the
+  listed changes' question. A person's session opens a card that names the two reds
+  and the listed commits on the row's path. The pull request that holds the second
+  red waits until the card's answer is on master. The answer is either a fix, which
+  begins a new tree, or a re-record that a person makes under ADR 0032, with a commit
+  message that says why each row loosened, by any amount. That is how the how-to
+  reads a `REGRESSION` on a p99.99: the change is slower at the tail until it is not,
+  or the baseline is raised in a commit whose message says why.
+
+ADR 0033's own case, master's red, keeps its words. This ADR reads the guard for its
+own case alone.
 
 Each red that counts is recorded before anything else is done about it: the first
-before its rerun, the second before the re-record. The second red can come days later, on another pull request and in another session,
-and the re-record needs the first red's process. So the session that holds a red
+before its rerun, the second before the re-record or the card. The second red can come
+days later, on another pull request and in another session, and the re-record needs
+the first red's process. So the session that holds a red
 downloads the attempt's artifact first. A rerun's artifact takes the same name, so a
 download by name gives the newest attempt's files alone, and every artifact expires
 seven days after its attempt began (Evidence). The session then comments on its pull
@@ -96,13 +133,14 @@ The re-record is a person's commit (ADR 0032), on a branch of its own, through t
 review loop. A person's session that holds the second red makes it. An agent's session
 that holds it, the writer on its `claude/...` branch or the fixer on any pull request,
 may never change `bench/baseline.json` (`.claude/agents/developer.md`), so it changes
-nothing there. Its record of the second red, a comment on its pull request, names both
-reds by run, attempt and row, and a person's session makes the re-record. In either
-case the pull request that holds the second red waits for the re-record, and does not
-rerun its job until a run passes. Once the re-record is on master, a merge of master
-into the pull request's branch gives it a run judged against the new entry. A pull
-request's run is still judged against the entry alone: the gate stays one number per
-row in `bench/baseline.json`.
+nothing there and opens no card. Its record of the second red, a comment on its pull
+request, names both reds by run, attempt and row and carries the guard's list. A
+person's session then makes the re-record, or opens the card when the list names a
+commit. In every case the pull request that holds the second red waits for the
+re-record or for the card's answer, and does not rerun its job until a run passes.
+Once that is on master, a merge of master into the pull request's branch gives it a
+run judged against the entry master then holds. A pull request's run is still judged
+against the entry alone: the gate stays one number per row in `bench/baseline.json`.
 
 ## Alternatives considered
 
@@ -146,6 +184,25 @@ row in `bench/baseline.json`.
   host.** Lost: `bench/results/` is ignored, and a squash merge would put a run's file
   on master. A file on the host is reachable only from the host, and keeping it there
   is a workflow change that an agent's branch cannot make (ADR 0004).
+- **Drop ADR 0033's guard for this case.** This decision's earlier versions, which
+  did so without saying it. Lost: master's runs passing says nothing about a change
+  that moved a row's band by less than the gate. Two reds at a later tree would put
+  that band in the entry with no named cause, and the next change would get its own
+  5 percent on top. Invariant 2 does not trade that away for a re-record with no card.
+- **Read the guard as the change that began master's tree.** Lost: it catches two reds
+  at the change's own tree, but not two reds at the next tree, once a control-plane
+  commit has begun it. The 2026-11-04 case is that shape. 7248621 began its tree with
+  a change to `crates/cavalry-control/src/doctor.rs`, and eighteen commits on the
+  guard's paths lie between the 2026-10-31 entry's tree and 7248621. Reading back to
+  the entry's tree closes the gap.
+- **Guard on the data-plane crates alone.** Lost: a change to the harness or a
+  dependency bump moves the gated rows as a data-plane change does. The memmap2 bump
+  of 07a6332 changed `Cargo.lock` for `cavalry-shm`. The how-to already gives the
+  re-record after a harness change to a person.
+- **Where the list names a commit, re-record anyway and name the commits.** Lost: the
+  commit would name the suspects without measuring them, and the entry would take the
+  band all the same. The card is the measurement: whether the band rose with the
+  changes or with the host.
 
 ## Evidence
 
@@ -174,6 +231,21 @@ from `gh pr view <n> --json files`. Pull request 114's re-record at 61fbfdd is f
 thirteen processes, with every loosened row's cause or card in its message. Card 198
 holds the host effects behind the band.
 
+The guard at 7248621's tree, against the 2026-10-31 entry at 0782ec5, which is on
+master:
+
+- **The guard's list.** `git log --oneline 0782ec5..7248621 -- crates/ bench/src
+  bench/host bench/Cargo.toml Cargo.toml Cargo.lock justfile ':!crates/cavalry-control'
+  ':!crates/cavalry'` lists eighteen commits. The newest is b6fc3ed (ADR 0045, the
+  padding frame), and the oldest is e5943f9. 06e3ccc, pull request 102's squash
+  commit, is among them.
+- **The tree's paths.** The same range over the tree's paths alone lists twenty-one.
+  The three that the guard leaves out are 7248621 (`crates/cavalry-control`), and
+  542112a and dd16167 (`crates/cavalry`).
+- **What the harness builds.** `bench/Cargo.toml` names `cavalry-shm`,
+  `cavalry-client`, `cavalry-driver` and `cavalry-log`, which in turn name
+  `cavalry-proto`. None of them names `cavalry` or `cavalry-control`.
+
 Where a first red's process is kept, read on 2026-11-05:
 
 - **Two artifacts, one name.** Run 41853288029's artifacts endpoint lists two
@@ -198,9 +270,10 @@ Where a first red's process is kept, read on 2026-11-05:
 
 ## Consequences
 
-Easier: a pull request's red at master's tree has a rule, and the second red on a row
-re-records with no call to wait for; the entry follows the host's band at each tree
-master reaches.
+Easier: a pull request's red at master's tree has a rule. Where no change the gated
+rows run lies between the entry's tree and master's, the second red on a row
+re-records with no call to wait for, and the entry follows the host's band to that
+tree. A change smaller than the gate cannot get into the entry through this rule.
 
 Harder: every red that counts costs a download and a comment of about 10 KB before its
 rerun. A second red costs the re-record's commit, every process's artifact read and
@@ -208,10 +281,15 @@ every loosened row explained or carded; the entry loosens to the band at the new
 as a re-record under ADR 0033's first case does. When an agent's session holds the
 second red, its pull request waits for a person's session to make the re-record. It
 waits for that work, not for a decision, since this rule has already made the
-decision.
+decision. After any change on the guard's paths, until the entry is re-recorded past
+it, a second red re-records nothing. It holds its pull request until a card is
+answered: whether the band rose with the changes or with the host. Most trees follow
+such a change, so the card is the common case and the re-record the rarer one. That
+is the gate declining to read a change's band as the host's.
 
 Revisit: when `scripts/bench-compare.py` reads several trees' entries; when card 198
-names the host effect behind `grip`'s band, which may tighten what a re-record admits.
+names the host effect behind `grip`'s band, which may tighten what a re-record admits;
+when a pull request has waited a week on the card for a second red.
 
 ## References
 

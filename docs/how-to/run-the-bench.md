@@ -218,7 +218,8 @@ shared runner is
    before and after and names the cause of every row that loosens by more than 5
    percent, or the card that will find it. It is re-recorded at master's tree as well
    when pull requests at that tree read red while master's own runs there pass,
-   against an entry recorded at an older tree
+   against an entry recorded at an older tree, and no change that the gated rows run
+   lies between the entry's tree and master's
    ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
    Three rules decide which reds count:
 
@@ -230,18 +231,20 @@ shared runner is
      other profile, starts a count of its own.
 
    Record each red that counts before you do anything else about it: the first before
-   its re-run, the second before the re-record. The second red can come days later, on another pull request and in another
-   session, and the re-record needs the first red's process. After a re-run, the
-   download by name gives the re-run's files, and the artifact expires after seven
-   days. So the record is a comment on the pull request that carries the attempt's
-   result files. A file downloaded into a CI workspace, where the writer and the fixer
-   run, is gone when the job ends.
+   its re-run, the second before the re-record or the card. The second red can come
+   days later, on another pull request and in another session, and the re-record
+   needs the first red's process. After a re-run, the download by name gives the
+   re-run's files, and the artifact expires after seven days. So the record is a
+   comment on the pull request that carries the attempt's result files. A file
+   downloaded into a CI workspace, where the writer and the fixer run, is gone when
+   the job ends.
 
-   1. Download the red attempt's artifact into a new directory, as above.
-   2. Find the tree's first commit. The result's `git` is the run's merge of the pull
-      request with master, and its first parent is master's commit. The tree's first
-      commit is the newest commit in that commit's history that changed the tree's
-      paths. For pull request 111's red:
+   1. **Download.** Download the red attempt's artifact into a new directory, as
+      above.
+   2. **Find the tree.** The result's `git` is the run's merge of the pull request
+      with master, and its first parent is master's commit. The tree's first commit is
+      the newest commit in that commit's history that changed the tree's paths. For
+      pull request 111's red:
 
       ```sh
       # ignore: needs gh signed in and master fetched; the commit is the red result's `git`
@@ -253,8 +256,8 @@ shared runner is
       `72486215fbb884cedfd5866839ed93e49d1dedef`. The second, given that commit,
       prints the tree's first commit and its date,
       `72486215fbb884cedfd5866839ed93e49d1dedef 2026-11-04T14:53:53Z`.
-   3. Look for an earlier red on the same row of the same profile at the tree, with
-      the date, the profile, the row and the commit from step 2:
+   3. **Look for an earlier red** on the same row of the same profile at the tree,
+      with the date and the commit that **Find the tree** printed:
 
       ```sh
       # ignore: needs gh signed in; the date, profile, row and commit are the red's
@@ -265,10 +268,28 @@ shared runner is
       tree began, and prints the address of each record of a red on that row there.
       If it prints nothing, your red is the first. If it prints one address, your red
       is the second.
-   4. Write the record to a file and post it with `gh pr comment <number> --body-file
-      <file>`, as a comment of its own, so that the key is its first line. An agent's
-      session writes the file with its file tools. Pull request 111's red would have
-      read:
+   4. **List the changes**, at a second red only: the changes behind the band. These
+      are the commits on master after the entry's tree, up to master's commit from
+      **Find the tree**, on the tree's paths except `crates/cavalry-control` and
+      `crates/cavalry`, the two crates the harness does not build. Start the range at
+      one of the entry's `git` commits that is on master (`git merge-base
+      --is-ancestor <commit> origin/master` exits 0 for one), or, for a pull request's
+      merge commit, at its first parent, read as in **Find the tree**. For a second
+      red at 7248621's tree, against the entry of 2026-10-31,
+      whose commits are 0782ec5, on master, and 11be900, a pull request's merge commit
+      whose first parent is 0782ec5:
+
+      ```sh
+      # ignore: needs master fetched; the range runs from the entry's commit to master's commit
+      git log --oneline 0782ec5c7f44465a38c65d7cf31eae9b45611268..72486215fbb884cedfd5866839ed93e49d1dedef -- crates/ bench/src bench/host bench/Cargo.toml Cargo.toml Cargo.lock justfile ':!crates/cavalry-control' ':!crates/cavalry'
+      ```
+
+      It prints eighteen commits, from b6fc3ed back to e5943f9, with pull request
+      102's 06e3ccc among them.
+   5. **Post the record.** Write the record to a file and post it with `gh pr comment
+      <number> --body-file <file>`, as a comment of its own, so that the key is its
+      first line. An agent's session writes the file with its file tools. Pull
+      request 111's red would have read:
 
       ````text
       ADR 0050 red: grip-linux-unchecked claim_commit_32_client at the tree of 72486215fbb884cedfd5866839ed93e49d1dedef
@@ -288,13 +309,25 @@ shared runner is
       The key is `ADR 0050 red:`, the profile, the row, and `at the tree of` with the
       full hash of the tree's first commit. Each result file goes in a `~~~json` fence
       that names the file. A `grip` result file is about 5 KB, and a comment holds
-      65,536 characters. A second red's record says `Second red.` and links the
-      first's.
+      65,536 characters. A second red's record says `Second red.`, links the first's,
+      and carries what **List the changes** printed.
 
-   After a first red, re-run the job. After a second, do not re-run: the second red
-   re-records that profile's entry at the tree from every process at it, the two red
-   runs included, in the form above, in a commit that names the two reds by run,
-   attempt and row. Take each red's result files from its record, one file at a time,
+   After a first red, re-run the job. After a second, do not re-run. What it does
+   depends on what **List the changes** printed:
+
+   - **Nothing.** The second red re-records that profile's entry at the tree from
+     every process at it, the two red runs included, in the form above, in a commit
+     that names the two reds by run, attempt and row.
+   - **One commit or more.** The second red re-records nothing. The band may have
+     risen with those changes rather than with the host, and one process at each
+     change's own tree could not tell the two apart. A person's session opens a card
+     that names the two reds and the commits on the row's path. The pull request
+     waits until the card's answer is on master. The answer is either a fix, which
+     begins a new tree, or a person's re-record whose message says why each row
+     loosened, by any amount, as `REGRESSION` on a p99.99 under
+     [When it does not work](#when-it-does-not-work) says.
+
+   A re-record takes each red's result files from its record, one file at a time,
    with the comment's id (the number after `issuecomment-` in its address) and the
    file's name from its fence:
 
@@ -304,11 +337,12 @@ shared runner is
    ```
 
    The re-record is a person's commit on a branch of its own. An agent's session that
-   holds the second red, the writer or the fixer, changes no `bench/baseline.json`.
-   Its record of the second red names both reds by run, attempt and row, and a
-   person's session makes the re-record. The pull request that holds the second red
-   waits for the re-record and does not rerun until a run passes. Once the re-record
-   is on master, merge master into the branch for a run judged against the new entry.
+   holds the second red, the writer or the fixer, changes no `bench/baseline.json` and
+   opens no card. Its record of the second red names both reds by run, attempt and
+   row and carries the list of changes, and a person's session makes the re-record
+   or opens the card. The pull request that holds the second red waits and does not
+   rerun until a run passes. Once the re-record or the card's answer is on master,
+   merge master into the branch for a run judged against the entry master then holds.
 
    A new row joins a baseline that already exists by adding its entry from the tree's
    processes that have it and leaving the other rows as they were recorded, in a

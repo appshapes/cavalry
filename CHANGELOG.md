@@ -1160,13 +1160,16 @@ user-visible change, added in the same commit as the change. The format follows
   row, at a tree where master's own runs pass against an entry recorded at an older
   tree, now has a rule: the first such red on a row of a profile is a rerun, and the
   second on the same row re-records that profile's baseline at the tree from every
-  process at it, as a person's commit naming both reds. A disturbed run, whose row
-  moved as a whole, counts for nothing and joins no entry. Each red that counts is
-  recorded before its re-run in a comment on its pull request that carries the
-  attempt's result files and starts with a key that the next session lists the
-  repository's comments for (`docs/how-to/run-the-bench.md`, step 4). An agent's
-  session that holds the second red records it and changes no baseline, and that pull
-  request waits for the re-record. Pull request 111's red on `grip`'s unchecked client row at
+  process at it, as a person's commit naming both reds. The second red re-records
+  only when no commit since the entry's tree changed a crate the harness builds, the
+  harness, its host check or the build. Otherwise it is a card on those changes, and
+  the pull request waits for the card's answer. A disturbed run, whose row moved as a
+  whole, counts for nothing and joins no entry. Each red that counts is recorded
+  before its re-run in a comment on its pull request that carries the attempt's
+  result files and starts with a key that the next session lists the repository's
+  comments for (`docs/how-to/run-the-bench.md`, step 4). An agent's session that
+  holds the second red records it and changes no baseline, and that pull request
+  waits for the re-record. Pull request 111's red on `grip`'s unchecked client row at
   7248621's tree on 2026-11-04 was such a red, with no rule then; pull requests 102,
   103 and 106 read red on the same row at trees of their own, which stay changes
   under ADR 0033 and which this rule does not count
