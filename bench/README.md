@@ -63,8 +63,9 @@ nothing depends on it.
   again with the data-plane checks built out, under a profile of its own, to price
   ADR 0010's checks.
 - Runs the measured loops under a counting allocator and fails the run when they
-  allocate, naming the benchmark whose loops did: the zero-allocations-per-message
-  assertion of the gate.
+  allocate, naming the benchmark whose loops did and printing the backtrace of the
+  first allocation it saw (ADR 0047): the zero-allocations-per-message assertion of
+  the gate.
 - Writes `bench/results/<profile>-<unix time>.json`, the clock's step included;
   `scripts/bench-compare.py` fails a p99.99 regression over 5 percent and over one clock
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`

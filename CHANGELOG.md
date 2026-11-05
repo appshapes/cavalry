@@ -1147,3 +1147,10 @@ user-visible change, added in the same commit as the change. The format follows
   [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
   made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
   tree while master is green is card 199's (card 182).
+- `just bench` names the frame when a measured loop allocates: the harness counts with
+  an allocator hook that keeps the first allocation's backtrace and prints it under the
+  failure line, frame by frame from the allocation to the thread's entry, so a run that
+  fails the allocation gate says where and not only how many; `stats_alloc` gives way
+  to `tracking-allocator` in the harness alone
+  ([ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md);
+  card 176).

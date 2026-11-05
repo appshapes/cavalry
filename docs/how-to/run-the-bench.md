@@ -311,7 +311,13 @@ shared runner is
   job; the `allocations by benchmark` line above it names the benchmark whose run
   allocated, with its count summed over the runs, and the failure line repeats it,
   `the measured loops allocated 1 times, by benchmark udp 1`; the result keeps it as
-  `allocations_by_benchmark`. The harness's loops allocate on no path but their error
+  `allocations_by_benchmark`. Under the failure line is the backtrace of the first
+  allocation a measured loop saw, captured once per process, frame by frame from the
+  allocation to the thread's entry, with the function names the release build keeps
+  and no line numbers
+  ([ADR 0047](../decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md)):
+  the top frames are the allocation and the call that made it, and the last frame
+  says which thread. The harness's loops allocate on no path but their error
   returns, so the allocation is in the crates the row runs: `cavalry-shm` for a log
   row, `cavalry-client` and the driver's conductor for a client row, and the driver's
   sender and receiver as well for a UDP or link row. A count far below the run's
