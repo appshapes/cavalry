@@ -1164,3 +1164,8 @@ user-visible change, added in the same commit as the change. The format follows
   branch that moved after the approval: a notice when GitHub has the new head's runs,
   which the loop reviews, and a failure that says what to push when it has none, as on
   pull request 106 (`.github/workflows/auto-merge.yml`, header; card 210).
+- The reviewer's run has sixty minutes, twice the longest review observed, where
+  thirty cancelled four reviews on 2026-11-05 with no verdict and no retry; the
+  how-to and the pull request skill say a review takes up to thirty minutes and
+  when to add the `review` label (`.github/workflows/review-pull-request.yml`;
+  card 213).

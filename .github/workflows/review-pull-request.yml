@@ -53,10 +53,13 @@ concurrency:
 jobs:
   review:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Brigade's bound (ADR 0004, Evidence): fifteen reviewer sessions finished inside
-    # six minutes, so thirty is more than five times the longest. Re-measure after the
-    # first ten Cavalry sessions and keep it at twice the longest observed.
-    timeout-minutes: 30
+    # Twice the longest review observed (card 213): 29.3 minutes on run 42001734914,
+    # pull request 117, on 2026-11-05, with the reviewer on Opus 5.5 at xhigh effort
+    # (7cae5b4). Brigade's bound of thirty, from fifteen sessions inside six minutes
+    # (ADR 0004, Evidence), cancelled four reviews that day with no verdict and no
+    # retry: runs 42002772353, 42008817746, 42010061655 and 42019291772. Re-measure
+    # when the model or the effort changes, and keep it at twice the longest observed.
+    timeout-minutes: 60
     permissions:
       contents: read           # the reviewer must not be able to push; this is the boundary
       pull-requests: read      # the verify step reads the reviews; the review itself is posted with the App token
