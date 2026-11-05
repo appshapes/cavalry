@@ -1147,6 +1147,15 @@ user-visible change, added in the same commit as the change. The format follows
   [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
   made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
   tree while master is green is card 199's (card 182).
+- `just bench` names the frame when a measured loop allocates: the harness counts with
+  an allocator hook that keeps the first allocation's backtrace and prints it under the
+  failure line, frame by frame from the hook to the thread's start, so a run that
+  fails the allocation gate says where and not only how many; `stats_alloc` gives way
+  to `tracking-allocator` in the harness alone. The count now includes reallocations:
+  a measured loop that grows a vector past a capacity it already had fails the gate,
+  where before it passed
+  ([ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md);
+  card 176).
 - The review loop's fixer run ends the `ci` runs GitHub held on the heads it pushed
   before its last as cancelled, where it left them held, and the `auto merge` run sweeps
   what is still held right before the merge: a held run ended as a failure, with a mail,
