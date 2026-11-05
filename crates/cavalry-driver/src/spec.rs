@@ -20,6 +20,13 @@ pub const CLIENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(10);
 /// An add or remove command unanswered for this long is reported to the caller as lost.
 pub const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long an `add subscription` waits for its channel's previous receive endpoint to
+/// close, from the moment the conductor read it, before it is answered with error code 4
+/// and registers nothing: half the response timeout, so that the answer reaches the
+/// client before the client reports the add lost (ADR 0049).
+pub const CLOSING_ENDPOINT_WAIT: Duration = Duration::from_secs(5);
+const _: () = assert!(CLOSING_ENDPOINT_WAIT.as_nanos() < RESPONSE_TIMEOUT.as_nanos());
+
 /// How long the command ring's head may stand still with the tail beyond it before the
 /// claim at the head is treated as a dead client's: the client liveness timeout.
 pub const COMMAND_RING_UNBLOCK_TIMEOUT: Duration = CLIENT_LIVENESS_TIMEOUT;

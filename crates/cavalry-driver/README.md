@@ -85,8 +85,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   receive endpoint, one socket shared by the subscriptions on it, and hands the receiver
   the socket and the stream wanted, and an add on a channel whose previous endpoint is
   still closing waits for the receiver's close and then runs as it arrived, so a client
-  that removes and adds on one channel needs no retry (ADR 0049); a setup frame for
-  that stream goes back to the
+  that removes and adds on one channel needs no retry, and one still waiting after the
+  closing endpoint wait, 5 s, a receiver starved that long, is code 4 with nothing
+  registered, counted in `subscription.add_deferred_timed_out` (ADR 0049); a setup
+  frame for that stream goes back to the
   conductor, which creates the image, a log of type 2 under `images/` at the position
   the setup names with a registration id of its own, allocates its two counters and a
   `subscription.position` per subscription, announces it with `available image` and the

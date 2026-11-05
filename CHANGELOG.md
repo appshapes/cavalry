@@ -1160,8 +1160,11 @@ user-visible change, added in the same commit as the change. The format follows
   longer needs a retry: an `add subscription` that finds the channel's previous
   receive endpoint still closing waits in the driver, with nothing registered, until
   the receiver has closed it and then runs as it arrived, binding the endpoint again;
-  waiting adds hold slots of the subscriptions registry and go with a client that
-  closes first, and `subscription.add_deferred` counts them; the refusal with code 4
-  and "add the subscription again" is gone
+  waiting adds hold slots of the subscriptions registry, on `cavalry:ipc` adds as on
+  `cavalry:udp` ones, and go with a client that closes first;
+  `subscription.add_deferred` counts them and `subscription.add_deferred_waiting` says
+  how many wait now; an add still waiting after 5 s, a receiver starved that long, is
+  refused with code 4 inside the client's response timeout, counted in
+  `subscription.add_deferred_timed_out`, which `cavalry doctor` reports
   ([ADR 0049](docs/decisions/0049-hold-an-add-until-the-closing-endpoint-has-closed.md);
   card 194).
