@@ -1224,9 +1224,11 @@ user-visible change, added in the same commit as the change. The format follows
   Aeron's C client's names, seven opaque handles, one publication type for both kinds,
   a caller-owned buffer claim that names its publication, synchronous adds, Aeron's
   six result codes with `TooLong` as `ERROR` and `CAVALRY_ERR_TOO_LONG`, one table of
-  error codes with the driver's on their values, lifetime and thread rules by
-  convention with debug builds poisoning what is released, and `CAVALRY_ABI_VERSION`
-  beside `cavalry_abi_version()`; its page is `spec/c-abi.md` with the committed
+  error codes with the driver's on their values from 1 to 99, an error message that
+  keeps its docs anchor when it is cut, a frame's position from its image's
+  constants, an answer for every call made during a claim or a poll, lifetime and
+  thread rules by convention with debug builds poisoning what is released, and a
+  `cavalry_context_init` that refuses a header of another ABI version; its page is `spec/c-abi.md` with the committed
   header as the artefact and vectors from the page's table, cbindgen 0.29.4 is a
   pinned tool of `just lint` and not a dependency, `conformance/c/` is the first
   runner, and two bench rows run through the ABI. The page, the crate, the runner and

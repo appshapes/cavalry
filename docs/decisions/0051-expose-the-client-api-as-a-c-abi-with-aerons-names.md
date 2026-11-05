@@ -220,7 +220,7 @@ take no handle, `cavalry_errcode`, `cavalry_errmsg`, the version functions and
 
 | Group | Functions |
 | --- | --- |
-| context | `cavalry_context_init(cavalry_context_t **)`, `cavalry_context_set_dir(ctx, const char *)`, `cavalry_context_get_dir(ctx) -> const char *`, `cavalry_context_close(ctx)`. A context with no directory set uses `CAVALRY_DIR` or the default directory, as `Cavalry::connect()` does. |
+| context | `cavalry_context_init(&context)`, a macro in the header over `cavalry_context_init_v(cavalry_context_t **, int abi_version)` that passes the header's `CAVALRY_ABI_VERSION`: the library refuses a version other than its own with −1, `CAVALRY_ERR_ABI_VERSION` and a message that names both numbers, so a program built against another header stops at its first call (see "What a reader rejects"); `cavalry_context_set_dir(ctx, const char *)`, `cavalry_context_get_dir(ctx) -> const char *`, `cavalry_context_close(ctx)`. A context with no directory set uses `CAVALRY_DIR` or the default directory, as `Cavalry::connect()` does. |
 | client | `cavalry_init(cavalry_t **, cavalry_context_t *)`: attaches and starts the client conductor in one call, since `Cavalry::connect` does both; `cavalry_close(cavalry_t *)`; `cavalry_is_closed(const cavalry_t *) -> bool`; `cavalry_closed(const cavalry_t *) -> int32_t`: 0 while open, else the reason, 1 by user, 2 driver closed, 3 driver timeout, 4 client timeout, 5 lapped, 6 corrupt, 7 overrun, `Closed`'s seven in order; `cavalry_client_id(const cavalry_t *) -> int64_t`; `cavalry_dir(const cavalry_t *) -> const char *`. |
 | adds and commands | `cavalry_add_publication(cavalry_publication_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_add_exclusive_publication(...)`, `cavalry_add_subscription(cavalry_subscription_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_start_recording(cavalry_recording_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_stop_recording(cavalry_t *, int64_t recording_id)`, `cavalry_truncate_recording(cavalry_t *, int64_t recording_id, int64_t position)`, `cavalry_purge_segments(cavalry_t *, int64_t recording_id, int64_t new_start_position)`, `cavalry_purge_recording(cavalry_t *, int64_t recording_id)`, `cavalry_start_replay(cavalry_replay_t **, cavalry_t *, int64_t recording_id, int64_t position, int64_t length, int32_t replay_stream_id, const char *channel)`, `cavalry_stop_replay(cavalry_t *, int64_t replay_session_id)`. Each is synchronous: it returns when the driver has answered or the 10 s response timeout has passed, as the Rust API does, with one operation in flight per client. |
 | publication | `cavalry_publication_try_claim(pub, size_t length, cavalry_buffer_claim_t *) -> int64_t`: the position after the frame, or a code below; `cavalry_buffer_claim_set_reserved_value(claim, int64_t)`; `cavalry_buffer_claim_commit(claim) -> int64_t` and `cavalry_buffer_claim_abort(claim) -> int64_t`: the position after the frame, or −1; `cavalry_publication_offer(pub, const uint8_t *, size_t length) -> int64_t`: the position after the message, or a code below; `cavalry_publication_position(pub) -> int64_t`, or −1; `cavalry_publication_position_limit(pub) -> int64_t`; `cavalry_publication_is_connected(pub) -> bool`; `cavalry_publication_is_closed(pub) -> bool`; `cavalry_publication_constants(pub, cavalry_publication_constants_t *)`; `cavalry_publication_close(pub)`. |
@@ -264,9 +264,9 @@ protocol, 111 log, 112 driver, 113 io, `ClientError`'s other kinds in order, and
 refused, a refusal whose code is outside 1 to 99; the faults a poll stops on, 120
 image, 121
 images full, 122 closed, `Fault`'s three; and the ABI's own, 130 too long, 131 null,
-132 claim outstanding, 133 no claim, 134 polling. A success clears nothing: the error
-is the last failure's until the next. With no failure yet on the thread,
-`cavalry_errcode` is 0 and `cavalry_errmsg` the empty string.
+132 claim outstanding, 133 no claim, 134 polling, 135 ABI version. A success clears
+nothing: the error is the last failure's until the next. With no failure yet on the
+thread, `cavalry_errcode` is 0 and `cavalry_errmsg` the empty string.
 
 **The message.** `cavalry_errmsg` is the Rust error's message, UTF-8 and
 NUL-terminated, in a thread-local buffer of 512 bytes: at most 511 bytes of message,
@@ -358,15 +358,26 @@ client conductor is the library's own thread, started by `cavalry_init` and join
 no panic path, by `.claude/rules/data-plane.md`, and Rust aborts the process if one
 did; a `longjmp` out of the handler is undefined.
 
-**What a reader rejects.** A program that compiles against a header whose
-`CAVALRY_ABI_VERSION` differs from `cavalry_abi_version()` stops before `cavalry_init`,
-and says both numbers: `conformance/c/` checks it first, and every generated client
-checks it when it loads the library. The page's vectors, `spec/vectors/c-abi.json`,
-are written by `spec/vectors/c-abi.py` from the page's own table: every function's
-name and signature, every struct's fields in order, and every code's name and value.
-`cavalry-ffi`'s conformance test parses the committed header and fails on a function,
-a field or a code the vectors have that the header lacks, or the header has that the
-vectors lack, so the page and the header cannot drift apart; `just conformance` runs
+**What a reader rejects.** A program built against a header whose
+`CAVALRY_ABI_VERSION` differs from the library's is refused at its first call. The
+header's `cavalry_context_init(&context)` expands to `cavalry_context_init_v(&context,
+CAVALRY_ABI_VERSION)`, as zlib's `deflateInit(strm, level)` expands to
+`deflateInit_(strm, level, ZLIB_VERSION, (int)sizeof(z_stream))`. The library compares
+the number with its own and, when they differ, returns −1 with
+`CAVALRY_ERR_ABI_VERSION` and a message that names both numbers, says to rebuild
+against the library's header, and ends with this page's anchor. The check is the
+default, so a C program that does nothing about versions is checked, and it costs one
+compare per context. A generated client loads the library without the header's
+macros, so it calls `cavalry_context_init_v` with the version its bindings were
+generated from, and it calls `cavalry_abi_version()` when it loads the library, before
+any other function, so that a mismatch fails at load time. `conformance/c/` checks
+both sides: a context made with `cavalry_context_init_v(&context, CAVALRY_ABI_VERSION
++ 1)` is refused with the code, and one made with the macro is not. The page's
+vectors, `spec/vectors/c-abi.json`, are written by `spec/vectors/c-abi.py` from the
+page's own table: every function's name and signature, every macro's name, every
+struct's fields in order, and every code's name and value. `cavalry-ffi`'s conformance
+test parses the committed header and fails on a function, a macro, a field or a code
+the vectors have that the header lacks, or the header has that the vectors lack, so the page and the header cannot drift apart; `just conformance` runs
 it with the other suites.
 
 ### `cavalry-ffi`
@@ -380,9 +391,9 @@ comment naming the lifetime or thread rule above that makes it sound. The per-me
 functions, `cavalry_publication_try_claim`, `cavalry_publication_offer`,
 `cavalry_buffer_claim_commit`, `cavalry_buffer_claim_abort`,
 `cavalry_buffer_claim_set_reserved_value`, `cavalry_subscription_poll` and
-`cavalry_header_values`, hold invariant 2's five rules
-from their call to their return, the time inside the C handler excepted: no heap
-allocation, no lock, no syscall, no `await`, no panic path. The thread-local error is
+`cavalry_header_values`, hold invariant 2's five rules from their call to their
+return, the time inside the C handler excepted: no heap allocation, no lock, no
+syscall, no `await`, no panic path. The thread-local error is
 a fixed buffer. The crate's dev-dependency `stats_alloc`, as `cavalry-client`'s tests
 use it, counts allocations and reallocations across every per-message function in a
 test, which asserts zero. `cavalry-ffi` takes no normal or build dependency:
@@ -390,8 +401,9 @@ test, which asserts zero. `cavalry-ffi` takes no normal or build dependency:
 
 **The header.** `crates/cavalry-ffi/include/cavalry.h` is generated by cbindgen 0.29.4
 from the crate and committed, with `crates/cavalry-ffi/cbindgen.toml` naming the
-language, the include guard, the `CAVALRY_` prefix and the `CAVALRY_ABI_VERSION` and
-code defines. cbindgen is a tool, run by `just lint`'s new `lint-header` recipe, not
+language, the include guard, the `CAVALRY_` prefix, the `CAVALRY_ABI_VERSION` and code
+defines, and, in its `trailer`, the `cavalry_context_init` macro, which cbindgen does
+not write from Rust. cbindgen is a tool, run by `just lint`'s new `lint-header` recipe, not
 a dependency of the crate: the recipe generates the header to a temporary file and
 fails when it differs from the committed one, prints `cargo install --locked
 cbindgen@0.29.4` when the tool is missing, as `just docs` does for `mdbook`, and CI
@@ -402,7 +414,9 @@ generator "named and justified" as ADR 0046 asked, with no entry.
 
 **The README's example** is a Rust doctest calling the ABI's functions through the
 crate's own declarations, in `unsafe` blocks, with an embedded driver as
-`cavalry-client`'s example has: a context, a client, a subscription and a publication
+`cavalry-client`'s example has: a context made by `cavalry_context_init_v` with the
+crate's `CAVALRY_ABI_VERSION`, since a Rust caller has no C macro, a client, a
+subscription and a publication
 on `cavalry:ipc`, a claim written and committed, a poll that prints the message with its
 session id, and every close. It lands in the commit with the first public item. The
 README and `CLAUDE.md`'s definition of the data plane gain the three parts of the
@@ -417,7 +431,8 @@ with `cc -std=c11 -Wall -Wextra -Werror` against `crates/cavalry-ffi/include/cav
 and links `target/release/libcavalry_ffi.a`, starts `target/release/cavalry run` on a
 driver directory of its own through `CAVALRY_DIR` and a log directory beside it, as
 `scripts/quickstart.sh` does, runs the program, stops the driver and removes both
-directories. The program checks the ABI version, then runs the ten-minute path's
+directories. The program checks the ABI version both ways, as "What a reader
+rejects" says, then runs the ten-minute path's
 shape: a recording of stream 1001 on `cavalry:ipc`, 1,000 messages of 64 bytes by
 claim and commit, read back by a subscription with every message once and in order
 and the header's session id and term id checked against `spec/frame.md`'s rules, the
@@ -517,9 +532,21 @@ version of the page with its ADR. The first release, which freezes version 0, is
   and an error, and a seventh code would be the one place a Cavalry client differs
   from an Aeron one on the offer path; the length and the limit reach the caller
   through the message.
-- **A version check that makes `cavalry_init` refuse a mismatched header.** Lost: the
-  library cannot see which header the caller compiled against, and the macro beside
-  the function is the check every generated client and the C runner run first.
+- **The version check as a convention alone: `cavalry_abi_version()` beside
+  `CAVALRY_ABI_VERSION`, which the caller compares.** Lost: a C program that skips
+  the comparison runs undefined against a library of another version, and that
+  matters most while version 0 can still move under new ADRs before the first
+  release. A header can pass its own version to the library through a macro, as
+  zlib's `deflateInit` passes `ZLIB_VERSION` and a libpng caller passes
+  `PNG_LIBPNG_VER_STRING` to `png_create_read_struct`. That makes the check the
+  default at one compare per context (invariant 5).
+- **The check in `cavalry_init` rather than in the context's init.** Lost: the
+  context is made first, so a check there fails before anything else is made, and
+  `cavalry_init` takes a context that has already been checked.
+- **A `sizeof` of each caller-owned struct passed beside the version, as zlib
+  passes `sizeof(z_stream)`.** Lost: every struct's layout belongs to the page's
+  version, and the vectors hold the header to the page, so a struct of another size
+  means another version, which the version check already refuses.
 - **`catch_unwind` in every function.** Lost: a panic path is forbidden on the message
   path, Rust aborts on an unwind out of `extern "C"` from 1.81, and a catch would hide
   a bug behind a code and cost a frame per call.
