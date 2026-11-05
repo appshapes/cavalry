@@ -9,6 +9,31 @@
 # rule REFUSING this merger; it rests on `gh pr merge --auto` choosing to wait for the
 # required checks anyway, which it does, and on the fallback below being guarded. Brigade
 # runs the same shape on the same kind of token.
+#
+# What a moved head does to an approval. An approval is of one commit: the `commit_id`
+# GitHub records on the review, the head its pull request object had when the review was
+# submitted. The `if:` below pins the merge to that commit, and `--match-head-commit` has
+# GitHub refuse the merge unless the branch is still at it when the merge happens, so a
+# push that crosses an approval never lands under it. GitHub refuses with "Head branch is
+# out of date" (or "was modified"), and the refusal is right: the new head has no approval
+# of its own. Two cases produce it, and the step below tells them apart by whether GitHub
+# raised any run for the branch's tip, polling for a minute:
+#   * a push after the approval that GitHub processed: the tip has its `ci` run and, for a
+#     person's push, its `dispatch review` run, so the loop reviews it and the next approval
+#     arms the next merge. The step ends with a notice and exit 0: a failure mail here
+#     would be noise.
+#   * a push GitHub never processed: the pull request object still names the approved
+#     commit, no run exists for the tip, and nothing in the loop reviews the tip until a
+#     push moves the object. The step ends with an error naming both commits and what to
+#     push. Pull request 106 on 2026-11-04 (run 41820298847) is the case: the fixer's push
+#     of 6a42562 was complete by 11:12:14, yet the pull request object named 203370b until
+#     a person's push at 11:24 and no run was ever raised for 6a42562. The fixer's "Verify
+#     the fix landed" read the object and called the push a body edit; the dispatcher took
+#     203370b from the `labeled` payload; the reviewer checked out 203370b, read 6a42562
+#     from the clone, and its approval was recorded against 203370b; both merge calls were
+#     refused and the job failed with nothing in its output naming the cause. No verifier
+#     in the loop could have refused that review: every one reads the pull request object,
+#     and the review's `commit_id` comes from the same object. This step reads the git ref.
 name: auto merge
 
 on:
@@ -28,7 +53,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'auto-merge') &&
       github.event.review.commit_id == github.event.pull_request.head.sha
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5          # one or two API calls; not a p90, a floor
+    timeout-minutes: 5          # a few API calls and a one-minute poll on a refusal; not a p90, a floor
     # The job's own GITHUB_TOKEN does nothing here: the merge authenticates with
     # GH_ACTIONS_TOKEN below. Declaring an empty block rather than inheriting the default
     # is the point.
@@ -40,19 +65,25 @@ jobs:
       # 0004). GitHub's defaults would use the single commit's own message on a one-commit
       # pull request and the review record would hold only by luck.
       #
-      # The `||` fallback is the COMMON path, not defensive noise: `--auto` calls GitHub's
-      # enablePullRequestAutoMerge mutation, which errors with "Pull request is in clean
-      # status" when the pull request is already mergeable, and here it usually is, since CI
-      # finishes long before a reviewer session does. The fallback is GUARDED by
-      # `gh pr checks --required`: the token is an admin's and bypasses the rule, so a bare
-      # merge would land past the required checks on ANY `--auto` error. The guard costs
-      # nothing on the already-green path and refuses every other.
+      # The `||` fallback is the COMMON path, not defensive noise: `--auto` enables GitHub's
+      # auto-merge while a required check is pending and merges at once when the pull
+      # request is already clean, which here it usually is, since CI finishes long before a
+      # reviewer session does; on some already-mergeable states the first call errors
+      # ("Pull request is in clean status"), and the fallback merges then. The fallback is
+      # GUARDED by `gh pr checks --required`: the token is an admin's and bypasses the rule,
+      # so a bare merge would land past the required checks on ANY `--auto` error. The
+      # guard costs nothing on the already-green path and refuses every other.
       #
       # The subject and body are passed explicitly rather than left to the repository
       # setting, for one reason: the Blacksmith Codesmith app appends an HTML footer to every
       # pull request body (seen on pull request 2), and a squash that took the body verbatim
       # would carry that footer into the commit on master. The footer sits between two
       # marker comments; everything between them is dropped, nothing else is touched.
+      #
+      # The branch's tip is read from the git ref before the merge and again after a
+      # refusal, and `explain_moved_head` says what the refusal means (the header above):
+      # the notice or the error, with the approved commit, the tip and the pull request
+      # object's head in its output, so that the run names its cause.
       - name: Merge when green
         env:
           # The owner's token. This job runs NO agent, which is the only reason the token may
@@ -60,12 +91,48 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          APPROVED: ${{ github.event.review.commit_id }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+          tip_now() { gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq '.object.sha'; }
+          # Why the merge was refused, when the branch is not at the approved commit. Exits.
+          explain_moved_head() {
+            local tip=$1 object_head runs deadline
+            object_head=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
+            echo "the approval is of $APPROVED; the branch $BRANCH is at $tip; the pull request object names $object_head"
+            deadline=$((SECONDS + 60))
+            while :; do
+              runs=$(gh api -X GET "repos/$REPO/actions/runs" -f "head_sha=$tip" -F per_page=20 \
+                --jq '[.workflow_runs[] | "\(.name) \(.id) \(.status)/\(.conclusion // "")"] | join(", ")')
+              [ -n "$runs" ] && break
+              [ "$SECONDS" -ge "$deadline" ] && break
+              sleep 10
+            done
+            if [ -n "$runs" ]; then
+              echo "::notice::No merge: a push moved #$PR from the approved $APPROVED to $tip, which has no approval of its own. GitHub raised runs for $tip ($runs), so the loop reviews it and its approval arms the next merge; nothing to do."
+              exit 0
+            fi
+            echo "::error::No merge, and nothing in the loop reviews the branch's tip: #$PR moved from the approved $APPROVED to $tip, but GitHub raised no run for $tip in 60 s and the pull request object still names $object_head, so every verifier reads the old head (auto-merge.yml's header; pull request 106 on 2026-11-04). Push a commit to the branch, a merge of master or the next change: the synchronize it raises moves the object and starts the review of the tip."
+            exit 1
+          }
+          tip=$(tip_now)
+          if [ "$tip" != "$APPROVED" ]; then
+            explain_moved_head "$tip"
+          fi
           subject=$(gh pr view "$PR" --repo "$REPO" --json title --jq '.title')
           body="$RUNNER_TEMP/squash-body.md"
           gh pr view "$PR" --repo "$REPO" --json body --jq '.body' \
             | sed '/<!-- codesmith:footer -->/,/<!-- \/codesmith:footer -->/d' \
             | cat -s > "$body"
-          gh pr merge "$PR" --squash --auto --repo "$REPO" --subject "$subject" --body-file "$body" \
-            || { gh pr checks "$PR" --required --repo "$REPO" && gh pr merge "$PR" --squash --repo "$REPO" --subject "$subject" --body-file "$body"; }
+          err="$RUNNER_TEMP/merge.err"
+          merge() { gh pr merge "$PR" --squash --repo "$REPO" --subject "$subject" --body-file "$body" --match-head-commit "$APPROVED" "$@"; }
+          if merge --auto 2>"$err"; then exit 0; fi
+          cat "$err" >&2
+          if gh pr checks "$PR" --required --repo "$REPO" && merge 2>"$err"; then exit 0; fi
+          cat "$err" >&2
+          if grep -qiE 'out of date|was modified|expected head' "$err"; then
+            explain_moved_head "$(tip_now)"
+          fi
+          echo "::error::GitHub refused the merge of #$PR; gh's reason is the line above"
+          exit 1

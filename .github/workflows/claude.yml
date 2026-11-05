@@ -484,12 +484,14 @@ jobs:
   # exempts). And it raises no `pull_request_target` run for that push at all, so the
   # dispatcher never starts the review of the fix (pull requests 52 and 53 on 2026-10-26:
   # `ci` held on 063f079 and 75fdba0, no `dispatch review` run on either, while a person's
-  # push to the same branches raised both within ten seconds). This job makes the two
-  # calls a person would make, `POST .../actions/runs/<id>/approve` and then the `review`
-  # label, from the token-holding side of the boundary above: no agent runs here, nothing
-  # here reads model output, and GH_ACTIONS_TOKEN stays out of the agent's job exactly as
-  # it does for `open-pr`. It runs after the agent job on every pull-request-bound event
-  # and is a no-op when the head raised no held run and has its dispatch run already,
+  # push to the same branches raised both within ten seconds). This job makes the calls a
+  # person would make: it ends the runs held on the heads the fixer pushed before its
+  # last (cancelled; the first step says how and why), approves the last head's with
+  # `POST .../actions/runs/<id>/approve`, and adds the `review` label, all from the
+  # token-holding side of the boundary above: no agent runs here, nothing here reads
+  # model output, and GH_ACTIONS_TOKEN stays out of the agent's job exactly as it does
+  # for `open-pr`. It runs after the agent job on every pull-request-bound event and is a
+  # no-op when the branch has no held run and the head has its dispatch run already,
   # with one exception: a fix that was an edit to the pull request body alone ("Verify
   # the fix landed", `landed=body`) leaves the head where the review found it, its
   # dispatch run already spent, so the label is the only way its review happens.
@@ -502,9 +504,91 @@ jobs:
       github.event_name == 'issue_comment' ||
       github.event_name == 'pull_request'
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5          # a two-minute poll at most; not a p90, a floor
+    timeout-minutes: 5          # a 90-second sweep and a two-minute poll at most; not a p90, a floor
     permissions: {}             # the job token does nothing here: the approval authenticates with GH_ACTIONS_TOKEN
     steps:
+      # A run held on an earlier head of the same cycle is superseded: the fixer pushes each
+      # blocker as it lands, and the pull request's checks are the head's alone. This step
+      # ends every such run CANCELLED, before the step below approves the head's. Until
+      # 2026-11-05 it was left held, on the reading that it sat in the Actions tab's waiting
+      # list and nothing read it. It did not stay there: the moment the pull request merged
+      # and GitHub deleted its branch, every run still held on the branch ended as a FAILURE
+      # with zero jobs and the annotation "This run likely failed because of a workflow file
+      # issue", and a failure mail went out, within two seconds of the merge. Twenty runs
+      # ended that way in the week to 2026-11-04, on pull requests 90, 92, 94, 97, 98, 99,
+      # 103, 108, 113 and 114 (run 41881392406, held on pull request 113's b826c22, is one
+      # to read), each with a green `ci` run on its final head; the probe for card 210
+      # reproduced it on 2026-11-05 (run 41998580734, failed one second after its branch
+      # was deleted). A cancelled run sends no mail: the week's 39 runs that `ci.yml`'s
+      # concurrency group cancelled on a person's next push sent none.
+      #
+      # How a held run is ended, measured on that probe (pull request 116, a job-token
+      # push): GitHub reports a held run as status `completed` with conclusion
+      # `action_required`, so `POST .../cancel` and `.../force-cancel` both answer 409
+      # "Cannot cancel a workflow run that is completed". The way is `POST .../approve`
+      # and then `.../cancel` retried once a second: the first second's answer is 409
+      # "Cannot cancel a workflow re-run that has not yet queued" ("... that is not in
+      # progress" was seen too), the 202 came at three seconds with the run `pending`, and
+      # the run ended `cancelled` at six seconds with no job created (run 41998580736). The
+      # retry is the point: a cancel sent 63 seconds after the approval found all four jobs
+      # started and the two bench jobs 76 seconds into their hosts (run 41997905395); the
+      # cancel of a run in progress is accepted, so the retry ends there at the latest.
+      # Why before the head's approval, and not left to the concurrency group: `ci.yml`'s
+      # group, `ci-<ref>` with cancel-in-progress on a pull request, cancels the group's
+      # in-progress run when a newer one queues, so an old run approved after the head's
+      # would cancel the head's; and an old run approved first is cancelled by the head's
+      # only when the head raised one, which it has not when GitHub's pull request object
+      # lags the push (pull request 106, 2026-11-04; auto-merge.yml's header). For the
+      # same reason "superseded" is judged against the branch's tip from the git ref as
+      # well as against the pull request object's head.
+      - name: Cancel the runs held on the heads the fixer left behind
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          if ! IFS=$'\t' read -r head branch < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.ref] | @tsv' 2>/dev/null); then
+            echo "#${PR_NUMBER} is not a pull request; nothing to cancel"
+            exit 0
+          fi
+          tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null || echo "$head")
+          superseded=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" -f "branch=${branch}" -f event=pull_request -F per_page=100 \
+            --jq ".workflow_runs[] | select(.conclusion == \"action_required\" and .head_sha != \"${head}\" and .head_sha != \"${tip}\") | \"\(.id) \(.head_sha)\"")
+          ids=()
+          while read -r id sha; do
+            [ -n "$id" ] || continue
+            if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null; then
+              echo "approved run ${id}, held on the superseded head ${sha}, to cancel it"
+              ids+=("$id")
+            else
+              echo "::warning::run ${id}, held on the superseded head ${sha}, refused the approval; left as it is"
+            fi
+          done <<< "$superseded"
+          deadline=$((SECONDS + 90))
+          while [ "${#ids[@]}" -gt 0 ]; do
+            left=()
+            for id in "${ids[@]}"; do
+              if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/cancel" >/dev/null 2>&1; then
+                echo "cancelled run ${id}"
+                continue
+              fi
+              state=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" --jq '"\(.status)/\(.conclusion // "")"')
+              case "$state" in
+                completed/*) echo "run ${id} ended ${state#completed/} before the cancel landed" ;;
+                *) left+=("$id") ;;
+              esac
+            done
+            ids=("${left[@]}")
+            [ "${#ids[@]}" -gt 0 ] || break
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::warning::${#ids[@]} superseded run(s) still refusing the cancel after 90 s: ${ids[*]}; the head's approval below cancels them through ci.yml's concurrency group when it approves one"
+              break
+            fi
+            sleep 1
+          done
+          echo "superseded held runs on ${branch}: $(printf '%s\n' "$superseded" | grep -c . || true)"
+
       - name: Approve the runs GitHub held on the fixer's push
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
@@ -518,11 +602,9 @@ jobs:
           fi
           # The held runs appear within seconds of the push, which happened before this job
           # started; poll for up to two minutes, approve whatever is held, and stop after one
-          # quiet poll once runs exist. Only the head's runs: the fixer pushes each blocker
-          # as it lands, and a run held on an earlier head of the same cycle stays at action
-          # required and never runs, which is right, since it would test a superseded head
-          # and queue on the single-tenant bench hosts; it sits in the Actions tab's waiting
-          # list and nothing reads it, as the pull request's checks are the head's alone.
+          # quiet poll once runs exist. Only the head's runs: a run held on an earlier head
+          # of the same cycle would test a superseded tree and queue on the single-tenant
+          # bench hosts, and the step above has ended it cancelled.
           approved=0; seen=0; quiet=0; deadline=$((SECONDS + 120))
           while :; do
             runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${head}&per_page=50" --jq '.workflow_runs[] | "\(.id) \(.status) \(.conclusion // "")"')
