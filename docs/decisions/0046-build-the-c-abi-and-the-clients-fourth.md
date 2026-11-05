@@ -242,9 +242,14 @@ other two languages Aeron leaves open and the beachhead's; the JVM and .NET last
 where Aeron already serves a client and the toolchains are the heaviest to add to the
 gates. The slice's acceptance test is `just conformance` running the C program and
 the five clients on both runners and passing; the card that lands last changes the
-README's status paragraph. The README's six commands stay six: `cargo install
-cavalry` is the driver whatever the client's language, and each client's README
-carries the path in its own language. Nothing in the slice needs a hand on the hosts:
+README's status paragraph. The README's six commands stay six. Whatever the client's
+language, the driver is the `cavalry` binary that the README's first command builds
+from the checkout, started with `target/release/cavalry run`; each client's README
+starts from those two commands, adds the one that builds `cavalry-ffi`'s library
+from the same checkout, and carries the path in its own language. `cargo install
+cavalry` gives the binary from the first release on: until then crates.io holds the
+`0.0.0` placeholders ADR 0002 reserved, and every crate is `publish = false`
+(ADR 0003). Nothing in the slice needs a hand on the hosts:
 the runners run on the shared runners, and the ABI rows run under `just bench` on the
 bench hosts with what they have.
 
@@ -431,10 +436,11 @@ runners, for whether that runner asserts it.
 
 - `CLAUDE.md`: invariants 1 to 6; Gates; Repository map; Unsafe; Protocol; Clients
   and developer experience; When in doubt
-- ADR 0001, ADR 0003, ADR 0007, ADR 0019, ADR 0021, ADR 0023, ADR 0025, ADR 0033,
-  ADR 0034, ADR 0039, ADR 0040, ADR 0041, ADR 0042, ADR 0044
-- `crates/cavalry-ffi/README.md`, `crates/cavalry-raft/README.md`,
-  `crates/cavalry-client/README.md`; `docs/glossary.md`;
+- ADR 0001, ADR 0002, ADR 0003, ADR 0007, ADR 0019, ADR 0021, ADR 0023, ADR 0025,
+  ADR 0033, ADR 0034, ADR 0039, ADR 0040, ADR 0041, ADR 0042, ADR 0044
+- `README.md`, the ten-minute path; `crates/cavalry-ffi/README.md`,
+  `crates/cavalry-raft/README.md`, `crates/cavalry-client/README.md`;
+  `crates/cavalry-client/src/publication.rs`, `Offer`; `docs/glossary.md`;
   `docs/explanation/why-cavalry.md`; `docs/how-to/implement-a-feature.md`;
   `scripts/quickstart.sh`; `justfile`, the `conformance` recipe
 - Aeron, read 2026-11-05 at `master`: `aeron-client/src/main/c/aeronc.h`
