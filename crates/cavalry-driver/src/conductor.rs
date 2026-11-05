@@ -1835,7 +1835,7 @@ impl Conductor {
     }
 
     /// What the sender said about a `cavalry:udp` publication's receiver, kept for the
-    /// limit and stored in the log's connected flag for the publisher.
+    /// limit pass, which stores the log's connected flag for the publisher (ADR 0048).
     fn set_udp_connected(&mut self, registration_id: i64, connected: bool) {
         if let Some(publication) = self
             .publications
@@ -3140,12 +3140,14 @@ impl Conductor {
             moved = true;
         }
         // The flag the publisher reads, stored after the limit and never before it
-        // (ADR 0048; card 187): 1 with a subscriber's position or a live recording and
-        // the limit past the consumer position, which the first raise after a
+        // (ADR 0048; card 187): 1 once the limit is past the consumer position with a
+        // subscriber's position or a live recording, which the first raise after a
         // connection leaves it, so that a claim reads `back pressured` only with a
-        // subscriber a window behind; 0 otherwise, which the lowering above makes true
-        // in the same pass. Stored only when it changes, as the limit is.
-        let flag = connected && publication.last_limit > consumer;
+        // subscriber a window behind; held at 1 while the publication stays connected,
+        // since a subscriber that reaches the limit while cleaning holds the next raise
+        // back still has its position; 0 otherwise. Stored only when it changes, as the
+        // limit is.
+        let flag = connected && (publication.connected_flag || publication.last_limit > consumer);
         if flag != publication.connected_flag {
             let _ = publication.log.set_connected(flag);
             publication.connected_flag = flag;
@@ -6975,7 +6977,7 @@ mod recording {
 
     /// Offers 32-byte messages, each numbered from `offered`, until back pressured at
     /// `limit`, folding what went as `fold_recording` folds what was recorded.
-    fn offer_to(
+    pub(super) fn offer_to(
         appender: &mut cavalry_shm::log::TermAppender,
         limit: i64,
         offered: &mut i64,
@@ -7331,7 +7333,7 @@ mod replay {
     };
     use cavalry_shm::log::ClaimError;
 
-    use super::recording::{Harness, TestReceiver};
+    use super::recording::{Harness, TestReceiver, offer_to};
     use super::*;
 
     const MS: i64 = 1_000_000;
@@ -7500,6 +7502,85 @@ mod replay {
         let publication = &h.conductor.publications[0];
         assert_eq!(publication.limit.get(), window);
         assert!(publication.log.is_connected());
+    }
+
+    /// The flag holds while the publication stays connected (ADR 0048): a subscriber
+    /// that reads up to the limit in a pass whose cleaning stops at the end of a term
+    /// holds the raise back to the next pass, and still has its position, so the
+    /// publisher at the limit reads `back pressured`, never `not connected`, and the
+    /// next pass raises the limit with the flag still 1.
+    #[test]
+    fn the_connected_flag_holds_while_cleaning_holds_the_raise_back() {
+        let mut h = Harness::new("connected-holds-while-cleaning");
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let term = i64::from(cavalry_shm::log::layout::MIN_TERM_LENGTH);
+        let now = h.now;
+        h.conductor
+            .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
+        h.conductor.add_subscription(CLIENT, 3, STREAM, IPC_CHANNEL);
+        h.conductor.keep_publications(now);
+        let window = i64::from(
+            h.conductor.publications[0]
+                .log
+                .header()
+                .publication_window_length(),
+        );
+        assert_eq!(window, term / 2);
+        assert_eq!(h.conductor.publications[0].limit.get(), window);
+        assert!(h.conductor.publications[0].log.is_connected());
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let mut offered = 0;
+
+        // The publisher fills the window, the subscriber reads it, and the limit runs a
+        // window ahead: to a term. The subscriber then reads 40 KiB, inside the first
+        // term, and the limit is 72 KiB, inside the second.
+        offer_to(&mut appender, window, &mut offered);
+        h.conductor.images[0].position.store_release(window);
+        h.conductor.keep_publications(now);
+        assert_eq!(h.conductor.publications[0].limit.get(), term);
+        offer_to(&mut appender, term, &mut offered);
+        let read = window + window / 4;
+        h.conductor.images[0].position.store_release(read);
+        h.conductor.keep_publications(now);
+        let limit = read + window;
+        assert_eq!(h.conductor.publications[0].limit.get(), limit);
+        offer_to(&mut appender, limit, &mut offered);
+        assert_eq!(appender.position().expect("the position"), limit);
+
+        // The subscriber reads up to the limit. Cleaning behind it stops at the end of
+        // the first term, so this pass holds the raise back; the subscriber still has
+        // its position, and the publisher reads connected.
+        h.conductor.images[0].position.store_release(limit);
+        h.conductor.keep_publications(now);
+        let publication = &h.conductor.publications[0];
+        assert_eq!(
+            publication.clean_position, term,
+            "cleaning stops at the term's end"
+        );
+        assert_eq!(
+            publication.limit.get(),
+            limit,
+            "the raise waits for cleaning"
+        );
+        assert!(
+            publication.log.is_connected(),
+            "a subscriber with a position keeps the publication connected"
+        );
+        assert!(matches!(
+            appender.offer(&[0u8; 32], limit, 0),
+            Err(ClaimError::BackPressured)
+        ));
+
+        // The next pass finishes cleaning and raises the limit; the flag stays 1.
+        h.conductor.keep_publications(now);
+        let publication = &h.conductor.publications[0];
+        assert_eq!(publication.clean_position, limit);
+        assert_eq!(publication.limit.get(), limit + window);
+        assert!(publication.log.is_connected());
+        drop(appender);
     }
 
     /// Offers `count` messages of 32 bytes, the first eight the message's number from

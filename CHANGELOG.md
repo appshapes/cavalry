@@ -1147,10 +1147,14 @@ user-visible change, added in the same commit as the change. The format follows
   [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
   made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
   tree while master is green is card 199's (card 182).
-- A publisher never reads a publication as connected with its limit still at its
-  position: the driver's conductor stores the connected flag in its limit pass, after
-  the limit and never before it, where it set the flag as an image joined, a recording
-  started or a status message arrived and raised the limit a step later in the cycle,
-  so `BackPressured` with no subscriber behind, which card 187 saw on the macOS gate,
-  cannot be read; `spec/log-buffer.md`, "The driver", says the order
+- A publisher never reads a publication as connected before its limit is raised for
+  the subscriber or recording that connects it: the driver's conductor stores the
+  connected flag in its limit pass, after the limit and never before it, where it set
+  the flag as an image joined, a recording started or a status message arrived and
+  raised the limit a step later in the cycle, so `BackPressured` with no subscriber
+  behind, which card 187 saw on the macOS gate, cannot be read; the flag then holds
+  while the publication stays connected, so a publisher whose subscriber reaches the
+  limit while cleaning holds the next raise back still reads connected and its claim
+  `BackPressured`, not `NotConnected`; `spec/log-buffer.md`, "The
+  driver", says the order
   ([ADR 0048](docs/decisions/0048-store-the-connected-flag-after-the-limit.md); card 187).

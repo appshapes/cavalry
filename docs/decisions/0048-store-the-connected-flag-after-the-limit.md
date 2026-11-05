@@ -34,9 +34,11 @@ code (`CLAUDE.md`, Protocol).
 ## Decision
 
 The conductor stores the flag in its limit pass, after the limit and never before it,
-in the same duty cycle as the limit's raise: the flag is 1 when a subscriber has a
-position or a recording is live and the limit stored is past the consumer position,
-which the first raise after a connection leaves it, and 0 otherwise. A publisher that
+in the same duty cycle as the limit's raise: the flag rises to 1 when a subscriber has
+a position or a recording is live and the limit stored is past the consumer position,
+which the first raise after a connection leaves it; it stays 1 while the publication
+stays connected, since a subscriber that reaches the limit in a pass whose cleaning
+holds the raise back still has its position; and it is 0 otherwise. A publisher that
 reads 1 therefore reads a limit raised for that subscriber or recording with it, so
 `back pressured` means what the client says it means. The commands pass, the start of
 a recording and the sender's replies no longer touch the flag; they change what the
@@ -57,11 +59,16 @@ pass.
 
 ## Evidence
 
-The two failures in Context, and the conductor's unit test
+The two failures in Context, and three of the conductor's unit tests.
 `the_connected_flag_is_stored_after_the_limit_in_the_same_cycle`: after an image joins
 in the commands pass the publication is not connected and its limit has not moved, and
-the limit pass raises the limit by the window and then sets the flag; the same for a
-recording that starts. Nothing a message passes through changes: the publisher's claim
+the limit pass raises the limit by the window and then sets the flag.
+`a_recording_connects_a_publication_in_the_limit_pass`: the same for a recording that
+connects a publication alone. `the_connected_flag_holds_while_cleaning_holds_the_raise_back`:
+on a 64 KiB term the subscriber reads up to a limit of 72 KiB, cleaning stops at the
+first term's end, and the pass that holds the raise back leaves the flag 1 and the
+publisher's claim `back pressured`; the next pass raises the limit with the flag still
+1. Nothing a message passes through changes: the publisher's claim
 reads the same two words, and the conductor stores one of them one step later in its
 cycle. `just bench` before and after is in the commit message.
 
@@ -72,7 +79,11 @@ the flag, from what the limit pass computes, where four places did.
 
 Harder: the flag follows the limit, so a subscriber that joins a publication whose
 cleaning is behind sees the flag a cycle or two after its position exists, during which
-a claim reads `not connected`; the page says so.
+a claim reads `not connected`; the page says so. Once 1, the flag holds while the
+publication stays connected, so a subscriber that reads up to the limit in a pass whose
+cleaning stops at a term's end holds the raise back for that cycle, and a claim at the
+limit reads `back pressured` with the subscriber at the limit rather than a window
+behind, as it did before this decision; the page says that too.
 
 Revisit: when a client needs a counter for the flag's transitions over IPC, as
 `publication.connected` counts them over UDP (ADR 0019's Revisit).
