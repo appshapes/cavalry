@@ -229,7 +229,10 @@ is no subscriber.
   every cycle, and only after cleaning. With neither a subscriber nor a recording the
   limit is the largest position any subscriber reached, so the publisher is told `not
   connected`; a recording alone connects the publication. It sets is connected to 1 while
-  a subscriber has a position or a recording is live, and to 0 otherwise.
+  a subscriber has a position or a recording is live, and to 0 otherwise, and it stores
+  the flag after the limit in the same duty cycle, never before it: a publisher that
+  reads 1 reads a limit raised for that subscriber or recording with it, so `back
+  pressured` means a subscriber a window behind (ADR 0048).
 - **Cleaning.** Before it raises the limit to L, it zeroes every byte from the clean
   position, the end of the last cleaning, up to L − window, the consumer position, one
   term at a time, so that no recorded byte is cleaned before the recorder has written it: the bytes after the first eight of the range with plain
