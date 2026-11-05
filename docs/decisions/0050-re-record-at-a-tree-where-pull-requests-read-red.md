@@ -74,14 +74,21 @@ count:
   in the host's other profile, starts a count of its own.
 
 The first red that counts on a row at a tree is a rerun of the job, as a process of
-the baseline's tree reading high is under ADR 0033. The second on the same row of the
-same profile, on the same pull request or another, is not rerun. Where the guard below
+the baseline's tree reading high is under ADR 0033; a person's session starts the
+rerun, since an agent's job cannot (below). The second on the same row of the same
+profile, on the same pull request or another, is not rerun. Where the guard below
 holds, it re-records that profile's entry at that tree in ADR 0033's form, from every
-process the host has run at the tree, master's runs and the pull requests' included,
-the two red runs among them and no disturbed run. The commit names the two reds by
-run, attempt and row, every gated row's slowest run before and after, and the cause of
-every row that loosens by more than 5 percent or the card that will find it. Once the
-entry is at the tree, a later red there is ADR 0033's join.
+process the host has run at the tree whose artifact is still kept, master's runs and
+the pull requests' included, and from every red's record, so that the red runs are
+among them, and no disturbed run. The commit names the reds by run, attempt and row,
+every gated row's slowest run before and after, and the cause of every row that
+loosens by more than 5 percent or the card that will find it. Once the entry is at the
+tree, a later red there is ADR 0033's join. Until then a third red on the row at the
+tree, or any later one, is the second's: it is recorded as the second was and links
+the record before it, it is not rerun, and its pull request waits on the same
+re-record or the same card, which nothing opens or makes twice. The common case is a
+pull request at the tree while the card is open, since every pull request there reads
+the row against the same entry.
 
 The guard is ADR 0033's "no data-plane change behind it", read as any such change
 since the entry's tree, not only the change that began master's tree. A change behind
@@ -126,21 +133,28 @@ writer and the fixer run, is gone when the job ends, and a file on a person's di
 not where the next session looks. A session that holds a red finds the earlier reds on
 its row at the tree by listing the repository's comments since the tree's first commit
 and keeping those whose body starts with the key. If it finds none, its red is the
-first. If it finds one, its red is the second. The re-record takes both reds' result
-files from their comments. `docs/how-to/run-the-bench.md`, step 4, has the commands.
+first. If it finds one, its red is the second. If it finds two or more, its red is a
+later one. The re-record takes every red's result files from their comments.
+`docs/how-to/run-the-bench.md`, step 4, has the commands.
 
 The re-record is a person's commit (ADR 0032), on a branch of its own, through the
-review loop. A person's session that holds the second red makes it. An agent's session
-that holds it, the writer on its `claude/...` branch or the fixer on any pull request,
-may never change `bench/baseline.json` (`.claude/agents/developer.md`), so it changes
-nothing there and opens no card. Its record of the second red, a comment on its pull
-request, names both reds by run, attempt and row and carries the guard's list. A
-person's session then makes the re-record, or opens the card when the list names a
-commit. In every case the pull request that holds the second red waits for the
-re-record or for the card's answer, and does not rerun its job until a run passes.
-Once that is on master, a merge of master into the pull request's branch gives it a
-run judged against the entry master then holds. A pull request's run is still judged
-against the entry alone: the gate stays one number per row in `bench/baseline.json`.
+review loop, and the rerun of a first red is a person's too. An agent's job reads runs
+and starts none: it has `actions: read` (`.github/workflows/claude.yml`), and the one
+token of the loop that acts on runs is kept out of it on purpose. The agent's session
+that can hold a red is the fixer. The writer's session ends before its pull request's
+first run, which starts when the pull request opens, and a fixer's own push starts a
+run that stays held until its job has ended; so the fixer holds a red when the
+reviewer blocked on a red bench job at the head before it. That fixer records the red
+as any session does, reruns nothing, and may never change `bench/baseline.json`
+(`.claude/agents/developer.md`), so it changes nothing there and opens no card. Its
+run then ends with no push, which fails as `developer.md` designs it, and the red is a
+person's: after a first red a person's session reruns the job, and after a second it
+makes the re-record, or opens the card when the list names a commit. In every case
+the pull request that holds the second red waits for the re-record or for the card's
+answer, and its job is not rerun: its next run is the one that a merge of master into
+its branch starts once that is on master, judged against the entry master then holds.
+A pull request's run is still judged against the entry alone: the gate stays one
+number per row in `bench/baseline.json`.
 
 ## Alternatives considered
 
@@ -203,6 +217,14 @@ against the entry alone: the gate stays one number per row in `bench/baseline.js
   commit would name the suspects without measuring them, and the entry would take the
   band all the same. The card is the measurement: whether the band rose with the
   changes or with the host.
+- **Let the agent's session rerun the first red.** Lost: its job reads runs and starts
+  none, and the token that would let it is kept out of that job so that an agent's
+  session cannot rerun a gate until it passes. Giving it one is a workflow change,
+  which is not an agent's branch's to make (ADR 0004), and it would reopen the coin
+  flip above.
+- **Rerun a third red.** Lost: the row's band at the tree is already measured twice,
+  and a rerun of the third is the coin flip above on a pull request that waits on the
+  same re-record or card as the second.
 
 ## Evidence
 
@@ -276,12 +298,15 @@ re-records with no call to wait for, and the entry follows the host's band to th
 tree. A change smaller than the gate cannot get into the entry through this rule.
 
 Harder: every red that counts costs a download and a comment of about 10 KB before its
-rerun. A second red costs the re-record's commit, every process's artifact read and
-every loosened row explained or carded; the entry loosens to the band at the new tree,
-as a re-record under ADR 0033's first case does. When an agent's session holds the
-second red, its pull request waits for a person's session to make the re-record. It
-waits for that work, not for a decision, since this rule has already made the
-decision. After any change on the guard's paths, until the entry is re-recorded past
+rerun. A second red costs the re-record's commit, every kept artifact and every red's
+record read, and every loosened row explained or carded; the entry loosens to the band
+at the new tree, as a re-record under ADR 0033's first case does. A tree older than a
+week has lost the artifacts of its first processes, and the re-record is from what is
+kept, which can only leave the entry tighter than every process would. When an agent's
+session holds a red, its pull request waits for a person's session: the rerun after a
+first red, the re-record or the card after a second, with the fixer's run ending in a
+failure that says so. It waits for that work, not for a decision, since this rule has
+already made the decision. After any change on the guard's paths, until the entry is re-recorded past
 it, a second red re-records nothing. It holds its pull request until a card is
 answered: whether the band rose with the changes or with the host. Most trees follow
 such a change, so the card is the common case and the re-record the rarer one. That

@@ -267,7 +267,10 @@ shared runner is
       It reads every comment on the repository's issues and pull requests since the
       tree began, and prints the address of each record of a red on that row there.
       If it prints nothing, your red is the first. If it prints one address, your red
-      is the second.
+      is the second. If it prints two or more, your red is a later one: record it as
+      a second red, linking the record before it, and do not re-run it. Its pull
+      request waits on the re-record or the card the second red already has; nothing
+      is re-recorded or carded twice.
    4. **List the changes**, at a second red only: the changes behind the band. These
       are the commits on master after the entry's tree, up to master's commit from
       **Find the tree**, on the tree's paths except `crates/cavalry-control` and
@@ -310,14 +313,17 @@ shared runner is
       full hash of the tree's first commit. Each result file goes in a `~~~json` fence
       that names the file. A `grip` result file is about 5 KB, and a comment holds
       65,536 characters. A second red's record says `Second red.`, links the first's,
-      and carries what **List the changes** printed.
+      and carries what **List the changes** printed; a later red's says `Third red.`,
+      and so on, and links the record before it.
 
-   After a first red, re-run the job. After a second, do not re-run. What it does
+   After a first red, a person's session re-runs the job; an agent's session cannot,
+   as below. After a second red or a later one, nobody re-runs. What a second red does
    depends on what **List the changes** printed:
 
    - **Nothing.** The second red re-records that profile's entry at the tree from
-     every process at it, the two red runs included, in the form above, in a commit
-     that names the two reds by run, attempt and row.
+     every process at it whose artifact is still kept and from every red's record,
+     so that the red runs are among them, in the form above, in a commit that names
+     the reds by run, attempt and row.
    - **One commit or more.** The second red re-records nothing. The band may have
      risen with those changes rather than with the host, and one process at each
      change's own tree could not tell the two apart. A person's session opens a card
@@ -336,13 +342,17 @@ shared runner is
    gh api repos/appshapes/cavalry/issues/comments/<comment id> --jq '.body | gsub("\r"; "") | split("\n~~~json grip-linux-unchecked-<time>.json\n")[1] | split("\n~~~")[0]' > grip-linux-unchecked-<time>.json
    ```
 
-   The re-record is a person's commit on a branch of its own. An agent's session that
-   holds the second red, the writer or the fixer, changes no `bench/baseline.json` and
-   opens no card. Its record of the second red names both reds by run, attempt and
-   row and carries the list of changes, and a person's session makes the re-record
-   or opens the card. The pull request that holds the second red waits and does not
-   rerun until a run passes. Once the re-record or the card's answer is on master,
-   merge master into the branch for a run judged against the entry master then holds.
+   The re-record is a person's commit on a branch of its own, and so is the re-run of
+   a first red: an agent's job can read runs and start none. The agent's session that
+   holds a red is the fixer, when the reviewer blocked on a red bench job at the head
+   before it; the writer's session ends before its pull request's first run. The
+   fixer records the red as above, re-runs nothing, changes no `bench/baseline.json`
+   and opens no card, and its run ends with no push, which fails as
+   `.claude/agents/developer.md` designs it. A person's session then re-runs the job
+   after a first red, and after a second makes the re-record or opens the card. The
+   pull request that holds the second red waits, and its job is not re-run: its next
+   run is the one that a merge of master into the branch starts once the re-record or
+   the card's answer is on master, judged against the entry master then holds.
 
    A new row joins a baseline that already exists by adding its entry from the tree's
    processes that have it and leaving the other rows as they were recorded, in a
