@@ -1212,3 +1212,6 @@ user-visible change, added in the same commit as the change. The format follows
   which loads the limit before the flag, can read `BackPressured` once when its two
   loads straddle a raise. `spec/log-buffer.md`, "The driver", says the order
   ([ADR 0048](docs/decisions/0048-store-the-connected-flag-after-the-limit.md); card 187).
+- ADR 0046 Accepted: Rjae accepted the fourth slice as proposed on 2026-11-05; card 204,
+  the C ABI's specification, is the next feature
+  ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
