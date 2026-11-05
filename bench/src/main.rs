@@ -107,6 +107,14 @@ impl Counting {
     }
 }
 
+/// A window closes when it is dropped as well, so a measured loop that returns early
+/// through `?` leaves no tracking enabled behind it. Closing twice is harmless.
+impl Drop for Counting {
+    fn drop(&mut self) {
+        AllocationRegistry::disable_tracking();
+    }
+}
+
 /// The first allocation's backtrace once the hook has captured it: `None` when no
 /// window counted an allocation. Otherwise the thread that allocated first is still
 /// symbolising the capture, or has finished, and this waits up to five seconds for it.
@@ -2439,7 +2447,11 @@ fn main() -> ExitCode {
     // The hook behind the measured loops' allocation count, set once per process and
     // enabled only inside a counting window.
     if AllocationRegistry::set_global_tracker(CountingTracker).is_err() {
-        eprintln!("cavalry-bench: the allocation tracker was already set");
+        eprintln!(
+            "cavalry-bench: the allocation tracker was already set, which nothing in this binary \
+             does before main; the allocation gate cannot count without its own, so report this \
+             line as a bug in the harness (bench/src/main.rs, main; ADR 0047)"
+        );
         return ExitCode::FAILURE;
     }
     // The clock calibrates once, for up to 200 ms, before the first row (ADR 0028).
