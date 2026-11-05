@@ -3165,6 +3165,9 @@ impl Conductor {
         // the publication stays connected: a subscriber that reaches the limit while
         // cleaning holds the next raise back still has its position, and a claim at the
         // limit reads `back pressured` for that cycle with the subscriber at the limit.
+        // A publisher that loads the flag before the limit and reads 1 reads the raised
+        // limit; a claim loads the limit first, so one whose two loads straddle these
+        // two stores reads the old limit with a 1, and `back pressured`, once.
         if connected && !publication.connected_flag && publication.last_limit > consumer {
             let _ = publication.log.set_connected(true);
             publication.connected_flag = true;
@@ -7543,9 +7546,11 @@ mod replay {
     /// The connected flag is stored after the limit, in the limit pass of the same
     /// duty cycle (ADR 0048; card 187): the commands pass that adds the image leaves
     /// the publication not connected with its limit where it was, and the limit pass
-    /// raises the limit by the window and then sets the flag. A publisher therefore
-    /// never reads connected with a limit at its position, which its claim would
-    /// report as a subscriber a window behind.
+    /// raises the limit by the window and then sets the flag. A publisher that loads
+    /// the flag and then the limit, as waiting for `is_connected()` and then claiming
+    /// does, therefore never reads 1 with a limit at its position. A claim loads the
+    /// limit first, so one whose two loads straddle the raise can still read
+    /// `back pressured` once; the page says so.
     #[test]
     fn the_connected_flag_is_stored_after_the_limit_in_the_same_cycle() {
         let mut h = Harness::new("connected-after-limit");

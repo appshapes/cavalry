@@ -43,8 +43,10 @@ limit's raise, never before it, and a 0 before the limit's lowering, never after
   a `cavalry:udp` publication. The limit pass stores the 1 when a subscriber has a
   position, a recording is live or, over UDP, a receiver answers, and the limit stored
   is past the consumer position, which the first raise after a connection leaves it.
-  A publisher that reads 1 therefore reads a limit raised for that subscriber or
-  recording with it, so `back pressured` means what the client says it means.
+  A publisher that loads the flag before the limit and reads 1 therefore reads a
+  limit raised for that subscriber or recording with it. Waiting for `is_connected()`
+  and then claiming loads them in that order, so card 187's two tests, and a program
+  written the same way, never read `back pressured` from a limit at the join.
 - **It holds while connected.** It stays 1 while the publication stays connected,
   since a subscriber that reaches the limit in a pass whose cleaning holds the raise
   back still has its position.
@@ -61,7 +63,21 @@ limit's raise, never before it, and a 0 before the limit's lowering, never after
   store is a backstop.
 
 The limit's raise and lowering stay in the limit pass, where the limit's rule lives.
-The page says the order.
+
+What a claim's `back pressured` then tells a publisher:
+
+- **It comes only while something reads the stream.** A subscriber has a position, a
+  recording is live or, over UDP, a receiver answers, as of the claim's load of the
+  flag, since the 0 is stored at the moment the last of them goes.
+- **It means the consumer position is a window behind, with two exceptions.** In a
+  cycle whose cleaning holds the raise back, the subscriber is at the limit, not a
+  window behind (the hold above). And a claim loads the limit before the flag, the
+  order the fall needs, so a claim whose two loads straddle a raise reads the old
+  limit with the 1 stored after the raise. It returns `back pressured` once, and the
+  next claim reads the raised limit. One load order cannot close both the rise and
+  the fall; closing the rise is in Revisit.
+
+The page says the order and both exceptions.
 
 ## Alternatives considered
 
@@ -121,23 +137,31 @@ before and after is in the commit message.
 
 ## Consequences
 
-Easier: a publisher's `back pressured` is true whenever it reads it; one place stores
-the 1, the limit pass, where three places did, and one helper stores the 0 where the
-last connecting fact goes.
+Easier: a publisher's `back pressured` comes only while a subscriber, a recording or
+a receiver reads the stream, and a publisher that waits for `is_connected()` before it
+claims reads the raised limit. One place stores the 1, the limit pass, where three
+places did, and one helper stores the 0 where the last connecting fact goes.
 
 Harder: the flag follows the limit, so when a subscriber joins a publication whose
 cleaning is behind, the publisher reads the flag a cycle or two after the subscriber's
 position exists, and a claim at the limit reads `not connected` until then; the page
 says so. A new site that removes a subscriber, a receiver or a recording must call
 `lower_connected`; the limit pass's 0 is a backstop, at the end of the cycle. Once 1,
-the flag holds while the
-publication stays connected, so a subscriber that reads up to the limit in a pass whose
-cleaning stops at a term's end holds the raise back for that cycle, and a claim at the
-limit reads `back pressured` with the subscriber at the limit rather than a window
-behind, as it did before this decision; the page says that too.
+the flag holds while the publication stays connected, so a subscriber that reads up to
+the limit in a pass whose cleaning stops at a term's end holds the raise back for that
+cycle, and a claim at the limit reads `back pressured` with the subscriber at the limit
+rather than a window behind, as it did before this decision. A claim whose two loads
+straddle a raise reads `back pressured` once, with no subscriber a window behind. The
+page says both. `Offer::BackPressured` in `cavalry-client` and `ClaimError::BackPressured`
+in `cavalry-shm`, with their error messages, still say only "the slowest subscriber is
+a window behind", which has the same two exceptions.
 
 Revisit: when a client needs a counter for the flag's transitions over IPC, as
-`publication.connected` counts them over UDP (ADR 0019's Revisit).
+`publication.connected` counts them over UDP (ADR 0019's Revisit). And when a claim's
+one `back pressured` across a raise matters to a user: on the refusal path only, when
+the flag reads 1, the claim loads the limit again after the flag and retries if it
+moved. That changes "Claim, commit and abort", step 1, `cavalry-shm` and the client,
+with its own ADR.
 
 ## References
 
