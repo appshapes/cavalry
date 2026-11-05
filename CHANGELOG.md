@@ -1153,9 +1153,13 @@ user-visible change, added in the same commit as the change. The format follows
   held by `just lint`, a C conformance runner that starts `conformance/`, and two ABI
   rows in the bench; then the Python, Node, Go, JVM and .NET clients, each generated
   from the header and run by `just conformance` on both runners. Invariant 2's
-  per-message rules and their gate stop at the ABI, and each client's runner reports
-  its one-way p50, p99.99 and max and the allocations per message on its runtime's
-  side, without a gate. Raft is the fifth slice; the first release, with
+  per-message rules hold the Rust core behind the ABI, under its gate; the code each
+  client's generator writes takes no lock, makes no syscall, never awaits and returns
+  `Offer`'s codes as values, which each card records and card 205's check in
+  `just lint` holds for locks, `await` and raises; and only the runtime's side, its
+  trampoline and the objects it makes, may allocate or take the runtime's own lock per
+  message, which each client's runner reports beside its one-way p50, p99.99 and max,
+  without a gate. Raft is the fifth slice; the first release, with
   `conformance/upgrade/` and the ABI's freeze, is an ADR of its own. Nothing in the
   slice needs a hand on the hosts. `why-cavalry.md`'s "One core, every language" now
   says every client reaches the header through its language's foreign-function

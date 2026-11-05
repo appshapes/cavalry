@@ -178,9 +178,10 @@ slice. Six features make the slice, one Trello card each, in this order:
    the README's example extended with the checks, publish and subscribe over both
    channels, record and replay, every message once and in order, the handler's header
    fields against `spec/frame.md`'s vectors, and a report printed and never gated: its
-   one-way p50, p99.99 and max, and the allocations per message on its runtime's side
-   of the boundary (below). The card records how `ctypes` calls the fragment handler
-   back and what that allocates per message: a `ctypes` callback builds its arguments
+   one-way p50, p99.99 and max, and the allocations per message on its side of the
+   boundary, the client's code and the runtime's together (below). The card records
+   how `ctypes` calls the fragment handler back, whether that takes the GIL, and what
+   it allocates per message: a `ctypes` callback builds its arguments
    as new Python objects on every call, and a view over a claimed slice is a new
    object per claim. Python first because both runners have Python 3 for the scripts
    (ADR 0003), `ctypes` is in its standard library so the client has no dependency,
@@ -210,32 +211,71 @@ slice. Six features make the slice, one Trello card each, in this order:
 Each of the four runners after Python's has the shape card 205 builds, its report
 included.
 
-Where invariant 2's per-message rules stop, one rule for all five clients. For a
-client over the ABI, the data plane those rules hold is the Rust core behind the ABI:
-each function a message passes through, `cavalry_publication_try_claim`,
-`cavalry_buffer_claim_commit`, `cavalry_publication_offer` and
-`cavalry_subscription_poll`, from its call to its return, except the time inside the
-C fragment handler the poll was given. That path makes no heap allocation, takes no
-lock, makes no syscall, has no `await` and no panic path per message; card 204's
-allocation test over the ABI's path asserts it, and its two bench rows gate it.
-Outside those rules and outside their
-gate is the runtime's side of each call: the language's trampoline, the objects it
-makes for the arguments, and the client's code between the user's code and the ABI,
-in both directions. Every client's card measures that side with what its runtime
-counts, allocations or bytes allocated per message; takes the call-back with the
-fewest allocations its runtime offers; records the call-back and the count in its
-commit and its README; and its runner prints the count in the report beside the
-one-way p50, p99.99 and max, which nothing gates. A card whose runtime cannot call
-the handler back without allocating, as Python's `ctypes` cannot, still lands, with
-its count on record: it does not hold the slice, add a knob, or move its client to a
-re-implementation of the protocol. Three reasons, given again in the alternative that
-lost: the allocation test counts Rust's global allocator and sees no runtime's heap,
-so a rule on the runtime's side would have no gate; the allocator, the collector and
-the interpreter belong to the runtime the user chose, and nothing in Cavalry removes
-the tail they add; and a rule that every client's side allocates nothing rules out
-Python, which `CLAUDE.md` names first among the clients. Card 204 writes this
-boundary into `CLAUDE.md`'s definition of the data plane and into
-`crates/cavalry-ffi/README.md`, in the commit with the first public item.
+Where invariant 2's per-message rules stop, one rule for all five clients, in three
+parts: the Rust core behind the ABI, the client's own code, and the runtime's side.
+
+The Rust core behind the ABI holds all five rules. It is every function card 204
+puts on a message's path, from its call to its return, except the time inside the C
+fragment handler the poll was given: functions such as
+`cavalry_publication_try_claim`, `cavalry_publication_offer`, their exclusive
+publication counterparts, `cavalry_buffer_claim_commit`,
+`cavalry_buffer_claim_abort` and `cavalry_subscription_poll`. That path makes no heap
+allocation, takes no lock, makes no syscall, has no `await` and no panic path per
+message. Card 204's allocation test asserts it over every one of those functions,
+not only the ones named here, and its two bench rows gate it.
+
+The client's own code is the code card 205's generator writes between the user's
+code and the ABI, in both directions. It holds four of the five rules. It calls the
+ABI on the caller's thread and returns when the ABI returns: one call per offer, per
+claim, per commit or abort and per poll, with no lock, no syscall, and no `await`,
+promise, future, task or coroutine around the call. A publication or a subscription
+is used from one thread at a time, as the Rust API's is (card 204's thread rules), so
+no client wraps an `offer` in a `lock` or `synchronized` block to share a publication
+across threads; a user who shares one arranges that in their own code. It returns
+`Offer`'s codes as values, never raising them: a number, an enum member, or in Go an
+error value made once. That is the managed-language form of no panic path. An
+exception the user's handler raises never crosses the ABI, because the ABI's Rust
+frames between the poll and the handler do not allow an unwind: each client's
+trampoline stops it, and where the caller sees it is the card's decision (below).
+Card 205 builds the check in `just lint` that the per-message functions the generator
+writes for every client have no lock, no `await` and no raise, as the workspace lint
+denies `async` and `std::sync::Mutex` in data-plane crates, and each card records
+that its client holds the four rules, beside its allocation count. The fifth rule, no
+heap allocation, is measured on the client's code together with the runtime's side,
+because a runtime counts its own heap and cannot tell the two apart: a view over a
+claimed slice is an object of the runtime's heap, whichever side asked for it.
+
+The runtime's side is the trampoline the runtime builds for each call and call-back,
+the objects it makes for the arguments and the return values, and the runtime's own
+step as a thread crosses the boundary. It is the runtime's code and not code Cavalry
+writes, and it stays outside the rules and their gate. The rules known to break
+there are these, each for reasons of its own:
+
+- **Allocation.** The allocation test counts Rust's global allocator and sees no
+  runtime's heap, so a rule on the runtime's side would have no gate. The allocator,
+  the collector and the interpreter belong to the runtime the user chose, and
+  nothing in Cavalry removes the tail they add. A rule that every client's side
+  allocates nothing rules out Python, which `CLAUDE.md` names first among the
+  clients. These reasons are given again in the alternative that lost.
+- **Locks, and the syscall a contended one waits in.** A runtime can take a lock of
+  its own as a thread crosses the boundary.
+  CPython's `ctypes` through `CDLL` releases the GIL around each foreign call and
+  re-acquires it in each call-back, and a thread that re-acquires it while another
+  Python thread holds it waits, in a syscall. That lock belongs to the runtime, as
+  its collector does, and nothing in Cavalry removes it.
+
+Every client's card measures that side with what its runtime counts, allocations or
+bytes allocated per message; takes the call and the call-back with the fewest
+allocations and locks its runtime offers (for Python, `ctypes.PyDLL`, which keeps the
+GIL held across a foreign call, weighed against `CDLL`); records the call-back, the
+count, and any lock or syscall the runtime's side makes per message, in its commit
+and its README; and its runner prints the count in the report beside the one-way
+p50, p99.99 and max, which nothing gates. A card whose runtime cannot call the
+handler back without allocating, as Python's `ctypes` cannot, still lands, with its
+count on record: it does not hold the slice, add a knob, or move its client to a
+re-implementation of the protocol. Card 204 writes the three parts into `CLAUDE.md`'s
+definition of the data plane and into `crates/cavalry-ffi/README.md`, in the commit
+with the first public item.
 
 The clients' order: Python first, for the reasons on its card; Node and Go next, the
 other two languages Aeron leaves open and the beachhead's; the JVM and .NET last,
@@ -267,8 +307,10 @@ of it rejects (card 204); how `Offer::TooLong`, which has no Aeron code, reaches
 ABI, as `ERROR` (−6) with `cavalry_errcode` and `cavalry_errmsg` giving the length
 asked for and the limit, or as a code of Cavalry's own past −6, read against what
 Aeron's C client returns for a message over its limit (card 204); and how each
-runtime calls the fragment handler back, with the fewest allocations it offers and
-the count on record (cards 205 to 209).
+runtime calls the fragment handler back, with the fewest allocations and locks it
+offers and the count on record, where its trampoline stops an exception the user's
+handler raises, and how the caller sees that exception once the poll returns (cards
+205 to 209).
 
 The open cards, placed. Nine are open on the Cavalry list and none joins the slice.
 Card 159, the soak host's week, waits on Rjae's hand on `kip`; its note that the host
@@ -331,7 +373,7 @@ slice reads the protocol.
   gates, a JDK and a build on both runners, for a language Aeron serves first-class;
   the first client proves the generator and the runner shape with the least new CI,
   and Python is on both runners today.
-- **Invariant 2's per-message rules over every client's own side, Python's
+- **Invariant 2's rule of no allocation over every client's runtime's side, Python's
   included.** Lost: CPython's `ctypes` cannot call a Python handler without making
   objects for its arguments, and a view over a claimed slice is an object per claim,
   so the rule rules out the first client and a language `CLAUDE.md` names; the
@@ -344,6 +386,14 @@ slice reads the protocol.
   runtimes can is what cards 205 to 209 find out, not what this ADR knows, and a rule
   that differs by client is five rules for a stranger to read; one rule holds all
   five, and a runner moves to a gate when its report earns it (Revisit).
+- **All five rules stopping at the ABI, the client's own code outside them with the
+  runtime's side.** Lost: the reasons for leaving the runtime's side outside are its
+  allocations and its own lock, and none of them covers the code the generator
+  writes, which is Cavalry's code. Under that rule card 208 or card 209 could wrap
+  each `offer` in a `synchronized` or `lock` block to share a publication across
+  threads, and card 206 could return a Promise from `offer`, each citing this ADR;
+  card 204 would copy the gap into `CLAUDE.md`'s definition of the data plane, and
+  the gap would become a rule.
 - **Hand-written clients.** Lost: `CLAUDE.md` says generated where possible, five
   hand-written wrappers drift from the header, and a generator over the one committed
   header is a change in one place per ABI change.
@@ -407,9 +457,11 @@ Harder: the gates grow by five toolchains, each a pinned set-up action and minut
 both runners; `cavalry-ffi` is the second `unsafe` crate, and its lifetimes are by
 convention, so misuse must be loud; a callback into a managed runtime is the slowest
 path a message takes, each client's runner reports it and nothing gates it; invariant
-2's per-message rules and their gate stop at the ABI, so a client's own side may
-allocate per message, as Python's does, and each client's runner reports what it
-allocates, which nothing gates either; the bench hosts' baselines gain two rows per
+2's gate stops at the ABI, so the code each client's generator writes holds four of
+the per-message rules by card 205's check in `just lint` and its card's record, and
+not by a measurement, and the runtime's side may allocate and take the runtime's own
+lock per message, as Python's `ctypes` does, which each client's card records and its
+runner reports, and nothing gates either; the bench hosts' baselines gain two rows per
 profile, recorded as ADR 0033 says; the ABI's ADR waits on Rjae, as the format ADRs
 did, and a later client can send it back to a new version before the first release;
 a flake in the client's tests is met by six runners instead of one until it is fixed.
@@ -427,8 +479,9 @@ one publication per follower or multi-destination cast (ADR 0039's Revisit); at 
 first release, for the release's ADR, `publish` flipped, the five registries, the
 version the ABI freezes at and `conformance/upgrade/` (ADR 0003's Revisit); when a
 user asks for a sixth language or a C++ wrapper; when a client needs counters of its
-own (ADR 0019's Revisit); when a managed runtime's callback cost or its allocations
-per message show in a client's report, for a batched poll across the boundary; when a
+own (ADR 0019's Revisit); when a managed runtime's callback cost, its allocations or
+its locks per message show in a client's report, for a batched poll across the
+boundary; when a
 client's report reads zero allocations per message on its runtime's side on both
 runners, for whether that runner asserts it.
 
