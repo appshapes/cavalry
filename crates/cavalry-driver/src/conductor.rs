@@ -50,11 +50,10 @@ use cavalry_shm::counters::generated::{
     PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
     RECORDING_CATALOG_TRUNCATED, RECORDING_DELETED, RECORDING_FILES_REMOVED,
     RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED,
-    RECORDING_RETENTION_FAILED, RECORDING_SEGMENTS_PURGED, RECORDING_SLOT_DROPPED,
-    RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_SYNCED_POSITION,
-    RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_POSITION,
-    REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED, SENDER_LIMIT, SENDER_POSITION,
-    SUBSCRIPTION_POSITION,
+    RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED,
+    RECORDING_STOPPED, RECORDING_SYNCED_POSITION, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
+    REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
+    SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
@@ -500,7 +499,6 @@ struct Statics {
     recording_started: Counter,
     recording_stopped: Counter,
     recording_truncated: Counter,
-    recording_segments_purged: Counter,
     recording_deleted: Counter,
     recording_retention_failed: Counter,
     recording_start_failed: Counter,
@@ -534,7 +532,6 @@ impl Statics {
             recording_started: get(RECORDING_STARTED)?,
             recording_stopped: get(RECORDING_STOPPED)?,
             recording_truncated: get(RECORDING_TRUNCATED)?,
-            recording_segments_purged: get(RECORDING_SEGMENTS_PURGED)?,
             recording_deleted: get(RECORDING_DELETED)?,
             recording_retention_failed: get(RECORDING_RETENTION_FAILED)?,
             recording_start_failed: get(RECORDING_START_FAILED)?,
@@ -5183,10 +5180,9 @@ impl Conductor {
                     );
                 }
                 replayer::Retention::Purge { .. } => {
+                    // The replayer counted each file in `recording.segments_purged` as
+                    // it went.
                     self.commands.swap_remove(index);
-                    for _ in 0..done.files_removed {
-                        self.statics.recording_segments_purged.increment();
-                    }
                     self.send(&Event::OperationSuccess { correlation_id });
                 }
                 replayer::Retention::Delete { .. } => {
@@ -5671,6 +5667,9 @@ mod recording {
                 replayer_reply_producer,
                 conductor
                     .counter(LOG_BUFFER_REJECTED_FRAME)
+                    .expect("a counter"),
+                conductor
+                    .counter(cavalry_shm::counters::generated::RECORDING_SEGMENTS_PURGED)
                     .expect("a counter"),
                 IdleStrategy::Backoff,
             )

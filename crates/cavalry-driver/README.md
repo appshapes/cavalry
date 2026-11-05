@@ -54,7 +54,9 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `start replay` of a recording under a command, counted in `replay.start_failed`; the
   replayer reads the slot, code 21 for one it cannot read as a valid recording, state 2
   among them, checks the position against the slot and the files and does the file
-  work one file per duty cycle; the recorder, which owns the catalog, makes each
+  work one file per duty cycle, each file's name formatted on its stack into a path it
+  keeps so that a removal allocates nothing, and counts each file a purge removes as
+  it goes; the recorder, which owns the catalog, makes each
   command's catalog writes, one slot and a sync each, in the page's order; and after a
   file error the replayer runs the file side of recovery's rules for the slot and the
   recorder writes the one slot they end in, so the slot and the files agree before the

@@ -40,7 +40,8 @@ use std::time::Duration;
 use cavalry_log::catalog::{CatalogError, CatalogReader};
 use cavalry_log::dir::{Recovery, SlotWrite};
 use cavalry_log::layout::{
-    Descriptor, FRAME_ALIGNMENT, SEGMENT_SUFFIX, State, locate, segment_file_name,
+    Descriptor, FRAME_ALIGNMENT, SEGMENT_NAME_CAPACITY, SEGMENT_SUFFIX, State, locate,
+    segment_file_name_into,
 };
 use cavalry_proto::client_protocol::{NULL_LENGTH, NULL_POSITION, ReplayStopReason};
 use cavalry_proto::frame::FrameError;
@@ -60,10 +61,6 @@ const DOC: &str = "docs/reference/client-protocol.md#error-codes";
 /// replies again; it keeps writing.
 pub(crate) const PENDING_REPLIES: usize =
     spec::MAX_REPLAYS + spec::MAX_COMMANDS_IN_PROGRESS + spec::REPLAYER_REQUESTS_PER_CYCLE;
-
-/// The longest segment file name, with room to spare, so a roll formats the name on
-/// the stack (`cavalry_log::recorder`).
-const SEGMENT_NAME_CAPACITY: usize = 64;
 
 /// How long the replayer parks at a time while it holds no replay and no reply. The
 /// conductor unparks it with every request it offers and `Driver::close` when it
@@ -457,21 +454,31 @@ pub(crate) struct Replayer {
     pending: VecDeque<Reply>,
     /// The block read from a segment file, sized once.
     buffer: Vec<u8>,
+    /// The path of the file a step of file work removes, kept with room for the
+    /// directory and the longest segment name, so a removal allocates nothing: the
+    /// name goes on the stack and into this buffer, as the recorder's roll does
+    /// (card 177).
+    work_path: PathBuf,
     rejected_frame: Counter,
+    /// `recording.segments_purged`, one per file as a purge removes it.
+    segments_purged: Counter,
     idler: Idler,
 }
 
 impl Replayer {
     /// A replayer over the log directory at `dir`, whose catalog it opens read-only,
-    /// with the one static counter it moves: `log_buffer.rejected_frame`.
+    /// with the two static counters it moves: `log_buffer.rejected_frame` and
+    /// `recording.segments_purged`.
     pub(crate) fn new(
         dir: &Path,
         requests: Consumer<Request>,
         replies: Producer<Reply>,
         rejected_frame: Counter,
+        segments_purged: Counter,
         idle: IdleStrategy,
     ) -> Result<Self, CatalogError> {
         Ok(Self {
+            work_path: PathBuf::with_capacity(dir.as_os_str().len() + 1 + SEGMENT_NAME_CAPACITY),
             dir: dir.to_path_buf(),
             catalog: CatalogReader::open(dir)?,
             requests,
@@ -481,6 +488,7 @@ impl Replayer {
             pending: VecDeque::with_capacity(PENDING_REPLIES),
             buffer: vec![0u8; spec::REPLAYER_BLOCK_LIMIT],
             rejected_frame,
+            segments_purged,
             idler: Idler::new(idle),
         })
     }
@@ -1204,13 +1212,30 @@ impl Replayer {
     /// The next step of the work at `index`: `None` while more remains, else the
     /// outcome.
     fn file_work_step(&mut self, index: usize) -> Option<Result<FileWorkDone, String>> {
-        let work = &mut self.works[index];
-        let recording_id = work.descriptor.recording_id();
-        if let Some(base) = work.bases.pop() {
-            let path = self.dir.join(segment_file_name(recording_id, base));
-            return match std::fs::remove_file(&path) {
+        let recording_id = self.works[index].descriptor.recording_id();
+        if let Some(base) = self.works[index].bases.pop() {
+            // The file's name on the stack and its path in the buffer kept for it, as
+            // the recorder's roll does: a removal allocates nothing, so a purge running
+            // beside the recorded rows adds nothing to the allocation gate's count
+            // (card 177).
+            let mut name = [0u8; SEGMENT_NAME_CAPACITY];
+            let Some(file_name) = segment_file_name_into(recording_id, base, &mut name) else {
+                return Some(Err(format!(
+                    "recording {recording_id}'s segment name at {base} is not UTF-8, which is a bug"
+                )));
+            };
+            self.work_path.clear();
+            self.work_path.push(&self.dir);
+            self.work_path.push(file_name);
+            return match std::fs::remove_file(&self.work_path) {
                 Ok(()) => {
+                    let work = &mut self.works[index];
                     work.files_removed += 1;
+                    if matches!(work.command, Retention::Purge { .. }) {
+                        // One per file as it goes, so the counter reads a purge's
+                        // progress (`counters.toml`, `recording.segments_purged`).
+                        self.segments_purged.increment();
+                    }
                     None
                 }
                 // A file already gone is a file removed: the work is idempotent, as
@@ -1218,10 +1243,11 @@ impl Replayer {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => Some(Err(format!(
                     "cannot remove the segment file {}: {error}",
-                    path.display()
+                    self.work_path.display()
                 ))),
             };
         }
+        let work = &mut self.works[index];
         if work.cut_due
             && let Retention::Truncate { position, .. } = work.command
         {

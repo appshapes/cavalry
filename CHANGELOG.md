@@ -1147,3 +1147,10 @@ user-visible change, added in the same commit as the change. The format follows
   [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
   made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
   tree while master is green is card 199's (card 182).
+- The driver's replayer removes a purged, truncated or deleted recording's segment
+  files without allocating, each file's name formatted on its stack as the recorder's
+  roll is, and `recording.segments_purged` moves one per file as a purge removes it
+  instead of by the whole count when the purge ends, so a running purge's progress reads
+  from the counter and a purge beside the bench's recorded rows adds nothing to the
+  allocation gate's count; `cavalry-log` shares the name formatting as
+  `layout::segment_file_name_into` (card 177).
