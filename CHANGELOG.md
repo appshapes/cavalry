@@ -1222,13 +1222,16 @@ user-visible change, added in the same commit as the change. The format follows
   card 213).
 - ADR 0051, Proposed: the C ABI, version 0, is the client API as it stands under
   Aeron's C client's names, seven opaque handles, one publication type for both kinds,
-  a caller-owned buffer claim that names its publication, synchronous adds, Aeron's
-  six result codes with `TooLong` as `ERROR` and `CAVALRY_ERR_TOO_LONG`, one table of
-  error codes with the driver's on their values from 1 to 99, an error message that
-  keeps its docs anchor when it is cut, a frame's position from its image's
-  constants, an answer for every call made during a claim or a poll, lifetime and
-  thread rules by convention with debug builds poisoning what is released, and a
-  `cavalry_context_init` that refuses a header of another ABI version; its page is `spec/c-abi.md` with the committed
+  a caller-owned buffer claim that names its publication and its position, so that a
+  stale one commits nothing, synchronous adds, Aeron's six result codes with
+  `TooLong` as `ERROR` and `CAVALRY_ERR_TOO_LONG`, one table of error codes with the
+  driver's on their values from 1 to 99, an error message that keeps its docs anchor
+  when it is cut, a refusal of a channel that is not UTF-8 and of an empty directory,
+  a frame's position from its image's constants, a poll's fault as a struct, an
+  answer for every call made during a claim or a poll, lifetime rules by convention
+  with debug builds poisoning what is released, every handle used from one thread at
+  a time, and a `cavalry_context_init` that refuses a header of another ABI version;
+  its page is `spec/c-abi.md` with the committed
   header as the artefact and vectors from the page's table, cbindgen 0.29.4 is a
   pinned tool of `just lint` and not a dependency, `conformance/c/` is the first
   runner, and two bench rows run through the ABI. The page, the crate, the runner and
