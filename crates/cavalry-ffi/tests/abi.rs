@@ -723,32 +723,21 @@ fn a_closed_client_answers_closed_on_every_handle() {
         assert_eq!(cavalry_close(client), 0);
         assert!(cavalry_publication_is_closed(publication));
         assert!(cavalry_subscription_is_closed(subscription));
-        // The claim path reads the limit alone (one load per claim, no closed flag), so
-        // a claim that still fits the window after the close lands in the log, which
-        // the publication's images drain, and the first claim the limit refuses after
-        // the close is `CAVALRY_PUBLICATION_CLOSED`, as the Rust client's
-        // `Offer::Closed` says; the driver's removal of the publication moves the limit
-        // within its duty cycle. On master's Linux run at 93efe94 the first claim after
-        // the close still fit and read a position, so the assertion loops to the first
-        // refusal, aborting each claim that fit.
+        // The first claim after the close is `CLOSED`, though the limit may still have
+        // room ("Lifetimes": the handle answers `CLOSED` from then), and the refusal
+        // clears the struct as every refused claim does ("Which claim a struct names").
         let mut claim = std::mem::zeroed::<cavalry_buffer_claim_t>();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            let result = cavalry_publication_try_claim(publication, 1, &mut claim);
-            if result == CAVALRY_PUBLICATION_CLOSED {
-                break;
-            }
-            assert!(
-                result > 0,
-                "a claim after the close is a position or CLOSED, not {result}: {}",
-                errmsg()
-            );
-            assert_eq!(cavalry_buffer_claim_abort(&mut claim), result);
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the close reached the publication's limit"
-            );
-        }
+        assert_eq!(
+            cavalry_publication_try_claim(publication, 1, &mut claim),
+            CAVALRY_PUBLICATION_CLOSED
+        );
+        assert!(claim.data.is_null());
+        assert!(claim.publication.is_null());
+        assert_eq!(claim.position_after, CAVALRY_NULL_POSITION);
+        assert_eq!(
+            cavalry_publication_offer(publication, b"after".as_ptr(), 5),
+            CAVALRY_PUBLICATION_CLOSED
+        );
         assert_eq!(
             cavalry_subscription_poll(subscription, Some(collect), ptr::null_mut(), 1),
             -1
