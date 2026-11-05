@@ -195,8 +195,11 @@ means the working directory passes `"."`, and one who wants the default does not
 A function cannot answer when it is given a null handle or a null required pointer,
 which is `CAVALRY_ERR_NULL`, except a claim struct's null `publication`, which is
 `CAVALRY_ERR_NO_CLAIM` ("Which claim a struct names"); when "Strings" refuses a string
-argument; or when "Calls during a claim or a poll" refuses the call. It then sets the
-thread's error and returns the value its return type gives:
+argument; or when "Calls during a claim or a poll" refuses the call. One read fails on
+the driver's state as well: `cavalry_publication_position` is −1 with
+`CAVALRY_ERR_LOG` when the log's active tail is not its active term's ("Functions"). A
+function that cannot answer sets the thread's error and returns the value its return
+type gives:
 
 | Return type | Functions | Value when the function cannot answer |
 | --- | --- | --- |
@@ -266,8 +269,9 @@ leaves as it was, so the caller can still commit or abort that claim.
 
 By convention and not by the borrow checker:
 
-- Every handle is freed by its own close and by nothing else. A handle closed twice, or
-  used after its close, is undefined. `cavalry_close` before a publication's or a
+- Every handle but an image and a frame header is freed by its own close and by
+  nothing else; "Handles" says what frees those two. A handle closed twice, or used
+  after its close, is undefined. `cavalry_close` before a publication's or a
   subscription's close is allowed: the handle answers `CLOSED` or the `closed` fault
   from then and still needs its own close, as the Rust handles outlive their client.
   `cavalry_context_close` before or after the `cavalry_close` of a client the context
