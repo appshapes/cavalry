@@ -19,6 +19,10 @@ cavalry-shm = { path = "../crates/cavalry-shm" }
 # process, so the gate holds the path a user takes to the budget (ADR 0021).
 cavalry-client = { path = "../crates/cavalry-client" }
 cavalry-driver = { path = "../crates/cavalry-driver" }
+# The ffi rows: the same client path through the C ABI's functions in this binary,
+# behind cavalry-ffi's safe harness module, since this crate may hold no unsafe
+# (ADR 0051).
+cavalry-ffi = { path = "../crates/cavalry-ffi" }
 # The record row: the recorder's block path, one scan and one positional write per block
 # into a segment file, under the counting allocator (ADR 0025).
 cavalry-log = { path = "../crates/cavalry-log" }

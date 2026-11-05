@@ -15,7 +15,9 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   crates with semver; everything else goes through this ABI.
 - Builds three ways: `cdylib`, the shared library the generated clients load,
   `staticlib`, which `conformance/c/` links, and `rlib`, which the bench and this
-  README's example call.
+  README's example call. The `harness` module is the bench's way in: one safe call
+  per `extern "C"` function for the `ffi` rows, since `bench/` may hold no `unsafe`;
+  it is not part of the ABI, and the header declares none of it.
 
 In Aeron, this is the C client, which re-implements the Java one; here the Rust core is
 the only implementation and the C ABI is a thin layer over it

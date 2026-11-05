@@ -44,6 +44,12 @@ nothing depends on it.
   timestamp to the subscriber's handler, for the exclusive and the concurrent log type,
   and a slot-padding microbench that times a load of a word and a store to a word 0, 64
   or 128 bytes away, from two threads (ADR 0011).
+- Measures the same two rows through the C ABI, `claim_commit_32_ffi` and
+  `one_way_32_ffi`: the client path of `claim_commit_32_client` reached through
+  `cavalry-ffi`'s `extern "C"` functions in this binary, behind its `harness` module's
+  one safe call per function, so the rows need no C compiler and the allocation gate
+  counts the ABI's path as it counts the client's (ADR 0051). The two sets of rows
+  differ by the boundary alone.
 - Measures the same two rows over `cavalry:udp` on the loopback, `claim_commit_32_udp`
   and `one_way_32_udp`: a publication and a subscription on one port of `127.0.0.1`
   through the driver's sender and receiver, with one message in flight at a time, so

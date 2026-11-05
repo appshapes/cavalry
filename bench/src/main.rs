@@ -28,6 +28,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cavalry_client::{Cavalry, Offer, Publication, Subscription};
 use cavalry_driver::{Driver, DriverThread, IdleStrategy, ThreadStart, spec};
+use cavalry_ffi::harness;
 use cavalry_log::dir::LogDir;
 use cavalry_log::layout::Recording;
 use cavalry_shm::counters::generated::{
@@ -232,6 +233,10 @@ enum Benchmark {
     /// The client path over `cavalry:udp` on the loopback, through the driver's sender
     /// and receiver, one message in flight (ADR 0044): the same two rows under `udp`.
     Udp,
+    /// The client path through the C ABI (ADR 0051): `cavalry-ffi`'s `extern "C"`
+    /// functions in this binary, so the rows need no C compiler and the allocation gate
+    /// counts the ABI's path as it counts the client's; the same two rows under `ffi`.
+    Ffi,
     /// A load and a store from two threads this many bytes apart (ADR 0011): the
     /// `slot_padding_<spacing>_load` and `slot_padding_<spacing>_store` rows.
     Slot { spacing: usize },
@@ -244,7 +249,7 @@ impl Benchmark {
     /// types, the client path with and without a recording on, the client path over
     /// UDP on the loopback, the three slot spacings, and last the recorder's block
     /// path, so its writes reach no other row.
-    const ALL: [Benchmark; 10] = [
+    const ALL: [Benchmark; 11] = [
         Benchmark::Timer,
         Benchmark::Log {
             log_type: LogType::Exclusive,
@@ -263,6 +268,7 @@ impl Benchmark {
             name: "recorded",
         },
         Benchmark::Udp,
+        Benchmark::Ffi,
         Benchmark::Slot { spacing: 0 },
         Benchmark::Slot { spacing: 64 },
         Benchmark::Slot { spacing: 128 },
@@ -282,6 +288,10 @@ impl Benchmark {
             Benchmark::Udp => vec![
                 format!("claim_commit_{body}_udp"),
                 format!("one_way_{body}_udp"),
+            ],
+            Benchmark::Ffi => vec![
+                format!("claim_commit_{body}_ffi"),
+                format!("one_way_{body}_ffi"),
             ],
             Benchmark::Slot { spacing } => vec![
                 format!("slot_padding_{spacing}_load"),
@@ -1346,6 +1356,161 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     client.close().map_err(|e| e.to_string())?;
     driver.close().map_err(|e| e.to_string())?;
     // Every driver thread is joined, so every hook is ordered before these loads.
+    pins.check(DriverThread::Conductor)?;
+    pins.check(DriverThread::Recorder)?;
+    pins.check(DriverThread::Replayer)?;
+    Ok(LogRun {
+        claim_commit: summarize(&hist, elapsed),
+        one_way: summarize(&one_way, elapsed),
+        retries,
+        allocations,
+        producer_position_loads: None,
+    })
+}
+
+fn bench_ffi(options: &Options) -> Result<LogRun, String> {
+    with_bench_dir("ffi", |dir| run_ffi(options, dir))
+}
+
+/// The client rows through the C ABI (ADR 0051): the same driver, client, subscription
+/// and publication as `run_client`'s, reached through `cavalry-ffi`'s `extern "C"`
+/// functions in this binary, behind its `harness` module's safe calls, one per
+/// function, since this crate may hold no `unsafe`. The stamp crosses the ABI in the
+/// claimed body, and the subscriber's C fragment handler hands it back. The driver's
+/// threads, the pins, the warm-up, the counting window and the stall bound are the
+/// client rows', so the two sets of rows differ by the boundary alone.
+fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
+    let housekeeping = options.housekeeping;
+    let conductor_cpu = options.pin.map(|pin| pin.conductor);
+    let pins = Arc::new(DriverPins::new());
+    let on_thread_start: ThreadStart = {
+        let pins = Arc::clone(&pins);
+        Arc::new(move |thread| {
+            let cpu = match thread {
+                DriverThread::Conductor => conductor_cpu,
+                DriverThread::Recorder
+                | DriverThread::Replayer
+                | DriverThread::Sender
+                | DriverThread::Receiver => housekeeping,
+            };
+            if pin_to(cpu).is_err() {
+                pins.slot(thread)
+                    .store(cpu.map_or(0, |cpu| cpu + 1), Ordering::Release);
+            }
+        })
+    };
+    pin_to(housekeeping)?;
+    let driver =
+        Driver::start_with_threads(dir, dir.join("log"), IdleStrategy::Backoff, on_thread_start)
+            .map_err(|e| e.to_string())?;
+    let mut client = harness::Client::connect(dir)?;
+    let mut subscription = client.add_subscription("cavalry:ipc", STREAM_ID)?;
+    pins.check(DriverThread::Conductor)?;
+    let mut publication = client.add_publication("cavalry:ipc", STREAM_ID)?;
+    pin_to(options.pin.map(|pin| pin.publisher))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !subscription.is_connected() {
+        subscription.poll(&mut |_| {}, 1)?;
+        if Instant::now() > deadline {
+            return Err("the subscription never connected".to_string());
+        }
+    }
+
+    let warmup = options.warmup_for(spec::IPC_TERM_LENGTH);
+    let total = warmup + options.messages;
+    let epoch = tick();
+
+    let subscriber = {
+        let cpu = options.pin.map(|pin| pin.subscriber);
+        thread::Builder::new()
+            .name("ffi-subscriber".into())
+            .spawn(
+                move || -> Result<(harness::Subscription, Histogram<u64>), String> {
+                    pin_to(cpu)?;
+                    let mut hist = histogram();
+                    let mut received: u64 = 0;
+                    while received < total {
+                        let delivered = subscription.poll(
+                            &mut |body| {
+                                let stamp =
+                                    u64::from_le_bytes(body[..8].try_into().expect("8 bytes"));
+                                if received >= warmup {
+                                    hist.saturating_record(nanos(epoch).saturating_sub(stamp));
+                                }
+                                received += 1;
+                            },
+                            1024,
+                        )?;
+                        if delivered == 0 {
+                            std::hint::spin_loop();
+                        }
+                    }
+                    Ok((subscription, hist))
+                },
+            )
+            .map_err(|e| e.to_string())?
+    };
+
+    let mut hist = histogram();
+    let mut retries: u64 = 0;
+    let mut stalled: u64 = 0;
+    const STALL_CHECK: u64 = 4096;
+    const STALL_LIMIT: Duration = Duration::from_secs(10);
+    let mut counting: Option<Counting> = None;
+    let mut start = Instant::now();
+    for i in 0..total {
+        if i == warmup {
+            counting = Some(Counting::open());
+            start = Instant::now();
+        }
+        let stamp = nanos(epoch);
+        let t0 = tick();
+        loop {
+            let position = publication.claim_commit(options.body, stamp);
+            if position >= 0 {
+                break;
+            }
+            match position {
+                cavalry_ffi::CAVALRY_PUBLICATION_BACK_PRESSURED
+                | cavalry_ffi::CAVALRY_PUBLICATION_ADMIN_ACTION
+                | cavalry_ffi::CAVALRY_PUBLICATION_NOT_CONNECTED => {
+                    retries += 1;
+                    stalled += 1;
+                    if subscriber.is_finished() {
+                        return Err(subscriber_failure(subscriber.join()));
+                    }
+                    if stalled.is_multiple_of(STALL_CHECK)
+                        && span_ns(t0, tick()) > STALL_LIMIT.as_nanos() as u64
+                    {
+                        return Err(format!(
+                            "the publisher was back-pressured for over {} s at message {i} of \
+                             {total}, so the subscriber stopped reading; see \
+                             docs/how-to/run-the-bench.md",
+                            STALL_LIMIT.as_secs()
+                        ));
+                    }
+                    std::hint::spin_loop();
+                }
+                other => return Err(format!("the claim through the ABI returned {other}")),
+            }
+        }
+        stalled = 0;
+        if i >= warmup {
+            hist.saturating_record(span_ns(t0, tick()));
+        }
+    }
+    let elapsed = start.elapsed();
+    let allocations = counting.as_ref().map_or(0, Counting::close);
+    let (subscription, one_way) = match subscriber.join() {
+        Ok(Ok(returned)) => returned,
+        failed => return Err(subscriber_failure(failed)),
+    };
+    // The subscription is handed back and closed after the window, as the client rows'
+    // is (card 176): its close is the conductor's work, not the window's.
+    publication.close()?;
+    subscription.close()?;
+    client.close()?;
+    driver.close().map_err(|e| e.to_string())?;
     pins.check(DriverThread::Conductor)?;
     pins.check(DriverThread::Recorder)?;
     pins.check(DriverThread::Replayer)?;
@@ -2434,6 +2599,11 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
                     options.udp_messages(),
                 );
             }
+            Benchmark::Ffi => {
+                let run = bench_ffi(options)
+                    .map_err(|message| format!("the ffi benchmark failed: {message}"))?;
+                pass.insert_message_run(benchmark, "ffi", options.body, run, options.messages);
+            }
             Benchmark::Slot { spacing } => {
                 let (loads, stores) = bench_slot(options, spacing).map_err(|message| {
                     format!("the slot_padding_{spacing} benchmark failed: {message}")
@@ -2947,10 +3117,10 @@ mod tests {
             panic!("--only slot_padding_96 parsed, and no row's name contains it");
         };
         assert!(error.starts_with("--only slot_padding_96:"), "{error}");
-        // The timer, two rows each of the five message benchmarks and the three slot
+        // The timer, two rows each of the six message benchmarks and the three slot
         // pairs, and the record row.
         let rows = options(&[]).rows();
-        assert_eq!(rows.len(), 18);
+        assert_eq!(rows.len(), 20);
         for row in rows {
             assert!(error.contains(&row), "{error} does not list {row}");
         }
