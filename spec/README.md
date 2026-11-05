@@ -8,9 +8,10 @@ Protocol).
 
 ## Conventions
 
-- One page per layout or protocol, and each page names its version in its title.
+- One page per layout, protocol or ABI, and each page names its version in its title.
   Multi-byte integers are little-endian. Offsets and lengths are in bytes. Signed
-  fields are two's complement.
+  fields are two's complement. An ABI page gives names, types, signatures, values and
+  the rules a caller holds by convention, and its artefact is a committed header.
 - Every layout carries a version in its header, and a reader rejects a version it does
   not know. Changing a field is a new version, a new ADR and new vectors, in that
   order, before any code. `just lint-docs` refuses a change under `spec/` without an
@@ -24,7 +25,9 @@ Protocol).
   either the fields a conforming reader decodes or the error a conforming reader
   reports. A vector may carry `inputs` instead of bytes: an arithmetic vector, whose
   fields a conforming implementation computes from the inputs, for the position and
-  claim arithmetic a layout defines. `just conformance` runs every implementation
+  claim arithmetic a layout defines. An ABI page's vectors are a third kind: the
+  names, signatures, fields and values a conforming header declares, which a reader
+  checks the committed header against. `just conformance` runs every implementation
   against every vector; `just test` runs the Rust one on every commit.
 - The book's reference section includes these pages unchanged, from
   `docs/reference/`. Edit here, never there.
@@ -41,3 +44,4 @@ Protocol).
 | `client-protocol.md`, the client protocol | 4 | ADR 0019, ADR 0025, ADR 0030, ADR 0031, ADR 0040 |
 | `durable-log.md`, the durable log | 1 | ADR 0024, ADR 0031 |
 | `udp.md`, the UDP transport | 0 | ADR 0040, ADR 0045 |
+| `c-abi.md`, the C ABI | 0 | ADR 0051 |

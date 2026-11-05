@@ -1,6 +1,6 @@
 # 0051. Expose the client API as a C ABI with Aeron's C client's names, version 0
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-05
 - **Invariants affected:** 1, 2, 3, 5, 6
 - **Supersedes:** none; adds `spec/c-abi.md`, the first page of `spec/` that is not
@@ -793,6 +793,14 @@ lint's rule on build dependencies in `scripts/lint-workspace.py`, lines 8 to 15.
 the implementation proves, the allocation count over every per-message function, the
 C runner's pass on both runners and the two rows' histograms on both hosts, goes in
 the commits that land with the acceptance.
+
+Acceptance, 2026-11-05 *(acceptance)*: Rjae accepted the decision as proposed on
+2026-11-05, answering the recorded decision d-20261105-66fa51 in this session after
+the proposal merged as 2243918 (pull request 127, reviewed and approved at 29b96c7
+over three reviews). Nothing in the Decision changed. The page, `spec/c-abi.md`
+version 0 with its vectors, lands with this acceptance; `cavalry-ffi`, the C runner
+and the bench rows follow, one pull request per crate, and card 204 closes on the
+last.
 
 ## Consequences
 

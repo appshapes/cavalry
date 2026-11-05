@@ -1261,3 +1261,13 @@ user-visible change, added in the same commit as the change. The format follows
   `grip-linux` names one runner
   (`scripts/wait-for-partner-job.py`; `.github/workflows/ci.yml`;
   [Run the bench](docs/how-to/run-the-bench.md), step 5; card 212).
+- ADR 0051 Accepted: Rjae accepted the C ABI as proposed on 2026-11-05, and
+  `spec/c-abi.md`, version 0, is its page: eight opaque handles, nine caller-owned
+  structs, 58 functions, the six result codes, one table of error codes with the
+  driver's below 100, the string, lifetime and thread rules, which claim a struct
+  names, a frame's position from its image's constants, and the version check a reader
+  runs first; `spec/vectors/c-abi.json`, written by `spec/vectors/c-abi.py`, will hold
+  the committed header to the page once `cavalry-ffi`'s test reads it. `spec/README.md` admits an ABI page and its kind of
+  vector, and `spec/client-protocol.md` keeps its error codes below 100 for the ABI
+  ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
+  card 204).
