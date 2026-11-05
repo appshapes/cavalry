@@ -1324,3 +1324,9 @@ user-visible change, added in the same commit as the change. The format follows
   lint-header` shows cbindgen's own output when it fails and says what to do next;
   every handle type is asserted `Send` at compile time, which the subscription
   handle's self-pointing views need an `unsafe impl` for (card 204).
+- A claim or an offer on a publication whose client has closed is now
+  `Offer::Closed`, `CAVALRY_PUBLICATION_CLOSED` in C, before anything is reserved,
+  where one that still fit the publisher limit used to read a position: the driver
+  ends the stream at the producer position it loads on `client close`, so such a
+  frame could land past the stream's end with no subscriber told of it
+  ([log buffer, "Closing"](spec/log-buffer.md); card 204).
