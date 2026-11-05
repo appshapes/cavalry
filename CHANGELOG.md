@@ -1156,8 +1156,10 @@ user-visible change, added in the same commit as the change. The format follows
   per-message rules hold the Rust core behind the ABI, under its gate; the code each
   client's generator writes takes no lock, makes no syscall, never awaits, returns
   `Offer`'s codes as values, and makes no allocation of its own per message beyond the
-  objects its runtime makes for the crossing, reusing one view where its runtime allows
-  and recording with its reason any allocation it cannot avoid; card 205's check in
+  objects its runtime makes for the crossing, keeping one view and one buffer claim
+  per publication and per subscription across messages where its runtime allows, as
+  the ABI's buffer claim is a struct the caller owns and every claim fills, and
+  recording with its reason any allocation it cannot avoid; card 205's check in
   `just lint` holds it for locks, `await` and raises, cards 206 to 209 each extend the
   check with their language's forms, and it fails on generated code in a language it
   has no rules for; each card records the rest, and its allocations are counted

@@ -140,7 +140,10 @@ slice. Six features make the slice, one Trello card each, in this order:
 
 1. **The C ABI, specified first (card 204).** Its ADR: the handle types, context,
    client, publication, exclusive publication, subscription, image, buffer claim,
-   recording and replay; the functions over `cavalry-client`'s API under Aeron's C
+   recording and replay, the buffer claim a struct the caller owns and
+   `cavalry_publication_try_claim` fills, as Aeron's C client fills the caller's
+   `aeron_buffer_claim_t`, so that a caller keeps one per publication and a claim
+   makes nothing new; the functions over `cavalry-client`'s API under Aeron's C
    names, `cavalry_publication_try_claim`, `cavalry_buffer_claim_commit`,
    `cavalry_subscription_poll` with a fragment handler of the shape above, and the
    rest; Aeron's negative result codes, −1 to −6, with `Offer`'s five Aeron variants
@@ -185,9 +188,10 @@ slice. Six features make the slice, one Trello card each, in this order:
    how `ctypes` calls the fragment handler back, whether that takes the GIL, and what
    it allocates per message: a `ctypes` callback builds its arguments as new Python
    objects on every call, which is the runtime's side; and whether the client's view
-   over a claimed slice is one object reused across claims or a new one per claim;
-   a new one per claim is an allocation of the client's own code, recorded with the
-   reason it could not be avoided (below). Python first because both runners have
+   over a claimed slice is the one object it keeps per publication, filled on each
+   claim as the ABI fills the caller's buffer claim, or a new one per claim; a new
+   one per claim is an allocation of the client's own code, recorded with the reason
+   it could not be avoided (below). Python first because both runners have
    Python 3 for the scripts (ADR 0003), `ctypes` is in its standard library so the
    client has no dependency, and Aeron has no Python client.
 3. **The Node client (card 206).** `clients/node/` with TypeScript types,
@@ -235,8 +239,9 @@ message. Card 204's allocation test asserts it over every one of those functions
 not only the ones named here, and its two bench rows gate it.
 
 The client's own code is the code card 205's generator writes between the user's
-code and the ABI, in both directions. It holds all five rules: four by a check and
-its card's record, and the fifth, no allocation, by its card's record and a count,
+code and the ABI, in both directions. It holds all five rules: three, no lock, no
+`await` and no raise, by a check and its card's record; the fourth, no syscall, by
+its card's record; and the fifth, no allocation, by its card's record and a count,
 without a gate. It calls the ABI on the caller's thread and returns when the ABI
 returns: one call per offer, per claim, per commit or abort and per poll, with no
 lock, no syscall, and no `await`, promise, future, task or coroutine around the call.
@@ -263,8 +268,10 @@ of the per-message functions, so a check that read nothing of a client cannot pa
 it. Each card records that its client holds the four rules, beside its allocation
 count. The client's code makes no heap allocation of its own per message beyond the
 objects its runtime makes for the crossing: where its runtime allows it, it reuses
-one view or wrapper per subscription, per publication or per claim instead of making
-a new one per message, and it never copies a fragment into a new array for the
+one view or wrapper per subscription and per publication across messages, the view
+over a claimed slice included, instead of making a new one per message or per claim,
+as the ABI's buffer claim is one struct the caller owns and every claim fills (item
+1), Aeron's flyweight; and it never copies a fragment into a new array for the
 handler, as Aeron's Java client hands its `FragmentHandler` a buffer with an offset
 and a length (ADR 0021).
 An allocation its code cannot avoid, because its runtime offers no reusable form, is
@@ -492,12 +499,15 @@ Harder: the gates grow by five toolchains, each a pinned set-up action and minut
 both runners; `cavalry-ffi` is the second `unsafe` crate, and its lifetimes are by
 convention, so misuse must be loud; a callback into a managed runtime is the slowest
 path a message takes, each client's runner reports it and nothing gates it; invariant
-2's gate stops at the ABI, so the code each client's generator writes holds four of
-the per-message rules by card 205's check in `just lint`, which each later card
-extends with its language's forms and which fails on a language it has no rules for,
-and by its card's record, and the fifth, no allocation of its own beyond the objects
-its runtime makes for the crossing, by its card's record and a count it shares with
-the runtime's side, and not by a gate; and the runtime's side may allocate and take
+2's gate stops at the ABI, so the code each client's generator writes holds three of
+the per-message rules, no lock, no `await` and no raise, by card 205's check in
+`just lint`, which each later card extends with its language's forms and which fails
+on a language it has no rules for, and by its card's record, the fourth, no syscall,
+by its card's record, and the fifth, no allocation of its own beyond the objects its
+runtime makes for the crossing, with one view and one buffer claim kept per
+publication and per subscription across messages, by its card's record and a count it
+shares with the runtime's side, and not by a gate; and the runtime's side may
+allocate and take
 the runtime's own lock per message, as Python's `ctypes` does, which each client's
 card records and its runner reports, and nothing gates either; the bench hosts'
 baselines gain two rows per profile, recorded as ADR 0033 says; the ABI's ADR waits on Rjae, as the format ADRs
