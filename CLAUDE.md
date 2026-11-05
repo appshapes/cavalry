@@ -71,7 +71,7 @@ bench/                harness, baseline.json, results/
 conformance/          protocol conformance suite and upgrade tests
 ```
 
-"Data plane" means any code a message passes through between `try_claim` on the publisher and the fragment handler on the subscriber, including the driver's sender and receiver threads. Everything else is control plane.
+"Data plane" means any code a message passes through between `try_claim` on the publisher and the fragment handler on the subscriber, including the driver's sender and receiver threads. Everything else is control plane. Across the C ABI the boundary has three parts (ADR 0046): the Rust core behind the ABI, every `cavalry-ffi` function a message passes through, holds all five per-message rules; a generated client's own code holds them by its card's check and record; the runtime's side, its trampoline, its argument objects and its own step across the boundary, is outside the rules and their gate, and each client's runner reports its cost.
 
 ## Rules
 
