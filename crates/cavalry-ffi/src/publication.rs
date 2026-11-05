@@ -22,11 +22,25 @@ enum State {
     Claimed { position_after: i64 },
 }
 
+/// The publication's constants, copied out of it when the handle is made, so that
+/// `cavalry_publication_constants` answers during a claim without reaching the
+/// publication the claim borrows.
+#[derive(Clone, Copy)]
+struct Constants {
+    registration_id: i64,
+    session_id: i32,
+    stream_id: i32,
+    max_payload_length: usize,
+    max_message_length: usize,
+    is_exclusive: bool,
+}
+
 /// A publication, concurrent or exclusive; made by `cavalry_add_publication` or
 /// `cavalry_add_exclusive_publication`, freed by `cavalry_publication_close`.
 pub struct cavalry_publication_t {
     state: State,
     channel: CString,
+    constants: Constants,
     /// The claim outstanding, if any, borrowed from `publication` below; dropped first,
     /// which aborts it, since fields drop in declaration order.
     claim: Option<BufferClaim<'static>>,
@@ -70,6 +84,14 @@ pub(crate) fn publication_handle(publication: Publication) -> *mut cavalry_publi
     handle::give(cavalry_publication_t {
         state: State::Idle,
         channel: strings::c_string(publication.channel()),
+        constants: Constants {
+            registration_id: publication.registration_id(),
+            session_id: publication.session_id(),
+            stream_id: publication.stream_id(),
+            max_payload_length: publication.max_payload_length(),
+            max_message_length: publication.max_message_length(),
+            is_exclusive: publication.is_exclusive(),
+        },
         claim: None,
         publication,
     })
@@ -142,6 +164,13 @@ pub unsafe extern "C" fn cavalry_publication_try_claim(
 ) -> i64 {
     if publication.is_null() {
         error::null("cavalry_publication_try_claim", "publication");
+        // A refused claim leaves no struct pointing into the log, and with no
+        // publication the struct names no outstanding claim ("Which claim a struct
+        // names").
+        if !claim.is_null() {
+            // SAFETY: non-null and writable, by the caller's convention.
+            unsafe { clear(claim) };
+        }
         return CAVALRY_PUBLICATION_ERROR;
     }
     if claim.is_null() {
@@ -503,21 +532,21 @@ pub unsafe extern "C" fn cavalry_publication_constants(
         error::null("cavalry_publication_constants", "constants");
         return -1;
     }
-    // SAFETY: a live handle; the constants are read through shared references to
-    // fields a claim's borrow does not cover, since a `BufferClaim` borrows the
-    // appender and the term and reads none of these getters' fields after it is made.
-    // The channel string is the handle's own copy.
+    // SAFETY: a live handle and a writable struct, by the caller's conventions. The
+    // reads go through the handle's pointer to its `channel` and `constants` fields
+    // alone, the copies `publication_handle` took, and never form a reference to the
+    // wrapped publication, which an outstanding claim borrows (`cavalry_publication_t`).
     unsafe {
         let channel = (*ptr::addr_of!((*publication).channel)).as_ptr();
-        let inner = &*ptr::addr_of!((*publication).publication);
+        let copy = ptr::addr_of!((*publication).constants).read();
         *constants = cavalry_publication_constants_t {
             channel,
-            registration_id: inner.registration_id(),
-            session_id: inner.session_id(),
-            stream_id: inner.stream_id(),
-            max_payload_length: inner.max_payload_length(),
-            max_message_length: inner.max_message_length(),
-            is_exclusive: inner.is_exclusive(),
+            registration_id: copy.registration_id,
+            session_id: copy.session_id,
+            stream_id: copy.stream_id,
+            max_payload_length: copy.max_payload_length,
+            max_message_length: copy.max_message_length,
+            is_exclusive: copy.is_exclusive,
         };
     }
     0

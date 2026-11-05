@@ -250,6 +250,74 @@ mod tests {
         assert!(text.ends_with(&format!("; see {DOC}#x")), "{text}");
     }
 
+    /// The bytes `cavalry_errmsg` points at up to its NUL, which must be inside the
+    /// buffer, as a C caller reads them.
+    fn errmsg_bytes() -> Vec<u8> {
+        // SAFETY: `cavalry_errmsg` points at this thread's buffer of `BUFFER` bytes,
+        // valid until the next failing call on the thread, and none runs here.
+        let buffer = unsafe { std::slice::from_raw_parts(cavalry_errmsg().cast::<u8>(), BUFFER) };
+        let end = buffer
+            .iter()
+            .position(|&b| b == 0)
+            .expect("the NUL is inside the 512 bytes");
+        buffer[..end].to_vec()
+    }
+
+    #[test]
+    fn a_long_error_message_keeps_its_docs_anchor() {
+        use std::path::PathBuf;
+
+        // The three messages ADR 0051 names ("The message"), formatted by the crates
+        // that write them, each with the anchor its own Display puts last.
+        // 4,096 bytes, ending in three-byte characters.
+        let what = format!("a{}", "€".repeat(1365));
+        // 4,096 bytes, none of them ASCII.
+        let path = "é".repeat(2048);
+        assert_eq!((what.len(), path.len()), (4096, 4096));
+        let driver = ClientError::Driver { what };
+        let io = ClientError::Io {
+            what: "open the counters file",
+            path: PathBuf::from(path),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        let too_long = Offer::TooLong {
+            found: usize::MAX,
+            limit: usize::MAX,
+        };
+
+        set_client(&driver);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_DRIVER);
+        let anchor = "; see docs/reference/client-protocol.md#error-codes";
+        check(&driver.to_string(), anchor);
+
+        set_client(&io);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_IO);
+        let anchor = "; see docs/reference/client-protocol.md#the-driver-directory";
+        check(&io.to_string(), anchor);
+
+        assert_eq!(offer_code(&too_long), CAVALRY_PUBLICATION_ERROR);
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_TOO_LONG);
+        let anchor = "; see docs/reference/log-buffer.md#claim-commit-and-abort";
+        check(&too_long.to_string(), anchor);
+
+        /// The message in the buffer is valid UTF-8, ends with the error's own anchor,
+        /// and is the whole message when that fits, else its head, `...` and its tail.
+        fn check(whole: &str, anchor: &str) {
+            assert!(whole.ends_with(anchor), "the error's Display ends {anchor}");
+            let bytes = errmsg_bytes();
+            assert!(bytes.len() < BUFFER);
+            let text = std::str::from_utf8(&bytes).expect("valid UTF-8 before the NUL");
+            assert!(text.ends_with(anchor), "{text}");
+            if whole.len() < BUFFER {
+                assert_eq!(text, whole);
+            } else {
+                let (head, _) = text.split_once("...").expect("a cut message holds `...`");
+                assert!(whole.starts_with(head), "{text}");
+                assert!(head.len() > BUFFER / 2, "the head keeps most of the buffer");
+            }
+        }
+    }
+
     #[test]
     fn a_long_message_with_no_anchor_keeps_its_last_bytes() {
         let what = "ü".repeat(600);

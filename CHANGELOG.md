@@ -1271,6 +1271,29 @@ user-visible change, added in the same commit as the change. The format follows
   vector, and `spec/client-protocol.md` keeps its error codes below 100 for the ABI
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).
+- `CLAUDE.md`'s working rules say which decisions a session makes and which it sends:
+  a choice between options is the session's own, on its recommendation, recorded with
+  the work, and a `brigade decision` goes to a person only for what needs their own
+  hand, a host, a credential, an account, or reverses a decision they made. An ADR,
+  one on the wire format, the on-disk log format or the C ABI included, lands Accepted
+  on its evidence and names no person to accept it
+  ([Implement a feature](docs/how-to/implement-a-feature.md), step 2; card 214).
+- The review loop's sweep of the `ci` runs GitHub holds on a fixer's superseded pushes
+  deletes each run instead of approving and cancelling it, in the fixer's last job and
+  again right before the merge: the approval queued the run into `ci.yml`'s concurrency
+  group, which cancelled the head's live run three seconds later (measured on pull
+  request 131), so the sweep had to stop while a run at the head was live, which at the
+  merge is usual, and what it left held still failed with a mail at the merge (pull
+  request 121); a held run accepts a delete, which queues nothing. And the auto-merge an
+  approval armed is disarmed by what moves the pull request past that approval: a push
+  by a person (`.github/workflows/dispatch-review.yml`), a push by the fixer
+  (`.github/workflows/claude.yml`, its last job, before it approves the pushed head's
+  held run) and a review that requests changes on the approved head
+  (`.github/workflows/auto-merge.yml`), since GitHub's auto-merge survives a push by a
+  person with write access and the branch protection requires no review; a head with an
+  approval of its own stays armed, and the reviewer's approval of the new head arms it
+  again. [Ask the agent to make a change](docs/how-to/ask-the-agent.md) says what
+  disarms a merge (card 217).
 - `cavalry-ffi` exposes the client API as the C ABI of `spec/c-abi.md`, version 0:
   58 `extern "C"` functions over eight opaque handles, the caller-owned buffer claim,
   header values, fault and constants structs, the codes and the thread-local error
