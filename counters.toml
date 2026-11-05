@@ -526,7 +526,7 @@ id = 41
 name = "recording.segments_purged"
 kind = "counter"
 scope = "static"
-doc = "Segment files removed by `purge segments`, one per file, once the recording's retained position was written past them (spec/durable-log.md, The driver; ADR 0031)."
+doc = "Segment files removed by `purge segments`, one per file as the replayer removes it, once the recording's retained position was written past them, so the counter reads a purge's progress while it runs (spec/durable-log.md, The driver; ADR 0031; card 177)."
 doctor = ""
 
 [[counter]]
