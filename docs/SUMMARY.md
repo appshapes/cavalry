@@ -88,4 +88,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0044. Gate UDP on the two bench hosts with one message in flight, on the loopback and across the link](decisions/0044-gate-udp-on-the-two-bench-hosts.md)
 - [0045. Carry a padding frame on the wire as its 32-byte header alone](decisions/0045-carry-a-padding-frame-as-its-header-alone.md)
 - [0047. Count the measured loops' allocations with a hook that keeps the first one's backtrace](decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md)
+- [0046. Build the C ABI and the language clients fourth, in six features](decisions/0046-build-the-c-abi-and-the-clients-fourth.md)
 - [0049. Hold an add subscription until its channel's closing endpoint has closed](decisions/0049-hold-an-add-until-the-closing-endpoint-has-closed.md)
