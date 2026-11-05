@@ -330,8 +330,16 @@ int main(void) {
         take_constants(&replayed);
         if (replayed.next >= MESSAGES && cavalry_replay_ended(replay, &ended_at, &reason)) break;
         if (passed(&replay_until)) {
-            fprintf(stderr, "conformance/c: replayed %" PRIu64 " of %d, ended %s\n", replayed.next,
-                    MESSAGES, cavalry_replay_ended(replay, NULL, NULL) ? "yes" : "no");
+            /* cavalry_replay_ended refuses a null pointer, so both are passed. */
+            if (cavalry_replay_ended(replay, &ended_at, &reason)) {
+                fprintf(stderr, "conformance/c: replayed %" PRIu64 " of %d in %d s; the replay "
+                        "ended at %" PRId64 " with reason %" PRId32 "\n", replayed.next,
+                        MESSAGES, WAIT_SECONDS, ended_at, reason);
+            } else {
+                fprintf(stderr, "conformance/c: replayed %" PRIu64 " of %d in %d s; the replay "
+                        "has not ended, at position %" PRId64 "\n", replayed.next, MESSAGES,
+                        WAIT_SECONDS, cavalry_replay_position(replay));
+            }
             return 1;
         }
     }
