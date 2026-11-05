@@ -139,6 +139,13 @@ impl Setup {
         }
     }
 
+    /// Polls with `count` into `counted`, up to 4,096 fragments.
+    fn poll_counting(&mut self, counted: &mut Count) -> i32 {
+        let counted: *mut Count = counted;
+        // SAFETY: the handle and the handler are this test's.
+        unsafe { cavalry_subscription_poll(self.subscription, Some(count), counted.cast(), 4096) }
+    }
+
     /// Claims and commits `body`, polling the subscription until the image joins.
     fn publish(&mut self, body: &[u8]) -> i64 {
         let mut claim = cavalry_buffer_claim_t {
@@ -339,6 +346,9 @@ fn a_live_claim_refuses_the_calls_the_rust_borrow_would() {
     assert_eq!(setup.received[1].body, b"live");
 }
 
+/// ADR 0051, "Which claim a struct names": c1's released struct and its copy answer
+/// `NO_CLAIM` beside c2 and again three terms later, beside the claim whose body is at
+/// c1's address; each claim they stood beside is read once with its own body.
 #[test]
 fn a_stale_claim_struct_leaves_the_outstanding_claim_untouched() {
     let mut setup = Setup::new("stale-claim");
@@ -386,10 +396,126 @@ fn a_stale_claim_struct_leaves_the_outstanding_claim_untouched() {
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_TOO_LONG);
         assert!(errmsg().contains("too-long"), "{}", errmsg());
         assert!(too_long.data.is_null() && too_long.publication.is_null() && too_long.length == 0);
+
+        setup.receive(3);
+        assert_eq!(setup.received[1].body, b"c1");
+        assert_eq!(setup.received[2].body, b"c2");
+
+        // Three terms later the log is back in c1's partition, and the claim at c1's
+        // term offset there has c1's body address: only the position tells the two
+        // structs apart ("Which claim a struct names").
+        let image = cavalry_subscription_image_at_index(setup.subscription, 0);
+        assert!(!image.is_null(), "{}", errmsg());
+        let mut image_constants = std::mem::zeroed::<cavalry_image_constants_t>();
+        assert_eq!(cavalry_image_constants(image, &mut image_constants), 0);
+        let term_length = 1i64 << image_constants.position_bits_to_shift;
+        assert!(term_length >= 64 * 1024, "a term of {term_length} bytes");
+        let mut constants = std::mem::zeroed::<cavalry_publication_constants_t>();
+        assert_eq!(
+            cavalry_publication_constants(setup.publication, &mut constants),
+            0
+        );
+        // Frames of one size, 1,024 bytes, tile a term; 64-byte frames, c1's size, fill
+        // to a 1,024-byte boundary after c2 and from the start of the fourth term to c1's
+        // offset. c1's frame begins 64 bytes before the position after it.
+        const LARGE: i64 = 1024;
+        const HEADER: usize = 32;
+        assert!(constants.max_payload_length >= LARGE as usize - HEADER);
+        let target = after1 - 64 + 3 * term_length;
+        let mut counted = Count {
+            marker: b"c4",
+            marked: 0,
+        };
+        let mut later = std::mem::zeroed::<cavalry_buffer_claim_t>();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let position = cavalry_publication_position(setup.publication);
+            assert!(
+                (0..=target).contains(&position),
+                "position {position} of {target}: {}",
+                errmsg()
+            );
+            let length = if position % LARGE == 0 && target - position >= LARGE {
+                LARGE as usize - HEADER
+            } else {
+                2
+            };
+            let after = cavalry_publication_try_claim(setup.publication, length, &mut later);
+            if after < 0 {
+                // Back-pressured until the subscriber reads: poll, and try again.
+                assert_ne!(after, CAVALRY_PUBLICATION_ERROR, "{}", errmsg());
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the publication reached {position} of {target}"
+                );
+                assert!(setup.poll_counting(&mut counted) >= 0, "{}", errmsg());
+                continue;
+            }
+            if later.data == copy.data {
+                break;
+            }
+            if length == 2 {
+                ptr::copy_nonoverlapping(b"--".as_ptr(), later.data, 2);
+            }
+            assert_eq!(cavalry_buffer_claim_commit(&mut later), after);
+        }
+        let after_later = later.position_after;
+        assert_eq!(
+            after_later,
+            after1 + 3 * term_length,
+            "c1's offset, three terms on"
+        );
+        assert_ne!(after_later, copy.position_after);
+        let body = std::slice::from_raw_parts(later.data, 2).to_vec();
+        for stale in [&mut c1, &mut cavalry_buffer_claim_t { ..copy }] {
+            assert_eq!(cavalry_buffer_claim_commit(stale), -1);
+            assert_eq!(cavalry_errcode(), CAVALRY_ERR_NO_CLAIM, "{}", errmsg());
+            assert_eq!(cavalry_buffer_claim_abort(stale), -1);
+            assert_eq!(cavalry_errcode(), CAVALRY_ERR_NO_CLAIM);
+            assert_eq!(cavalry_buffer_claim_set_reserved_value(stale, 1), -1);
+            assert_eq!(cavalry_errcode(), CAVALRY_ERR_NO_CLAIM);
+        }
+        assert_eq!(
+            std::slice::from_raw_parts(later.data, 2),
+            body.as_slice(),
+            "the new claim's body is untouched"
+        );
+        ptr::copy_nonoverlapping(b"c4".as_ptr(), later.data, 2);
+        assert_eq!(cavalry_buffer_claim_commit(&mut later), after_later);
+        // The subscriber reads the new claim once, with the body its own struct wrote.
+        while counted.marked == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the subscriber read c4"
+            );
+            assert!(setup.poll_counting(&mut counted) >= 0, "{}", errmsg());
+        }
+        assert_eq!(setup.poll_counting(&mut counted), 0, "nothing after c4");
+        assert_eq!(counted.marked, 1);
+        let image = cavalry_subscription_image_at_index(setup.subscription, 0);
+        assert_eq!(cavalry_image_position(image), after_later);
     }
-    setup.receive(3);
-    assert_eq!(setup.received[1].body, b"c1");
-    assert_eq!(setup.received[2].body, b"c2");
+}
+
+/// What `count` keeps across polls: how many fragments had `marker` as their body.
+struct Count {
+    marker: &'static [u8],
+    marked: usize,
+}
+
+unsafe extern "C" fn count(
+    clientd: *mut c_void,
+    buffer: *const u8,
+    length: usize,
+    _header: *const cavalry_header_t,
+) {
+    // SAFETY: the test passes a `Count`, and the body is valid for the call.
+    unsafe {
+        let count = &mut *clientd.cast::<Count>();
+        if std::slice::from_raw_parts(buffer, length) == count.marker {
+            count.marked += 1;
+        }
+    }
 }
 
 /// A handler that calls back into its own subscription: every such call is refused
