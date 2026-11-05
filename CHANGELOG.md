@@ -1246,3 +1246,18 @@ user-visible change, added in the same commit as the change. The format follows
   ends, so the counter reads a running purge's progress, and a purge beside the bench's
   recorded rows adds nothing to the allocation gate's count. `cavalry-log` shares the
   name formatting as `layout::segment_file_name_into` (card 177).
+- The `bench (udp)` and `bench (udp peer)` jobs each wait, before their run, until the
+  run's other job is in progress, for up to 45 minutes, so the two ends of one run
+  meet each other. Before, each host started its end from its own queue: the harness's
+  ten-minute wait ended one end whenever the other started more than ten minutes
+  later, twice on master on 2026-11-05, and the end that passed had measured against
+  another run's end, built from another tree. When two runs' pairs each hold one host
+  and wait for each other, the newer run's end fails at once and names the older run.
+  A refused token fails the wait at once, an API that does not answer after three
+  tries and a wrong job name after a minute, each with its reason. Each failure names
+  the re-run that brings both ends back, `gh run rerun <run id> --failed` when both
+  failed and the whole run when one passed, since a re-run of one end alone finds its
+  partner's earlier result and fails at once saying so. Each of `bench-linux` and
+  `grip-linux` names one runner
+  (`scripts/wait-for-partner-job.py`; `.github/workflows/ci.yml`;
+  [Run the bench](docs/how-to/run-the-bench.md), step 5; card 212).
