@@ -1322,7 +1322,13 @@ user-visible change, added in the same commit as the change. The format follows
   tree, master's own run among them, at 330 ns against a slowest run of 310 ns
   recorded on 2026-10-31. Card 216 measured card 177's commit against its parent on
   the idle host, three 21-run processes of each interleaved, and found them not
-  separated, the parent reading 320 with runs to 330 as the commit does, so the band
-  rose with the host, not the code. Seven rows loosen by more than 5 percent: the
-  recorded row to 360 ns, four by one run of one process, and two by a whole process
-  that card 219 holds. The commit is the owner's under ADR 0032 (card 216).
+  separated, the parent reading 320 with runs to 330 as the commit does, so any shift
+  at the code is under the gate's one clock step of 10 ns, where CI's own processes at
+  the two trees sat about one step apart, and the band rose with the host. Seven rows
+  loosen by more than 5 percent: the recorded row to 360 ns; the checked
+  `claim_commit_32_client` row to 170 ns, by 25 runs in eight of the twenty processes
+  with every process's median at 159 or 160 ns; the unchecked `claim_commit_32_udp`
+  and `one_way_32_client` rows, each by one run of one process; and three rows by the
+  two whole processes that card 219 holds, where one run of a third process also
+  reaches the checked `one_way_32_concurrent` row's new 250 ns. The commit is the
+  owner's under ADR 0032 (card 216).
