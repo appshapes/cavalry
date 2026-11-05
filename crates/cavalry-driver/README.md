@@ -17,7 +17,14 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   every publication's positions, cleaning, unblocking and closing as
   `spec/log-buffer.md`, "The driver" says, loading a publication's producer position
   at most once every two milliseconds so that the publisher's cache line is not read on every
-  cycle (ADR 0022). The strategy it runs is stored once in the
+  cycle (ADR 0022). The connected flag the publisher reads is raised in the limit pass
+  after the limit's raise, and lowered where the last subscriber, receiver or recording
+  goes, before the limit pass lowers the limit. So a claim reads `back pressured` only
+  while a subscriber, a recording or a receiver reads the stream, and `not connected`
+  from the moment the last one is gone. `back pressured` means a subscriber a window
+  behind, except in a cycle whose cleaning holds the raise back, where the subscriber
+  is at the limit, and once for a claim whose two loads straddle a raise
+  (ADR 0048; card 187). The strategy it runs is stored once in the
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
   `Driver::start_with_threads` takes a hook each thread runs first, named the thread it
   is on, where a caller that owns the host's CPUs pins the conductor to a CPU of its own
@@ -58,9 +65,19 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   command's catalog writes, one slot and a sync each, in the page's order; and after a
   file error the replayer runs the file side of recovery's rules for the slot and the
   recorder writes the one slot they end in, so the slot and the files agree before the
-  refusal is answered. Each outcome moves its counter: `recording.truncated`,
-  `recording.segments_purged`, `recording.deleted` and `recording.retention_failed`,
-  the last for a file the operating system refused and nothing else.
+  refusal is answered. The removal of a segment file allocates nothing while the log
+  directory's path is at most 337 bytes (`cavalry_log::recorder::LOG_DIR_PATH_LIMIT`,
+  the same limit as the recorder's roll, which `cavalry doctor --log-dir` checks): the
+  replayer formats the file's name on its stack into a path it keeps, and the standard
+  library hands a path under 384 bytes to the operating system from its stack. The
+  rest of a command's file work allocates a few times per command and never per file:
+  the listing of its files when it is admitted, a truncate's cut of the segment that
+  holds its position and of the time index, and a delete's removal of the time index.
+  A truncate, a delete and a refusal each move one counter once, when they end:
+  `recording.truncated`, `recording.deleted` and `recording.retention_failed`, the last
+  for a file the operating system refused and nothing else. A purge moves
+  `recording.segments_purged` once per file instead, as it removes the file, so the
+  counter reads a running purge's progress.
 - Sends a `cavalry:udp` publication's log on a fourth thread, the sender, by the rules
   of `spec/udp.md`, "The sender" (ADR 0040, ADR 0041): `add publication` on
   `cavalry:udp?endpoint=<host>:<port>` resolves the host once, opens the channel's send

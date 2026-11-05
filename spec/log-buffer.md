@@ -229,7 +229,21 @@ is no subscriber.
   every cycle, and only after cleaning. With neither a subscriber nor a recording the
   limit is the largest position any subscriber reached, so the publisher is told `not
   connected`; a recording alone connects the publication. It sets is connected to 1 while
-  a subscriber has a position or a recording is live, and to 0 otherwise.
+  a subscriber has a position or a recording is live, and to 0 otherwise, in the same
+  duty cycle as the limit: a 1 after the limit's raise and never before it, held while
+  the subscriber or the recording stays, and a 0 as the last subscriber or recording
+  goes, before the limit's lowering and never after it. So a claim reads `back
+  pressured` only while a subscriber has a position or a recording is live, as of its
+  load of is connected, and a publisher that reads the lowered limit reads 0 with it.
+  A publisher that loads is connected before the limit and reads 1, as one that waits
+  for is connected to read 1 and then claims does, reads a limit raised for that
+  subscriber or recording. `back pressured` then means the consumer position is a
+  window behind, with two exceptions. In a cycle whose cleaning holds the raise back,
+  the subscriber is at the limit. And a claim loads the limit before is connected
+  (step 1 of "Claim, commit and abort"), so a claim whose two loads straddle a raise
+  can read the old limit with the 1 and return `back pressured` once. A subscriber
+  that joins while cleaning holds the raise back is read as `not connected` until the
+  raise, a cycle or two (ADR 0048).
 - **Cleaning.** Before it raises the limit to L, it zeroes every byte from the clean
   position, the end of the last cleaning, up to L − window, the consumer position, one
   term at a time, so that no recorded byte is cleaned before the recorder has written it: the bytes after the first eight of the range with plain
