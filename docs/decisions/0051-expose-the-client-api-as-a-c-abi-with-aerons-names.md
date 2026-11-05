@@ -134,8 +134,9 @@ to its `allowed-dependencies`, and exempts dev-dependencies.
 Rust API lacks, as an `extern "C"` ABI of version 0 with Aeron's C client's names
 where the concept matches, specified on one page, `spec/c-abi.md`, whose artefact is
 the committed header `crates/cavalry-ffi/include/cavalry.h`. The page lands with the
-acceptance of this ADR, with the crate's functions, the header, the C runner and the
-bench rows, in one pull request per crate.
+acceptance of this ADR, with the sentence in `spec/client-protocol.md` that keeps its
+error codes below 100 ("The errors", below), the crate's functions, the header, the C
+runner and the bench rows, in one pull request per crate.
 
 ### `spec/c-abi.md`, version 0: the C ABI
 
@@ -195,8 +196,27 @@ that frame's `term_id` and `term_offset` and takes the image's constants once th
 returns.
 
 **The functions**, each returning 0 for success and −1 with the thread's error set
-unless the table says otherwise. A null handle or a null required pointer is −1, or
-`ERROR` on an offer or a claim, with `CAVALRY_ERR_NULL`.
+unless the table says otherwise. A function cannot answer when it is given a null
+handle or a null required pointer, which is `CAVALRY_ERR_NULL`, or when "Calls during
+a claim or a poll" refuses the call. It then sets the thread's error and returns the
+value its return type gives:
+
+| Return type | Functions | Value when the function cannot answer |
+| --- | --- | --- |
+| `int` status | every function the table below gives no other type | −1 |
+| `int64_t` position | `cavalry_publication_try_claim`, `cavalry_publication_offer` | `CAVALRY_PUBLICATION_ERROR`, −6 |
+| `int64_t` | every other: commit, abort, the positions, the limit, `cavalry_client_id` | −1; every position, limit and id the ABI returns is 0 or more, so −1 is never an answer |
+| `int32_t` or `int` count | `cavalry_closed`, `cavalry_subscription_poll`, `cavalry_subscription_image_count` | −1 |
+| pointer | `cavalry_context_get_dir`, `cavalry_dir`, `cavalry_subscription_image_at_index` | null |
+| `bool` | the `_is_connected`, `_is_closed` and `_is_end_of_stream` functions, and `cavalry_replay_ended`, which then writes nothing through its pointers | `false` |
+
+A `bool` function fails only when the caller misuses a handle, with a null pointer or a
+call the tables of "Calls during a claim or a poll" refuse, never because of the
+driver's state. A correct program therefore reads every `false` as the answer.
+`cavalry_subscription_image_at_index` past the count is null with no error set, as an
+index past the end is the answer "no such image" and not a misuse. The functions that
+take no handle, `cavalry_errcode`, `cavalry_errmsg`, the version functions and
+`cavalry_abi_version`, cannot fail.
 
 | Group | Functions |
 | --- | --- |
@@ -226,12 +246,23 @@ it takes no code of Cavalry's own past −6, so that a client reads six codes an
 error, as it does from Aeron.
 
 **The errors.** `cavalry_errcode` is one of a table the header carries as
-`CAVALRY_ERR_*`: 0 none; 1 to 24 the driver's refusal, the client protocol's error
-code as `spec/client-protocol.md`, "Error codes", gives it, which `ClientError::Refused`
-carries; then the client's own, 100 not found, 101 driver gone, 102 closed, 103
-subscriptions full, 104 replays full, 105 replay queue full, 106 response timeout, 107
-command ring, 108 broadcast, 109 counters, 110 protocol, 111 log, 112 driver, 113 io,
-`ClientError`'s other kinds in order; the faults a poll stops on, 120 image, 121
+`CAVALRY_ERR_*`. 0 is none. 1 to 99 are the driver's refusal, the client protocol's
+error code that `ClientError::Refused` carries as `raw_code`. The header names the
+codes of `spec/client-protocol.md`, "Error codes", 1 to 24, on their values. A raw code
+from 1 to 99 passes through on its value whether this version names it or not, so
+that, during an upgrade, a newer driver's code reaches the caller with the driver's
+message (invariant 3, mixed versions). A raw code outside 1 to 99, 0, a negative or
+100 and above, is 114 refused, with the raw code in the message, so that it never
+reads as one of the client's or the ABI's own codes. The client protocol's own codes
+count up from 20, so 1 to 99 leaves 75 free; with the acceptance,
+`spec/client-protocol.md`'s "Error codes" gains the sentence that its codes stay below
+100 because the C ABI carries them on their values, which changes no code this
+version sends and needs no version bump. Then come the client's own, 100 not found,
+101 driver gone, 102 closed, 103 subscriptions full, 104 replays full, 105 replay
+queue full, 106 response timeout, 107 command ring, 108 broadcast, 109 counters, 110
+protocol, 111 log, 112 driver, 113 io, `ClientError`'s other kinds in order, and 114
+refused, a refusal whose code is outside 1 to 99; the faults a poll stops on, 120
+image, 121
 images full, 122 closed, `Fault`'s three; and the ABI's own, 130 too long, 131 null,
 132 claim outstanding, 133 no claim, 134 polling. A success clears nothing: the error
 is the last failure's until the next. With no failure yet on the thread,
@@ -475,6 +506,13 @@ version of the page with its ADR. The first release, which freezes version 0, is
   A larger buffer only moves the limit: a driver's refusal message alone may be 4,096
   bytes (`spec/client-protocol.md`, "Encoding"), and the debug form of an unexpected
   event carries strings of that length, before the client's own text and a path.
+- **Passing every raw driver code through on its value.** Lost: a code of 100 or above
+  from a newer driver would read as one of the client's or the ABI's own, and a
+  caller that switches on the code would act on the wrong error. The range 1 to 99
+  keeps a newer driver's codes, and 114 names any code outside it.
+- **A `bool` function that cannot answer returning the value that ends a loop on it.**
+  Lost: a loop on `_is_connected` may wait for `true` or run while it holds, so no
+  single value ends every loop; `false` is one rule, and only a misuse reaches it.
 - **A code of Cavalry's own for `TooLong`, −7.** Lost: Aeron's clients read six codes
   and an error, and a seventh code would be the one place a Cavalry client differs
   from an Aeron one on the offer path; the length and the limit reach the caller
