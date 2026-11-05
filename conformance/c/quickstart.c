@@ -136,10 +136,24 @@ static void compute_positions(receiver_t *r) {
     }
 }
 
+/* A result code's name (spec/c-abi.md, "Result codes"). */
+static const char *result_name(int64_t code) {
+    switch (code) {
+    case CAVALRY_PUBLICATION_NOT_CONNECTED: return "CAVALRY_PUBLICATION_NOT_CONNECTED";
+    case CAVALRY_PUBLICATION_BACK_PRESSURED: return "CAVALRY_PUBLICATION_BACK_PRESSURED";
+    case CAVALRY_PUBLICATION_ADMIN_ACTION: return "CAVALRY_PUBLICATION_ADMIN_ACTION";
+    case CAVALRY_PUBLICATION_CLOSED: return "CAVALRY_PUBLICATION_CLOSED";
+    case CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED: return "CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED";
+    case CAVALRY_PUBLICATION_ERROR: return "CAVALRY_PUBLICATION_ERROR";
+    default: return "not a result code";
+    }
+}
+
 /* Publishes MESSAGES messages by claim and commit on `publication`, polling `r` as it
  * goes, and drains `r` to the end. */
 static void publish_and_receive(cavalry_publication_t *publication, receiver_t *r) {
     cavalry_buffer_claim_t claim;
+    struct timespec publish_until = deadline();
     for (uint64_t i = 0; i < MESSAGES;) {
         /* The image joins on a poll; take its constants before the first frame is read. */
         if (cavalry_subscription_poll(r->subscription, on_fragment, r, 16) < 0)
@@ -147,7 +161,26 @@ static void publish_and_receive(cavalry_publication_t *publication, receiver_t *
         take_constants(r);
         int64_t position = cavalry_publication_try_claim(publication, BODY, &claim);
         if (position == CAVALRY_PUBLICATION_ERROR) fail("cavalry_publication_try_claim");
-        if (position < 0) continue; /* not connected or back pressured: poll and retry */
+        /* CLOSED and MAX_POSITION_EXCEEDED never clear, and a result code sets no error,
+         * so the code itself is the message. */
+        if (position == CAVALRY_PUBLICATION_CLOSED ||
+            position == CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED) {
+            fprintf(stderr, "conformance/c: %s: cavalry_publication_try_claim returned %s (%" PRId64
+                    ") after %" PRIu64 " of %d messages\n", r->name, result_name(position),
+                    position, i, MESSAGES);
+            exit(1);
+        }
+        if (position < 0) {
+            /* Not connected, back pressured or an admin action: poll and retry, within
+             * the bound. */
+            if (passed(&publish_until)) {
+                fprintf(stderr, "conformance/c: %s: published %" PRIu64 " of %d in %d s; the last "
+                        "claim returned %s (%" PRId64 ")\n", r->name, i, MESSAGES, WAIT_SECONDS,
+                        result_name(position), position);
+                exit(1);
+            }
+            continue;
+        }
         memcpy(claim.data, &i, sizeof i);
         for (size_t b = sizeof i; b < BODY; b++) claim.data[b] = (uint8_t)(i + b);
         if (cavalry_buffer_claim_commit(&claim) != position) fail("cavalry_buffer_claim_commit");
@@ -185,6 +218,9 @@ static int free_udp_port(void) {
 }
 
 int main(void) {
+    /* A line at a time, so that a failure on stderr follows the lines before it in a
+     * CI log, where stdout is a pipe. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     /* What a reader rejects, both ways: another version is refused with the code, and
      * the header's own version is not. */
     cavalry_context_t *context = NULL;
