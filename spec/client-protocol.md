@@ -183,7 +183,12 @@ What the driver does with each, after the checks of "What the driver rejects":
   receiver's request queue with no room for the endpoint and the subscription, or with
   a request still waiting for room (ADR 0042), is error code 10, as it is for an `add
   publication`; a socket that cannot be opened or bound is code 4; a host that does
-  not resolve is code 9.
+  not resolve is code 9. An add on a `cavalry:udp` channel whose previous receive
+  endpoint is still closing, its socket with the receiver, waits with nothing
+  registered and no event sent until the receiver has closed it, one receiver cycle,
+  and then runs as if it had just arrived, the first such add binding the endpoint
+  again; waiting adds hold slots of the subscriptions registry, run in the order they
+  arrived, and go with a client that closes or times out first (ADR 0049).
 - **remove subscription.** The driver removes the subscription and every image it has,
   frees their position counters, and answers `operation success`; an image over UDP
   shared with other subscriptions on the endpoint and stream goes on with them, one the
@@ -601,7 +606,7 @@ with error code 10 and registers nothing:
 | --- | --- | --- |
 | clients | 256 | every client id the driver has not forgotten |
 | publications | 1024 | every registration of a publication, shared or not |
-| subscriptions | 1024 | every registration of a subscription |
+| subscriptions | 1024 | every registration of a subscription, and every `add subscription` waiting for a closing receive endpoint |
 | images | 2048 | every pair of a subscription and a publication, or a subscription and an image over UDP, that match: an image over UDP shared by several subscriptions on its endpoint and stream counts once per subscription, with a `subscription.position` per pair, so that the counters bound below holds |
 | recordings | 1024 | every recording that is starting or live, one per publication or image at most |
 | replays | 64 | every replay that is starting or live |
