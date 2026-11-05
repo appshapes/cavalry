@@ -102,7 +102,8 @@ lint-header:
     [ "$version" = "0.29.4" ] || { echo "lint-header: cbindgen $version is installed and the header is written by 0.29.4; cargo install --locked cbindgen@0.29.4" >&2; exit 1; }
     tmp=$(mktemp)
     trap 'rm -f "$tmp"' EXIT
-    cbindgen --config crates/cavalry-ffi/cbindgen.toml --crate cavalry-ffi --output "$tmp" 2>/dev/null
+    cbindgen --config crates/cavalry-ffi/cbindgen.toml --crate cavalry-ffi --output "$tmp" 2>"$tmp.err" || { cat "$tmp.err" >&2; echo "lint-header: cbindgen could not write the header from crates/cavalry-ffi; fix what it reported above, then run just lint-header again" >&2; rm -f "$tmp.err"; exit 1; }
+    rm -f "$tmp.err"
     if ! diff -u crates/cavalry-ffi/include/cavalry.h "$tmp"; then
         echo "lint-header: crates/cavalry-ffi/include/cavalry.h differs from what cbindgen writes; regenerate it with 'cbindgen --config crates/cavalry-ffi/cbindgen.toml --crate cavalry-ffi --output crates/cavalry-ffi/include/cavalry.h' and commit it with its ADR (spec/c-abi.md)" >&2
         exit 1

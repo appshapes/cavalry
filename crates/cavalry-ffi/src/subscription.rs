@@ -44,6 +44,13 @@ pub struct cavalry_subscription_t {
     subscription: Subscription,
 }
 
+// SAFETY: the one raw pointer the handle holds, each view's `subscription`, points at
+// the handle's own heap allocation (`handle::give` boxes it and the box never moves), so
+// a handle sent to another thread carries what the pointer names with it, and the views
+// are rebuilt by each poll on the thread that polls ("Threads"); everything else in the
+// handle is `Send` on its own.
+unsafe impl Send for cavalry_subscription_t {}
+
 /// One of a subscription's images, as `cavalry_subscription_image_at_index` gives it:
 /// valid until the subscription's next poll or close.
 pub struct cavalry_image_t {

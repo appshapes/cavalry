@@ -10,6 +10,11 @@
 /* The environment variable a context's default directory reads. */
 #define CAVALRY_DIR_ENV "CAVALRY_DIR"
 
+/* The header's own version, passed to the library by default, so that a program built
+   against another version is refused at its first call (spec/c-abi.md, "Versions and
+   what a reader rejects"). */
+#define cavalry_context_init(context) cavalry_context_init_v((context), CAVALRY_ABI_VERSION)
+
 
 /*
  This page's version: the header's `CAVALRY_ABI_VERSION`, which
@@ -1061,7 +1066,9 @@ int64_t cavalry_replay_position(const cavalry_replay_t *replay);
 
 /*
  Whether the replay has ended; when it has, the end position and the reason,
- `CAVALRY_REPLAY_STOP_*` or −1 for none, are written through the non-null pointers.
+ `CAVALRY_REPLAY_STOP_*` or −1 for none, are written through the pointers. A null
+ `position` or `reason` is refused as any null required pointer is, with
+ `CAVALRY_ERR_NULL` and `false`.
 
  # Safety
 
@@ -1234,8 +1241,3 @@ int cavalry_abi_version(void);
 #endif  // __cplusplus
 
 #endif  /* CAVALRY_H */
-
-/* The header's own version, passed to the library by default, so that a program built
-   against another version is refused at its first call (spec/c-abi.md, "Versions and
-   what a reader rejects"). */
-#define cavalry_context_init(context) cavalry_context_init_v((context), CAVALRY_ABI_VERSION)

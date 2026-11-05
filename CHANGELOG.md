@@ -1318,3 +1318,9 @@ user-visible change, added in the same commit as the change. The format follows
   `cavalry-ffi`'s header test among them
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).
+- `cavalry-ffi` takes its reviews' notes: `cavalry_replay_ended` refuses a null
+  `position` or `reason` as it refuses any null required pointer; the
+  `cavalry_context_init` macro sits inside the header's include guard; `just
+  lint-header` shows cbindgen's own output when it fails and says what to do next;
+  every handle type is asserted `Send` at compile time, which the subscription
+  handle's self-pointing views need an `unsafe impl` for (card 204).
