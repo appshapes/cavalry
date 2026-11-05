@@ -1197,3 +1197,18 @@ user-visible change, added in the same commit as the change. The format follows
   says every client reaches the header through its language's foreign-function
   interface, where it named PyO3 and napi-rs, which bind the Rust crates instead
   ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
+- A publisher that waits for `is_connected()` and then claims reads the limit raised
+  for the subscriber or recording that connects it: the driver's conductor stores the
+  connected flag's 1 in its limit pass, after the limit's raise, where it set the flag
+  as an image joined, a recording started or a status message arrived and raised the
+  limit a step later in the cycle. So the claim's `BackPressured` with no subscriber
+  behind, which card 187 saw on the macOS gate, is not read. The 0 is still stored
+  where the last subscriber, receiver or recording goes, before the limit pass lowers
+  the limit, so `BackPressured` comes only while something reads the stream, and a
+  publisher at the old limit or the lowered one is told `NotConnected` from that
+  moment. The flag holds while the publication stays connected, so a publisher whose
+  subscriber reaches the limit while cleaning holds the next raise back reads
+  `BackPressured`, with the subscriber at the limit, not `NotConnected`; and a claim,
+  which loads the limit before the flag, can read `BackPressured` once when its two
+  loads straddle a raise. `spec/log-buffer.md`, "The driver", says the order
+  ([ADR 0048](docs/decisions/0048-store-the-connected-flag-after-the-limit.md); card 187).
