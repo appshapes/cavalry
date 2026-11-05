@@ -143,7 +143,8 @@ gh pr checks <number>
   head it leaves. When the run completes, its last job cancels the `ci` runs GitHub
   held on the heads the agent pushed before its last (`claude.yml`, "Cancel the runs
   held on the heads the fixer left behind": a held run left alone ends as a failure,
-  with a mail, when the branch is deleted at the merge), approves the `ci` run held on
+  with a mail, when the branch is deleted at the merge; the `auto merge` run sweeps
+  what that job left held, right before the merge), approves the `ci` run held on
   the last push, and adds the `review` label if the head has no `dispatch review` run
   yet, or if the fix was an edit to the pull request body alone (`claude.yml`, "Ask for
   the review of the agent's push"), so a `dispatch review` run appears within a minute

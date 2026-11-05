@@ -1148,9 +1148,10 @@ user-visible change, added in the same commit as the change. The format follows
   made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
   tree while master is green is card 199's (card 182).
 - The review loop's fixer run ends the `ci` runs GitHub held on the heads it pushed
-  before its last as cancelled, where it left them held: a held run ended as a failure,
-  with a mail, when the branch was deleted at the merge, twenty times in the week to
-  2026-11-04. And the `auto merge` run names its cause when GitHub refuses a merge on a
+  before its last as cancelled, where it left them held, and the `auto merge` run sweeps
+  what is still held right before the merge: a held run ended as a failure, with a mail,
+  when the branch was deleted at the merge, twenty times in the week to 2026-11-04. And
+  the `auto merge` run names its cause when GitHub refuses a merge on a
   branch that moved after the approval: a notice when GitHub has the new head's runs,
   which the loop reviews, and a failure that says what to push when it has none, as on
   pull request 106 (`.github/workflows/auto-merge.yml`, header; card 210).
