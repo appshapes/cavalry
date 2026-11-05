@@ -57,8 +57,10 @@ bench-compare:
 # the client protocol, and the UDP transport's frames, datagram and channel URI),
 # cavalry-shm's (the counters file, the log buffer, the command ring and the broadcast
 # buffer), cavalry-log's, and cavalry-ffi's (the committed C header against the C ABI's
-# vectors, spec/c-abi.md); every vector test also runs in `just test`. A client in
-# clients/ joins here with its own runner.
+# vectors, spec/c-abi.md); every vector test also runs in `just test`. Then each
+# client's runner under conformance/ (conformance/README.md): today
+# conformance/c/run.sh, a C program over the header against a driver of its own
+# (ADR 0051). A client in clients/ joins here with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance

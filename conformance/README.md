@@ -8,7 +8,10 @@ directory, each a program in its language that runs the ten-minute path's shape
 against a driver through `crates/cavalry-ffi/include/cavalry.h`: publish and subscribe
 over `cavalry:ipc` and `cavalry:udp`, record and replay, every message once and in
 order, with the header's fields and each frame's position checked against the pages.
-A runner that fails prints the function, the code and `cavalry_errmsg` and exits 1.
+A runner that fails prints the function and the code, with `cavalry_errmsg` when the
+call set the thread's error (a result code such as `CAVALRY_PUBLICATION_CLOSED` sets
+none, so the runner names the code itself), and exits 1. Every wait in a runner is
+bounded at 10 s, and one that runs out says how far it got.
 
 | Runner | Language | Runs with | Decided in |
 | --- | --- | --- | --- |
