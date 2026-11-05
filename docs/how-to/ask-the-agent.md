@@ -31,7 +31,7 @@ first one. Why the loop is built this way is in ADR 0004
      `master`, which either approves or requests changes;
    - on requested changes, a second `claude` run applies the blockers on the same
      branch, one commit per blocker, pushed as each lands; when it ends, the run
-     approves the `ci` run GitHub held on its last push, cancels the runs held on its
+     approves the `ci` run GitHub held on its last push, deletes the runs held on its
      earlier pushes, and adds the `review` label itself, because a push by the agent
      starts no review on its own; a blocker
      in the pull request body alone it fixes by editing the body, and asks for the
@@ -39,7 +39,9 @@ first one. Why the loop is built this way is in ADR 0004
      times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
      pull request merges as one squash commit when `gates (linux)`, `gates (macos)`,
-     `bench (linux)` and `bench (grip)` pass. The issue closes.
+     `bench (linux)` and `bench (grip)` pass, and the issue closes. A push after the
+     approval, yours or the agent's, or a review that requests changes on the approved
+     head, disarms the merge; the reviewer's approval of the new head arms it again.
 
    The two `gates` jobs run `just lint`, `just test`, `just conformance`, `just loom`,
    `just miri`, `just docs` and `just lint-docs`; `bench (linux)` and `bench (grip)`
@@ -91,8 +93,14 @@ branch locally; GitHub has already deleted it on origin.
   run `cancelled` after sixty minutes hit the job's timeout, which runs nothing again
   (card 213). Add the `review` label to the pull request to run it again. Pull requests from forks are not reviewed by the agent, only by a person.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
-  label, or a required check failed, or the branch moved after the approval, the next
-  entry. `gh pr checks <number>` shows a failed check; the `auto merge` run on the
+  label, or a required check failed, or the merge was disarmed since the approval: a
+  push, yours or the agent's, or a review that requested changes on the approved head,
+  and the reviewer's approval of the new head arms it again, or of the same head asked
+  for with the `review` label (`gh pr view <number> --json autoMergeRequest` reads
+  null until then); or a request for changes from a collaborator is open on the head,
+  which the `auto merge` run says, and the approval that follows its answer arms the
+  merge; or GitHub never saw the push, the next entry. A disarm run that says the
+  approval crossed it names the same label. `gh pr checks <number>` shows a failed check; the `auto merge` run on the
   Actions tab shows a moved head.
 - **The `auto merge` run failed: "nothing in the loop reviews the branch's tip".** The
   branch moved after the reviewer's approval, and GitHub raised no run for the new
