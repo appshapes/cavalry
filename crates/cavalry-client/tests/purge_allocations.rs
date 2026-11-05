@@ -1,12 +1,14 @@
 //! The allocation gate over a purge's file work (CLAUDE.md, invariant 2 and gate 2;
 //! card 177): a driver whose log directory holds a stopped recording of 8,192 sparse
-//! segment files, a client that purges them all with one `purge segments`, and the
-//! counting allocator the bench uses over the window from the first file's removal to
-//! the last's but one, with no allocation at all. The replayer lists a command's files
-//! once, when it is admitted, and formats each file's name on its stack after that;
-//! `recording.segments_purged` moves one per file as it goes, which is how the window
-//! is placed. Alone in its binary, so that no other test's threads are counted
-//! (`cargo test` runs a binary's tests in parallel).
+//! segment files, a client that purges them all with one `purge segments`, and
+//! `stats_alloc` over the window from the first file's removal to the last's but one,
+//! with no allocation and no reallocation at all. `stats_alloc` counts a `realloc`, a
+//! buffer grown past a capacity it already had, apart from an allocation, so the test
+//! adds the two, as the bench's gate has counted both since ADR 0047. The replayer
+//! lists a command's files once, when it is admitted, and formats each file's name on
+//! its stack after that; `recording.segments_purged` moves one per file as it goes,
+//! which is how the window is placed. Alone in its binary, so that no other test's
+//! threads are counted (`cargo test` runs a binary's tests in parallel).
 use std::alloc::System;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -56,7 +58,7 @@ impl Drop for Dirs {
 }
 
 /// A stopped recording of `segments` segment files in `log_dir`, built before the
-/// driver opens it, as the bench's `--purging` builds its pile: the slot added and
+/// driver opens it, as card 177's bench mode will build its pile: the slot added and
 /// stopped at the end of the last file, the index header, and each file created at the
 /// segment length and never written, so it is sparse. Returns the position past every
 /// file, what `purge segments` is asked to retain from.
@@ -141,13 +143,14 @@ fn a_purges_file_work_allocates_nothing_per_file() {
     }
     // The window closes before the last file, whose removal ends the command and sends
     // the reply through the conductor and the client, which is not the file work.
-    let allocations = region.change().allocations;
+    let change = region.change();
     purger.join().expect("the purger thread");
     assert_eq!(purged(), SEGMENTS, "every file of the pile went");
     driver.close().expect("the driver's close");
     assert_eq!(
-        allocations, 0,
-        "the file work allocated {allocations} times between the first file's removal \
-         and the last's but one; see .claude/rules/data-plane.md"
+        change.allocations + change.reallocations,
+        0,
+        "the file work allocated or reallocated between the first file's removal and the \
+         last's but one: {change:?}; see .claude/rules/data-plane.md"
     );
 }

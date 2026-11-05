@@ -25,9 +25,11 @@ cavalry-driver = { path = "../cavalry-driver" }
 # test builds its pile of segment files in the log directory before the driver opens it
 # (card 177). Dev only.
 cavalry-log = { path = "../cavalry-log" }
-# The UDP tests count allocations across the send path with the counting allocator the
-# bench uses, so the sender's zero-allocation claim is a test (CLAUDE.md, gate 2; ADR
-# 0041). Dev only.
+# The counting allocator of the allocation tests, so a zero-allocation claim is a test
+# (CLAUDE.md, gate 2): the UDP tests count across the send and receive paths (ADR 0041),
+# and the purge allocation test across a purge's file work, allocations and
+# reallocations both (card 177). The bench counts with `tracking-allocator` since ADR
+# 0047. Dev only.
 stats_alloc = "0.1"
 # The UDP tests' receiver by hand sets its socket's receive buffer and reads back what
 # the host gave, which `std::net::UdpSocket` cannot: it has no NAK, so what the sender
