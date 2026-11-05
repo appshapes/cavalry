@@ -1,0 +1,18 @@
+# Throwaway, for card 210: pushes one empty commit to this branch with the job token, so
+# that the `ci` run GitHub holds on a bot push can be measured. Deleted with the branch.
+name: probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  push:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "210: Probe push from the job token"
+          git push
