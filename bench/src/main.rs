@@ -300,7 +300,7 @@ Options:
   --purging         run the recorded rows again as claim_commit_<body>_recorded_purging and
                     one_way_<body>_recorded_purging, with one `purge segments` of a stopped
                     recording of --messages/50 sparse segment files (8,192 at least,
-                    150,000 at most) running on the driver's replayer, one file per duty
+                    100,000 at most) running on the driver's replayer, one file per duty
                     cycle, from before the warm-up until past the measured loop; the lines
                     under the table say how many files went during the loop and whether the
                     purge outlasted it; the rows are reported until a baseline holds them
@@ -1129,8 +1129,8 @@ const PILE_MESSAGES_PER_SEGMENT: u64 = 50;
 const PILE_LEAST: u64 = 8_192;
 /// The most files in a pile: one `purge segments` removes them all, and its reply must
 /// come inside the client's 10 s response timeout, which this many unlinks does at
-/// 15,000 a second.
-const PILE_MOST: u64 = 150_000;
+/// 15,000 a second, the laptop's rate; a bench host's is higher.
+const PILE_MOST: u64 = 100_000;
 /// The pile's term length, the smallest the durable log admits: nothing reads its
 /// bytes, and a segment file is at least a term.
 const PILE_TERM_LENGTH: i32 = 64 * 1024;
@@ -3335,5 +3335,77 @@ mod tests {
         drop(writer);
         drop(log);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--purging` adds the recorded rows with a purge running, after the recorded
+    /// rows and before the UDP rows, and the rows grow by its two.
+    #[test]
+    fn purging_adds_the_recorded_purging_benchmark_after_recorded() {
+        let options = options(&["--purging"]);
+        let mut expected = Benchmark::ALL.to_vec();
+        expected.insert(5, Benchmark::PURGING);
+        assert_eq!(options.benchmarks(), expected);
+        assert_eq!(options.rows().len(), 20);
+        assert!(
+            options
+                .rows()
+                .contains(&"one_way_32_recorded_purging".to_string())
+        );
+    }
+
+    /// `--only recorded_purging` runs that benchmark alone under `--purging`, and is
+    /// an error without the flag, since no row of such a run has the name; `--only
+    /// recorded` under the flag admits both recorded benchmarks.
+    #[test]
+    fn only_recorded_purging_needs_purging() {
+        assert_eq!(
+            options(&["--only", "recorded_purging", "--purging"]).benchmarks(),
+            vec![Benchmark::PURGING]
+        );
+        assert!(parsed(&["--only", "recorded_purging"]).is_err());
+        assert_eq!(
+            options(&["--only", "recorded", "--purging"]).benchmarks(),
+            vec![Benchmark::ALL[4], Benchmark::PURGING]
+        );
+    }
+
+    /// A pass keeps the purge's figures under the benchmark's name, and a run without
+    /// a purge leaves none.
+    #[test]
+    fn a_pass_keeps_the_purge_figures_by_benchmark() {
+        let empty = Summary {
+            count: 0,
+            p50_ns: 0,
+            p99_ns: 0,
+            p99_99_ns: 0,
+            max_ns: 0,
+            rate_per_s: 0.0,
+        };
+        let run = |purged| LogRun {
+            claim_commit: empty.clone(),
+            one_way: empty.clone(),
+            retries: 0,
+            allocations: 0,
+            producer_position_loads: None,
+            purged,
+        };
+        let purged = Purged {
+            during: 3107,
+            pile: 100_000,
+            outlasted: true,
+        };
+        let mut pass = Pass::default();
+        pass.insert_message_run(
+            Benchmark::PURGING,
+            "recorded_purging",
+            32,
+            run(Some(purged)),
+            10,
+        );
+        pass.insert_message_run(Benchmark::ALL[4], "recorded", 32, run(None), 10);
+        assert_eq!(
+            pass.purged,
+            BTreeMap::from([("recorded_purging".to_string(), purged)])
+        );
     }
 }

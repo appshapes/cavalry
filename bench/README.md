@@ -61,7 +61,13 @@ nothing depends on it.
   the offset between the two hosts' clocks and is reported beside it, never gated (ADR
   0039, ADR 0044). `just bench-unchecked` runs it all
   again with the data-plane checks built out, under a profile of its own, to price
-  ADR 0010's checks.
+  ADR 0010's checks. With `--purging` it runs the recorded rows a second time as
+  `claim_commit_32_recorded_purging` and `one_way_32_recorded_purging`, while one
+  `purge segments` of a stopped recording's sparse segment files, a pile the harness
+  builds before the driver opens the log directory, runs on the driver's replayer from
+  before the warm-up until past the measured loop; the lines under the table say how
+  many files went during the loop and whether the purge outlasted it, and the rows are
+  reported until a baseline holds them (card 177; ADR 0031's Evidence).
 - Runs the measured loops under a counting allocator and fails the run when they
   allocate, naming the benchmark whose loops did: the zero-allocations-per-message
   assertion of the gate.
