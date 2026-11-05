@@ -1156,6 +1156,14 @@ user-visible change, added in the same commit as the change. The format follows
   where before it passed
   ([ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md);
   card 176).
+- The review loop's fixer run ends the `ci` runs GitHub held on the heads it pushed
+  before its last as cancelled, where it left them held, and the `auto merge` run sweeps
+  what is still held right before the merge: a held run ended as a failure, with a mail,
+  when the branch was deleted at the merge, twenty times in the week to 2026-11-04. And
+  the `auto merge` run names its cause when GitHub refuses a merge on a
+  branch that moved after the approval: a notice when GitHub has the new head's runs,
+  which the loop reviews, and a failure that says what to push when it has none, as on
+  pull request 106 (`.github/workflows/auto-merge.yml`, header; card 210).
 - The client's replay test no longer reads the replay's image after the drain as if
   it stayed: the driver retires a replay's image once every subscriber has read to the
   end of stream position or the publication linger has passed, as the client protocol
