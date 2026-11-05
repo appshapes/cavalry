@@ -1238,6 +1238,14 @@ user-visible change, added in the same commit as the change. The format follows
   the rows land with the acceptance
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).
+- The driver's replayer removes a purged, truncated or deleted recording's segment
+  files without allocating, while the log directory's path is at most 337 bytes, the
+  limit `cavalry doctor --log-dir` already checks for the recorder's roll: each file's
+  name is formatted on the stack, as the recorder's roll does. `recording.segments_purged`
+  now moves one per file as a purge removes it, not by the whole count when the purge
+  ends, so the counter reads a running purge's progress, and a purge beside the bench's
+  recorded rows adds nothing to the allocation gate's count. `cavalry-log` shares the
+  name formatting as `layout::segment_file_name_into` (card 177).
 - The `bench (udp)` and `bench (udp peer)` jobs each wait, before their run, until the
   run's other job is in progress, for up to 45 minutes, so the two ends of one run
   meet each other. Before, each host started its end from its own queue: the harness's
