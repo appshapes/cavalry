@@ -90,7 +90,9 @@ branch locally; GitHub has already deleted it on origin.
   session did in its job summary. Add the `review` label to the pull request to run
   it again. Pull requests from forks are not reviewed by the agent, only by a person.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
-  label, or a required check failed. `gh pr checks <number>` shows which.
+  label, or a required check failed, or the branch moved after the approval, the next
+  entry. `gh pr checks <number>` shows a failed check; the `auto merge` run on the
+  Actions tab shows a moved head.
 - **The `auto merge` run failed: "nothing in the loop reviews the branch's tip".** The
   branch moved after the reviewer's approval, and GitHub raised no run for the new
   head: its pull request object still names the approved commit, and the loop reads

@@ -42,8 +42,13 @@
 # why the sweep stops while a run at the head is live). This job is the loop's last before
 # that deletion, so it makes the same sweep, under the same guard, right before the merge:
 # what a failed fixer job, a missed deadline or a live head run left held is ended here,
-# cancelled. When the head's own run is still live, the sweep stops as it does there, the
-# merge is handed to GitHub with `--auto`, and a run still held then ends as it always did.
+# cancelled. When the head's own `ci` run is still live, the sweep stops as it does there,
+# the merge is handed to GitHub with `--auto`, and a run still held then ends as it always
+# did. The sweep sits in the merge step, after the moved-head check, because it needs the
+# tip that check read and must never run on a head the approval does not cover; it must
+# not stop the merge either, so every call in it tolerates a failure with a warning that
+# names the next step, rather than a step of its own with `continue-on-error`, which
+# would have to read the tip and make the moved-head check a second time.
 name: auto merge
 
 on:
@@ -91,10 +96,11 @@ jobs:
       # marker comments; everything between them is dropped, nothing else is touched.
       #
       # The branch's tip is read from the git ref before the merge and again after a
-      # refusal, and `explain_moved_head` says what the refusal means (the header above):
-      # the notice or the error, with the approved commit, the tip and the pull request
-      # object's head in its output, so that the run names its cause. Every other ending
-      # names the next command to run.
+      # refusal (`read_tip`, which ends with a notice when the branch is gone because the
+      # pull request was merged or closed by hand meanwhile), and `explain_moved_head`
+      # says what the refusal means (the header above): the notice or the error, with the
+      # approved commit, the tip and the pull request object's head in its output, so
+      # that the run names its cause. Every other ending names the next command to run.
       - name: Merge when green
         env:
           # The owner's token. This job runs NO agent, which is the only reason the token may
@@ -106,28 +112,38 @@ jobs:
           BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
-          tip_now() { gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq '.object.sha'; }
+          # The branch's tip, or the ending when the branch is gone. Exits then.
+          read_tip() {
+            local state
+            if ! tip=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq '.object.sha' 2>/dev/null) || [ -z "$tip" ]; then
+              state=$(gh pr view "$PR" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "unread")
+              case "$state" in
+                MERGED|CLOSED) echo "::notice::#$PR is $state and its branch $BRANCH is gone; nothing to do"; exit 0 ;;
+                *) echo "::error::the branch $BRANCH of #$PR (state $state) cannot be read: gh api repos/$REPO/git/ref/heads/$BRANCH failed. Read the run's log, then merge by hand: gh pr merge $PR --squash --match-head-commit $APPROVED"; exit 1 ;;
+              esac
+            fi
+          }
           # Why the merge was refused, when the branch is not at the approved commit. Exits,
           # unless the branch is still at it, which is not this cause: then it returns.
           explain_moved_head() {
-            local tip=$1 object_head runs dispatched deadline
+            local object_head runs dispatched deadline
             if [ "$tip" = "$APPROVED" ]; then
               echo "the branch $BRANCH is still at the approved $APPROVED, so the refusal is not a moved head"
               return 0
             fi
-            object_head=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
+            object_head=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha' 2>/dev/null || echo "unread")
             echo "the approval is of $APPROVED; the branch $BRANCH is at $tip; the pull request object names $object_head"
             deadline=$((SECONDS + 60))
             while :; do
               runs=$(gh api -X GET "repos/$REPO/actions/runs" -f "head_sha=$tip" -F per_page=20 \
-                --jq '[.workflow_runs[] | "\(.name) \(.id) \(.status)/\(.conclusion // "")"] | join(", ")')
+                --jq '[.workflow_runs[] | "\(.name) \(.id) \(.status)/\(.conclusion // "")"] | join(", ")' 2>/dev/null || true)
               [ -n "$runs" ] && break
               [ "$SECONDS" -ge "$deadline" ] && break
               sleep 10
             done
             if [ -n "$runs" ]; then
               dispatched=$(gh api -X GET "repos/$REPO/actions/workflows/dispatch-review.yml/runs" -f "head_sha=$tip" -F per_page=10 \
-                --jq '[.workflow_runs[] | select(.conclusion != "skipped") | .id] | join(" ")')
+                --jq '[.workflow_runs[] | select(.conclusion != "skipped") | .id] | join(" ")' 2>/dev/null || true)
               if [ -n "$dispatched" ]; then
                 echo "::notice::No merge: a push moved #$PR from the approved $APPROVED to $tip, which has no approval of its own. GitHub raised runs for $tip ($runs), its review is dispatched (run $dispatched), and that review's approval arms the next merge; nothing to do."
               else
@@ -140,21 +156,26 @@ jobs:
           }
           # The last sweep of the runs held on superseded heads of the branch (the header;
           # claude.yml, "Cancel the runs held on the heads the fixer left behind", the same
-          # calls, measured there). Never while a run at the tip is live: approving a held
-          # run would cancel the live one through ci.yml's concurrency group.
+          # calls, measured there). This repository's runs only, since a fork's branch can
+          # share the name. Never while a `ci` run at the tip is live: approving a held run
+          # would cancel the live one through ci.yml's concurrency group; only `ci.yml`'s
+          # runs count, since this job's own run sits at the tip too. No call here may stop
+          # the merge: each failure is a warning and the sweep returns.
           sweep_held_runs() {
-            local tip=$1 held count live ids left id sha state deadline
+            local held count live ids left id sha state deadline
             held=$(gh api -X GET "repos/$REPO/actions/runs" -f "branch=$BRANCH" -f event=pull_request -f status=action_required -F per_page=100 \
-              --jq ".workflow_runs[] | select(.head_sha != \"$tip\") | \"\(.id) \(.head_sha)\"")
+              --jq ".workflow_runs[] | select((.head_repository.full_name // \"\") == \"$REPO\" and .head_sha != \"$tip\") | \"\(.id) \(.head_sha)\"") \
+              || { echo "::warning::the held runs of $BRANCH could not be listed (the line above); nothing swept, and the merge goes on"; return 0; }
             count=$(printf '%s\n' "$held" | grep -c . || true)
             if [ "$count" -eq 0 ]; then
               echo "no run is held on a superseded head of $BRANCH"
               return 0
             fi
             live=$(gh api -X GET "repos/$REPO/actions/runs" -f "head_sha=$tip" -F per_page=50 \
-              --jq '.workflow_runs[] | select(.status != "completed") | "\(.name) \(.id) \(.status)"')
+              --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .status != "completed") | "\(.name) \(.id) \(.status)"') \
+              || { echo "::warning::the runs at $tip could not be listed (the line above), so the $count held run(s) on superseded heads of $BRANCH are left held and end as failures at the merge; the merge goes on"; return 0; }
             if [ -n "$live" ]; then
-              echo "::warning::$count run(s) held on superseded heads of $BRANCH left held: a run at the tip is live ($(printf '%s' "$live" | tr '\n' ';')) and approving a held run would cancel it through ci.yml's concurrency group; GitHub ends them as failures at the merge. To end one now, approve it and cancel it on the Actions tab once it is queued."
+              echo "::warning::$count run(s) held on superseded heads of $BRANCH left held: the ci run at the tip is live ($(printf '%s' "$live" | tr '\n' ';')) and approving a held run would cancel it through ci.yml's concurrency group; GitHub ends them as failures at the merge. To end one now, approve it and cancel it on the Actions tab once it is queued."
               return 0
             fi
             ids=()
@@ -175,7 +196,7 @@ jobs:
                   echo "cancelled run $id"
                   continue
                 fi
-                state=$(gh api "repos/$REPO/actions/runs/$id" --jq '"\(.status)/\(.conclusion // "")"')
+                state=$(gh api "repos/$REPO/actions/runs/$id" --jq '"\(.status)/\(.conclusion // "")"') || state="unread/"
                 case "$state" in
                   completed/action_required) left+=("$id") ;;   # still held: the approval has not taken effect yet
                   completed/*) echo "run $id ended ${state#completed/} before the cancel landed" ;;
@@ -185,24 +206,18 @@ jobs:
               ids=("${left[@]}")
               [ "${#ids[@]}" -gt 0 ] || break
               if [ "$SECONDS" -ge "$deadline" ]; then
-                echo "::warning::${#ids[@]} superseded run(s) still refusing the cancel after 90 s: ${ids[*]}; cancel them on the Actions tab"
+                echo "::warning::${#ids[@]} approved superseded run(s) still refusing the cancel after 90 s: ${ids[*]}; cancel them on the Actions tab, and the merge goes on"
                 break
               fi
               sleep 1
             done
             echo "superseded held runs on $BRANCH: $count"
           }
-          if ! tip=$(tip_now 2>/dev/null); then
-            state=$(gh pr view "$PR" --repo "$REPO" --json state --jq '.state')
-            case "$state" in
-              MERGED|CLOSED) echo "::notice::#$PR is $state and its branch $BRANCH is gone; nothing to do"; exit 0 ;;
-              *) echo "::error::the branch $BRANCH of #$PR (state $state) cannot be read: gh api repos/$REPO/git/ref/heads/$BRANCH failed. Read the run's log, then merge by hand: gh pr merge $PR --squash --match-head-commit $APPROVED"; exit 1 ;;
-            esac
-          fi
+          read_tip
           if [ "$tip" != "$APPROVED" ]; then
-            explain_moved_head "$tip"
+            explain_moved_head
           fi
-          sweep_held_runs "$tip"
+          sweep_held_runs
           subject=$(gh pr view "$PR" --repo "$REPO" --json title --jq '.title')
           body="$RUNNER_TEMP/squash-body.md"
           gh pr view "$PR" --repo "$REPO" --json body --jq '.body' \
@@ -218,7 +233,8 @@ jobs:
             cat "$err" >&2
           fi
           if grep -qiE 'out of date|was modified|expected head' "$err"; then
-            explain_moved_head "$(tip_now)"
+            read_tip
+            explain_moved_head
           fi
           echo "::error::GitHub refused the merge of #$PR; gh's reason is above. Next: gh pr checks $PR --required, then gh pr view $PR --json mergeStateStatus (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
           exit 1

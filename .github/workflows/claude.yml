@@ -543,11 +543,22 @@ jobs:
       # well as against the pull request object's head. The same group is why the sweep
       # STOPS when a run at the head is live (queued or in progress, a person's push
       # whose run started on its own): approving a held run then would cancel the live
-      # one. It leaves those held, says so, and auto-merge.yml makes the same sweep
-      # right before the merge, the last run of the loop before GitHub deletes the
-      # branch, under the same guard; what a failed fixer job (which skips this job) or
-      # a missed deadline here leaves held is swept there.
+      # one. Only `ci.yml`'s runs count as live: the group is theirs, and this job's own
+      # run and the `claude` run of the same event sit at the head too (a
+      # `pull_request_review` run's head_sha is the reviewed commit), so counting every
+      # run would stop the sweep on itself whenever the agent pushed nothing. It leaves
+      # those held, says so, and auto-merge.yml makes the same sweep right before the
+      # merge, the last run of the loop before GitHub deletes the branch, under the same
+      # guard; what a failed fixer job (which skips this job) or a missed deadline here
+      # leaves held is swept there. Only this repository's runs are listed: the runs API
+      # matches `branch` against the head branch's name, which a fork's pull request can
+      # share, and approving a fork's held run with the owner's token is the approval
+      # GitHub holds an outsider's code for (ADR 0005). This step is NOT allowed to stop
+      # the steps after it: it exists to stop noise mail, and the approval and the review
+      # label below are the loop's critical path, so every call in it tolerates a failure
+      # with a warning that names the next step, and `continue-on-error` is the belt.
       - name: Cancel the runs held on the heads the fixer left behind
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -560,20 +571,20 @@ jobs:
           fi
           tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null || echo "$head")
           # The held runs, from the runs API's own filter for them, so that a long-lived
-          # branch's oldest runs are not left on a later page.
+          # branch's oldest runs are not left on a later page; this repository's only.
           superseded=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" -f "branch=${branch}" -f event=pull_request -f status=action_required -F per_page=100 \
-            --jq ".workflow_runs[] | select(.head_sha != \"${head}\" and .head_sha != \"${tip}\") | \"\(.id) \(.head_sha)\"")
+            --jq ".workflow_runs[] | select((.head_repository.full_name // \"\") == \"${GITHUB_REPOSITORY}\" and .head_sha != \"${head}\" and .head_sha != \"${tip}\") | \"\(.id) \(.head_sha)\"") \
+            || { echo "::warning::the held runs of ${branch} could not be listed (the line above); nothing swept, and the approval of the head's run below goes on"; exit 0; }
           count=$(printf '%s\n' "$superseded" | grep -c . || true)
           if [ "$count" -eq 0 ]; then
             echo "no run is held on a superseded head of ${branch}"
             exit 0
           fi
-          live=$(for sha in $(printf '%s\n%s\n' "$head" "$tip" | sort -u); do
-            gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" -f "head_sha=${sha}" -F per_page=50 \
-              --jq '.workflow_runs[] | select(.status != "completed") | "\(.name) \(.id) \(.status)"'
-          done)
+          live=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" -f "branch=${branch}" -f event=pull_request -F per_page=100 \
+            --jq ".workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .status != \"completed\" and (.head_sha == \"${head}\" or .head_sha == \"${tip}\")) | \"\(.name) \(.id) \(.status)\"") \
+            || { echo "::warning::the runs at the head of ${branch} could not be listed (the line above), so the ${count} held run(s) on its superseded heads are left held; the auto merge run sweeps them before the merge, and the approval of the head's run below goes on"; exit 0; }
           if [ -n "$live" ]; then
-            echo "::warning::${count} run(s) held on superseded heads of ${branch} left held: a run at the head is live ($(printf '%s' "$live" | tr '\n' ';')) and approving a held run would cancel it through ci.yml's concurrency group. The auto merge run sweeps them before the merge; to end one now, approve it and cancel it on the Actions tab once it is queued."
+            echo "::warning::${count} run(s) held on superseded heads of ${branch} left held: a ci run at the head is live ($(printf '%s' "$live" | tr '\n' ';')) and approving a held run would cancel it through ci.yml's concurrency group. The auto merge run sweeps them before the merge; to end one now, approve it and cancel it on the Actions tab once it is queued."
             exit 0
           fi
           ids=()
@@ -594,7 +605,7 @@ jobs:
                 echo "cancelled run ${id}"
                 continue
               fi
-              state=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" --jq '"\(.status)/\(.conclusion // "")"')
+              state=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" --jq '"\(.status)/\(.conclusion // "")"') || state="unread/"
               case "$state" in
                 completed/action_required) left+=("$id") ;;   # still held: the approval has not taken effect yet
                 completed/*) echo "run ${id} ended ${state#completed/} before the cancel landed" ;;
@@ -604,7 +615,7 @@ jobs:
             ids=("${left[@]}")
             [ "${#ids[@]}" -gt 0 ] || break
             if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::warning::${#ids[@]} superseded run(s) still refusing the cancel after 90 s: ${ids[*]}; the head's approval below cancels them through ci.yml's concurrency group when it approves one, and the auto merge run sweeps what is left before the merge"
+              echo "::warning::${#ids[@]} approved superseded run(s) still refusing the cancel after 90 s: ${ids[*]}. Cancel them on the Actions tab now: one that queues after the head's run is approved below cancels the head's run through ci.yml's concurrency group; one already queued is cancelled by that approval instead."
               break
             fi
             sleep 1
