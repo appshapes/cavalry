@@ -1232,12 +1232,13 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         let cpu = options.pin.map(|pin| pin.subscriber);
         thread::Builder::new()
             .name("client-subscriber".into())
-            // The subscription comes back with the histogram and is closed by this
-            // thread after the counting window, as the UDP rows' is: dropped here, on
-            // the way out, it reached the driver's conductor as `remove subscription`
-            // while the publisher was still inside the window once in twenty million
-            // messages, and the conductor's `drop_subscription` allocates, which the
-            // window counted (card 176).
+            // The subscription comes back with the histogram and is closed by the
+            // publisher's thread after the counting window, as the UDP rows' is:
+            // dropped on this thread's way out, it wrote `remove subscription` onto the
+            // driver's command ring while the publisher was still inside the window
+            // once in twenty million messages, and the driver's conductor ran
+            // `drop_subscription` on its next duty cycle; that allocates, and the
+            // window counted it (card 176).
             .spawn(move || -> Result<(Subscription, Histogram<u64>), String> {
                 pin_to(cpu)?;
                 let mut hist = histogram();
