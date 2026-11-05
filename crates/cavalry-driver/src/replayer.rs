@@ -238,11 +238,11 @@ pub(crate) enum CheckFailure {
     Files(String),
 }
 
-/// What a command's file work left: for the catalog's last write and the counters.
+/// What a command's file work left: for a truncate's last catalog write. A purge's
+/// files are counted in `recording.segments_purged` as each goes, so nothing here
+/// carries a count (card 177).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FileWorkDone {
-    /// Segment files removed, and for a delete the index too.
-    pub files_removed: u64,
     /// For a truncate, the timestamp of the last index entry left: the stop timestamp
     /// recovery would rebuild.
     pub stop_timestamp: i64,
@@ -359,7 +359,6 @@ struct Work {
     cut_due: bool,
     /// Whether the index still waits for its cut (a truncate) or removal (a delete).
     index_due: bool,
-    files_removed: u64,
     stop_timestamp: i64,
 }
 
@@ -1175,7 +1174,6 @@ impl Replayer {
             bases,
             cut_due,
             index_due,
-            files_removed: 0,
             stop_timestamp: 0,
         });
     }
@@ -1227,9 +1225,7 @@ impl Replayer {
             self.work_path.push(file_name);
             return match std::fs::remove_file(&self.work_path) {
                 Ok(()) => {
-                    let work = &mut self.works[index];
-                    work.files_removed += 1;
-                    if matches!(work.command, Retention::Purge { .. }) {
+                    if matches!(self.works[index].command, Retention::Purge { .. }) {
                         // One per file as it goes, so the counter reads a purge's
                         // progress (`counters.toml`, `recording.segments_purged`).
                         self.segments_purged.increment();
@@ -1282,10 +1278,7 @@ impl Replayer {
                         .dir
                         .join(cavalry_log::layout::index_file_name(recording_id));
                     return match std::fs::remove_file(&path) {
-                        Ok(()) => {
-                            work.files_removed += 1;
-                            None
-                        }
+                        Ok(()) => None,
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                         Err(error) => Some(Err(format!(
                             "cannot remove the time index {}: {error}",
@@ -1297,7 +1290,6 @@ impl Replayer {
             }
         }
         Some(Ok(FileWorkDone {
-            files_removed: work.files_removed,
             stop_timestamp: work.stop_timestamp,
         }))
     }

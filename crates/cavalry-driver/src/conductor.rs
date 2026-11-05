@@ -5148,9 +5148,9 @@ impl Conductor {
         }
     }
 
-    /// The replayer's file work ended: a truncate's last catalog write, a purge's or a
-    /// delete's answer with its counter, or the repair after a file the operating
-    /// system refused.
+    /// The replayer's file work ended: a truncate's last catalog write, a purge's
+    /// answer, whose files the replayer counted as each went, a delete's answer with
+    /// its counter, or the repair after a file the operating system refused.
     fn on_file_work_done(
         &mut self,
         correlation_id: i64,
