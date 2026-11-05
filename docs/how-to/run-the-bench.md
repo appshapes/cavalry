@@ -58,6 +58,18 @@ shared runner is
    it and never judges it as a full run; when no message row ran it judges the
    allocations by their count, which the result carries as `allocations` beside the
    ratio, and passes on 0. A name that no row contains is an error that lists the rows.
+   `just bench --purging` runs the recorded rows a second time as
+   `claim_commit_<body>_recorded_purging` and `one_way_<body>_recorded_purging`, while
+   one `purge segments` of a stopped recording's segment files runs on the driver's
+   replayer, one file per duty cycle, from before the warm-up until past the measured
+   loop (card 177; what
+   [ADR 0031](../decisions/0031-truncate-purge-and-delete-a-stopped-recording.md)'s
+   Evidence names). The recording is a pile the harness builds in the log directory
+   before the driver opens it, a sparse file every 50 messages of `--messages`, 8,192
+   files at least and 100,000 at most, so one command's reply comes inside the client's
+   10 s response timeout; the lines under the table say how many files went during the
+   loop and whether the purge outlasted it, and the result carries both as
+   `segments_purged`. The rows are reported until a baseline holds them.
 
 2. Read the table. Every row is one benchmark with its count and its p50, p99, p99.99
    and max in nanoseconds, then its rate. No row is a mean: the data plane is judged at
@@ -72,6 +84,8 @@ shared runner is
    | `one_way_<body>_client` | From the publisher's timestamp to `Subscription::poll`'s handler, through a real driver and the client's conductor hand-off; the path a user's message takes (ADR 0021). |
    | `claim_commit_<body>_recorded` | The client row's claim, write and commit while the driver's recorder writes the same stream to the durable log under the bench directory (ADR 0025): what recording costs the publisher, whose limit respects the recorder's position. The run fails unless the recording reached the publisher's final position. |
    | `one_way_<body>_recorded` | The client row's publish to delivery with the recorder on: one more reader of the log, on the driver's recorder thread, which runs on a housekeeping CPU under `--pin` (the CPUs left to everything but the pinned threads, [the host's set](set-up-a-bench-host.md#steps)) (until card 136 it shared the conductor's CPU, where ADR 0025's cost of 80 ns at p99.99 was measured). |
+   | `claim_commit_<body>_recorded_purging` | With `--purging`: the recorded row's claim, write and commit while one `purge segments` removes a stopped recording's segment files on the driver's replayer, one file per duty cycle, from before the warm-up until past the measured loop (card 177; ADR 0031's Evidence). The recording is a pile the harness builds before the driver opens the log directory; the lines under the table say how many of its files went during the loop and whether the purge outlasted it. Reported until a baseline holds the row. |
+   | `one_way_<body>_recorded_purging` | The recorded row's publish to delivery with that purge running: the recorder's reads and the replayer's file work share the housekeeping CPUs under `--pin`, and the conductor carries the command's hops, so the row is what the file work costs a live recording's delivery. |
    | `claim_commit_<body>_udp` | The client row's claim, write and commit on a `cavalry:udp` publication whose endpoint is a port of `127.0.0.1`, with one message in flight: the publisher claims the next message once the subscriber's handler has had the last, so the window is never full and the row is the claim path, with the wait for a connection that dropped in it as in the other rows ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). Gated as the other message rows once the host's baseline holds it, `no baseline` until then. A tenth of `--messages` per run, after a warm-up of 10,000 messages rather than a rotation, since the driver pre-touches both logs when it makes them. |
    | `one_way_<body>_udp` | From the publisher's timestamp to `Subscription::poll`'s handler through the driver's sender, the loopback and the driver's receiver, one message in flight, so a sample is the path's latency and not the depth of the sender's window, which a publisher that runs ahead fills to 8 MiB. Under `--pin` the sender has the third CPU and the receiver the fourth, and the driver's threads busy-spin; unpinned they back off, as a driver on a laptop does. |
    | `claim_commit_<body>_udp_mdc` | The UDP row's claim, write and commit on a publication whose channel is a control channel, `cavalry:udp?control=127.0.0.1:<port>\|control-mode=manual\|fc=min`, with two destinations, a subscription of the driver on each of two loopback ports, one message in flight; under `--link-here` and `--link-peer` the second destination is the peer's endpoint across the cable, so the row runs over the cable and this host at once ([ADR 0053](../decisions/0053-add-multi-destination-cast-to-cavalry-udp.md)). Reported and never gated: every isolated core of both bench hosts is taken, and the row joins the gate with a host change that gives it cores ([ADR 0052](../decisions/0052-build-raft-on-the-durable-log-fifth.md), feature 1). |
@@ -823,3 +837,14 @@ shared runner is
 - The harness refuses to start: it needs to create files under `/dev/shm` or the
   system's temporary directory and at least two cores; the error names what it could
   not do.
+- `the recorded_purging benchmark failed: the purge removed no file of the pile in 60 s`:
+  the replayer admitted the purge but removed nothing in a minute. The pile is
+  `--messages`/50 files, so a smaller run has a smaller pile; a replayer that removes
+  nothing of a pile of 8,192 is stuck, which is a driver bug under invariant 3: keep
+  the run's first line and report it.
+- `the purge did not outlast the loop in every run` under the table: in at least one
+  run the pile ran out before the measured loop ended, so part of that run's samples
+  had no file work beside them. The row prints and is reported either way. A host that
+  removes a file in less than the time the row takes to publish 50 messages needs a
+  larger pile, which is `PILE_MESSAGES_PER_SEGMENT` in `bench/src/main.rs`, a change to
+  the harness and never a knob.
