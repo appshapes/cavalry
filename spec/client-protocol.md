@@ -560,7 +560,8 @@ whose correlation id, registration id or client id is its own and ignores the re
 
 Codes 5, 8, 13 and 14 are Aeron's for features outside this version, 15 to 19 are
 left free for Aeron's later codes, and all are reserved; Cavalry's own codes count up
-from 20.
+from 20 and stay below 100, because the C ABI carries them to a caller on their
+values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 
 ## Liveness and timeouts
 

@@ -36,6 +36,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Client protocol](reference/client-protocol.md)
 - [Durable log](reference/durable-log.md)
 - [UDP transport](reference/udp.md)
+- [C ABI](reference/c-abi.md)
 - [Configuration](reference/config.md)
 - [Glossary](glossary.md)
 

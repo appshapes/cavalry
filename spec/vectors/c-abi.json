@@ -1,0 +1,1018 @@
+{
+  "spec": "spec/c-abi.md",
+  "version": 0,
+  "generated_by": "spec/vectors/c-abi.py; do not edit by hand",
+  "opaque_types": [
+    "cavalry_context_t",
+    "cavalry_t",
+    "cavalry_publication_t",
+    "cavalry_subscription_t",
+    "cavalry_image_t",
+    "cavalry_recording_t",
+    "cavalry_replay_t",
+    "cavalry_header_t"
+  ],
+  "structs": {
+    "cavalry_buffer_claim_t": [
+      [
+        "uint8_t *",
+        "data"
+      ],
+      [
+        "size_t",
+        "length"
+      ],
+      [
+        "int64_t",
+        "position_after"
+      ],
+      [
+        "cavalry_publication_t *",
+        "publication"
+      ]
+    ],
+    "cavalry_header_values_frame_t": [
+      [
+        "int32_t",
+        "frame_length"
+      ],
+      [
+        "int8_t",
+        "version"
+      ],
+      [
+        "uint8_t",
+        "flags"
+      ],
+      [
+        "uint16_t",
+        "type"
+      ],
+      [
+        "int32_t",
+        "term_offset"
+      ],
+      [
+        "int32_t",
+        "session_id"
+      ],
+      [
+        "int32_t",
+        "stream_id"
+      ],
+      [
+        "int32_t",
+        "term_id"
+      ],
+      [
+        "int64_t",
+        "reserved_value"
+      ]
+    ],
+    "cavalry_header_values_t": [
+      [
+        "cavalry_header_values_frame_t",
+        "frame"
+      ]
+    ],
+    "cavalry_fault_t": [
+      [
+        "int32_t",
+        "code"
+      ],
+      [
+        "int32_t",
+        "session_id"
+      ],
+      [
+        "int64_t",
+        "position"
+      ]
+    ],
+    "cavalry_publication_constants_t": [
+      [
+        "const char *",
+        "channel"
+      ],
+      [
+        "int64_t",
+        "registration_id"
+      ],
+      [
+        "int32_t",
+        "session_id"
+      ],
+      [
+        "int32_t",
+        "stream_id"
+      ],
+      [
+        "size_t",
+        "max_payload_length"
+      ],
+      [
+        "size_t",
+        "max_message_length"
+      ],
+      [
+        "bool",
+        "is_exclusive"
+      ]
+    ],
+    "cavalry_subscription_constants_t": [
+      [
+        "const char *",
+        "channel"
+      ],
+      [
+        "int64_t",
+        "registration_id"
+      ],
+      [
+        "int32_t",
+        "stream_id"
+      ]
+    ],
+    "cavalry_image_constants_t": [
+      [
+        "const char *",
+        "source_identity"
+      ],
+      [
+        "int64_t",
+        "correlation_id"
+      ],
+      [
+        "size_t",
+        "position_bits_to_shift"
+      ],
+      [
+        "int32_t",
+        "session_id"
+      ],
+      [
+        "int32_t",
+        "initial_term_id"
+      ]
+    ],
+    "cavalry_recording_constants_t": [
+      [
+        "const char *",
+        "channel"
+      ],
+      [
+        "int64_t",
+        "recording_id"
+      ],
+      [
+        "int32_t",
+        "session_id"
+      ],
+      [
+        "int32_t",
+        "stream_id"
+      ]
+    ],
+    "cavalry_replay_constants_t": [
+      [
+        "const char *",
+        "channel"
+      ],
+      [
+        "int64_t",
+        "replay_session_id"
+      ],
+      [
+        "int64_t",
+        "recording_id"
+      ],
+      [
+        "int64_t",
+        "start_position"
+      ],
+      [
+        "int32_t",
+        "session_id"
+      ],
+      [
+        "int32_t",
+        "stream_id"
+      ]
+    ]
+  },
+  "typedefs": {
+    "cavalry_fragment_handler_t": "void (*)(void *clientd, const uint8_t *buffer, size_t length, const cavalry_header_t *header)"
+  },
+  "macros": {
+    "cavalry_context_init": {
+      "params": [
+        "context"
+      ],
+      "expands_to": "cavalry_context_init_v((context), CAVALRY_ABI_VERSION)"
+    }
+  },
+  "functions": [
+    {
+      "name": "cavalry_context_init_v",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_context_t **",
+          "context"
+        ],
+        [
+          "int",
+          "abi_version"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_context_set_dir",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_context_t *",
+          "context"
+        ],
+        [
+          "const char *",
+          "dir"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_context_get_dir",
+      "returns": "const char *",
+      "params": [
+        [
+          "const cavalry_context_t *",
+          "context"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_context_close",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_context_t *",
+          "context"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_init",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t **",
+          "client"
+        ],
+        [
+          "cavalry_context_t *",
+          "context"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_close",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t *",
+          "client"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_is_closed",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_t *",
+          "client"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_closed",
+      "returns": "int32_t",
+      "params": [
+        [
+          "const cavalry_t *",
+          "client"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_client_id",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_t *",
+          "client"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_dir",
+      "returns": "const char *",
+      "params": [
+        [
+          "const cavalry_t *",
+          "client"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_add_publication",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_publication_t **",
+          "publication"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "const char *",
+          "channel"
+        ],
+        [
+          "int32_t",
+          "stream_id"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_add_exclusive_publication",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_publication_t **",
+          "publication"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "const char *",
+          "channel"
+        ],
+        [
+          "int32_t",
+          "stream_id"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_add_subscription",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_subscription_t **",
+          "subscription"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "const char *",
+          "channel"
+        ],
+        [
+          "int32_t",
+          "stream_id"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_start_recording",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_recording_t **",
+          "recording"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "const char *",
+          "channel"
+        ],
+        [
+          "int32_t",
+          "stream_id"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_stop_recording",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "int64_t",
+          "recording_id"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_truncate_recording",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "int64_t",
+          "recording_id"
+        ],
+        [
+          "int64_t",
+          "position"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_purge_segments",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "int64_t",
+          "recording_id"
+        ],
+        [
+          "int64_t",
+          "new_start_position"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_purge_recording",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "int64_t",
+          "recording_id"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_start_replay",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_replay_t **",
+          "replay"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "int64_t",
+          "recording_id"
+        ],
+        [
+          "int64_t",
+          "position"
+        ],
+        [
+          "int64_t",
+          "length"
+        ],
+        [
+          "int32_t",
+          "replay_stream_id"
+        ],
+        [
+          "const char *",
+          "channel"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_stop_replay",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "int64_t",
+          "replay_session_id"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_publication_try_claim",
+      "returns": "int64_t",
+      "params": [
+        [
+          "cavalry_publication_t *",
+          "publication"
+        ],
+        [
+          "size_t",
+          "length"
+        ],
+        [
+          "cavalry_buffer_claim_t *",
+          "claim"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_buffer_claim_set_reserved_value",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_buffer_claim_t *",
+          "claim"
+        ],
+        [
+          "int64_t",
+          "value"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_buffer_claim_commit",
+      "returns": "int64_t",
+      "params": [
+        [
+          "cavalry_buffer_claim_t *",
+          "claim"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_buffer_claim_abort",
+      "returns": "int64_t",
+      "params": [
+        [
+          "cavalry_buffer_claim_t *",
+          "claim"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_publication_offer",
+      "returns": "int64_t",
+      "params": [
+        [
+          "cavalry_publication_t *",
+          "publication"
+        ],
+        [
+          "const uint8_t *",
+          "buffer"
+        ],
+        [
+          "size_t",
+          "length"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_publication_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_publication_t *",
+          "publication"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_publication_position_limit",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_publication_t *",
+          "publication"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_publication_is_connected",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_publication_t *",
+          "publication"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_publication_is_closed",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_publication_t *",
+          "publication"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_publication_constants",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_publication_t *",
+          "publication"
+        ],
+        [
+          "cavalry_publication_constants_t *",
+          "constants"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_publication_close",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_publication_t *",
+          "publication"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_subscription_poll",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_subscription_t *",
+          "subscription"
+        ],
+        [
+          "cavalry_fragment_handler_t",
+          "handler"
+        ],
+        [
+          "void *",
+          "clientd"
+        ],
+        [
+          "size_t",
+          "fragment_limit"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_subscription_fault",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_subscription_t *",
+          "subscription"
+        ],
+        [
+          "cavalry_fault_t *",
+          "fault"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_subscription_image_count",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_subscription_t *",
+          "subscription"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_subscription_image_at_index",
+      "returns": "cavalry_image_t *",
+      "params": [
+        [
+          "cavalry_subscription_t *",
+          "subscription"
+        ],
+        [
+          "size_t",
+          "index"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_subscription_is_connected",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_subscription_t *",
+          "subscription"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_subscription_is_closed",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_subscription_t *",
+          "subscription"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_subscription_constants",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_subscription_t *",
+          "subscription"
+        ],
+        [
+          "cavalry_subscription_constants_t *",
+          "constants"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_subscription_close",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_subscription_t *",
+          "subscription"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_image_constants",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_image_t *",
+          "image"
+        ],
+        [
+          "cavalry_image_constants_t *",
+          "constants"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_image_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_image_t *",
+          "image"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_image_is_end_of_stream",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_image_t *",
+          "image"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_header_values",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_header_t *",
+          "header"
+        ],
+        [
+          "cavalry_header_values_t *",
+          "values"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_recording_constants",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_recording_t *",
+          "recording"
+        ],
+        [
+          "cavalry_recording_constants_t *",
+          "constants"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_recording_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_recording_t *",
+          "recording"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_recording_synced_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_recording_t *",
+          "recording"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_recording_close",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_recording_t *",
+          "recording"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_replay_constants",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_replay_t *",
+          "replay"
+        ],
+        [
+          "cavalry_replay_constants_t *",
+          "constants"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_replay_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_replay_t *",
+          "replay"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_replay_ended",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_replay_t *",
+          "replay"
+        ],
+        [
+          "int64_t *",
+          "position"
+        ],
+        [
+          "int32_t *",
+          "reason"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_replay_close",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_replay_t *",
+          "replay"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_errcode",
+      "returns": "int",
+      "params": []
+    },
+    {
+      "name": "cavalry_errmsg",
+      "returns": "const char *",
+      "params": []
+    },
+    {
+      "name": "cavalry_version_major",
+      "returns": "int",
+      "params": []
+    },
+    {
+      "name": "cavalry_version_minor",
+      "returns": "int",
+      "params": []
+    },
+    {
+      "name": "cavalry_version_patch",
+      "returns": "int",
+      "params": []
+    },
+    {
+      "name": "cavalry_version_full",
+      "returns": "const char *",
+      "params": []
+    },
+    {
+      "name": "cavalry_abi_version",
+      "returns": "int",
+      "params": []
+    }
+  ],
+  "defines": {
+    "CAVALRY_ABI_VERSION": 0,
+    "CAVALRY_DIR_ENV": "CAVALRY_DIR",
+    "CAVALRY_MAX_IMAGES": 256,
+    "CAVALRY_NULL_POSITION": -1,
+    "CAVALRY_NULL_LENGTH": -1,
+    "CAVALRY_FOLLOW_LENGTH": 9223372036854775807,
+    "CAVALRY_PUBLICATION_NOT_CONNECTED": -1,
+    "CAVALRY_PUBLICATION_BACK_PRESSURED": -2,
+    "CAVALRY_PUBLICATION_ADMIN_ACTION": -3,
+    "CAVALRY_PUBLICATION_CLOSED": -4,
+    "CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED": -5,
+    "CAVALRY_PUBLICATION_ERROR": -6,
+    "CAVALRY_ERR_NONE": 0,
+    "CAVALRY_ERR_INVALID_CHANNEL": 1,
+    "CAVALRY_ERR_UNKNOWN_SUBSCRIPTION": 2,
+    "CAVALRY_ERR_UNKNOWN_PUBLICATION": 3,
+    "CAVALRY_ERR_CHANNEL_ENDPOINT_ERROR": 4,
+    "CAVALRY_ERR_UNKNOWN_COMMAND_TYPE": 6,
+    "CAVALRY_ERR_MALFORMED_COMMAND": 7,
+    "CAVALRY_ERR_UNKNOWN_HOST": 9,
+    "CAVALRY_ERR_RESOURCE_TEMPORARILY_UNAVAILABLE": 10,
+    "CAVALRY_ERR_GENERIC_ERROR": 11,
+    "CAVALRY_ERR_STORAGE_SPACE": 12,
+    "CAVALRY_ERR_NO_PUBLICATION_TO_RECORD": 20,
+    "CAVALRY_ERR_UNKNOWN_RECORDING": 21,
+    "CAVALRY_ERR_ALREADY_RECORDING": 22,
+    "CAVALRY_ERR_POSITION_OUT_OF_RANGE": 23,
+    "CAVALRY_ERR_RECORDING_BUSY": 24,
+    "CAVALRY_ERR_NOT_FOUND": 100,
+    "CAVALRY_ERR_DRIVER_GONE": 101,
+    "CAVALRY_ERR_CLOSED": 102,
+    "CAVALRY_ERR_SUBSCRIPTIONS_FULL": 103,
+    "CAVALRY_ERR_REPLAYS_FULL": 104,
+    "CAVALRY_ERR_REPLAY_QUEUE_FULL": 105,
+    "CAVALRY_ERR_RESPONSE_TIMEOUT": 106,
+    "CAVALRY_ERR_COMMAND_RING": 107,
+    "CAVALRY_ERR_BROADCAST": 108,
+    "CAVALRY_ERR_COUNTERS": 109,
+    "CAVALRY_ERR_PROTOCOL": 110,
+    "CAVALRY_ERR_LOG": 111,
+    "CAVALRY_ERR_DRIVER": 112,
+    "CAVALRY_ERR_IO": 113,
+    "CAVALRY_ERR_REFUSED": 114,
+    "CAVALRY_ERR_FAULT_IMAGE": 120,
+    "CAVALRY_ERR_FAULT_IMAGES_FULL": 121,
+    "CAVALRY_ERR_FAULT_CLOSED": 122,
+    "CAVALRY_ERR_TOO_LONG": 130,
+    "CAVALRY_ERR_NULL": 131,
+    "CAVALRY_ERR_CLAIM_OUTSTANDING": 132,
+    "CAVALRY_ERR_NO_CLAIM": 133,
+    "CAVALRY_ERR_POLLING": 134,
+    "CAVALRY_ERR_ABI_VERSION": 135,
+    "CAVALRY_ERR_NOT_UTF8": 136,
+    "CAVALRY_ERR_EMPTY_DIR": 137,
+    "CAVALRY_CLOSED_BY_USER": 1,
+    "CAVALRY_CLOSED_DRIVER_CLOSED": 2,
+    "CAVALRY_CLOSED_DRIVER_TIMEOUT": 3,
+    "CAVALRY_CLOSED_CLIENT_TIMEOUT": 4,
+    "CAVALRY_CLOSED_LAPPED": 5,
+    "CAVALRY_CLOSED_CORRUPT": 6,
+    "CAVALRY_CLOSED_OVERRUN": 7,
+    "CAVALRY_REPLAY_STOP_ENDED": 0,
+    "CAVALRY_REPLAY_STOP_STOPPED": 1,
+    "CAVALRY_REPLAY_STOP_NOT_CONNECTED": 2,
+    "CAVALRY_REPLAY_STOP_FAILED": 3,
+    "CAVALRY_FLAGS_BEGIN": 128,
+    "CAVALRY_FLAGS_END": 64,
+    "CAVALRY_FLAGS_EOS": 32,
+    "CAVALRY_FLAGS_UNFRAGMENTED": 192,
+    "CAVALRY_FRAME_TYPE_PAD": 0,
+    "CAVALRY_FRAME_TYPE_DATA": 1
+  }
+}
