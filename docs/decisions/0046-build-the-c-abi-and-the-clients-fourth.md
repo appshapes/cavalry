@@ -70,8 +70,11 @@ and stop a replay, close, and why it closed), `Publication` (`try_claim`, `offer
 position, limit, connected, close) with `BufferClaim` (commit, abort), `Subscription`
 (`poll` with a handler over the body and the data frame header, the images, connected,
 close), `Image` (session id, position, end of stream, source identity, the position
-arithmetic), `Offer`'s six Aeron codes and `TooLong`, `Fault`'s three, `Recording`,
-`Replay`, `DIR_ENV` and `MAX_IMAGES`. Since ADR 0021 shaped it on 2026-10-13 the API
+arithmetic), `Offer` (five of Aeron's codes, `NotConnected`, `BackPressured`,
+`AdminAction`, `MaxPositionExceeded` and `Closed`, as ADR 0021 lists them, and a
+sixth variant, `TooLong`, which is not one of Aeron's codes), `Fault`'s three,
+`Recording`, `Replay`, `DIR_ENV` and `MAX_IMAGES`. Since ADR 0021 shaped it on
+2026-10-13 the API
 has gained recording (ADR 0025), replay (ADR 0030), retention (ADR 0031), the
 `cavalry:udp` channel with the channel status and the source identity (ADR 0040) and
 replay over UDP (ADR 0043), and the ten-minute path runs the same program over shared
@@ -91,8 +94,10 @@ fragment_limit)` with `typedef void (*aeron_fragment_handler_t)(void *clientd, c
 uint8_t *buffer, size_t length, aeron_header_t *header)`, per-image polls,
 `aeron_image_position` and `aeron_image_is_end_of_stream`; offer and try-claim return
 the new position or one of six negative values, `NOT_CONNECTED` −1, `BACK_PRESSURED`
-−2, `ADMIN_ACTION` −3, `CLOSED` −4, `MAX_POSITION_EXCEEDED` −5 and `ERROR` −6;
-`aeron_errcode()` and `aeron_errmsg()` give the calling thread's last error; and
+−2, `ADMIN_ACTION` −3, `CLOSED` −4, `MAX_POSITION_EXCEEDED` −5 and `ERROR` −6, the
+first five of them `Offer`'s five and `ERROR` with no `Offer` variant, while
+`Offer::TooLong` has no code of Aeron's; `aeron_errcode()` and `aeron_errmsg()` give
+the calling thread's last error; and
 `aeron_version_major`, `_minor`, `_patch`, `_full`, `_text` and `_gitsha` give the
 version. That C client re-implements the Java one; Aeron.NET is "A .NET port of the
 Aeron Client" that ships the Java media driver in a NuGet package (its README); and
@@ -138,8 +143,9 @@ slice. Six features make the slice, one Trello card each, in this order:
    recording and replay; the functions over `cavalry-client`'s API under Aeron's C
    names, `cavalry_publication_try_claim`, `cavalry_buffer_claim_commit`,
    `cavalry_subscription_poll` with a fragment handler of the shape above, and the
-   rest; Aeron's negative result codes, −1 to −6; `cavalry_errcode` and
-   `cavalry_errmsg` per thread; `cavalry_version_*` and how a caller checks the
+   rest; Aeron's negative result codes, −1 to −6, with `Offer`'s five Aeron variants
+   on −1 to −5 and `TooLong`'s code decided by this card (below); `cavalry_errcode`
+   and `cavalry_errmsg` per thread; `cavalry_version_*` and how a caller checks the
    header's version; the lifetime rules, who frees what, a claim committed or aborted
    once, a released buffer poisoned in debug builds; and the thread rules, a
    publication or a subscription from one thread at a time, as the Rust API. The ADR
@@ -249,11 +255,15 @@ since a C++ program includes the header; a Rust client over the ABI, since the R
 client is the core; client-side counters and `add counter` (ADR 0019's Revisit); the
 invoker mode and image handlers (ADR 0021's Revisit); the `console` command; OTel
 export and discovery (`cavalry-control`); encryption; multicast and multi-destination
-cast (ADR 0039). Two decisions are left to the feature ADRs that must carry their
+cast (ADR 0039). Three decisions are left to the feature ADRs that must carry their
 evidence: where the ABI's page lives, under `spec/` beside the layouts with the
 committed header as its vector or as the header's reference page, and what a reader
-of it rejects (card 204); and how each runtime calls the fragment handler back, with
-the fewest allocations it offers and the count on record (cards 205 to 209).
+of it rejects (card 204); how `Offer::TooLong`, which has no Aeron code, reaches the
+ABI, as `ERROR` (−6) with `cavalry_errcode` and `cavalry_errmsg` giving the length
+asked for and the limit, or as a code of Cavalry's own past −6, read against what
+Aeron's C client returns for a message over its limit (card 204); and how each
+runtime calls the fragment handler back, with the fewest allocations it offers and
+the count on record (cards 205 to 209).
 
 The open cards, placed. Nine are open on the Cavalry list and none joins the slice.
 Card 159, the soak host's week, waits on Rjae's hand on `kip`; its note that the host
