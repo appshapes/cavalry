@@ -249,10 +249,11 @@ heroics and clears the bar Aeron set.
 - **Memory safety is a compliance feature.** A 24/7 daemon with a small, audited
   `unsafe` surface is an easier conversation with risk and security teams than a C++
   driver, and a different conversation from a JVM.
-- **One core, every language.** A Rust core with an `extern "C"` ABI and cbindgen
-  headers gives thin clients for Python (PyO3), Node (napi-rs), .NET (P/Invoke), JVM
-  (Panama FFM) and Go (cgo), all sharing one protocol implementation. This inverts
-  Aeron's model, where the C client had to re-implement the Java one.
+- **One core, every language.** A Rust core with an `extern "C"` ABI and a cbindgen
+  header gives thin clients over that header for Python, Node, .NET, the JVM and Go,
+  each through its language's own foreign-function interface (P/Invoke for .NET,
+  Panama FFM for the JVM, cgo for Go), all sharing one protocol implementation. This
+  inverts Aeron's model, where the C client had to re-implement the Java one.
 - **The ecosystem now exists.** `io-uring`, AF_XDP bindings, `quinn` for QUIC,
   `zerocopy` and `bytemuck` for wire structs, `memmap2`, `crossbeam`,
   `hdrhistogram`, `opentelemetry`. None of this was available to Aeron's designers.
