@@ -7,7 +7,7 @@
 //! duty cycle, so nothing here reads a clock.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write as _};
+use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ use crate::catalog::CatalogError;
 use crate::dir::LogDir;
 use crate::layout::{
     Descriptor, ENTRY_LENGTH, FRAME_ALIGNMENT, HEADER_LENGTH, IndexEntry, IndexHeader, LayoutError,
-    Recording, SEGMENT_SUFFIX, index_file_name, locate,
+    Recording, SEGMENT_NAME_CAPACITY, index_file_name, locate, segment_file_name_into,
 };
 
 const DOC: &str = "docs/reference/durable-log.md#the-driver";
@@ -24,9 +24,6 @@ const DOC: &str = "docs/reference/durable-log.md#the-driver";
 /// it has unsynced bytes (ADR 0025). Nanoseconds.
 pub const SYNC_INTERVAL: i64 = 1_000_000_000;
 
-/// The longest segment file name: two i64s in decimal with a sign, a dash and `.rec`,
-/// with room to spare, so a roll formats the name on the stack.
-const SEGMENT_NAME_CAPACITY: usize = 64;
 /// The standard library's stack buffer for a path handed to the operating system: a
 /// path of this many bytes or more is copied into a heap-allocated C string first
 /// (`std::sys::helpers::small_c_string::MAX_STACK_ALLOCATION`).
@@ -469,25 +466,9 @@ impl RecordingWriter {
             .map_err(io("sync", &self.segment_path))?;
         let base = self.segment_base + self.segment_length;
         let mut name = [0u8; SEGMENT_NAME_CAPACITY];
-        let length = {
-            let mut cursor = io::Cursor::new(&mut name[..]);
-            // Two i64s in decimal and the suffix fit the buffer by construction, so
-            // the write cannot fail; a short write would name a wrong file, which the
-            // debug assertion below catches.
-            let _ = write!(
-                cursor,
-                "{}-{}{}",
-                self.descriptor.recording_id(),
-                base,
-                SEGMENT_SUFFIX
-            );
-            cursor.position() as usize
-        };
-        debug_assert!(
-            length < SEGMENT_NAME_CAPACITY,
-            "the segment name fits its buffer"
-        );
-        let Ok(file_name) = std::str::from_utf8(&name[..length]) else {
+        let Some(file_name) =
+            segment_file_name_into(self.descriptor.recording_id(), base, &mut name)
+        else {
             return Err(RecorderError::Block {
                 position: self.position,
                 length: 0,
@@ -514,7 +495,7 @@ mod tests {
     /// name are one byte under the standard library's stack buffer.
     #[test]
     fn the_log_directory_path_limit_keeps_a_roll_under_the_stack_buffer() {
-        let longest = format!("{}-{}{}", i64::MIN, i64::MIN, SEGMENT_SUFFIX);
+        let longest = format!("{}-{}{}", i64::MIN, i64::MIN, crate::layout::SEGMENT_SUFFIX);
         assert_eq!(longest.len(), LONGEST_SEGMENT_NAME);
         assert!(longest.len() < SEGMENT_NAME_CAPACITY);
         let path_length = LOG_DIR_PATH_LIMIT + 1 + longest.len();
