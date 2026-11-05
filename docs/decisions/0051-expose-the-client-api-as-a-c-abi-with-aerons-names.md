@@ -202,7 +202,7 @@ unless the table says otherwise, or unless the function cannot answer (below).
 
 | Group | Functions |
 | --- | --- |
-| context | `cavalry_context_init(&context)`, a macro in the header over `cavalry_context_init_v(cavalry_context_t **, int abi_version)` that passes the header's `CAVALRY_ABI_VERSION`: the library refuses a version other than its own with −1, `CAVALRY_ERR_ABI_VERSION` and a message that names both numbers, so a program built against another header stops at its first call (see "What a reader rejects"); `cavalry_context_set_dir(ctx, const char *)`, `cavalry_context_get_dir(ctx) -> const char *`, `cavalry_context_close(ctx)`. A context resolves its directory when it is made, as `Cavalry::default_dir()` does: `CAVALRY_DIR` when it is set and not empty, else the driver's default. `cavalry_context_set_dir` replaces it, and `cavalry_context_get_dir` returns the directory `cavalry_init` will use, never null for a context, valid until the next `set_dir` or the context's close. |
+| context | `cavalry_context_init(&context)`, a macro in the header over `cavalry_context_init_v(cavalry_context_t **, int abi_version)` that passes the header's `CAVALRY_ABI_VERSION`: the library refuses a version other than its own with −1, `CAVALRY_ERR_ABI_VERSION` and a message that names both numbers, so a program built against another header stops at its first call (see "What a reader rejects"); `cavalry_context_set_dir(ctx, const char *)`, `cavalry_context_get_dir(ctx) -> const char *`, `cavalry_context_close(ctx)`. A context resolves its directory when it is made, as `Cavalry::default_dir()` does: `CAVALRY_DIR` when it is set and not empty, else the driver's default. `cavalry_context_set_dir` replaces it with the caller's bytes and refuses an empty string ("Strings", below), and `cavalry_context_get_dir` returns the directory `cavalry_init` will use, never null for a context, valid until the next `set_dir` or the context's close. |
 | client | `cavalry_init(cavalry_t **, cavalry_context_t *)`: attaches and starts the client conductor in one call, since `Cavalry::connect` does both; `cavalry_close(cavalry_t *)`; `cavalry_is_closed(const cavalry_t *) -> bool`; `cavalry_closed(const cavalry_t *) -> int32_t`: 0 while open, else the reason, 1 by user, 2 driver closed, 3 driver timeout, 4 client timeout, 5 lapped, 6 corrupt, 7 overrun, `Closed`'s seven in order; `cavalry_client_id(const cavalry_t *) -> int64_t`; `cavalry_dir(const cavalry_t *) -> const char *`. |
 | adds and commands | `cavalry_add_publication(cavalry_publication_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_add_exclusive_publication(...)`, `cavalry_add_subscription(cavalry_subscription_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_start_recording(cavalry_recording_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_stop_recording(cavalry_t *, int64_t recording_id)`, `cavalry_truncate_recording(cavalry_t *, int64_t recording_id, int64_t position)`, `cavalry_purge_segments(cavalry_t *, int64_t recording_id, int64_t new_start_position)`, `cavalry_purge_recording(cavalry_t *, int64_t recording_id)`, `cavalry_start_replay(cavalry_replay_t **, cavalry_t *, int64_t recording_id, int64_t position, int64_t length, int32_t replay_stream_id, const char *channel)`, `cavalry_stop_replay(cavalry_t *, int64_t replay_session_id)`. Each is synchronous: it returns when the driver has answered or the 10 s response timeout has passed, as the Rust API does, with one operation in flight per client. |
 | publication | `cavalry_publication_try_claim(pub, size_t length, cavalry_buffer_claim_t *) -> int64_t`: the position after the frame, or a code below; `cavalry_buffer_claim_set_reserved_value(claim, int64_t)`; `cavalry_buffer_claim_commit(claim) -> int64_t` and `cavalry_buffer_claim_abort(claim) -> int64_t`: the position after the frame, or −1; `cavalry_publication_offer(pub, const uint8_t *, size_t length) -> int64_t`: the position after the message, or a code below; `cavalry_publication_position(pub) -> int64_t`, or −1; `cavalry_publication_position_limit(pub) -> int64_t`; `cavalry_publication_is_connected(pub) -> bool`; `cavalry_publication_is_closed(pub) -> bool`; `cavalry_publication_constants(pub, cavalry_publication_constants_t *)`; `cavalry_publication_close(pub)`. |
@@ -216,10 +216,30 @@ size_t length, const cavalry_header_t *header)`: the body as a view into the log
 the frame's header, valid for the call, as `Subscription::poll` hands them. Nothing is
 copied, and the ABI makes nothing new for the call.
 
+**Strings.** Every `const char *` the ABI takes is NUL-terminated and is read during
+the call; the library copies what it keeps. A `channel`, which every add,
+`cavalry_start_recording` and `cavalry_start_replay` take, is a `&str` in the Rust API,
+so it must be UTF-8. A channel that is not is −1 with `CAVALRY_ERR_NOT_UTF8`, and
+nothing is sent to the driver. The message names the function and the parameter. The
+library does not replace the bad bytes with U+FFFD, because the driver would then be
+asked for a channel the caller did not write. A directory is a path, and on Unix,
+which Linux and macOS are, Rust's `Path` holds a path as bytes:
+`cavalry_context_set_dir` takes the bytes as they are, as `Cavalry::connect_to` takes
+a `Path`, and `cavalry_context_get_dir` and `cavalry_dir` return them unchanged. On a
+platform whose paths are not bytes, a directory that is not UTF-8 is refused as a
+channel is. An error message shows a path as `Path::display` does, with U+FFFD for each
+bad sequence, so the message stays UTF-8. An empty directory is refused:
+`cavalry_context_set_dir(ctx, "")` is −1 with `CAVALRY_ERR_EMPTY_DIR`, and the context
+keeps the directory it had. An empty path names no directory: given to
+`Cavalry::connect_to`, it would look for the command ring in the working directory,
+which `"."` names for a caller who means it. A caller that wants the default does not
+call `cavalry_context_set_dir`.
+
 **When a function cannot answer.** A function cannot answer when it is given a null
-handle or a null required pointer, which is `CAVALRY_ERR_NULL`, or when "Calls during
-a claim or a poll" refuses the call. It then sets the thread's error and returns the
-value its return type gives:
+handle or a null required pointer, which is `CAVALRY_ERR_NULL`; when a string
+argument is refused by "Strings", above; or when "Calls during a claim or a poll"
+refuses the call. It then sets the thread's error and returns the value its return
+type gives:
 
 | Return type | Functions | Value when the function cannot answer |
 | --- | --- | --- |
@@ -281,7 +301,8 @@ queue full, 106 response timeout, 107 command ring, 108 broadcast, 109 counters,
 protocol, 111 log, 112 driver, 113 io, `ClientError`'s other kinds in order, and 114
 refused, a refusal whose code is outside 1 to 99; the faults a poll stops on, 120
 image, 121 images full, 122 closed, `Fault`'s three; and the ABI's own, 130 too long,
-131 null, 132 claim outstanding, 133 no claim, 134 polling, 135 ABI version. The
+131 null, 132 claim outstanding, 133 no claim, 134 polling, 135 ABI version, 136 not
+UTF-8, 137 empty directory. The
 message of an ABI code is the library's own, in the form of the Rust messages: what
 the caller did, what to do next, and this page's anchor for the rule. A success clears
 nothing: the error is the last failure's until the next. With no failure yet on the
@@ -546,6 +567,23 @@ Revisit.
   from a newer driver would read as one of the client's or the ABI's own, and a
   caller that switches on the code would act on the wrong error. The range 1 to 99
   keeps a newer driver's codes, and 114 names any code outside it.
+- **A channel that is not UTF-8 converted with U+FFFD for each bad sequence, as
+  `String::from_utf8_lossy` does.** Lost: the driver would be asked for a channel the
+  caller did not write, and would refuse it as an unknown channel or, worse, add one
+  the caller never named. A refusal names the parameter and costs nothing a correct
+  caller pays.
+- **A directory held to UTF-8 on every platform.** Lost: on Unix a path is bytes, and
+  `Cavalry::connect_to` takes any of them, so the ABI would refuse a directory the
+  Rust API accepts.
+- **An empty `cavalry_context_set_dir` read as the default, as an empty `CAVALRY_DIR`
+  is.** Lost: a caller that meant a directory and passed an empty buffer would attach
+  to the default driver, which on a laptop is running, and the program would work
+  against a driver it did not name. An empty variable is how a shell says unset,
+  which is why `Cavalry::default_dir()` reads it so; a C caller says it by not calling
+  `cavalry_context_set_dir`.
+- **An empty directory passed to `Cavalry::connect_to` as it is.** Lost: the empty path
+  joins to `command-ring` in the working directory, so `""` would mean `"."` and the
+  context's directory would read as empty.
 - **A `bool` function that cannot answer returning the value that ends a loop on it.**
   Lost: a loop on `_is_connected` may wait for `true` or run while it holds, so no
   single value ends every loop; `false` is one rule, and only a misuse reaches it.
@@ -603,7 +641,12 @@ and `return AERON_PUBLICATION_ERROR`. cbindgen 0.29.4 on crates.io, updated
 `Subscription::poll`'s handler bound at `crates/cavalry-client/src/subscription.rs`
 lines 272 to 274 and `Image::positions` at 194, and `DataFrameHeader`'s fields at
 `crates/cavalry-proto/src/frame.rs` lines 188 to 197, with no initial term id and no
-term length; `spec/frame.md` types the version `i8`. The gates' runners and the
+term length; `spec/frame.md` types the version `i8`. The channel a `&str` in
+`add_subscription`, `add_publication`, `add_exclusive_publication`, `start_recording`
+and `start_replay` (`crates/cavalry-client/src/client.rs` lines 178 to 182, 261 to 276,
+369 to 373 and 559 to 565); `connect_to`'s `dir.join("command-ring")` at lines 88 to
+92, and `default_dir`'s filter of an empty `CAVALRY_DIR` at line 62; a path shown by
+`display()` in `error.rs` at lines 201, 207 and 290. The gates' runners and the
 pinned `mdbook` install in `.github/workflows/ci.yml`. The dependency
 lint's rule on build dependencies in `scripts/lint-workspace.py`, lines 8 to 15. What
 the implementation proves, the allocation count over every per-message function, the
