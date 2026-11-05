@@ -62,7 +62,7 @@ that guard.
 ADR 0033's trigger gains a second case. A pull request at master's tree that reads red
 on a row, against an entry recorded at an older tree, while master's own runs at that
 tree pass, has measured the host's band at a tree the entry has not seen, if no change
-that the gated rows run lies between the two trees. Three rules decide which reds
+that the gated rows run lies between the two trees. Four rules decide which reds
 count:
 
 - A pull request at master's tree is one that changes none of the tree's paths. A red
@@ -75,8 +75,8 @@ count:
 - A red counts once master has a passing run at the tree. Each bench job runs on its
   one host, so a pull request at a new tree can run before master's own run there. A
   red read before that waits for master's run: if that run fails or brushes the gate,
-  ADR 0033's own case re-records and this rule counts nothing; if it passes, the red
-  counts from then. The session that holds such a red records it at once all the same,
+  it is ADR 0033's own case, which re-records only with no data-plane change behind
+  it, and this rule counts nothing; if it passes, the red counts from then. The session that holds such a red records it at once all the same,
   since the record costs a comment and the artifact expires, and a record that ADR
   0033's own case overtakes is left where it is.
 
@@ -181,11 +181,11 @@ number per row in `bench/baseline.json`.
 - **A person's call each time, as on 2026-11-04.** Lost: card 199's point; the next
   stranger needs a rule to follow, not a call to wait for.
 - **The session that holds the second red re-records, whoever it is.** The first
-  version of this decision. Lost: the second red can land on a writer's `claude/...`
-  branch, or on the run a fixer's push starts, as on pull request 114. That session
-  may never change `bench/baseline.json`, and the reviewer's checklist blocks the
-  change, since a baseline an agent rewrote hides a regression. The rule then gave the
-  work to a session that may not do it, and fell back to a call each time.
+  version of this decision. Lost: the second red can land on an agent's pull request,
+  on the run a fixer's push starts, as on pull request 114, and the fixer may never
+  change `bench/baseline.json`; the reviewer's checklist blocks the change, since a
+  baseline an agent rewrote hides a regression. The rule then gave the work to a
+  session that may not do it, and fell back to a call each time.
 - **Rerun the job after the second red until a run passes, and merge.** Lost: that is
   the coin flip ADR 0033's first alternative lost, and the entry stays where it was,
   so the next pull request at the tree reads red against it again.
@@ -232,6 +232,10 @@ number per row in `bench/baseline.json`.
 - **Rerun a third red.** Lost: the row's band at the tree is already measured twice,
   and a rerun of the third is the coin flip above on a pull request that waits on the
   same re-record or card as the second.
+- **Count a red read before master's run at the tree.** Lost: master's run there can
+  fail or brush the gate, which is ADR 0033's own case, and the same red would then
+  count under both rules, a rerun under this one and a re-record or a regression
+  under the other.
 
 ## Evidence
 

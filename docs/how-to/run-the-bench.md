@@ -221,7 +221,7 @@ shared runner is
    against an entry recorded at an older tree, and no change that the gated rows run
    lies between the entry's tree and master's
    ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
-   Three rules decide which reds count:
+   Four rules decide which reds count:
 
    - A pull request at master's tree is one that changes none of the tree's paths. A
      red at a pull request's own tree is a change and does not count.
@@ -230,9 +230,10 @@ shared runner is
    - Count the reds on one row of one profile. A red on another row, or in the host's
      other profile, starts a count of its own.
    - A red counts once master has a passing run at the tree. A red read before
-     master's own run there waits for it: a failing master run is ADR 0033's own
-     case, which re-records, and a passing one makes the red count from then. Record
-     it at once all the same; a record the other case overtakes stays where it is.
+     master's own run there waits for it: a master run that fails or brushes the gate
+     is ADR 0033's own case, above, and the red counts nothing; a passing one makes
+     the red count from then. Record it at once all the same; a record the other case
+     overtakes stays where it is.
 
    Record each red that counts before you do anything else about it: the first before
    its re-run, the second before the re-record or the card. The second red can come
