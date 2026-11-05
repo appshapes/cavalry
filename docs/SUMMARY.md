@@ -87,3 +87,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0043. Replay a recording over a `cavalry:udp` channel through the sender](decisions/0043-replay-a-recording-over-a-udp-channel-through-the-sender.md)
 - [0044. Gate UDP on the two bench hosts with one message in flight, on the loopback and across the link](decisions/0044-gate-udp-on-the-two-bench-hosts.md)
 - [0045. Carry a padding frame on the wire as its 32-byte header alone](decisions/0045-carry-a-padding-frame-as-its-header-alone.md)
+- [0046. Build the C ABI and the language clients fourth, in six features](decisions/0046-build-the-c-abi-and-the-clients-fourth.md)

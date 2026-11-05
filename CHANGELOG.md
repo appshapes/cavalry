@@ -1147,3 +1147,12 @@ user-visible change, added in the same commit as the change. The format follows
   [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
   made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
   tree while master is green is card 199's (card 182).
+- ADR 0046, Proposed: the fourth slice is the C ABI and the five language clients over
+  it, in six features (cards 204 to 209): the ABI specified first under an ADR a person
+  accepts, with Aeron's C client's names and result codes, a committed cbindgen header
+  held by `just lint`, a C conformance runner that starts `conformance/`, and two ABI
+  rows in the bench; then the Python, Node, Go, JVM and .NET clients, each generated
+  from the header and run by `just conformance` on both runners. Raft is the fifth
+  slice; the first release, with `conformance/upgrade/` and the ABI's freeze, is an
+  ADR of its own. Nothing in the slice needs a hand on the hosts
+  ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
