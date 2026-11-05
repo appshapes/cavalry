@@ -82,10 +82,7 @@ fn defines(lines: &[String]) -> BTreeMap<String, String> {
 fn macros(lines: &[String]) -> BTreeMap<String, String> {
     lines
         .iter()
-        .filter(|line| {
-            line.strip_prefix("#define ")
-                .is_some_and(|rest| is_function_like(rest))
-        })
+        .filter(|line| line.strip_prefix("#define ").is_some_and(is_function_like))
         .map(|line| {
             let rest = &line["#define ".len()..];
             let name = &rest[..rest.find('(').expect("a function-like macro")];
