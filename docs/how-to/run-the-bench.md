@@ -211,6 +211,13 @@ shared runner is
    another, re-records the entry at that tree from every process at it, the red runs
    included, as a person's commit that names the two reds and the row
    ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
+   The re-record is a person's commit on a branch of its own. An agent's session that
+   holds the second red, the writer or the fixer, changes no `bench/baseline.json`.
+   Instead it comments on its pull request, naming the two reds by run, attempt and
+   row, and a person's session makes the re-record. The pull request that holds the
+   second red waits for the re-record and does not rerun until a run passes. Once the
+   re-record is on master, merge master into the branch for a run judged against the
+   new entry.
    Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
    with its p99.99 and its rate fell against the other processes at the tree, the
    host was disturbed during the run (the troubleshooting list below); re-run the job

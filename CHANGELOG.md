@@ -1160,7 +1160,9 @@ user-visible change, added in the same commit as the change. The format follows
   row, at a tree where master's own runs pass against an entry recorded at an older
   tree, now has a rule: the first such red at a tree is a rerun, and the second
   re-records the host's baseline at that tree from every process at it, as a person's
-  commit naming both reds. Pull request 111's red on `grip`'s unchecked client row at
+  commit naming both reds. An agent's session that holds the second red comments on
+  its pull request instead and changes no baseline, and that pull request waits for
+  the re-record. Pull request 111's red on `grip`'s unchecked client row at
   7248621's tree on 2026-11-04 was such a red, with no rule then; pull requests 102,
   103 and 106 read red on the same row at trees of their own, which stay changes
   under ADR 0033 and which this rule does not count

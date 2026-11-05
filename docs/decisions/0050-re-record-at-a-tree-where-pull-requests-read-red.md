@@ -55,12 +55,21 @@ tree the entry has not seen. The first such red at a tree is a rerun of the job,
 process of the baseline's tree reading high is under ADR 0033. The second red at the
 same tree, on the same pull request or another, re-records the entry at that tree in
 ADR 0033's form, from every process the host has run at the tree, master's runs and
-the pull requests' included, the red runs among them, as a person's commit (ADR 0032)
-by the session that holds the second red, on its own branch through the review loop,
-with the commit naming the two reds by run and row, every gated row's slowest run
-before and after, and the cause of every row that loosens by more than 5 percent or
-the card that will find it. A pull request's run is still judged against the entry
-alone: the gate stays one number per row in `bench/baseline.json`.
+the pull requests' included, the red runs among them, with the commit naming the two
+reds by run and row, every gated row's slowest run before and after, and the cause of
+every row that loosens by more than 5 percent or the card that will find it.
+
+The re-record is a person's commit (ADR 0032), on a branch of its own, through the
+review loop. A person's session that holds the second red makes it. An agent's session
+that holds it, the writer on its `claude/...` branch or the fixer on any pull request,
+may never change `bench/baseline.json` (`.claude/agents/developer.md`), so it changes
+nothing there. Instead it comments on its pull request, naming the two reds by run,
+attempt and row and this ADR, and a person's session makes the re-record. In either
+case the pull request that holds the second red waits for the re-record, and does not
+rerun its job until a run passes. Once the re-record is on master, a merge of master
+into the pull request's branch gives it a run judged against the new entry. A pull
+request's run is still judged against the entry alone: the gate stays one number per
+row in `bench/baseline.json`.
 
 ## Alternatives considered
 
@@ -79,6 +88,15 @@ alone: the gate stays one number per row in `bench/baseline.json`.
   wider gate hides a regression the same size.
 - **A person's call each time, as on 2026-11-04.** Lost: card 199's point; the next
   stranger needs a rule to follow, not a call to wait for.
+- **The session that holds the second red re-records, whoever it is.** The first
+  version of this decision. Lost: the second red can land on a writer's `claude/...`
+  branch, or on the run a fixer's push starts, as on pull request 114. That session
+  may never change `bench/baseline.json`, and the reviewer's checklist blocks the
+  change, since a baseline an agent rewrote hides a regression. The rule then gave the
+  work to a session that may not do it, and fell back to a call each time.
+- **Rerun the job after the second red until a run passes, and merge.** Lost: that is
+  the coin flip ADR 0033's first alternative lost, and the entry stays where it was,
+  so the next pull request at the tree reads red against it again.
 
 ## Evidence
 
@@ -114,7 +132,10 @@ wait for; the entry follows the host's band at each tree master reaches.
 
 Harder: a second red costs the re-record's commit, every process's artifact read and
 every loosened row explained or carded; the entry loosens to the band at the new tree,
-as a re-record under ADR 0033's first case does.
+as a re-record under ADR 0033's first case does. When an agent's session holds the
+second red, its pull request waits for a person's session to make the re-record. It
+waits for that work, not for a decision, since this rule has already made the
+decision.
 
 Revisit: when `scripts/bench-compare.py` reads several trees' entries; when card 198
 names the host effect behind `grip`'s band, which may tighten what a re-record admits.
@@ -122,6 +143,8 @@ names the host effect behind `grip`'s band, which may tighten what a re-record a
 ## References
 
 - ADR 0029, ADR 0032, ADR 0033; `docs/how-to/run-the-bench.md`, step 4
+- `.claude/agents/developer.md` and `.claude/agents/reviewer.md`, which keep
+  `bench/baseline.json` from an agent
 - `bench/baseline.json`; `scripts/bench-compare.py`
 - Pull requests 102, 103, 106, 111 and 114; CI runs 41853288029 (attempts 1 and 2),
   41852170961, 41868019184, 41870700774, 41874887478 and 41884701705; AppShapes
