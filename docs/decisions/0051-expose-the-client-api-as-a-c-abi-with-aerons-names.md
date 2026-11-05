@@ -151,15 +151,17 @@ constants; the ABI has no `cavalry_exclusive_publication_*` family. An eighth op
 type, `cavalry_header_t`, is the frame header a poll hands the fragment handler, valid
 for the call. Three structs the caller owns:
 
-- `cavalry_buffer_claim_t { uint8_t *data; size_t length; cavalry_publication_t
-  *publication; }`, filled by `cavalry_publication_try_claim`: `data` is the frame's
-  body in the term, `length` the length claimed, `publication` the handle the claim
-  belongs to. The claim itself lives inside the publication handle, one outstanding
-  claim per publication, which is the Rust borrow rule made a convention: a commit or
-  abort with no claim outstanding is −1 with `CAVALRY_ERR_NO_CLAIM`, and what every
-  other call on the publication answers while a claim is outstanding is "Calls during
-  a claim or a poll", below. A caller keeps one struct per publication, and a claim
-  allocates nothing.
+- `cavalry_buffer_claim_t { uint8_t *data; size_t length; int64_t position_after;
+  cavalry_publication_t *publication; }`, filled by `cavalry_publication_try_claim`:
+  `data` is the frame's body in the term, `length` the length claimed,
+  `position_after` the position after the frame, which `try_claim` also returns, and
+  `publication` the handle the claim belongs to. The claim itself lives inside the
+  publication handle, one outstanding claim per publication, which is the Rust borrow
+  rule made a convention. The struct names that claim, and a commit or an abort
+  checks that it does ("Which claim a struct names", below). What every other call on
+  the publication answers while a claim is outstanding is "Calls during a claim or a
+  poll", below. A caller keeps one struct per publication, and a claim allocates
+  nothing.
 - `cavalry_header_values_t { cavalry_header_values_frame_t frame; }`, filled by
   `cavalry_header_values(header, &values)`, where `cavalry_header_values_frame_t` is
   the data frame header's fields in the order and the types of `spec/frame.md`:
@@ -236,7 +238,9 @@ which `"."` names for a caller who means it. A caller that wants the default doe
 call `cavalry_context_set_dir`.
 
 **When a function cannot answer.** A function cannot answer when it is given a null
-handle or a null required pointer, which is `CAVALRY_ERR_NULL`; when a string
+handle or a null required pointer, which is `CAVALRY_ERR_NULL`, except a claim
+struct's null `publication`, which is `CAVALRY_ERR_NO_CLAIM` ("Which claim a struct
+names"); when a string
 argument is refused by "Strings", above; or when "Calls during a claim or a poll"
 refuses the call. It then sets the thread's error and returns the value its return
 type gives:
@@ -268,8 +272,8 @@ enums carry across the boundary: `CAVALRY_DIR_ENV` `"CAVALRY_DIR"` (`DIR_ENV`),
 `CAVALRY_FRAME_TYPE_DATA` 1 (`FrameType`), for the header's values; `CAVALRY_CLOSED_*`,
 1 to 7 in `Closed`'s order, for `cavalry_closed`; and `CAVALRY_REPLAY_STOP_*`, 0 to 3
 in `ReplayStopReason`'s order, for `cavalry_replay_ended`. `BufferClaim::body` is the
-claim struct's `data` and `length`, and `position_after` is what
-`cavalry_publication_try_claim` returns. `Recording::stop` and `Replay::stop` are
+claim struct's `data` and `length`, and `BufferClaim::position_after` is its
+`position_after`, which `cavalry_publication_try_claim` also returns. `Recording::stop` and `Replay::stop` are
 `cavalry_stop_recording` and `cavalry_stop_replay` with the handle's id.
 
 **The codes.** `cavalry_publication_try_claim` and `cavalry_publication_offer` return
@@ -356,8 +360,10 @@ the error's anchor.
   constants struct's strings are valid for the handle's life. `cavalry_errmsg`'s
   string is valid until the next failing call on the thread.
 - Debug builds poison what is released, so misuse is loud: a committed or aborted
-  claim's struct is overwritten with a null `data`, a length of 0 and a null
-  `publication`; a closed handle's memory is filled with `0xDD` before it is freed.
+  claim's struct is overwritten with a null `data`, a length of 0, a `position_after`
+  of `CAVALRY_NULL_POSITION` and a null `publication`; a closed handle's memory is
+  filled with `0xDD` before it is freed. A released struct answers a second commit
+  or abort with the same code in both builds ("Which claim a struct names").
 
 **Calls during a claim or a poll.** A live claim holds its publication mutably until
 its commit or abort, `try_claim(&mut self) -> BufferClaim<'_>`, and a poll holds its
@@ -368,7 +374,7 @@ was.
 
 | Call | While a claim is outstanding on the publication |
 | --- | --- |
-| `cavalry_buffer_claim_set_reserved_value`, `_commit`, `_abort` | the claim's own functions, as the function table says |
+| `cavalry_buffer_claim_set_reserved_value`, `_commit`, `_abort` | the claim's own functions, as the function table and "Which claim a struct names" say |
 | `cavalry_publication_constants` | 0, from the copy the handle took when it was made: the constants never change |
 | `cavalry_publication_try_claim`, `cavalry_publication_offer` | `ERROR` with `CAVALRY_ERR_CLAIM_OUTSTANDING`. Aeron's C client lets a concurrent publication offer beside a claim; the Rust borrow does not, and the ABI keeps the Rust rule |
 | `cavalry_publication_position`, `_position_limit` | −1 with `CAVALRY_ERR_CLAIM_OUTSTANDING` |
@@ -394,6 +400,47 @@ pointer and without forming a reference to the wrapped value, and refuses before
 touches that value. The word is plain memory and not an atomic, since one thread uses
 a handle at a time (Threads). It costs one load and one compare per call, and one store
 at each claim, commit, abort and poll.
+
+**Which claim a struct names.** `cavalry_buffer_claim_commit`, `_abort` and
+`_set_reserved_value` act on the claim outstanding on `claim->publication` only when
+the struct names it: its `publication` is not null, a claim is outstanding on that
+publication, and the struct's `position_after` is that claim's. Any other struct is
+−1 with `CAVALRY_ERR_NO_CLAIM`, and the outstanding claim, if there is one, is
+untouched.
+
+- **A stale struct.** A struct kept after its commit cannot commit or abort the next
+  claim on its publication. Claim c1, commit c1, claim c2, then commit c1's struct
+  again: the answer is `NO_CLAIM`, c2 stays outstanding until its own struct commits
+  it, and no subscriber reads a frame whose body the publisher had not written.
+- **Why the position.** The check compares `position_after` and not the body's
+  address. A position names one place in the stream, and a frame's term id and term
+  offset follow from it (`spec/log-buffer.md`, "Positions"), so no two claims on a
+  publication have the same position after. The log has three partitions and reuses
+  each every three terms, so a struct kept that long can hold the address of a new
+  claim's body.
+- **A null `publication`** answers `NO_CLAIM` too, not `CAVALRY_ERR_NULL`. A release
+  build leaves a released struct as its commit found it, and a debug build poisons it
+  with a null `publication` (Lifetimes); both answer a second commit with
+  `NO_CLAIM`, so one conformance test passes in both builds.
+- **The cost.** The handle keeps the outstanding claim's position after beside its
+  state word, stored at the claim, so the check is one more load and compare at a
+  commit or an abort.
+- **A refused `try_claim`** leaves no struct pointing into the log. When the code is
+  −1 to −6 and the struct is not null, `cavalry_publication_try_claim` writes a null
+  `data`, a length of 0, a `position_after` of `CAVALRY_NULL_POSITION` and a null
+  `publication`. The one exception is a struct that names the claim outstanding on
+  the publication: the refusal with `CAVALRY_ERR_CLAIM_OUTSTANDING` leaves it as it
+  was, so the caller can still commit or abort that claim. A caller that misses the
+  code holds a null `data` and a length of 0, and not a pointer into a delivered
+  message.
+
+`cavalry-ffi`'s test `a_stale_claim_struct_leaves_the_outstanding_claim_untouched`
+claims c1, copies its struct and commits it. It then claims c2, and commits and
+aborts both c1's poisoned struct and the copy, which is the struct a release build
+leaves. It checks that each call answers `NO_CLAIM`, that c2's body is unchanged, and
+that a subscriber reads c2 once, with the body c2's own struct then writes and commits.
+It repeats the stale commit three terms later, when a new claim's body is at c1's
+address, and checks a refused `try_claim`'s struct for the null fields.
 
 **Threads.** Every handle is used from one thread at a time: a call on a handle
 returns before the next call on the same handle begins, whichever thread makes it.
@@ -554,6 +601,17 @@ Revisit.
   from the term; keeping the claim inside the publication handle and naming the handle
   in the struct makes the Rust claim the one claim and the struct a view of it, with
   the one-claim-at-a-time rule, which the Rust borrow enforces, written down.
+- **A commit that acts on whatever claim is outstanding on `claim->publication`.**
+  Lost: a struct kept after its commit would commit the next claim before its body is
+  written, and subscribers would read a frame the publisher never wrote (invariant 1).
+  In Aeron the same mistake rewrites the old claim's own header, because Aeron's
+  struct points at its frame. Here the struct points at a handle that holds the newer
+  claim.
+- **A commit that compares the struct's `data` with the outstanding claim's body.**
+  Lost: the log reuses each partition every three terms, so a struct kept that long
+  can hold the address of a new claim's body, and the compare would pass. The
+  position after costs the same compare and is never reused on a publication; it
+  takes one more field in the struct, which Aeron's struct does not have.
 - **`cavalry_header_position`, with `initial_term_id` and `position_bits_to_shift` in
   the header's values, as Aeron's header carries them.** Lost for version 0: the Rust
   handler is given `&DataFrameHeader`, which carries neither (ADR 0021), so the ABI
@@ -687,7 +745,9 @@ and `start_replay` (`crates/cavalry-client/src/client.rs` lines 178 to 182, 261 
 `closed` and `is_closed` as `&self` methods at `client.rs` lines 742 to 761, `closed`
 reading `self.shared`, the conductor's state, a `pub(crate) struct Shared` at
 `crates/cavalry-client/src/conductor.rs` line 84; a `Publication` moved to a thread of
-its own in `crates/cavalry-client/tests/udp_receive.rs` line 355. The gates' runners and the
+its own in `crates/cavalry-client/tests/udp_receive.rs` line 355. The log's three
+partitions, a partition of a position its term count modulo 3, at
+`spec/log-buffer.md`, "Positions". The gates' runners and the
 pinned `mdbook` install in `.github/workflows/ci.yml`. The dependency
 lint's rule on build dependencies in `scripts/lint-workspace.py`, lines 8 to 15. What
 the implementation proves, the allocation count over every per-message function, the
