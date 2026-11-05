@@ -54,10 +54,11 @@ bench-compare:
 
 # Wire-spec conformance: every implementation against every vector in spec/vectors/
 # (spec/README.md). Today the implementations are cavalry-proto's (the frame header,
-# the client protocol, and the UDP transport's frames, datagram and channel URI) and
+# the client protocol, and the UDP transport's frames, datagram and channel URI),
 # cavalry-shm's (the counters file, the log buffer, the command ring and the broadcast
-# buffer); every vector test also runs in `just test`. A client in clients/ joins here
-# with its own runner.
+# buffer), cavalry-log's, and cavalry-ffi's (the committed C header against the C ABI's
+# vectors, spec/c-abi.md); every vector test also runs in `just test`. A client in
+# clients/ joins here with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance
@@ -67,6 +68,7 @@ conformance:
     cargo test -p cavalry-shm --test command_ring_conformance
     cargo test -p cavalry-shm --test broadcast_buffer_conformance
     cargo test -p cavalry-log --test conformance
+    cargo test -p cavalry-ffi --test conformance
 
 # Deterministic replay test (CLAUDE.md, gate 1; ADR 0030): a driver on a directory of
 # its own records 100,000 hash-chained messages while a live subscriber prints them,

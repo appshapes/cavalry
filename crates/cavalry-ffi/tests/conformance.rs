@@ -2,7 +2,8 @@
 //! page's vectors (`spec/c-abi.md`, "Versions and what a reader rejects"; ADR 0051):
 //! every opaque type, every struct with its fields in order, the handler typedef, the
 //! macro, every function with its return type and parameters, and every define with
-//! its value, each way. `just conformance` runs this test with the other suites.
+//! its value, each way, and a header with one more of any kind fails. `just
+//! conformance` runs this test with the other suites, and `just test` runs it too.
 
 use std::collections::BTreeMap;
 
@@ -13,9 +14,9 @@ const HEADER: &str = include_str!("../include/cavalry.h");
 
 /// The header with its comments removed and its whitespace folded, one declaration
 /// per `;`.
-fn declarations() -> Vec<String> {
+fn declarations(header: &str) -> Vec<String> {
     let mut text = String::new();
-    let mut rest = HEADER;
+    let mut rest = header;
     while let Some(start) = rest.find("/*") {
         text.push_str(&rest[..start]);
         let end = rest[start..].find("*/").expect("a comment ends") + start + 2;
@@ -55,15 +56,73 @@ fn fold(text: &str) -> String {
     out.replace("* ", "*").replace("( ", "(").replace(" )", ")")
 }
 
+/// Whether a `#define`'s text, after the keyword, is a function-like macro: a `(`
+/// straight after the name, as C requires of one.
+fn is_function_like(rest: &str) -> bool {
+    let name_end = rest
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(rest.len());
+    rest[name_end..].starts_with('(')
+}
+
+/// The header's object-like defines: name to value.
 fn defines(lines: &[String]) -> BTreeMap<String, String> {
     lines
         .iter()
         .filter_map(|line| line.strip_prefix("#define "))
+        .filter(|rest| !is_function_like(rest))
         .filter_map(|rest| {
             let (name, value) = rest.split_once(' ')?;
             Some((name.to_string(), value.trim().to_string()))
         })
         .collect()
+}
+
+/// The header's function-like macros: name to the whole `#define` line.
+fn macros(lines: &[String]) -> BTreeMap<String, String> {
+    lines
+        .iter()
+        .filter(|line| {
+            line.strip_prefix("#define ")
+                .is_some_and(|rest| is_function_like(rest))
+        })
+        .map(|line| {
+            let rest = &line["#define ".len()..];
+            let name = &rest[..rest.find('(').expect("a function-like macro")];
+            (name.to_string(), line.clone())
+        })
+        .collect()
+}
+
+/// The header's typedefs other than its structs: name to the folded statement. A
+/// function pointer's name is the one inside `(*` and `)`; any other typedef's is its
+/// last word.
+fn typedefs(lines: &[String]) -> BTreeMap<String, String> {
+    let joined = lines
+        .iter()
+        .filter(|l| !l.starts_with('#'))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = BTreeMap::new();
+    for statement in joined.split(';') {
+        let statement = statement.trim();
+        if !statement.starts_with("typedef ") || statement.starts_with("typedef struct") {
+            continue;
+        }
+        let name = match statement.find("(*") {
+            Some(at) => {
+                let rest = &statement[at + 2..];
+                rest[..rest.find(')').expect("a function pointer's name closes")].trim()
+            }
+            None => statement
+                .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
+                .find(|word| !word.is_empty())
+                .expect("a typedef names a type"),
+        };
+        out.insert(name.to_string(), fold(&format!("{statement};")));
+    }
+    out
 }
 
 /// The header's functions: name to (return type, parameters as `type name`).
@@ -157,9 +216,70 @@ fn define_value(value: &Value) -> String {
 
 #[test]
 fn the_header_declares_what_the_vectors_say_and_nothing_else() {
+    check(HEADER);
+}
+
+/// The header with `extra` inserted before its functions, after its last typedef.
+fn with_extra(extra: &str) -> String {
+    let at = HEADER
+        .find("#ifdef __cplusplus")
+        .expect("the header opens its C++ guard");
+    format!("{}{extra}\n\n{}", &HEADER[..at], &HEADER[at..])
+}
+
+#[test]
+fn a_header_that_declares_more_than_the_vectors_is_rejected() {
+    // Each kind the page names, one more than the vectors list.
+    for (extra, says) in [
+        (
+            "typedef void (*cavalry_other_handler_t)(void *clientd);",
+            "a typedef the vectors lack: cavalry_other_handler_t",
+        ),
+        (
+            "typedef int32_t cavalry_alias_t;",
+            "a typedef the vectors lack: cavalry_alias_t",
+        ),
+        (
+            "#define cavalry_publication_init(publication) (publication)",
+            "a macro the vectors lack: cavalry_publication_init",
+        ),
+        (
+            "#define CAVALRY_EXTRA 1",
+            "defines what the vectors lack: CAVALRY_EXTRA",
+        ),
+        (
+            "typedef struct cavalry_extra_t cavalry_extra_t;",
+            "the opaque types",
+        ),
+        (
+            "typedef struct {\n  int32_t field;\n} cavalry_extra_values_t;",
+            "a struct the vectors lack: cavalry_extra_values_t",
+        ),
+        (
+            "int cavalry_extra(void);",
+            "a function the vectors lack: cavalry_extra",
+        ),
+    ] {
+        let header = with_extra(extra);
+        let refused = std::panic::catch_unwind(|| check(&header))
+            .expect_err(&format!("a header with `{extra}` passed"));
+        let message = refused
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| refused.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            message.contains(says),
+            "a header with `{extra}` failed for another reason: {message}"
+        );
+    }
+}
+
+/// Holds `header` to the vectors, each way; panics on the first difference.
+fn check(header: &str) {
     let vectors: Value = serde_json::from_str(VECTORS).expect("the vectors parse");
     assert_eq!(vectors["spec"], "spec/c-abi.md");
-    let lines = declarations();
+    let lines = declarations(header);
 
     // Opaque types, each way.
     let want: Vec<String> = vectors["opaque_types"]
@@ -222,18 +342,29 @@ fn the_header_declares_what_the_vectors_say_and_nothing_else() {
         );
     }
 
-    // The handler typedef and the macro.
-    let joined = lines.join(" ");
-    for (name, signature) in vectors["typedefs"].as_object().expect("typedefs") {
+    // The handler typedef, each way.
+    let have = typedefs(&lines);
+    let want = vectors["typedefs"].as_object().expect("typedefs");
+    for (name, signature) in want {
         let signature = signature.as_str().expect("a signature");
         let (returns, params) = signature.split_once(" (*)").expect("a function pointer");
         let expected = fold(&format!("typedef {returns} (*{name}){params};"));
+        let found = have
+            .get(name)
+            .unwrap_or_else(|| panic!("the header lacks the typedef {expected}"));
+        assert_eq!(found, &expected, "the typedef {name}");
+    }
+    for name in have.keys() {
         assert!(
-            fold(&joined).contains(&expected),
-            "the header lacks the typedef {expected}"
+            want.contains_key(name),
+            "the header declares a typedef the vectors lack: {name}"
         );
     }
-    for (name, macro_) in vectors["macros"].as_object().expect("macros") {
+
+    // The macro, each way.
+    let have = macros(&lines);
+    let want = vectors["macros"].as_object().expect("macros");
+    for (name, macro_) in want {
         let params = macro_["params"]
             .as_array()
             .expect("params")
@@ -243,7 +374,16 @@ fn the_header_declares_what_the_vectors_say_and_nothing_else() {
             .join(", ");
         let expands = macro_["expands_to"].as_str().expect("an expansion");
         let line = format!("#define {name}({params}) {expands}");
-        assert!(lines.contains(&line), "the header lacks the macro {line}");
+        let found = have
+            .get(name)
+            .unwrap_or_else(|| panic!("the header lacks the macro {line}"));
+        assert_eq!(found, &line, "the macro {name}");
+    }
+    for name in have.keys() {
+        assert!(
+            want.contains_key(name),
+            "the header declares a macro the vectors lack: {name}"
+        );
     }
 
     // Defines, each way, the include guard aside.
@@ -256,7 +396,7 @@ fn the_header_declares_what_the_vectors_say_and_nothing_else() {
         assert_eq!(found, &define_value(value), "the value of {name}");
     }
     for name in have.keys() {
-        if name == "CAVALRY_H" || name.starts_with("cavalry_") {
+        if name == "CAVALRY_H" {
             continue;
         }
         assert!(
