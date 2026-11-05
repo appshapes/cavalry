@@ -1274,4 +1274,7 @@ user-visible change, added in the same commit as the change. The format follows
 - `CLAUDE.md`'s working rules say which decisions a session makes and which it sends:
   a choice between options is the session's own, on its recommendation, recorded with
   the work, and a `brigade decision` goes to a person only for what needs their own
-  hand, a host, a credential, an account, or reverses a decision they made (card 214).
+  hand, a host, a credential, an account, or reverses a decision they made. An ADR,
+  one on the wire format, the on-disk log format or the C ABI included, lands Accepted
+  on its evidence and names no person to accept it
+  ([Implement a feature](docs/how-to/implement-a-feature.md), step 2; card 214).
