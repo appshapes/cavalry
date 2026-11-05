@@ -17,7 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use cavalry_log::dir::LogDir;
-use cavalry_shm::counters::generated::{LOG_BUFFER_REJECTED_FRAME, RECORDING_WRITE_FAILED};
+use cavalry_shm::counters::generated::{
+    LOG_BUFFER_REJECTED_FRAME, RECORDING_SEGMENTS_PURGED, RECORDING_WRITE_FAILED,
+};
 use cavalry_shm::spsc;
 
 pub use error::DriverError;
@@ -197,6 +199,7 @@ impl Driver {
             replayer_request_consumer,
             replayer_reply_producer,
             conductor.counter(LOG_BUFFER_REJECTED_FRAME)?,
+            conductor.counter(RECORDING_SEGMENTS_PURGED)?,
             idle,
         )
         .map_err(|error| DriverError::LogDir(error.into()))?;

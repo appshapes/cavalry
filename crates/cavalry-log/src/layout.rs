@@ -1034,6 +1034,36 @@ pub fn segment_file_name(recording_id: i64, segment_base_position: i64) -> Strin
     format!("{recording_id}-{segment_base_position}{SEGMENT_SUFFIX}")
 }
 
+/// The buffer a segment file's name is formatted into on the stack: two i64s in
+/// decimal with a sign, a dash and the suffix, 45 bytes at most, with room to spare.
+pub const SEGMENT_NAME_CAPACITY: usize = 64;
+
+/// [`segment_file_name`] written into `name` on the caller's stack, for a thread that
+/// must not allocate per file: the recorder's roll and the replayer's file work
+/// (ADR 0025; card 177). The digits, the dash and the suffix are ASCII and fit the
+/// buffer by construction, so `None`, a name that is not UTF-8, is a bug.
+pub fn segment_file_name_into(
+    recording_id: i64,
+    segment_base_position: i64,
+    name: &mut [u8; SEGMENT_NAME_CAPACITY],
+) -> Option<&str> {
+    use std::io::Write as _;
+    let length = {
+        let mut cursor = std::io::Cursor::new(&mut name[..]);
+        // A short write would name a wrong file, which the debug assertion catches.
+        let _ = write!(
+            cursor,
+            "{recording_id}-{segment_base_position}{SEGMENT_SUFFIX}"
+        );
+        cursor.position() as usize
+    };
+    debug_assert!(
+        length < SEGMENT_NAME_CAPACITY,
+        "the segment name fits its buffer"
+    );
+    std::str::from_utf8(&name[..length]).ok()
+}
+
 /// The name of a recording's time index.
 pub fn index_file_name(recording_id: i64) -> String {
     format!("{recording_id}{INDEX_SUFFIX}")
