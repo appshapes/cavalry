@@ -1215,3 +1215,8 @@ user-visible change, added in the same commit as the change. The format follows
 - ADR 0046 Accepted: Rjae accepted the fourth slice as proposed on 2026-11-05; card 204,
   the C ABI's specification, is the next feature
   ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
+- The reviewer's run has sixty minutes, twice the longest review observed, where
+  thirty cancelled four reviews on 2026-11-05 with no verdict and no retry; the
+  how-to and the pull request skill say a review takes up to thirty minutes and
+  when to add the `review` label (`.github/workflows/review-pull-request.yml`;
+  card 213).
