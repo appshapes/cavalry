@@ -37,13 +37,15 @@ debug builds poison released buffers; and it defines the data plane, where invar
 forbids a heap allocation per message, as "any code a message passes through between
 `try_claim` on the publisher and the fragment handler on the subscriber", which does
 not say where that path ends in a client written in another language.
-`crates/cavalry-ffi/README.md`: one Rust core
-serves every language through a generated header; every non-Rust client's messages
-cross this boundary, which is why it is on the data plane; it is "the one surface
-frozen between releases"; it never changes without an accepted ADR, never behaves
-differently from the Rust client, and never allocates per message; its example is
-"Not yet". `docs/explanation/why-cavalry.md`: "One core, every language"; "Stable
-ABI only at the C boundary"; the FFI-lifetimes risk; and, of Aeron's clients, Java
+`crates/cavalry-ffi/README.md`: one Rust core serves every language through a
+generated header; every non-Rust client's messages cross this boundary, which is why
+it is on the data plane; it is "the one surface frozen between releases"; it never
+changes without an accepted ADR, never behaves differently from the Rust client, and
+never allocates per message; its example is "Not yet".
+`docs/explanation/why-cavalry.md`: "One core, every language", whose thin clients
+were Python through PyO3 and Node through napi-rs beside .NET through P/Invoke, the
+JVM through Panama FFM and Go through cgo, until this ADR's commit (Consequences);
+"Stable ABI only at the C boundary"; the FFI-lifetimes risk; and, of Aeron's clients, Java
 first-class, C and C++ in the main repository, .NET in a separate Adaptive repository,
 Rust only as community wrappers over the C client, "No Python, TypeScript or Go", with
 the beachhead "every team that evaluated Aeron and chose Kafka, NATS or gRPC". Raft:
@@ -180,8 +182,10 @@ slice. Six features make the slice, one Trello card each, in this order:
 3. **The Node client (card 206).** `clients/node/` with TypeScript types,
    `conformance/node/`, and Node on both runners through its set-up action pinned to
    a full commit SHA (ADR 0003). How the client reaches the header, a native addon
-   over N-API or a foreign-function package, is the card's decision, recorded in its
-   commit with the reason, and under the allowlist rule if it is a dependency; the
+   over N-API that calls the header or a foreign-function package, is the card's
+   decision, recorded in its commit with the reason, and under the allowlist rule if
+   it is a dependency; napi-rs over the Rust crates is not one of the two
+   (Alternatives); the
    card records how the fragment handler is called back and what that allocates per
    message.
 4. **The Go client (card 207).** `clients/go/` over the header through cgo,
@@ -328,6 +332,18 @@ slice reads the protocol.
 - **Hand-written clients.** Lost: `CLAUDE.md` says generated where possible, five
   hand-written wrappers drift from the header, and a generator over the one committed
   header is a change in one place per ABI change.
+- **A Rust extension per language, PyO3 for Python and napi-rs for Node, as
+  `why-cavalry.md`'s "One core, every language" named them.** Lost: such an
+  extension binds `cavalry-client` directly through the language's own extension API,
+  not the header, so it is not a thin wrapper over `cavalry-ffi` (`CLAUDE.md`,
+  Clients and developer experience); two of the five clients would go round the
+  surface the first release freezes, so `conformance/c/` and the committed header
+  would not cover what they call, and the ABI would meet three runtimes' rules for
+  pointers, callbacks and threads before it freezes instead of five; and each would
+  be a further Rust crate on the data plane with its binding as a dependency under
+  the allowlist, built per platform into the language's package beside the one
+  library `cavalry-ffi` builds for all five, where Python's `ctypes` loads that
+  library and needs no dependency. The bullet now names the header (Consequences).
 - **A binding generator that owns the ABI.** Lost: such a generator's calling
   convention and buffer passing sit on the message path, and the ABI is Cavalry's own,
   decided under an ADR with Aeron's names, so that a C program calls it with no
@@ -378,11 +394,16 @@ convention, so misuse must be loud; a callback into a managed runtime is the slo
 path a message takes, each client's runner reports it and nothing gates it; invariant
 2's per-message rules and their gate stop at the ABI, so a client's own side may
 allocate per message, as Python's does, and each client's runner reports what it
-allocates, which nothing gates either; the bench
-hosts' baselines gain two rows per profile, recorded as ADR 0033 says; the ABI's ADR
-waits on Rjae, as the format ADRs did, and a later client can send it back to a new
-version before the first release; a flake in the client's tests is met by six runners
-instead of one until it is fixed.
+allocates, which nothing gates either; the bench hosts' baselines gain two rows per
+profile, recorded as ADR 0033 says; the ABI's ADR waits on Rjae, as the format ADRs
+did, and a later client can send it back to a new version before the first release;
+a flake in the client's tests is met by six runners instead of one until it is fixed.
+
+Changed in this ADR's commit: `why-cavalry.md`'s "One core, every language" named
+PyO3 for Python and napi-rs for Node, which bind the Rust crates and not the header,
+and now says that every client reaches the header through its language's
+foreign-function interface, as `CLAUDE.md`'s repository map and its rule for clients
+already say; the alternative that lost says why.
 
 Revisit: when the fifth client passes `just conformance` on both runners and the
 README says the fourth slice works, with a new ADR for the fifth slice, Raft, which

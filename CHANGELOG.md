@@ -1155,7 +1155,9 @@ user-visible change, added in the same commit as the change. The format follows
   from the header and run by `just conformance` on both runners. Invariant 2's
   per-message rules and their gate stop at the ABI, and each client's runner reports
   its one-way p50, p99.99 and max and the allocations per message on its runtime's
-  side, without a gate. Raft is the fifth
-  slice; the first release, with `conformance/upgrade/` and the ABI's freeze, is an
-  ADR of its own. Nothing in the slice needs a hand on the hosts
+  side, without a gate. Raft is the fifth slice; the first release, with
+  `conformance/upgrade/` and the ABI's freeze, is an ADR of its own. Nothing in the
+  slice needs a hand on the hosts. `why-cavalry.md`'s "One core, every language" now
+  says every client reaches the header through its language's foreign-function
+  interface, where it named PyO3 and napi-rs, which bind the Rust crates instead
   ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
