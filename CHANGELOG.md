@@ -1147,3 +1147,12 @@ user-visible change, added in the same commit as the change. The format follows
   [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
   made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
   tree while master is green is card 199's (card 182).
+- Removing and adding a subscription on one `cavalry:udp` channel in one client no
+  longer needs a retry: an `add subscription` that finds the channel's previous
+  receive endpoint still closing waits in the driver, with nothing registered, until
+  the receiver has closed it and then runs as it arrived, binding the endpoint again;
+  waiting adds hold slots of the subscriptions registry and go with a client that
+  closes first, and `subscription.add_deferred` counts them; the refusal with code 4
+  and "add the subscription again" is gone
+  ([ADR 0049](docs/decisions/0049-hold-an-add-until-the-closing-endpoint-has-closed.md);
+  card 194).

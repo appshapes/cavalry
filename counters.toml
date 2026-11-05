@@ -977,6 +977,14 @@ scope = "static"
 doc = "Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5)."
 doctor = ""
 
+[[counter]]
+id = 98
+name = "subscription.add_deferred"
+kind = "counter"
+scope = "static"
+doc = "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049)."
+doctor = ""
+
 # The image's life (spec/udp.md, "The receiver", step 5; ADR 0042): the receiver moves
 # it to live when the conductor hands the image over and to ended, timed out or
 # unsubscribed when it retires it; the conductor moves it to removed when it has

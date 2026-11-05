@@ -103,6 +103,7 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 95 | `image.timed_out` | counter | static | Images retired because no accepted datagram or heartbeat arrived for the image liveness timeout, 10 s (spec/udp.md, The receiver, step 5). | The sender stopped, its host went away, or the link dropped everything for 10 s: the subscribers got unavailable image; a sender that comes back creates a new image after the cool-down. |
 | 96 | `image.unsubscribed` | counter | static | Images retired because their last subscription on the endpoint and stream was removed, by remove subscription, client close or client timeout, with no unavailable image for a subscription its client removed (spec/udp.md, The receiver, step 5). |  |
 | 97 | `image.removed` | counter | static | Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5). |  |
+| 98 | `subscription.add_deferred` | counter | static | `add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049). |  |
 
 ## State machines
 
