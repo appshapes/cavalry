@@ -1152,7 +1152,10 @@ user-visible change, added in the same commit as the change. The format follows
   accepts, with Aeron's C client's names and result codes, a committed cbindgen header
   held by `just lint`, a C conformance runner that starts `conformance/`, and two ABI
   rows in the bench; then the Python, Node, Go, JVM and .NET clients, each generated
-  from the header and run by `just conformance` on both runners. Raft is the fifth
+  from the header and run by `just conformance` on both runners. Invariant 2's
+  per-message rules and their gate stop at the ABI, and each client's runner reports
+  its one-way p50, p99.99 and max and the allocations per message on its runtime's
+  side, without a gate. Raft is the fifth
   slice; the first release, with `conformance/upgrade/` and the ABI's freeze, is an
   ADR of its own. Nothing in the slice needs a hand on the hosts
   ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).

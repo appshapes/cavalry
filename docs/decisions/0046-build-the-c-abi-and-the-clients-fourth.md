@@ -32,8 +32,12 @@ other crate where `unsafe` is allowed, and `clients/` the "thin clients generate
 the C ABI: python, node, dotnet, jvm, go"; its gate for invariant 1 says
 "`conformance/` runs every client against `spec/`"; its rule says clients are "thin
 wrappers over `cavalry-ffi`, generated where possible, released together, all passing
-`conformance/`"; and its Unsafe rule says FFI buffer lifetimes are by convention, so
-debug builds poison released buffers. `crates/cavalry-ffi/README.md`: one Rust core
+`conformance/`"; its Unsafe rule says FFI buffer lifetimes are by convention, so
+debug builds poison released buffers; and it defines the data plane, where invariant 2
+forbids a heap allocation per message, as "any code a message passes through between
+`try_claim` on the publisher and the fragment handler on the subscriber", which does
+not say where that path ends in a client written in another language.
+`crates/cavalry-ffi/README.md`: one Rust core
 serves every language through a generated header; every non-Rust client's messages
 cross this boundary, which is why it is on the data plane; it is "the one surface
 frozen between releases"; it never changes without an accepted ADR, never behaves
@@ -165,27 +169,63 @@ slice. Six features make the slice, one Trello card each, in this order:
    released together. It builds the per-client runner shape, `conformance/python/`:
    the README's example extended with the checks, publish and subscribe over both
    channels, record and replay, every message once and in order, the handler's header
-   fields against `spec/frame.md`'s vectors, and its one-way p50 and p99.99 printed
-   as a report, never gated. Python first because both runners have Python 3 for the
-   scripts (ADR 0003), `ctypes` is in its standard library so the client has no
-   dependency, and Aeron has no Python client.
+   fields against `spec/frame.md`'s vectors, and a report printed and never gated: its
+   one-way p50, p99.99 and max, and the allocations per message on its runtime's side
+   of the boundary (below). The card records how `ctypes` calls the fragment handler
+   back and what that allocates per message: a `ctypes` callback builds its arguments
+   as new Python objects on every call, and a view over a claimed slice is a new
+   object per claim. Python first because both runners have Python 3 for the scripts
+   (ADR 0003), `ctypes` is in its standard library so the client has no dependency,
+   and Aeron has no Python client.
 3. **The Node client (card 206).** `clients/node/` with TypeScript types,
    `conformance/node/`, and Node on both runners through its set-up action pinned to
    a full commit SHA (ADR 0003). How the client reaches the header, a native addon
    over N-API or a foreign-function package, is the card's decision, recorded in its
-   commit with the reason, and under the allowlist rule if it is a dependency.
+   commit with the reason, and under the allowlist rule if it is a dependency; the
+   card records how the fragment handler is called back and what that allocates per
+   message.
 4. **The Go client (card 207).** `clients/go/` over the header through cgo,
    `conformance/go/`, and Go on both runners the same way; cgo's pointer rules decide
    what crosses the boundary, and the card records how the fragment handler is called
-   back without a per-message allocation.
+   back and what that allocates per message.
 5. **The JVM client (card 208).** `clients/jvm/` through Java's foreign function and
    memory API, no JNI, `conformance/jvm/`, and a JDK on both runners the same way;
-   the card records the Java release it needs and how an upcall for the fragment
-   handler is made without a per-message allocation.
+   the card records the Java release it needs, and how an upcall for the fragment
+   handler is made and what that allocates per message.
 6. **The .NET client (card 209).** `clients/dotnet/` through P/Invoke with the
    source-generated marshalling, `conformance/dotnet/`, and the .NET SDK on both
    runners the same way; the card records how the handler delegate is called back
-   without a per-message allocation.
+   and what that allocates per message.
+
+Each of the four runners after Python's has the shape card 205 builds, its report
+included.
+
+Where invariant 2's per-message rules stop, one rule for all five clients. For a
+client over the ABI, the data plane those rules hold is the Rust core behind the ABI:
+each function a message passes through, `cavalry_publication_try_claim`,
+`cavalry_buffer_claim_commit`, `cavalry_publication_offer` and
+`cavalry_subscription_poll`, from its call to its return, except the time inside the
+C fragment handler the poll was given. That path makes no heap allocation, takes no
+lock, makes no syscall, has no `await` and no panic path per message; card 204's
+allocation test over the ABI's path asserts it, and its two bench rows gate it.
+Outside those rules and outside their
+gate is the runtime's side of each call: the language's trampoline, the objects it
+makes for the arguments, and the client's code between the user's code and the ABI,
+in both directions. Every client's card measures that side with what its runtime
+counts, allocations or bytes allocated per message; takes the call-back with the
+fewest allocations its runtime offers; records the call-back and the count in its
+commit and its README; and its runner prints the count in the report beside the
+one-way p50, p99.99 and max, which nothing gates. A card whose runtime cannot call
+the handler back without allocating, as Python's `ctypes` cannot, still lands, with
+its count on record: it does not hold the slice, add a knob, or move its client to a
+re-implementation of the protocol. Three reasons, given again in the alternative that
+lost: the allocation test counts Rust's global allocator and sees no runtime's heap,
+so a rule on the runtime's side would have no gate; the allocator, the collector and
+the interpreter belong to the runtime the user chose, and nothing in Cavalry removes
+the tail they add; and a rule that every client's side allocates nothing rules out
+Python, which `CLAUDE.md` names first among the clients. Card 204 writes this
+boundary into `CLAUDE.md`'s definition of the data plane and into
+`crates/cavalry-ffi/README.md`, in the commit with the first public item.
 
 The clients' order: Python first, for the reasons on its card; Node and Go next, the
 other two languages Aeron leaves open and the beachhead's; the JVM and .NET last,
@@ -208,8 +248,8 @@ export and discovery (`cavalry-control`); encryption; multicast and multi-destin
 cast (ADR 0039). Two decisions are left to the feature ADRs that must carry their
 evidence: where the ABI's page lives, under `spec/` beside the layouts with the
 committed header as its vector or as the header's reference page, and what a reader
-of it rejects (card 204); and how each managed runtime calls the fragment handler
-back without a per-message allocation (cards 206 to 209).
+of it rejects (card 204); and how each runtime calls the fragment handler back, with
+the fewest allocations it offers and the count on record (cards 205 to 209).
 
 The open cards, placed. Nine are open on the Cavalry list and none joins the slice.
 Card 159, the soak host's week, waits on Rjae's hand on `kip`; its note that the host
@@ -272,6 +312,19 @@ slice reads the protocol.
   gates, a JDK and a build on both runners, for a language Aeron serves first-class;
   the first client proves the generator and the runner shape with the least new CI,
   and Python is on both runners today.
+- **Invariant 2's per-message rules over every client's own side, Python's
+  included.** Lost: CPython's `ctypes` cannot call a Python handler without making
+  objects for its arguments, and a view over a claimed slice is an object per claim,
+  so the rule rules out the first client and a language `CLAUDE.md` names; the
+  allocation test counts Rust's global allocator and sees no runtime's heap, so the
+  rule would be one with no gate, and `CLAUDE.md` says not to ship around a missing
+  gate; and a runtime's collector and interpreter add a tail that nothing in Cavalry
+  can remove. Each runner reports the runtime's side instead, and the Revisit names
+  the report that reads zero.
+- **A zero-allocation gate on the clients whose runtime can meet one.** Lost: which
+  runtimes can is what cards 205 to 209 find out, not what this ADR knows, and a rule
+  that differs by client is five rules for a stranger to read; one rule holds all
+  five, and a runner moves to a gate when its report earns it (Revisit).
 - **Hand-written clients.** Lost: `CLAUDE.md` says generated where possible, five
   hand-written wrappers drift from the header, and a generator over the one committed
   header is a change in one place per ABI change.
@@ -322,7 +375,10 @@ a frozen surface instead of changing it.
 Harder: the gates grow by five toolchains, each a pinned set-up action and minutes on
 both runners; `cavalry-ffi` is the second `unsafe` crate, and its lifetimes are by
 convention, so misuse must be loud; a callback into a managed runtime is the slowest
-path a message takes, each client's runner reports it and nothing gates it; the bench
+path a message takes, each client's runner reports it and nothing gates it; invariant
+2's per-message rules and their gate stop at the ABI, so a client's own side may
+allocate per message, as Python's does, and each client's runner reports what it
+allocates, which nothing gates either; the bench
 hosts' baselines gain two rows per profile, recorded as ADR 0033 says; the ABI's ADR
 waits on Rjae, as the format ADRs did, and a later client can send it back to a new
 version before the first release; a flake in the client's tests is met by six runners
@@ -335,8 +391,10 @@ one publication per follower or multi-destination cast (ADR 0039's Revisit); at 
 first release, for the release's ADR, `publish` flipped, the five registries, the
 version the ABI freezes at and `conformance/upgrade/` (ADR 0003's Revisit); when a
 user asks for a sixth language or a C++ wrapper; when a client needs counters of its
-own (ADR 0019's Revisit); when a managed runtime's callback cost shows in a client's
-report, for a batched poll across the boundary.
+own (ADR 0019's Revisit); when a managed runtime's callback cost or its allocations
+per message show in a client's report, for a batched poll across the boundary; when a
+client's report reads zero allocations per message on its runtime's side on both
+runners, for whether that runner asserts it.
 
 ## References
 
