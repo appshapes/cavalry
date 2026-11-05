@@ -1271,3 +1271,15 @@ user-visible change, added in the same commit as the change. The format follows
   vector, and `spec/client-protocol.md` keeps its error codes below 100 for the ABI
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).
+- `bench`'s two bench profiles, `bench-linux` and `bench-linux-unchecked`, are
+  re-recorded at the tree of 3fe13b4 from its ten processes, pull request 128's four
+  runs, master's two and pull request 129's four, with every gated row's slowest run
+  before and after in the commit and the process behind each row that loosened. The
+  checked `claim_commit_32_recorded` row had turned `bench (linux)` red on pull
+  requests 128 and 129 at 330 ns against a slowest run of 310 ns recorded on
+  2026-10-31, while master's own runs at the tree read 320 and passed. Card 216's
+  measurement on the idle host, five runs at c07266e and five at its parent 2243918,
+  read the same band at both, 310 to 330 against 310 to 320, so the band is the host's
+  and the 21-run process's, not card 177's change. Six rows loosen by more than
+  5 percent: the checked recorded row to 360 ns, and five by one run of one process,
+  one or two clock steps above the rest (card 216).
