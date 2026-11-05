@@ -2026,7 +2026,7 @@ impl Conductor {
             self.add_udp_subscription(client_id, correlation_id, stream_id, udp, raw);
             return;
         }
-        if self.subscriptions.len() >= spec::MAX_SUBSCRIPTIONS {
+        if self.subscriptions_full() {
             self.registry_full(correlation_id, "subscriptions", spec::MAX_SUBSCRIPTIONS);
             return;
         }
@@ -2100,6 +2100,15 @@ impl Conductor {
         Some((endpoint, interface))
     }
 
+    /// Whether the subscriptions registry is at capacity: its registered subscriptions
+    /// and the adds waiting for a closing receive endpoint, which hold a slot each
+    /// (`spec/client-protocol.md`, "Sizes"; ADR 0049). Every `add subscription`, on
+    /// `cavalry:ipc` or `cavalry:udp`, asks this one, so neither takes a waiting add's
+    /// slot.
+    fn subscriptions_full(&self) -> bool {
+        self.subscriptions.len() + self.pending_subscriptions.len() >= spec::MAX_SUBSCRIPTIONS
+    }
+
     /// `add subscription` on a `cavalry:udp` channel (`spec/client-protocol.md`,
     /// "Commands"; `spec/udp.md`, "The receiver"; ADR 0042): the host is resolved once,
     /// code 9 when it does not; the first subscription on the resolved channel binds its
@@ -2120,8 +2129,7 @@ impl Conductor {
         channel: UdpChannel<'_>,
         raw: &[u8],
     ) {
-        // An add waiting for a closing endpoint holds a slot of the registry (ADR 0049).
-        if self.subscriptions.len() + self.pending_subscriptions.len() >= spec::MAX_SUBSCRIPTIONS {
+        if self.subscriptions_full() {
             self.registry_full(correlation_id, "subscriptions", spec::MAX_SUBSCRIPTIONS);
             return;
         }
@@ -11313,6 +11321,61 @@ mod receiving {
         assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
         assert!(h.conductor.subscriptions.is_empty());
         assert_eq!(h.counter(CHANNEL_OPENED), 1);
+    }
+
+    /// A `cavalry:ipc` add counts the waiting adds against the subscriptions registry
+    /// as a `cavalry:udp` add does, so it cannot take a slot a waiting add holds: with
+    /// 1023 subscriptions registered and one add waiting, the IPC add is code 10 with
+    /// nothing registered, and the close then registers the waiting add
+    /// (`spec/client-protocol.md`, "Sizes"; ADR 0049).
+    #[test]
+    fn an_ipc_add_cannot_take_the_slot_a_waiting_add_holds() {
+        let mut h = Harness::new("udp-closing-ipc");
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 2, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        assert_eq!(
+            h.conductor.receive_endpoints[0].state,
+            ChannelState::Closing
+        );
+        let registered = spec::MAX_SUBSCRIPTIONS as i64 - 1;
+        for n in 0..registered {
+            h.conductor.add_subscription(1, 10 + n, STREAM, IPC_CHANNEL);
+        }
+        assert_eq!(h.last_error(10), None);
+        assert_eq!(h.conductor.subscriptions.len(), spec::MAX_SUBSCRIPTIONS - 1);
+        h.conductor
+            .add_subscription(1, 5_000, STREAM, channel.as_bytes());
+        assert_eq!(h.conductor.pending_subscriptions.len(), 1);
+        // The registry is full, 1023 registered and one waiting: the IPC add is
+        // refused, with nothing registered.
+        h.conductor.add_subscription(1, 6_000, STREAM, IPC_CHANNEL);
+        let (code, message) = h.last_error(6_000).expect("the IPC add is refused");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("subscriptions"), "{message}");
+        assert_eq!(h.conductor.subscriptions.len(), spec::MAX_SUBSCRIPTIONS - 1);
+        assert!(
+            !h.conductor
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.registration_id == 6_000)
+        );
+        // The receiver closes the endpoint: the waiting add takes the slot it held.
+        assert!(h.cycle_until(|h| h.conductor.subscriptions.len() == spec::MAX_SUBSCRIPTIONS));
+        assert_eq!(h.last_error(5_000), None);
+        assert!(h.conductor.pending_subscriptions.is_empty());
+        assert!(
+            h.conductor
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.registration_id == 5_000)
+        );
+        assert_eq!(h.counter(CHANNEL_OPENED), 2);
     }
 
     /// The receive endpoints registry fills at its capacity, and a 65th is code 10
