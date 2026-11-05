@@ -25,9 +25,12 @@ cavalry-log = { path = "../crates/cavalry-log" }
 # The histograms every number comes from: p50, p99, p99.99 and max, never a mean
 # (CLAUDE.md, invariant 2; ADR 0015). Fixed bounds, so recording never allocates.
 hdrhistogram = "7"
-# The counting allocator behind the zero-allocations-per-message assertion (CLAUDE.md,
-# gate 2). It carries the `unsafe` a global allocator needs, so this crate carries none.
-stats_alloc = "0.1"
+# The allocator behind the zero-allocations-per-message assertion (CLAUDE.md, gate 2): a
+# hook on every allocation while a counting window is open, which counts it and keeps
+# the first one's backtrace, so a run that fails the gate names the frame (ADR 0047;
+# card 176). It carries the `unsafe` a global allocator needs, so this crate carries
+# none. Its `tracing` features are off: nothing here traces.
+tracking-allocator = { version = "0.4", default-features = false }
 # `--pin`: each measured thread on a CPU of its own on the bench host (ADR 0016). It
 # carries the `unsafe` the affinity call needs, so this crate carries none.
 core_affinity = "0.8"
