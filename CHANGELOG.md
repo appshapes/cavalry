@@ -1278,6 +1278,22 @@ user-visible change, added in the same commit as the change. The format follows
   one on the wire format, the on-disk log format or the C ABI included, lands Accepted
   on its evidence and names no person to accept it
   ([Implement a feature](docs/how-to/implement-a-feature.md), step 2; card 214).
+- The review loop's sweep of the `ci` runs GitHub holds on a fixer's superseded pushes
+  deletes each run instead of approving and cancelling it, in the fixer's last job and
+  again right before the merge: the approval queued the run into `ci.yml`'s concurrency
+  group, which cancelled the head's live run three seconds later (measured on pull
+  request 131), so the sweep had to stop while a run at the head was live, which at the
+  merge is usual, and what it left held still failed with a mail at the merge (pull
+  request 121); a held run accepts a delete, which queues nothing. And the auto-merge an
+  approval armed is disarmed by what moves the pull request past that approval: a push
+  by a person (`.github/workflows/dispatch-review.yml`), a push by the fixer
+  (`.github/workflows/claude.yml`, its last job, before it approves the pushed head's
+  held run) and a review that requests changes on the approved head
+  (`.github/workflows/auto-merge.yml`), since GitHub's auto-merge survives a push by a
+  person with write access and the branch protection requires no review; a head with an
+  approval of its own stays armed, and the reviewer's approval of the new head arms it
+  again. [Ask the agent to make a change](docs/how-to/ask-the-agent.md) says what
+  disarms a merge (card 217).
 - The bench's client rows no longer count the driver's conductor retiring the
   subscriber's subscription inside the measured loop: the subscriber thread hands its
   subscription back with its histogram, as the UDP rows' does, and the publisher closes
