@@ -250,10 +250,11 @@ fn a_replay_plays_a_recording_into_a_subscription_at_the_recordings_positions() 
     );
     // The image ends at the end position and then goes: the driver retires a replay's
     // image as it does a closed publication's, once every subscriber has reached the
-    // end of stream position (`spec/client-protocol.md`, "Replay"), which this
-    // subscriber has. So after the drain the image is there and ended, or gone; this
-    // test read it as if it stayed, and found it gone once in a few hundred runs on the
-    // Linux gate (card 185): the test's race, not the driver's.
+    // end of stream position or the linger has passed (`spec/client-protocol.md`,
+    // "Commands" and "Events"), and this test's one subscriber has reached it. So
+    // after the drain the image is there and ended, or gone; this test read it as if
+    // it stayed, and found it gone once in a few hundred runs on the Linux gate (card
+    // 185): the test's race, not the driver's.
     wait("the image ends, or has gone", || {
         subscription.poll(|_, _| {}, 0).expect("the poll applies");
         match subscription.images().first() {
