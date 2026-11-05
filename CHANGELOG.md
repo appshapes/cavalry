@@ -1277,9 +1277,18 @@ user-visible change, added in the same commit as the change. The format follows
   before and after in the commit and the process behind each row that loosened. The
   checked `claim_commit_32_recorded` row had turned `bench (linux)` red on pull
   requests 128 and 129 at 330 ns against a slowest run of 310 ns recorded on
-  2026-10-31, while master's own runs at the tree read 320 and passed. Card 216's
-  measurement on the idle host, five runs at c07266e and five at its parent 2243918,
-  read the same band at both, 310 to 330 against 310 to 320, so the band is the host's
-  and the 21-run process's, not card 177's change. Six rows loosen by more than
-  5 percent: the checked recorded row to 360 ns, and five by one run of one process,
-  one or two clock steps above the rest (card 216).
+  2026-10-31, while master's own runs at the tree read 320 and 319 ns and passed.
+  Card 216's measurement on the idle host, one process of five runs at c07266e and one
+  at its parent 2243918, read 310 to 330 against 310 to 320 ns. CI's 21-run processes
+  of 2026-11-05 split the row at card 177's commit: the twelve at the parent's tree
+  read medians of 300 to 320 ns and no run above 330, and the sixteen with card 177's
+  change read medians of 310 to 330 ns, nine of them with a run above 330. This change
+  does not settle whether the row rose with the host or with card 177's change
+  (card 216). Six rows loosen by more than 5 percent: the checked recorded row to
+  360 ns; the checked client and concurrent claim rows to 170 ns, one clock step above
+  the other processes' slowest runs, the client row by twelve runs in three processes
+  and the concurrent row by one run in each of two; and three rows by one run of one
+  process, the checked one-way concurrent row two clock steps above every other run,
+  the unchecked udp claim row 41 ns above every other run, more than four steps, with
+  no cause on record, and the unchecked one-way client row one step above every other
+  run.
