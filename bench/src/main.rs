@@ -15,13 +15,14 @@
 //! `cavalry-bench --help` lists the options; `docs/how-to/run-the-bench.md` is the page.
 
 use std::alloc::System;
+use std::backtrace::Backtrace;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -36,10 +37,102 @@ use cavalry_shm::counters::generated::{
 use cavalry_shm::counters::{CountersFile, CountersReader};
 use cavalry_shm::log::{ClaimError, HeaderFields, LogBuffers, LogType};
 use hdrhistogram::Histogram;
-use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
+use tracking_allocator::{AllocationGroupId, AllocationRegistry, AllocationTracker, Allocator};
 
 #[global_allocator]
-static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+static GLOBAL: Allocator<System> = Allocator::system();
+
+/// The allocations every thread of this process made while a [`Counting`] window was
+/// open, a reallocation counted as one, counted by the hook below; a window's count is
+/// the difference between its two readings.
+static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+/// The backtrace of the first allocation a window saw, once per process, captured in
+/// the hook, so that a run which fails the allocation gate names the frame that
+/// allocated and the thread it ran on, not a count alone: one allocation in 20,000,000
+/// messages on the macOS gate, seen now and then, could not be placed from the count
+/// (card 176; ADR 0047).
+static FIRST_ALLOCATION: OnceLock<String> = OnceLock::new();
+
+/// The hook the allocator calls for every allocation while tracking is enabled, which
+/// is only inside a [`Counting`] window: it counts, and on the first one it captures
+/// the backtrace. The allocator ignores the allocations the capture itself makes, so
+/// the capture neither recurses nor counts. A reallocation reaches it too: the
+/// allocator keeps `GlobalAlloc`'s default `realloc`, which allocates anew through the
+/// hooked `alloc`, so a vector grown past its capacity counts, where `stats_alloc`'s
+/// count left it out (ADR 0047).
+struct CountingTracker;
+
+impl AllocationTracker for CountingTracker {
+    fn allocated(
+        &self,
+        _addr: usize,
+        _object_size: usize,
+        _wrapped_size: usize,
+        _group: AllocationGroupId,
+    ) {
+        if ALLOCATIONS.fetch_add(1, Ordering::Relaxed) == 0 {
+            let _ = FIRST_ALLOCATION.set(Backtrace::force_capture().to_string());
+        }
+    }
+
+    fn deallocated(
+        &self,
+        _addr: usize,
+        _object_size: usize,
+        _wrapped_size: usize,
+        _source: AllocationGroupId,
+        _current: AllocationGroupId,
+    ) {
+    }
+}
+
+/// A counting window around a measured loop: opened when the warm-up ends, closed when
+/// the loop ends. Every thread's allocations count while it is open, the driver's and
+/// the subscriber's included, as the gate's rule says; nothing counts outside one.
+struct Counting {
+    start: usize,
+}
+
+impl Counting {
+    fn open() -> Self {
+        let start = ALLOCATIONS.load(Ordering::Relaxed);
+        AllocationRegistry::enable_tracking();
+        Self { start }
+    }
+
+    /// Closes the window and returns the allocations it saw.
+    fn close(&self) -> usize {
+        AllocationRegistry::disable_tracking();
+        ALLOCATIONS.load(Ordering::Relaxed).wrapping_sub(self.start)
+    }
+}
+
+/// A window closes when it is dropped as well, so a measured loop that returns early
+/// through `?` leaves no tracking enabled behind it. Closing twice is harmless.
+impl Drop for Counting {
+    fn drop(&mut self) {
+        AllocationRegistry::disable_tracking();
+    }
+}
+
+/// The first allocation's backtrace once the hook has captured it: `None` when no
+/// window counted an allocation. Otherwise the thread that allocated first is still
+/// symbolising the capture, or has finished, and this waits up to five seconds for it.
+fn first_allocation() -> Option<&'static str> {
+    if ALLOCATIONS.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(first) = FIRST_ALLOCATION.get() {
+            return Some(first.as_str());
+        }
+        if Instant::now() > deadline {
+            return None;
+        }
+        thread::yield_now();
+    }
+}
 
 const SCHEMA: u32 = 0;
 /// Spins of the conductor's loop between two reads of the clock, which decide when the
@@ -996,11 +1089,11 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
     let mut appender = publisher_log.appender().map_err(|e| e.to_string())?;
     let mut hist = histogram();
     let mut retries: u64 = 0;
-    let mut region: Option<Region<'static, System>> = None;
+    let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
     for i in 0..total {
         if i == warmup {
-            region = Some(Region::new(GLOBAL));
+            counting = Some(Counting::open());
             start = Instant::now();
         }
         let stamp = nanos(epoch);
@@ -1024,7 +1117,7 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
         }
     }
     let elapsed = start.elapsed();
-    let allocations = region.as_ref().map_or(0, |r| r.change().allocations);
+    let allocations = counting.as_ref().map_or(0, Counting::close);
     let one_way = subscriber
         .join()
         .map_err(|_| "the subscriber thread panicked".to_string())??;
@@ -1174,11 +1267,11 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
     let mut stalled: u64 = 0;
     const STALL_CHECK: u64 = 4096;
     const STALL_LIMIT: Duration = Duration::from_secs(10);
-    let mut region: Option<Region<'static, System>> = None;
+    let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
     for i in 0..total {
         if i == warmup {
-            region = Some(Region::new(GLOBAL));
+            counting = Some(Counting::open());
             start = Instant::now();
         }
         let stamp = nanos(epoch);
@@ -1217,7 +1310,7 @@ fn run_client(options: &Options, dir: &std::path::Path, recorded: bool) -> Resul
         }
     }
     let elapsed = start.elapsed();
-    let allocations = region.as_ref().map_or(0, |r| r.change().allocations);
+    let allocations = counting.as_ref().map_or(0, Counting::close);
     let one_way = match subscriber.join() {
         Ok(Ok(hist)) => hist,
         failed => return Err(subscriber_failure(failed)),
@@ -1541,11 +1634,11 @@ fn publish_one_in_flight<T>(
     const STALL_LIMIT: Duration = Duration::from_secs(10);
     let mut hist = histogram();
     let mut retries: u64 = 0;
-    let mut region: Option<Region<'static, System>> = None;
+    let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
     for i in 0..total {
         if i == warmup {
-            region = Some(Region::new(GLOBAL));
+            counting = Some(Counting::open());
             start = Instant::now();
         }
         // One in flight: the last message has reached the subscriber's handler.
@@ -1612,7 +1705,7 @@ fn publish_one_in_flight<T>(
         }
     }
     let elapsed = start.elapsed();
-    let allocations = region.as_ref().map_or(0, |r| r.change().allocations);
+    let allocations = counting.as_ref().map_or(0, Counting::close);
     Ok(Published {
         claim_commit: hist,
         elapsed,
@@ -2100,8 +2193,12 @@ fn json_object<T: std::fmt::Display>(by_name: &BTreeMap<String, T>) -> String {
 /// benchmarks whose loops made it, each under the name the lines under the table list
 /// it by, and the anchor that explains it; `None` when every benchmark's count is 0.
 /// A count of 1 in 20,500,000 messages, which `gates (macos)` read at cb2f538, could
-/// not be placed from the sum alone.
-fn allocation_failure(by_benchmark: &BTreeMap<String, usize>) -> Option<String> {
+/// not be placed from the sum alone, so the message carries `first`, the backtrace of
+/// the first allocation a window saw ([`FIRST_ALLOCATION`]), frame by frame.
+fn allocation_failure(
+    by_benchmark: &BTreeMap<String, usize>,
+    first: Option<&str>,
+) -> Option<String> {
     let allocations: usize = by_benchmark.values().sum();
     if allocations == 0 {
         return None;
@@ -2111,12 +2208,26 @@ fn allocation_failure(by_benchmark: &BTreeMap<String, usize>) -> Option<String> 
         .filter(|(_, count)| **count > 0)
         .map(|(name, &count)| (name.clone(), count))
         .collect();
-    Some(format!(
+    let mut message = format!(
         "the measured loops allocated {allocations} times, by benchmark {}; the gate requires \
          zero allocations per message (CLAUDE.md, gate 2; .claude/rules/data-plane.md); see \
          docs/how-to/run-the-bench.md#when-it-does-not-work",
         listed(&allocated, "")
-    ))
+    );
+    match first {
+        Some(backtrace) => {
+            let _ = write!(
+                message,
+                "\n  the first allocation a measured loop saw, frame by frame from the \
+                 allocator's hook to the thread's start:\n{backtrace}"
+            );
+        }
+        None => message.push_str(
+            "\n  no backtrace was captured for the first allocation within five seconds of the \
+             last row; run the same command again, since each run captures afresh",
+        ),
+    }
+    Some(message)
 }
 
 /// What the record row produced.
@@ -2192,11 +2303,11 @@ fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, Str
         (usize::try_from(options.messages).unwrap_or(usize::MAX) / per_block).clamp(1, most);
     let warmup = blocks.min(8);
     let mut hist = histogram();
-    let mut region: Option<Region<'static, System>> = None;
+    let mut counting: Option<Counting> = None;
     let mut start = Instant::now();
     for block in 0..warmup + blocks {
         if block == warmup {
-            region = Some(Region::new(GLOBAL));
+            counting = Some(Counting::open());
             start = Instant::now();
         }
         for _ in 0..per_block {
@@ -2224,7 +2335,7 @@ fn run_record(options: &Options, dir: &std::path::Path) -> Result<RecordRun, Str
         }
     }
     let elapsed = start.elapsed();
-    let allocations = region.as_ref().map_or(0, |r| r.change().allocations);
+    let allocations = counting.as_ref().map_or(0, Counting::close);
     log_dir.stop(writer, now).map_err(|e| e.to_string())?;
     Ok(RecordRun {
         record_block: summarize(&hist, elapsed),
@@ -2333,6 +2444,16 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
 }
 
 fn main() -> ExitCode {
+    // The hook behind the measured loops' allocation count, set once per process and
+    // enabled only inside a counting window.
+    if AllocationRegistry::set_global_tracker(CountingTracker).is_err() {
+        eprintln!(
+            "cavalry-bench: the allocation tracker was already set, which nothing in this binary \
+             does before main; the allocation gate cannot count without its own, so report this \
+             line as a bug in the harness (bench/src/main.rs, main; ADR 0047)"
+        );
+        return ExitCode::FAILURE;
+    }
     // The clock calibrates once, for up to 200 ms, before the first row (ADR 0028).
     let _ = clock();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -2626,7 +2747,7 @@ fn main() -> ExitCode {
         println!("  written to {}", path.display());
     }
 
-    if let Some(message) = allocation_failure(&allocations_by_benchmark) {
+    if let Some(message) = allocation_failure(&allocations_by_benchmark, first_allocation()) {
         eprintln!("cavalry-bench: {message}");
         return ExitCode::FAILURE;
     }
@@ -2976,16 +3097,90 @@ mod tests {
     #[test]
     fn the_allocation_failure_names_the_benchmarks_that_allocated() {
         let mut by_benchmark = BTreeMap::from([("client".to_string(), 0), ("udp".to_string(), 0)]);
-        assert_eq!(allocation_failure(&by_benchmark), None);
+        assert_eq!(allocation_failure(&by_benchmark, None), None);
         by_benchmark.insert("udp".to_string(), 1);
         by_benchmark.insert("record".to_string(), 2);
-        let message = allocation_failure(&by_benchmark).expect("three allocations fail");
+        let message = allocation_failure(&by_benchmark, None).expect("three allocations fail");
         assert!(
             message.contains("allocated 3 times")
                 && message.contains("by benchmark record 2, udp 1;")
                 && !message.contains("client")
                 && message.contains("docs/how-to/run-the-bench.md#when-it-does-not-work"),
             "{message}"
+        );
+    }
+
+    /// The failure's message carries the first allocation's backtrace when one was
+    /// captured, and says so when none was.
+    #[test]
+    fn the_failure_carries_the_first_allocations_backtrace() {
+        let by_benchmark = BTreeMap::from([("udp".to_string(), 1)]);
+        let frames = "   0: alloc::raw_vec::grow\n   1: cavalry_bench::entry";
+        let message =
+            allocation_failure(&by_benchmark, Some(frames)).expect("one allocation fails");
+        assert!(
+            message.contains("allocated 1 times, by benchmark udp 1"),
+            "{message}"
+        );
+        assert!(message.contains("frame by frame"), "{message}");
+        assert!(message.contains("0: alloc::raw_vec::grow"), "{message}");
+        let message = allocation_failure(&by_benchmark, None).expect("one allocation fails");
+        assert!(message.contains("no backtrace was captured"), "{message}");
+    }
+
+    /// The tests that open a counting window take this first, so they run one at a
+    /// time: tracking is process-wide, and one test's window closing would stop the
+    /// count inside another's. The tests that open none run beside them, and their
+    /// allocations count in an open window, so a window's count is a lower bound.
+    static ONE_WINDOW: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn one_window() -> std::sync::MutexGuard<'static, ()> {
+        ONE_WINDOW
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A counting window counts the allocations made while it is open and keeps the
+    /// first one's backtrace, captured inside the allocator's hook.
+    #[test]
+    fn a_counting_window_counts_and_keeps_the_first_backtrace() {
+        let _one = one_window();
+        // The tracker is process-wide and set once; another test may have set it.
+        let _ = AllocationRegistry::set_global_tracker(CountingTracker);
+        let window = Counting::open();
+        let grown: Vec<u8> = std::hint::black_box(vec![7u8; 4096]);
+        let counted = window.close();
+        assert_eq!(grown.len(), 4096);
+        assert!(counted >= 1, "counted {counted}");
+        let first = first_allocation().expect("the first allocation's backtrace");
+        assert!(!first.is_empty());
+    }
+
+    /// A vector grown past a capacity it already had counts: the allocator keeps
+    /// `GlobalAlloc`'s default `realloc`, which allocates anew through the hooked
+    /// `alloc`, copies and frees. `stats_alloc` counted a reallocation apart from the
+    /// allocations the gate read, so before ADR 0047 none of these counted.
+    #[test]
+    fn a_counting_window_counts_a_vector_grown_past_its_capacity() {
+        // Each grow below is from a capacity of one or more, so each is a reallocation
+        // and none an allocation from empty; 64 of them, so that the count is the
+        // grows' and not the few allocations another test makes inside the window.
+        const GROWS: usize = 64;
+        let _one = one_window();
+        let _ = AllocationRegistry::set_global_tracker(CountingTracker);
+        let mut grown: Vec<u8> = Vec::with_capacity(1);
+        grown.push(0);
+        let window = Counting::open();
+        for _ in 0..GROWS {
+            grown.reserve_exact(1);
+            grown.push(7);
+            std::hint::black_box(&mut grown);
+        }
+        let counted = window.close();
+        assert_eq!(grown.len(), GROWS + 1);
+        assert!(
+            counted >= GROWS,
+            "counted {counted} in {GROWS} reallocations"
         );
     }
 }
