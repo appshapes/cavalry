@@ -286,9 +286,11 @@ master:
 - **What the harness builds.** `bench/Cargo.toml` names `cavalry-shm`,
   `cavalry-client`, `cavalry-driver` and `cavalry-log`, which in turn name
   `cavalry-proto`. None of them names `cavalry` or `cavalry-control`, nor
-  `cavalry-ffi` or `cavalry-raft`, the two data-plane stubs the guard keeps all the
-  same; `git log 0782ec5..34049ac -- crates/cavalry-ffi crates/cavalry-raft` prints
-  nothing, so the eighteen stand under the guard as written.
+  `cavalry-ffi` or `cavalry-raft`, the two data-plane crates the harness does not
+  build, which the guard keeps all the same; `git log 0782ec5..34049ac --
+  crates/cavalry-ffi crates/cavalry-raft` prints nothing, so the eighteen stand under
+  the guard as written (93efe94 later built `cavalry-ffi` into a crate, and the guard
+  lists it for a second red against an older entry, as designed).
 
 Where a first red's process is kept, read on 2026-11-05:
 

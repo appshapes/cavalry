@@ -185,13 +185,18 @@ shared runner is
    `gh run rerun <run id>` (step 5). Download each attempt's artifact before the next
    re-run, `bench-results-bench-linux` from `bench (linux)` for `bench`,
    `bench-results-grip-linux` from `bench (grip)` for `grip` or
-   `bench-results-bench-linux-link` from `bench (udp)` for the link: a re-run replaces
-   the run's artifact of the same name, and the run's page and the artifacts endpoint
-   keep only the newest attempt's, so an attempt whose artifact was not saved first is
-   a lost process (attempts 1 and 2 of run 41196273792 went that way on 2026-10-31).
-   The download is `gh run download <run id> --name <artifact> --dir <a new
-   directory>`, which gives the newest attempt's files alone. Every artifact
-   expires seven days after its attempt began.
+   `bench-results-bench-linux-link` from `bench (udp)` for the link. After a re-run of
+   one job, the run's artifacts endpoint lists two artifacts of that name, one per
+   attempt (runs 42104363740 and 42105029604 on 2026-11-05, and run 41853288029 in
+   ADR 0050's Evidence), and `gh run download <run id> --name <artifact>` fetches one
+   of them, the first attempt's on those runs; so list them with `gh api
+   repos/appshapes/cavalry/actions/runs/<run id>/artifacts` and take each attempt's by
+   its id, `gh api repos/appshapes/cavalry/actions/artifacts/<id>/zip`, into a new
+   directory each. After a re-run of every job, which a link row's whole-run re-run is
+   (step 5), the run's page and the artifacts endpoint keep the newest attempt's
+   alone, so an attempt whose artifact was not saved first is a lost process (attempts
+   1 and 2 of run 41196273792 went that way on 2026-10-31). Every artifact expires
+   seven days after its attempt began.
    Pass one profile's
    files to one `--update`, the `bench-linux` results in one call and the
    `bench-linux-unchecked` results in another, or the `grip-linux` and
@@ -328,7 +333,8 @@ shared runner is
       and carries what **List the changes** printed; a later red's says `Third red.`,
       and so on, and links the record before it.
 
-   After a first red, a person's session re-runs the job; an agent's session cannot,
+   After a first red, a person's session re-runs the job, or for a link row the whole
+   run (step 5); an agent's session cannot,
    as below. After a second red or a later one, nobody re-runs. What a second red does
    depends on what **List the changes** printed:
 
