@@ -606,21 +606,34 @@ jobs:
       # reviewer's approval alone counts, since it alone arms a merge, as its latest
       # verdict on the head, and the check is made again after the disarm, since an
       # approval that crossed it leaves a merge nothing arms again on its own. A failure
-      # here stops the job: approving the held run under an armed merge is the one thing
-      # this job must not do, so the error names what to run, and the approval and the
-      # label are a person's then.
+      # here stops the job, a failed read included: approving the held run under an
+      # armed merge is the one thing this job must not do, so every ending that leaves
+      # the question open is an error naming what to run, and the approval and the
+      # label are a person's then. Whether the event is a pull request's is read from
+      # the event, never from a read's success.
       - name: Disarm the merge the fixer's push moved past
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          # Empty on an issue's event. Whether this is a pull request is decided from the
+          # event, not from whether a read of it succeeded: a failed read stops this job.
+          PR_URL: ${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url || '' }}
         run: |
           set -euo pipefail
-          if ! IFS=$'\t' read -r head branch < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.ref] | @tsv' 2>/dev/null); then
-            echo "#${PR_NUMBER} is not a pull request; nothing to disarm"
+          if [ -z "$PR_URL" ]; then
+            echo "#${PR_NUMBER} is an issue, not a pull request; nothing to disarm"
             exit 0
           fi
-          armed=$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // ""')
+          next="Run by hand: gh pr view ${PR_NUMBER} --json autoMergeRequest, then gh pr merge ${PR_NUMBER} --disable-auto if it is armed, then approve the held ci run of the branch's tip on the Actions tab and add the review label (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
+          if ! IFS=$'\t' read -r head branch < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.ref] | @tsv'); then
+            echo "::error::pull request #${PR_NUMBER} could not be read (the line above), so whether a merge is armed on it is unknown and the held run below is not approved. ${next}"
+            exit 1
+          fi
+          if ! armed=$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // ""'); then
+            echo "::error::whether a merge is armed on #${PR_NUMBER} could not be read (the line above), so the held run below is not approved. ${next}"
+            exit 1
+          fi
           if [ -z "$armed" ]; then
             echo "no merge is armed on #${PR_NUMBER}; nothing to disarm"
             exit 0
@@ -631,7 +644,7 @@ jobs:
           approved() {
             local verdicts
             if ! verdicts=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
-              --jq ".[] | select(.commit_id == \"${tip}\" and (.user.login | startswith(\"claude\")) and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | \"\(.submitted_at) \(.user.login) \(.state)\""); then
+              --jq ".[] | select(.commit_id == \"${tip}\" and (.user.login // \"\") == \"claude[bot]\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | \"\(.submitted_at) \(.user.login) \(.state)\""); then
               echo "::warning::the reviews of #${PR_NUMBER} could not be listed (the line above); read as no approval of ${tip}"
               return 1
             fi
@@ -642,10 +655,10 @@ jobs:
             exit 0
           fi
           if ! gh pr merge "$PR_NUMBER" --disable-auto; then
-            echo "::error::the merge of #${PR_NUMBER}, armed at ${armed}, is still armed on ${tip}, which nobody reviewed: gh pr merge --disable-auto failed (the line above). Run it by hand, gh pr merge ${PR_NUMBER} --disable-auto, then approve the held ci run of ${tip} on the Actions tab and add the review label (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
+            echo "::error::the merge of #${PR_NUMBER}, armed at ${armed}, is still armed on ${tip}, which nobody reviewed: gh pr merge --disable-auto failed (the line above), and the held run below is not approved. ${next}"
             exit 1
           fi
-          echo "disarmed the merge of #${PR_NUMBER}, armed at ${armed}: the fixer's push moved the head to ${tip}, past the approval, and the review of ${tip} arms it again"
+          echo "disarmed the merge of #${PR_NUMBER}, armed at ${armed}: the fixer's push moved the head to ${tip}, past the approval; on a labelled pull request the review of ${tip} arms it again, and a person arms it otherwise"
           if approved; then
             echo "::warning::the reviewer approved ${tip} while this step was disarming, so the merge that approval armed is gone with the old one, and nothing arms it again on its own. Add the review label to #${PR_NUMBER} once this run ends: the fresh approval arms it (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
           fi

@@ -67,22 +67,23 @@ jobs:
   # here either. The job token may disable an auto-merge: measured on pull request 131
   # (card 217) with the two permissions below, on a merge the owner's token had armed.
   # Labelled pull requests only: a merge armed by hand on an unlabelled one is its
-  # owner's. The pushed head is the event's, and a head the reviewer approved is left
-  # armed: when the runner queue is long this job can start after the reviewer approved
-  # the very head the push raised, and the merge it finds is then that approval's, not
-  # the old one's. The reviewer's approval alone counts, since it alone arms a merge
-  # (auto-merge.yml), as its latest verdict on the head; the check is made again after
+  # owner's. The head judged is the branch's tip from the git ref, not the event's: when
+  # the runner queue is long this job can start after more pushes and after the
+  # reviewer approved the tip, and the merge it finds is then that approval's, not the
+  # old one's, whichever push this run is for. A tip the reviewer approved is left
+  # armed; the reviewer's approval alone counts, since it alone arms a merge
+  # (auto-merge.yml), as its latest verdict on the tip; the check is made again after
   # the disarm, and an approval that crossed it is a warning naming the next step, since
-  # nothing arms that merge again on its own. A fixer's push raises no
-  # `pull_request_target` event; claude.yml's last job disarms for it. Dependabot's
-  # rebase is a push like a person's.
+  # nothing arms that merge again on its own. Every read that fails ends in an error
+  # naming what to run. A fixer's push raises no `pull_request_target` event;
+  # claude.yml's last job disarms for it. Dependabot's rebase is a push like a person's.
   disarm:
     if: |
       github.event.action == 'synchronize' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(github.event.pull_request.labels.*.name, 'auto-merge')
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 2          # four API calls; not a p90, a floor
+    timeout-minutes: 2          # five API calls; not a p90, a floor
     permissions:
       contents: write           # `gh pr merge --disable-auto`
       pull-requests: write
@@ -92,34 +93,49 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          PUSHED: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          armed=$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // ""')
+          next="Run by hand: gh pr view ${PR_NUMBER} --json autoMergeRequest, then gh pr merge ${PR_NUMBER} --disable-auto if it is armed (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
+          if ! armed=$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // ""'); then
+            echo "::error::whether a merge is armed on #${PR_NUMBER} could not be read (the line above). ${next}"
+            exit 1
+          fi
           if [ -z "$armed" ]; then
             echo "no merge is armed on #${PR_NUMBER}; nothing to disarm"
             exit 0
           fi
-          # The reviewer's latest verdict on the pushed head, per account; its approval is what
+          # The branch's tip, not the event's head: this job can start late, after more
+          # pushes and after the reviewer approved the tip, and it is the tip's approval
+          # that says whether the armed merge is its own.
+          if ! tip=$(gh api "repos/${GH_REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha'); then
+            state=$(gh pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null || echo "unread")
+            case "$state" in
+              MERGED|CLOSED) echo "#${PR_NUMBER} is ${state} and its branch ${BRANCH} is gone; nothing to disarm"; exit 0 ;;
+              *) echo "::error::the branch ${BRANCH} of #${PR_NUMBER} (state ${state}) could not be read (the line above), and the merge armed at ${armed} may sit on a head nobody reviewed. ${next}"; exit 1 ;;
+            esac
+          fi
+          # The reviewer's latest verdict on the tip, per account; its approval is what
           # arms a merge. Every page, oldest first, so the newest verdict is read last.
           approved() {
             local verdicts
             if ! verdicts=$(gh api --paginate "repos/${GH_REPO}/pulls/${PR_NUMBER}/reviews" \
-              --jq ".[] | select(.commit_id == \"${HEAD_SHA}\" and (.user.login | startswith(\"claude\")) and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | \"\(.submitted_at) \(.user.login) \(.state)\""); then
-              echo "::warning::the reviews of #${PR_NUMBER} could not be listed (the line above); read as no approval of ${HEAD_SHA}"
+              --jq ".[] | select(.commit_id == \"${tip}\" and (.user.login // \"\") == \"claude[bot]\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | \"\(.submitted_at) \(.user.login) \(.state)\""); then
+              echo "::warning::the reviews of #${PR_NUMBER} could not be listed (the line above); read as no approval of ${tip}"
               return 1
             fi
             printf '%s\n' "$verdicts" | sort | awk '{last[$2] = $3} END {for (u in last) if (last[u] == "APPROVED") found = 1; exit !found}'
           }
           if approved; then
-            echo "the pushed head ${HEAD_SHA} has the reviewer's approval, so the merge armed at ${armed} is its own; nothing to disarm"
+            echo "the branch's tip ${tip} has the reviewer's approval, so the merge armed at ${armed} is its own; nothing to disarm (this run is for the push of ${PUSHED})"
             exit 0
           fi
           if ! gh pr merge "$PR_NUMBER" --disable-auto; then
-            echo "::error::the merge of #${PR_NUMBER}, armed at ${armed}, is still armed on ${HEAD_SHA}, which nobody reviewed: gh pr merge --disable-auto failed (the line above). Run it by hand: gh pr merge ${PR_NUMBER} --disable-auto (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
+            echo "::error::the merge of #${PR_NUMBER}, armed at ${armed}, is still armed on ${tip}, which nobody reviewed: gh pr merge --disable-auto failed (the line above). ${next}"
             exit 1
           fi
-          echo "disarmed the merge of #${PR_NUMBER}, armed at ${armed}: the push moved the head to ${HEAD_SHA}, past the approval, and the reviewer's approval of ${HEAD_SHA} arms it again"
+          echo "disarmed the merge of #${PR_NUMBER}, armed at ${armed}: the push of ${PUSHED} moved the head past the approval, the branch is at ${tip}, and the reviewer's approval of ${tip} arms it again"
           if approved; then
-            echo "::warning::the reviewer approved ${HEAD_SHA} while this run was disarming, so the merge that approval armed is gone with the old one, and nothing arms it again on its own. Add the review label to #${PR_NUMBER}: the fresh approval arms it (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
+            echo "::warning::the reviewer approved ${tip} while this run was disarming, so the merge that approval armed is gone with the old one, and nothing arms it again on its own. Add the review label to #${PR_NUMBER}: the fresh approval arms it (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
           fi
