@@ -116,6 +116,13 @@ dependencies = [
 [[package]]
 name = "cavalry-ffi"
 version = "0.1.0"
+dependencies = [
+ "cavalry-client",
+ "cavalry-driver",
+ "cavalry-proto",
+ "serde_json",
+ "stats_alloc",
+]
 
 [[package]]
 name = "cavalry-log"
