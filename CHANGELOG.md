@@ -1147,3 +1147,10 @@ user-visible change, added in the same commit as the change. The format follows
   [ADR 0032](docs/decisions/0032-load-the-producer-position-every-two-milliseconds.md),
   made by the owner on 2026-11-04; the rule for a pull request that reads red at a new
   tree while master is green is card 199's (card 182).
+- The client's replay test no longer reads the replay's image after the drain as if
+  it stayed: the driver retires a replay's image once the subscriber has read to the
+  end of stream position, as the client protocol page says, so the test takes the
+  image's identity from the poll that found it and then waits for the image to end or
+  go, which is what the third replay test already did; the flake it fixes was the
+  test's race, not the driver's, and [Replay a recording](docs/how-to/replay-a-recording.md)
+  now says when the image goes (card 185, issue 88).

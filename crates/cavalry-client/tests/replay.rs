@@ -96,8 +96,14 @@ fn recorded(dir: &TestDir, count: u8) -> (Driver, Cavalry, i64) {
 }
 
 /// What a drained replay delivered: every frame's position and body in order, the end
-/// position and the reason.
-type Drained = (Vec<(i64, Vec<u8>)>, i64, Option<ReplayStopReason>);
+/// position, the reason, and the correlation id of the replay's image as the poll that
+/// found it saw it, `None` when no poll found it.
+struct Drained {
+    frames: Vec<(i64, Vec<u8>)>,
+    end: i64,
+    reason: Option<ReplayStopReason>,
+    image_correlation_id: Option<i64>,
+}
 
 /// Polls `subscription` until `replay` has ended and its image was read to the end;
 /// returns every frame's position and body in order, the position from the frame's
@@ -109,14 +115,16 @@ fn drain(subscription: &mut Subscription, replay: &Replay) -> Drained {
     // The replay's image joins at a poll: a fragment limit of 0 applies the images the
     // driver announced and reads no frame, so its positions are known before the first.
     let mut positions: Option<Positions> = None;
+    let mut image_correlation_id: Option<i64> = None;
     loop {
         if positions.is_none() {
             subscription.poll(|_, _| {}, 0).expect("the poll applies");
-            positions = subscription
+            let image = subscription
                 .images()
                 .iter()
-                .find(|image| image.session_id() == replay.session_id())
-                .map(|image| image.positions());
+                .find(|image| image.session_id() == replay.session_id());
+            positions = image.map(|image| image.positions());
+            image_correlation_id = image.map(|image| image.correlation_id());
         }
         let mut batch = Vec::new();
         let delivered = match positions {
@@ -153,7 +161,12 @@ fn drain(subscription: &mut Subscription, replay: &Replay) -> Drained {
         if let Some((end, reason)) = replay.ended()
             && (read_to >= end || subscription.images().is_empty())
         {
-            return (frames, end, reason);
+            return Drained {
+                frames,
+                end,
+                reason,
+                image_correlation_id,
+            };
         }
         assert!(Instant::now() < deadline, "the replay did not end");
         if delivered == 0 {
@@ -214,10 +227,13 @@ fn a_replay_plays_a_recording_into_a_subscription_at_the_recordings_positions() 
     assert!(replay.replay_session_id() > 0);
     assert_eq!(replay.ended(), None);
 
-    let (frames, ended_at, reason) = drain(&mut subscription, &replay);
-    assert_eq!((ended_at, reason), (6400, Some(ReplayStopReason::Ended)));
-    assert_eq!(frames.len(), 100);
-    for (i, (position, body)) in frames.iter().enumerate() {
+    let drained = drain(&mut subscription, &replay);
+    assert_eq!(
+        (drained.end, drained.reason),
+        (6400, Some(ReplayStopReason::Ended))
+    );
+    assert_eq!(drained.frames.len(), 100);
+    for (i, (position, body)) in drained.frames.iter().enumerate() {
         assert_eq!(
             *position,
             i as i64 * 64,
@@ -226,11 +242,30 @@ fn a_replay_plays_a_recording_into_a_subscription_at_the_recordings_positions() 
         assert_eq!(&body[..8], &(i as i64).to_le_bytes(), "frame {i}: body");
     }
     assert_eq!(replay.position(), 6400);
-    let image = subscription.images().first().expect("the image");
-    assert_eq!(image.session_id(), replay.session_id());
-    assert_eq!(image.correlation_id(), replay.replay_session_id());
-    assert!(image.is_end_of_stream());
-    assert_eq!(image.position(), 6400);
+    // The image's identity, as the drain saw it: the drain found the image by the
+    // replay's session id, and its correlation id is the replay session id.
+    assert_eq!(
+        drained.image_correlation_id,
+        Some(replay.replay_session_id())
+    );
+    // The image ends at the end position and then goes: the driver retires a replay's
+    // image as it does a closed publication's, once every subscriber has reached the
+    // end of stream position (`spec/client-protocol.md`, "Replay"), which this
+    // subscriber has. So after the drain the image is there and ended, or gone; this
+    // test read it as if it stayed, and found it gone once in a few hundred runs on the
+    // Linux gate (card 185): the test's race, not the driver's.
+    wait("the image ends, or has gone", || {
+        subscription.poll(|_, _| {}, 0).expect("the poll applies");
+        match subscription.images().first() {
+            Some(image) if image.is_end_of_stream() => {
+                assert_eq!(image.session_id(), replay.session_id());
+                assert_eq!(image.position(), 6400);
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
+    });
     println!("{replay:?}");
 
     // A stop of an ended replay is success with nothing done.
@@ -299,19 +334,27 @@ fn a_frames_position_comes_from_its_header_across_a_padding_frame() {
     let replay = client
         .start_replay(0, NULL_POSITION, NULL_LENGTH, 2076, "cavalry:ipc")
         .expect("a replay");
-    let (frames, ended_at, reason) = drain(&mut subscription, &replay);
-    assert_eq!((ended_at, reason), (192, Some(ReplayStopReason::Ended)));
-    assert_eq!(frames.len(), 2, "the padding frame is handed to no handler");
+    let drained = drain(&mut subscription, &replay);
     assert_eq!(
-        frames
+        (drained.end, drained.reason),
+        (192, Some(ReplayStopReason::Ended))
+    );
+    assert_eq!(
+        drained.frames.len(),
+        2,
+        "the padding frame is handed to no handler"
+    );
+    assert_eq!(
+        drained
+            .frames
             .iter()
             .map(|(position, _)| *position)
             .collect::<Vec<_>>(),
         vec![0, 128],
         "the second frame is past the padding, not at the sum of the lengths delivered"
     );
-    assert_eq!(frames[0].1, vec![1u8; 32]);
-    assert_eq!(frames[1].1, vec![2u8; 32]);
+    assert_eq!(drained.frames[0].1, vec![1u8; 32]);
+    assert_eq!(drained.frames[1].1, vec![2u8; 32]);
     client.close().expect("closes");
     driver.close().expect("closes");
 }
@@ -358,7 +401,12 @@ fn a_replay_takes_a_position_and_a_length_or_follows_a_live_recording() {
         .start_replay(0, 128, 192, 2072, "cavalry:ipc")
         .expect("a replay");
     assert_eq!(replay.start_position(), 128);
-    let (frames, ended_at, reason) = drain(&mut part, &replay);
+    let Drained {
+        frames,
+        end: ended_at,
+        reason,
+        ..
+    } = drain(&mut part, &replay);
     assert_eq!((ended_at, reason), (320, Some(ReplayStopReason::Ended)));
     assert_eq!(
         frames
@@ -467,9 +515,9 @@ fn a_replay_plays_a_recording_to_a_udp_subscription_on_the_same_driver() {
     });
     let source = subscription.images()[0].source_identity().to_string();
     assert!(source.starts_with("127.0.0.1:"), "{source}");
-    let (frames, ended_at, reason) = drain(&mut subscription, &replay);
-    assert_eq!(frames.len(), 100);
-    for (n, (position, body)) in frames.iter().enumerate() {
+    let drained = drain(&mut subscription, &replay);
+    assert_eq!(drained.frames.len(), 100);
+    for (n, (position, body)) in drained.frames.iter().enumerate() {
         assert_eq!(
             *position,
             n as i64 * 64,
@@ -477,7 +525,10 @@ fn a_replay_plays_a_recording_to_a_udp_subscription_on_the_same_driver() {
         );
         assert_eq!(&body[..8], &(n as i64).to_le_bytes(), "frame {n}: body");
     }
-    assert_eq!((ended_at, reason), (end, Some(ReplayStopReason::Ended)));
+    assert_eq!(
+        (drained.end, drained.reason),
+        (end, Some(ReplayStopReason::Ended))
+    );
     // The stream ends with the replay: the image's end of stream is the end position,
     // and the image goes.
     wait("the image ends", || {

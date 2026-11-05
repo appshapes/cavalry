@@ -113,6 +113,10 @@ joins at a poll; `subscription.poll(|_, _| {}, 0)?` applies the images the drive
 announced and reads no frame, so a program takes the positions before its first
 message. Poll until `image.position()` reaches the end `ended()` reports: an image
 that goes first took the rest with it, and the program has read to where it has.
+Once the subscriber has read to the end of stream position the driver retires the
+image as it does a closed publication's (`spec/client-protocol.md`, "Replay"), so a
+program that needs the image's fields after the end takes them from the poll that read
+it there; a later poll may find the image gone.
 `cavalry::index::position_at(log_dir, recording_id, instant)` and `position_after`
 resolve instants as the command does. The replay is the driver's: dropping the handle
 stops nothing, and `client.stop_replay(id)?`, or `replay.stop(&mut client)?`, ends it
