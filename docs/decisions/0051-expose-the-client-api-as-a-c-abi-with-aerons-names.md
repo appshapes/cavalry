@@ -52,11 +52,11 @@ Offer>`, `offer(&[u8]) -> Result<i64, Offer>`, `position`, `limit`, `is_connecte
 claim aborts. `Subscription::poll(handler, fragment_limit) -> Result<usize, Fault>` with
 `FnMut(&[u8], &DataFrameHeader)`, `image_count`, `images() -> &[Image]`, `is_connected`,
 `registration_id`, `stream_id`, `channel`, `is_closed`, `close`; `Image::correlation_id`,
-`session_id`, `source_identity`, `position`, `is_end_of_stream`, `position_of(header)`;
-`Recording::recording_id`, `session_id`, `stream_id`, `channel`, `position`,
-`synced_position`; `Replay::replay_session_id`, `recording_id`, `start_position`,
-`session_id`, `stream_id`, `channel`, `position`, `ended() -> Option<(i64,
-Option<ReplayStopReason>)>`. `Offer` has `NotConnected`, `BackPressured`,
+`session_id`, `source_identity`, `position`, `is_end_of_stream`, `position_of(header)`,
+`positions() -> Positions`; `Recording::recording_id`, `session_id`, `stream_id`,
+`channel`, `position`, `synced_position`; `Replay::replay_session_id`, `recording_id`,
+`start_position`, `session_id`, `stream_id`, `channel`, `position`, `ended() ->
+Option<(i64, Option<ReplayStopReason>)>`. `Offer` has `NotConnected`, `BackPressured`,
 `AdminAction`, `MaxPositionExceeded`, `Closed` and `TooLong { found, limit }`; `Fault`
 has `Image { session_id, position, reason }`, `ImagesFull { session_id }` and `Closed`;
 `ClientError` has fifteen kinds, `Refused` carrying the driver's error code of
@@ -65,6 +65,18 @@ that explains it. The log buffer's claim protocol (`spec/log-buffer.md`, "Claim,
 and abort") is what `try_claim`, `commit` and `abort` run, and a message longer than
 the maximum payload is fragmented by `offer`, so `TooLong` is a caller's error before
 anything is reserved.
+
+The fragment handler is given the wire header alone (ADR 0021). `DataFrameHeader`
+(`crates/cavalry-proto/src/frame.rs`) carries the 32 bytes of `spec/frame.md` and no
+initial term id or term length, and the initial term id is any value the log's creator
+chose (`spec/log-buffer.md`, "Header"), so a frame's position cannot be computed from
+its header. `Image::position_of(header)` needs the image, and the handler can reach no
+image while the poll holds the subscription mutably; nor is it told which image a frame
+came from. The Rust answer is `Image::positions()`, the image's initial term id and
+term length as a copyable value that the caller takes before the poll and the handler
+holds. The images a poll reads from are those the subscription lists after a poll with
+a fragment limit of 0, which joins the images the driver announced and reads no frame;
+a poll with a limit above 0 also joins, at its start, the images announced since.
 
 Aeron's C client, read from `aeronc.h` and `aeron_publication.c` at `master` on
 2026-11-05. Handles are opaque pointers: `aeron_context_t`, `aeron_t`,
@@ -91,8 +103,12 @@ error to `EINVAL` with a message naming the length and the limit and return −6
 `typedef void (*aeron_fragment_handler_t)(void *clientd, const uint8_t *buffer, size_t
 length, aeron_header_t *header)`; `aeron_subscription_poll(subscription, handler,
 clientd, fragment_limit)` returns the fragments read or −1; `aeron_header_values(header,
-&values)` fills a struct with the frame's fields, and `aeron_header_position(header)`
-computes the frame's position; `aeron_subscription_image_count`, `_image_at_index`,
+&values)` fills an `aeron_header_values_t`, `{ aeron_header_values_frame_t frame;
+int32_t initial_term_id; size_t position_bits_to_shift; }`, whose `frame` holds the
+frame's fields with an `int8_t version`, and whose other two fields are the image's
+position context, carried by Aeron's header, which is what lets
+`aeron_header_position(header)` compute the frame's position from the header alone;
+`aeron_subscription_image_count`, `_image_at_index`,
 `_image_by_session_id`, `_image_retain` and `_image_release`; `aeron_image_constants`
 with the source identity, the correlation id and the session id, `aeron_image_position`,
 `aeron_image_is_end_of_stream`. `aeron_errcode()` and `aeron_errmsg()` are the calling
@@ -141,22 +157,42 @@ for the call. Three structs the caller owns:
   `CAVALRY_ERR_CLAIM_OUTSTANDING`, and a commit or abort with no claim outstanding is
   −1 with `CAVALRY_ERR_NO_CLAIM`. A caller keeps one struct per publication, and a
   claim allocates nothing.
-- `cavalry_header_values_t`, the data frame header's fields in the order and widths of
-  `spec/frame.md`: `int32_t frame_length; uint8_t version; uint8_t flags; uint16_t
-  type; int32_t term_offset; int32_t session_id; int32_t stream_id; int32_t term_id;
-  int64_t reserved_value;`, 32 bytes, filled by `cavalry_header_values(header,
-  &values)`.
+- `cavalry_header_values_t { cavalry_header_values_frame_t frame; }`, filled by
+  `cavalry_header_values(header, &values)`, where `cavalry_header_values_frame_t` is
+  the data frame header's fields in the order and the types of `spec/frame.md`:
+  `int32_t frame_length; int8_t version; uint8_t flags; uint16_t type; int32_t
+  term_offset; int32_t session_id; int32_t stream_id; int32_t term_id; int64_t
+  reserved_value;`, 32 bytes. This is Aeron's nesting, `aeron_header_values_t`'s
+  `frame`, so a program ported from Aeron reads `values.frame.session_id` unchanged.
+  The outer struct has no `initial_term_id` and no `position_bits_to_shift`, because
+  the header the Rust handler is given carries neither (Context); a ported line that
+  reads them fails to compile, so the one difference is found at build time and not
+  read as a wrong value. The image's constants carry the two instead.
 - The constants structs: `cavalry_publication_constants_t { const char *channel;
   int64_t registration_id; int32_t session_id; int32_t stream_id; size_t
   max_payload_length; size_t max_message_length; bool is_exclusive; }`,
   `cavalry_subscription_constants_t { const char *channel; int64_t registration_id;
   int32_t stream_id; }`, `cavalry_image_constants_t { const char *source_identity;
-  int64_t correlation_id; int32_t session_id; }`, `cavalry_recording_constants_t {
-  const char *channel; int64_t recording_id; int32_t session_id; int32_t stream_id;
-  }` and `cavalry_replay_constants_t { const char *channel; int64_t
-  replay_session_id; int64_t recording_id; int64_t start_position; int32_t
-  session_id; int32_t stream_id; }`, each filled by its `_constants(handle,
-  &constants)` function, the strings valid for the handle's life.
+  int64_t correlation_id; size_t position_bits_to_shift; int32_t session_id; int32_t
+  initial_term_id; }`, `cavalry_recording_constants_t { const char *channel; int64_t
+  recording_id; int32_t session_id; int32_t stream_id; }` and
+  `cavalry_replay_constants_t { const char *channel; int64_t replay_session_id; int64_t
+  recording_id; int64_t start_position; int32_t session_id; int32_t stream_id; }`,
+  each filled by its `_constants(handle, &constants)` function, the strings valid for
+  the handle's life. Every struct has C's natural layout, with no packing.
+
+**A frame's position.** The image's `initial_term_id` and `position_bits_to_shift`, the
+base-2 logarithm of its term length, are `Image::positions()` in C, under the names of
+Aeron's `aeron_header_values_t`. A frame's position is its term count shifted left by
+`position_bits_to_shift`, plus its `term_offset`, with the term count computed in
+32-bit two's complement as `spec/log-buffer.md`, "Positions", says; in C,
+`(int32_t)((uint32_t)term_id - (uint32_t)initial_term_id)`, so that the subtraction is
+not a signed overflow. The handler finds a frame's image by the header's `session_id`.
+A caller that needs positions takes each image's constants after a poll with a
+fragment limit of 0, as the Rust caller takes `Image::positions()`; a session id it
+holds no constants for is an image the poll joined at its start, and the caller keeps
+that frame's `term_id` and `term_offset` and takes the image's constants once the poll
+returns.
 
 **The functions**, each returning 0 for success and −1 with the thread's error set
 unless the table says otherwise. A null handle or a null required pointer is −1, or
@@ -169,7 +205,7 @@ unless the table says otherwise. A null handle or a null required pointer is −
 | adds and commands | `cavalry_add_publication(cavalry_publication_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_add_exclusive_publication(...)`, `cavalry_add_subscription(cavalry_subscription_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_start_recording(cavalry_recording_t **, cavalry_t *, const char *channel, int32_t stream_id)`, `cavalry_stop_recording(cavalry_t *, int64_t recording_id)`, `cavalry_truncate_recording(cavalry_t *, int64_t recording_id, int64_t position)`, `cavalry_purge_segments(cavalry_t *, int64_t recording_id, int64_t new_start_position)`, `cavalry_purge_recording(cavalry_t *, int64_t recording_id)`, `cavalry_start_replay(cavalry_replay_t **, cavalry_t *, int64_t recording_id, int64_t position, int64_t length, int32_t replay_stream_id, const char *channel)`, `cavalry_stop_replay(cavalry_t *, int64_t replay_session_id)`. Each is synchronous: it returns when the driver has answered or the 10 s response timeout has passed, as the Rust API does, with one operation in flight per client. |
 | publication | `cavalry_publication_try_claim(pub, size_t length, cavalry_buffer_claim_t *) -> int64_t`: the position after the frame, or a code below; `cavalry_buffer_claim_set_reserved_value(claim, int64_t)`; `cavalry_buffer_claim_commit(claim) -> int64_t` and `cavalry_buffer_claim_abort(claim) -> int64_t`: the position after the frame, or −1; `cavalry_publication_offer(pub, const uint8_t *, size_t length) -> int64_t`: the position after the message, or a code below; `cavalry_publication_position(pub) -> int64_t`, or −1; `cavalry_publication_position_limit(pub) -> int64_t`; `cavalry_publication_is_connected(pub) -> bool`; `cavalry_publication_is_closed(pub) -> bool`; `cavalry_publication_constants(pub, cavalry_publication_constants_t *)`; `cavalry_publication_close(pub)`. |
 | subscription | `cavalry_subscription_poll(sub, cavalry_fragment_handler_t, void *clientd, size_t fragment_limit) -> int`: the fragments delivered, or −1 with the fault as the error; `cavalry_subscription_image_count(sub) -> int`; `cavalry_subscription_image_at_index(sub, size_t) -> cavalry_image_t *`, null past the count; `cavalry_subscription_is_connected(sub) -> bool`; `cavalry_subscription_is_closed(sub) -> bool`; `cavalry_subscription_constants(sub, cavalry_subscription_constants_t *)`; `cavalry_subscription_close(sub)`. |
-| image and header | `cavalry_image_constants(image, cavalry_image_constants_t *)`; `cavalry_image_position(image) -> int64_t`; `cavalry_image_is_end_of_stream(image) -> bool`; `cavalry_header_values(const cavalry_header_t *, cavalry_header_values_t *)`; `cavalry_header_position(const cavalry_header_t *) -> int64_t`, the frame's position, `Image::position_of`. |
+| image and header | `cavalry_image_constants(image, cavalry_image_constants_t *)`; `cavalry_image_position(image) -> int64_t`; `cavalry_image_is_end_of_stream(image) -> bool`; `cavalry_header_values(const cavalry_header_t *, cavalry_header_values_t *)`. A frame's position is computed from its image's constants, as above; this version has no `cavalry_header_position`. |
 | recording and replay | `cavalry_recording_constants(rec, cavalry_recording_constants_t *)`; `cavalry_recording_position(rec) -> int64_t`; `cavalry_recording_synced_position(rec) -> int64_t`; `cavalry_recording_close(rec)`, which frees the handle and stops nothing, since `cavalry_stop_recording` stops; `cavalry_replay_constants(replay, cavalry_replay_constants_t *)`; `cavalry_replay_position(replay) -> int64_t`; `cavalry_replay_ended(replay, int64_t *position, int32_t *reason) -> bool`, the reason `ReplayStopReason`'s value or −1 for none; `cavalry_replay_close(replay)`, which frees the handle. |
 | errors and version | `cavalry_errcode(void) -> int` and `cavalry_errmsg(void) -> const char *`: the calling thread's last error, the message valid until the next failing call on that thread; `cavalry_version_major(void)`, `_minor`, `_patch` `-> int` and `cavalry_version_full(void) -> const char *`, the crate's version; `cavalry_abi_version(void) -> int`, 0, beside the header's `CAVALRY_ABI_VERSION`. |
 
@@ -251,8 +287,8 @@ behind `Box`es the handles point to; every `unsafe` block carries its `// SAFETY
 comment naming the lifetime or thread rule above that makes it sound. The per-message
 functions, `cavalry_publication_try_claim`, `cavalry_publication_offer`,
 `cavalry_buffer_claim_commit`, `cavalry_buffer_claim_abort`,
-`cavalry_buffer_claim_set_reserved_value`, `cavalry_subscription_poll`,
-`cavalry_header_values` and `cavalry_header_position`, hold invariant 2's five rules
+`cavalry_buffer_claim_set_reserved_value`, `cavalry_subscription_poll` and
+`cavalry_header_values`, hold invariant 2's five rules
 from their call to their return, the time inside the C handler excepted: no heap
 allocation, no lock, no syscall, no `await`, no panic path. The thread-local error is
 a fixed buffer. The crate's dev-dependency `stats_alloc`, as `cavalry-client`'s tests
@@ -294,8 +330,10 @@ shape: a recording of stream 1001 on `cavalry:ipc`, 1,000 messages of 64 bytes b
 claim and commit, read back by a subscription with every message once and in order
 and the header's session id and term id checked against `spec/frame.md`'s rules, the
 same 1,000 over `cavalry:udp?endpoint=127.0.0.1:<a free port>`, the recording stopped
-and replayed to a subscription on stream 2001 with the same checks and
-`cavalry_replay_ended` reporting the end position, and every handle closed; a failed
+and replayed to a subscription on stream 2001 with the same checks, each replayed
+frame's position computed from its image's constants and equal to the position the
+recording holds it at (ADR 0030), and `cavalry_replay_ended` reporting the end
+position, and every handle closed; a failed
 check prints the function, the code and `cavalry_errmsg` and exits 1.
 
 ### The bench rows
@@ -315,7 +353,9 @@ Image handlers and the invoker mode (ADR 0021's Revisit); counters and `add coun
 (ADR 0019's Revisit); the channel status as a function, which the counters file holds;
 `offerv`, the controlled and block polls and the fragment assemblers; destinations;
 `revoke` and `append_padding`; `local_sockaddrs`; `print_counters` and the `cnc`
-family, which `cavalry doctor` serves. Each arrives, if a client needs it, under a new
+family, which `cavalry doctor` serves; `aeron_header_position` and the position context
+in the header's values, which the Rust handler's header does not carry (Context). Each
+arrives, if a client needs it, under a new
 version of the page with its ADR. The first release, which freezes version 0, is ADR
 0003's Revisit.
 
@@ -341,6 +381,21 @@ version of the page with its ADR. The first release, which freezes version 0, is
   from the term; keeping the claim inside the publication handle and naming the handle
   in the struct makes the Rust claim the one claim and the struct a view of it, with
   the one-claim-at-a-time rule, which the Rust borrow enforces, written down.
+- **`cavalry_header_position`, with `initial_term_id` and `position_bits_to_shift` in
+  the header's values, as Aeron's header carries them.** Lost for version 0: the Rust
+  handler is given `&DataFrameHeader`, which carries neither (ADR 0021), so the ABI
+  could fill them only by finding the frame's image itself. A search by session id
+  costs every message a lookup, and a table taken before the poll misses an image the
+  poll joins at its start. The sound form hands the handler its image's `Positions`.
+  That form changes `Subscription::poll`'s handler, every handler in the tree and the
+  README's ten-minute path, against what ADR 0021 accepted. A client that needs the
+  header's own position sends it to a new version of the page, with the
+  `cavalry-client` change and its ADR.
+- **A flat `cavalry_header_values_t`, the frame's fields at the top level.** Lost:
+  Aeron's `aeron_header_values_t` nests them in `frame`, so a program ported from
+  Aeron reads `values.frame.session_id`. A flat struct under Aeron's outer name breaks
+  every such line. The nested struct breaks only the lines that read the position
+  context, at compile time.
 - **`errno` values for `cavalry_errcode`, `EINVAL` for a length over the limit.**
   Lost: the client protocol has a table of codes every client reads, and the Rust
   client's errors have kinds; one table of Cavalry's own, with the driver's codes kept
@@ -375,13 +430,19 @@ version of the page with its ADR. The first release, which freezes version 0, is
 Read on 2026-11-05: `aeronc.h` at `master`, 2,865 lines, its typedefs at lines 45 to
 74, `aeron_buffer_claim_t` at 1133, the six codes at 1075 to 1105,
 `aeron_fragment_handler_t` at 1714, `aeron_subscription_poll` at 1860,
-`aeron_errcode` and `aeron_errmsg` at 2665 and 2672; `aeron_publication.c` at
+`aeron_errcode` and `aeron_errmsg` at 2665 and 2672, `aeron_header_values_t` with its
+nested `frame` and `int8_t version` at 54 to 74 and `aeron_header_position` at 1787,
+which the review of pull request 127 read; `aeron_publication.c` at
 `master`, 886 lines, `offer`'s `length > max_message_length` at line 513 and
 `try_claim`'s `length > max_payload_length` at 647, each `AERON_SET_ERR(EINVAL, ...)`
 and `return AERON_PUBLICATION_ERROR`. cbindgen 0.29.4 on crates.io, updated
 2026-06-09. The workspace's `rust-version` 1.89 and `edition` 2024; Rust's
 `extern "C"` abort-on-unwind since 1.81. The client crate's public items at fe27c02
-(`grep -n 'pub ' crates/cavalry-client/src/*.rs`), named in Context. The gates'
+(`grep -n 'pub ' crates/cavalry-client/src/*.rs`), named in Context; among them
+`Subscription::poll`'s handler bound at `crates/cavalry-client/src/subscription.rs`
+lines 272 to 274 and `Image::positions` at 194, and `DataFrameHeader`'s fields at
+`crates/cavalry-proto/src/frame.rs` lines 188 to 197, with no initial term id and no
+term length; `spec/frame.md` types the version `i8`. The gates'
 runners and the pinned `mdbook` install in `.github/workflows/ci.yml`. The dependency
 lint's rule on build dependencies in `scripts/lint-workspace.py`, lines 8 to 15. What
 the implementation proves, the allocation count over every per-message function, the
@@ -404,7 +465,8 @@ the borrow checker; debug builds make the common mistakes loud, and the generate
 clients hold the rules for their users.
 
 Revisit: when a client needs image handlers, the invoker mode, counters, the channel
-status, `offerv` or a controlled poll, each a new version of the page; when the first
+status, `offerv`, a controlled poll or a frame's position from its header alone, each
+a new version of the page; when the first
 release freezes version 0 (ADR 0003's Revisit); when a generated client's runtime
 needs a calling convention the C header cannot give it.
 
@@ -412,10 +474,11 @@ needs a calling convention the C header cannot give it.
 
 - ADR 0003, ADR 0019, ADR 0021, ADR 0025, ADR 0030, ADR 0031, ADR 0033, ADR 0040,
   ADR 0046, ADR 0047
-- `spec/frame.md`, `spec/log-buffer.md` ("Claim, commit and abort"),
-  `spec/client-protocol.md` ("Error codes"); `spec/README.md`, Conventions
+- `spec/frame.md`, `spec/log-buffer.md` ("Header", "Positions", "Claim, commit and
+  abort"), `spec/client-protocol.md` ("Error codes"); `spec/README.md`, Conventions
 - `crates/cavalry-ffi/README.md`; `crates/cavalry-client/src/{client,publication,
-  subscription,recording,replay,error}.rs`; `scripts/lint-workspace.py`
+  subscription,recording,replay,error}.rs`; `crates/cavalry-proto/src/frame.rs`;
+  `scripts/lint-workspace.py`
 - `aeron-client/src/main/c/aeronc.h` and `aeron_publication.c` at aeron-io/aeron
   `master`; cbindgen 0.29.4 (crates.io)
 - AppShapes Trello card 204
