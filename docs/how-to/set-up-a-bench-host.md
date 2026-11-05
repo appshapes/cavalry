@@ -154,8 +154,9 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    re-run the job twice, with `gh run rerun <run id> --job <job id>` or the job's
    re-run button on the run's page, downloading each attempt's artifact before the
    next re-run, `bench-results-bench-linux` from `bench (linux)` on `bench` or
-   `bench-results-grip-linux` from `bench (grip)` on `grip`, because a re-run replaces
-   the run's artifact of the same name and only the newest attempt's is kept. Record
+   `bench-results-grip-linux` from `bench (grip)` on `grip`, because a re-run's
+   artifact takes the same name, the download by name gives the newest attempt's
+   alone, and an artifact expires seven days after its attempt began. Record
    each profile's
    files as [Run the bench](run-the-bench.md) describes in its step 4, under the
    host's own profiles, `bench-linux` and `bench-linux-unchecked` or `grip-linux` and

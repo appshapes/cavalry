@@ -72,12 +72,32 @@ run before and after, and the cause of every row that loosens by more than 5 per
 or the card that will find it. Once the entry is at the tree, a later red there is
 ADR 0033's join.
 
+Each red that counts is recorded before anything else is done about it: the first
+before its rerun, the second before the re-record. The second red can come days later, on another pull request and in another session,
+and the re-record needs the first red's process. So the session that holds a red
+downloads the attempt's artifact first. A rerun's artifact takes the same name, so a
+download by name gives the newest attempt's files alone, and every artifact expires
+seven days after its attempt began (Evidence). The session then comments on its pull
+request, in a comment of its own. The comment's first line is the record's key:
+`ADR 0050 red:`, the profile, the row, and `at the tree of` with the full hash of the
+tree's first commit. That commit is the newest commit to change the tree's paths in
+the history of the master commit the run merged. The comment then says whether the
+red is the first or the second, names the run, the attempt, the job, the pull request
+and the row's numbers, and carries both of the attempt's result files whole. The
+comment is where the process is kept. A file downloaded into a CI workspace, where the
+writer and the fixer run, is gone when the job ends, and a file on a person's disk is
+not where the next session looks. A session that holds a red finds the earlier reds on
+its row at the tree by listing the repository's comments since the tree's first commit
+and keeping those whose body starts with the key. If it finds none, its red is the
+first. If it finds one, its red is the second. The re-record takes both reds' result
+files from their comments. `docs/how-to/run-the-bench.md`, step 4, has the commands.
+
 The re-record is a person's commit (ADR 0032), on a branch of its own, through the
 review loop. A person's session that holds the second red makes it. An agent's session
 that holds it, the writer on its `claude/...` branch or the fixer on any pull request,
 may never change `bench/baseline.json` (`.claude/agents/developer.md`), so it changes
-nothing there. Instead it comments on its pull request, naming the two reds by run,
-attempt and row and this ADR, and a person's session makes the re-record. In either
+nothing there. Its record of the second red, a comment on its pull request, names both
+reds by run, attempt and row, and a person's session makes the re-record. In either
 case the pull request that holds the second red waits for the re-record, and does not
 rerun its job until a run passes. Once the re-record is on master, a merge of master
 into the pull request's branch gives it a run judged against the new entry. A pull
@@ -117,6 +137,15 @@ row in `bench/baseline.json`.
 - **Count two reds on any rows of a profile.** Lost: two reds on two rows are one high
   run on each row, and ADR 0033 reruns a high run. A re-record rewrites every row of
   the profile, so it needs one row's band measured twice, not two rows measured once.
+- **Leave the first red in its job's log and its run's artifact.** Lost: the log holds
+  the comparison, not the result file, and only a session that already knows which run
+  to open finds it. This ADR's own Evidence came from reading every `bench (grip)` job
+  log at the tree. After the rerun, the artifact's name gives the newest attempt's
+  files, and every artifact expires after seven days.
+- **Keep the first red's result file on the pull request's branch, or on the bench
+  host.** Lost: `bench/results/` is ignored, and a squash merge would put a run's file
+  on master. A file on the host is reachable only from the host, and keeping it there
+  is a workflow change that an agent's branch cannot make (ADR 0004).
 
 ## Evidence
 
@@ -145,13 +174,36 @@ from `gh pr view <n> --json files`. Pull request 114's re-record at 61fbfdd is f
 thirteen processes, with every loosened row's cause or card in its message. Card 198
 holds the host effects behind the band.
 
+Where a first red's process is kept, read on 2026-11-05:
+
+- **Two artifacts, one name.** Run 41853288029's artifacts endpoint lists two
+  `bench-results-grip-linux` artifacts: 13336413831 from attempt 1, at 15:07:14Z, and
+  13337971965 from attempt 2, at 15:23:04Z. Attempt 2 reran `bench (grip)` alone.
+- **The name gives the newest.** `gh run download 41853288029 --name
+  bench-results-grip-linux` gives attempt 2's files: the unchecked
+  `claim_commit_32_client` row at 115 ns and 14,591,744 claims a second.
+- **A rerun of every job.** Run 41196273792, whose attempts 4 and 5 each ran every
+  job, lists one artifact per name.
+- **Seven days.** Each artifact expires seven days after its attempt began. Attempt 1's
+  expires on 2026-11-11 at 15:00:37Z.
+- **The size.** A `grip` result file is about 5 KB. Run 41884701705 at a718d63 wrote
+  5,077 bytes for `grip-linux` and 5,185 bytes for `grip-linux-unchecked`. A comment
+  holds 65,536 characters, so one comment carries both files.
+- **The tree.** The commit in pull request 111's results, ab9cf24, has 7248621 as its
+  first parent and 1545bab as its second (`gh api
+  repos/appshapes/cavalry/commits/ab9cf24…`). The newest commit on the tree's paths in
+  7248621's history is 7248621 itself, at 2026-11-04T14:53:53Z.
+- **The listing.** Step 4's listing, run with the date of 7419b2b's tree, read the
+  repository's twelve comments since that tree began and found no record among them.
+
 ## Consequences
 
 Easier: a pull request's red at master's tree has a rule, and the second red on a row
 re-records with no call to wait for; the entry follows the host's band at each tree
 master reaches.
 
-Harder: a second red costs the re-record's commit, every process's artifact read and
+Harder: every red that counts costs a download and a comment of about 10 KB before its
+rerun. A second red costs the re-record's commit, every process's artifact read and
 every loosened row explained or carded; the entry loosens to the band at the new tree,
 as a re-record under ADR 0033's first case does. When an agent's session holds the
 second red, its pull request waits for a person's session to make the re-record. It
@@ -168,5 +220,7 @@ names the host effect behind `grip`'s band, which may tighten what a re-record a
   `bench/baseline.json` from an agent
 - `bench/baseline.json`; `scripts/bench-compare.py`
 - Pull requests 102, 103, 106, 111 and 114; CI runs 41853288029 (attempts 1 and 2),
-  41852170961, 41868019184, 41870700774, 41874887478 and 41884701705; AppShapes
-  Trello cards 198 and 199
+  41852170961, 41868019184, 41870700774, 41874887478 and 41884701705, and run
+  41196273792 for its artifacts; AppShapes Trello cards 198 and 199
+- GitHub's REST endpoints for a repository's issue comments
+  (`repos/{owner}/{repo}/issues/comments`), a run's artifacts and a commit

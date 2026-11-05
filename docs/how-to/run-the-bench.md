@@ -183,10 +183,12 @@ shared runner is
    page, gives the next at the same commit whether the first passed or failed. Download
    each attempt's artifact before the next re-run, `bench-results-bench-linux` from
    `bench (linux)` for `bench` or `bench-results-grip-linux` from `bench (grip)` for
-   `grip`: a re-run replaces
-   the run's artifact of the same name, and the run's page and the artifacts endpoint
-   keep only the newest attempt's, so an attempt whose artifact was not saved first is
-   a lost process (attempts 1 and 2 of run 41196273792 went that way on 2026-10-31).
+   `grip`, with `gh run download <run id> --name <artifact> --dir <a new directory>`.
+   A re-run's artifact takes the same name, and the download by name gives the newest
+   attempt's files alone. After re-runs of every job, the run's page and the artifacts
+   endpoint keep the newest attempt's alone, so an attempt whose artifact was not saved
+   first is a lost process (attempts 1 and 2 of run 41196273792 went that way on
+   2026-10-31). Every artifact expires seven days after its attempt began.
    Pass one profile's
    files to one `--update`, the `bench-linux` results in one call and the
    `bench-linux-unchecked` results in another, or the `grip-linux` and
@@ -227,16 +229,86 @@ shared runner is
    - Count the reds on one row of one profile. A red on another row, or in the host's
      other profile, starts a count of its own.
 
-   The first red that counts is a rerun of the job. The second, on the same pull
-   request or another, re-records that profile's entry at the tree from every process
-   at it, the two red runs included, in the form above, in a commit that names the two
-   reds by run, attempt and row. The re-record is a person's commit on a branch of its
-   own. An agent's session that holds the second red, the writer or the fixer, changes
-   no `bench/baseline.json`. Instead it comments on its pull request, naming the two
-   reds by run, attempt and row, and a person's session makes the re-record. The pull
-   request that holds the second red waits for the re-record and does not rerun until
-   a run passes. Once the re-record is on master, merge master into the branch for a
-   run judged against the new entry.
+   Record each red that counts before you do anything else about it: the first before
+   its re-run, the second before the re-record. The second red can come days later, on another pull request and in another
+   session, and the re-record needs the first red's process. After a re-run, the
+   download by name gives the re-run's files, and the artifact expires after seven
+   days. So the record is a comment on the pull request that carries the attempt's
+   result files. A file downloaded into a CI workspace, where the writer and the fixer
+   run, is gone when the job ends.
+
+   1. Download the red attempt's artifact into a new directory, as above.
+   2. Find the tree's first commit. The result's `git` is the run's merge of the pull
+      request with master, and its first parent is master's commit. The tree's first
+      commit is the newest commit in that commit's history that changed the tree's
+      paths. For pull request 111's red:
+
+      ```sh
+      # ignore: needs gh signed in and master fetched; the commit is the red result's `git`
+      gh api repos/appshapes/cavalry/commits/ab9cf24b84c159f37e5cccae506aeede7a5175ee --jq '.parents[0].sha'
+      git log -1 --format='%H %cI' 72486215fbb884cedfd5866839ed93e49d1dedef -- crates/ bench/src bench/host bench/Cargo.toml Cargo.toml Cargo.lock justfile
+      ```
+
+      The first command prints master's commit,
+      `72486215fbb884cedfd5866839ed93e49d1dedef`. The second, given that commit,
+      prints the tree's first commit and its date,
+      `72486215fbb884cedfd5866839ed93e49d1dedef 2026-11-04T14:53:53Z`.
+   3. Look for an earlier red on the same row of the same profile at the tree, with
+      the date, the profile, the row and the commit from step 2:
+
+      ```sh
+      # ignore: needs gh signed in; the date, profile, row and commit are the red's
+      gh api --method GET --paginate repos/appshapes/cavalry/issues/comments -f since=2026-11-04T14:53:53Z -f per_page=100 --jq '.[] | select(.body | startswith("ADR 0050 red: grip-linux-unchecked claim_commit_32_client at the tree of 72486215fbb884cedfd5866839ed93e49d1dedef")) | .html_url'
+      ```
+
+      It reads every comment on the repository's issues and pull requests since the
+      tree began, and prints the address of each record of a red on that row there.
+      If it prints nothing, your red is the first. If it prints one address, your red
+      is the second.
+   4. Write the record to a file and post it with `gh pr comment <number> --body-file
+      <file>`, as a comment of its own, so that the key is its first line. An agent's
+      session writes the file with its file tools. Pull request 111's red would have
+      read:
+
+      ````text
+      ADR 0050 red: grip-linux-unchecked claim_commit_32_client at the tree of 72486215fbb884cedfd5866839ed93e49d1dedef
+
+      First red. Run 41853288029, attempt 1, job 126655372604, pull request 111 at 1545bab, git ab9cf24.
+      p99.99 127 ns (runs 119 to 134) against the entry's 119 ns, +6.7%. p50 21 ns, 14,589,196 claims a second.
+
+      ~~~json grip-linux-<time>.json
+      <the attempt's grip-linux result file, whole>
+      ~~~
+
+      ~~~json grip-linux-unchecked-<time>.json
+      <the attempt's grip-linux-unchecked result file, whole>
+      ~~~
+      ````
+
+      The key is `ADR 0050 red:`, the profile, the row, and `at the tree of` with the
+      full hash of the tree's first commit. Each result file goes in a `~~~json` fence
+      that names the file. A `grip` result file is about 5 KB, and a comment holds
+      65,536 characters. A second red's record says `Second red.` and links the
+      first's.
+
+   After a first red, re-run the job. After a second, do not re-run: the second red
+   re-records that profile's entry at the tree from every process at it, the two red
+   runs included, in the form above, in a commit that names the two reds by run,
+   attempt and row. Take each red's result files from its record, one file at a time,
+   with the comment's id (the number after `issuecomment-` in its address) and the
+   file's name from its fence:
+
+   ```sh
+   # ignore: needs gh signed in; the comment id and the file name are the record's
+   gh api repos/appshapes/cavalry/issues/comments/<comment id> --jq '.body | gsub("\r"; "") | split("\n~~~json grip-linux-unchecked-<time>.json\n")[1] | split("\n~~~")[0]' > grip-linux-unchecked-<time>.json
+   ```
+
+   The re-record is a person's commit on a branch of its own. An agent's session that
+   holds the second red, the writer or the fixer, changes no `bench/baseline.json`.
+   Its record of the second red names both reds by run, attempt and row, and a
+   person's session makes the re-record. The pull request that holds the second red
+   waits for the re-record and does not rerun until a run passes. Once the re-record
+   is on master, merge master into the branch for a run judged against the new entry.
 
    A new row joins a baseline that already exists by adding its entry from the tree's
    processes that have it and leaving the other rows as they were recorded, in a
