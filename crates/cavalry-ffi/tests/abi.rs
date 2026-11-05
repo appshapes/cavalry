@@ -396,6 +396,21 @@ fn a_stale_claim_struct_leaves_the_outstanding_claim_untouched() {
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_TOO_LONG);
         assert!(errmsg().contains("too-long"), "{}", errmsg());
         assert!(too_long.data.is_null() && too_long.publication.is_null() && too_long.length == 0);
+        // A claim refused for a null publication clears the struct too: a stale struct
+        // passed with it no longer points into a delivered message.
+        let mut stale = cavalry_buffer_claim_t { ..copy };
+        assert_eq!(
+            cavalry_publication_try_claim(ptr::null_mut(), 2, &mut stale),
+            CAVALRY_PUBLICATION_ERROR
+        );
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+        assert!(stale.data.is_null() && stale.publication.is_null() && stale.length == 0);
+        assert_eq!(stale.position_after, CAVALRY_NULL_POSITION);
+        assert_eq!(
+            cavalry_publication_try_claim(ptr::null_mut(), 2, ptr::null_mut()),
+            CAVALRY_PUBLICATION_ERROR
+        );
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
 
         setup.receive(3);
         assert_eq!(setup.received[1].body, b"c1");

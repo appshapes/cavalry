@@ -164,6 +164,13 @@ pub unsafe extern "C" fn cavalry_publication_try_claim(
 ) -> i64 {
     if publication.is_null() {
         error::null("cavalry_publication_try_claim", "publication");
+        // A refused claim leaves no struct pointing into the log, and with no
+        // publication the struct names no outstanding claim ("Which claim a struct
+        // names").
+        if !claim.is_null() {
+            // SAFETY: non-null and writable, by the caller's convention.
+            unsafe { clear(claim) };
+        }
         return CAVALRY_PUBLICATION_ERROR;
     }
     if claim.is_null() {
