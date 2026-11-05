@@ -81,6 +81,13 @@ static int64_t frame_position(const cavalry_image_constants_t *c, int32_t term_i
 static void on_fragment(void *clientd, const uint8_t *buffer, size_t length,
                         const cavalry_header_t *header) {
     receiver_t *r = clientd;
+    /* Every message has arrived, so this fragment is one of them again, and the arrays
+     * hold no room for it. */
+    if (r->next >= MESSAGES) {
+        fprintf(stderr, "conformance/c: %s: a fragment after all %d messages (once and in "
+                "order)\n", r->name, MESSAGES);
+        exit(1);
+    }
     cavalry_header_values_t values;
     CHECK(cavalry_header_values(header, &values));
     if (length != BODY) {
@@ -161,6 +168,18 @@ static void compute_positions(receiver_t *r) {
     }
 }
 
+/* After the last message, one more poll delivers nothing. A drain stops at the last
+ * message, so without it a fragment delivered again after that one would go unseen. */
+static void expect_no_more(receiver_t *r) {
+    int count = cavalry_subscription_poll(r->subscription, on_fragment, r, 16);
+    if (count < 0) fail("cavalry_subscription_poll");
+    if (count != 0) {
+        fprintf(stderr, "conformance/c: %s: a poll after all %d messages delivered %d more\n",
+                r->name, MESSAGES, count);
+        exit(1);
+    }
+}
+
 /* A result code's name (spec/c-abi.md, "Result codes"). */
 static const char *result_name(int64_t code) {
     switch (code) {
@@ -175,7 +194,7 @@ static const char *result_name(int64_t code) {
 }
 
 /* Publishes MESSAGES messages by claim and commit on `publication`, polling `r` as it
- * goes, and drains `r` to the end. */
+ * goes, drains `r` to the end and polls it once more for nothing. */
 static void publish_and_receive(cavalry_publication_t *publication, receiver_t *r) {
     cavalry_buffer_claim_t claim;
     struct timespec publish_until = deadline();
@@ -222,6 +241,7 @@ static void publish_and_receive(cavalry_publication_t *publication, receiver_t *
             exit(1);
         }
     }
+    expect_no_more(r);
     compute_positions(r);
 }
 
@@ -350,6 +370,7 @@ int main(void) {
             return 1;
         }
     }
+    expect_no_more(&replayed);
     compute_positions(&replayed);
     if (ended_at != end || reason != CAVALRY_REPLAY_STOP_ENDED) {
         fprintf(stderr, "conformance/c: the replay ended at %" PRId64 " with reason %d, not at %"
