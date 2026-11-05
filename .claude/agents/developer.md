@@ -57,8 +57,8 @@ just lint-docs
 All four pass on the head you leave the branch at, before its push. A push in the middle
 of a fix, one blocker committed and the next still to do, needs that blocker's own test
 and nothing more. CI runs the four on the head you leave, once the run's last job
-approves the `ci` run GitHub held on that push; the same job ends the run held on an
-intermediate head cancelled, so it never runs and never fails. Your comment says, for
+approves the `ci` run GitHub held on that push; the same job deletes the run held on an
+intermediate head, so it never runs and never fails. Your comment says, for
 each pushed head, which gates ran on it and which did not, so that the reviewer and a
 person can read the comment against CI's run on the last head. `just lint-docs` here
 runs over CI's range,
