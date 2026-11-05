@@ -9473,6 +9473,9 @@ mod replay {
             },
         );
         wait_answer(&mut h, 20).expect("success");
+        assert_eq!(h.counter(RECORDING_TRUNCATED), 1);
+        // The file a truncate removes is not a purged segment (card 177).
+        assert_eq!(h.counter(RECORDING_SEGMENTS_PURGED), 0);
         let after = slot(&h, 0);
         assert_eq!(after.stop_position(), 0);
         assert_eq!(after.stop_timestamp(), after.start_timestamp());
@@ -9563,6 +9566,8 @@ mod replay {
             .retention(20, replayer::Retention::Delete { recording_id: 0 });
         wait_answer(&mut h, 20).expect("success");
         assert_eq!(h.counter(RECORDING_DELETED), 1);
+        // The files a delete removes are not purged segments (card 177).
+        assert_eq!(h.counter(RECORDING_SEGMENTS_PURGED), 0);
         assert_eq!(slot(&h, 0).state(), cavalry_log::layout::State::Deleted);
         assert!(!segment(&h, 0, 0).exists());
         assert!(

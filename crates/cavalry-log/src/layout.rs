@@ -1068,3 +1068,23 @@ pub fn segment_file_name_into(
 pub fn index_file_name(recording_id: i64) -> String {
     format!("{recording_id}{INDEX_SUFFIX}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stack-formatted name is the allocated one, byte for byte, at zero and at
+    /// both i64 extremes, the longest name there is: a roll and a removal name the
+    /// file every other reader of the directory names (card 177).
+    #[test]
+    fn segment_file_name_into_is_segment_file_name() {
+        for (recording_id, base) in [(0, 0), (i64::MAX, i64::MAX), (i64::MIN, i64::MIN)] {
+            let mut name = [0u8; SEGMENT_NAME_CAPACITY];
+            assert_eq!(
+                segment_file_name_into(recording_id, base, &mut name),
+                Some(segment_file_name(recording_id, base).as_str()),
+                "recording {recording_id} at {base}"
+            );
+        }
+    }
+}
