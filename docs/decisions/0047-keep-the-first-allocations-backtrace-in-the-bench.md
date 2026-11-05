@@ -81,8 +81,10 @@ path alone.
   backtrace; `the_failure_carries_the_first_allocations_backtrace` reads the frames in
   the failure's message.
 - `just bench --messages 100000` on the laptop at this change reads `allocations per
-  message: 0 (0 in 510000 messages)`, as before the change; the histograms are in the
-  commit message, inside the laptop's band.
+  message: 0 (0 in 410000 messages)`, as before the change: one pass measures the two
+  log rows and the two client rows of 100,000 each and the UDP row of a tenth of that,
+  4 × 100,000 + 10,000. The histograms are in the commit message, inside the laptop's
+  band.
 
 ## Consequences
 
