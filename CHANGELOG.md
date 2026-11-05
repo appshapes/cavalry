@@ -1164,3 +1164,11 @@ user-visible change, added in the same commit as the change. The format follows
   branch that moved after the approval: a notice when GitHub has the new head's runs,
   which the loop reviews, and a failure that says what to push when it has none, as on
   pull request 106 (`.github/workflows/auto-merge.yml`, header; card 210).
+- The client's replay test no longer reads the replay's image after the drain as if
+  it stayed: the driver retires a replay's image once every subscriber has read to the
+  end of stream position or the publication linger has passed, as the client protocol
+  page says, so the test takes the image's identity from the poll that found it and
+  then waits for the image to end or go, which is what the third replay test already
+  did; the flake it fixes was the test's race, not the driver's, and
+  [Replay a recording](docs/how-to/replay-a-recording.md) now says when the image goes
+  (card 185, issue 88).
