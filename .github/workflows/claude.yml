@@ -485,8 +485,9 @@ jobs:
   # dispatcher never starts the review of the fix (pull requests 52 and 53 on 2026-10-26:
   # `ci` held on 063f079 and 75fdba0, no `dispatch review` run on either, while a person's
   # push to the same branches raised both within ten seconds). This job makes the calls a
-  # person would make: it ends the runs held on the heads the fixer pushed before its
-  # last (cancelled; the first step says how and why), approves the last head's with
+  # person would make: it deletes the runs held on the heads the fixer pushed before its
+  # last (the first step says why a delete), disarms the merge an earlier approval armed
+  # when the push moved past it, approves the last head's with
   # `POST .../actions/runs/<id>/approve`, and adds the `review` label, all from the
   # token-holding side of the boundary above: no agent runs here, nothing here reads
   # model output, and GH_ACTIONS_TOKEN stays out of the agent's job exactly as it does
@@ -495,69 +496,70 @@ jobs:
   # with one exception: a fix that was an edit to the pull request body alone ("Verify
   # the fix landed", `landed=body`) leaves the head where the review found it, its
   # dispatch run already spent, so the label is the only way its review happens.
-  # `needs: agent` skips it when the agent job failed.
+  # After a failed or cancelled agent job it runs the first two steps alone: a push that
+  # run made before it ended is swept and disarmed for, and its held run and its review
+  # are a person's, since the fixer's comment says what it did; the approval and the
+  # label wait for a run that ended well.
   approve-fixer-runs:
     needs: agent
     if: |
+      always() && needs.agent.result != 'skipped' && (
       github.event_name == 'pull_request_review' ||
       github.event_name == 'pull_request_review_comment' ||
       github.event_name == 'issue_comment' ||
-      github.event_name == 'pull_request'
+      github.event_name == 'pull_request')
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5          # a 90-second sweep and a two-minute poll at most; not a p90, a floor
+    timeout-minutes: 5          # a few deletes and a two-minute poll at most; not a p90, a floor
     permissions: {}             # the job token does nothing here: the approval authenticates with GH_ACTIONS_TOKEN
     steps:
       # A run held on an earlier head of the same cycle is superseded: the fixer pushes each
       # blocker as it lands, and the pull request's checks are the head's alone. This step
-      # ends every such run CANCELLED, before the step below approves the head's. Until
-      # 2026-11-05 it was left held, on the reading that it sat in the Actions tab's waiting
-      # list and nothing read it. It did not stay there: the moment the pull request merged
-      # and GitHub deleted its branch, every run still held on the branch ended as a FAILURE
+      # DELETES every such run, before the step below approves the head's. Until 2026-11-05
+      # it was left held, on the reading that it sat in the Actions tab's waiting list and
+      # nothing read it. It did not stay there: the moment the pull request merged and
+      # GitHub deleted its branch, every run still held on the branch ended as a FAILURE
       # with zero jobs and the annotation "This run likely failed because of a workflow file
       # issue", and a failure mail went out, within two seconds of the merge. Twenty runs
       # ended that way in the week to 2026-11-04, on pull requests 90, 92, 94, 97, 98, 99,
       # 103, 108, 113 and 114 (run 41881392406, held on pull request 113's b826c22, is one
       # to read), each with a green `ci` run on its final head; the probe for card 210
       # reproduced it on 2026-11-05 (run 41998580734, failed one second after its branch
-      # was deleted). A cancelled run sends no mail: the week's 39 runs that `ci.yml`'s
-      # concurrency group cancelled on a person's next push sent none.
+      # was deleted). A cancelled or deleted run sends no mail.
       #
-      # How a held run is ended, measured on that probe (pull request 116, a job-token
-      # push): GitHub reports a held run as status `completed` with conclusion
-      # `action_required`, so `POST .../cancel` and `.../force-cancel` both answer 409
-      # "Cannot cancel a workflow run that is completed". The way is `POST .../approve`
-      # and then `.../cancel` retried once a second: the first second's answer is 409
-      # "Cannot cancel a workflow re-run that has not yet queued" ("... that is not in
-      # progress" was seen too), the 202 came at three seconds with the run `pending`, and
-      # the run ended `cancelled` at six seconds with no job created (run 41998580736). The
-      # retry is the point: a cancel sent 63 seconds after the approval found all four jobs
-      # started and the two bench jobs 76 seconds into their hosts (run 41997905395); the
-      # cancel of a run in progress is accepted, so the retry ends there at the latest.
-      # Why before the head's approval, and not left to the concurrency group: `ci.yml`'s
-      # group, `ci-<ref>` with cancel-in-progress on a pull request, cancels the group's
-      # in-progress run when a newer one queues, so an old run approved after the head's
-      # would cancel the head's; and an old run approved first is cancelled by the head's
-      # only when the head raised one, which it has not when GitHub's pull request object
-      # lags the push (pull request 106, 2026-11-04; auto-merge.yml's header). For the
-      # same reason "superseded" is judged against the branch's tip from the git ref as
-      # well as against the pull request object's head. The same group is why the sweep
-      # STOPS when a run at the head is live (queued or in progress, a person's push
-      # whose run started on its own): approving a held run then would cancel the live
-      # one. Only `ci.yml`'s runs count as live: the group is theirs, and this job's own
-      # run and the `claude` run of the same event sit at the head too (a
-      # `pull_request_review` run's head_sha is the reviewed commit), so counting every
-      # run would stop the sweep on itself whenever the agent pushed nothing. It leaves
-      # those held, says so, and auto-merge.yml makes the same sweep right before the
-      # merge, the last run of the loop before GitHub deletes the branch, under the same
-      # guard; what a failed fixer job (which skips this job) or a missed deadline here
-      # leaves held is swept there. Only this repository's runs are listed: the runs API
+      # Why a delete and not a cancel. GitHub reports a held run as status `completed` with
+      # conclusion `action_required`, so `POST .../cancel` and `.../force-cancel` both
+      # answer 409; the way to a cancel is `POST .../approve` and then `.../cancel` retried
+      # once a second, which ended a held run cancelled in six seconds with no job created
+      # (card 210, run 41998580736). That was this step from 2026-11-05 13:00 until card
+      # 217, and it had a window it could not use: the approval queues the run into
+      # `ci.yml`'s concurrency group, `ci-<ref>` with cancel-in-progress on a pull request,
+      # and the group cancels the run in progress when another queues. Measured on pull
+      # request 131 (card 217): with the tip's run 42093799584 queued, approving run
+      # 42093707931, held on an older head, put the older run in `pending` and ended the
+      # tip's jobs cancelled three seconds later; the sweep's cancel within a second had
+      # beaten that reaction on pull request 119, which proved nothing. So the sweep had to
+      # stop while a `ci` run at the head was live, which at the merge, with a bench queue,
+      # is usual (pull requests 121 to 124 on 2026-11-05, every one), and what it left held
+      # failed at the merge as before (pull request 121, run 42011131843, two seconds after
+      # the merge). `DELETE .../actions/runs/<id>` has no such window: a held run accepts it
+      # (runs 42093756872, 42093707959, 42093756942 and 42093799622 on that probe, each 404
+      # after), the run never queues, so the group never sees it, and GitHub has nothing
+      # left to fail when the branch goes. What the delete costs is the Actions tab's record
+      # of a run that never ran, with zero jobs; the line this step prints names the run and
+      # the head it was held on, and the commit stays in the pull request's history.
+      #
+      # "Superseded" is judged against the branch's tip from the git ref as well as against
+      # the pull request object's head, because the object can lag the push (pull request
+      # 106, 2026-11-04; auto-merge.yml's header): a run held on the tip is the head's, and
+      # the step below approves it. Only this repository's runs are listed: the runs API
       # matches `branch` against the head branch's name, which a fork's pull request can
-      # share, and approving a fork's held run with the owner's token is the approval
-      # GitHub holds an outsider's code for (ADR 0005). This step is NOT allowed to stop
-      # the steps after it: it exists to stop noise mail, and the approval and the review
-      # label below are the loop's critical path, so every call in it tolerates a failure
-      # with a warning that names the next step, and `continue-on-error` is the belt.
-      - name: Cancel the runs held on the heads the fixer left behind
+      # share, and the owner's token must not touch an outsider's run (ADR 0005).
+      # auto-merge.yml makes the same sweep right before the merge, the loop's last run
+      # before GitHub deletes the branch; what a refused delete leaves held is swept there. This step is NOT allowed to stop the
+      # steps after it: it exists to stop noise mail, and the approval and the review label
+      # below are the loop's critical path, so every call in it tolerates a failure with a
+      # warning that names the next step, and `continue-on-error` is the belt.
+      - name: Delete the runs held on the heads the fixer left behind
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
@@ -566,7 +568,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! IFS=$'\t' read -r head branch < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.ref] | @tsv' 2>/dev/null); then
-            echo "#${PR_NUMBER} is not a pull request; nothing to cancel"
+            echo "#${PR_NUMBER} is not a pull request; nothing to delete"
             exit 0
           fi
           tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null || echo "$head")
@@ -580,49 +582,76 @@ jobs:
             echo "no run is held on a superseded head of ${branch}"
             exit 0
           fi
-          live=$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs" -f "branch=${branch}" -f event=pull_request -F per_page=100 \
-            --jq ".workflow_runs[] | select(.path == \".github/workflows/ci.yml\" and .status != \"completed\" and (.head_sha == \"${head}\" or .head_sha == \"${tip}\")) | \"\(.name) \(.id) \(.status)\"") \
-            || { echo "::warning::the runs at the head of ${branch} could not be listed (the line above), so the ${count} held run(s) on its superseded heads are left held; the auto merge run sweeps them before the merge, and the approval of the head's run below goes on"; exit 0; }
-          if [ -n "$live" ]; then
-            echo "::warning::${count} run(s) held on superseded heads of ${branch} left held: a ci run at the head is live ($(printf '%s' "$live" | tr '\n' ';')) and approving a held run would cancel it through ci.yml's concurrency group. The auto merge run sweeps them before the merge; to end one now, approve it and cancel it on the Actions tab once it is queued."
-            exit 0
-          fi
-          ids=()
+          deleted=0
           while read -r id sha; do
             [ -n "$id" ] || continue
-            if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null; then
-              echo "approved run ${id}, held on the superseded head ${sha}, to cancel it"
-              ids+=("$id")
+            if gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" >/dev/null; then
+              echo "deleted run ${id}, held on the superseded head ${sha}"
+              deleted=$((deleted + 1))
             else
-              echo "::warning::run ${id}, held on the superseded head ${sha}, refused the approval and is left held; the auto merge run sweeps it before the merge, or approve and cancel it on the Actions tab"
+              echo "::warning::run ${id}, held on the superseded head ${sha}, refused the delete (the line above) and is left held; the auto merge run sweeps it before the merge, or delete it on the Actions tab"
             fi
           done <<< "$superseded"
-          deadline=$((SECONDS + 90))
-          while [ "${#ids[@]}" -gt 0 ]; do
-            left=()
-            for id in "${ids[@]}"; do
-              if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/cancel" >/dev/null 2>&1; then
-                echo "cancelled run ${id}"
-                continue
-              fi
-              state=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${id}" --jq '"\(.status)/\(.conclusion // "")"') || state="unread/"
-              case "$state" in
-                completed/action_required) left+=("$id") ;;   # still held: the approval has not taken effect yet
-                completed/*) echo "run ${id} ended ${state#completed/} before the cancel landed" ;;
-                *) left+=("$id") ;;
-              esac
-            done
-            ids=("${left[@]}")
-            [ "${#ids[@]}" -gt 0 ] || break
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::warning::${#ids[@]} approved superseded run(s) still refusing the cancel after 90 s: ${ids[*]}. Cancel them on the Actions tab now: one that queues after the head's run is approved below cancels the head's run through ci.yml's concurrency group; one already queued is cancelled by that approval instead."
-              break
+          echo "superseded held runs on ${branch}: ${count}, deleted ${deleted}"
+
+      # The fixer's push moved the head past the approval that armed the merge, when one
+      # had: GitHub's auto-merge survives the push, and the pushed head's checks pass the
+      # moment the step below approves its held `ci` run, so the merge would land a head
+      # nobody reviewed (auto-merge.yml's header, "What disarms the merge"). This step
+      # disarms it first, whatever started the fixer: a changes-requested review, whose
+      # own `auto merge` run disarmed already, or an `@claude` comment or review, whose
+      # push raises no event at all. A head that has an approval of its own is left armed:
+      # a run that pushed nothing, or a body-only fix, leaves the approved head where it
+      # was, and a reviewer may have approved the pushed head before this job ran; the
+      # reviewer's approval alone counts, since it alone arms a merge, as its latest
+      # verdict on the head, and the check is made again after the disarm, since an
+      # approval that crossed it leaves a merge nothing arms again on its own. A failure
+      # here stops the job: approving the held run under an armed merge is the one thing
+      # this job must not do, so the error names what to run, and the approval and the
+      # label are a person's then.
+      - name: Disarm the merge the fixer's push moved past
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          if ! IFS=$'\t' read -r head branch < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.ref] | @tsv' 2>/dev/null); then
+            echo "#${PR_NUMBER} is not a pull request; nothing to disarm"
+            exit 0
+          fi
+          armed=$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // ""')
+          if [ -z "$armed" ]; then
+            echo "no merge is armed on #${PR_NUMBER}; nothing to disarm"
+            exit 0
+          fi
+          tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null || echo "$head")
+          # The reviewer's latest verdict on the tip, per account; its approval is what arms a
+          # merge. Every page, oldest first, so the newest verdict is read last.
+          approved() {
+            local verdicts
+            if ! verdicts=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+              --jq ".[] | select(.commit_id == \"${tip}\" and (.user.login | startswith(\"claude\")) and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | \"\(.submitted_at) \(.user.login) \(.state)\""); then
+              echo "::warning::the reviews of #${PR_NUMBER} could not be listed (the line above); read as no approval of ${tip}"
+              return 1
             fi
-            sleep 1
-          done
-          echo "superseded held runs on ${branch}: ${count}"
+            printf '%s\n' "$verdicts" | sort | awk '{last[$2] = $3} END {for (u in last) if (last[u] == "APPROVED") found = 1; exit !found}'
+          }
+          if approved; then
+            echo "the branch's tip ${tip} has the reviewer's approval, so the merge armed at ${armed} is its own; nothing to disarm"
+            exit 0
+          fi
+          if ! gh pr merge "$PR_NUMBER" --disable-auto; then
+            echo "::error::the merge of #${PR_NUMBER}, armed at ${armed}, is still armed on ${tip}, which nobody reviewed: gh pr merge --disable-auto failed (the line above). Run it by hand, gh pr merge ${PR_NUMBER} --disable-auto, then approve the held ci run of ${tip} on the Actions tab and add the review label (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
+            exit 1
+          fi
+          echo "disarmed the merge of #${PR_NUMBER}, armed at ${armed}: the fixer's push moved the head to ${tip}, past the approval, and the review of ${tip} arms it again"
+          if approved; then
+            echo "::warning::the reviewer approved ${tip} while this step was disarming, so the merge that approval armed is gone with the old one, and nothing arms it again on its own. Add the review label to #${PR_NUMBER} once this run ends: the fresh approval arms it (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
+          fi
 
       - name: Approve the runs GitHub held on the fixer's push
+        if: needs.agent.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -637,7 +666,7 @@ jobs:
           # started; poll for up to two minutes, approve whatever is held, and stop after one
           # quiet poll once runs exist. Only the head's runs: a run held on an earlier head
           # of the same cycle would test a superseded tree and queue on the single-tenant
-          # bench hosts, and the step above has ended it cancelled.
+          # bench hosts, and the step above has deleted it.
           approved=0; seen=0; quiet=0; deadline=$((SECONDS + 120))
           while :; do
             runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${head}&per_page=50" --jq '.workflow_runs[] | "\(.id) \(.status) \(.conclusion // "")"')
@@ -668,6 +697,7 @@ jobs:
       # another label, not a review, so it does not count. The dispatcher refuses a fork,
       # so a fork head gets no label either.
       - name: Ask for the review of the agent's push
+        if: needs.agent.result == 'success'
         env:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
           GH_REPO: ${{ github.repository }}
