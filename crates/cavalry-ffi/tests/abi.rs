@@ -283,6 +283,11 @@ fn a_live_claim_refuses_the_calls_the_rust_borrow_would() {
     setup.receive(1);
     // SAFETY: the ABI's conventions.
     unsafe {
+        let mut idle = std::mem::zeroed::<cavalry_publication_constants_t>();
+        assert_eq!(
+            cavalry_publication_constants(setup.publication, &mut idle),
+            0
+        );
         let mut claim = std::mem::zeroed::<cavalry_buffer_claim_t>();
         let after = cavalry_publication_try_claim(setup.publication, 4, &mut claim);
         assert!(after > 0, "{}", errmsg());
@@ -312,11 +317,20 @@ fn a_live_claim_refuses_the_calls_the_rust_borrow_would() {
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_CLAIM_OUTSTANDING);
         assert!(!cavalry_publication_is_connected(setup.publication));
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_CLAIM_OUTSTANDING);
+        // The constants answer during the claim, from the handle's copy, as before it.
         let mut constants = std::mem::zeroed::<cavalry_publication_constants_t>();
         assert_eq!(
             cavalry_publication_constants(setup.publication, &mut constants),
             0
         );
+        assert_eq!(constants.channel, idle.channel);
+        assert_eq!(constants.registration_id, idle.registration_id);
+        assert_eq!(constants.session_id, idle.session_id);
+        assert_eq!(constants.stream_id, 1001);
+        assert_eq!(constants.max_payload_length, idle.max_payload_length);
+        assert_eq!(constants.max_message_length, idle.max_message_length);
+        assert!(constants.max_payload_length > 0 && constants.max_message_length > 0);
+        assert_eq!(constants.is_exclusive, idle.is_exclusive);
         ptr::copy_nonoverlapping(b"live".as_ptr(), claim.data, 4);
         assert_eq!(cavalry_buffer_claim_commit(&mut claim), after);
         assert!(cavalry_publication_is_connected(setup.publication));
@@ -405,10 +419,17 @@ unsafe extern "C" fn reentrant(
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_POLLING);
         let mut fault = std::mem::zeroed::<cavalry_fault_t>();
         assert_eq!(cavalry_subscription_fault(*subscription, &mut fault), -1);
+        // The constants answer from inside the handler, from the handle's copy.
         let mut constants = std::mem::zeroed::<cavalry_subscription_constants_t>();
         assert_eq!(
             cavalry_subscription_constants(*subscription, &mut constants),
             0
+        );
+        assert_eq!(constants.stream_id, 1001);
+        assert!(constants.registration_id >= 0);
+        assert_eq!(
+            CStr::from_ptr(constants.channel).to_str().unwrap(),
+            "cavalry:ipc"
         );
         let mut values = std::mem::zeroed::<cavalry_header_values_t>();
         assert_eq!(cavalry_header_values(header, &mut values), 0);

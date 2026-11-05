@@ -22,12 +22,22 @@ enum State {
     Polling,
 }
 
+/// The subscription's constants, copied out of it when the handle is made, so that
+/// `cavalry_subscription_constants` answers from inside the handler without reaching
+/// the subscription the running poll borrows.
+#[derive(Clone, Copy)]
+struct Constants {
+    registration_id: i64,
+    stream_id: i32,
+}
+
 /// A subscription; made by `cavalry_add_subscription`, freed by
 /// `cavalry_subscription_close`.
 pub struct cavalry_subscription_t {
     state: State,
     fault: cavalry_fault_t,
     channel: CString,
+    constants: Constants,
     /// The views `cavalry_subscription_image_at_index` hands out, one per image,
     /// rebuilt when the images change and valid until the next poll or close.
     views: Vec<cavalry_image_t>,
@@ -142,6 +152,10 @@ pub(crate) fn subscription_handle(subscription: Subscription) -> *mut cavalry_su
         state: State::Idle,
         fault: NO_FAULT,
         channel: strings::c_string(subscription.channel()),
+        constants: Constants {
+            registration_id: subscription.registration_id(),
+            stream_id: subscription.stream_id(),
+        },
         views: Vec::new(),
         subscription,
     })
@@ -584,15 +598,18 @@ pub unsafe extern "C" fn cavalry_subscription_constants(
         error::null("cavalry_subscription_constants", "constants");
         return -1;
     }
-    // SAFETY: a live handle; the getters read fields a running poll's borrow does not
-    // write, and the channel string is the handle's own copy.
+    // SAFETY: a live handle and a writable struct, by the caller's conventions. The
+    // reads go through the handle's pointer to its `channel` and `constants` fields
+    // alone, the copies `subscription_handle` took, and never form a reference to the
+    // wrapped subscription, which a running poll holds as `&mut` while it calls the
+    // handler this call may come from.
     unsafe {
         let channel = (*ptr::addr_of!((*subscription).channel)).as_ptr();
-        let inner = &*ptr::addr_of!((*subscription).subscription);
+        let copy = ptr::addr_of!((*subscription).constants).read();
         *constants = cavalry_subscription_constants_t {
             channel,
-            registration_id: inner.registration_id(),
-            stream_id: inner.stream_id(),
+            registration_id: copy.registration_id,
+            stream_id: copy.stream_id,
         };
     }
     0
