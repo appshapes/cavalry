@@ -342,6 +342,12 @@ the error's anchor.
   after its close, is undefined. `cavalry_close` before a publication's or a
   subscription's close is allowed: the handle answers `CLOSED` or the `closed` fault
   from then and still needs its own close, as the Rust handles outlive their client.
+  `cavalry_context_close` before or after the `cavalry_close` of a client the context
+  made is allowed too: `cavalry_init` copies the directory into the client, which
+  keeps no pointer to its context. In Aeron's C client the context must outlive its
+  client, so a program ported from Aeron, which closes the context last, is correct
+  here as well. One context may make any number of clients, each `cavalry_init`
+  reading the directory at its call.
 - A claim's `data` is valid from `try_claim` until its commit or abort, and a claim
   is committed or aborted once; a claim neither committed nor aborted before the
   publication's close is aborted by the close. The image pointer
@@ -389,11 +395,29 @@ touches that value. The word is plain memory and not an atomic, since one thread
 a handle at a time (Threads). It costs one load and one compare per call, and one store
 at each claim, commit, abort and poll.
 
-**Threads.** A publication, a subscription, a recording or a replay handle is used
-from one thread at a time, and a client's commands from one thread at a time, as the
-Rust API's `&mut self` has it; any handle may move between threads between calls. The
-client conductor is the library's own thread, started by `cavalry_init` and joined by
-`cavalry_close`. The fragment handler runs on the polling thread, inside
+**Threads.** Every handle is used from one thread at a time: a call on a handle
+returns before the next call on the same handle begins, whichever thread makes it.
+The rule covers every function of the handle, as the Rust borrow does, which lets no
+`&self` call run beside a `&mut self` one:
+
+- **A client.** Its reads, `cavalry_is_closed`, `cavalry_closed`, `cavalry_client_id`
+  and `cavalry_dir`, are `&self` methods of `Cavalry`, and its adds and commands are
+  `&mut self`, so a read never runs beside an add that waits up to 10 s, nor beside
+  `cavalry_close`. The `const` in a signature promises that the function writes
+  nothing through the pointer, not that it may run beside another call. A program
+  that watches a client from a second thread holds its own lock around every call on
+  the client handle.
+- **A context.** `cavalry_init` reads the context, so it counts as a call on the
+  context as well as on the new client: no `set_dir`, `get_dir` or close of the
+  context runs beside it.
+- **An image.** An image is part of its subscription, as `Subscription::images()`
+  borrows it, so a call on an image counts as a call on its subscription.
+- **Different handles.** Two handles may be used from two threads at once, a client
+  and its publications, subscriptions, recordings and replays among them, since each
+  Rust value is separate and none borrows the client.
+
+Any handle may move between threads between calls. The client conductor is the
+library's own thread, started by `cavalry_init` and joined by `cavalry_close`. The fragment handler runs on the polling thread, inside
 `cavalry_subscription_poll`. No `extern "C"` function of the library unwinds: each has
 no panic path, by `.claude/rules/data-plane.md`, and Rust aborts the process if one
 did; a `longjmp` out of the handler is undefined.
@@ -606,6 +630,19 @@ Revisit.
   passes `sizeof(z_stream)`.** Lost: every struct's layout belongs to the page's
   version, and the vectors hold the header to the page, so a struct of another size
   means another version, which the version check already refuses.
+- **A client's reads allowed beside its commands, from copies the handle holds outside
+  the wrapped `Cavalry`.** Lost for version 0: `client_id` and `dir` could be copied at
+  `cavalry_init`, but `closed()` reads the conductor's state, which `cavalry-client`
+  keeps in its private `Shared`. The ABI could reach it only by forming `&Cavalry`
+  while another thread holds `&mut Cavalry`, the aliased reference this ADR refuses
+  for a claim and a poll, and a read that raced `cavalry_close` would still read freed
+  memory. A sound `cavalry_is_closed` beside a command needs `cavalry-client` to share
+  that state with the handle, which is a change to the Rust API and a new version of
+  the page with its ADR.
+- **A context the client keeps, closed after it, as Aeron's is.** Lost: the client
+  needs only the directory, which it copies at `cavalry_init`, on the control plane;
+  a context the client keeps would add one more lifetime for the caller to hold, and
+  buy nothing.
 - **`catch_unwind` in every function.** Lost: a panic path is forbidden on the message
   path, Rust aborts on an unwind out of `extern "C"` from 1.81, and a catch would hide
   a bug behind a code and cost a frame per call.
@@ -646,7 +683,11 @@ term length; `spec/frame.md` types the version `i8`. The channel a `&str` in
 and `start_replay` (`crates/cavalry-client/src/client.rs` lines 178 to 182, 261 to 276,
 369 to 373 and 559 to 565); `connect_to`'s `dir.join("command-ring")` at lines 88 to
 92, and `default_dir`'s filter of an empty `CAVALRY_DIR` at line 62; a path shown by
-`display()` in `error.rs` at lines 201, 207 and 290. The gates' runners and the
+`display()` in `error.rs` at lines 201, 207 and 290. `Cavalry::dir`, `client_id`,
+`closed` and `is_closed` as `&self` methods at `client.rs` lines 742 to 761, `closed`
+reading `self.shared`, the conductor's state, a `pub(crate) struct Shared` at
+`crates/cavalry-client/src/conductor.rs` line 84; a `Publication` moved to a thread of
+its own in `crates/cavalry-client/tests/udp_receive.rs` line 355. The gates' runners and the
 pinned `mdbook` install in `.github/workflows/ci.yml`. The dependency
 lint's rule on build dependencies in `scripts/lint-workspace.py`, lines 8 to 15. What
 the implementation proves, the allocation count over every per-message function, the
