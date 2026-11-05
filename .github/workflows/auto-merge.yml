@@ -37,18 +37,46 @@
 #     and the review's `commit_id` comes from the same object. This step reads the git ref.
 #
 # The last sweep of the held runs. At the merge GitHub deletes the branch and ends every
-# run still held on it as a failure, with a mail (claude.yml, "Cancel the runs held on the
-# heads the fixer left behind", which says how a held run is measured to end cancelled and
-# why the sweep stops while a run at the head is live). This job is the loop's last before
-# that deletion, so it makes the same sweep, under the same guard, right before the merge:
-# what a failed fixer job, a missed deadline or a live head run left held is ended here,
-# cancelled. When the head's own `ci` run is still live, the sweep stops as it does there,
-# the merge is handed to GitHub with `--auto`, and a run still held then ends as it always
-# did. The sweep sits in the merge step, after the moved-head check, because it needs the
-# tip that check read and must never run on a head the approval does not cover; it must
-# not stop the merge either, so every call in it tolerates a failure with a warning that
-# names the next step, rather than a step of its own with `continue-on-error`, which
-# would have to read the tip and make the moved-head check a second time.
+# run still held on it as a failure, with a mail (claude.yml, "Delete the runs held on the
+# heads the fixer left behind", which says what was measured and why the sweep deletes a
+# held run rather than approving and cancelling it: the approval queues the run into
+# ci.yml's concurrency group, which cancels the head's live run, so that sweep had to
+# stop while one was live, which at the merge is usual; a delete queues nothing). This
+# job is the loop's last before that deletion, so it makes the same sweep right before
+# the merge: what a failed fixer job or a refused delete left held is deleted here. The
+# sweep sits in the merge step, after the moved-head check, because it needs the tip that
+# check read and must never run on a head the approval does not cover; it must not stop
+# the merge either, so every call in it tolerates a failure with a warning that names the
+# next step, rather than a step of its own with `continue-on-error`, which would have to
+# read the tip and make the moved-head check a second time.
+#
+# What disarms the merge. GitHub's auto-merge, once armed, survives a push by a person
+# with write access, and the branch protection requires no review, so an armed merge
+# would land the pushed head, which nobody reviewed, the moment its checks passed (pull
+# request 118 on 2026-11-05: disarmed by hand before a merge of master was pushed).
+# Three things move a pull request past its approval without a new one, and each
+# disarms the merge from the token-holding side: a push by a person, in
+# dispatch-review.yml, which runs on every such push before it dispatches the review of
+# the new head; a push by the fixer, whatever started it (a changes-requested review, an
+# `@claude` comment or review), in claude.yml's last job, before it approves the held
+# `ci` run of the pushed head, which is the only way that head's checks can pass; and a
+# review that requests changes on the current head, in the `disarm` job below, so that
+# the approved head does not land under an open request; and the `auto-merge` job arms
+# nothing while such a request is open on the tip, so the order of the request and the
+# approval does not matter. The reviewer's request or a collaborator's counts; a
+# stranger's does not move a merge: the reviewer is the App's login `claude[bot]`,
+# matched exactly here and in the jobs that read its verdicts, since a login cannot
+# hold a bracket and a prefix match let any account named claude-something arm or
+# disarm a merge on a public repository (the review of pull request 134 found it in
+# the arming clause, which had it from the start). Each disarm leaves a head the reviewer approved
+# armed, on its latest verdict. The reviewer's approval of the new head arms the merge
+# again through `auto-merge` above, pinned to that head, so a person pushes a merge of
+# master freely and disarms nothing by hand. GitHub would do the disarming itself with
+# a required approving review that a push dismisses; that rule brings "require a pull
+# request before merging" with it, which closes the direct commit to master the working
+# rules give developers unless the rule exempts admins, and whether an auto-merge under
+# the admin token honours it is unmeasured, so the three jobs are the mechanism until
+# both are known.
 name: auto merge
 
 on:
@@ -64,11 +92,11 @@ jobs:
     # and Dependabot sets it on its own pull requests (.github/dependabot.yml).
     if: |
       github.event.review.state == 'approved' &&
-      startsWith(github.event.review.user.login, 'claude') &&
+      github.event.review.user.login == 'claude[bot]' &&
       contains(github.event.pull_request.labels.*.name, 'auto-merge') &&
       github.event.review.commit_id == github.event.pull_request.head.sha
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 6          # a 90-second sweep, a few API calls and a one-minute poll on a refusal; not a p90, a floor
+    timeout-minutes: 4          # a few deletes, a few API calls, the reviews and a one-minute poll on a refusal; not a p90, a floor
     # The job's own GITHUB_TOKEN does nothing here: the merge authenticates with
     # GH_ACTIONS_TOKEN below. Declaring an empty block rather than inheriting the default
     # is the point.
@@ -155,14 +183,13 @@ jobs:
             exit 1
           }
           # The last sweep of the runs held on superseded heads of the branch (the header;
-          # claude.yml, "Cancel the runs held on the heads the fixer left behind", the same
-          # calls, measured there). This repository's runs only, since a fork's branch can
-          # share the name. Never while a `ci` run at the tip is live: approving a held run
-          # would cancel the live one through ci.yml's concurrency group; only `ci.yml`'s
-          # runs count, since this job's own run sits at the tip too. No call here may stop
-          # the merge: each failure is a warning and the sweep returns.
+          # claude.yml, "Delete the runs held on the heads the fixer left behind", the same
+          # call, measured there). This repository's runs only, since a fork's branch can
+          # share the name. A delete never queues the run, so nothing at the tip, live or
+          # not, is touched. No call here may stop the merge: each failure is a warning and
+          # the sweep goes on.
           sweep_held_runs() {
-            local held count live ids left id sha state deadline
+            local held count deleted id sha
             held=$(gh api -X GET "repos/$REPO/actions/runs" -f "branch=$BRANCH" -f event=pull_request -f status=action_required -F per_page=100 \
               --jq ".workflow_runs[] | select((.head_repository.full_name // \"\") == \"$REPO\" and .head_sha != \"$tip\") | \"\(.id) \(.head_sha)\"") \
               || { echo "::warning::the held runs of $BRANCH could not be listed (the line above); nothing swept, and the merge goes on"; return 0; }
@@ -171,47 +198,38 @@ jobs:
               echo "no run is held on a superseded head of $BRANCH"
               return 0
             fi
-            live=$(gh api -X GET "repos/$REPO/actions/runs" -f "head_sha=$tip" -F per_page=50 \
-              --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .status != "completed") | "\(.name) \(.id) \(.status)"') \
-              || { echo "::warning::the runs at $tip could not be listed (the line above), so the $count held run(s) on superseded heads of $BRANCH are left held and end as failures at the merge; the merge goes on"; return 0; }
-            if [ -n "$live" ]; then
-              echo "::warning::$count run(s) held on superseded heads of $BRANCH left held: the ci run at the tip is live ($(printf '%s' "$live" | tr '\n' ';')) and approving a held run would cancel it through ci.yml's concurrency group; GitHub ends them as failures at the merge. To end one now, approve it and cancel it on the Actions tab once it is queued."
-              return 0
-            fi
-            ids=()
+            deleted=0
             while read -r id sha; do
               [ -n "$id" ] || continue
-              if gh api -X POST "repos/$REPO/actions/runs/$id/approve" >/dev/null; then
-                echo "approved run $id, held on the superseded head $sha, to cancel it"
-                ids+=("$id")
+              if gh api -X DELETE "repos/$REPO/actions/runs/$id" >/dev/null; then
+                echo "deleted run $id, held on the superseded head $sha"
+                deleted=$((deleted + 1))
               else
-                echo "::warning::run $id, held on the superseded head $sha, refused the approval and is left held; approve and cancel it on the Actions tab"
+                echo "::warning::run $id, held on the superseded head $sha, refused the delete (the line above) and is left held; it ends as a failure at the merge unless it is deleted on the Actions tab first"
               fi
             done <<< "$held"
-            deadline=$((SECONDS + 90))
-            while [ "${#ids[@]}" -gt 0 ]; do
-              left=()
-              for id in "${ids[@]}"; do
-                if gh api -X POST "repos/$REPO/actions/runs/$id/cancel" >/dev/null 2>&1; then
-                  echo "cancelled run $id"
-                  continue
-                fi
-                state=$(gh api "repos/$REPO/actions/runs/$id" --jq '"\(.status)/\(.conclusion // "")"') || state="unread/"
-                case "$state" in
-                  completed/action_required) left+=("$id") ;;   # still held: the approval has not taken effect yet
-                  completed/*) echo "run $id ended ${state#completed/} before the cancel landed" ;;
-                  *) left+=("$id") ;;
-                esac
-              done
-              ids=("${left[@]}")
-              [ "${#ids[@]}" -gt 0 ] || break
-              if [ "$SECONDS" -ge "$deadline" ]; then
-                echo "::warning::${#ids[@]} approved superseded run(s) still refusing the cancel after 90 s: ${ids[*]}; cancel them on the Actions tab, and the merge goes on"
-                break
-              fi
-              sleep 1
-            done
-            echo "superseded held runs on $BRANCH: $count"
+            echo "superseded held runs on $BRANCH: $count, deleted $deleted"
+          }
+          # An open request for changes on the tip, from the reviewer or a collaborator,
+          # outranks an approval that a session which started earlier submits after it:
+          # the merge is not armed under it (the header, "What disarms the merge"). The
+          # latest verdict per account counts, so an account that asked for changes and
+          # then approved has approved; every page, oldest first. Exits with a notice
+          # when one is open, and with a notice when the reviews cannot be read, since
+          # the question is open then too; returns otherwise. Called right before the
+          # arm, so that the window between the check and the arm is the one call.
+          refuse_open_request() {
+            local verdicts open
+            if ! verdicts=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
+              --jq ".[] | select(.commit_id == \"$tip\" and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\") and ((.user.login // \"\") == \"claude[bot]\" or .author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\")) | \"\(.submitted_at) \(.user.login) \(.state)\""); then
+              echo "::notice::No merge: the reviews of #$PR could not be listed (the line above), so whether a request for changes is open on $tip is unknown, and the approval does not arm the merge on its own. Add the review label to #$PR: the next approval tries again (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")."
+              exit 0
+            fi
+            open=$(printf '%s\n' "$verdicts" | sort | awk '{last[$2] = $3} END {for (u in last) if (last[u] == "CHANGES_REQUESTED") print u}' | tr '\n' ' ')
+            if [ -n "$open" ]; then
+              echo "::notice::No merge: ${open}asked for changes on $tip and that request is open, so the approval does not arm the merge. The approval of the head that answers it, or of this one asked for again with the review label once the request is withdrawn, arms it (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")."
+              exit 0
+            fi
           }
           read_tip
           if [ "$tip" != "$APPROVED" ]; then
@@ -223,6 +241,7 @@ jobs:
           gh pr view "$PR" --repo "$REPO" --json body --jq '.body' \
             | sed '/<!-- codesmith:footer -->/,/<!-- \/codesmith:footer -->/d' \
             | cat -s > "$body"
+          refuse_open_request
           merge() { gh pr merge "$PR" --squash --repo "$REPO" --subject "$subject" --body-file "$body" --match-head-commit "$APPROVED" "$@"; }
           err="$RUNNER_TEMP/merge-auto.err"
           if merge --auto 2>"$err"; then exit 0; fi
@@ -238,3 +257,63 @@ jobs:
           fi
           echo "::error::GitHub refused the merge of #$PR; gh's reason is above. Next: gh pr checks $PR --required, then gh pr view $PR --json mergeStateStatus (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
           exit 1
+
+  # The last of the three in "What disarms the merge" in the header: a review that
+  # requests changes on the current head. The merge an earlier approval armed would land
+  # that head under the open request; and when the fixer answers it, its push moves the
+  # head on, which claude.yml's last job disarms for. The reviewer's request counts and
+  # a collaborator's, a person's as much as the agent's; a stranger's review on a public
+  # repository moves no merge. The commit pin is the `auto-merge` job's: a request
+  # against an older head is about a head that is gone, and the approval of the current
+  # one stands, and a run that starts after a push moved the branch on says so and
+  # leaves the tip's own review to decide. Nothing waits on this job, so a failure
+  # here is loud and stops nothing, and every ending that leaves the question open
+  # names what to run.
+  disarm:
+    if: |
+      github.event.review.state == 'changes_requested' &&
+      contains(github.event.pull_request.labels.*.name, 'auto-merge') &&
+      github.event.review.commit_id == github.event.pull_request.head.sha &&
+      (github.event.review.user.login == 'claude[bot]' ||
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association))
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 2          # four API calls; not a p90, a floor
+    permissions: {}             # the job token does nothing here: GH_ACTIONS_TOKEN armed the merge and disarms it
+    steps:
+      - name: Disarm the merge the review moved past
+        env:
+          GH_TOKEN: ${{ secrets.GH_ACTIONS_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          REVIEWED: ${{ github.event.review.commit_id }}
+        run: |
+          set -euo pipefail
+          next="Run by hand: gh pr view $PR --json autoMergeRequest, then gh pr merge $PR --disable-auto if it is armed (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
+          if ! armed=$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // ""'); then
+            echo "::error::whether a merge is armed on #$PR could not be read (the line above). $next"
+            exit 1
+          fi
+          if [ -z "$armed" ]; then
+            echo "no merge is armed on #$PR; nothing to disarm"
+            exit 0
+          fi
+          # The branch's tip, not the payload's head: this job can start late, after a
+          # push moved the branch on, and then the request is about a head that is gone
+          # and the tip's own review decides its merge.
+          if ! tip=$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq '.object.sha'); then
+            state=$(gh pr view "$PR" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "unread")
+            case "$state" in
+              MERGED|CLOSED) echo "#$PR is $state and its branch $BRANCH is gone; nothing to disarm"; exit 0 ;;
+              *) echo "::error::the branch $BRANCH of #$PR (state $state) could not be read (the line above), and the merge armed at $armed may sit under the open request on $REVIEWED. $next"; exit 1 ;;
+            esac
+          fi
+          if [ "$tip" != "$REVIEWED" ]; then
+            echo "the branch moved on from the reviewed $REVIEWED to $tip since the review, so the request is about a head that is gone and the review of $tip decides its merge; nothing to disarm"
+            exit 0
+          fi
+          if ! gh pr merge "$PR" --repo "$REPO" --disable-auto; then
+            echo "::error::the merge of #$PR, armed at $armed, is still armed on $tip, which a review asked to change: gh pr merge --disable-auto failed (the line above). $next"
+            exit 1
+          fi
+          echo "disarmed the merge of #$PR, armed at $armed: the review requested changes on $tip, and the approval of the head that answers it, or of this one asked for again with the review label once the request is withdrawn, arms it again"
