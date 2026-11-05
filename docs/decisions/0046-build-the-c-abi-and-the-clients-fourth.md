@@ -504,8 +504,8 @@ the per-message rules, no lock, no `await` and no raise, by card 205's check in
 `just lint`, which each later card extends with its language's forms and which fails
 on a language it has no rules for, and by its card's record, the fourth, no syscall,
 by its card's record, and the fifth, no allocation of its own beyond the objects its
-runtime makes for the crossing, with one view and one buffer claim kept per
-publication and per subscription across messages, by its card's record and a count it
+runtime makes for the crossing, with one view per subscription, and one view and one
+buffer claim per publication, kept across messages, by its card's record and a count it
 shares with the runtime's side, and not by a gate; and the runtime's side may
 allocate and take
 the runtime's own lock per message, as Python's `ctypes` does, which each client's
