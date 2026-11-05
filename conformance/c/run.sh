@@ -41,7 +41,11 @@ for _ in $(seq 1 100); do
     if target/release/cavalry doctor >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
-target/release/cavalry doctor | grep -q 'is running' || {
+# Doctor's whole output first, as scripts/quickstart.sh reads it: doctor exits 1 on
+# any failed finding, and a `grep -q` in a pipe exits at the first match, so doctor's
+# next write would fail and pipefail would report a running driver as not running.
+running=$(target/release/cavalry doctor || true)
+grep -q 'is running' <<<"$running" || {
     echo "conformance/c: the driver did not report running" >&2; exit 1; }
 
 echo "conformance/c: run the program"
