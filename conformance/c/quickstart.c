@@ -6,7 +6,9 @@
  * A failed check prints the function and the code, with cavalry_errmsg when the call
  * set the thread's error, and exits 1; every wait is bounded at WAIT_SECONDS. */
 /* clock_gettime and CLOCK_MONOTONIC are POSIX, not C11: glibc declares them under
- * -std=c11 only with this defined before the first include; macOS does as well. */
+ * -std=c11 only with this defined before the first include; macOS does as well. The
+ * loopback address is parsed with inet_pton, which POSIX declares, because macOS hides
+ * INADDR_LOOPBACK, a BSD name, when _POSIX_C_SOURCE is defined. */
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <inttypes.h>
@@ -228,7 +230,11 @@ static int free_udp_port(void) {
     if (fd < 0) { perror("socket"); exit(1); }
     struct sockaddr_in address = {0};
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    /* The address the channel string names. */
+    if (inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) != 1) {
+        fprintf(stderr, "conformance/c: inet_pton did not parse 127.0.0.1\n");
+        exit(1);
+    }
     socklen_t length = sizeof address;
     if (bind(fd, (struct sockaddr *)&address, length) < 0 ||
         getsockname(fd, (struct sockaddr *)&address, &length) < 0) {
