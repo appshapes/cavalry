@@ -21,7 +21,9 @@ cavalry-proto = { path = "../cavalry-proto" }
 [dev-dependencies]
 # The tests run a real driver in the test process (ADR 0007: one driver, Rust clients).
 cavalry-driver = { path = "../cavalry-driver" }
-# The recording test reads the catalog's stop back (ADR 0025). Dev only.
+# The recording test reads the catalog's stop back (ADR 0025), and the purge allocation
+# test builds its pile of segment files in the log directory before the driver opens it
+# (card 177). Dev only.
 cavalry-log = { path = "../cavalry-log" }
 # The UDP tests count allocations across the send path with the counting allocator the
 # bench uses, so the sender's zero-allocation claim is a test (CLAUDE.md, gate 2; ADR
