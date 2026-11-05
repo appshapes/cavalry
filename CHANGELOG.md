@@ -1220,6 +1220,24 @@ user-visible change, added in the same commit as the change. The format follows
   how-to and the pull request skill say a review takes up to thirty minutes and
   when to add the `review` label (`.github/workflows/review-pull-request.yml`;
   card 213).
+- ADR 0051, Proposed: the C ABI, version 0, is the client API as it stands under
+  Aeron's C client's names, seven opaque handles, one publication type for both kinds,
+  a caller-owned buffer claim that names its publication and its position, so that a
+  stale one commits nothing, synchronous adds, Aeron's six result codes with
+  `TooLong` as `ERROR` and `CAVALRY_ERR_TOO_LONG`, one table of error codes with the
+  driver's on their values from 1 to 99, an error message that keeps its docs anchor
+  when it is cut, a refusal of a channel that is not UTF-8 and of an empty directory,
+  a frame's position from its image's constants, a poll's fault as a struct, an
+  answer for every call made during a claim or a poll, lifetime rules by convention
+  with debug builds poisoning what is released, every handle used from one thread at
+  a time, and a `cavalry_context_init` that refuses a header of another ABI version;
+  its page is `spec/c-abi.md` with the committed
+  header as the artefact and vectors from the page's table, cbindgen 0.29.4 is a
+  pinned tool of `just lint` and not a dependency, `conformance/c/` is the first
+  runner, and two bench rows run through the ABI. The page, the crate, the runner and
+  the rows land with the acceptance
+  ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
+  card 204).
 - The `bench (udp)` and `bench (udp peer)` jobs each wait, before their run, until the
   run's other job is in progress, for up to 45 minutes, so the two ends of one run
   meet each other. Before, each host started its end from its own queue: the harness's
