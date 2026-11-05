@@ -1,10 +1,11 @@
-# 0048. Store a publication's connected flag after its limit, in the same duty cycle
+# 0048. Raise a publication's connected flag after its limit and lower it before, in the same duty cycle
 
 - **Status:** Accepted
 - **Date:** 2026-11-05
 - **Invariants affected:** 1, 4
 - **Supersedes:** none. Amends `spec/log-buffer.md`, "The driver", within version 1
-  with an order the page did not state: the connected flag is stored after the limit
+  with an order the page did not state: the connected flag rises after the limit's
+  raise and falls before its lowering
 
 ## Context
 
@@ -33,18 +34,29 @@ code (`CLAUDE.md`, Protocol).
 
 ## Decision
 
-The conductor stores the flag in its limit pass, after the limit and never before it,
-in the same duty cycle as the limit's raise: the flag rises to 1 when a subscriber has
-a position or a recording is live and the limit stored is past the consumer position,
-which the first raise after a connection leaves it; it stays 1 while the publication
-stays connected, since a subscriber that reaches the limit in a pass whose cleaning
-holds the raise back still has its position; and it is 0 otherwise. A publisher that
-reads 1 therefore reads a limit raised for that subscriber or recording with it, so
-`back pressured` means what the client says it means. The commands pass, the start of
-a recording and the sender's replies no longer touch the flag; they change what the
-limit pass computes from. The page says so in one sentence. A disconnect goes the same
-way: the limit lowers to the consumer position and the flag follows it to 0 in the same
-pass.
+The conductor stores the flag in its limit pass, in the same duty cycle as the limit:
+a 1 after the limit's raise, never before it, and a 0 before the limit's lowering,
+never after it.
+
+- **It rises after the raise.** The flag rises to 1 when a subscriber has a position
+  or a recording is live and the limit stored is past the consumer position, which the
+  first raise after a connection leaves it. A publisher that reads 1 therefore reads a
+  limit raised for that subscriber or recording with it, so `back pressured` means
+  what the client says it means.
+- **It holds while connected.** It stays 1 while the publication stays connected,
+  since a subscriber that reaches the limit in a pass whose cleaning holds the raise
+  back still has its position.
+- **It falls before the lowering.** It falls to 0 when neither a subscriber has a
+  position nor a recording is live, and the limit lowers to the consumer position
+  after it. A claim loads the limit before the flag ("Claim, commit and abort", step
+  1), and both stores are release stores, so a publisher that reads the lowered limit
+  reads 0 with it and is told `not connected`. The reverse order would tell a
+  publisher between the consumer position and the old limit `back pressured` with no
+  subscriber: card 187's false result in the other direction.
+
+The commands pass, the start and stop of a recording and the sender's replies no
+longer touch the flag; they change what the limit pass computes from. The page says
+so.
 
 ## Alternatives considered
 
@@ -56,30 +68,48 @@ pass.
   of it in three places is three places for it to drift.
 - **Leave it to the tests to wait on the limit.** Lost: a user's program reads the
   same two words, and the page's `back pressured` would be false for them too.
+- **Lower the flag in the commands pass, where the subscriber or recording goes.** The
+  driver did this before this decision, in `drop_subscription`, the sender's reply and
+  a recording's stop, and it is a truthful order too. Lost: it keeps a copy of the
+  connected facts at each of those sites, the places this decision makes one, and the
+  limit pass stores the 0 in the same cycle, before the lowering, where the publisher
+  reads the two words in order.
 
 ## Evidence
 
-The two failures in Context, and three of the conductor's unit tests.
-`the_connected_flag_is_stored_after_the_limit_in_the_same_cycle`: after an image joins
-in the commands pass the publication is not connected and its limit has not moved, and
-the limit pass raises the limit by the window and then sets the flag.
-`a_recording_connects_a_publication_in_the_limit_pass`: the same for a recording that
-connects a publication alone. `the_connected_flag_holds_while_cleaning_holds_the_raise_back`:
-on a 64 KiB term the subscriber reads up to a limit of 72 KiB, cleaning stops at the
-first term's end, and the pass that holds the raise back leaves the flag 1 and the
-publisher's claim `back pressured`; the next pass raises the limit with the flag still
-1. Nothing a message passes through changes: the publisher's claim
-reads the same two words, and the conductor stores one of them one step later in its
-cycle. `just bench` before and after is in the commit message.
+The two failures in Context, and four of the conductor's unit tests:
+
+- `the_connected_flag_is_stored_after_the_limit_in_the_same_cycle`: after an image
+  joins in the commands pass the publication is not connected and its limit has not
+  moved, and the limit pass raises the limit by the window and then sets the flag.
+- `a_recording_connects_a_publication_in_the_limit_pass`: the same for a recording
+  that connects a publication alone.
+- `the_connected_flag_holds_while_cleaning_holds_the_raise_back`: on a 64 KiB term the
+  subscriber reads up to a limit of 72 KiB and cleaning stops at the first term's end.
+  The pass that holds the raise back leaves the flag 1 and the publisher's claim
+  `back pressured`, and the next pass raises the limit with the flag still 1. The
+  rule this decision first had, 1 only while the limit is past the consumer position,
+  fails it.
+- `a_disconnect_stores_the_flag_then_lowers_the_limit_in_the_limit_pass`: the
+  commands pass that removes the last subscription moves neither word, and the limit
+  pass leaves the flag 0 and the limit at the subscriber's last position, below the
+  publisher, whose claim reads `not connected`. The order of the two stores inside the
+  pass is the code's; a test on one thread sees both words only after the pass.
+
+Nothing a message passes through changes: the publisher's claim reads the same two
+words, and the conductor stores the flag at another step of its cycle. `just bench`
+before and after is in the commit message.
 
 ## Consequences
 
 Easier: a publisher's `back pressured` is true whenever it reads it; one place sets
 the flag, from what the limit pass computes, where four places did.
 
-Harder: the flag follows the limit, so a subscriber that joins a publication whose
-cleaning is behind sees the flag a cycle or two after its position exists, during which
-a claim reads `not connected`; the page says so. Once 1, the flag holds while the
+Harder: the flag follows the limit, so when a subscriber joins a publication whose
+cleaning is behind, the publisher reads the flag a cycle or two after the subscriber's
+position exists, and a claim at the limit reads `not connected` until then; the page
+says so. A disconnect's 0 waits for the limit pass of the same cycle, where the driver
+before this decision stored it in the commands pass. Once 1, the flag holds while the
 publication stays connected, so a subscriber that reads up to the limit in a pass whose
 cleaning stops at a term's end holds the raise back for that cycle, and a claim at the
 limit reads `back pressured` with the subscriber at the limit rather than a window

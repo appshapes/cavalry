@@ -196,8 +196,9 @@ struct Publication {
     clean_position: i64,
     /// The limit last stored.
     last_limit: i64,
-    /// The connected flag as last stored to the log header: set in the limit pass,
-    /// after the limit and never before it (ADR 0048; card 187).
+    /// The connected flag as last stored to the log header: stored in the limit pass,
+    /// raised after the limit's raise and lowered before its lowering (ADR 0048;
+    /// card 187).
     connected_flag: bool,
     /// The producer position as last loaded, and when, by the conductor's clock: loaded
     /// at most once per [`spec::PRODUCER_POSITION_INTERVAL`] (ADR 0022, ADR 0032).
@@ -3134,23 +3135,29 @@ impl Conductor {
             && (candidate - publication.last_limit >= step || !connected)
             && publication.clean_position >= clean_to;
         let lower = candidate < publication.last_limit && !connected;
+        // The flag the publisher reads rises after the limit's raise and falls before
+        // its lowering, in the same pass (ADR 0048; card 187), so that a claim reads
+        // `back pressured` only with a subscriber a window behind. Stored only when it
+        // changes, as the limit is. It falls first: with neither a subscriber's
+        // position nor a live recording it is 0 before the limit lowers, so a publisher
+        // that reads the lowered limit reads 0 with it and is told `not connected`.
+        if !connected && publication.connected_flag {
+            let _ = publication.log.set_connected(false);
+            publication.connected_flag = false;
+            moved = true;
+        }
         if raise || lower {
             publication.limit.store_release(candidate);
             publication.last_limit = candidate;
             moved = true;
         }
-        // The flag the publisher reads, stored after the limit and never before it
-        // (ADR 0048; card 187): 1 once the limit is past the consumer position with a
-        // subscriber's position or a live recording, which the first raise after a
-        // connection leaves it, so that a claim reads `back pressured` only with a
-        // subscriber a window behind; held at 1 while the publication stays connected,
-        // since a subscriber that reaches the limit while cleaning holds the next raise
-        // back still has its position; 0 otherwise. Stored only when it changes, as the
-        // limit is.
-        let flag = connected && (publication.connected_flag || publication.last_limit > consumer);
-        if flag != publication.connected_flag {
-            let _ = publication.log.set_connected(flag);
-            publication.connected_flag = flag;
+        // It rises once the limit is past the consumer position, which the first raise
+        // after a connection leaves it, and holds while the publication stays
+        // connected: a subscriber that reaches the limit while cleaning holds the next
+        // raise back still has its position.
+        if connected && !publication.connected_flag && publication.last_limit > consumer {
+            let _ = publication.log.set_connected(true);
+            publication.connected_flag = true;
             moved = true;
         }
         // Unblocking: a consumer position stalled for the timeout with the producer beyond it.
@@ -7580,6 +7587,65 @@ mod replay {
         assert_eq!(publication.clean_position, limit);
         assert_eq!(publication.limit.get(), limit + window);
         assert!(publication.log.is_connected());
+        drop(appender);
+    }
+
+    /// On a disconnect the flag falls before the limit lowers, in the limit pass
+    /// (ADR 0048): the commands pass that removes the last subscription moves neither
+    /// word the publisher reads, and the limit pass stores 0 and then lowers the limit
+    /// to the largest position the subscriber reached, so the publisher between that
+    /// position and the old limit is told `not connected`, never `back pressured`. The
+    /// order of the two stores inside the pass is the code's, which a test on one
+    /// thread cannot see; this test pins what it can, both words after the pass.
+    #[test]
+    fn a_disconnect_stores_the_flag_then_lowers_the_limit_in_the_limit_pass() {
+        let mut h = Harness::new("disconnect-flag-before-limit");
+        let now = h.now;
+        h.conductor
+            .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
+        h.conductor.add_subscription(CLIENT, 3, STREAM, IPC_CHANNEL);
+        h.conductor.keep_publications(now);
+        let window = i64::from(
+            h.conductor.publications[0]
+                .log
+                .header()
+                .publication_window_length(),
+        );
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let mut offered = 0;
+
+        // The publisher fills the window and the subscriber reads half of it: the limit
+        // runs a window ahead of the subscriber, past the publisher.
+        offer_to(&mut appender, window, &mut offered);
+        let read = window / 2;
+        h.conductor.images[0].position.store_release(read);
+        h.conductor.keep_publications(now);
+        assert_eq!(h.conductor.publications[0].limit.get(), read + window);
+        assert!(h.conductor.publications[0].log.is_connected());
+
+        // The commands pass: the last subscription goes, and nothing the publisher
+        // reads moves.
+        h.conductor.remove_subscription(CLIENT, 4, 3, now);
+        assert!(h.conductor.images.is_empty());
+        let publication = &h.conductor.publications[0];
+        assert!(
+            publication.log.is_connected(),
+            "the flag waits for the limit pass"
+        );
+        assert_eq!(publication.limit.get(), read + window);
+        // The limit pass: the flag to 0, then the limit to the subscriber's last
+        // position, below the publisher's.
+        h.conductor.keep_publications(now);
+        let publication = &h.conductor.publications[0];
+        assert!(!publication.log.is_connected());
+        assert_eq!(publication.limit.get(), read);
+        assert!(matches!(
+            appender.offer(&[0u8; 32], read, 0),
+            Err(ClaimError::NotConnected)
+        ));
         drop(appender);
     }
 
