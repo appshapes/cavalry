@@ -142,8 +142,8 @@ gh pr checks <number>
   request 57 two reviews lost their fix run that way and the run that did work answered
   a review two heads old. The fixer commits each blocker as its test passes and pushes
   as it goes, so the head may move more than once during one run; the review is of the
-  head it leaves. When the run completes, its last job cancels the `ci` runs GitHub
-  held on the heads the agent pushed before its last (`claude.yml`, "Cancel the runs
+  head it leaves. When the run completes, its last job deletes the `ci` runs GitHub
+  held on the heads the agent pushed before its last (`claude.yml`, "Delete the runs
   held on the heads the fixer left behind": a held run left alone ends as a failure,
   with a mail, when the branch is deleted at the merge; the `auto merge` run sweeps
   what that job left held, right before the merge), approves the `ci` run held on
@@ -185,7 +185,12 @@ gh pr checks <number>
 
 - **Approved.** `auto-merge.yml` arms the merge on an approval whose `commit_id` is the
   current head; an approval of an older head arms nothing, and the newer head gets its
-  own review. The merge lands when the required checks pass: `gh pr checks <number>
+  own review. A push after the approval, yours (`dispatch-review.yml`) or the fixer's
+  (`claude.yml`, its last job), disarms the merge, as does a review that requests
+  changes on the approved head (`auto-merge.yml`), and an open request from a
+  collaborator on the head arms nothing, which the `auto merge` run says; the
+  reviewer's approval of the new head arms it again, so disarm nothing by hand.
+  The merge lands when the required checks pass: `gh pr checks <number>
   --required`. A branch that moved after the approval is refused by GitHub, and the
   `auto merge` run says why: a notice, and the run green, when GitHub raised runs for
   the new tip, which the loop reviews on its own; a failure when it raised none within
