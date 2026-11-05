@@ -1266,8 +1266,8 @@ user-visible change, added in the same commit as the change. The format follows
   structs, 58 functions, the six result codes, one table of error codes with the
   driver's below 100, the string, lifetime and thread rules, which claim a struct
   names, a frame's position from its image's constants, and the version check a reader
-  runs first; `spec/vectors/c-abi.json`, written by `spec/vectors/c-abi.py`, holds the
-  committed header to the page. `spec/README.md` admits an ABI page and its kind of
+  runs first; `spec/vectors/c-abi.json`, written by `spec/vectors/c-abi.py`, will hold
+  the committed header to the page once `cavalry-ffi`'s test reads it. `spec/README.md` admits an ABI page and its kind of
   vector, and `spec/client-protocol.md` keeps its error codes below 100 for the ABI
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).

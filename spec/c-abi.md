@@ -64,16 +64,17 @@ The structs the caller owns. Every struct has C's natural layout, with no packin
   `values.frame.session_id` unchanged. The outer struct has no `initial_term_id` and no
   `position_bits_to_shift`: the header the handler is given carries neither, and a
   ported line that reads them fails to compile rather than reading a wrong value. The
-  image's constants carry the two instead ("A frame's position"). Two fields differ
-  from Aeron's frame struct in type, as `spec/frame.md` types them: `version` is
-  `int8_t`, Aeron's `int8_t` too, and `type` is `uint16_t` where Aeron's is `int16_t`;
-  every frame type `spec/` gives is below 12, so it reads the same in either.
+  image's constants carry the two instead ("A frame's position"). One field differs
+  from Aeron's frame struct in type: `type` is `uint16_t`, as `spec/frame.md` types it,
+  where Aeron's is `int16_t`; `version` is `int8_t` in both. Every frame type `spec/`
+  gives is below 12, so `type` reads the same in either.
 - **The fault.** The fault the subscription's last poll stopped on. `code` is 120, 121
   or 122 ("Error codes"), the code `cavalry_errcode` gave after that poll, and 0 when
   the last poll returned a count. `session_id` is the image's for 120 and 121, else 0.
   `position` is the reader's position when the check failed for 120, else
   `CAVALRY_NULL_POSITION`. The check that failed is in the message. A poll that
-  cannot answer leaves the fault as it was.
+  cannot answer leaves the fault as it was, and before any poll the fault is 0, 0 and
+  `CAVALRY_NULL_POSITION`.
 - **The constants.** Each is filled by its handle's `_constants` function from a copy
   the handle took when it was made, so the call cannot fail on the driver's state; the
   strings are valid for the handle's life.
@@ -91,7 +92,7 @@ handle writes nothing through that pointer; it promises nothing about threads
 | context | `int cavalry_context_init_v(cavalry_context_t **context, int abi_version)`, which the header's macro `cavalry_context_init(context)` calls with `CAVALRY_ABI_VERSION` ("Versions and what a reader rejects"); `int cavalry_context_set_dir(cavalry_context_t *context, const char *dir)`; `const char *cavalry_context_get_dir(const cavalry_context_t *context)`; `int cavalry_context_close(cavalry_context_t *context)`. A context resolves its directory when it is made, as the Rust client's default does: `CAVALRY_DIR` when it is set and not empty, else the driver's default directory (`spec/client-protocol.md`, "The driver directory"). `set_dir` replaces it with the caller's bytes and refuses an empty string ("Strings"); `get_dir` returns the directory `cavalry_init` will use, never null for a context, valid until the next `set_dir` or the context's close. |
 | client | `int cavalry_init(cavalry_t **client, cavalry_context_t *context)`: attaches to the driver at the context's directory and starts the client conductor, in one call, and copies the directory, so the client keeps no pointer to its context; `int cavalry_close(cavalry_t *client)`; `bool cavalry_is_closed(const cavalry_t *client)`; `int32_t cavalry_closed(const cavalry_t *client)`: 0 while open, else why, `CAVALRY_CLOSED_*` ("Constants"); `int64_t cavalry_client_id(const cavalry_t *client)`; `const char *cavalry_dir(const cavalry_t *client)`. |
 | adds and commands | `int cavalry_add_publication(cavalry_publication_t **publication, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_add_exclusive_publication(cavalry_publication_t **publication, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_add_subscription(cavalry_subscription_t **subscription, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_start_recording(cavalry_recording_t **recording, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_stop_recording(cavalry_t *client, int64_t recording_id)`; `int cavalry_truncate_recording(cavalry_t *client, int64_t recording_id, int64_t position)`; `int cavalry_purge_segments(cavalry_t *client, int64_t recording_id, int64_t new_start_position)`; `int cavalry_purge_recording(cavalry_t *client, int64_t recording_id)`; `int cavalry_start_replay(cavalry_replay_t **replay, cavalry_t *client, int64_t recording_id, int64_t position, int64_t length, int32_t replay_stream_id, const char *channel)`; `int cavalry_stop_replay(cavalry_t *client, int64_t replay_session_id)`. Each is synchronous: it returns when the driver has answered or the response timeout, 10 s, has passed, with one operation in flight per client, as the client protocol has it. The driver's refusal is the error, with the driver's code and message. |
-| publication | `int64_t cavalry_publication_try_claim(cavalry_publication_t *publication, size_t length, cavalry_buffer_claim_t *claim)`: the position after the frame, with the struct filled, or a result code; `int cavalry_buffer_claim_set_reserved_value(cavalry_buffer_claim_t *claim, int64_t value)`; `int64_t cavalry_buffer_claim_commit(cavalry_buffer_claim_t *claim)` and `int64_t cavalry_buffer_claim_abort(cavalry_buffer_claim_t *claim)`: the position after the frame, or −1; `int64_t cavalry_publication_offer(cavalry_publication_t *publication, const uint8_t *buffer, size_t length)`: the position after the message, or a result code; `int64_t cavalry_publication_position(const cavalry_publication_t *publication)`; `int64_t cavalry_publication_position_limit(const cavalry_publication_t *publication)`; `bool cavalry_publication_is_connected(const cavalry_publication_t *publication)`; `bool cavalry_publication_is_closed(const cavalry_publication_t *publication)`; `int cavalry_publication_constants(const cavalry_publication_t *publication, cavalry_publication_constants_t *constants)`; `int cavalry_publication_close(cavalry_publication_t *publication)`. |
+| publication | `int64_t cavalry_publication_try_claim(cavalry_publication_t *publication, size_t length, cavalry_buffer_claim_t *claim)`: the position after the frame, with the struct filled, or a result code; `int cavalry_buffer_claim_set_reserved_value(cavalry_buffer_claim_t *claim, int64_t value)`; `int64_t cavalry_buffer_claim_commit(cavalry_buffer_claim_t *claim)` and `int64_t cavalry_buffer_claim_abort(cavalry_buffer_claim_t *claim)`: the position after the frame, or −1; `int64_t cavalry_publication_offer(cavalry_publication_t *publication, const uint8_t *buffer, size_t length)`: the position after the message, or a result code; `int64_t cavalry_publication_position(const cavalry_publication_t *publication)`: the position after the last committed frame, or −1 with the thread's error set, `CAVALRY_ERR_LOG` when the log's active tail is not its active term's, the one check of `spec/log-buffer.md` this read runs; `int64_t cavalry_publication_position_limit(const cavalry_publication_t *publication)`; `bool cavalry_publication_is_connected(const cavalry_publication_t *publication)`; `bool cavalry_publication_is_closed(const cavalry_publication_t *publication)`; `int cavalry_publication_constants(const cavalry_publication_t *publication, cavalry_publication_constants_t *constants)`; `int cavalry_publication_close(cavalry_publication_t *publication)`. |
 | subscription | `int cavalry_subscription_poll(cavalry_subscription_t *subscription, cavalry_fragment_handler_t handler, void *clientd, size_t fragment_limit)`: the fragments delivered, or −1 with the fault as the error; a `fragment_limit` above `INT_MAX` is read as `INT_MAX`, so that the count fits the `int`; `int cavalry_subscription_fault(const cavalry_subscription_t *subscription, cavalry_fault_t *fault)`; `int cavalry_subscription_image_count(const cavalry_subscription_t *subscription)`; `cavalry_image_t *cavalry_subscription_image_at_index(cavalry_subscription_t *subscription, size_t index)`: null past the count, with no error set; `bool cavalry_subscription_is_connected(const cavalry_subscription_t *subscription)`; `bool cavalry_subscription_is_closed(const cavalry_subscription_t *subscription)`; `int cavalry_subscription_constants(const cavalry_subscription_t *subscription, cavalry_subscription_constants_t *constants)`; `int cavalry_subscription_close(cavalry_subscription_t *subscription)`. |
 | image and header | `int cavalry_image_constants(const cavalry_image_t *image, cavalry_image_constants_t *constants)`; `int64_t cavalry_image_position(const cavalry_image_t *image)`; `bool cavalry_image_is_end_of_stream(const cavalry_image_t *image)`; `int cavalry_header_values(const cavalry_header_t *header, cavalry_header_values_t *values)`. This version has no `cavalry_header_position`: a frame's position is computed from its image's constants ("A frame's position"). |
 | recording and replay | `int cavalry_recording_constants(const cavalry_recording_t *recording, cavalry_recording_constants_t *constants)`; `int64_t cavalry_recording_position(const cavalry_recording_t *recording)`; `int64_t cavalry_recording_synced_position(const cavalry_recording_t *recording)`; `int cavalry_recording_close(cavalry_recording_t *recording)`, which frees the handle and stops nothing; `int cavalry_replay_constants(const cavalry_replay_t *replay, cavalry_replay_constants_t *constants)`; `int64_t cavalry_replay_position(const cavalry_replay_t *replay)`; `bool cavalry_replay_ended(const cavalry_replay_t *replay, int64_t *position, int32_t *reason)`: `true` once the replay has ended, with the end position and the reason, `CAVALRY_REPLAY_STOP_*` or −1 for none, written through the pointers; `int cavalry_replay_close(cavalry_replay_t *replay)`, which frees the handle. |
@@ -132,7 +133,7 @@ empty string.
 | --- | --- | --- |
 | none | 0 `CAVALRY_ERR_NONE` | no failure yet |
 | the driver's refusal | 1 to 99 | the client protocol's error code, on its value (`spec/client-protocol.md`, "Error codes"), with the driver's message. The header names the codes this version has: 1 `INVALID_CHANNEL`, 2 `UNKNOWN_SUBSCRIPTION`, 3 `UNKNOWN_PUBLICATION`, 4 `CHANNEL_ENDPOINT_ERROR`, 6 `UNKNOWN_COMMAND_TYPE`, 7 `MALFORMED_COMMAND`, 9 `UNKNOWN_HOST`, 10 `RESOURCE_TEMPORARILY_UNAVAILABLE`, 11 `GENERIC_ERROR`, 12 `STORAGE_SPACE`, 20 `NO_PUBLICATION_TO_RECORD`, 21 `UNKNOWN_RECORDING`, 22 `ALREADY_RECORDING`, 23 `POSITION_OUT_OF_RANGE`, 24 `RECORDING_BUSY`. A code from 1 to 99 passes through on its value whether this version names it or not, so that a newer driver's code reaches the caller during an upgrade. The client protocol keeps its codes below 100 for this |
-| the client's own | 100 `NOT_FOUND` (no driver at the directory), 101 `DRIVER_GONE`, 102 `CLOSED`, 103 `SUBSCRIPTIONS_FULL`, 104 `REPLAYS_FULL`, 105 `REPLAY_QUEUE_FULL`, 106 `RESPONSE_TIMEOUT`, 107 `COMMAND_RING`, 108 `BROADCAST`, 109 `COUNTERS`, 110 `PROTOCOL`, 111 `LOG`, 112 `DRIVER`, 113 `IO`, 114 `REFUSED` | the Rust `ClientError`'s kinds in order, with its message; 114 is a refusal whose code is outside 1 to 99, 0, negative or 100 and above, with the raw code in the message, so that it never reads as one of the codes below |
+| the client's own | 100 `NOT_FOUND` (no driver at the directory), 101 `DRIVER_GONE`, 102 `CLOSED`, 103 `SUBSCRIPTIONS_FULL`, 104 `REPLAYS_FULL`, 105 `REPLAY_QUEUE_FULL`, 106 `RESPONSE_TIMEOUT`, 107 `COMMAND_RING`, 108 `BROADCAST`, 109 `COUNTERS`, 110 `PROTOCOL`, 111 `LOG`, 112 `DRIVER`, 113 `IO`, 114 `REFUSED` | the Rust `ClientError`'s other kinds in order, with its message, then 114, a refusal whose code is outside 1 to 99, 0, negative or 100 and above, with the raw code in the message, so that it never reads as one of the codes below |
 | the faults a poll stops on | 120 `FAULT_IMAGE`, 121 `FAULT_IMAGES_FULL`, 122 `FAULT_CLOSED` | the Rust `Fault`'s three; `cavalry_subscription_fault` gives their fields |
 | the ABI's own | 130 `TOO_LONG`, 131 `NULL`, 132 `CLAIM_OUTSTANDING`, 133 `NO_CLAIM`, 134 `POLLING`, 135 `ABI_VERSION`, 136 `NOT_UTF8`, 137 `EMPTY_DIR` | what the caller did, what to do next, and this page's anchor for the rule, in the message |
 
@@ -277,8 +278,11 @@ By convention and not by the borrow checker:
   committed or aborted once; a claim neither committed nor aborted before the
   publication's close is aborted by the close. The image pointer
   `cavalry_subscription_image_at_index` returns is valid until the subscription's next
-  poll or close. The handler's `buffer` and `header` are valid for the call. A
-  constants struct's strings are valid for the handle's life. `cavalry_errmsg`'s string
+  poll or close, and so is the `source_identity` string its constants carry, since the
+  image is part of its subscription; the constants' numeric fields are the caller's
+  copy and may be kept across polls. The handler's `buffer` and `header` are valid for
+  the call. Every other constants struct's strings are valid for the handle's life.
+  `cavalry_errmsg`'s string
   is valid until the next failing call on the thread. `cavalry_context_get_dir`'s is
   valid until the next `set_dir` or the context's close.
 - Debug builds poison what is released, so misuse is loud: a committed or aborted
@@ -319,10 +323,13 @@ in 32-bit two's complement as `spec/log-buffer.md`, "Positions", says: in C,
 `(int32_t)((uint32_t)term_id - (uint32_t)initial_term_id)`, so that the subtraction is
 not a signed overflow. The handler finds a frame's image by the header's `session_id`.
 A caller that needs positions takes each image's constants after a poll with a
-fragment limit of 0, which joins the images the driver announced and reads no frame; a
-session id it holds no constants for is an image the poll joined at its start, and the
-caller keeps that frame's `term_id` and `term_offset` and takes the image's constants
-once the poll returns.
+fragment limit of 0, which joins the images the driver announced and reads no frame,
+and keeps the struct's numeric fields, `session_id`, `initial_term_id` and
+`position_bits_to_shift`, across the polls that follow; its `source_identity` string is
+valid only until the next poll ("Lifetimes"), so a caller that wants it copies it then.
+A session id it holds no constants for is an image the poll joined at its start, and
+the caller keeps that frame's `term_id` and `term_offset` and takes the image's
+constants once the poll returns.
 
 ## Versions and what a reader rejects
 
@@ -356,7 +363,8 @@ Image handlers and the invoker mode; counters and `add counter`, and the Rust
 holds; a vectored offer, the controlled and block polls and the fragment assemblers;
 destinations; `revoke` and `append_padding`; `local_sockaddrs`; `print_counters` and
 the `cnc` family, which `cavalry doctor` serves; `cavalry_header_position` and the
-position context in the header's values; and the Rust `reason()` names of `Offer`,
+position context in the header's values; the Rust `Flags::NONE` and `Flags::RESERVED`,
+which a C caller writes as 0 and reads from the flags byte; and the Rust `reason()` names of `Offer`,
 `Closed`, `Fault` and `ClientError`, which every message carries in its parentheses
 and the codes stand for. Each arrives, if a client needs it, under a new version of
 this page with its ADR (ADR 0051, "Out of this ADR").
