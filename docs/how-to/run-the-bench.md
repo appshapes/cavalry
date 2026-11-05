@@ -323,7 +323,15 @@ shared runner is
   for a UDP or link row. A count far below the run's messages is a rare event, not
   one per message. The frames under the failure line say where it is (the next
   entry). Find it and remove it: nothing on the per-message path may allocate
-  (`.claude/rules/data-plane.md`).
+  (`.claude/rules/data-plane.md`). One frame is not on that path: a command's
+  function above `<cavalry_driver::conductor::Conductor>::handle`, such as
+  `<cavalry_driver::conductor::Conductor>::drop_subscription`, is the driver's
+  conductor answering a client's command, which it runs once per subscription or
+  publication and not once per message. It means a harness thread closed or dropped
+  a `Subscription` or a `Publication` while the publisher's counting window was
+  still open. Do not change the driver; fix the harness. Hand the handle back to the
+  publisher's thread and close it there after `Counting::close`, as `run_client` and
+  `spawn_subscriber` do (card 176).
 - Frames under the failure line, after `the first allocation a measured loop saw`:
   the backtrace of the first allocation any measured loop counted, captured once per
   process inside the allocator's hook. It has the function names the release build
