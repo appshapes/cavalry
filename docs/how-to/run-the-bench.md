@@ -205,7 +205,13 @@ shared runner is
    appends its runs to the entry and raises the slowest run where it read higher, in a
    commit whose message names the run and the row. A run at another tree never joins:
    a pull request that changes the tree's paths is judged, and a red there is a
-   change. Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
+   change. A pull request that changes none of them is at master's tree, and a red
+   there while master's own runs at the tree pass is the band at a tree the entry has
+   not seen: the first is a rerun, and the second, on the same pull request or
+   another, re-records the entry at that tree from every process at it, the red runs
+   included, as a person's commit that names the two reds and the row
+   ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
+   Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
    with its p99.99 and its rate fell against the other processes at the tree, the
    host was disturbed during the run (the troubleshooting list below); re-run the job
    and name the disturbance where the host's journal shows it. A baseline is re-recorded at a new tree when master's own run fails or

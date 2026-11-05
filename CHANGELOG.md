@@ -1156,3 +1156,10 @@ user-visible change, added in the same commit as the change. The format follows
   where before it passed
   ([ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md);
   card 176).
+- A pull request that reads red on a bench row it does not touch, at a tree where
+  master's own runs pass, now has a rule: the first such red at a tree is a rerun, and
+  the second re-records the host's baseline at that tree from every process at it, as
+  a person's commit naming both reds, which is what four pull requests on `grip`'s
+  unchecked client row waited on a call for in one week
+  ([ADR 0050](docs/decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md);
+  card 199).
