@@ -233,10 +233,35 @@ subscriptions full, 104 replays full, 105 replay queue full, 106 response timeou
 command ring, 108 broadcast, 109 counters, 110 protocol, 111 log, 112 driver, 113 io,
 `ClientError`'s other kinds in order; the faults a poll stops on, 120 image, 121
 images full, 122 closed, `Fault`'s three; and the ABI's own, 130 too long, 131 null,
-132 claim outstanding, 133 no claim, 134 polling. `cavalry_errmsg` is the Rust error's message, the
-docs anchor included, written into a thread-local buffer of 512 bytes with no
-allocation, cut at the buffer if longer. A success clears nothing: the error is the
-last failure's until the next.
+132 claim outstanding, 133 no claim, 134 polling. A success clears nothing: the error
+is the last failure's until the next. With no failure yet on the thread,
+`cavalry_errcode` is 0 and `cavalry_errmsg` the empty string.
+
+**The message.** `cavalry_errmsg` is the Rust error's message, UTF-8 and
+NUL-terminated, in a thread-local buffer of 512 bytes: at most 511 bytes of message,
+then the NUL, always inside the buffer. A message of 511 bytes or fewer is written
+whole. A longer one keeps its docs anchor and loses its middle. It is written as its
+head, the three bytes `...`, and its tail:
+
+- The tail is the message from its last `; see `, which every message of the Rust
+  crates puts before its anchor. When that part is longer than 128 bytes, or the
+  message has no `; see `, the tail is the message's last 128 bytes instead, moved
+  forward to the start of a UTF-8 sequence.
+- The head is as many of the message's first bytes as fit before `...` and the tail,
+  moved back to the start of a UTF-8 sequence.
+
+So the buffer is valid UTF-8 where the message holds `Offer::TooLong`'s `÷` or a path
+that is not ASCII, and a client that decodes it does not fail. The anchors are short:
+the longest the crates write, `; see
+docs/reference/command-ring.md#heartbeat-and-correlation-ids`, is 66 bytes. The
+writer keeps the message's first bytes in the buffer and its last 128 in a ring beside
+it while the message is formatted, so the cut allocates nothing. `cavalry-ffi`'s test
+`a_long_error_message_keeps_its_docs_anchor` formats three messages: a
+`ClientError::Driver` whose `what` is 4,096 bytes ending in multi-byte characters, a
+`ClientError::Io` whose path is 4,096 bytes and not ASCII, and an `Offer::TooLong` with
+both numbers at `usize::MAX`. For each, the test checks that the NUL is inside the 512
+bytes, that the bytes before it are valid UTF-8, and that they end with `; see ` and
+the error's anchor.
 
 **Lifetimes**, by convention and not by the borrow checker (`CLAUDE.md`, Unsafe):
 
@@ -444,6 +469,12 @@ version of the page with its ADR. The first release, which freezes version 0, is
   Lost: the client protocol has a table of codes every client reads, and the Rust
   client's errors have kinds; one table of Cavalry's own, with the driver's codes kept
   on their values, is what a stranger reads from one page.
+- **An error message cut at the end of the buffer, or a larger buffer.** Lost: a cut
+  at the end drops the docs anchor, which every message ends with and invariant 6
+  requires, and a cut inside a UTF-8 sequence fails a client that decodes the bytes.
+  A larger buffer only moves the limit: a driver's refusal message alone may be 4,096
+  bytes (`spec/client-protocol.md`, "Encoding"), and the debug form of an unexpected
+  event carries strings of that length, before the client's own text and a path.
 - **A code of Cavalry's own for `TooLong`, −7.** Lost: Aeron's clients read six codes
   and an error, and a seventh code would be the one place a Cavalry client differs
   from an Aeron one on the offer path; the length and the limit reach the caller
@@ -497,8 +528,8 @@ the commits that land with the acceptance.
 
 Easier: one surface for five clients, with Aeron's names, so that a program written
 against Aeron's C client reads Cavalry's header with the differences on one page; a C
-program needs no generator; every error reaches a C caller with the Rust message and
-its docs anchor; the header, the page and the vectors cannot drift apart.
+program needs no generator; every error reaches a C caller with the Rust message, whole
+or cut in its middle, and always with its docs anchor; the header, the page and the vectors cannot drift apart.
 
 Harder: every change to the client API is from now a change to the ABI, with its
 version and its ADR, and the Rust API is no longer the only thing a feature changes.
