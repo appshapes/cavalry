@@ -1197,3 +1197,16 @@ user-visible change, added in the same commit as the change. The format follows
   says every client reaches the header through its language's foreign-function
   interface, where it named PyO3 and napi-rs, which bind the Rust crates instead
   ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
+- ADR 0051, Proposed: the C ABI, version 0, is the client API as it stands under
+  Aeron's C client's names, seven opaque handles, one publication type for both kinds,
+  a caller-owned buffer claim that names its publication, synchronous adds, Aeron's
+  six result codes with `TooLong` as `ERROR` and `CAVALRY_ERR_TOO_LONG`, one table of
+  error codes with the driver's on their values, lifetime and thread rules by
+  convention with debug builds poisoning what is released, and `CAVALRY_ABI_VERSION`
+  beside `cavalry_abi_version()`; its page is `spec/c-abi.md` with the committed
+  header as the artefact and vectors from the page's table, cbindgen 0.29.4 is a
+  pinned tool of `just lint` and not a dependency, `conformance/c/` is the first
+  runner, and two bench rows run through the ABI. The page, the crate, the runner and
+  the rows land with the acceptance
+  ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
+  card 204).
