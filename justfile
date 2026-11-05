@@ -65,6 +65,8 @@ conformance:
     cargo test -p cavalry-shm --test command_ring_conformance
     cargo test -p cavalry-shm --test broadcast_buffer_conformance
     cargo test -p cavalry-log --test conformance
+    cargo test -p cavalry-ffi --test conformance
+    conformance/c/run.sh
 
 # Deterministic replay test (CLAUDE.md, gate 1; ADR 0030): a driver on a directory of
 # its own records 100,000 hash-chained messages while a live subscriber prints them,

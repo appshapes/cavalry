@@ -1260,3 +1260,15 @@ user-visible change, added in the same commit as the change. The format follows
   three parts
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).
+- `conformance/c/`, the first runner of the directory gate 1 names: `quickstart.c`, a
+  C11 program over the committed header that checks the ABI version both ways,
+  publishes 1,000 messages by claim and commit over `cavalry:ipc` and reads them back
+  once and in order with the header's fields checked, records the stream, does the
+  same over `cavalry:udp` on the loopback, and replays the recording to another
+  stream at the positions the recording holds each frame, computed from the image's
+  constants; `run.sh` builds the driver and the library, compiles and links the
+  program with the runner's C compiler, and runs it against a driver on a directory
+  of its own; `just conformance` runs it after the Rust vector suites, with
+  `cavalry-ffi`'s header test among them
+  ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
+  card 204).
