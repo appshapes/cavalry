@@ -140,12 +140,15 @@ gh pr checks <number>
   request 57 two reviews lost their fix run that way and the run that did work answered
   a review two heads old. The fixer commits each blocker as its test passes and pushes
   as it goes, so the head may move more than once during one run; the review is of the
-  head it leaves. When the run completes, its last job approves the `ci` run GitHub
-  held on the agent's push and adds the `review` label if the head has no `dispatch
-  review` run yet, or if the fix was an edit to the pull request body alone
-  (`claude.yml`, "Ask for the review of the agent's push"), so a `dispatch review` run
-  appears within a minute of the run's end. Add `review` yourself only when a minute
-  has passed and none has.
+  head it leaves. When the run completes, its last job cancels the `ci` runs GitHub
+  held on the heads the agent pushed before its last (`claude.yml`, "Cancel the runs
+  held on the heads the fixer left behind": a held run left alone ends as a failure,
+  with a mail, when the branch is deleted at the merge; the `auto merge` run sweeps
+  what that job left held, right before the merge), approves the `ci` run held on
+  the last push, and adds the `review` label if the head has no `dispatch review` run
+  yet, or if the fix was an edit to the pull request body alone (`claude.yml`, "Ask for
+  the review of the agent's push"), so a `dispatch review` run appears within a minute
+  of the run's end. Add `review` yourself only when a minute has passed and none has.
 
 - **"Autonomous fix cap reached".** The fourth changes-requested review ends the fixer's
   part (`claude.yml`, `MAX_ATTEMPTS: 3`). The pull request is the author's now: fix,
@@ -179,7 +182,12 @@ gh pr checks <number>
 - **Approved.** `auto-merge.yml` arms the merge on an approval whose `commit_id` is the
   current head; an approval of an older head arms nothing, and the newer head gets its
   own review. The merge lands when the required checks pass: `gh pr checks <number>
-  --required`.
+  --required`. A branch that moved after the approval is refused by GitHub, and the
+  `auto merge` run says why: a notice, and the run green, when GitHub raised runs for
+  the new tip, which the loop reviews on its own; a failure when it raised none within
+  a minute, the pull request object still naming the approved commit, and then only a
+  push moves it: step 4, step 2, push (`auto-merge.yml`'s header; pull request 106 on
+  2026-11-04).
 
 - **Merged.** `git fetch --quiet origin` and `git log --oneline -1 origin/master` show
   the squash commit with the pull request's title; `gh run list --branch master
