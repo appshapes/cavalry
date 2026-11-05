@@ -198,27 +198,7 @@ that frame's `term_id` and `term_offset` and takes the image's constants once th
 returns.
 
 **The functions**, each returning 0 for success and −1 with the thread's error set
-unless the table says otherwise. A function cannot answer when it is given a null
-handle or a null required pointer, which is `CAVALRY_ERR_NULL`, or when "Calls during
-a claim or a poll" refuses the call. It then sets the thread's error and returns the
-value its return type gives:
-
-| Return type | Functions | Value when the function cannot answer |
-| --- | --- | --- |
-| `int` status | every function the table below gives no other type | −1 |
-| `int64_t` position | `cavalry_publication_try_claim`, `cavalry_publication_offer` | `CAVALRY_PUBLICATION_ERROR`, −6 |
-| `int64_t` | every other: commit, abort, the positions, the limit, `cavalry_client_id` | −1; every position, limit and id the ABI returns is 0 or more, so −1 is never an answer |
-| `int32_t` or `int` count | `cavalry_closed`, `cavalry_subscription_poll`, `cavalry_subscription_image_count` | −1 |
-| pointer | `cavalry_context_get_dir`, `cavalry_dir`, `cavalry_subscription_image_at_index` | null |
-| `bool` | the `_is_connected`, `_is_closed` and `_is_end_of_stream` functions, and `cavalry_replay_ended`, which then writes nothing through its pointers | `false` |
-
-A `bool` function fails only when the caller misuses a handle, with a null pointer or a
-call the tables of "Calls during a claim or a poll" refuse, never because of the
-driver's state. A correct program therefore reads every `false` as the answer.
-`cavalry_subscription_image_at_index` past the count is null with no error set, as an
-index past the end is the answer "no such image" and not a misuse. The functions that
-take no handle, `cavalry_errcode`, `cavalry_errmsg`, the version functions and
-`cavalry_abi_version`, cannot fail.
+unless the table says otherwise, or unless the function cannot answer (below).
 
 | Group | Functions |
 | --- | --- |
@@ -235,6 +215,28 @@ take no handle, `cavalry_errcode`, `cavalry_errmsg`, the version functions and
 size_t length, const cavalry_header_t *header)`: the body as a view into the log and
 the frame's header, valid for the call, as `Subscription::poll` hands them. Nothing is
 copied, and the ABI makes nothing new for the call.
+
+**When a function cannot answer.** A function cannot answer when it is given a null
+handle or a null required pointer, which is `CAVALRY_ERR_NULL`, or when "Calls during
+a claim or a poll" refuses the call. It then sets the thread's error and returns the
+value its return type gives:
+
+| Return type | Functions | Value when the function cannot answer |
+| --- | --- | --- |
+| `int` status | every function the function table gives no other type | −1 |
+| `int64_t` position | `cavalry_publication_try_claim`, `cavalry_publication_offer` | `CAVALRY_PUBLICATION_ERROR`, −6 |
+| `int64_t` | every other: commit, abort, the positions, the limit, `cavalry_client_id` | −1; every position, limit and id the ABI returns is 0 or more, so −1 is never an answer |
+| `int32_t` or `int` count | `cavalry_closed`, `cavalry_subscription_poll`, `cavalry_subscription_image_count` | −1 |
+| pointer | `cavalry_context_get_dir`, `cavalry_dir`, `cavalry_subscription_image_at_index` | null |
+| `bool` | the `_is_connected`, `_is_closed` and `_is_end_of_stream` functions, and `cavalry_replay_ended`, which then writes nothing through its pointers | `false` |
+
+A `bool` function fails only when the caller misuses a handle, with a null pointer or a
+call the tables of "Calls during a claim or a poll" refuse, never because of the
+driver's state. A correct program therefore reads every `false` as the answer.
+`cavalry_subscription_image_at_index` past the count is null with no error set, as an
+index past the end is the answer "no such image" and not a misuse. The functions that
+take no handle, `cavalry_errcode`, `cavalry_errmsg`, the version functions and
+`cavalry_abi_version`, cannot fail.
 
 **Constants.** The header defines the Rust API's public constants and the values its
 enums carry across the boundary: `CAVALRY_DIR_ENV` `"CAVALRY_DIR"` (`DIR_ENV`),
@@ -278,9 +280,10 @@ version sends and needs no version bump. Then come the client's own, 100 not fou
 queue full, 106 response timeout, 107 command ring, 108 broadcast, 109 counters, 110
 protocol, 111 log, 112 driver, 113 io, `ClientError`'s other kinds in order, and 114
 refused, a refusal whose code is outside 1 to 99; the faults a poll stops on, 120
-image, 121
-images full, 122 closed, `Fault`'s three; and the ABI's own, 130 too long, 131 null,
-132 claim outstanding, 133 no claim, 134 polling, 135 ABI version. A success clears
+image, 121 images full, 122 closed, `Fault`'s three; and the ABI's own, 130 too long,
+131 null, 132 claim outstanding, 133 no claim, 134 polling, 135 ABI version. The
+message of an ABI code is the library's own, in the form of the Rust messages: what
+the caller did, what to do next, and this page's anchor for the rule. A success clears
 nothing: the error is the last failure's until the next. With no failure yet on the
 thread, `cavalry_errcode` is 0 and `cavalry_errmsg` the empty string.
 
@@ -393,8 +396,9 @@ vectors, `spec/vectors/c-abi.json`, are written by `spec/vectors/c-abi.py` from 
 page's own table: every function's name and signature, every macro's name, every
 struct's fields in order, and every code's name and value. `cavalry-ffi`'s conformance
 test parses the committed header and fails on a function, a macro, a field or a code
-the vectors have that the header lacks, or the header has that the vectors lack, so the page and the header cannot drift apart; `just conformance` runs
-it with the other suites.
+the vectors have that the header lacks, or the header has that the vectors lack, so
+the page and the header cannot drift apart; `just conformance` runs it with the other
+suites.
 
 ### `cavalry-ffi`
 
@@ -409,18 +413,18 @@ functions, `cavalry_publication_try_claim`, `cavalry_publication_offer`,
 `cavalry_buffer_claim_set_reserved_value`, `cavalry_subscription_poll` and
 `cavalry_header_values`, hold invariant 2's five rules from their call to their
 return, the time inside the C handler excepted: no heap allocation, no lock, no
-syscall, no `await`, no panic path. The thread-local error is
-a fixed buffer. The crate's dev-dependency `stats_alloc`, as `cavalry-client`'s tests
-use it, counts allocations and reallocations across every per-message function in a
-test, which asserts zero. `cavalry-ffi` takes no normal or build dependency:
+syscall, no `await`, no panic path. The thread-local error is a fixed buffer. The
+crate's dev-dependency `stats_alloc`, as `cavalry-client`'s tests use it, counts
+allocations and reallocations across every per-message function in a test, which
+asserts zero. `cavalry-ffi` takes no normal or build dependency:
 `allowed-dependencies` stays empty.
 
 **The header.** `crates/cavalry-ffi/include/cavalry.h` is generated by cbindgen 0.29.4
 from the crate and committed, with `crates/cavalry-ffi/cbindgen.toml` naming the
 language, the include guard, the `CAVALRY_` prefix, the `CAVALRY_ABI_VERSION` and code
 defines, and, in its `trailer`, the `cavalry_context_init` macro, which cbindgen does
-not write from Rust. cbindgen is a tool, run by `just lint`'s new `lint-header` recipe, not
-a dependency of the crate: the recipe generates the header to a temporary file and
+not write from Rust. cbindgen is a tool, run by `just lint`'s new `lint-header`
+recipe, not a dependency of the crate: the recipe generates the header to a temporary file and
 fails when it differs from the committed one, prints `cargo install --locked
 cbindgen@0.29.4` when the tool is missing, as `just docs` does for `mdbook`, and CI
 installs it through `taiki-e/install-action` at that version. A build dependency would
@@ -432,9 +436,8 @@ generator "named and justified" as ADR 0046 asked, with no entry.
 crate's own declarations, in `unsafe` blocks, with an embedded driver as
 `cavalry-client`'s example has: a context made by `cavalry_context_init_v` with the
 crate's `CAVALRY_ABI_VERSION`, since a Rust caller has no C macro, a client, a
-subscription and a publication
-on `cavalry:ipc`, a claim written and committed, a poll that prints the message with its
-session id, and every close. It lands in the commit with the first public item. The
+subscription and a publication on `cavalry:ipc`, a claim written and committed, a
+poll that prints the message with its session id, and every close. It lands in the commit with the first public item. The
 README and `CLAUDE.md`'s definition of the data plane gain the three parts of the
 boundary ADR 0046 gives, in that commit.
 
@@ -448,16 +451,16 @@ and links `target/release/libcavalry_ffi.a`, starts `target/release/cavalry run`
 driver directory of its own through `CAVALRY_DIR` and a log directory beside it, as
 `scripts/quickstart.sh` does, runs the program, stops the driver and removes both
 directories. The program checks the ABI version both ways, as "What a reader
-rejects" says, then runs the ten-minute path's
-shape: a recording of stream 1001 on `cavalry:ipc`, 1,000 messages of 64 bytes by
-claim and commit, read back by a subscription with every message once and in order
-and the header's session id and term id checked against `spec/frame.md`'s rules, the
-same 1,000 over `cavalry:udp?endpoint=127.0.0.1:<a free port>`, the recording stopped
-and replayed to a subscription on stream 2001 with the same checks, each replayed
-frame's position computed from its image's constants and equal to the position the
-recording holds it at (ADR 0030), and `cavalry_replay_ended` reporting the end
-position, and every handle closed; a failed
-check prints the function, the code and `cavalry_errmsg` and exits 1.
+rejects" says, then runs the ten-minute path's shape: a recording of stream 1001 on
+`cavalry:ipc`, 1,000 messages of 64 bytes by claim and commit, read back by a
+subscription with every message once and in order and the header's session id and
+term id checked against `spec/frame.md`'s rules, the same 1,000 over
+`cavalry:udp?endpoint=127.0.0.1:<a free port>`, the recording stopped and replayed to
+a subscription on stream 2001 with the same checks, each replayed frame's position
+computed from its image's constants and equal to the position the recording holds it
+at (ADR 0030), and `cavalry_replay_ended` reporting the end position, and every
+handle closed; a failed check prints the function, the code and `cavalry_errmsg` and
+exits 1.
 
 ### The bench rows
 
@@ -480,9 +483,9 @@ family, which `cavalry doctor` serves; `aeron_header_position` and the position 
 in the header's values, which the Rust handler's header does not carry (Context);
 `Cavalry::counters()`, with the counters; and the `reason()` names of `Offer`,
 `Closed`, `Fault` and `ClientError`, which every message carries in its parentheses
-and the codes stand for. Each arrives, if a client needs it, under a new
-version of the page with its ADR. The first release, which freezes version 0, is ADR
-0003's Revisit.
+and the codes stand for. Each arrives, if a client needs it, under a new version of
+the page with its ADR. The first release, which freezes version 0, is ADR 0003's
+Revisit.
 
 ## Alternatives considered
 
@@ -590,8 +593,8 @@ Read on 2026-11-05: `aeronc.h` at `master`, 2,865 lines, its typedefs at lines 4
 `aeron_fragment_handler_t` at 1714, `aeron_subscription_poll` at 1860,
 `aeron_errcode` and `aeron_errmsg` at 2665 and 2672, `aeron_header_values_t` with its
 nested `frame` and `int8_t version` at 54 to 74 and `aeron_header_position` at 1787,
-which the review of pull request 127 read; `aeron_publication.c` at
-`master`, 886 lines, `offer`'s `length > max_message_length` at line 513 and
+which the review of pull request 127 read; `aeron_publication.c` at `master`, 886
+lines, `offer`'s `length > max_message_length` at line 513 and
 `try_claim`'s `length > max_payload_length` at 647, each `AERON_SET_ERR(EINVAL, ...)`
 and `return AERON_PUBLICATION_ERROR`. cbindgen 0.29.4 on crates.io, updated
 2026-06-09. The workspace's `rust-version` 1.89 and `edition` 2024; Rust's
@@ -600,8 +603,8 @@ and `return AERON_PUBLICATION_ERROR`. cbindgen 0.29.4 on crates.io, updated
 `Subscription::poll`'s handler bound at `crates/cavalry-client/src/subscription.rs`
 lines 272 to 274 and `Image::positions` at 194, and `DataFrameHeader`'s fields at
 `crates/cavalry-proto/src/frame.rs` lines 188 to 197, with no initial term id and no
-term length; `spec/frame.md` types the version `i8`. The gates'
-runners and the pinned `mdbook` install in `.github/workflows/ci.yml`. The dependency
+term length; `spec/frame.md` types the version `i8`. The gates' runners and the
+pinned `mdbook` install in `.github/workflows/ci.yml`. The dependency
 lint's rule on build dependencies in `scripts/lint-workspace.py`, lines 8 to 15. What
 the implementation proves, the allocation count over every per-message function, the
 C runner's pass on both runners and the two rows' histograms on both hosts, goes in
