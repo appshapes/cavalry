@@ -239,7 +239,13 @@ shared runner is
    `bench-link` and `grip-link` are the cable's two ends in both hosts' `/etc/hosts`
    ([Set up a bench host](set-up-a-bench-host.md#further-hosts-the-roles-the-direct-link-and-the-clock)).
    Each side subscribes on its own end and publishes to the other's, and waits up to
-   ten minutes for the other to connect, so the order does not matter. The peer prints
+   ten minutes for the other to connect, so the order does not matter. In CI each job
+   first waits for the run's other job to be in progress
+   (`scripts/wait-for-partner-job.sh`, polling the run's jobs every 20 s for up to 45
+   minutes), because the partner can sit queued behind another run's job on its host
+   for longer than those ten minutes, and the end that started first died waiting;
+   a job whose partner completed before it started, or never started, fails with a
+   message that says so and the pair is re-run when both hosts are free (card 212). The peer prints
    `the stream from <address> is connected, echoing`, then, when `bench`'s run ends the
    stream, `echoed N messages from <address> back to <host:port> in <s> s`, and exits 0;
    it exits 1 when the stream goes without its end. The measuring side prints the two

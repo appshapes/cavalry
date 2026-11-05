@@ -1220,3 +1220,9 @@ user-visible change, added in the same commit as the change. The format follows
   how-to and the pull request skill say a review takes up to thirty minutes and
   when to add the `review` label (`.github/workflows/review-pull-request.yml`;
   card 213).
+- The `bench (udp)` and `bench (udp peer)` jobs each wait, before their run, for the
+  run's other job to be in progress, polling the run's jobs through the API every 20 s
+  for up to 45 minutes, so the pair meets however each host's queue stands; before,
+  the end that started first died after the harness's ten-minute wait whenever its
+  partner sat behind another run's job, three times on 2026-11-05, and master read red
+  (`scripts/wait-for-partner-job.sh`; `.github/workflows/ci.yml`; card 212).
