@@ -1197,3 +1197,6 @@ user-visible change, added in the same commit as the change. The format follows
   says every client reaches the header through its language's foreign-function
   interface, where it named PyO3 and napi-rs, which bind the Rust crates instead
   ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
+- ADR 0046 Accepted: Rjae accepted the fourth slice as proposed on 2026-11-05; card 204,
+  the C ABI's specification, is the next feature
+  ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
