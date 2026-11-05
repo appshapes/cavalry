@@ -34,29 +34,34 @@ code (`CLAUDE.md`, Protocol).
 
 ## Decision
 
-The conductor stores the flag in its limit pass, in the same duty cycle as the limit:
-a 1 after the limit's raise, never before it, and a 0 before the limit's lowering,
-never after it.
+The conductor stores the flag in the same duty cycle as the limit: a 1 after the
+limit's raise, never before it, and a 0 before the limit's lowering, never after it.
 
-- **It rises after the raise.** The flag rises to 1 when a subscriber has a position
-  or a recording is live and the limit stored is past the consumer position, which the
-  first raise after a connection leaves it. A publisher that reads 1 therefore reads a
-  limit raised for that subscriber or recording with it, so `back pressured` means
-  what the client says it means.
+- **It rises in the limit pass, after the raise.** The commands pass no longer stores
+  a 1: not when an image joins (`add_image`), not when a recording starts
+  (`start_recording`), and not when the sender's reply says a status message connected
+  a `cavalry:udp` publication. The limit pass stores the 1 when a subscriber has a
+  position, a recording is live or, over UDP, a receiver answers, and the limit stored
+  is past the consumer position, which the first raise after a connection leaves it.
+  A publisher that reads 1 therefore reads a limit raised for that subscriber or
+  recording with it, so `back pressured` means what the client says it means.
 - **It holds while connected.** It stays 1 while the publication stays connected,
   since a subscriber that reaches the limit in a pass whose cleaning holds the raise
   back still has its position.
-- **It falls before the lowering.** It falls to 0 when neither a subscriber has a
-  position nor a recording is live, and the limit lowers to the consumer position
-  after it. A claim loads the limit before the flag ("Claim, commit and abort", step
-  1), and both stores are release stores, so a publisher that reads the lowered limit
-  reads 0 with it and is told `not connected`. The reverse order would tell a
-  publisher between the consumer position and the old limit `back pressured` with no
-  subscriber: card 187's false result in the other direction.
+- **It falls where the last connecting fact goes.** The commands pass stores the 0 at
+  the moment the last subscriber, receiver or recording goes, through one helper,
+  `lower_connected`, called from `drop_subscription` (which runs on `remove
+  subscription`, client close and client timeout), from the sender's disconnected
+  reply, and from a recording's stop and its failed start. The limit pass of the same
+  cycle lowers the limit to the consumer position after it. So from the moment the
+  last of them goes, a publisher at the old limit or at the lowered one reads 0 and
+  is told `not connected`: a claim loads the limit before the flag
+  ("Claim, commit and abort", step 1), and both stores are release stores. The limit
+  pass also stores the 0, before its lowering, when it finds nothing connected; that
+  store is a backstop.
 
-The commands pass, the start and stop of a recording and the sender's replies no
-longer touch the flag; they change what the limit pass computes from. The page says
-so.
+The limit's raise and lowering stay in the limit pass, where the limit's rule lives.
+The page says the order.
 
 ## Alternatives considered
 
@@ -68,16 +73,19 @@ so.
   of it in three places is three places for it to drift.
 - **Leave it to the tests to wait on the limit.** Lost: a user's program reads the
   same two words, and the page's `back pressured` would be false for them too.
-- **Lower the flag in the commands pass, where the subscriber or recording goes.** The
-  driver did this before this decision, in `drop_subscription`, the sender's reply and
-  a recording's stop, and it is a truthful order too. Lost: it keeps a copy of the
-  connected facts at each of those sites, the places this decision makes one, and the
-  limit pass stores the 0 in the same cycle, before the lowering, where the publisher
-  reads the two words in order.
+- **Lower the flag in the limit pass only, before its lowering.** One place would
+  store both values, from the facts the limit pass computes. Lost: the 0 would wait
+  for the last step of the cycle. For that part of a cycle a publisher that a slow
+  subscriber held at the limit reads the old limit with a 1 after the last subscriber
+  went, and its claim returns `back pressured` with no subscriber at all: card 187's
+  false result, for a disconnect. One place for the flag serves invariant 6, and
+  invariant 1 outranks it. The driver before this decision stored the 0 in the
+  commands pass, and this decision keeps that, with the connected facts in one
+  helper.
 
 ## Evidence
 
-The two failures in Context, and four of the conductor's unit tests:
+The two failures in Context, and seven of the conductor's unit tests:
 
 - `the_connected_flag_is_stored_after_the_limit_in_the_same_cycle`: after an image
   joins in the commands pass the publication is not connected and its limit has not
@@ -90,11 +98,22 @@ The two failures in Context, and four of the conductor's unit tests:
   `back pressured`, and the next pass raises the limit with the flag still 1. The
   rule this decision first had, 1 only while the limit is past the consumer position,
   fails it.
-- `a_disconnect_stores_the_flag_then_lowers_the_limit_in_the_limit_pass`: the
-  commands pass that removes the last subscription moves neither word, and the limit
-  pass leaves the flag 0 and the limit at the subscriber's last position, below the
-  publisher, whose claim reads `not connected`. The order of the two stores inside the
-  pass is the code's; a test on one thread sees both words only after the pass.
+- `a_disconnect_stores_the_flag_in_the_commands_pass_before_the_limit_lowers`: a slow
+  subscriber holds the publisher at the limit, where its claim reads `back pressured`.
+  Removing the last subscription, in the commands pass, stores 0 and leaves the limit
+  where it was, and the publisher's claim at the old limit reads `not connected`. The
+  limit pass then lowers the limit to the subscriber's last position with the flag
+  still 0.
+- `a_recording_stop_stores_the_flag_before_the_limit_lowers` and
+  `a_recording_that_fails_to_start_stores_the_flag_before_the_limit_lowers`: the same
+  for a recording that connected a publication alone, at the recorder's stop and at
+  its refusal to start.
+- `a_udp_disconnect_stores_the_flag_before_the_limit_lowers`: the same for the
+  sender's disconnected reply on a `cavalry:udp` publication.
+
+The four disconnect tests fail when the 0 waits for the limit pass, as it did in this
+decision's first form: each fails at its assertion that the flag is 0 before the limit
+pass.
 
 Nothing a message passes through changes: the publisher's claim reads the same two
 words, and the conductor stores the flag at another step of its cycle. `just bench`
@@ -102,14 +121,16 @@ before and after is in the commit message.
 
 ## Consequences
 
-Easier: a publisher's `back pressured` is true whenever it reads it; one place sets
-the flag, from what the limit pass computes, where four places did.
+Easier: a publisher's `back pressured` is true whenever it reads it; one place stores
+the 1, the limit pass, where three places did, and one helper stores the 0 where the
+last connecting fact goes.
 
 Harder: the flag follows the limit, so when a subscriber joins a publication whose
 cleaning is behind, the publisher reads the flag a cycle or two after the subscriber's
 position exists, and a claim at the limit reads `not connected` until then; the page
-says so. A disconnect's 0 waits for the limit pass of the same cycle, where the driver
-before this decision stored it in the commands pass. Once 1, the flag holds while the
+says so. A new site that removes a subscriber, a receiver or a recording must call
+`lower_connected`; the limit pass's 0 is a backstop, at the end of the cycle. Once 1,
+the flag holds while the
 publication stays connected, so a subscriber that reads up to the limit in a pass whose
 cleaning stops at a term's end holds the raise back for that cycle, and a claim at the
 limit reads `back pressured` with the subscriber at the limit rather than a window

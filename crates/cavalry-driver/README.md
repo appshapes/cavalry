@@ -15,13 +15,13 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   recommends busy-spin on isolated cores. On every duty cycle the conductor stores its
   heartbeat, reads and answers commands, unblocks the ring, times out clients, and keeps
   every publication's positions, cleaning, unblocking and closing as
-  `spec/log-buffer.md`, "The driver" says, with the connected flag the publisher reads
-  raised after the limit's raise and lowered before its lowering, in the same duty
-  cycle, so that a claim reads `back pressured` only with a subscriber a window behind
-  and `not connected` once the last one is gone (ADR 0048; card 187),
-  loading a publication's producer position
+  `spec/log-buffer.md`, "The driver" says, loading a publication's producer position
   at most once every two milliseconds so that the publisher's cache line is not read on every
-  cycle (ADR 0022). The strategy it runs is stored once in the
+  cycle (ADR 0022). The connected flag the publisher reads is raised in the limit pass
+  after the limit's raise, and lowered where the last subscriber, receiver or recording
+  goes, before the limit pass lowers the limit, so that a claim reads `back pressured`
+  only with a subscriber a window behind and `not connected` from the moment the last
+  one is gone (ADR 0048; card 187). The strategy it runs is stored once in the
   `conductor.idle_strategy` counter, so that `doctor` can name it from the counters file.
   `Driver::start_with_threads` takes a hook each thread runs first, named the thread it
   is on, where a caller that owns the host's CPUs pins the conductor to a CPU of its own

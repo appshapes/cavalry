@@ -196,9 +196,9 @@ struct Publication {
     clean_position: i64,
     /// The limit last stored.
     last_limit: i64,
-    /// The connected flag as last stored to the log header: stored in the limit pass,
-    /// raised after the limit's raise and lowered before its lowering (ADR 0048;
-    /// card 187).
+    /// The connected flag as last stored to the log header: raised in the limit pass
+    /// after the limit's raise, and lowered where the last subscriber, receiver or
+    /// recording goes, before the limit pass lowers the limit (ADR 0048; card 187).
     connected_flag: bool,
     /// The producer position as last loaded, and when, by the conductor's clock: loaded
     /// at most once per [`spec::PRODUCER_POSITION_INTERVAL`] (ADR 0022, ADR 0032).
@@ -1836,15 +1836,20 @@ impl Conductor {
     }
 
     /// What the sender said about a `cavalry:udp` publication's receiver, kept for the
-    /// limit pass, which stores the log's connected flag for the publisher (ADR 0048).
+    /// limit pass. A disconnect stores the log's connected flag 0 here, before the limit
+    /// pass lowers the limit; a connect leaves the 1 to the limit pass, after its raise
+    /// (ADR 0048).
     fn set_udp_connected(&mut self, registration_id: i64, connected: bool) {
-        if let Some(publication) = self
+        if let Some(index) = self
             .publications
-            .iter_mut()
-            .find(|publication| publication.registration_id == registration_id)
-            && let Some(udp) = &mut publication.udp
+            .iter()
+            .position(|publication| publication.registration_id == registration_id)
+            && let Some(udp) = &mut self.publications[index].udp
         {
             udp.connected = connected;
+            if !connected {
+                self.lower_connected(index);
+            }
         }
         // A replay's publication: the replay's entry keeps the fact for the connect
         // timeout, so that `keep_replays` reads one bool and scans nothing (ADR 0043).
@@ -2908,6 +2913,11 @@ impl Conductor {
         self.images = kept;
         self.images
             .reserve(spec::MAX_IMAGES.saturating_sub(self.images.len()));
+        // A publication whose last image went is not connected from here, before the
+        // limit pass lowers its limit (ADR 0048).
+        for index in 0..self.publications.len() {
+            self.lower_connected(index);
+        }
     }
 
     /// Client close and client timeout: every registration and subscription of the
@@ -3135,12 +3145,11 @@ impl Conductor {
             && (candidate - publication.last_limit >= step || !connected)
             && publication.clean_position >= clean_to;
         let lower = candidate < publication.last_limit && !connected;
-        // The flag the publisher reads rises after the limit's raise and falls before
-        // its lowering, in the same pass (ADR 0048; card 187), so that a claim reads
-        // `back pressured` only with a subscriber a window behind. Stored only when it
-        // changes, as the limit is. It falls first: with neither a subscriber's
-        // position nor a live recording it is 0 before the limit lowers, so a publisher
-        // that reads the lowered limit reads 0 with it and is told `not connected`.
+        // The flag the publisher reads, stored only when it changes, as the limit is
+        // (ADR 0048; card 187). It falls in the commands pass, where the last
+        // subscriber, receiver or recording goes (`lower_connected`), so a publisher at
+        // the old limit or the lowered one is told `not connected`; this 0 is a
+        // backstop, and it too comes before the lowering.
         if !connected && publication.connected_flag {
             let _ = publication.log.set_connected(false);
             publication.connected_flag = false;
@@ -3151,10 +3160,11 @@ impl Conductor {
             publication.last_limit = candidate;
             moved = true;
         }
-        // It rises once the limit is past the consumer position, which the first raise
-        // after a connection leaves it, and holds while the publication stays
-        // connected: a subscriber that reaches the limit while cleaning holds the next
-        // raise back still has its position.
+        // It rises after the limit's raise, once the limit is past the consumer
+        // position, which the first raise after a connection leaves it, and holds while
+        // the publication stays connected: a subscriber that reaches the limit while
+        // cleaning holds the next raise back still has its position, and a claim at the
+        // limit reads `back pressured` for that cycle with the subscriber at the limit.
         if connected && !publication.connected_flag && publication.last_limit > consumer {
             let _ = publication.log.set_connected(true);
             publication.connected_flag = true;
@@ -3927,6 +3937,15 @@ impl Conductor {
             self.recordings[index].state = RecordingState::Failed;
             self.recordings.swap_remove(index);
         }
+        // As on a stop: not connected from here if the recording connected the
+        // publication alone (ADR 0048).
+        if let Some(index) = self
+            .publications
+            .iter()
+            .position(|publication| publication.registration_id == publication_id)
+        {
+            self.lower_connected(index);
+        }
         match failure {
             StartFailure::CatalogFull => {
                 self.statics.recording_catalog_full.increment();
@@ -3946,6 +3965,36 @@ impl Conductor {
             }
         }
         self.drop_recording_reader(publication_id);
+    }
+
+    /// Stores is connected 0 for the publication at `index` once nothing connects it:
+    /// neither an image nor a recording of it, or over `cavalry:udp` no receiver. The
+    /// commands pass calls it where the last of these goes, so that the 0 is stored
+    /// before the limit pass lowers the limit, and a publisher at the old limit or the
+    /// lowered one is told `not connected`, never `back pressured`. The 1 is the limit
+    /// pass's, after its raise (ADR 0048; card 187).
+    fn lower_connected(&mut self, index: usize) {
+        let Some(publication) = self.publications.get(index) else {
+            return;
+        };
+        if !publication.connected_flag {
+            return;
+        }
+        let id = publication.registration_id;
+        let connected = match &publication.udp {
+            Some(udp) => udp.connected,
+            None => {
+                self.images.iter().any(|image| image.publication_id == id)
+                    || self
+                        .recordings
+                        .iter()
+                        .any(|recording| recording.publication_id == id)
+            }
+        };
+        if !connected && let Some(publication) = self.publications.get_mut(index) {
+            let _ = publication.log.set_connected(false);
+            publication.connected_flag = false;
+        }
     }
 
     /// A recording of an image over UDP ended or failed: its reader leaves the image,
@@ -3993,6 +4042,15 @@ impl Conductor {
             {
                 let _ = self.counters.free(counter.id(), reuse);
             }
+        }
+        // Not connected from here if the recording connected the publication alone,
+        // before the event and before the limit pass lowers the limit (ADR 0048).
+        if let Some(index) = self
+            .publications
+            .iter()
+            .position(|publication| publication.registration_id == publication_id)
+        {
+            self.lower_connected(index);
         }
         self.statics.recording_stopped.increment();
         if let Some(correlation_id) = correlation_id {
@@ -6054,6 +6112,40 @@ mod recording {
         );
     }
 
+    /// The sender's disconnected reply stores the flag 0 where the conductor takes it,
+    /// in the commands pass, before the limit pass lowers the limit (ADR 0048): a
+    /// publisher at the old limit is told `not connected`, never `back pressured`.
+    #[test]
+    fn a_udp_disconnect_stores_the_flag_before_the_limit_lowers() {
+        let mut h = Harness::new("udp-disconnect-flag-before-limit");
+        let mut receiver = TestReceiver::bind();
+        connect_udp(&mut h, &mut receiver, 2, 7, 131072);
+        let window = i64::from(
+            h.conductor.publications[0]
+                .log
+                .header()
+                .publication_window_length(),
+        );
+        assert!(h.conductor.publications[0].log.is_connected());
+        assert_eq!(h.conductor.publications[0].limit.get(), window);
+
+        h.conductor.set_udp_connected(2, false);
+        let publication = &h.conductor.publications[0];
+        assert!(
+            !publication.log.is_connected(),
+            "the 0 is stored where the reply is taken"
+        );
+        assert_eq!(
+            publication.limit.get(),
+            window,
+            "the limit waits for the limit pass"
+        );
+        h.conductor.keep_publications(now_nanos());
+        let publication = &h.conductor.publications[0];
+        assert!(!publication.log.is_connected());
+        assert_eq!(publication.limit.get(), 0);
+    }
+
     /// Two channels are the same channel when their resolved endpoint and interface
     /// are the same: a second stream shares the endpoint, the same stream joins the
     /// first publication, and an exclusive one never joins.
@@ -7590,16 +7682,16 @@ mod replay {
         drop(appender);
     }
 
-    /// On a disconnect the flag falls before the limit lowers, in the limit pass
-    /// (ADR 0048): the commands pass that removes the last subscription moves neither
-    /// word the publisher reads, and the limit pass stores 0 and then lowers the limit
-    /// to the largest position the subscriber reached, so the publisher between that
-    /// position and the old limit is told `not connected`, never `back pressured`. The
-    /// order of the two stores inside the pass is the code's, which a test on one
-    /// thread cannot see; this test pins what it can, both words after the pass.
+    /// On a disconnect the flag falls in the commands pass, before the limit lowers
+    /// (ADR 0048): removing the last subscription stores 0 where the subscriber goes
+    /// and leaves the limit where it was, so a publisher a slow subscriber held at the
+    /// limit is told `not connected` at once, never `back pressured`. The limit pass of
+    /// the same cycle then lowers the limit to the largest position the subscriber
+    /// reached, and the flag stays 0.
     #[test]
-    fn a_disconnect_stores_the_flag_then_lowers_the_limit_in_the_limit_pass() {
+    fn a_disconnect_stores_the_flag_in_the_commands_pass_before_the_limit_lowers() {
         let mut h = Harness::new("disconnect-flag-before-limit");
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
         let now = h.now;
         h.conductor
             .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
@@ -7617,27 +7709,42 @@ mod replay {
             .expect("an appender");
         let mut offered = 0;
 
-        // The publisher fills the window and the subscriber reads half of it: the limit
-        // runs a window ahead of the subscriber, past the publisher.
+        // The publisher fills the window and the subscriber reads half of it; the limit
+        // runs a window ahead of the subscriber, and the publisher fills up to it.
         offer_to(&mut appender, window, &mut offered);
         let read = window / 2;
         h.conductor.images[0].position.store_release(read);
         h.conductor.keep_publications(now);
-        assert_eq!(h.conductor.publications[0].limit.get(), read + window);
+        let limit = read + window;
+        assert_eq!(h.conductor.publications[0].limit.get(), limit);
+        offer_to(&mut appender, limit, &mut offered);
+        assert_eq!(appender.position().expect("the position"), limit);
         assert!(h.conductor.publications[0].log.is_connected());
+        assert!(matches!(
+            appender.offer(&[0u8; 32], limit, 0),
+            Err(ClaimError::BackPressured)
+        ));
 
-        // The commands pass: the last subscription goes, and nothing the publisher
-        // reads moves.
+        // The commands pass: the last subscription goes, and the flag with it, before
+        // the limit moves.
         h.conductor.remove_subscription(CLIENT, 4, 3, now);
         assert!(h.conductor.images.is_empty());
         let publication = &h.conductor.publications[0];
         assert!(
-            publication.log.is_connected(),
-            "the flag waits for the limit pass"
+            !publication.log.is_connected(),
+            "the 0 is stored where the last subscriber goes"
         );
-        assert_eq!(publication.limit.get(), read + window);
-        // The limit pass: the flag to 0, then the limit to the subscriber's last
-        // position, below the publisher's.
+        assert_eq!(
+            publication.limit.get(),
+            limit,
+            "the limit waits for the limit pass"
+        );
+        assert!(matches!(
+            appender.offer(&[0u8; 32], limit, 0),
+            Err(ClaimError::NotConnected)
+        ));
+        // The limit pass lowers the limit to the subscriber's last position, below the
+        // publisher's, and the flag stays 0.
         h.conductor.keep_publications(now);
         let publication = &h.conductor.publications[0];
         assert!(!publication.log.is_connected());
@@ -7647,6 +7754,91 @@ mod replay {
             Err(ClaimError::NotConnected)
         ));
         drop(appender);
+    }
+
+    /// The same for a recording that connected a publication alone (ADR 0048): the
+    /// recorder's refusal to start it, read in the commands pass, stores 0 before the
+    /// limit pass lowers the limit, as the recorder's stop does.
+    #[test]
+    fn a_recording_that_fails_to_start_stores_the_flag_before_the_limit_lowers() {
+        let mut h = Harness::new("recording-fails-flag-before-limit");
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let now = h.now;
+        h.conductor
+            .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
+        h.cycle();
+        h.conductor.start_recording(3, STREAM, IPC_CHANNEL, now);
+        h.conductor.keep_publications(now);
+        let window = i64::from(
+            h.conductor.publications[0]
+                .log
+                .header()
+                .publication_window_length(),
+        );
+        assert_eq!(h.conductor.publications[0].limit.get(), window);
+        assert!(h.conductor.publications[0].log.is_connected());
+
+        h.conductor.on_start_failed(
+            2,
+            3,
+            crate::recorder::StartFailure::Files("no space".to_owned()),
+        );
+        assert!(h.conductor.recordings.is_empty());
+        let publication = &h.conductor.publications[0];
+        assert!(
+            !publication.log.is_connected(),
+            "the 0 is stored where the recording goes"
+        );
+        assert_eq!(
+            publication.limit.get(),
+            window,
+            "the limit waits for the limit pass"
+        );
+        h.conductor.keep_publications(now);
+        let publication = &h.conductor.publications[0];
+        assert!(!publication.log.is_connected());
+        assert_eq!(publication.limit.get(), 0);
+    }
+
+    /// The recorder's stop of a recording that connected a publication alone stores 0
+    /// where the conductor takes the stop, before the limit pass lowers the limit
+    /// (ADR 0048). The entry is given the id the recorder's reply would have given it.
+    #[test]
+    fn a_recording_stop_stores_the_flag_before_the_limit_lowers() {
+        let mut h = Harness::new("recording-stop-flag-before-limit");
+        h.conductor.term_length = cavalry_shm::log::layout::MIN_TERM_LENGTH;
+        let now = h.now;
+        h.conductor
+            .add_publication(CLIENT, 2, STREAM, IPC_CHANNEL, true, now);
+        h.cycle();
+        h.conductor.start_recording(3, STREAM, IPC_CHANNEL, now);
+        h.conductor.recordings[0].recording_id = Some(0);
+        h.conductor.keep_publications(now);
+        let window = i64::from(
+            h.conductor.publications[0]
+                .log
+                .header()
+                .publication_window_length(),
+        );
+        assert_eq!(h.conductor.publications[0].limit.get(), window);
+        assert!(h.conductor.publications[0].log.is_connected());
+
+        h.conductor.on_stopped(0, 2, 0, None, now);
+        assert!(h.conductor.recordings.is_empty());
+        let publication = &h.conductor.publications[0];
+        assert!(
+            !publication.log.is_connected(),
+            "the 0 is stored where the stop is taken"
+        );
+        assert_eq!(
+            publication.limit.get(),
+            window,
+            "the limit waits for the limit pass"
+        );
+        h.conductor.keep_publications(now);
+        let publication = &h.conductor.publications[0];
+        assert!(!publication.log.is_connected());
+        assert_eq!(publication.limit.get(), 0);
     }
 
     /// Offers `count` messages of 32 bytes, the first eight the message's number from

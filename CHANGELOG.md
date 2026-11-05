@@ -1158,13 +1158,14 @@ user-visible change, added in the same commit as the change. The format follows
   card 176).
 - A publisher never reads a publication as connected before its limit is raised for
   the subscriber or recording that connects it: the driver's conductor stores the
-  connected flag in its limit pass, a 1 after the limit's raise and a 0 before its
-  lowering, where it set the flag as an image joined, a recording started or a status
-  message arrived and raised the limit a step later in the cycle, so `BackPressured`
-  with no subscriber behind, which card 187 saw on the macOS gate, cannot be read, and
-  a publisher that reads the limit lowered after its last subscriber goes is told
-  `NotConnected`; the flag holds while the publication stays connected, so a publisher
-  whose subscriber reaches the limit while cleaning holds the next raise back still
-  reads connected and its claim `BackPressured`, not `NotConnected`;
-  `spec/log-buffer.md`, "The driver", says the order
+  connected flag's 1 in its limit pass, after the limit's raise, where it set the flag
+  as an image joined, a recording started or a status message arrived and raised the
+  limit a step later in the cycle, so `BackPressured` with no subscriber behind, which
+  card 187 saw on the macOS gate, cannot be read. The 0 is still stored where the last
+  subscriber, receiver or recording goes, before the limit pass lowers the limit, so a
+  publisher at the old limit or the lowered one is told `NotConnected` from that
+  moment. The flag holds while the publication stays connected, so a publisher whose
+  subscriber reaches the limit while cleaning holds the next raise back still reads
+  connected and its claim `BackPressured`, not `NotConnected`; `spec/log-buffer.md`,
+  "The driver", says the order
   ([ADR 0048](docs/decisions/0048-store-the-connected-flag-after-the-limit.md); card 187).
