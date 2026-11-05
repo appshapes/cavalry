@@ -61,8 +61,8 @@ that guard.
 
 ADR 0033's trigger gains a second case. A pull request at master's tree that reads red
 on a row, against an entry recorded at an older tree, while master's own runs at that
-tree pass, has measured the host's band at a tree the entry has not seen, if no change
-that the gated rows run lies between the two trees. Four rules decide which reds
+tree pass, has measured the host's band at a tree the entry has not seen, if no commit
+on the guard's paths, below, lies between the two trees. Four rules decide which reds
 count:
 
 - A pull request at master's tree is one that changes none of the tree's paths. A red
@@ -101,10 +101,13 @@ The guard is ADR 0033's "no data-plane change behind it", read as any such chang
 since the entry's tree, not only the change that began master's tree. A change behind
 the band is a commit on master after the entry's tree, up to master's commit at the
 second red, on any of the tree's paths except `crates/cavalry-control` and
-`crates/cavalry`. Those two crates are the ones CLAUDE.md does not mark data plane and
-the harness does not build. Every other path on the tree is a crate the gated rows
-run, the harness, its host check, or the manifests, lockfile and recipes that build
-them. The session that holds the second red lists those commits with one `git log`
+`crates/cavalry`, the two crates CLAUDE.md does not mark data plane. The guard is that
+list and nothing narrower. It keeps, on purpose, the data-plane crates the harness
+does not build yet, `crates/cavalry-ffi` and `crates/cavalry-raft`, and a crate's test
+files, which the harness never compiles: a commit there is listed and sends the second
+red to a card, because the guard errs toward a card. A card that was not needed costs
+a measurement; a re-record that was not deserved loosens the gate (invariant 2). The
+session that holds the second red lists those commits with one `git log`
 (`docs/how-to/run-the-bench.md`, step 4), and its record of the red carries the list.
 
 - **The list is empty.** The guard holds, and the second red re-records as above.
@@ -220,6 +223,11 @@ number per row in `bench/baseline.json`.
   dependency bump moves the gated rows as a data-plane change does. The memmap2 bump
   of 07a6332 changed `Cargo.lock` for `cavalry-shm`. The how-to already gives the
   re-record after a harness change to a person.
+- **Guard on the crates the harness builds, and on their non-test files.** Lost: the
+  list would follow `bench/Cargo.toml` each time the harness gains a dependency, and
+  two readers of this frozen ADR could disagree on whether a test file counts. The
+  wider list errs toward a card, and a card costs a measurement where a re-record
+  that was not deserved loosens the gate.
 - **Where the list names a commit, re-record anyway and name the commits.** Lost: the
   commit would name the suspects without measuring them, and the entry would take the
   band all the same. The card is the measurement: whether the band rose with the
@@ -277,7 +285,10 @@ master:
   542112a and dd16167 (`crates/cavalry`).
 - **What the harness builds.** `bench/Cargo.toml` names `cavalry-shm`,
   `cavalry-client`, `cavalry-driver` and `cavalry-log`, which in turn name
-  `cavalry-proto`. None of them names `cavalry` or `cavalry-control`.
+  `cavalry-proto`. None of them names `cavalry` or `cavalry-control`, nor
+  `cavalry-ffi` or `cavalry-raft`, the two data-plane stubs the guard keeps all the
+  same; `git log 0782ec5..34049ac -- crates/cavalry-ffi crates/cavalry-raft` prints
+  nothing, so the eighteen stand under the guard as written.
 
 Where a first red's process is kept, read on 2026-11-05:
 
@@ -303,8 +314,8 @@ Where a first red's process is kept, read on 2026-11-05:
 
 ## Consequences
 
-Easier: a pull request's red at master's tree has a rule. Where no change the gated
-rows run lies between the entry's tree and master's, the second red on a row
+Easier: a pull request's red at master's tree has a rule. Where no commit on the
+guard's paths lies between the entry's tree and master's, the second red on a row
 re-records with no call to wait for, and the entry follows the host's band to that
 tree. A change smaller than the gate cannot get into the entry through this rule.
 

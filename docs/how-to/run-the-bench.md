@@ -218,8 +218,8 @@ shared runner is
    before and after and names the cause of every row that loosens by more than 5
    percent, or the card that will find it. It is re-recorded at master's tree as well
    when pull requests at that tree read red while master's own runs there pass,
-   against an entry recorded at an older tree, and no change that the gated rows run
-   lies between the entry's tree and master's
+   against an entry recorded at an older tree, and no commit on the guard's paths,
+   item 4 below, lies between the entry's tree and master's
    ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
    Four rules decide which reds count:
 
@@ -279,7 +279,10 @@ shared runner is
    4. **List the changes**, at a second red only: the changes behind the band. These
       are the commits on master after the entry's tree, up to master's commit from
       **Find the tree**, on the tree's paths except `crates/cavalry-control` and
-      `crates/cavalry`, the two crates the harness does not build. Start the range at
+      `crates/cavalry`, the two crates CLAUDE.md does not mark data plane. The list
+      keeps, on purpose, the data-plane crates the harness does not build yet,
+      `crates/cavalry-ffi` and `crates/cavalry-raft`, and test files, which it never
+      compiles: the guard errs toward a card. Start the range at
       one of the entry's `git` commits that is on master (`git merge-base
       --is-ancestor <commit> origin/master` exits 0 for one), or, for a pull request's
       merge commit, at its first parent, read as in **Find the tree**. For a second
