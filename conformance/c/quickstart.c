@@ -62,7 +62,11 @@ typedef struct {
     int64_t positions[MESSAGES];
     cavalry_subscription_t *subscription;
     int have_constants;
+    /* The numeric fields of the frames' image's constants, which may be kept across
+     * polls; its source identity is valid only until the next poll ("Lifetimes"), so
+     * it is copied out, and the struct's pointer is null. */
     cavalry_image_constants_t constants;
+    char source_identity[128];
 } receiver_t;
 
 static int64_t frame_position(const cavalry_image_constants_t *c, int32_t term_id,
@@ -114,21 +118,39 @@ static void on_fragment(void *clientd, const uint8_t *buffer, size_t length,
     r->next++;
 }
 
-/* Takes the image's constants once the poll has joined it, for the positions. */
+/* Takes the constants of the image the frames came from, for the positions, once a poll
+ * has delivered a frame: the image is the one whose session id the frames' header
+ * carries (spec/c-abi.md, "A frame's position"). The source identity is copied now,
+ * while the image pointer is valid, and the struct keeps no pointer to it. */
 static void take_constants(receiver_t *r) {
-    if (r->have_constants) return;
-    if (cavalry_subscription_image_count(r->subscription) < 1) return;
-    cavalry_image_t *image = cavalry_subscription_image_at_index(r->subscription, 0);
-    if (image == NULL) fail("cavalry_subscription_image_at_index");
-    CHECK(cavalry_image_constants(image, &r->constants));
-    r->have_constants = 1;
+    if (r->have_constants || r->next == 0) return;
+    int count = cavalry_subscription_image_count(r->subscription);
+    if (count < 0) fail("cavalry_subscription_image_count");
+    for (int i = 0; i < count; i++) {
+        cavalry_image_t *image = cavalry_subscription_image_at_index(r->subscription, (size_t)i);
+        if (image == NULL) fail("cavalry_subscription_image_at_index");
+        cavalry_image_constants_t constants;
+        CHECK(cavalry_image_constants(image, &constants));
+        if (constants.session_id != r->session_id) continue;
+        int written = snprintf(r->source_identity, sizeof r->source_identity, "%s",
+                               constants.source_identity);
+        if (written < 0 || (size_t)written >= sizeof r->source_identity) {
+            fprintf(stderr, "conformance/c: %s: the image's source identity is longer than %zu "
+                    "bytes\n", r->name, sizeof r->source_identity - 1);
+            exit(1);
+        }
+        constants.source_identity = NULL;
+        r->constants = constants;
+        r->have_constants = 1;
+        return;
+    }
 }
 
 /* Every frame's position from the image's constants, once all are received. */
 static void compute_positions(receiver_t *r) {
     if (!r->have_constants) {
-        fprintf(stderr, "conformance/c: %s: no image constants after %" PRIu64 " messages\n",
-                r->name, r->next);
+        fprintf(stderr, "conformance/c: %s: no image of session %" PRId32 " after %" PRIu64
+                " messages\n", r->name, r->session_id, r->next);
         exit(1);
     }
     for (uint64_t i = 0; i < r->next; i++) {
@@ -155,7 +177,7 @@ static void publish_and_receive(cavalry_publication_t *publication, receiver_t *
     cavalry_buffer_claim_t claim;
     struct timespec publish_until = deadline();
     for (uint64_t i = 0; i < MESSAGES;) {
-        /* The image joins on a poll; take its constants before the first frame is read. */
+        /* The image joins on a poll; take its constants once a frame from it is read. */
         if (cavalry_subscription_poll(r->subscription, on_fragment, r, 16) < 0)
             fail("cavalry_subscription_poll");
         take_constants(r);
@@ -283,12 +305,10 @@ int main(void) {
     static receiver_t udp = {.name = "cavalry:udp"};
     udp.subscription = udp_sub;
     publish_and_receive(udp_pub, &udp);
-    cavalry_image_constants_t udp_image;
-    take_constants(&udp);
-    udp_image = udp.constants;
+    /* The image's source identity as take_constants copied it, inside its lifetime. */
     printf("conformance/c: %d messages over %s by session %" PRId32
            " received once, in order, from %s\n", MESSAGES, udp_channel, udp.session_id,
-           udp_image.source_identity);
+           udp.source_identity);
     CHECK(cavalry_publication_close(udp_pub));
     CHECK(cavalry_subscription_close(udp_sub));
 
