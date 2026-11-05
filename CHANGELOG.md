@@ -1252,11 +1252,12 @@ user-visible change, added in the same commit as the change. The format follows
   ten-minute wait ended one end whenever the other started more than ten minutes
   later, twice on master on 2026-11-05, and the end that passed had measured against
   another run's end, built from another tree. When two runs' pairs each hold one host
-  and wait for each other, the newer run's end fails at once and names the older run;
-  a wrong job name, a refused token or an API that does not answer fails the wait at
-  once with its reason. Each failure names the re-run that brings both ends back,
-  `gh run rerun <run id> --failed` when both failed and the whole run when one passed,
-  since a re-run of one end alone finds its partner from the earlier attempt and fails
-  saying so. Each of `bench-linux` and `grip-linux` names one runner
+  and wait for each other, the newer run's end fails at once and names the older run.
+  A refused token fails the wait at once, an API that does not answer after three
+  tries and a wrong job name after a minute, each with its reason. Each failure names
+  the re-run that brings both ends back, `gh run rerun <run id> --failed` when both
+  failed and the whole run when one passed, since a re-run of one end alone finds its
+  partner's earlier result and fails at once saying so. Each of `bench-linux` and
+  `grip-linux` names one runner
   (`scripts/wait-for-partner-job.py`; `.github/workflows/ci.yml`;
   [Run the bench](docs/how-to/run-the-bench.md), step 5; card 212).

@@ -55,13 +55,14 @@ with 5 other runs in progress, about 310 an hour for an end, and 620 for both.
 It exits 0 once the partner is in progress, and 1, with a message that says which reason
 ended the wait and what to do, when:
 
-- the partner completed before this job reached it, so the pair cannot meet;
+- the partner completed after this job was created but before this job reached it, so
+  the pair cannot meet;
+- the partner completed before this job was created, so the attempt re-ran this end
+  alone and the pair cannot meet, as below;
 - the pair is crossed with another run's, as above, and this run is the newer;
-- the partner, or this job, is not listed in this attempt's jobs after LISTED_WITHIN: the
-  two jobs of the pair are created together, the moment their `needs` end, so a name
-  still missing after the first minute is a wrong name in attempt 1, and in a later
-  attempt a re-run of this end alone, whose partner is listed from an earlier attempt or
-  not at all;
+- the partner, or this job, is not listed in the run's jobs after LISTED_WITHIN: the two
+  jobs of the pair are created together, the moment their `needs` end, so a name still
+  missing after the first minute is a wrong name;
 - the API refused a request (any 4xx: a token without `actions: read`, a spent rate limit,
   a wrong run), or did not answer TRIES times in a row, POLL apart;
 - the partner has not started within BOUND, 45 minutes of wall clock, which is a host
@@ -74,6 +75,16 @@ never two chosen jobs; a job an attempt does not re-run keeps its earlier result
 both ends fail, `--failed` re-runs the pair, and when the partner passed, as the peer
 does when `bench-compare` fails a link row on `bench (udp)`, `--failed` or `--job` re-runs
 this end alone, and only the whole run re-runs both.
+
+GitHub lists a job that an attempt did not re-run as a copy in that attempt: a new id and
+the attempt's `run_attempt`, with the earlier attempt's `started_at`, `completed_at` and
+conclusion, and a `created_at` of the attempt. Attempt 3 of run 42001521540 re-ran
+`bench (udp peer)` alone, and lists `bench (udp)` as id 127175392697, `run_attempt` 3,
+created at 09:58:17, completed at 09:58:08 with success; attempt 3 of run 41896534567,
+which re-ran `gates (linux)` alone, lists every other job the same way. So a re-run of
+one end finds its partner completed and of its own attempt, and what tells the two cases
+apart is the time: a partner of this attempt is created with this job, so it cannot have
+completed before this job was created, and a copy completed before its attempt began.
 
 Environment, checked before the first request:
   GH_TOKEN           the job's token with `actions: read`; the step sets it from github.token.
@@ -93,6 +104,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 
 POLL = 20               # s between reads of the run's jobs
 LOOK_EVERY = 180        # s between looks at what holds the partner's host, while it is queued
@@ -193,9 +205,21 @@ def rerun_whole(run_id):
             f"then run `gh run rerun {run_id}` ({DOCS})")
 
 
-def attempt(job):
-    """The run attempt that last ran the job; the jobs list gives it as `run_attempt`."""
-    return job.get("run_attempt") or 1
+def when(job, key):
+    """The job's time under <key>, as the API gives it (`2026-11-05T09:58:17Z`), or None."""
+    try:
+        return datetime.fromisoformat(job[key].replace("Z", "+00:00"))
+    except (KeyError, AttributeError, ValueError):
+        return None
+
+
+def copied(partner, me):
+    """Whether the partner completed before this job was created: the copy of a job that this
+    attempt did not re-run (the docstring above). The jobs list gives the copy this attempt's
+    `run_attempt`, so the times are what tell. A partner without both times is read as this
+    attempt's, whose message names the same re-run and gives the race as the reason."""
+    done, created = when(partner, "completed_at"), when(me, "created_at")
+    return done is not None and created is not None and done < created
 
 
 def labels(job):
@@ -271,20 +295,15 @@ class Wait:
             partner = next((j for j in jobs if j.get("name") == self.partner), None)
             if me is not None and partner is not None and me.get("id") == partner.get("id"):
                 raise Fail(f"{self.partner!r} is this job's own name; pass the other job of the pair")
-            # A partner listed from an earlier attempt is not in this one: the attempt re-ran this
-            # end alone, or has not listed this attempt's partner yet, which LISTED_WITHIN covers.
-            if me is None or partner is None or attempt(partner) < attempt(me):
+            if me is None or partner is None:
                 if waited >= LISTED_WITHIN:
-                    raise Fail(self.not_listed(jobs, me, partner, waited))
-                if partner is None:
-                    self.say(f"{self.partner} is not listed yet after {waited} s")
-                else:
-                    self.say(f"{self.partner} is listed from attempt {attempt(partner)} only, after {waited} s")
+                    raise Fail(self.not_listed(jobs, me, waited))
+                self.say(f"{self.partner} is not listed yet after {waited} s")
             elif partner.get("status") == "in_progress":
                 self.say(f"{self.partner} is in progress after {waited} s")
                 return
             elif partner.get("status") == "completed":
-                raise Fail(self.completed(partner))
+                raise Fail(self.completed(partner, me))
             else:
                 self.say(f"{self.partner} is {partner.get('status')} after {waited} s")
                 if self.clock() >= next_look:
@@ -296,29 +315,27 @@ class Wait:
                            f"ends too; {rerun_failed(self.run_id)}")
             self.sleep(POLL)
 
-    def completed(self, partner):
-        """Why a partner that completed in this attempt cannot meet this job, and the re-run that
-        brings both ends back: `--failed` once both have failed, the whole run if it passed."""
-        done = f"{self.partner} completed ({partner.get('conclusion')}) before this job reached it, so the pair cannot meet"
-        if partner.get("conclusion") == "success":
+    def completed(self, partner, me):
+        """Why a completed partner cannot meet this job, and the re-run that brings both ends
+        back: `--failed` once both have failed, the whole run if the partner passed."""
+        conclusion = partner.get("conclusion")
+        if copied(partner, me):
+            done = (f"{self.partner} completed ({conclusion}) at {partner['completed_at']}, before this job was "
+                    f"created at {me['created_at']}, so it is an earlier attempt's result that this attempt "
+                    f"kept: the attempt re-ran this end alone, and the pair cannot meet")
+            if conclusion == "success":
+                return f"{done}. {rerun_whole(self.run_id)}"
+            return f"{done}; {rerun_failed(self.run_id)}"
+        done = f"{self.partner} completed ({conclusion}) before this job reached it, so the pair cannot meet"
+        if conclusion == "success":
             return f"{done}, and `--failed` would re-run this end alone. {rerun_whole(self.run_id)}"
         return f"{done}; {rerun_failed(self.run_id)}"
 
-    def not_listed(self, jobs, me, partner, waited):
+    def not_listed(self, jobs, me, waited):
         listed = ", ".join(f"{j.get('name')!r} ({j.get('status')}, runner {j.get('runner_name')!r})" for j in jobs)
         if me is None:
             return (f"no job of run {self.run_id} is in progress on runner {self.runner!r} after {waited} s, "
                     f"so this job cannot find itself; the run's jobs are {listed or 'none'}")
-        if partner is not None:
-            return (f"{self.partner} last ran in attempt {attempt(partner)} ({partner.get('status')}, "
-                    f"{partner.get('conclusion')}), and this job is attempt {attempt(me)}: the attempt re-ran "
-                    f"this end alone, so the pair cannot meet. {rerun_whole(self.run_id)}")
-        if attempt(me) > 1:
-            # A re-run runs the run's own ci.yml, so a wrong name would have ended attempt 1 here,
-            # with the message below: in a later attempt, the partner was not re-run.
-            return (f"{self.partner!r} is not a job of attempt {attempt(me)} of run {self.run_id} after {waited} s: "
-                    f"the attempt re-ran this end alone, so the pair cannot meet. {rerun_whole(self.run_id)}. "
-                    f"The run's jobs are {listed or 'none'}")
         return (f"{self.partner!r} is not a job of run {self.run_id} after {waited} s, and the pair's two "
                 f"jobs are created together; pass the other job's `name:` from .github/workflows/ci.yml. "
                 f"The run's jobs are {listed or 'none'}")

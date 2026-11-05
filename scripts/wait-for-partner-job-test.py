@@ -32,14 +32,10 @@ UDP, PEER = "bench (udp)", "bench (udp peer)"
 BENCH, GRIP = ["self-hosted", "bench-linux"], ["self-hosted", "grip-linux"]
 
 
-def job(id_, name, status, labels, runner=None):
+def job(id_, name, status, labels, runner=None, created="2026-11-05T15:10:52Z", done="2026-11-05T15:28:40Z"):
     return {"id": id_, "name": name, "status": status, "conclusion": "success" if status == "completed" else None,
-            "labels": labels, "runner_name": runner if status != "queued" else None, "run_attempt": 1}
-
-
-def rerun(jobs, *names, run_attempt=2):
-    """The jobs as a later attempt lists them, with only the named jobs re-run in it."""
-    return [{**j, "run_attempt": run_attempt} if j["name"] in names else j for j in jobs]
+            "labels": labels, "runner_name": runner if status != "queued" else None, "run_attempt": 1,
+            "created_at": created, "completed_at": done if status == "completed" else None}
 
 
 def concluded(jobs, name, conclusion):
@@ -47,11 +43,12 @@ def concluded(jobs, name, conclusion):
 
 
 def pair(run_id, udp, peer):
-    """A run's jobs at the moment its pair is queued or running: the single-host jobs done."""
-    return [job(run_id * 10 + 1, "bench (linux)", "completed", BENCH, "bench"),
-            job(run_id * 10 + 2, "bench (grip)", "completed", GRIP, "grip"),
-            job(run_id * 10 + 3, UDP, udp, BENCH, "bench"),
-            job(run_id * 10 + 4, PEER, peer, GRIP, "grip")]
+    """A run's jobs at the moment its pair is queued or running: the single-host jobs done,
+    and the pair's two created together the moment they ended, as in run 42051225401."""
+    return [job(run_id * 10 + 1, "bench (linux)", "completed", BENCH, "bench", "2026-11-05T15:00:00Z", "2026-11-05T15:10:52Z"),
+            job(run_id * 10 + 2, "bench (grip)", "completed", GRIP, "grip", "2026-11-05T15:00:00Z", "2026-11-05T15:04:10Z"),
+            job(run_id * 10 + 3, UDP, udp, BENCH, "bench", "2026-11-05T15:10:52Z"),
+            job(run_id * 10 + 4, PEER, peer, GRIP, "grip", "2026-11-05T15:10:53Z")]
 
 
 class Clock:
@@ -236,38 +233,67 @@ class Ends(Base):
         self.fails("GITHUB_API_URL must use https", env={"GITHUB_API_URL": "http://api.example"})
 
 
+def listed(id_, name, attempt, status, conclusion, labels, runner, created, done):
+    """One job as the jobs list gives it, with the fields the wait reads."""
+    return {"id": id_, "name": name, "run_attempt": attempt, "status": status, "conclusion": conclusion,
+            "labels": labels, "runner_name": runner, "created_at": created, "completed_at": done}
+
+
 class ReRun(Base):
-    """GitHub re-runs one job, the failed jobs or the whole run. Re-running one end alone, as
-    `--job` does, or `--failed` when the other end passed, leaves the partner's earlier attempt
-    in the list, or no partner at all: the pair cannot meet, and only the whole run re-runs it."""
+    """GitHub lists a job that an attempt did not re-run as a copy in that attempt: a new id
+    and the attempt's `run_attempt`, with the earlier attempt's times and conclusion. So a
+    re-run of one end finds its partner completed before this job was created, which a
+    partner of the same attempt cannot be. The listings are run 42001521540's bench jobs, as
+    `gh api repos/appshapes/cavalry/actions/runs/42001521540/jobs` gives them: attempt 3
+    re-ran `bench (udp peer)` alone, and in attempt 2 the peer failed before `bench (udp)`
+    started."""
 
-    def test_a_partner_from_an_earlier_attempt_ends_after_a_minute_naming_the_whole_run(self):
-        self.jobs(self.RUN, rerun(pair(self.RUN, "in_progress", "completed"), UDP))
-        self.fails(f"{PEER} last ran in attempt 1 (completed, success), and this job is attempt 2",
-                   "the attempt re-ran this end alone, so the pair cannot meet",
+    RUN = 42001521540
+
+    def attempt_3(self, udp="success", udp_done="2026-11-05T09:58:08Z"):
+        """Attempt 3 from the peer's end, re-run alone: `bench (udp)` is attempt 2's, copied."""
+        return [listed(127175389992, PEER, 3, "in_progress", None, GRIP, "grip", "2026-11-05T09:58:17Z", None),
+                listed(127175391268, "bench (grip)", 3, "completed", "success", GRIP, "grip", "2026-11-05T09:58:17Z", "2026-11-05T09:24:10Z"),
+                listed(127175392697, UDP, 3, "completed", udp, BENCH, "bench", "2026-11-05T09:58:17Z", udp_done),
+                listed(127175449669, "bench (linux)", 3, "completed", "success", BENCH, "bench", "2026-11-05T09:58:24Z", "2026-11-05T09:27:34Z")]
+
+    def test_the_peer_re_run_alone_against_a_copied_success_names_the_whole_run(self):
+        self.jobs(self.RUN, self.attempt_3())
+        self.fails(f"{UDP} completed (success) at 2026-11-05T09:58:08Z, before this job was created at "
+                   "2026-11-05T09:58:17Z, so it is an earlier attempt's result that this attempt kept: the attempt "
+                   "re-ran this end alone, and the pair cannot meet",
                    "GitHub re-runs one job (`--job`), the failed jobs (`--failed`) or the whole run",
-                   "download the attempt's artifacts (step 4), then run `gh run rerun 200` (")
-        self.assertIn(f"{PEER} is listed from attempt 1 only, after 0 s", self.out)
-        self.assertNotIn("gh run rerun 200 --failed", self.err)
-        self.assertEqual(self.clock.now, wait.LISTED_WITHIN)
+                   "download the attempt's artifacts (step 4), then run `gh run rerun 42001521540` (",
+                   partner=UDP, env={"RUNNER_NAME": "grip"})
+        self.assertNotIn("--failed` re-runs both ends", self.err)
+        self.assertNotIn("before this job reached it", self.err)
+        self.assertEqual(self.clock.slept, [])
 
-    def test_a_partner_missing_from_a_later_attempt_names_the_whole_run(self):
-        jobs = [j for j in rerun(pair(self.RUN, "in_progress", "completed"), UDP) if j["name"] != PEER]
-        self.jobs(self.RUN, jobs)
-        self.fails(f"'{PEER}' is not a job of attempt 2 of run 200 after 60 s: the attempt re-ran this end alone",
-                   "then run `gh run rerun 200` (", "The run's jobs are 'bench (linux)'")
-        self.assertNotIn("`name:`", self.err)
+    def test_the_same_against_a_copied_failure_names_the_failed_jobs(self):
+        self.jobs(self.RUN, self.attempt_3(udp="failure"))
+        self.fails(f"{UDP} completed (failure) at 2026-11-05T09:58:08Z, before this job was created at",
+                   "the attempt re-ran this end alone, and the pair cannot meet",
+                   "once the run has ended, `gh run rerun 42001521540 --failed` re-runs both ends",
+                   partner=UDP, env={"RUNNER_NAME": "grip"})
+        self.assertNotIn("then run `gh run rerun 42001521540` (", self.err)
+        self.assertEqual(self.clock.slept, [])
 
-    def test_this_attempts_partner_listed_within_the_minute_is_waited_for(self):
-        early = rerun(pair(self.RUN, "in_progress", "completed"), UDP)
-        self.jobs(self.RUN, then(early, rerun(pair(self.RUN, "in_progress", "in_progress"), UDP, PEER)))
-        self.passes(f"{PEER} is listed from attempt 1 only, after 0 s", f"{PEER} is in progress after 20 s")
+    def test_a_partner_that_completed_after_this_job_was_created_is_the_race(self):
+        # Attempt 2 from bench (udp)'s end, at 09:53:17: the peer, created with it at 09:27:34,
+        # failed at 09:40:33, having waited its ten minutes.
+        self.jobs(self.RUN, [
+            listed(127158086123, "bench (linux)", 2, "completed", "success", BENCH, "bench", "2026-11-05T09:21:07Z", "2026-11-05T09:27:34Z"),
+            listed(127158086388, "bench (grip)", 2, "completed", "success", GRIP, "grip", "2026-11-05T09:21:07Z", "2026-11-05T09:24:10Z"),
+            listed(127161076193, PEER, 2, "completed", "failure", GRIP, "grip", "2026-11-05T09:27:34Z", "2026-11-05T09:40:33Z"),
+            listed(127161076211, UDP, 2, "in_progress", None, BENCH, "bench", "2026-11-05T09:27:34Z", None)])
+        self.fails(f"{PEER} completed (failure) before this job reached it, so the pair cannot meet",
+                   "once the run has ended, `gh run rerun 42001521540 --failed` re-runs both ends")
+        self.assertNotIn("re-ran this end alone", self.err)
 
-    def test_a_whole_run_re_run_meets_as_the_first_attempt_does(self):
-        names = [j["name"] for j in pair(self.RUN, "queued", "queued")]
-        queued = rerun(pair(self.RUN, "in_progress", "queued"), *names)
-        self.jobs(self.RUN, then(queued, rerun(pair(self.RUN, "in_progress", "in_progress"), *names)))
-        self.passes(f"{PEER} is queued after 0 s", f"{PEER} is in progress after 20 s")
+    def test_a_partner_without_its_times_is_read_as_this_attempts(self):
+        self.jobs(self.RUN, self.attempt_3(udp_done=None))
+        self.fails(f"{UDP} completed (success) before this job reached it",
+                   "then run `gh run rerun 42001521540` (", partner=UDP, env={"RUNNER_NAME": "grip"})
 
 
 class Crossed(Base):

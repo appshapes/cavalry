@@ -253,24 +253,29 @@ shared runner is
    holds while `bench-linux` and `grip-linux` each name one runner. The log prints
    `wait-for-partner-job: bench (udp peer) is in progress after <s> s` when the pair
    meets. The wait fails with a message that names the reason and the command to run
-   next: the partner completed before this job reached it, or did not start within the
-   45 minutes; the partner is not one of this attempt's jobs after a minute, which is a
-   wrong name in the first attempt and a re-run of this end alone in a later one; an
-   API that refuses the job's token or goes unanswered three times in a row. Each
-   waiting job holds its host, so two runs' pairs can hold one host each and wait on
-   each other. While the partner is queued, the wait looks every three minutes at the
-   job that holds the partner's host, and prints it. When that job is the end of
-   another run's pair whose own partner is queued behind this job, the end in the
-   newer run fails at once and names the older run, whose pair then meets.
+   next: the partner completed before this job reached it, or before this job was
+   created, which is an attempt that re-ran this end alone; the partner did not start
+   within the 45 minutes; the partner is not one of the run's jobs after a minute, which
+   is a wrong name; an API that refuses the job's token or goes unanswered three times
+   in a row. Each waiting job holds its host, so two runs' pairs can hold one host each
+   and wait on each other. While the partner is queued, the wait looks every three
+   minutes at the job that holds the partner's host, and prints it. When that job is
+   the end of another run's pair whose own partner is queued behind this job, the end
+   in the newer run fails at once and names the older run, whose pair then meets.
    `scripts/wait-for-partner-job.py` lists the runs that showed each hazard (card 212).
 
    To re-run the pair, re-run both of its jobs in one attempt. GitHub re-runs one job
    (`gh run rerun <run id> --job <job id>`, or the job's re-run button), the failed
    jobs (`gh run rerun <run id> --failed`, or "Re-run failed jobs") or the whole run
    (`gh run rerun <run id>`), each once the run has ended, and never two chosen jobs; a
-   job that an attempt does not re-run keeps its earlier result. So `--job` on one end
-   of the pair cannot work: that end's wait finds its partner from the earlier attempt
-   and fails after a minute with `the attempt re-ran this end alone`.
+   job that an attempt does not re-run keeps its earlier result. The attempt lists that
+   job as a copy, with a new id and the attempt's number but the earlier times and
+   conclusion. Attempt 3 of run 42001521540 re-ran `bench (udp peer)` alone and lists
+   `bench (udp)` as completed at 09:58:08, before the attempt created the peer at
+   09:58:17; attempt 3 of run 41896534567, which re-ran `gates (linux)` alone, lists
+   every other job the same way. So `--job` on one end of the pair cannot work: that
+   end's wait finds its partner completed before this job was created, and fails at once
+   with `the attempt re-ran this end alone`.
    - **Both ends failed.** The wait or the harness's ten minutes ended one end, and the
      other then failed too. `gh run rerun <run id> --failed` re-runs both, with any
      other job of the run that failed.
