@@ -451,10 +451,15 @@ pub(crate) struct Replayer {
     pending: VecDeque<Reply>,
     /// The block read from a segment file, sized once.
     buffer: Vec<u8>,
-    /// The path of the file a step of file work removes, kept with room for the
-    /// directory and the longest segment name, so a removal allocates nothing: the
-    /// name goes on the stack and into this buffer, as the recorder's roll does
-    /// (card 177).
+    /// The path of the segment file a step of file work removes, kept with room for
+    /// the directory and the longest segment name: the name goes on the stack and into
+    /// this buffer, as the recorder's roll does. A segment file's removal then
+    /// allocates nothing while the directory's path is at most
+    /// `cavalry_log::recorder::LOG_DIR_PATH_LIMIT` bytes, which `cavalry doctor
+    /// --log-dir` checks; past it the standard library copies the path into a heap C
+    /// string for the system call. The listing when a command is admitted, a
+    /// truncate's cut and index truncation, and a delete's index removal build their
+    /// own paths and allocate a few times per command, never per file (card 177).
     work_path: PathBuf,
     rejected_frame: Counter,
     /// `recording.segments_purged`, one per file as a purge removes it.
@@ -1211,9 +1216,9 @@ impl Replayer {
         let recording_id = self.works[index].descriptor.recording_id();
         if let Some(base) = self.works[index].bases.pop() {
             // The file's name on the stack and its path in the buffer kept for it, as
-            // the recorder's roll does: a removal allocates nothing, so a purge running
-            // beside the recorded rows adds nothing to the allocation gate's count
-            // (card 177).
+            // the recorder's roll does: within the log directory path limit a removal
+            // allocates nothing (`work_path`), so a purge running beside the recorded
+            // rows adds nothing to the allocation gate's count (card 177).
             let mut name = [0u8; SEGMENT_NAME_CAPACITY];
             let Some(file_name) = segment_file_name_into(recording_id, base, &mut name) else {
                 return Some(Err(format!(

@@ -1157,9 +1157,10 @@ user-visible change, added in the same commit as the change. The format follows
   ([ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md);
   card 176).
 - The driver's replayer removes a purged, truncated or deleted recording's segment
-  files without allocating, each file's name formatted on its stack as the recorder's
-  roll is, and `recording.segments_purged` moves one per file as a purge removes it
-  instead of by the whole count when the purge ends, so a running purge's progress reads
-  from the counter and a purge beside the bench's recorded rows adds nothing to the
-  allocation gate's count; `cavalry-log` shares the name formatting as
-  `layout::segment_file_name_into` (card 177).
+  files without allocating, while the log directory's path is at most 337 bytes, the
+  limit `cavalry doctor --log-dir` already checks for the recorder's roll: each file's
+  name is formatted on the stack, as the recorder's roll does. `recording.segments_purged`
+  now moves one per file as a purge removes it, not by the whole count when the purge
+  ends, so the counter reads a running purge's progress, and a purge beside the bench's
+  recorded rows adds nothing to the allocation gate's count. `cavalry-log` shares the
+  name formatting as `layout::segment_file_name_into` (card 177).
