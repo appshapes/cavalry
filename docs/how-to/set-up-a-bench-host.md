@@ -63,7 +63,10 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    registration token. Give the runner the custom label `bench-linux`, which is the
    label the bench job names. Another host gets a label of its own, `grip-linux` for
    the host `grip`, and never `bench-linux`: the gate job
-   selects that label, and its baseline belongs to the host that recorded it. Then
+   selects that label, and its baseline belongs to the host that recorded it. Each
+   label names one runner, never two: the udp pair's wait reads the job in progress
+   under a label as the one that holds that host
+   ([Run the bench](run-the-bench.md), step 5; `scripts/wait-for-partner-job.py`). Then
    install it as a service so it starts at boot:
 
    ```sh

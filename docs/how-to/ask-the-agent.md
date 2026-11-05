@@ -82,13 +82,14 @@ branch locally; GitHub has already deleted it on origin.
   review. A fixer run that ended early with some blockers done is not this case: it
   pushed those as commits, its comment says which gates ran on the head it left, and
   the review of that head lists what is left.
-- **No review arrived.** A review lands within about ten minutes of the push. A
-  reviewer session that ends without submitting one is run again once, on its own,
-  and a comment on the pull request says so. When the review is more than fifteen
-  minutes late, run `gh run list --workflow "review pr"`: each run is named with its
-  pull request number and attempt, and a `failure` is the second miss, with what the
-  session did in its job summary. Add the `review` label to the pull request to run
-  it again. Pull requests from forks are not reviewed by the agent, only by a person.
+- **No review arrived.** A review lands within about thirty minutes of the push, most
+  inside fifteen. A reviewer session that ends without submitting one is run again
+  once, on its own, and a comment on the pull request says so. When the review is more
+  than thirty minutes late, run `gh run list --workflow "review pr"`: each run is named
+  with its pull request number and attempt, a run `in_progress` is still working, a
+  `failure` is the second miss, with what the session did in its job summary, and a
+  run `cancelled` after sixty minutes hit the job's timeout, which runs nothing again
+  (card 213). Add the `review` label to the pull request to run it again. Pull requests from forks are not reviewed by the agent, only by a person.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
   label, or a required check failed, or the branch moved after the approval, the next
   entry. `gh pr checks <number>` shows a failed check; the `auto merge` run on the

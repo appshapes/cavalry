@@ -1197,6 +1197,87 @@ user-visible change, added in the same commit as the change. The format follows
   says every client reaches the header through its language's foreign-function
   interface, where it named PyO3 and napi-rs, which bind the Rust crates instead
   ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
+- A publisher that waits for `is_connected()` and then claims reads the limit raised
+  for the subscriber or recording that connects it: the driver's conductor stores the
+  connected flag's 1 in its limit pass, after the limit's raise, where it set the flag
+  as an image joined, a recording started or a status message arrived and raised the
+  limit a step later in the cycle. So the claim's `BackPressured` with no subscriber
+  behind, which card 187 saw on the macOS gate, is not read. The 0 is still stored
+  where the last subscriber, receiver or recording goes, before the limit pass lowers
+  the limit, so `BackPressured` comes only while something reads the stream, and a
+  publisher at the old limit or the lowered one is told `NotConnected` from that
+  moment. The flag holds while the publication stays connected, so a publisher whose
+  subscriber reaches the limit while cleaning holds the next raise back reads
+  `BackPressured`, with the subscriber at the limit, not `NotConnected`; and a claim,
+  which loads the limit before the flag, can read `BackPressured` once when its two
+  loads straddle a raise. `spec/log-buffer.md`, "The driver", says the order
+  ([ADR 0048](docs/decisions/0048-store-the-connected-flag-after-the-limit.md); card 187).
+- ADR 0046 Accepted: Rjae accepted the fourth slice as proposed on 2026-11-05; card 204,
+  the C ABI's specification, is the next feature
+  ([ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md); card 203).
+- The reviewer's run has sixty minutes, twice the longest review observed, where
+  thirty cancelled four reviews on 2026-11-05 with no verdict and no retry; the
+  how-to and the pull request skill say a review takes up to thirty minutes and
+  when to add the `review` label (`.github/workflows/review-pull-request.yml`;
+  card 213).
+- ADR 0051, Proposed: the C ABI, version 0, is the client API as it stands under
+  Aeron's C client's names, seven opaque handles, one publication type for both kinds,
+  a caller-owned buffer claim that names its publication and its position, so that a
+  stale one commits nothing, synchronous adds, Aeron's six result codes with
+  `TooLong` as `ERROR` and `CAVALRY_ERR_TOO_LONG`, one table of error codes with the
+  driver's on their values from 1 to 99, an error message that keeps its docs anchor
+  when it is cut, a refusal of a channel that is not UTF-8 and of an empty directory,
+  a frame's position from its image's constants, a poll's fault as a struct, an
+  answer for every call made during a claim or a poll, lifetime rules by convention
+  with debug builds poisoning what is released, every handle used from one thread at
+  a time, and a `cavalry_context_init` that refuses a header of another ABI version;
+  its page is `spec/c-abi.md` with the committed
+  header as the artefact and vectors from the page's table, cbindgen 0.29.4 is a
+  pinned tool of `just lint` and not a dependency, `conformance/c/` is the first
+  runner, and two bench rows run through the ABI. The page, the crate, the runner and
+  the rows land with the acceptance
+  ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
+  card 204).
+- The driver's replayer removes a purged, truncated or deleted recording's segment
+  files without allocating, while the log directory's path is at most 337 bytes, the
+  limit `cavalry doctor --log-dir` already checks for the recorder's roll: each file's
+  name is formatted on the stack, as the recorder's roll does. `recording.segments_purged`
+  now moves one per file as a purge removes it, not by the whole count when the purge
+  ends, so the counter reads a running purge's progress, and a purge beside the bench's
+  recorded rows adds nothing to the allocation gate's count. `cavalry-log` shares the
+  name formatting as `layout::segment_file_name_into` (card 177).
+- The `bench (udp)` and `bench (udp peer)` jobs each wait, before their run, until the
+  run's other job is in progress, for up to 45 minutes, so the two ends of one run
+  meet each other. Before, each host started its end from its own queue: the harness's
+  ten-minute wait ended one end whenever the other started more than ten minutes
+  later, twice on master on 2026-11-05, and the end that passed had measured against
+  another run's end, built from another tree. When two runs' pairs each hold one host
+  and wait for each other, the newer run's end fails at once and names the older run.
+  A refused token fails the wait at once, an API that does not answer after three
+  tries and a wrong job name after a minute, each with its reason. Each failure names
+  the re-run that brings both ends back, `gh run rerun <run id> --failed` when both
+  failed and the whole run when one passed, since a re-run of one end alone finds its
+  partner's earlier result and fails at once saying so. Each of `bench-linux` and
+  `grip-linux` names one runner
+  (`scripts/wait-for-partner-job.py`; `.github/workflows/ci.yml`;
+  [Run the bench](docs/how-to/run-the-bench.md), step 5; card 212).
+- ADR 0051 Accepted: Rjae accepted the C ABI as proposed on 2026-11-05, and
+  `spec/c-abi.md`, version 0, is its page: eight opaque handles, nine caller-owned
+  structs, 58 functions, the six result codes, one table of error codes with the
+  driver's below 100, the string, lifetime and thread rules, which claim a struct
+  names, a frame's position from its image's constants, and the version check a reader
+  runs first; `spec/vectors/c-abi.json`, written by `spec/vectors/c-abi.py`, will hold
+  the committed header to the page once `cavalry-ffi`'s test reads it. `spec/README.md` admits an ABI page and its kind of
+  vector, and `spec/client-protocol.md` keeps its error codes below 100 for the ABI
+  ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
+  card 204).
+- `CLAUDE.md`'s working rules say which decisions a session makes and which it sends:
+  a choice between options is the session's own, on its recommendation, recorded with
+  the work, and a `brigade decision` goes to a person only for what needs their own
+  hand, a host, a credential, an account, or reverses a decision they made. An ADR,
+  one on the wire format, the on-disk log format or the C ABI included, lands Accepted
+  on its evidence and names no person to accept it
+  ([Implement a feature](docs/how-to/implement-a-feature.md), step 2; card 214).
 - The bench's client rows no longer count the driver's conductor retiring the
   subscriber's subscription inside the measured loop: the subscriber thread hands its
   subscription back with its histogram, as the UDP rows' does, and the publisher closes

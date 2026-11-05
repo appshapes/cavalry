@@ -118,8 +118,9 @@ named below, stop and hand it back.
 
 ## 2. Watch the pull request
 
-Read the state in one go, then wait. A review lands about ten minutes after a push; a
-fix run takes up to thirty minutes; the `bench (linux)` and `bench (grip)` jobs each
+Read the state in one go, then wait. A review lands up to thirty minutes after a push,
+most inside fifteen, the longest on an ADR with reviews behind it, and its run is
+cancelled at sixty (card 213); a fix run takes up to thirty minutes; the `bench (linux)` and `bench (grip)` jobs each
 have their host, `bench` and `grip`, to themselves. Poll no more often than every five
 minutes, and touch nothing a rule below does not name. Every wait here is the loop's own work in progress; the stalls are the rules.
 
@@ -164,11 +165,13 @@ gh pr checks <number>
   body yourself, `gh pr edit <number> --body-file <file>` and then `gh pr edit <number>
   --add-label review`, because an edit to the body raises no review.
 
-- **No review fifteen minutes after a head.** `gh run list --workflow "review pr"`: a
-  run whose reviewer session ended without a verdict is retried as `attempt 2` by the
-  loop itself; a failed `attempt 2` is the second miss, and `gh pr edit <number>
-  --add-label review` starts a third. A head with no `dispatch review` run at all, after
-  a push of yours: the same label.
+- **No review thirty minutes after a head.** `gh run list --workflow "review pr"`: a
+  run still `in_progress` is working, and is left alone until it ends or its sixty
+  minutes pass; a run whose reviewer session ended without a verdict is retried as
+  `attempt 2` by the loop itself; a failed `attempt 2` is the second miss, and `gh pr
+  edit <number> --add-label review` starts a third. A run `cancelled` at the sixty
+  minutes gets no retry: the same label. A head with no `dispatch review` run at all,
+  after a push of yours: the same label.
 
 - **`CONFLICTING`.** `master` moved under the branch; GitHub starts no run on a
   conflicting pull request. Step 4, step 2, push.

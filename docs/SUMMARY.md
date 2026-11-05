@@ -36,6 +36,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Client protocol](reference/client-protocol.md)
 - [Durable log](reference/durable-log.md)
 - [UDP transport](reference/udp.md)
+- [C ABI](reference/c-abi.md)
 - [Configuration](reference/config.md)
 - [Glossary](glossary.md)
 
@@ -89,3 +90,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0045. Carry a padding frame on the wire as its 32-byte header alone](decisions/0045-carry-a-padding-frame-as-its-header-alone.md)
 - [0047. Count the measured loops' allocations with a hook that keeps the first one's backtrace](decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md)
 - [0046. Build the C ABI and the language clients fourth, in six features](decisions/0046-build-the-c-abi-and-the-clients-fourth.md)
+- [0048. Raise a publication's connected flag after its limit and lower it before, in the same duty cycle](decisions/0048-store-the-connected-flag-after-the-limit.md)
+- [0051. Expose the client API as a C ABI with Aeron's C client's names, version 0](decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md)
