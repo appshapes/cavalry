@@ -1,6 +1,6 @@
 # 0046. Build the C ABI and the language clients fourth, in six features
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-05
 - **Invariants affected:** 1, 2, 3, 5, 6
 - **Supersedes:** none; ADR 0039's Revisit named the fourth slice as Raft or the C ABI
@@ -485,6 +485,13 @@ the absence of `clients/` and `conformance/` and the eight suites `just conforma
 runs; Aeron's sources named in Context, read on 2026-11-05; the hosts' state in
 ADR 0034 and ADR 0044; the nine open cards and five open issues with their briefs;
 and cards 203 to 209 on the Cavalry list with their briefs and "Done when" sections.
+
+Acceptance, 2026-11-05 *(acceptance)*: Rjae accepted the decision as proposed on
+2026-11-05, answering the recorded decision d-20261105-b40b18 through the team's Slack
+gateway after the proposal merged as fe27c02 (pull request 115, reviewed and approved at
+d5bb37c). Nothing in the Decision changed; the six feature cards, 204 to 209, stand on
+the Cavalry list with their briefs read from this text. Card 204, the C ABI's
+specification, is the next task.
 
 ## Consequences
 
