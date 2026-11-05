@@ -152,11 +152,11 @@ for the call. Three structs the caller owns:
   *publication; }`, filled by `cavalry_publication_try_claim`: `data` is the frame's
   body in the term, `length` the length claimed, `publication` the handle the claim
   belongs to. The claim itself lives inside the publication handle, one outstanding
-  claim per publication, which is the Rust borrow rule made a convention: a second
-  `try_claim` before the first claim's commit or abort is `ERROR` with
-  `CAVALRY_ERR_CLAIM_OUTSTANDING`, and a commit or abort with no claim outstanding is
-  −1 with `CAVALRY_ERR_NO_CLAIM`. A caller keeps one struct per publication, and a
-  claim allocates nothing.
+  claim per publication, which is the Rust borrow rule made a convention: a commit or
+  abort with no claim outstanding is −1 with `CAVALRY_ERR_NO_CLAIM`, and what every
+  other call on the publication answers while a claim is outstanding is "Calls during
+  a claim or a poll", below. A caller keeps one struct per publication, and a claim
+  allocates nothing.
 - `cavalry_header_values_t { cavalry_header_values_frame_t frame; }`, filled by
   `cavalry_header_values(header, &values)`, where `cavalry_header_values_frame_t` is
   the data frame header's fields in the order and the types of `spec/frame.md`:
@@ -233,7 +233,7 @@ subscriptions full, 104 replays full, 105 replay queue full, 106 response timeou
 command ring, 108 broadcast, 109 counters, 110 protocol, 111 log, 112 driver, 113 io,
 `ClientError`'s other kinds in order; the faults a poll stops on, 120 image, 121
 images full, 122 closed, `Fault`'s three; and the ABI's own, 130 too long, 131 null,
-132 claim outstanding, 133 no claim. `cavalry_errmsg` is the Rust error's message, the
+132 claim outstanding, 133 no claim, 134 polling. `cavalry_errmsg` is the Rust error's message, the
 docs anchor included, written into a thread-local buffer of 512 bytes with no
 allocation, cut at the buffer if longer. A success clears nothing: the error is the
 last failure's until the next.
@@ -256,6 +256,42 @@ last failure's until the next.
 - Debug builds poison what is released, so misuse is loud: a committed or aborted
   claim's struct is overwritten with a null `data`, a length of 0 and a null
   `publication`; a closed handle's memory is filled with `0xDD` before it is freed.
+
+**Calls during a claim or a poll.** A live claim holds its publication mutably until
+its commit or abort, `try_claim(&mut self) -> BufferClaim<'_>`, and a poll holds its
+subscription mutably for the whole run of the handler, `poll(&mut self, ..)`. In Rust
+the borrow checker refuses every other call on either. Here the convention replaces
+it, and each such call has one answer. A refusal leaves the claim or the poll as it
+was.
+
+| Call | While a claim is outstanding on the publication |
+| --- | --- |
+| `cavalry_buffer_claim_set_reserved_value`, `_commit`, `_abort` | the claim's own functions, as the function table says |
+| `cavalry_publication_constants` | 0, from the copy the handle took when it was made: the constants never change |
+| `cavalry_publication_try_claim`, `cavalry_publication_offer` | `ERROR` with `CAVALRY_ERR_CLAIM_OUTSTANDING`. Aeron's C client lets a concurrent publication offer beside a claim; the Rust borrow does not, and the ABI keeps the Rust rule |
+| `cavalry_publication_position`, `_position_limit` | −1 with `CAVALRY_ERR_CLAIM_OUTSTANDING` |
+| `cavalry_publication_is_connected`, `_is_closed` | `false` with `CAVALRY_ERR_CLAIM_OUTSTANDING` |
+| `cavalry_publication_close` | aborts the claim, then closes, as Lifetimes says |
+
+| Call from inside the handler | While the subscription's poll runs |
+| --- | --- |
+| `cavalry_header_values` on the handler's `header` | the function's own answer |
+| `cavalry_subscription_constants` | 0, from the copy the handle took when it was made |
+| `cavalry_subscription_poll`, `_image_count`, `_close` | −1 with `CAVALRY_ERR_POLLING`; a refused close leaves the subscription open |
+| `cavalry_subscription_image_at_index` | null with `CAVALRY_ERR_POLLING` |
+| `cavalry_subscription_is_connected`, `_is_closed` | `false` with `CAVALRY_ERR_POLLING` |
+| `cavalry_image_*` on an image of this subscription | undefined: the image pointer was valid only until this poll began (Lifetimes) |
+| any call on another handle | allowed, by the thread rules below: a handler may offer on a publication, or poll another subscription |
+
+The refusals are sound because no function reaches the borrowed value while the borrow
+lives. Each publication and subscription handle holds two things outside the
+`Publication` or `Subscription` it wraps: the copy of its constants, with the strings
+NUL-terminated, and a state word that says whether a claim is outstanding or a poll
+runs. Every function of the handle reads the state word first, through the handle's
+pointer and without forming a reference to the wrapped value, and refuses before it
+touches that value. The word is plain memory and not an atomic, since one thread uses
+a handle at a time (Threads). It costs one load and one compare per call, and one store
+at each claim, commit, abort and poll.
 
 **Threads.** A publication, a subscription, a recording or a replay handle is used
 from one thread at a time, and a client's commands from one thread at a time, as the
@@ -391,6 +427,14 @@ version of the page with its ADR. The first release, which freezes version 0, is
   README's ten-minute path, against what ADR 0021 accepted. A client that needs the
   header's own position sends it to a new version of the page, with the
   `cavalry-client` change and its ADR.
+- **Leaving a call on a publication with a claim outstanding, or on a subscription
+  from inside its own handler, undefined.** Lost: the Rust borrow would make it an
+  aliased `&mut` inside `cavalry-ffi`, which no test or debug build reports, while a
+  refusal costs one load and one compare per call and names what the caller did.
+- **Answering a publication's position, limit and flags while a claim is outstanding,
+  from values the handle loads at each claim.** Lost: two more acquire loads on every
+  claim, the per-message path, for calls a caller holding a claim has no reason to
+  make, and a value loaded at the claim is stale when it is read.
 - **A flat `cavalry_header_values_t`, the frame's fields at the top level.** Lost:
   Aeron's `aeron_header_values_t` nests them in `frame`, so a program ported from
   Aeron reads `values.frame.session_id`. A flat struct under Aeron's outer name breaks
