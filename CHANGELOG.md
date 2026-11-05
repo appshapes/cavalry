@@ -1158,9 +1158,10 @@ user-visible change, added in the same commit as the change. The format follows
   card 176).
 - A pull request that changes none of the bench's tree paths and reads red on a bench
   row, at a tree where master's own runs pass against an entry recorded at an older
-  tree, now has a rule: the first such red at a tree is a rerun, and the second
-  re-records the host's baseline at that tree from every process at it, as a person's
-  commit naming both reds. An agent's session that holds the second red comments on
+  tree, now has a rule: the first such red on a row of a profile is a rerun, and the
+  second on the same row re-records that profile's baseline at the tree from every
+  process at it, as a person's commit naming both reds. A disturbed run, whose row
+  moved as a whole, counts for nothing and joins no entry. An agent's session that holds the second red comments on
   its pull request instead and changes no baseline, and that pull request waits for
   the re-record. Pull request 111's red on `grip`'s unchecked client row at
   7248621's tree on 2026-11-04 was such a red, with no rule then; pull requests 102,

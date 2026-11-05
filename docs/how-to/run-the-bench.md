@@ -205,31 +205,43 @@ shared runner is
    appends its runs to the entry and raises the slowest run where it read higher, in a
    commit whose message names the run and the row. A run at another tree never joins:
    a pull request that changes the tree's paths is judged, and a red there is a
-   change. A pull request that changes none of them is at master's tree, and a red
-   there while master's own runs at the tree pass is the band at a tree the entry has
-   not seen: the first is a rerun, and the second, on the same pull request or
-   another, re-records the entry at that tree from every process at it, the red runs
-   included, as a person's commit that names the two reds and the row
-   ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
-   The re-record is a person's commit on a branch of its own. An agent's session that
-   holds the second red, the writer or the fixer, changes no `bench/baseline.json`.
-   Instead it comments on its pull request, naming the two reds by run, attempt and
-   row, and a person's session makes the re-record. The pull request that holds the
-   second red waits for the re-record and does not rerun until a run passes. Once the
-   re-record is on master, merge master into the branch for a run judged against the
-   new entry.
-   Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
+   change. Nor does a run whose row moved as a whole: when the row's p50 and p99 moved
    with its p99.99 and its rate fell against the other processes at the tree, the
    host was disturbed during the run (the troubleshooting list below); re-run the job
-   and name the disturbance where the host's journal shows it. A baseline is re-recorded at a new tree when master's own run fails or
-   brushes the gate there with no data-plane change behind it, from the tree's first
-   three processes and every one after them; the commit lists every gated row's
-   slowest run before and after and names the cause of every row that loosens by more
-   than 5 percent, or the card that will find it. A new row joins a baseline that
-   already exists by adding its entry from the tree's processes that have it and
-   leaving the other rows as they were recorded, in a commit that names the row and
-   the runs; `--update` rewrites the whole profile, which is for a host whose numbers
-   moved, never for one new row.
+   and name the disturbance where the host's journal shows it.
+
+   A baseline is re-recorded at a new tree when master's own run fails or brushes the
+   gate there with no data-plane change behind it, from the tree's first three
+   processes and every one after them; the commit lists every gated row's slowest run
+   before and after and names the cause of every row that loosens by more than 5
+   percent, or the card that will find it. It is re-recorded at master's tree as well
+   when pull requests at that tree read red while master's own runs there pass,
+   against an entry recorded at an older tree
+   ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
+   Three rules decide which reds count:
+
+   - A pull request at master's tree is one that changes none of the tree's paths. A
+     red at a pull request's own tree is a change and does not count.
+   - A disturbed run, whose row moved as a whole, does not count. Re-run it as above,
+     and record it in no entry.
+   - Count the reds on one row of one profile. A red on another row, or in the host's
+     other profile, starts a count of its own.
+
+   The first red that counts is a rerun of the job. The second, on the same pull
+   request or another, re-records that profile's entry at the tree from every process
+   at it, the two red runs included, in the form above, in a commit that names the two
+   reds by run, attempt and row. The re-record is a person's commit on a branch of its
+   own. An agent's session that holds the second red, the writer or the fixer, changes
+   no `bench/baseline.json`. Instead it comments on its pull request, naming the two
+   reds by run, attempt and row, and a person's session makes the re-record. The pull
+   request that holds the second red waits for the re-record and does not rerun until
+   a run passes. Once the re-record is on master, merge master into the branch for a
+   run judged against the new entry.
+
+   A new row joins a baseline that already exists by adding its entry from the tree's
+   processes that have it and leaving the other rows as they were recorded, in a
+   commit that names the row and the runs; `--update` rewrites the whole profile,
+   which is for a host whose numbers moved, never for one new row.
 
 5. Measure the link between the two bench hosts, which the `bench (udp)` job does on
    every push with its peer job `bench (udp peer)`

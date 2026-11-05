@@ -50,14 +50,27 @@ it, since master's own runs at the tree pass either way.
 ## Decision
 
 ADR 0033's trigger gains a second case. A pull request at master's tree that reads red
-on a row while master's own runs at that tree pass has measured the host's band at a
-tree the entry has not seen. The first such red at a tree is a rerun of the job, as a
-process of the baseline's tree reading high is under ADR 0033. The second red at the
-same tree, on the same pull request or another, re-records the entry at that tree in
-ADR 0033's form, from every process the host has run at the tree, master's runs and
-the pull requests' included, the red runs among them, with the commit naming the two
-reds by run and row, every gated row's slowest run before and after, and the cause of
-every row that loosens by more than 5 percent or the card that will find it.
+on a row, against an entry recorded at an older tree, while master's own runs at that
+tree pass, has measured the host's band at a tree the entry has not seen. Three rules
+decide which reds count:
+
+- A pull request at master's tree is one that changes none of the tree's paths. A red
+  at a pull request's own tree is a change under ADR 0033 and never counts.
+- A disturbed run never counts. That is a run whose row's p50 and p99 moved with its
+  p99.99 and whose rate fell against every other process at the tree. It is rerun as
+  ADR 0033 says, and no entry records it, this rule's re-record included.
+- Reds count on one row of one profile, and so of one host. A red on another row, or
+  in the host's other profile, starts a count of its own.
+
+The first red that counts on a row at a tree is a rerun of the job, as a process of
+the baseline's tree reading high is under ADR 0033. The second on the same row of the
+same profile, on the same pull request or another, re-records that profile's entry at
+that tree in ADR 0033's form, from every process the host has run at the tree, master's
+runs and the pull requests' included, the two red runs among them and no disturbed run,
+with the commit naming the two reds by run, attempt and row, every gated row's slowest
+run before and after, and the cause of every row that loosens by more than 5 percent
+or the card that will find it. Once the entry is at the tree, a later red there is
+ADR 0033's join.
 
 The re-record is a person's commit (ADR 0032), on a branch of its own, through the
 review loop. A person's session that holds the second red makes it. An agent's session
@@ -97,6 +110,13 @@ row in `bench/baseline.json`.
 - **Rerun the job after the second red until a run passes, and merge.** Lost: that is
   the coin flip ADR 0033's first alternative lost, and the entry stays where it was,
   so the next pull request at the tree reads red against it again.
+- **Count a disturbed run as a red.** Lost: a host disturbance, such as the
+  `sysstat-collect` run in ADR 0033's Evidence, plus one ordinary high run would
+  re-record, and the re-record would loosen the gate with the disturbance inside it.
+  ADR 0033 already reruns such a run and records it in no entry.
+- **Count two reds on any rows of a profile.** Lost: two reds on two rows are one high
+  run on each row, and ADR 0033 reruns a high run. A re-record rewrites every row of
+  the profile, so it needs one row's band measured twice, not two rows measured once.
 
 ## Evidence
 
@@ -127,8 +147,9 @@ holds the host effects behind the band.
 
 ## Consequences
 
-Easier: a red at a new tree has a rule, and the second red re-records with no call to
-wait for; the entry follows the host's band at each tree master reaches.
+Easier: a pull request's red at master's tree has a rule, and the second red on a row
+re-records with no call to wait for; the entry follows the host's band at each tree
+master reaches.
 
 Harder: a second red costs the re-record's commit, every process's artifact read and
 every loosened row explained or carded; the entry loosens to the band at the new tree,
