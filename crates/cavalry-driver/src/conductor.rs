@@ -50,11 +50,10 @@ use cavalry_shm::counters::generated::{
     PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
     RECORDING_CATALOG_TRUNCATED, RECORDING_DELETED, RECORDING_FILES_REMOVED,
     RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED,
-    RECORDING_RETENTION_FAILED, RECORDING_SEGMENTS_PURGED, RECORDING_SLOT_DROPPED,
-    RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_SYNCED_POSITION,
-    RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED, REPLAY_NOT_CONNECTED, REPLAY_POSITION,
-    REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED, SENDER_LIMIT, SENDER_POSITION,
-    SUBSCRIPTION_POSITION,
+    RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED,
+    RECORDING_STOPPED, RECORDING_SYNCED_POSITION, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
+    REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
+    SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
@@ -504,7 +503,6 @@ struct Statics {
     recording_started: Counter,
     recording_stopped: Counter,
     recording_truncated: Counter,
-    recording_segments_purged: Counter,
     recording_deleted: Counter,
     recording_retention_failed: Counter,
     recording_start_failed: Counter,
@@ -538,7 +536,6 @@ impl Statics {
             recording_started: get(RECORDING_STARTED)?,
             recording_stopped: get(RECORDING_STOPPED)?,
             recording_truncated: get(RECORDING_TRUNCATED)?,
-            recording_segments_purged: get(RECORDING_SEGMENTS_PURGED)?,
             recording_deleted: get(RECORDING_DELETED)?,
             recording_retention_failed: get(RECORDING_RETENTION_FAILED)?,
             recording_start_failed: get(RECORDING_START_FAILED)?,
@@ -5202,9 +5199,9 @@ impl Conductor {
         }
     }
 
-    /// The replayer's file work ended: a truncate's last catalog write, a purge's or a
-    /// delete's answer with its counter, or the repair after a file the operating
-    /// system refused.
+    /// The replayer's file work ended: a truncate's last catalog write, a purge's
+    /// answer, whose files the replayer counted as each went, a delete's answer with
+    /// its counter, or the repair after a file the operating system refused.
     fn on_file_work_done(
         &mut self,
         correlation_id: i64,
@@ -5234,10 +5231,9 @@ impl Conductor {
                     );
                 }
                 replayer::Retention::Purge { .. } => {
+                    // The replayer counted each file in `recording.segments_purged` as
+                    // it went.
                     self.commands.swap_remove(index);
-                    for _ in 0..done.files_removed {
-                        self.statics.recording_segments_purged.increment();
-                    }
                     self.send(&Event::OperationSuccess { correlation_id });
                 }
                 replayer::Retention::Delete { .. } => {
@@ -5722,6 +5718,9 @@ mod recording {
                 replayer_reply_producer,
                 conductor
                     .counter(LOG_BUFFER_REJECTED_FRAME)
+                    .expect("a counter"),
+                conductor
+                    .counter(cavalry_shm::counters::generated::RECORDING_SEGMENTS_PURGED)
                     .expect("a counter"),
                 IdleStrategy::Backoff,
             )
@@ -9862,6 +9861,9 @@ mod replay {
             },
         );
         wait_answer(&mut h, 20).expect("success");
+        assert_eq!(h.counter(RECORDING_TRUNCATED), 1);
+        // The file a truncate removes is not a purged segment (card 177).
+        assert_eq!(h.counter(RECORDING_SEGMENTS_PURGED), 0);
         let after = slot(&h, 0);
         assert_eq!(after.stop_position(), 0);
         assert_eq!(after.stop_timestamp(), after.start_timestamp());
@@ -9952,6 +9954,8 @@ mod replay {
             .retention(20, replayer::Retention::Delete { recording_id: 0 });
         wait_answer(&mut h, 20).expect("success");
         assert_eq!(h.counter(RECORDING_DELETED), 1);
+        // The files a delete removes are not purged segments (card 177).
+        assert_eq!(h.counter(RECORDING_SEGMENTS_PURGED), 0);
         assert_eq!(slot(&h, 0).state(), cavalry_log::layout::State::Deleted);
         assert!(!segment(&h, 0, 0).exists());
         assert!(
