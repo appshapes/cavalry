@@ -229,6 +229,10 @@ shared runner is
      and record it in no entry.
    - Count the reds on one row of one profile. A red on another row, or in the host's
      other profile, starts a count of its own.
+   - A red counts once master has a passing run at the tree. A red read before
+     master's own run there waits for it: a failing master run is ADR 0033's own
+     case, which re-records, and a passing one makes the red count from then. Record
+     it at once all the same; a record the other case overtakes stays where it is.
 
    Record each red that counts before you do anything else about it: the first before
    its re-run, the second before the re-record or the card. The second red can come

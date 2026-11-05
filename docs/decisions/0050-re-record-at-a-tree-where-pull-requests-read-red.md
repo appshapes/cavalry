@@ -72,6 +72,13 @@ count:
   ADR 0033 says, and no entry records it, this rule's re-record included.
 - Reds count on one row of one profile, and so of one host. A red on another row, or
   in the host's other profile, starts a count of its own.
+- A red counts once master has a passing run at the tree. Each bench job runs on its
+  one host, so a pull request at a new tree can run before master's own run there. A
+  red read before that waits for master's run: if that run fails or brushes the gate,
+  ADR 0033's own case re-records and this rule counts nothing; if it passes, the red
+  counts from then. The session that holds such a red records it at once all the same,
+  since the record costs a comment and the artifact expires, and a record that ADR
+  0033's own case overtakes is left where it is.
 
 The first red that counts on a row at a tree is a rerun of the job, as a process of
 the baseline's tree reading high is under ADR 0033; a person's session starts the
