@@ -1306,3 +1306,16 @@ user-visible change, added in the same commit as the change. The format follows
   three parts
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).
+- `bench`'s two bench profiles, `bench-linux` and `bench-linux-unchecked`, are
+  re-recorded at the tree of 3fe13b4 from its twenty processes, pull request 128's
+  four runs, master's five with both attempts of a re-run, pull requests 129's four,
+  130's two, 132's one and 134's four, with every gated row's slowest run before and
+  after in the commit and the process behind each row that loosened. The checked
+  `claim_commit_32_recorded` row had turned `bench (linux)` red four times at that
+  tree, master's own run among them, at 330 ns against a slowest run of 310 ns
+  recorded on 2026-10-31. Card 216 measured card 177's commit against its parent on
+  the idle host, three 21-run processes of each interleaved, and found them not
+  separated, the parent reading 320 with runs to 330 as the commit does, so the band
+  rose with the host, not the code. Seven rows loosen by more than 5 percent: the
+  recorded row to 360 ns, four by one run of one process, and two by a whole process
+  that card 219 holds. The commit is the owner's under ADR 0032 (card 216).
