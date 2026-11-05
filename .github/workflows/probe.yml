@@ -1,30 +1,25 @@
-# Throwaway, for the follow-up to card 210: on this pull request's own events, pushes three
-# empty commits to the branch with the job token, one after the other, so that GitHub holds a
-# `ci` run on each. Two measurements: with the third push's run live, approve the first push's
-# held run and read which of the two the concurrency group cancels; then delete the second
-# push's held run and read the answer. Never runs for the bot's own pushes. Deleted with the
-# branch.
+# Throwaway, for the follow-up to card 210. Second measurement on this pull request: whether
+# the job token, with the permissions dispatch-review.yml would declare, can disable an
+# auto-merge that the owner's token armed. Runs on this branch's own events, with the job
+# token, and prints what GitHub answers. Deleted with the branch.
 name: probe
 on:
   pull_request:
     types: [opened, synchronize]
 permissions:
   contents: write
+  pull-requests: write
 jobs:
-  push:
+  disarm:
     if: github.head_ref == '210-probe-concurrency' && github.actor != 'github-actions[bot]'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.head_ref }}
-      - run: |
-          if git log -1 --format=%s | grep -q '^210: Probe push'; then echo "already pushed"; exit 0; fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          for n in 1 2 3; do
-            git commit --allow-empty -m "210: Probe push $n from the job token"
-            git push origin "HEAD:${{ github.head_ref }}"
-            sleep 15
-          done
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          echo "auto-merge before: $(gh pr view "$PR" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // "none"')"
+          if gh pr merge "$PR" --disable-auto; then echo "disable-auto: accepted"; else echo "disable-auto: refused, exit $?"; fi
+          echo "auto-merge after: $(gh pr view "$PR" --json autoMergeRequest --jq '.autoMergeRequest.enabledAt // "none"')"
