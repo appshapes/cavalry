@@ -57,13 +57,23 @@ ended the wait and what to do, when:
 
 - the partner completed before this job reached it, so the pair cannot meet;
 - the pair is crossed with another run's, as above, and this run is the newer;
-- the partner, or this job, is not listed in the run's jobs after LISTED_WITHIN: the two
-  jobs of the pair are created together, the moment their `needs` end, so a name still
-  missing after the first minute is a wrong name, not a wait;
+- the partner, or this job, is not listed in this attempt's jobs after LISTED_WITHIN: the
+  two jobs of the pair are created together, the moment their `needs` end, so a name
+  still missing after the first minute is a wrong name in attempt 1, and in a later
+  attempt a re-run of this end alone, whose partner is listed from an earlier attempt or
+  not at all;
 - the API refused a request (any 4xx: a token without `actions: read`, a spent rate limit,
   a wrong run), or did not answer TRIES times in a row, POLL apart;
 - the partner has not started within BOUND, 45 minutes of wall clock, which is a host
   whose runner is gone or a queue longer than any this repository has seen.
+
+Each message that ends an end of the pair names the re-run that brings both ends back.
+GitHub re-runs one job (`gh run rerun <run id> --job <job id>`, or the job's re-run
+button), the failed jobs (`--failed`) or the whole run, each once the run has ended, and
+never two chosen jobs; a job an attempt does not re-run keeps its earlier result. So when
+both ends fail, `--failed` re-runs the pair, and when the partner passed, as the peer
+does when `bench-compare` fails a link row on `bench (udp)`, `--failed` or `--job` re-runs
+this end alone, and only the whole run re-runs both.
 
 Environment, checked before the first request:
   GH_TOKEN           the job's token with `actions: read`; the step sets it from github.token.
@@ -110,6 +120,7 @@ class Api:
     def __init__(self, env, sleep, say):
         self.base = f"{env['GITHUB_API_URL'].rstrip('/')}/repos/{env['GITHUB_REPOSITORY']}"
         self._token = env["GH_TOKEN"]
+        self.run_id = env["GITHUB_RUN_ID"]
         self.sleep, self.say = sleep, say
         # https only: the job token rides on every request. Loopback is the exception the tests run on.
         if not (self.base.startswith("https://") or re.match(r"^http://(127\.0\.0\.1|localhost)(:\d+)?/", self.base)):
@@ -122,21 +133,21 @@ class Api:
                    "Authorization": f"Bearer {self._token}"}
         request = urllib.request.Request(self.base + path, headers=headers)
         where = path.split("?")[0]
-        for attempt in range(1, TRIES + 1):
+        for tried in range(1, TRIES + 1):
             try:
                 with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 message = api_message(e)
                 if e.code < 500:
-                    raise Fail(f"GET {where} answered HTTP {e.code}: {message}; {refusal_hint(e)}") from None
+                    raise Fail(f"GET {where} answered HTTP {e.code}: {message}; {refusal_hint(e, self.run_id)}") from None
                 reason = f"HTTP {e.code}: {message}"
             except (urllib.error.URLError, OSError, ValueError) as e:
                 reason = str(getattr(e, "reason", e))
-            if attempt == TRIES:
+            if tried == TRIES:
                 raise Fail(f"GET {where} went unanswered {TRIES} times in a row, {POLL} s apart: {reason}; "
-                           f"if https://www.githubstatus.com shows Actions or the API down, re-run both jobs "
-                           f"of the pair once it is up ({DOCS})")
+                           f"https://www.githubstatus.com says whether Actions or the API is down; "
+                           f"{rerun_failed(self.run_id, 'both are up and ')}")
             self.say(f"GET {where}: {reason}; trying again in {POLL} s")
             self.sleep(POLL)
         return None    # unreachable: every path above returns or raises
@@ -149,13 +160,13 @@ def api_message(error):
         return ""
 
 
-def refusal_hint(error):
+def refusal_hint(error, run_id):
     """What the operator does about a 4xx."""
     if error.code == 429 or error.headers.get("x-ratelimit-remaining") == "0":
         reset = error.headers.get("x-ratelimit-reset")
         when = time.strftime("%H:%M:%S UTC", time.gmtime(int(reset))) if reset and reset.isdigit() else "its reset"
         return (f"the job token's rate limit, 1,000 requests an hour for the repository, is spent until "
-                f"{when}; re-run both jobs of the pair after it ({DOCS})")
+                f"{when}; {rerun_failed(run_id, 'it has reset and ')}")
     if error.code == 401:
         return "the token was refused; the step must set `GH_TOKEN: ${{ github.token }}`"
     return ("the job's token needs `actions: read` (the job's `permissions` in .github/workflows/ci.yml), "
@@ -168,6 +179,23 @@ def environment(env):
             raise Fail(f"{name} is not set; {why}")
     if not env["GITHUB_RUN_ID"].isdigit():
         raise Fail(f"GITHUB_RUN_ID is not a run id: {env['GITHUB_RUN_ID']}")
+
+
+def rerun_failed(run_id, first=""):
+    """The re-run once both ends have failed in this attempt: the failed jobs are the pair."""
+    return f"once {first}the run has ended, `gh run rerun {run_id} --failed` re-runs both ends ({DOCS})"
+
+
+def rerun_whole(run_id):
+    """The re-run once one end has passed, which `--failed` and `--job` leave as it was."""
+    return (f"GitHub re-runs one job (`--job`), the failed jobs (`--failed`) or the whole run, so only the "
+            f"whole run re-runs both ends: once the run has ended, download the attempt's artifacts (step 4), "
+            f"then run `gh run rerun {run_id}` ({DOCS})")
+
+
+def attempt(job):
+    """The run attempt that last ran the job; the jobs list gives it as `run_attempt`."""
+    return job.get("run_attempt") or 1
 
 
 def labels(job):
@@ -224,8 +252,8 @@ class Wait:
                 raise Fail(f"{self.partner} is queued, and its host runs {holder.get('name')} of {where}, which "
                            f"waits for its own {me.get('name')}, queued on this host behind this job: each "
                            f"end holds the host the other's partner needs. Run {run['id']} is the older, so this "
-                           f"job ends to free this host for it; re-run this run's {me.get('name')} and "
-                           f"{self.partner} when both hosts are free ({DOCS})")
+                           f"job ends to free this host for it, and this run's {self.partner} ends when it "
+                           f"starts; {rerun_failed(self.run_id)}")
             self.say(f"{self.partner}'s host runs {holder.get('name')} of {where}, which waits for its own "
                      f"{me.get('name')}, queued behind this job; that run is the newer, so its end ends and "
                      f"this one keeps waiting")
@@ -243,16 +271,20 @@ class Wait:
             partner = next((j for j in jobs if j.get("name") == self.partner), None)
             if me is not None and partner is not None and me.get("id") == partner.get("id"):
                 raise Fail(f"{self.partner!r} is this job's own name; pass the other job of the pair")
-            if me is None or partner is None:
+            # A partner listed from an earlier attempt is not in this one: the attempt re-ran this
+            # end alone, or has not listed this attempt's partner yet, which LISTED_WITHIN covers.
+            if me is None or partner is None or attempt(partner) < attempt(me):
                 if waited >= LISTED_WITHIN:
-                    raise Fail(self.not_listed(jobs, me, waited))
-                self.say(f"{self.partner} is not listed yet after {waited} s")
+                    raise Fail(self.not_listed(jobs, me, partner, waited))
+                if partner is None:
+                    self.say(f"{self.partner} is not listed yet after {waited} s")
+                else:
+                    self.say(f"{self.partner} is listed from attempt {attempt(partner)} only, after {waited} s")
             elif partner.get("status") == "in_progress":
                 self.say(f"{self.partner} is in progress after {waited} s")
                 return
             elif partner.get("status") == "completed":
-                raise Fail(f"{self.partner} completed ({partner.get('conclusion')}) before this job reached it, "
-                           f"so the pair cannot meet; re-run both jobs of the pair when both hosts are free ({DOCS})")
+                raise Fail(self.completed(partner))
             else:
                 self.say(f"{self.partner} is {partner.get('status')} after {waited} s")
                 if self.clock() >= next_look:
@@ -260,14 +292,33 @@ class Wait:
                     self.look_across(me, partner)
             if self.clock() - start >= BOUND:
                 raise Fail(f"{self.partner} did not start within {BOUND // 60} minutes; is its host's runner "
-                           f"online, or its queue that long? ({DOCS})")
+                           f"online, or its queue that long? When it starts, it finds this job completed and "
+                           f"ends too; {rerun_failed(self.run_id)}")
             self.sleep(POLL)
 
-    def not_listed(self, jobs, me, waited):
+    def completed(self, partner):
+        """Why a partner that completed in this attempt cannot meet this job, and the re-run that
+        brings both ends back: `--failed` once both have failed, the whole run if it passed."""
+        done = f"{self.partner} completed ({partner.get('conclusion')}) before this job reached it, so the pair cannot meet"
+        if partner.get("conclusion") == "success":
+            return f"{done}, and `--failed` would re-run this end alone. {rerun_whole(self.run_id)}"
+        return f"{done}; {rerun_failed(self.run_id)}"
+
+    def not_listed(self, jobs, me, partner, waited):
         listed = ", ".join(f"{j.get('name')!r} ({j.get('status')}, runner {j.get('runner_name')!r})" for j in jobs)
         if me is None:
             return (f"no job of run {self.run_id} is in progress on runner {self.runner!r} after {waited} s, "
                     f"so this job cannot find itself; the run's jobs are {listed or 'none'}")
+        if partner is not None:
+            return (f"{self.partner} last ran in attempt {attempt(partner)} ({partner.get('status')}, "
+                    f"{partner.get('conclusion')}), and this job is attempt {attempt(me)}: the attempt re-ran "
+                    f"this end alone, so the pair cannot meet. {rerun_whole(self.run_id)}")
+        if attempt(me) > 1:
+            # A re-run runs the run's own ci.yml, so a wrong name would have ended attempt 1 here,
+            # with the message below: in a later attempt, the partner was not re-run.
+            return (f"{self.partner!r} is not a job of attempt {attempt(me)} of run {self.run_id} after {waited} s: "
+                    f"the attempt re-ran this end alone, so the pair cannot meet. {rerun_whole(self.run_id)}. "
+                    f"The run's jobs are {listed or 'none'}")
         return (f"{self.partner!r} is not a job of run {self.run_id} after {waited} s, and the pair's two "
                 f"jobs are created together; pass the other job's `name:` from .github/workflows/ci.yml. "
                 f"The run's jobs are {listed or 'none'}")

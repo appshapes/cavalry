@@ -1254,6 +1254,9 @@ user-visible change, added in the same commit as the change. The format follows
   another run's end, built from another tree. When two runs' pairs each hold one host
   and wait for each other, the newer run's end fails at once and names the older run;
   a wrong job name, a refused token or an API that does not answer fails the wait at
-  once with its reason. Each of `bench-linux` and `grip-linux` names one runner
+  once with its reason. Each failure names the re-run that brings both ends back,
+  `gh run rerun <run id> --failed` when both failed and the whole run when one passed,
+  since a re-run of one end alone finds its partner from the earlier attempt and fails
+  saying so. Each of `bench-linux` and `grip-linux` names one runner
   (`scripts/wait-for-partner-job.py`; `.github/workflows/ci.yml`;
   [Run the bench](docs/how-to/run-the-bench.md), step 5; card 212).
