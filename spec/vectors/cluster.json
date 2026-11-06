@@ -1302,20 +1302,25 @@
           {
             "member": 0,
             "position": 98304,
-            "age_ns": 0
+            "age_ns": 0,
+            "term": 3
           },
           {
             "member": 1,
             "position": 98304,
-            "age_ns": 1000
+            "age_ns": 1000,
+            "term": 3
           },
           {
             "member": 2,
             "position": 98304,
-            "age_ns": 1000
+            "age_ns": 1000,
+            "term": 3
           }
         ],
-        "leader_position": 98304
+        "leader_position": 98304,
+        "leader_term": 3,
+        "term_base": 0
       },
       "fields": {
         "quorum_position": 98304,
@@ -1331,20 +1336,25 @@
           {
             "member": 0,
             "position": 98304,
-            "age_ns": 0
+            "age_ns": 0,
+            "term": 3
           },
           {
             "member": 1,
             "position": 98304,
-            "age_ns": 1000
+            "age_ns": 1000,
+            "term": 3
           },
           {
             "member": 2,
             "position": 65536,
-            "age_ns": 1000
+            "age_ns": 1000,
+            "term": 3
           }
         ],
-        "leader_position": 98304
+        "leader_position": 98304,
+        "leader_term": 3,
+        "term_base": 0
       },
       "fields": {
         "quorum_position": 98304,
@@ -1360,20 +1370,25 @@
           {
             "member": 0,
             "position": 65536,
-            "age_ns": 0
+            "age_ns": 0,
+            "term": 3
           },
           {
             "member": 1,
             "position": 98304,
-            "age_ns": 1000
+            "age_ns": 1000,
+            "term": 3
           },
           {
             "member": 2,
             "position": 98304,
-            "age_ns": 1000
+            "age_ns": 1000,
+            "term": 3
           }
         ],
-        "leader_position": 65536
+        "leader_position": 65536,
+        "leader_term": 3,
+        "term_base": 0
       },
       "fields": {
         "quorum_position": 98304,
@@ -1389,20 +1404,25 @@
           {
             "member": 0,
             "position": 98304,
-            "age_ns": 0
+            "age_ns": 0,
+            "term": 3
           },
           {
             "member": 1,
             "position": 98304,
-            "age_ns": 10000000000
+            "age_ns": 10000000000,
+            "term": 3
           },
           {
             "member": 2,
             "position": 65536,
-            "age_ns": 1000
+            "age_ns": 1000,
+            "term": 3
           }
         ],
-        "leader_position": 98304
+        "leader_position": 98304,
+        "leader_term": 3,
+        "term_base": 0
       },
       "fields": {
         "quorum_position": 65536,
@@ -1418,20 +1438,25 @@
           {
             "member": 0,
             "position": 98304,
-            "age_ns": 0
+            "age_ns": 0,
+            "term": 3
           },
           {
             "member": 1,
             "position": 98304,
-            "age_ns": 20000000000
+            "age_ns": 20000000000,
+            "term": 3
           },
           {
             "member": 2,
             "position": 98304,
-            "age_ns": 20000000000
+            "age_ns": 20000000000,
+            "term": 3
           }
         ],
-        "leader_position": 98304
+        "leader_position": 98304,
+        "leader_term": 3,
+        "term_base": 0
       },
       "fields": {
         "quorum_position": 0,
@@ -1447,34 +1472,143 @@
           {
             "member": 0,
             "position": 500,
-            "age_ns": 0
+            "age_ns": 0,
+            "term": 3
           },
           {
             "member": 1,
             "position": 400,
-            "age_ns": 1
+            "age_ns": 1,
+            "term": 3
           },
           {
             "member": 2,
             "position": 300,
-            "age_ns": 1
+            "age_ns": 1,
+            "term": 3
           },
           {
             "member": 3,
             "position": 200,
-            "age_ns": 1
+            "age_ns": 1,
+            "term": 3
           },
           {
             "member": 4,
             "position": 100,
-            "age_ns": 1
+            "age_ns": 1,
+            "term": 3
           }
         ],
-        "leader_position": 500
+        "leader_position": 500,
+        "leader_term": 3,
+        "term_base": 0
       },
       "fields": {
         "quorum_position": 300,
         "commit_position": 300
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-below-base-not-counted",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 1000,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 1100,
+            "age_ns": 1000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 960,
+            "age_ns": 1000,
+            "term": 3
+          }
+        ],
+        "leader_position": 1100,
+        "leader_term": 3,
+        "term_base": 1000
+      },
+      "fields": {
+        "quorum_position": 1000,
+        "commit_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-older-term-not-counted",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 1100,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 1100,
+            "age_ns": 1000,
+            "term": 1
+          },
+          {
+            "member": 2,
+            "position": 1000,
+            "age_ns": 1000,
+            "term": 1
+          }
+        ],
+        "leader_position": 1100,
+        "leader_term": 3,
+        "term_base": 1000
+      },
+      "fields": {
+        "quorum_position": 0,
+        "commit_position": 0
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-at-base-counts",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 1100,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 1000,
+            "age_ns": 1000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 960,
+            "age_ns": 1000,
+            "term": 1
+          }
+        ],
+        "leader_position": 1100,
+        "leader_term": 3,
+        "term_base": 1000
+      },
+      "fields": {
+        "quorum_position": 1000,
+        "commit_position": 1000
       }
     },
     {
