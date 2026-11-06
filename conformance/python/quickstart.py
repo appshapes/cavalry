@@ -404,6 +404,18 @@ def edges(client):
         fail(f"{name}: a claim's view written after its publication's close")
     except ValueError:
         pass
+    # The close zeroed the claim struct, so the claim's calls after it hand the ABI a
+    # struct that names no publication: -1 with CAVALRY_ERR_NO_CLAIM each, and no read of
+    # the handle the close freed (spec/c-abi.md, "Which claim a struct names").
+    abi = cavalry.library()
+    after_close = []
+    after_close.append(("commit", publication.commit(), abi.cavalry_errcode()))
+    after_close.append(("abort", publication.abort(), abi.cavalry_errcode()))
+    after_close.append(("set_reserved_value", publication.set_reserved_value(1), abi.cavalry_errcode()))
+    for call, result, code in after_close:
+        if result != -1 or code != _abi.CAVALRY_ERR_NO_CLAIM:
+            fail(f"{name}: {call} after the publication's close returned {result} with error {code}; expected -1 with "
+                 f"CAVALRY_ERR_NO_CLAIM ({_abi.CAVALRY_ERR_NO_CLAIM}), since the close zeroed the claim struct")
     poll_or_fail(name, subscription, unexpected, 17, 17)  # the close aborted the claim: padding, never a fragment
     subscription.close()
     print(f"conformance/python: {name}: a poll from inside a handler of its own subscription returned -1 with "
