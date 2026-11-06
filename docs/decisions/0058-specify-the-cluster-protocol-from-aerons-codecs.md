@@ -73,8 +73,11 @@ position is the log position at which its new leadership term event begins; an e
 position is the position after its frame, `spec/log-buffer.md`'s arithmetic, so that
 every member's log holds every entry at one position. The commit position is the
 highest position a quorum of active members, the leader among them, has appended,
-bounded by the leader's own; the quorum is half the members plus one; a member is
-active while its last append position is younger than the leader heartbeat timeout. The
+bounded by the leader's own, a member counting only once its last report was for the
+leader's term and at or past its base, Raft's rule that a leader commits no older
+term's entries by counting replicas, which departs from Aeron (Alternatives); the
+quorum is half the members plus one; a member is active while its last append
+position is younger than the leader heartbeat timeout. The
 election is Aeron's state machine, its eighteen states and the transitions the page
 lists, with a member voting for a candidate whose log is at least its own by term then
 position. The cluster's timestamp is the leader's wall clock in milliseconds since the
@@ -135,8 +138,11 @@ member records a term when it joins the term's log, when a replication of it end
 and when it replays its new leadership term event, in a record of terms and their
 base positions kept in its durable log directory and written before it reports an
 append position for the term, so that a member that joined a term before its first
-entry reached it outranks a longer log of an older term and a committed entry is
-never truncated, the Raft paper's figure 8. The leader's log publication of every
+entry reached it outranks a longer log of an older term; with the leader recording
+its term on entering leader log replication and a follower whose replication ends at
+the leader's term base recording the leader's term before it reports the base, so
+that only members that recorded the term count toward its commits, a committed entry
+is never truncated, the Raft paper's figure 8 and its section 5.4.2. The leader's log publication of every
 term after the first starts at the term base log position, which needs a publication
 created at a position that the transport does not give yet: the version of `spec/udp.md` and
 `spec/client-protocol.md` that adds one, under its own ADR, is card 227's first
@@ -197,6 +203,19 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   position order, one per term received live and one per replayed span, and leaves
   one recording across terms, and a replay that carries the log's session id, to the
   Revisit.
+- **Aeron's quorum position, every active member's last position whatever term it was
+  reported for.** Lost: invariant 1. Aeron's `quorumPositionBoundedByLeaderLog` ranks
+  every active member, `leaderInit` records the leader's term before a follower has
+  joined it, and a replication that stops at the leader's term base records the
+  follower's old term, so a leader can commit an older term's entries from members
+  that still record the older term, and a restarted member whose log ranks higher by
+  its recorded term can win a vote and truncate them, the ninth review's example of a
+  committed entry lost. The page counts a member toward a commit only once its last
+  report was for the leader's term at or past its base, records the leader's term on
+  entering leader log replication and at the end of a replication that reaches the
+  base, and stays at the old commit position during an election until a quorum has
+  recorded the new term, Raft's section 5.4.2, which Aeron's documentation does not
+  explain and this ADR does.
 - **A members string of up to eight fields, as Aeron parses.** Lost. The seventh and
   eighth are Aeron's archive response and egress response endpoints, for response
   channels Cavalry does not have; a string with more than six fields is a grammar

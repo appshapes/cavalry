@@ -374,12 +374,16 @@ def quorum(count):
     return count // 2 + 1
 
 
-def commit_position(positions, leader_position, timeout_ns=LEADER_HEARTBEAT_TIMEOUT_NS):
-    """spec/cluster.md, "The commit position": the quorum-th highest append position among the
-    active members, 0 with fewer than a quorum active, bounded by the leader's own."""
-    active = sorted((p["position"] for p in positions if p["age_ns"] < timeout_ns), reverse=True)
+def commit_position(positions, leader_position, leader_term, term_base, timeout_ns=LEADER_HEARTBEAT_TIMEOUT_NS):
+    """spec/cluster.md, "The commit position": a member counts when it is active, its last report was
+    for the leader's term and its position is at or past the term base log position; the quorum
+    position is the quorum-th highest position among those that count, 0 with fewer than a quorum,
+    bounded by the leader's own (Raft's rule, not Aeron's)."""
+    counted = sorted((p["position"] for p in positions
+                      if p["age_ns"] < timeout_ns and p["term"] == leader_term and p["position"] >= term_base),
+                     reverse=True)
     q = quorum(len(positions))
-    quorum_position = active[q - 1] if len(active) >= q else 0
+    quorum_position = counted[q - 1] if len(counted) >= q else 0
     return {"quorum_position": quorum_position, "commit_position": min(quorum_position, leader_position)}
 
 
@@ -484,34 +488,34 @@ def arithmetic(name, rule, inputs, fields):
 
 
 def positions(*items):
-    return [{"member": m, "position": p, "age_ns": a} for m, p, a in items]
+    """Each item: member, position, age in ns, and the term the report was for (3 unless given)."""
+    return [{"member": i[0], "position": i[1], "age_ns": i[2], "term": i[3] if len(i) > 3 else 3} for i in items]
+
+
+def commit_vector(name, items, leader_position, leader_term=3, term_base=0):
+    inputs = {"positions": positions(*items), "leader_position": leader_position, "leader_term": leader_term,
+              "term_base": term_base}
+    return arithmetic(name, "commit-position", inputs,
+                      commit_position(positions(*items), leader_position, leader_term, term_base))
 
 
 VECTORS += [arithmetic(f"quorum-of-{n}", "quorum", {"members": n}, {"quorum": quorum(n)}) for n in range(1, 9)]
 VECTORS += [
-    arithmetic("commit-position-all-level", "commit-position",
-               {"positions": positions((0, 98304, 0), (1, 98304, 1000), (2, 98304, 1000)), "leader_position": 98304},
-               commit_position(positions((0, 98304, 0), (1, 98304, 1000), (2, 98304, 1000)), 98304)),
-    arithmetic("commit-position-slowest-left-out", "commit-position",
-               {"positions": positions((0, 98304, 0), (1, 98304, 1000), (2, 65536, 1000)), "leader_position": 98304},
-               commit_position(positions((0, 98304, 0), (1, 98304, 1000), (2, 65536, 1000)), 98304)),
-    arithmetic("commit-position-follower-ahead-of-leader", "commit-position",
-               {"positions": positions((0, 65536, 0), (1, 98304, 1000), (2, 98304, 1000)), "leader_position": 65536},
-               commit_position(positions((0, 65536, 0), (1, 98304, 1000), (2, 98304, 1000)), 65536)),
-    arithmetic("commit-position-inactive-member", "commit-position",
-               {"positions": positions((0, 98304, 0), (1, 98304, LEADER_HEARTBEAT_TIMEOUT_NS), (2, 65536, 1000)),
-                "leader_position": 98304},
-               commit_position(positions((0, 98304, 0), (1, 98304, LEADER_HEARTBEAT_TIMEOUT_NS), (2, 65536, 1000)),
-                               98304)),
-    arithmetic("commit-position-no-quorum-active", "commit-position",
-               {"positions": positions((0, 98304, 0), (1, 98304, 20_000_000_000), (2, 98304, 20_000_000_000)),
-                "leader_position": 98304},
-               commit_position(positions((0, 98304, 0), (1, 98304, 20_000_000_000), (2, 98304, 20_000_000_000)),
-                               98304)),
-    arithmetic("commit-position-five-members", "commit-position",
-               {"positions": positions((0, 500, 0), (1, 400, 1), (2, 300, 1), (3, 200, 1), (4, 100, 1)),
-                "leader_position": 500},
-               commit_position(positions((0, 500, 0), (1, 400, 1), (2, 300, 1), (3, 200, 1), (4, 100, 1)), 500)),
+    commit_vector("commit-position-all-level", [(0, 98304, 0), (1, 98304, 1000), (2, 98304, 1000)], 98304),
+    commit_vector("commit-position-slowest-left-out", [(0, 98304, 0), (1, 98304, 1000), (2, 65536, 1000)], 98304),
+    commit_vector("commit-position-follower-ahead-of-leader", [(0, 65536, 0), (1, 98304, 1000), (2, 98304, 1000)], 65536),
+    commit_vector("commit-position-inactive-member",
+                  [(0, 98304, 0), (1, 98304, LEADER_HEARTBEAT_TIMEOUT_NS), (2, 65536, 1000)], 98304),
+    commit_vector("commit-position-no-quorum-active",
+                  [(0, 98304, 0), (1, 98304, 20_000_000_000), (2, 98304, 20_000_000_000)], 98304),
+    commit_vector("commit-position-five-members",
+                  [(0, 500, 0), (1, 400, 1), (2, 300, 1), (3, 200, 1), (4, 100, 1)], 500),
+    commit_vector("commit-position-below-base-not-counted",
+                  [(0, 1000, 0), (1, 1100, 1000), (2, 960, 1000)], 1100, leader_term=3, term_base=1000),
+    commit_vector("commit-position-older-term-not-counted",
+                  [(0, 1100, 0), (1, 1100, 1000, 1), (2, 1000, 1000, 1)], 1100, leader_term=3, term_base=1000),
+    commit_vector("commit-position-at-base-counts",
+                  [(0, 1100, 0), (1, 1000, 1000), (2, 960, 1000, 1)], 1100, leader_term=3, term_base=1000),
     arithmetic("compare-log-higher-term", "compare-log",
                {"term": 3, "position": 0, "other_term": 2, "other_position": 98304}, {"at_least": True}),
     arithmetic("compare-log-lower-term", "compare-log",
