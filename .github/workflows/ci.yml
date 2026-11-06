@@ -76,6 +76,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+      # Go for the Go client, which `just conformance` builds through cgo against the
+      # header and the static library, and for conformance/go (ADR 0046, card 207). The
+      # version is clients/go/go.mod's; nothing comes from a module proxy.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: clients/go/go.mod
+          cache: false
       # .NET for the .NET client, which `just conformance` builds with the runner's SDK and
       # runs through P/Invoke over the shared library, and for conformance/dotnet (ADR
       # 0046, card 209): .NET 10, the long-term release the client needs; no package

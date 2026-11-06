@@ -20,8 +20,8 @@ generator writes every file of the package; nothing in a package is edited by ha
 regenerates each package in memory and fails when a committed file differs, naming the
 command that fixes it. The generator writes Python (`python/`, by `write_python` in
 `generate.py`), Node (`node/`, by `generate_node.py` beside it, which `generate.py`
-imports) and .NET (`dotnet/`, by `generate_dotnet.py`); the Go and JVM clients (cards
-207 and 208) add a language each as a writer module of their own.
+imports), Go (`go/`, by `generate_go.py`) and .NET (`dotnet/`, by `generate_dotnet.py`);
+the JVM client (card 208) adds a language as a writer module of its own.
 
 ## What every client must pass
 
@@ -77,4 +77,5 @@ built from the same checkout, or regenerate the package from the library's heade
 | --- | --- | --- | --- |
 | `python/` | `cavalry`, `ctypes` over the shared library | `conformance/python/` | ADR 0046 (card 205) |
 | `node/` | `@cavalry/client`, an N-API addon in C over the header, linked with the static library | `conformance/node/` | ADR 0046 (card 206) |
+| `go/` | `github.com/appshapes/cavalry/clients/go`, cgo over the header, linked with the static library | `conformance/go/` | ADR 0046 (card 207) |
 | `dotnet/` | `Cavalry`, P/Invoke with the source-generated marshalling over the shared library, .NET 10 and nothing else | `conformance/dotnet/` | ADR 0046 (card 209) |
