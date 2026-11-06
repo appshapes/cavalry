@@ -121,7 +121,7 @@ FUNCTIONS = [
        ("int64_t", "recording_id"), ("int64_t", "position"), ("int64_t", "length"),
        ("int32_t", "replay_stream_id"), ("const char *", "channel")),
     fn("int", "cavalry_stop_replay", CLIENT, ("int64_t", "replay_session_id")),
-    # Version 1: the destination commands (ADR 0056).
+    # Version 1: the destination commands (ADR 0057).
     fn("int", "cavalry_add_destination", CLIENT, CPUB, ("const char *", "channel")),
     fn("int", "cavalry_remove_destination", CLIENT, CPUB, ("const char *", "channel")),
     # publication

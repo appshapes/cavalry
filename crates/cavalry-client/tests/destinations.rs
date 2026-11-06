@@ -1,4 +1,4 @@
-//! A publication on a control channel through the public API (ADR 0053, ADR 0056): the
+//! A publication on a control channel through the public API (ADR 0053, ADR 0057): the
 //! client adds two destinations, each a subscription on a loopback endpoint of this
 //! driver, every message reaches both once and in order, and the commands' refusals
 //! carry the codes `spec/client-protocol.md`, "Commands", gives them.

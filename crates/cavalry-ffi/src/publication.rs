@@ -82,7 +82,7 @@ pub struct cavalry_publication_constants_t {
 
 /// The registration id the handle copied when it was made: what the destination
 /// commands name the publication by, read without reaching the publication a claim
-/// may be borrowing (ADR 0056).
+/// may be borrowing (ADR 0057).
 ///
 /// # Safety
 ///

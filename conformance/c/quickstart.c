@@ -354,7 +354,7 @@ int main(void) {
 
     /* 2b. The same 1,000 over a control channel to two destinations, each a subscription
      * on a loopback port of its own, under fc=min: multi-destination cast (ADR 0053),
-     * through cavalry_add_destination and cavalry_remove_destination (ADR 0056). */
+     * through cavalry_add_destination and cavalry_remove_destination (ADR 0057). */
     char control_channel[96], destination_a[64], destination_b[64];
     snprintf(control_channel, sizeof control_channel,
              "cavalry:udp?control=127.0.0.1:%d|control-mode=manual|fc=min", free_udp_port());

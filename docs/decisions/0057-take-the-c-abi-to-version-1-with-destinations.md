@@ -1,4 +1,4 @@
-# 0056. Take the C ABI to version 1 with add and remove destination
+# 0057. Take the C ABI to version 1 with add and remove destination
 
 - **Status:** Accepted
 - **Date:** 2026-11-06
