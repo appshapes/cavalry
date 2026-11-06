@@ -1693,14 +1693,19 @@ impl Conductor {
             }
         };
         let key = position_key(correlation_id, session_id, stream_id);
-        // The sender's two labels end in the endpoint's registration id, so that `doctor`
-        // names a publication's endpoint from the counters file alone.
+        // The sender's labels end in the endpoint's registration id, so that `doctor`
+        // names a publication's endpoint from the counters file alone, and the receivers
+        // gauge's in the strategy after it, so that `doctor` reads which publications
+        // keep a `min` table (ADR 0053).
         let label = |name: &str, endpoint: bool| {
+            let mut label = format!("{name} {correlation_id} {session_id} {stream_id}");
             if endpoint {
-                format!("{name} {correlation_id} {session_id} {stream_id} {endpoint_id}")
-            } else {
-                format!("{name} {correlation_id} {session_id} {stream_id}")
+                label.push_str(&format!(" {endpoint_id}"));
             }
+            if name == "sender.flow_control_receivers" {
+                label.push_str(&format!(" fc={}", flow_control.name()));
+            }
+            label
         };
         let mut allocated: Vec<Counter> = Vec::with_capacity(5);
         for (id, name, endpoint) in [
@@ -4893,9 +4898,10 @@ impl Conductor {
             }
         };
         // The counters: the publication's two and `replay.position`, and over UDP the
-        // sender's two, labelled as a publication's with the endpoint's registration id
-        // last, so that `doctor` names the endpoint from the counters file alone; one
-        // the counters file refuses frees the ones before it.
+        // sender's three, labelled as a publication's with the endpoint's registration
+        // id after, and the strategy after that on the receivers gauge, so that `doctor`
+        // names the endpoint and reads a `min` publication from the counters file alone;
+        // one the counters file refuses frees the ones before it.
         let key = position_key(replay_session_id, session_id, stream_id);
         let replay_key = replay_session_id.to_le_bytes();
         let label = |name: &str| format!("{name} {replay_session_id} {session_id} {stream_id}");
@@ -4911,15 +4917,16 @@ impl Conductor {
             ),
         ];
         if let Some(endpoint_id) = endpoint_id {
-            for (id, name) in [
-                (SENDER_POSITION, "sender.position"),
-                (SENDER_LIMIT, "sender.limit"),
+            for (id, name, strategy) in [
+                (SENDER_POSITION, "sender.position", String::new()),
+                (SENDER_LIMIT, "sender.limit", String::new()),
                 (
                     SENDER_FLOW_CONTROL_RECEIVERS,
                     "sender.flow_control_receivers",
+                    format!(" fc={}", flow_control.name()),
                 ),
             ] {
-                wanted.push((id, &key, format!("{} {endpoint_id}", label(name))));
+                wanted.push((id, &key, format!("{} {endpoint_id}{strategy}", label(name))));
             }
         }
         let mut allocated: Vec<Counter> = Vec::with_capacity(wanted.len());
@@ -6876,6 +6883,17 @@ mod recording {
         }
     }
 
+    /// The label of counter record `id`, read from the counters file as `doctor` reads it.
+    fn label_of(h: &Harness, id: u32) -> String {
+        cavalry_shm::counters::CountersReader::open(h.dir.path())
+            .expect("the counters file opens")
+            .record(id)
+            .expect("a record")
+            .expect("allocated")
+            .label()
+            .to_string()
+    }
+
     /// A status message answering `setup` from the receiver `receiver_id` with `window`.
     fn status(setup: &SetupFrame, window: i32, receiver_id: i64) -> StatusMessage {
         StatusMessage {
@@ -6934,6 +6952,20 @@ mod recording {
         let setup_b = expect_setup(&mut b);
         assert_eq!(setup_a.session_id, setup_b.session_id);
         assert_eq!(h.counter(SENDER_SETUPS_SENT), 2, "once per destination");
+        // The receivers gauge names the strategy last, so that `doctor` reads a `max`
+        // publication's 0 as no table (ADR 0053).
+        let receivers_id = h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .expect("a cavalry:udp publication")
+            .receivers_id;
+        assert_eq!(
+            label_of(&h, receivers_id),
+            format!(
+                "sender.flow_control_receivers 2 {} 7 2 fc=max",
+                setup_a.session_id
+            )
+        );
         // Each answers with a receiver id of its own: under max the greater window wins.
         a.send_status_message(&status(&setup_a, 4096, 9));
         b.send_status_message(&status(&setup_b, 8192, 10));
@@ -7033,6 +7065,11 @@ mod recording {
             .expect("a cavalry:udp publication");
         assert_eq!(udp.flow_control, FlowControl::Min);
         let receivers_id = udp.receivers_id;
+        assert!(
+            label_of(&h, receivers_id).ends_with(" 2 fc=min"),
+            "{}",
+            label_of(&h, receivers_id)
+        );
         let gauge = |h: &Harness| {
             h.conductor
                 .counters
@@ -10433,6 +10470,19 @@ mod replay {
                 publication.limit.get(),
                 3200,
                 "the limit stands at the start"
+            );
+            // The receivers gauge's label names the endpoint and the replay channel's
+            // strategy, as a client's publication's does.
+            let label = cavalry_shm::counters::CountersReader::open(h.dir.path())
+                .expect("the counters file opens")
+                .record(udp.receivers_id)
+                .expect("a record")
+                .expect("allocated")
+                .label()
+                .to_string();
+            assert_eq!(
+                label,
+                format!("sender.flow_control_receivers 6 {session_id} {REPLAY_STREAM} 6 fc=max")
             );
             assert_eq!(publication.log.header().term_length(), term);
         }

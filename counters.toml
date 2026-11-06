@@ -1077,7 +1077,7 @@ id = 103
 name = "sender.flow_control_receivers"
 kind = "gauge"
 scope = "instance"
-doc = "The receivers in one cavalry:udp publication's min table, each answering within the flow control receiver timeout; 0 under max, which keeps no table; key and label as sender.position (ADR 0053)."
+doc = "The receivers in one cavalry:udp publication's min table, each answering within the flow control receiver timeout; 0 under max, which keeps no table; key as sender.position; label text: sender.position's four, then the publication's strategy as fc=max or fc=min, space-separated, so that doctor reads which publications keep a table (ADR 0053)."
 doctor = "A min publication whose receivers are fewer than its endpoint's channel.destinations has a destination that is not answering: the stream waits for it until the timeout drops it, then runs without it."
 
 [[counter]]
