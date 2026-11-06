@@ -3,7 +3,7 @@
 //! vector is rejected for the named reason (`spec/README.md`, "Conventions"; ADR 0019).
 //! `just conformance` runs this test alone; `just test` runs it with the rest.
 
-use cavalry_proto::client_protocol::{Command, Event};
+use cavalry_proto::client_protocol::{Command, Event, VERSION};
 use serde_json::{Value, json};
 
 const VECTORS: &str = include_str!("../../../spec/vectors/client-protocol.json");
@@ -249,7 +249,10 @@ fn event_fields(event: &Event<'_>) -> Value {
 #[test]
 fn every_vector_in_spec_vectors_client_protocol_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("client-protocol.json parses");
-    assert_eq!(doc["version"], 5, "the vectors are for version 5");
+    assert_eq!(
+        doc["version"], VERSION,
+        "the vectors are for the version this crate reads and writes"
+    );
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
         vectors.len() >= 80,

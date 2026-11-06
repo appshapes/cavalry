@@ -1,7 +1,8 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 4
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 5
 //! (ADR 0019; the recording commands and events are ADR 0025, the replay commands and
 //! events ADR 0030, the retention commands ADR 0031, the `cavalry:udp` channel, the
-//! channel status indicator id and error codes 4 and 9 ADR 0040).
+//! channel status indicator id and error codes 4 and 9 ADR 0040, the destination
+//! commands ADR 0053).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -43,7 +44,7 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 4;
+pub const VERSION: i32 = 5;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
