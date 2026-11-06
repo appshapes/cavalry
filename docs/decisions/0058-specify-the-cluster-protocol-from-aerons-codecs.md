@@ -20,9 +20,12 @@ durable log records a stream at the positions the stream has (`spec/durable-log.
 and the C ABI at version 1 reaches both from five languages (ADR 0057). Two things it
 lacks the page names as dependencies: no command of `spec/client-protocol.md` version
 5 and no key of `spec/udp.md` version 1 creates a publication at a position, which
-every term after the first needs for its log publication, and a replay's publication
-has a session id of its own, so a span a member records from a replay carries that
-id in its frame headers.
+every term after the first needs for its log publication; `start recording` records
+an image from its rebuild position when the command is handled, not from the
+position the image joined at, so data that arrived first lands in no recording, where
+a member's recording of the log must begin at the join position; and a replay's
+publication has a session id of its own, so a span a member records from a replay
+carries that id in its frame headers.
 
 Aeron Cluster's protocol is its codecs schema, `aeron-cluster-codecs.xml`, id 111 at
 version 17, read on 2026-11-06 at `master` (1.55.0-SNAPSHOT), with the election in
@@ -108,9 +111,15 @@ a session id of its own, so the follower finds either replay as the one image of
 stream 100 on its `catchup` endpoint, and the span it records from it carries the
 replay's session id in its frame headers. A member's log is therefore its recordings
 of stream 100 in position order, one per term received live and one per span received
-from a replay; every member's log holds every entry at the same position with the
-same payload, and two members' logs differ in the session ids of their frame headers
-alone. The leader's log publication of every term after the first starts at the term
+from a replay, its append position the end of the contiguous span they hold from the
+log's start and each position read from the recording that begins first among those
+holding it; every member's log holds every entry at the same position with the same
+payload, and two members' logs differ in the session ids of their frame headers
+alone. New leadership term carries Aeron's next fields, −1 for all three when the
+reported term is the leader's own, so a returning leader truncates no more than its
+uncommitted tail and a member two terms behind replicates one term at a time; a
+reader whose message carries no next term for a position below the leader's term base
+fails its election. The leader's log publication of every term after the first starts at the term
 base log position, which needs a publication created at a position that the
 transport does not give yet: the version of `spec/udp.md` and
 `spec/client-protocol.md` that adds one, under its own ADR, is card 227's first
@@ -167,9 +176,10 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   which is the fall-over invariant 3 forbids.
 - **One recording spanning terms, Aeron's extend recording.** Lost for this version: a
   recording holds one session id (`spec/durable-log.md`) and each term's publication
-  has its own, so the page defines a member's log as its recordings in position order
-  and leaves one recording across terms, and a replay that carries the log's session
-  id, to the Revisit.
+  and each replay has its own, so the page defines a member's log as its recordings in
+  position order, one per term received live and one per replayed span, and leaves
+  one recording across terms, and a replay that carries the log's session id, to the
+  Revisit.
 - **A members string of up to eight fields, as Aeron parses.** Lost. The seventh and
   eighth are Aeron's archive response and egress response endpoints, for response
   channels Cavalry does not have; a string with more than six fields is a grammar
@@ -233,9 +243,13 @@ at version N+1 must speak this page's header version 0 to a member at version N,
 a reader rejects any other, and card 231 decides how it does (ADR 0052, feature 7).
 Before card 227 builds the replicated log, a version of `spec/udp.md` and
 `spec/client-protocol.md` must let a publication be created at a position, Aeron's
-`init-term-id`, `term-id` and `term-offset` keys or their equal, under its own ADR:
-without it no term after the first can start its log at the term base log position.
-That version is card 227's first change. A member rejoins by replicating one term at
+`init-term-id`, `term-id` and `term-offset` keys or their equal, and let a recording
+be armed on a subscription before its image arrives so that it begins at the image's
+join position, as Aeron's Archive records each image of a channel, under its own ADR:
+without the first no term after the first can start its log at the term base log
+position, and without the second a follower's recording of the live log or of a
+replay begins past the data that arrived first, a hole its append position never
+passes. That version is card 227's first change. A member rejoins by replicating one term at
 a time from the leader's recordings, so a leader keeps the recordings of every term a
 member may still lack, and a position retention purged is a replication the leader
 cannot serve, counted in `cluster.log_replications_unavailable`, which `doctor` reads.

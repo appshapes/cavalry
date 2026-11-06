@@ -424,6 +424,33 @@ def replication_stop(append_position, next_term_base_log_position, next_log_posi
     return {"replicate": False, "stop_position": NULL}
 
 
+def new_leadership_term_action(log_term, append, msg):
+    """spec/cluster.md, "Messages during an election", new leadership term: what a reader with log
+    leadership term id `log_term` and append position `append` does with the message's fields."""
+    if msg["log_leadership_term_id"] != log_term:
+        return {"action": "canvass", "truncate_to": NULL, "stop_position": NULL}
+    truncate_to = NULL
+    nb = msg["next_term_base_log_position"]
+    if nb != NULL and append > nb:
+        truncate_to, append = nb, nb
+    if append < msg["term_base_log_position"]:
+        if msg["next_leadership_term_id"] == NULL:
+            return {"action": "fail", "truncate_to": truncate_to, "stop_position": NULL}
+        stop = replication_stop(append, nb, msg["next_log_position"])
+        if stop["replicate"]:
+            return {"action": "replicate", "truncate_to": truncate_to, "stop_position": stop["stop_position"]}
+        return {"action": "wait", "truncate_to": truncate_to, "stop_position": NULL}
+    return {"action": "replay", "truncate_to": truncate_to, "stop_position": NULL}
+
+
+def nlt(log_leadership_term_id, next_leadership_term_id, next_term_base_log_position, next_log_position,
+        leadership_term_id, term_base_log_position, log_position):
+    return {"log_leadership_term_id": log_leadership_term_id, "next_leadership_term_id": next_leadership_term_id,
+            "next_term_base_log_position": next_term_base_log_position, "next_log_position": next_log_position,
+            "leadership_term_id": leadership_term_id, "term_base_log_position": term_base_log_position,
+            "log_position": log_position}
+
+
 def entry_position(position, length, mtu):
     """spec/cluster.md, "The log": the position after an entry of `length` bytes that begins at
     `position`, fragments of mtu − 32 and a last of the remainder, each frame aligned to 32."""
@@ -534,6 +561,27 @@ VECTORS += [
     arithmetic("replication-stop-nothing-known", "replication-stop",
                {"append_position": 960, "next_term_base_log_position": NULL, "next_log_position": NULL},
                replication_stop(960, NULL, NULL)),
+    arithmetic("new-leadership-term-returning-leader-truncates", "new-leadership-term",
+               {"log_leadership_term_id": 4, "append_position": 1100, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(4, 1100, nlt(4, 5, 1000, NULL, 5, 1000, 5000))),
+    arithmetic("new-leadership-term-behind-replicates", "new-leadership-term",
+               {"log_leadership_term_id": 4, "append_position": 960, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(4, 960, nlt(4, 5, 1000, NULL, 5, 1000, 5000))),
+    arithmetic("new-leadership-term-two-terms-behind", "new-leadership-term",
+               {"log_leadership_term_id": 2, "append_position": 200, "message": nlt(2, 3, 200, 500, 5, 1000, 5000)},
+               new_leadership_term_action(2, 200, nlt(2, 3, 200, 500, 5, 1000, 5000))),
+    arithmetic("new-leadership-term-own-term-replays", "new-leadership-term",
+               {"log_leadership_term_id": 5, "append_position": 3000, "message": nlt(5, NULL, NULL, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(5, 3000, nlt(5, NULL, NULL, NULL, 5, 1000, 5000))),
+    arithmetic("new-leadership-term-other-log-term-canvasses", "new-leadership-term",
+               {"log_leadership_term_id": 3, "append_position": 900, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(3, 900, nlt(4, 5, 1000, NULL, 5, 1000, 5000))),
+    arithmetic("new-leadership-term-no-next-term-fails", "new-leadership-term",
+               {"log_leadership_term_id": 4, "append_position": 960, "message": nlt(4, NULL, NULL, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(4, 960, nlt(4, NULL, NULL, NULL, 5, 1000, 5000))),
+    arithmetic("new-leadership-term-at-next-base-no-end-waits", "new-leadership-term",
+               {"log_leadership_term_id": 3, "append_position": 500, "message": nlt(3, 4, 500, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(3, 500, nlt(3, 4, 500, NULL, 5, 1000, 5000))),
     arithmetic("entry-position-one-frame", "entry-position",
                {"position": 65536, "length": 56, "mtu": 1408}, entry_position(65536, 56, 1408)),
     arithmetic("entry-position-aligned", "entry-position",

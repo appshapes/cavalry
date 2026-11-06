@@ -1971,6 +1971,167 @@
     },
     {
       "kind": "arithmetic",
+      "name": "new-leadership-term-returning-leader-truncates",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 4,
+        "append_position": 1100,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "action": "replay",
+        "truncate_to": 1000,
+        "stop_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-behind-replicates",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 4,
+        "append_position": 960,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "action": "replicate",
+        "truncate_to": -1,
+        "stop_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-two-terms-behind",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 2,
+        "append_position": 200,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 3,
+          "next_term_base_log_position": 200,
+          "next_log_position": 500,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "action": "replicate",
+        "truncate_to": -1,
+        "stop_position": 500
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-own-term-replays",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 5,
+        "append_position": 3000,
+        "message": {
+          "log_leadership_term_id": 5,
+          "next_leadership_term_id": -1,
+          "next_term_base_log_position": -1,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "action": "replay",
+        "truncate_to": -1,
+        "stop_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-other-log-term-canvasses",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 3,
+        "append_position": 900,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "action": "canvass",
+        "truncate_to": -1,
+        "stop_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-no-next-term-fails",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 4,
+        "append_position": 960,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": -1,
+          "next_term_base_log_position": -1,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "action": "fail",
+        "truncate_to": -1,
+        "stop_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-at-next-base-no-end-waits",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 3,
+        "append_position": 500,
+        "message": {
+          "log_leadership_term_id": 3,
+          "next_leadership_term_id": 4,
+          "next_term_base_log_position": 500,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "action": "wait",
+        "truncate_to": -1,
+        "stop_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "entry-position-one-frame",
       "rule": "entry-position",
       "inputs": {
