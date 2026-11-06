@@ -4,8 +4,14 @@
 a change to the header changes the package, `offer` takes bytes and refuses a `str`,
 `load` refuses a library of another ABI version before it touches any other function,
 `Header.values()` returns the one frame struct it keeps, `HandlerError` says what to do and
-names a heading of the README, and `--check` fails on a package that differs.
-`just test` runs this through `test-scripts`. Python 3.9 standard library only.
+names a heading of the README, and `--check` fails on a package that differs. The same
+for the Node package (`NodePackage`): the committed five files are what the parse gives,
+a header change changes the addon and the client, the addon wraps every function but the
+poll, which is its own `poll` around the one `cavalry_subscription_poll` call, the struct
+layout the client reads its `DataView`s by is the layout `ctypes` gives the Python
+binding, `HandlerError`'s message says what to do and names a heading of the README, and
+`--check` fails on a package that differs. `just test` runs this through `test-scripts`.
+Python 3.9 standard library only.
 """
 
 import ctypes
@@ -20,6 +26,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate as gen  # noqa: E402
+import generate_node as gen_node  # noqa: E402
 
 VECTORS = os.path.join(gen.ROOT, "spec", "vectors", "c-abi.json")
 
@@ -249,6 +256,109 @@ class Package(unittest.TestCase):
                     self.assertEqual(gen.main(["generate.py", "python", "--check"]), 1)
                 self.assertIn("differs from what the header gives in cavalry/_abi.py", err.getvalue())
                 self.assertIn("python3 clients/generate.py python", err.getvalue())
+            finally:
+                gen.ROOT, gen.HEADER = root, header
+
+
+class NodePackage(unittest.TestCase):
+    """The Node package, `clients/node` (clients/node/README.md; ADR 0046, card 206)."""
+
+    FILES = ["binding.gyp", "index.d.ts", "index.js", "package.json", "src/addon.c"]
+
+    @classmethod
+    def setUpClass(cls):
+        with open(gen.HEADER, encoding="utf-8") as f:
+            cls.text = f.read()
+        cls.header = gen.parse(cls.text)
+
+    def committed(self, name):
+        with open(os.path.join(gen.ROOT, "clients", "node", name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_the_committed_package_is_what_the_header_gives(self):
+        files = gen_node.write_node(self.header)
+        self.assertEqual(sorted(files), self.FILES)
+        for name, content in files.items():
+            self.assertEqual(self.committed(name), content, name)
+        self.assertIs(gen.WRITERS["node"], gen_node.write_node)
+        self.assertEqual(gen.LANGUAGES["node"], "node")
+
+    def test_a_header_change_changes_the_addon_and_the_client(self):
+        changed = gen.parse(self.text.replace("#define CAVALRY_MAX_IMAGES 256", "#define CAVALRY_MAX_IMAGES 512"))
+        files = gen_node.write_node(changed)
+        self.assertIn("  CAVALRY_MAX_IMAGES: 512,", files["index.js"])
+        self.assertNotEqual(files["index.js"], self.committed("index.js"))
+        changed.functions = [fn for fn in changed.functions if fn.name != "cavalry_version_patch"]
+        addon = gen_node.write_node(changed)["src/addon.c"]
+        self.assertNotIn("fn_cavalry_version_patch", addon)
+        self.assertIn("fn_cavalry_version_minor", addon)
+
+    def test_the_addon_wraps_every_function_and_the_poll_is_its_own(self):
+        """One N-API function per ABI function, registered under the ABI's name, except the
+        poll: the addon's `poll` makes the one `cavalry_subscription_poll` call with its
+        trampoline, and the header's fields are read through `headerField`."""
+        addon = gen_node.write_node(self.header)["src/addon.c"]
+        for fn in self.header.functions:
+            if fn.name == "cavalry_subscription_poll":
+                self.assertNotIn("fn_cavalry_subscription_poll", addon)
+                continue
+            self.assertIn(f"static napi_value fn_{fn.name}(napi_env env, napi_callback_info info)", addon)
+            self.assertIn(f'{{ "{fn.name}", NULL, fn_{fn.name}, NULL, NULL, NULL, napi_default, NULL }},', addon)
+        self.assertEqual(addon.count("cavalry_subscription_poll("), 2)  # the nested refusal and the poll itself
+        for own in ("registerSubscription", "poll", "headerField", "view", "detach", "stringAt"):
+            self.assertIn(f'{{ "{own}", NULL, fn_{own}, NULL, NULL, NULL, napi_default, NULL }},', addon)
+        self.assertIn("cavalry_header_values(s->current, &s->values)", addon)
+
+    def test_the_layout_the_client_reads_by_is_the_layout_ctypes_gives(self):
+        """index.js reads a struct's fields from a DataView at the offsets `layout` computes
+        from the header; the Python binding's ctypes structures are the same header's, laid
+        out by the C ABI of this machine, so the two must agree, size and offset."""
+        _abi = load_package()._abi
+        layout = gen_node.layout(self.header)
+        for struct in self.header.structs:
+            cls = getattr(_abi, struct.name)
+            self.assertEqual(layout[struct.name]["size"], ctypes.sizeof(cls), struct.name)
+            for field in struct.fields:
+                self.assertEqual(layout[struct.name]["fields"][field.name]["offset"], getattr(cls, field.name).offset,
+                                 f"{struct.name}.{field.name}")
+        index = gen_node.write_node(self.header)["index.js"]
+        self.assertIn(f'"cavalry_buffer_claim_t": {{\n    "size": {layout["cavalry_buffer_claim_t"]["size"]},', index)
+
+    def test_handler_errors_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
+        """CLAUDE.md: every error message says what to do next and names the docs anchor
+        that explains it. The anchor `HandlerError` names is a heading of the README; the
+        message is read from the generated source, since the test does not need Node."""
+        index = gen_node.write_node(self.header)["index.js"]
+        body = index.split("class HandlerError extends Error {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("fragment(s) this poll delivered", body)
+        self.assertIn("before it stopped on a fault, which subscription.fault() reads", body)
+        self.assertIn("Fix the handler: its first exception, ${String(cause)}, is this error's cause", body)
+        self.assertIn("See clients/node/README.md#the-exception`, { cause });", body)
+        with open(os.path.join(gen.ROOT, "clients", "node", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("the-exception", slugs)
+
+    def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(gen.ROOT, "clients", "node"), os.path.join(tmp, "clients", "node"),
+                            ignore=shutil.ignore_patterns("build", "node_modules", "package-lock.json"))
+            os.makedirs(os.path.join(tmp, "crates", "cavalry-ffi", "include"))
+            shutil.copy(gen.HEADER, os.path.join(tmp, "crates", "cavalry-ffi", "include", "cavalry.h"))
+            root, header = gen.ROOT, gen.HEADER
+            gen.ROOT = tmp
+            gen.HEADER = os.path.join(tmp, "crates", "cavalry-ffi", "include", "cavalry.h")
+            try:
+                self.assertEqual(gen.main(["generate.py", "node", "--check"]), 0)
+                with open(os.path.join(tmp, "clients", "node", "src", "addon.c"), "a", encoding="utf-8") as f:
+                    f.write("/* edited by hand */\n")
+                import io
+                import contextlib
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(gen.main(["generate.py", "node", "--check"]), 1)
+                self.assertIn("differs from what the header gives in src/addon.c", err.getvalue())
+                self.assertIn("python3 clients/generate.py node", err.getvalue())
             finally:
                 gen.ROOT, gen.HEADER = root, header
 

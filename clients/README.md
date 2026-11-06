@@ -18,8 +18,10 @@ hold invariant 2's per-message rules between the user's code and the ABI. The
 generator writes every file of the package; nothing in a package is edited by hand.
 `just generate-clients` writes every package; commit what it writes. `just lint`
 regenerates each package in memory and fails when a committed file differs, naming the
-command that fixes it. Today the generator writes Python (`python/`); the Node, Go,
-JVM and .NET clients (cards 206 to 209) add a language each.
+command that fixes it. The generator writes Python (`python/`, by `write_python` in
+`generate.py`) and Node (`node/`, by `generate_node.py` beside it, which `generate.py`
+imports); the Go, JVM and .NET clients (cards 207 to 209) add a language each as a
+writer module of their own.
 
 ## What every client must pass
 
@@ -68,3 +70,4 @@ built from the same checkout, or regenerate the package from the library's heade
 | Client | Package | Runner | Decided in |
 | --- | --- | --- | --- |
 | `python/` | `cavalry`, `ctypes` over the shared library | `conformance/python/` | ADR 0046 (card 205) |
+| `node/` | `@cavalry/client`, an N-API addon in C over the header, linked with the static library | `conformance/node/` | ADR 0046 (card 206) |

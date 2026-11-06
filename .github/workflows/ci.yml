@@ -71,6 +71,11 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      # Node for the Node client's addon, which `just conformance` builds with npm's own
+      # node-gyp, and for conformance/node (ADR 0046, card 206). Nothing from the registry.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
       # mdBook for `just docs`, as a prebuilt binary checked against the action's own
       # manifest, pinned to the version the justfile names; bump both together (ADR 0006).
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0

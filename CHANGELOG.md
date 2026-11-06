@@ -1429,3 +1429,19 @@ user-visible change, added in the same commit as the change. The format follows
   ten-minute path's shape through the client and the README's example, with a report
   of its one-way latency over 100,000 messages and its allocations per message
   ([clients/python/README.md](clients/python/README.md); ADR 0046, card 205).
+- The Node client, `clients/node`, generated from the committed C header by
+  `clients/generate.py node` (`just generate-clients`): a native addon in C over N-API,
+  built by `npm install` against the header and linked with `libcavalry_ffi.a`, so the
+  package has no runtime dependency, that refuses a library of another ABI version when
+  the package loads, before any other function; and the client's own code, typed by
+  `index.d.ts`, a `Client`, a `Publication` whose `tryClaim` and `offer` return the
+  position or the result code and whose `claim` is a `Buffer` over the log, a
+  `Subscription` polled with a fragment handler that every delivered fragment reaches,
+  the body a `Buffer` into the log for the call, a `Recording` and a `Replay`; a call
+  the ABI refuses during a claim or a poll leaves the client's state as it was; `just
+  lint` regenerates the package and reads its per-message functions, and the package's
+  functions they call, for JavaScript's `async`, `await`, `Promise`, `.then`, `throw`
+  and `Atomics.wait`; `just conformance` runs `conformance/node/`, the ten-minute
+  path's shape through the client and the README's example, with a report of its
+  one-way latency over 100,000 messages and its allocations per message
+  ([clients/node/README.md](clients/node/README.md); ADR 0046, card 206).

@@ -1,0 +1,15 @@
+{
+  "name": "@cavalry/client",
+  "version": "0.1.0",
+  "description": "The Node client over Cavalry's C ABI: a native addon over N-API, generated from the committed header (clients/node/README.md).",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "gypfile": true,
+  "private": true,
+  "scripts": {
+    "install": "node-gyp rebuild"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

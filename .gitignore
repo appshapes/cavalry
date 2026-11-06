@@ -21,3 +21,9 @@ CLAUDE.*.md
 .ignored/
 .brigade
 __pycache__/
+
+# The Node client's addon and npm's files, built by `npm install` in clients/node
+# (clients/node/README.md); the generated sources beside them are committed.
+/clients/node/build/
+/clients/node/node_modules/
+/clients/node/package-lock.json
