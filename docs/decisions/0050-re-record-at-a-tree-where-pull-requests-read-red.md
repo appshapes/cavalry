@@ -129,9 +129,11 @@ Each red that counts is recorded before anything else is done about it: the firs
 before its rerun, the second before the re-record or the card. The second red can come
 days later, on another pull request and in another session, and the re-record needs
 the first red's process. So the session that holds a red
-downloads the attempt's artifact first. A rerun's artifact takes the same name, so a
-download by name gives the newest attempt's files alone, and every artifact expires
-seven days after its attempt began (Evidence). The session then comments on its pull
+downloads the attempt's artifact first, by its id: after a one-job rerun each attempt
+keeps its own artifact under the same name, a download by name returns one of them and
+not always the newest, and every artifact expires seven days after its attempt began
+(Evidence; `docs/how-to/run-the-bench.md`, step 4, says how an id is matched to its
+attempt). The session then comments on its pull
 request, in a comment of its own. The comment's first line is the record's key:
 `ADR 0050 red:`, the profile, the row, and `at the tree of` with the full hash of the
 tree's first commit. That commit is the newest commit to change the tree's paths in
@@ -202,8 +204,8 @@ number per row in `bench/baseline.json`.
 - **Leave the first red in its job's log and its run's artifact.** Lost: the log holds
   the comparison, not the result file, and only a session that already knows which run
   to open finds it. This ADR's own Evidence came from reading every `bench (grip)` job
-  log at the tree. After the rerun, the artifact's name gives the newest attempt's
-  files, and every artifact expires after seven days.
+  log at the tree. After the rerun, each attempt's artifact stays under the same name
+  and is told apart by its id, and every artifact expires after seven days.
 - **Keep the first red's result file on the pull request's branch, or on the bench
   host.** Lost: `bench/results/` is ignored, and a squash merge would put a run's file
   on master. A file on the host is reachable only from the host, and keeping it there
@@ -297,9 +299,16 @@ Where a first red's process is kept, read on 2026-11-05:
 - **Two artifacts, one name.** Run 41853288029's artifacts endpoint lists two
   `bench-results-grip-linux` artifacts: 13336413831 from attempt 1, at 15:07:14Z, and
   13337971965 from attempt 2, at 15:23:04Z. Attempt 2 reran `bench (grip)` alone.
-- **The name gives the newest.** `gh run download 41853288029 --name
-  bench-results-grip-linux` gives attempt 2's files: the unchecked
-  `claim_commit_32_client` row at 115 ns and 14,591,744 claims a second.
+- **The name picks one attempt, not always the newest.** The artifacts endpoint lists
+  the highest id first. On run 41853288029 that is 13337971965, attempt 2's (expires
+  2026-11-11T15:15:39Z), before attempt 1's 13336413831 (expires 15:00:37Z), and
+  `gh run download 41853288029 --name bench-results-grip-linux` gave attempt 2's files,
+  the unchecked `claim_commit_32_client` row at 115 ns and 14,591,744 claims a second.
+  On run 42104363740 the first listed is 13452765715, attempt 1's (created
+  2026-11-05T20:44:29Z, expires 2026-11-12T20:32:42Z), before attempt 2's 13452204848
+  (created 21:04:07Z, expires 20:45:17Z), so a download by name there gives attempt 1's.
+  An artifact's `expires_at` less seven days is its attempt's `run_started_at`, to within
+  3 seconds on both runs, which is how an id is matched to its attempt.
 - **A rerun of every job.** Run 41196273792, whose attempts 4 and 5 each ran every
   job, lists one artifact per name.
 - **Seven days.** Each artifact expires seven days after its attempt began. Attempt 1's

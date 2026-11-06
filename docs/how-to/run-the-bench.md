@@ -189,10 +189,18 @@ shared runner is
    one job, the run's artifacts endpoint lists two artifacts of that name, one per
    attempt (runs 42104363740 and 42105029604 on 2026-11-05, and run 41853288029 in
    ADR 0050's Evidence), and `gh run download <run id> --name <artifact>` fetches one
-   of them, the first attempt's on those runs; so list them with `gh api
-   repos/appshapes/cavalry/actions/runs/<run id>/artifacts` and take each attempt's by
-   its id, `gh api repos/appshapes/cavalry/actions/artifacts/<id>/zip`, into a new
-   directory each. After a re-run of every job, which a link row's whole-run re-run is
+   of them, not always the newest. So list them, tell the attempts apart (an artifact's
+   `expires_at` less seven days is its attempt's `run_started_at`, to within 3 seconds
+   on those runs), and take each attempt's artifact by its id into a new directory each:
+
+   ```sh
+   # ignore: needs gh signed in; the run id, the attempt number and the artifact name are the job's
+   gh api repos/appshapes/cavalry/actions/runs/<run id>/artifacts --jq '.artifacts[] | select(.name == "<artifact>") | "\(.id) \(.expires_at)"'
+   gh api repos/appshapes/cavalry/actions/runs/<run id>/attempts/<n> --jq .run_started_at
+   gh api repos/appshapes/cavalry/actions/artifacts/<id>/zip > <id>.zip && unzip -d <a new directory> <id>.zip
+   ```
+
+   After a re-run of every job, which a link row's whole-run re-run is
    (step 5), the run's page and the artifacts endpoint keep the newest attempt's
    alone, so an attempt whose artifact was not saved first is a lost process (attempts
    1 and 2 of run 41196273792 went that way on 2026-10-31). Every artifact expires
@@ -247,14 +255,15 @@ shared runner is
    Record each red that counts before you do anything else about it: the first before
    its re-run, the second before the re-record or the card. The second red can come
    days later, on another pull request and in another session, and the re-record
-   needs the first red's process. After a re-run, the download by name gives the
-   re-run's files, and the artifact expires after seven days. So the record is a
+   needs the first red's process. After a re-run, each attempt's artifact is under the
+   same name and is taken by its id, and the artifact expires after seven days. So the
+   record is a
    comment on the pull request that carries the attempt's result files. A file
    downloaded into a CI workspace, where the writer and the fixer run, is gone when
    the job ends.
 
-   1. **Download.** Download the red attempt's artifact into a new directory, as
-      above.
+   1. **Download.** Download the red attempt's artifact by its id into a new directory,
+      with the three commands above.
    2. **Find the tree.** The result's `git` is the run's merge of the pull request
       with master, and its first parent is master's commit. The tree's first commit is
       the newest commit in that commit's history that changed the tree's paths. For
