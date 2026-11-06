@@ -11,7 +11,9 @@
  * offset and session id checked against spec/frame.md; waits for the recording to sync to
  * the stream's end and stops it; checks where a handler's exception goes, that `offer`
  * refuses what is not bytes and that a view or a header kept past its call reads as empty,
- * on stream 1003 (`edges`); does the same 1,000 over `cavalry:udp` on the loopback; and
+ * on stream 1003 (`edges`); checks that a reserved value beyond 2^53 reaches the handler
+ * exactly, as a BigInt, on stream 1005 (`reservedValues`); does the same 1,000 over
+ * `cavalry:udp` on the loopback; and
  * replays the recording onto stream 2001, each frame at the position the recording holds it
  * at, with the end reported. Every wait is bounded at 10 s, and a wait that runs out says
  * how far it got. It exits 1 with the function, the code and `cavalry_errmsg` when a call
@@ -537,6 +539,73 @@ function edges(client) {
       `closed it; a close with a claim outstanding released its Buffer`);
 }
 
+/** The reserved value, on stream 1005: any int64 a publisher sets reaches the handler
+ * exactly, as the field of a delivered frame must (spec/c-abi.md,
+ * `cavalry_header_values_frame_t`), beyond the 2^53 a number holds. Two claims, each with
+ * its index in the body: the first sets `2n ** 62n + 1n`, the second `-(2n ** 63n)`, the
+ * int64's least. The handler must read each as the BigInt set, `===`. Then a BigInt outside
+ * the int64 range, `2n ** 63n`, is refused with RangeError before the ABI sees it, and the
+ * claim it was meant for is aborted, which leaves padding and no fragment. */
+function reservedValues(client) {
+  const name = "reserved value";
+  const subscription = client.addSubscription("cavalry:ipc", STREAM + 4);
+  const publication = client.addPublication("cavalry:ipc", STREAM + 4);
+  const values = [2n ** 62n + 1n, -(2n ** 63n)];
+  const received = [];
+  const onFragment = (body, header) => received.push([indexOf(body), header.reservedValue]);
+  const claim = (sent) => {
+    const until = deadline();
+    for (;;) {
+      pollOrFail(name, subscription, onFragment, received.length, values.length); // the image joins on a poll
+      const position = publication.tryClaim(BODY);
+      if (position >= 0) return position;
+      refused(name, position, sent, until, values.length);
+    }
+  };
+  for (let i = 0; i < values.length; i++) {
+    const position = claim(i);
+    publication.claim.writeBigUInt64LE(BigInt(i), 0);
+    const set = publication.setReservedValue(values[i]);
+    if (set !== 0) {
+      fail(`${name}: setReservedValue(${values[i]}n) returned ${set} with error ${addon.cavalry_errcode()}: ${errmsg()}`);
+    }
+    if (publication.commit() !== position) fail(`${name}: commit did not return the claim's position ${position}`);
+  }
+  const until = deadline();
+  while (received.length < values.length) {
+    pollOrFail(name, subscription, onFragment, received.length, values.length);
+    if (Date.now() > until) fail(`${name}: received ${received.length} of ${values.length} in ${WAIT_MS / 1000} s`);
+  }
+  for (let i = 0; i < values.length; i++) {
+    const [index, value] = received[i];
+    if (index !== i || typeof value !== "bigint" || value !== values[i]) {
+      fail(`${name}: message ${index} carried reservedValue ${String(value)} (${typeof value}); expected message ${i} ` +
+           `with the BigInt ${values[i]}n its publisher set, exactly`);
+    }
+  }
+
+  const outOfRange = 2n ** 63n;
+  const position = claim(values.length);
+  let refusal = null;
+  try {
+    publication.setReservedValue(outOfRange);
+  } catch (thrown) {
+    refusal = thrown;
+  }
+  if (!(refusal instanceof RangeError)) {
+    fail(`${name}: setReservedValue(${outOfRange}n), outside the int64 range, ${refusal === null ? "was taken" : `threw ${refusal}`}; ` +
+         `expected a RangeError before the ABI sees it`);
+  }
+  if (publication.abort() !== position) fail(`${name}: the abort did not return the claim's position ${position}`);
+  if (subscription.poll(onFragment, 10) !== 0 || received.length !== values.length) {
+    fail(`${name}: an aborted claim delivered a fragment`);
+  }
+  publication.close();
+  subscription.close();
+  say(`${name}: the handler read ${values.map((v) => `${v}n`).join(" and ")} as the BigInts their publisher set, ` +
+      `exactly; setReservedValue(${outOfRange}n), outside the int64 range, was refused with RangeError`);
+}
+
 /** The latency round, for the report: 100,000 messages over cavalry:ipc on stream 1004, one
  * at a time on this thread. The publisher writes `process.hrtime.bigint()` into the claim
  * just before its commit; the handler reads the clock first and keeps the difference. The
@@ -828,6 +897,7 @@ function main(udpPort) {
     ipcPub.close();
 
     edges(client);
+    reservedValues(client);
 
     // The report's latency round, which checks nothing else; its allocation round runs last.
     const round = latency(client);

@@ -17,8 +17,8 @@ and the wrappers of the claim, the reserved value, the commit, the abort and the
 read by the same tokenizer for C's forms: a lock, `pthread_mutex_*`, `pthread_rwlock_*`,
 C11's `mtx_*`, libuv's `uv_mutex_*` and `uv_rwlock_*`, and N-API's
 `napi_*threadsafe_function*`; and a raise, `napi_throw*` and `napi_fatal_*`, except in the
-argument readers, which throw a TypeError for an argument of the wrong type before the ABI
-is called. A call reaches the package's own functions by name: a
+argument readers, which throw a TypeError or a RangeError for an argument the ABI's
+parameter cannot take, before the ABI is called. A call reaches the package's own functions by name: a
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
 The one raise allowed is in `poll`, after the last line that calls the ABI, where the

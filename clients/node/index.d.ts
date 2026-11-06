@@ -139,7 +139,8 @@ export class Publication {
   tryClaim(length: number): number;
   commit(): number;
   abort(): number;
-  setReservedValue(value: number): number;
+  /** Any int64: a BigInt exactly, a number below 2^53 in magnitude. */
+  setReservedValue(value: number | bigint): number;
   offer(message: Buffer | Uint8Array): number;
   position(): number;
   positionLimit(): number;
@@ -157,7 +158,8 @@ export class Header {
   readonly sessionId: number | undefined;
   readonly streamId: number | undefined;
   readonly termId: number | undefined;
-  readonly reservedValue: number | undefined;
+  /** Any int64 the publisher set, 0 unless set, as a BigInt so that every one is exact. */
+  readonly reservedValue: bigint | undefined;
 }
 
 export class Image {

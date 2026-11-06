@@ -1443,7 +1443,8 @@ user-visible change, added in the same commit as the change. The format follows
   `index.d.ts`, a `Client`, a `Publication` whose `tryClaim` and `offer` return the
   position or the result code and whose `claim` is a `Buffer` over the log, a
   `Subscription` polled with a fragment handler that every delivered fragment reaches,
-  the body a `Buffer` into the log for the call, whose `poll` throws `HandlerError`
+  the body a `Buffer` into the log for the call and the header's `reservedValue` a
+  `BigInt`, exact for any int64 a publisher sets, whose `poll` throws `HandlerError`
   with the counts when a handler threw or the runtime kept a fragment from the
   handler, a `Recording` and a `Replay`; `buffersHeld()`, the `Buffer`s, received
   bodies and claims' views, whose native objects Node frees only when its event loop

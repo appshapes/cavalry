@@ -495,6 +495,9 @@ class Publication {
   commit() { this._release(); return addon.cavalry_buffer_claim_commit(this._claim.buffer); }
   /** Abort the claim, leaving padding: the position after the frame, or -1. */
   abort() { this._release(); return addon.cavalry_buffer_claim_abort(this._claim.buffer); }
+  /** Set the reserved value the claim's frame header carries, any int64: a BigInt carries
+   * every one exactly, a number those below 2^53 in magnitude, and a BigInt outside the int64
+   * range is refused with RangeError. 0, or -1 with the ABI's error. */
   setReservedValue(value) { return addon.cavalry_buffer_claim_set_reserved_value(this._claim.buffer, value); }
   /** Offer `message`, a Buffer or any typed array: the position after it, or a code below zero. */
   offer(message) { return addon.cavalry_publication_offer(this.handle, message); }
@@ -519,7 +522,8 @@ class Publication {
 class Header {
   /** The frame header a poll hands the handler, valid for the call: each getter reads the field
    * through the addon, which reads `cavalry_header_values` once per fragment into the struct it
-   * keeps for the subscription; outside the call every getter is undefined. */
+   * keeps for the subscription; outside the call every getter is undefined. Every field is a
+   * number but `reservedValue`, a BigInt, since it is any int64 a publisher sets. */
   constructor(state) { this._state = state; }
   get frameLength() { return addon.headerField(this._state, 0); }
   get version() { return addon.headerField(this._state, 1); }

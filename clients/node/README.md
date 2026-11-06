@@ -106,7 +106,13 @@ through their `ArrayBuffer`'s memory, and makes the one ABI call on the caller's
 thread. A struct argument smaller than its struct, or not aligned for it, is refused
 with a `RangeError` before the ABI is called, since the ABI reads and writes the whole
 struct at the address it is given. A position comes back as a number
-(`napi_create_int64`), exact below 2^53, which every position is. Node has one
+(`napi_create_int64`), exact below 2^53 in magnitude, which every position is. The
+reserved value is not a position: it is any int64 a publisher sets, such as a
+timestamp in nanoseconds or a CRC-64. So `header.reservedValue` comes back as a
+`BigInt` ("The call-back, by construction"), and `setReservedValue` takes a `BigInt`
+or a number. A `BigInt` carries every int64 exactly, and a number carries those below
+2^53 in magnitude. A `BigInt` outside the int64 range is refused with a `RangeError`,
+since N-API would otherwise wrap it to another value. Node has one
 thread for JavaScript, so a call holds it for the
 call, and an add, a command or a close, which waits on the driver for up to 10 s
 (`spec/c-abi.md`, "Threads"), holds it as long: the client is synchronous, and a
@@ -160,8 +166,13 @@ The addon's own share is one counter increment per `Buffer`, for `buffersHeld`.
 
 The `Header`'s getters each call the addon's `headerField`, which reads
 `cavalry_header_values` once per fragment, on the first getter, into the one
-`cavalry_header_values_t` the addon keeps per subscription, and returns the field as a
-number, which V8 keeps on the stack for a small integer; outside the handler call every
+`cavalry_header_values_t` the addon keeps per subscription, and returns the field.
+Every field but one is a number, which V8 keeps on the stack for a small integer.
+`reservedValue` is a `BigInt` (`napi_create_bigint_int64`), because the field is any
+int64 a publisher sets and a number is exact only below 2^53 in magnitude. A `BigInt`
+is an object on V8's heap, freed by a collection, and the runtime makes a new one for
+the return value on each read of `reservedValue` (ADR 0046, the runtime's side). A
+handler that does not read `reservedValue` makes none. Outside the handler call every
 getter is `undefined`, since the header is valid for the call alone. The handler is the
 poll's own argument: the addon's `poll` keeps its value in the subscription's state for
 the call, and N-API keeps that value valid until the call returns, so a poll makes no

@@ -616,6 +616,24 @@ class NodePackage(unittest.TestCase):
                 self.assertNotIn(made, body, f"{name} calls {made}")
         self.assertIn("s->handler = argv[2];", addon)
 
+    def test_the_reserved_value_is_a_bigint_both_ways(self):
+        """Invariant 1: the reserved value is any int64 a publisher sets, so the header's
+        field reaches the handler as a BigInt, exact over the whole range, never as a number,
+        which N-API rounds beyond 2^53; `setReservedValue` takes a BigInt and refuses one
+        outside the int64 range rather than let N-API wrap it; and the types say both."""
+        files = gen_node.write_node(self.header)
+        addon = files["src/addon.c"]
+        index = gen_node.HEADER_FIELDS.index("reserved_value")
+        self.assertIn(f"    case {index}: return make_bigint64(env, f->reserved_value);", addon)
+        self.assertIn("static napi_value make_bigint64(napi_env env, int64_t n) { napi_value v; "
+                      "napi_create_bigint_int64(env, n, &v); return v; }", addon)
+        reader = addon.split("static int64_t int64_arg(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("if (lossless) return n;", reader)
+        self.assertIn("napi_throw_range_error(env, NULL, message);", reader)
+        self.assertIn(f"get reservedValue() {{ return addon.headerField(this._state, {index}); }}", files["index.js"])
+        self.assertIn("  readonly reservedValue: bigint | undefined;", files["index.d.ts"])
+        self.assertIn("  setReservedValue(value: number | bigint): number;", files["index.d.ts"])
+
     def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
         with tempfile.TemporaryDirectory() as tmp:
             shutil.copytree(os.path.join(gen.ROOT, "clients", "node"), os.path.join(tmp, "clients", "node"),

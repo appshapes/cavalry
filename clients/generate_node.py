@@ -359,11 +359,20 @@ static const char *string_arg(napi_env env, napi_value v, char *buf, size_t cap,
   return buf;
 }
 
+/* An int64: a number, or a BigInt, which carries every int64 exactly; a BigInt outside the
+ * int64 range is refused with a RangeError, since N-API would wrap it to another value. */
 static int64_t int64_arg(napi_env env, napi_value v, const char *name) {
   int64_t n = 0; bool lossless;
   napi_valuetype t;
   if (napi_typeof(env, v, &t) == napi_ok && t == napi_bigint) {
-    if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok) return n;
+    if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok) {
+      if (lossless) return n;
+      char message[160];
+      snprintf(message, sizeof message, "%s: a BigInt from -(2n ** 63n) to 2n ** 63n - 1n expected, an int64", name);
+      napi_throw_range_error(env, NULL, message);
+      arg_failed = true;
+      return 0;
+    }
   } else if (napi_get_value_int64(env, v, &n) == napi_ok) {
     return n;
   }
@@ -389,8 +398,13 @@ static bool bool_arg(napi_env env, napi_value v, const char *name) {
 }
 
 static napi_value make_int32(napi_env env, int32_t n) { napi_value v; napi_create_int32(env, n, &v); return v; }
-/* An int64 as a JS number: exact below 2^53, which every position and id of the ABI is. */
+/* An int64 as a JS number: exact below 2^53 in magnitude, which every position, length,
+ * count and id of the ABI is. The header's reserved value is none of these, so it goes
+ * through make_bigint64. */
 static napi_value make_int64(napi_env env, int64_t n) { napi_value v; napi_create_int64(env, n, &v); return v; }
+/* An int64 as a BigInt, exact over the whole int64 range: the header's reserved value, any
+ * int64 a publisher sets (spec/c-abi.md, cavalry_header_values_frame_t). */
+static napi_value make_bigint64(napi_env env, int64_t n) { napi_value v; napi_create_bigint_int64(env, n, &v); return v; }
 static napi_value make_bool(napi_env env, bool b) { napi_value v; napi_get_boolean(env, b, &v); return v; }
 static napi_value make_null(napi_env env) { napi_value v; napi_get_null(env, &v); return v; }
 static napi_value make_string(napi_env env, const char *s) {
@@ -702,7 +716,7 @@ static napi_value fn_headerField(napi_env env, napi_callback_info info) {
     case 5: return make_int32(env, f->session_id);
     case 6: return make_int32(env, f->stream_id);
     case 7: return make_int32(env, f->term_id);
-    case 8: return make_int64(env, f->reserved_value);
+    case 8: return make_bigint64(env, f->reserved_value);
     default: { napi_value u; napi_get_undefined(env, &u); return u; }
   }
 }
@@ -1030,6 +1044,9 @@ class Publication {
   commit() { this._release(); return addon.cavalry_buffer_claim_commit(this._claim.buffer); }
   /** Abort the claim, leaving padding: the position after the frame, or -1. */
   abort() { this._release(); return addon.cavalry_buffer_claim_abort(this._claim.buffer); }
+  /** Set the reserved value the claim's frame header carries, any int64: a BigInt carries
+   * every one exactly, a number those below 2^53 in magnitude, and a BigInt outside the int64
+   * range is refused with RangeError. 0, or -1 with the ABI's error. */
   setReservedValue(value) { return addon.cavalry_buffer_claim_set_reserved_value(this._claim.buffer, value); }
   /** Offer `message`, a Buffer or any typed array: the position after it, or a code below zero. */
   offer(message) { return addon.cavalry_publication_offer(this.handle, message); }
@@ -1054,7 +1071,8 @@ class Publication {
 class Header {
   /** The frame header a poll hands the handler, valid for the call: each getter reads the field
    * through the addon, which reads `cavalry_header_values` once per fragment into the struct it
-   * keeps for the subscription; outside the call every getter is undefined. */
+   * keeps for the subscription; outside the call every getter is undefined. Every field is a
+   * number but `reservedValue`, a BigInt, since it is any int64 a publisher sets. */
   constructor(state) { this._state = state; }
   get frameLength() { return addon.headerField(this._state, 0); }
   get version() { return addon.headerField(this._state, 1); }
@@ -1259,7 +1277,8 @@ export class Publication {
   tryClaim(length: number): number;
   commit(): number;
   abort(): number;
-  setReservedValue(value: number): number;
+  /** Any int64: a BigInt exactly, a number below 2^53 in magnitude. */
+  setReservedValue(value: number | bigint): number;
   offer(message: Buffer | Uint8Array): number;
   position(): number;
   positionLimit(): number;
@@ -1277,7 +1296,8 @@ export class Header {
   readonly sessionId: number | undefined;
   readonly streamId: number | undefined;
   readonly termId: number | undefined;
-  readonly reservedValue: number | undefined;
+  /** Any int64 the publisher set, 0 unless set, as a BigInt so that every one is exact. */
+  readonly reservedValue: bigint | undefined;
 }
 
 export class Image {

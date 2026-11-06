@@ -116,11 +116,20 @@ static const char *string_arg(napi_env env, napi_value v, char *buf, size_t cap,
   return buf;
 }
 
+/* An int64: a number, or a BigInt, which carries every int64 exactly; a BigInt outside the
+ * int64 range is refused with a RangeError, since N-API would wrap it to another value. */
 static int64_t int64_arg(napi_env env, napi_value v, const char *name) {
   int64_t n = 0; bool lossless;
   napi_valuetype t;
   if (napi_typeof(env, v, &t) == napi_ok && t == napi_bigint) {
-    if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok) return n;
+    if (napi_get_value_bigint_int64(env, v, &n, &lossless) == napi_ok) {
+      if (lossless) return n;
+      char message[160];
+      snprintf(message, sizeof message, "%s: a BigInt from -(2n ** 63n) to 2n ** 63n - 1n expected, an int64", name);
+      napi_throw_range_error(env, NULL, message);
+      arg_failed = true;
+      return 0;
+    }
   } else if (napi_get_value_int64(env, v, &n) == napi_ok) {
     return n;
   }
@@ -140,8 +149,13 @@ static size_t size_arg(napi_env env, napi_value v, const char *name) {
 }
 
 static napi_value make_int32(napi_env env, int32_t n) { napi_value v; napi_create_int32(env, n, &v); return v; }
-/* An int64 as a JS number: exact below 2^53, which every position and id of the ABI is. */
+/* An int64 as a JS number: exact below 2^53 in magnitude, which every position, length,
+ * count and id of the ABI is. The header's reserved value is none of these, so it goes
+ * through make_bigint64. */
 static napi_value make_int64(napi_env env, int64_t n) { napi_value v; napi_create_int64(env, n, &v); return v; }
+/* An int64 as a BigInt, exact over the whole int64 range: the header's reserved value, any
+ * int64 a publisher sets (spec/c-abi.md, cavalry_header_values_frame_t). */
+static napi_value make_bigint64(napi_env env, int64_t n) { napi_value v; napi_create_bigint_int64(env, n, &v); return v; }
 static napi_value make_bool(napi_env env, bool b) { napi_value v; napi_get_boolean(env, b, &v); return v; }
 static napi_value make_null(napi_env env) { napi_value v; napi_get_null(env, &v); return v; }
 static napi_value make_string(napi_env env, const char *s) {
@@ -453,7 +467,7 @@ static napi_value fn_headerField(napi_env env, napi_callback_info info) {
     case 5: return make_int32(env, f->session_id);
     case 6: return make_int32(env, f->stream_id);
     case 7: return make_int32(env, f->term_id);
-    case 8: return make_int64(env, f->reserved_value);
+    case 8: return make_bigint64(env, f->reserved_value);
     default: { napi_value u; napi_get_undefined(env, &u); return u; }
   }
 }
