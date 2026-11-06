@@ -625,13 +625,18 @@ class Header:
         self._pointer = None
         self._values = _abi.cavalry_header_values_t()
         self._values_ref = ctypes.byref(self._values)
+        # ctypes builds a new object on every read of a struct field; this one, over
+        # `_values`' memory, reads what each `cavalry_header_values` call writes there.
+        self._frame = self._values.frame
 
     def values(self):
-        """The frame's fields, `cavalry_header_values_frame_t`; None when the ABI refuses
-        the pointer, which on the handler's own header it cannot, so this never raises."""
+        """The frame's fields: the one `cavalry_header_values_frame_t` this object keeps,
+        over the struct each call fills, so it reads the latest call's header and a field
+        to keep is copied out. None when the ABI refuses the pointer, which on the
+        handler's own header it cannot, so this never raises."""
         if self._abi.cavalry_header_values(self._pointer, self._values_ref) != 0:
             return None
-        return self._values.frame
+        return self._frame
 
     @property
     def session_id(self):

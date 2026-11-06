@@ -2,8 +2,9 @@
 """The generator's tests (ADR 0026): its parse of the committed header equals
 `spec/vectors/c-abi.json` each way, the committed Python package is what the parse gives,
 a change to the header changes the package, `offer` takes bytes and refuses a `str`,
-`load` refuses a library of another ABI version before it touches any other function, and
-`--check` fails on a package that differs.
+`load` refuses a library of another ABI version before it touches any other function,
+`Header.values()` returns the one frame struct it keeps, and `--check` fails on a package
+that differs.
 `just test` runs this through `test-scripts`. Python 3.9 standard library only.
 """
 
@@ -186,6 +187,32 @@ class Package(unittest.TestCase):
         self.assertEqual(library.touched[0], "cavalry_abi_version")
         self.assertEqual(sorted(library.touched + held.touched), sorted(_abi.FUNCTIONS))
         self.assertEqual(sorted(held.touched), sorted(_abi.PER_MESSAGE))
+
+    def test_header_values_returns_the_one_frame_struct_it_keeps(self):
+        """ctypes builds a new object on every read of a struct field, so `values()` keeps
+        one over its struct's memory: every call returns it, and it reads what the latest
+        `cavalry_header_values` wrote."""
+        cavalry = load_package()
+
+        class Abi:
+            session_id = 0
+
+            def cavalry_header_values(self, pointer, values):
+                if pointer is None:
+                    return -1
+                self.session_id += 1
+                values._obj.frame.session_id = self.session_id  # the struct `byref` points at
+                return 0
+
+        header = cavalry.Header(Abi())
+        header._pointer = 1
+        frame = header.values()
+        self.assertIs(header.values(), frame)
+        self.assertEqual(frame.session_id, 2)
+        self.assertEqual(header.session_id, 3)
+        self.assertEqual(frame.session_id, 3)
+        header._pointer = None
+        self.assertIsNone(header.values())
 
     def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
         with tempfile.TemporaryDirectory() as tmp:

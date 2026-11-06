@@ -31,7 +31,8 @@ library's header (`spec/c-abi.md`, "Versions and what a reader rejects").
   `async def`, `await`, `raise`, and building `CavalryError`), in their own bodies and
   in every function of the package they call, such as `_check`; `just lint` fails on
   any of them. `Header.values()` is None when the ABI refuses the header's pointer,
-  which inside the handler's call it cannot.
+  which inside the handler's call it cannot. Otherwise it is the one frame struct the
+  header keeps, rewritten by each call, so copy a field out to keep it.
 - Never raise for an `Offer` code: `try_claim` and `offer` return the position after
   the frame or the code below zero (`cavalry.BACK_PRESSURED`, `NOT_CONNECTED`,
   `ADMIN_ACTION`, `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the
@@ -143,7 +144,16 @@ runners'):
   view, and that view cast to the native byte format. That is seven objects per
   received message, the runtime's three and the client's four, each freed before the
   next fragment, plus whatever `ctypes` makes inside its own steps, such as finding
-  the array type for the length, which this list does not count.
+  the array type for the length, which this list does not count. The client's four
+  cannot be one view kept per subscription, which ADR 0046 asks for where the runtime
+  allows it: the ABI hands the handler an address, not a term buffer and an offset
+  into it, and Python has no view whose address can be moved, so each body needs a
+  view of its own. What can be kept is kept, once per subscription: the trampoline,
+  the `Header`, its `cavalry_header_values_t` and the one frame struct over it that
+  every `header.values()` returns. ctypes builds a new object on each read of a struct
+  field, so the header keeps that one rather than reading the field per call. Reading
+  the header therefore makes no object of the client's own; each field read gives an
+  `int`, which CPython builds for a value above 256.
 - **The view over a claimed slice, by construction.** `publication.claim` is a new
   `memoryview` per claim, built the same four-object way from the pointer the ABI
   filled into the one `cavalry_buffer_claim_t` the publication keeps: Python has no

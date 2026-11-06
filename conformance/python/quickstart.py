@@ -307,14 +307,17 @@ def edges(client):
     kept = []
 
     def keeps(body, header):
-        kept.append((body, header))
+        kept.append((body, header, header.values(), header.values()))
 
     until = deadline()
     while not kept:
         poll_or_fail(name, subscription, keeps, 0, 1)
         if time.monotonic() > until:
             fail(f"{name}: message 12 did not arrive in {WAIT_SECONDS:.0f} s")
-    body, header = kept[0]
+    body, header, frame, again = kept[0]
+    if frame is None or frame is not again:
+        fail(f"{name}: two reads of Header.values() in one handler call gave {frame!r} and {again!r}; expected the one "
+             f"frame struct the header keeps")
     try:
         body[0]
         fail(f"{name}: a body read after its handler call")
@@ -323,7 +326,8 @@ def edges(client):
     if header.values() is not None:
         fail(f"{name}: a header's values read after its handler call")
     print(f"conformance/python: {name}: a claim's view written after its commit and a body read after its handler "
-          f"call raised ValueError, and a header read after the call gave None")
+          f"call raised ValueError, a header read after the call gave None, and Header.values() gave the one struct "
+          f"the header keeps on each read")
 
     # Calls the ABI refuses during a poll or a claim leave the wrapper as they found it
     # (spec/c-abi.md, "Calls during a claim or a poll").
