@@ -2415,6 +2415,53 @@ pub const fn new_leadership_term_action(
     }
 }
 
+/// One term of a leader's log, for [`replay_end`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TermSpan {
+    /// The leadership term id.
+    pub term: i64,
+    /// The term base log position.
+    pub base: i64,
+    /// The position the term ends at, the next term's base, or −1 for an open term.
+    pub end: i64,
+}
+
+/// Where the leader's replay for a position begins and ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReplayEnd {
+    /// The term whose recording the replay begins in, or −1 when none holds the position.
+    pub term: i64,
+    /// The first term base log position above the position, or −1 when the position
+    /// lies in the leader's open term, a catch-up that follows the live recording.
+    pub end_position: i64,
+}
+
+/// The leader's replay for `position` over its `terms` (`spec/cluster.md`, "Messages
+/// outside an election"): it begins in the recording of the term that begins at or
+/// below the position and ends above it, and a replication's replays end at the first
+/// term base log position above the position.
+pub fn replay_end(terms: &[TermSpan], position: i64) -> ReplayEnd {
+    let holder = terms
+        .iter()
+        .find(|t| t.base <= position && (t.end == NULL_VALUE || position < t.end));
+    let Some(holder) = holder else {
+        return ReplayEnd {
+            term: NULL_VALUE,
+            end_position: NULL_VALUE,
+        };
+    };
+    let end_position = terms
+        .iter()
+        .filter(|t| t.base > position)
+        .map(|t| t.base)
+        .min()
+        .unwrap_or(NULL_VALUE);
+    ReplayEnd {
+        term: holder.term,
+        end_position,
+    }
+}
+
 /// The position after an entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EntryPosition {

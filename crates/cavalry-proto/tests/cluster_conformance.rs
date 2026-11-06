@@ -8,9 +8,9 @@
 use cavalry_proto::cluster::{
     Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
     EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
-    NewLeadershipTermAction, ReplicationStop, SnapshotMark, Stream, TermFields, TimeUnit, VERSION,
-    ballot, candidate, commit_position, entry_position, log_at_least, new_leadership_term_action,
-    parse_members, quorum, replication_stop,
+    NewLeadershipTermAction, ReplayEnd, ReplicationStop, SnapshotMark, Stream, TermFields,
+    TermSpan, TimeUnit, VERSION, ballot, candidate, commit_position, entry_position, log_at_least,
+    new_leadership_term_action, parse_members, quorum, replay_end, replication_stop,
 };
 use serde_json::{Map, Value, json};
 
@@ -454,6 +454,20 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 },
             );
             json!({"action": action.name(), "truncate_to": truncate_to, "stop_position": stop_position})
+        }
+        "replay-end" => {
+            let terms: Vec<TermSpan> = inputs["terms"]
+                .as_array()
+                .expect("terms")
+                .iter()
+                .map(|t| TermSpan {
+                    term: t[0].as_i64().expect("term"),
+                    base: t[1].as_i64().expect("base"),
+                    end: t[2].as_i64().expect("end"),
+                })
+                .collect();
+            let ReplayEnd { term, end_position } = replay_end(&terms, int(inputs, "position"));
+            json!({"term": term, "end_position": end_position})
         }
         "entry-position" => {
             let after = entry_position(
