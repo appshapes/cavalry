@@ -96,6 +96,35 @@ messages, is left out: the cluster's members are named in its configuration (ADR
 Configuration), and a destination that announces itself is one the operator did not
 name.
 
+**A destination the socket can never send to is refused when it is added, and one the
+socket refuses holds back no other.** A socket bound to the control address sends only
+to addresses of that address's family, and when bound to a loopback address it sends
+to no other host. A connected socket of version 0 meets either case at `connect`, and
+its command gets code 4 at once. An unconnected socket would meet it at every send,
+after the command had been answered with `operation success`. So `add destination`
+resolves the destination's endpoint to the first address of the control address's
+family that the resolver returns, not to the first address of any family. It refuses
+with code 1 and the reason `destination` a destination with no such address, an
+address of the other family written in the channel among them, and one that is not a
+loopback address beside a loopback control address; the message names the
+destination, the control address and what to change. A name that resolves to no
+address at all is code 9, as on every channel. While the stream lives, the socket can
+still refuse a destination for a reason of that destination's own: no route from the
+control address to it, a firewall, an address that has gone. The sender does not wait
+for such a destination. The datagrams of the burst from the refused one on are lost to
+that destination alone, as datagrams lost between the hosts are, and its receiver NAKs
+them as it NAKs any loss; when the socket refused every destination so, the sender
+position holds, as on an endpoint. A refusal of the socket's own, no room in its send
+buffer (`EAGAIN` or `ENOBUFS` on Linux) or an interrupted send (`EINTR`), holds the
+sender position for every destination, as a short send does, and the destinations
+that took the datagram get it again, so that back-pressure costs no destination a
+frame. `sender.short_sends` and `sender.send_failed` count each destination's short or
+refused send, as the counters of a send count each destination's send. Aeron's `send`
+returns the fewest bytes any destination took (Context). Applied to a refusal as well,
+that rule would let one destination the socket refuses stop the stream to every
+destination until a client removes it, and `sender.send_failed`, which is not keyed by
+destination, would not tell `doctor` which one.
+
 **A status message reaches its publication by session id and stream id**, on the
 endpoint it arrived at, as it does on a unicast endpoint and in Aeron; the datagram's
 source address is not read for the matching, so a destination behind an address
@@ -118,23 +147,35 @@ falls under either strategy, as version 0's vector `sender-limit-never-falls` pi
 Aeron's idle path can lower it when a receiver's window shrinks, and a Cavalry
 receiver's window is fixed (`spec/udp.md`, "Values"). Under `max` the sender keeps no
 table and version 0's rule stands. A destination itself never times out: the operator
-named it and the command removes it, Aeron's manual mode; what a dead destination
-costs the stream, a sender limit held back for the receiver timeout under `min` and
-nothing under `max`, `cavalry doctor` explains from the three counters.
+named it and the command removes it, Aeron's manual mode. A dead destination's sends
+either vanish on the way or are refused for a reason of its own (above), and in
+neither case does the sender wait for it. What it costs the stream is nothing under
+`max`. Under `min` it costs a sender limit held back for as long as its status
+messages still arrive and for the flow control receiver timeout after they stop,
+which is `min`'s promise that no receiver loses its image to a faster one. `cavalry
+doctor` explains it from the three counters and `sender.send_failed`.
 
 **The commands are Aeron's, under its numbers.** `add destination` and `remove
 destination` carry client id, correlation id, the client's registration of the
 publication and the destination channel, and are answered with `operation success`.
 Only the destination channel's `endpoint` is read, resolved once as every channel's
-host is; `cavalry:ipc` or a control channel as a destination is code 1. An unknown or
+host is, to an address of the control address's family (above); `cavalry:ipc` or a
+control channel as a destination is code 1. An unknown or
 another client's registration is code 3; a publication whose channel has no control
 address is code 1, Aeron's `INVALID_CHANNEL`, with a message that says what to add to
 the channel; a 65th destination on an endpoint is code 10 and counts
 `driver.registry_full`, the destinations being a bounded table of the endpoint's,
-listed under "Sizes"; a destination already present is added once more by nothing and
+listed under "Sizes". A destination is its endpoint as the add wrote it, the host
+compared byte for byte and the port by value, and the endpoint keeps that beside the
+address it resolved. A destination already present is added once more by nothing and
 answered with success, so that a client that retries after a response timeout is not
-refused; a destination not present is removed by nothing and answered with success, as
-`stop recording` of a stopped recording is. A replay's publication on a control
+refused; two writings of one address, a name and the address it resolves to, are two
+destinations, as two adds are in Aeron. `remove destination` matches the endpoint as
+written and resolves nothing. So a name whose address changed after the add removes
+the address the add resolved, rather than missing it, answering success, and leaving
+that address to receive every datagram. A destination not present is removed by
+nothing and answered with success, as `stop recording` of a stopped recording is. A
+replay's publication on a control
 channel sends to the endpoint's destinations, which a client adds through a
 publication of its own on the channel, since a replay has no client registration to
 name. The reserved ids 7 to 10 become 9 and 10.
@@ -195,13 +236,41 @@ commits on the card, each with its evidence.
 - **`fc=min` options, `t:` and `g:`.** Lost: the timeout is Aeron's default until
   `doctor` shows a host that needs otherwise (`CLAUDE.md`, Configuration and
   defaults), and the group is the Revisit's.
+- **Hold the stream for a destination the socket refuses**, taking Aeron's fewest
+  bytes for a refusal too. Lost: one destination the socket cannot reach stops the
+  stream to every destination until a client removes it, which breaks this ADR's
+  promise that a dead destination costs nothing under `max`. `sender.send_failed`,
+  not keyed by destination, would not say which destination it is.
+- **Leave a destination's family and loopback address to the send.** Lost: the
+  command would answer `operation success` for a destination the socket can never
+  send to, and every datagram to it would be refused for as long as it stays. Version
+  0 refuses the same mistake at `connect` with code 4, and the add is where the
+  operator is.
+- **Code 9 for a destination with no address of the control address's family.** Lost:
+  code 9 says a name does not resolve, and an address of the other family written in
+  the channel needs no resolving. Code 1 with the reason `destination` covers both
+  cases and names what to change.
+- **Count a refused send in a keyed counter per destination.** Lost: 64 destinations
+  on each of 64 endpoints is 4096 counters, and the counters file has 492 to spare
+  (`spec/client-protocol.md`, "Sizes"). The refusals that last, the family and the
+  loopback address, are refused when the destination is added. What is left, a route
+  that comes and goes, is `sender.send_failed` on the sender's host beside
+  `receiver.gaps_detected` on the destination's.
+- **Match a remove by the address its endpoint resolves to now.** Lost: a name whose
+  address changes between the add and the remove, such as a member replaced behind
+  its name, would remove nothing and be answered with success. The address the add
+  resolved, perhaps another host's by then, would go on receiving every datagram.
 
 ## Evidence
 
 None measured: a channel grammar and two command layouts, with Aeron's rules. What
 informed it: Aeron's sources named in Context, read on 2026-11-06, and its
 Configuration's defaults, `aeron.flow.control.receiver.timeout` 5 s and
-`aeron.flow.control.group.min.size` 0; ADR 0052's Decision and card 225's brief;
+`aeron.flow.control.group.min.size` 0; ADR 0052's Decision and card 225's brief; the
+driver's `resolve` in `crates/cavalry-driver/src/conductor.rs`, which takes the first
+address of any family the system gives; the review of pull request 151 on 2026-11-06,
+which found that a destination of the other family would be answered with success
+and then refused at every send;
 `spec/udp.md`'s sender and receiver as they stand, whose setup elicitation already
 lets a destination added after the first status message get its setup frame from the
 sender, and whose retransmit rules already drop a second receiver's NAK for a range on
@@ -222,7 +291,9 @@ dropped receiver is three counters `doctor` reads.
 
 Harder: the sender gains an unconnected socket with a per-datagram address, a
 destinations table per endpoint and a receivers table per `min` publication, each
-bounded and tested at its bound; a cycle sends up to sixteen datagrams per
+bounded and tested at its bound; the sender tells a refusal of the socket's own from
+a destination's, and the destinations table keeps each destination's endpoint as
+written beside its address; a cycle sends up to sixteen datagrams per
 destination; the client API, the ABI and the five clients gain two functions, and the
 ABI's version moves before its first release (ADR 0051); the counters file's sum rises
 to 15,892 of 16384 ("Sizes"), leaving 492 for the slice's remaining features.
@@ -250,4 +321,5 @@ nears 16384, for a larger capacity under `spec/counters-file.md`.
   `aeron-client/src/main/java/io/aeron/command/{ControlProtocolEvents,DestinationMessageFlyweight}.java`;
   `aeron-client/src/main/java/io/aeron/{ChannelUri,CommonContext,ErrorCode}.java`;
   the wiki pages Multiple Destinations and Flow and Congestion Control
-- AppShapes Trello card 225; ADR 0052's card 224
+- AppShapes Trello card 225; ADR 0052's card 224; the review of pull request 151,
+  2026-11-06
