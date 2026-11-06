@@ -9,8 +9,10 @@ forms are `threading`'s locks and anything else of `threading`, `async def`, `aw
 `raise`, and building one of the package's own exceptions. A call reaches the package's
 own functions by name: a module function, a class's `__init__`, a method of the same class
 through `self`, and any other method by its name in any class of the package. The one
-raise allowed is in `poll`, after the line that calls the ABI, where the user's handler's
-exception is raised once the poll has returned (clients/python/README.md).
+raise allowed is in `poll`, after the last line that calls the ABI, where the user's
+handler's exception is raised once the poll has returned (clients/python/README.md); a
+raise between two of its calls, such as the refused poll from inside a handler and the
+poll's own call, is not after the poll.
 
 It fails on generated code under `clients/` in a language it has no rules for, and on a
 package in which it finds none of the per-message functions, so that a client cannot slip
@@ -170,10 +172,10 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
             findings.append(f"{where} is `async def`: a per-message function runs on the caller's thread and returns "
                             f"when the ABI returns, with no coroutine around it; {HELP}")
         abi_line = None
-        if name == allowed_in:
+        if name == allowed_in:  # the last line that calls the ABI: a raise between two of its calls is not after the poll
             for sub in ast.walk(node):
                 if isinstance(sub, ast.Attribute) and sub.attr == abi_call:
-                    abi_line = sub.lineno if abi_line is None else min(abi_line, sub.lineno)
+                    abi_line = sub.lineno if abi_line is None else max(abi_line, sub.lineno)
         for kind, line, what in package.forms(name, node, abi_line):
             if kind in WHY:
                 findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")

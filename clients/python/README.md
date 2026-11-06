@@ -45,13 +45,21 @@ library's header (`spec/c-abi.md`, "Versions and what a reader rejects").
   point into the log, which is reused and unmapped later. Once the handler returns,
   the trampoline releases `body` and clears the header's pointer, so a kept `body`
   raises `ValueError` when used, and a kept header's `values()` is None (its
-  properties raise `AttributeError`). `commit` and `abort` release `publication.claim`
-  in the same way. This costs one call per message on each side. A slice of a view,
+  properties raise `AttributeError`). `commit`, `abort` and the publication's `close`,
+  which aborts a claim still outstanding, release `publication.claim` in the same way.
+  This costs one call per message on each side. A slice of a view,
   or an export of it such as a `numpy.frombuffer` array, is not released and must not
   outlive the call: copy with `bytes(body)`. A handler that still holds an export of
   `body` when it returns makes `poll` raise `HandlerError` with a `BufferError`; an
   export of the claim held across `commit` is left to the caller to drop before the
   next claim.
+- Never let a call the ABI refuses change a claim or a poll (`spec/c-abi.md`, "Calls
+  during a claim or a poll"). A `try_claim` while a claim is outstanding returns
+  `cavalry.ERROR` with `CAVALRY_ERR_CLAIM_OUTSTANDING`, and `publication.claim` stays
+  the outstanding claim's view until its `commit` or `abort` releases it. A `poll`
+  from inside a handler of the same subscription returns −1 with
+  `CAVALRY_ERR_POLLING`, and the poll in progress goes on with its own handler and
+  its own count of raises.
 - Never drop a fragment and never swallow the user's exception: the ABI's poll
   consumes every fragment it delivers, so every one reaches the handler, once and in
   order, even after a call raised; `poll` raises once the ABI has returned, the one

@@ -4,7 +4,8 @@ per-message function carrying each forbidden form, a `threading` lock, `async de
 or `raise`, fails naming the function and the form; so does one that calls the package's
 own raising function, `_check`, `_error` or a raising method, and the wrappers of the
 reserved value and the header's values with its properties are read as the others are; a
-raise in `poll` after the ABI's call passes and one before it fails; a package with none of
+raise in `poll` after the ABI's last call passes, and one before it or between its two
+calls fails; a package with none of
 the per-message functions fails; a language with no rules fails. `just test` runs this
 through `test-scripts`.
 """
@@ -63,6 +64,16 @@ class Clients(unittest.TestCase):
     def test_the_handlers_raise_after_the_poll_passes_and_before_it_fails(self):
         self.assertEqual(lint.findings(self.tmp), [])
         self.edit("        self._handler = handler\n", "        self._handler = handler\n        raise RuntimeError('too early')\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Subscription.poll", finding)
+        self.assertIn("raises", finding)
+
+    def test_a_raise_between_polls_two_abi_calls_fails(self):
+        """`poll` calls the ABI on two lines, the refused nested poll and its own; the raise
+        allowed is after the last of them."""
+        self.edit("        try:\n            fragments = self._abi.cavalry_subscription_poll(",
+                  "        raise RuntimeError('between')\n        try:\n"
+                  "            fragments = self._abi.cavalry_subscription_poll(")
         [finding] = lint.findings(self.tmp)
         self.assertIn("Subscription.poll", finding)
         self.assertIn("raises", finding)

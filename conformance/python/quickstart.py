@@ -204,7 +204,10 @@ def edges(client):
     SystemExit as itself. Then what `offer` refuses: a `str`, a `bytearray` and a
     `memoryview` are refused with `ctypes.ArgumentError` and nothing is published. Then
     the lifetimes: a claim's view kept past its commit, and a body and a header kept past
-    their handler call, fail in Python when used."""
+    their handler call, fail in Python when used. Then the refusals of spec/c-abi.md,
+    "Calls during a claim or a poll", which leave the wrapper as they found it: a poll
+    from inside a handler of its own subscription, a second claim with one outstanding,
+    and a close with a claim outstanding, which releases its view."""
     name = "handler exceptions"
     subscription = client.add_subscription("cavalry:ipc", STREAM + 2)
     publication = client.add_publication("cavalry:ipc", STREAM + 2)
@@ -319,10 +322,88 @@ def edges(client):
         pass
     if header.values() is not None:
         fail(f"{name}: a header's values read after its handler call")
-    publication.close()
-    subscription.close()
     print(f"conformance/python: {name}: a claim's view written after its commit and a body read after its handler "
           f"call raised ValueError, and a header read after the call gave None")
+
+    # Calls the ABI refuses during a poll or a claim leave the wrapper as they found it
+    # (spec/c-abi.md, "Calls during a claim or a poll").
+    name = "refusals"
+    for i in range(13, 16):
+        offer_or_fail(name, publication, message(i), i)
+    outer = []
+    nested = []
+
+    def nested_handler(body, header):
+        fail(f"{name}: a poll from inside a handler of the same subscription delivered a fragment")
+
+    def outer_handler(body, header):
+        outer.append(int.from_bytes(body[:8], "little"))
+        nested.append((subscription.poll(nested_handler, 10), cavalry.library().cavalry_errcode()))
+
+    until = deadline()
+    while len(outer) < 3:
+        poll_or_fail(name, subscription, outer_handler, len(outer), 3)
+        if time.monotonic() > until:
+            fail(f"{name}: received messages {outer} of 13 to 15 in {WAIT_SECONDS:.0f} s")
+    if outer != [13, 14, 15] or nested != [(-1, _abi.CAVALRY_ERR_POLLING)] * 3:
+        fail(f"{name}: the outer handler saw {outer} and the polls from inside it returned (result, code) {nested}; "
+             f"expected messages 13 to 15, and -1 with CAVALRY_ERR_POLLING ({_abi.CAVALRY_ERR_POLLING}) each time")
+
+    until = deadline()
+    while True:
+        position = publication.try_claim(BODY)
+        if position >= 0:
+            break
+        refused(name, position, 16, until)
+    first = publication.claim
+    first[:8] = (16).to_bytes(8, "little")
+    again = publication.try_claim(BODY)
+    code = cavalry.library().cavalry_errcode()
+    if again != cavalry.ERROR or code != _abi.CAVALRY_ERR_CLAIM_OUTSTANDING or publication.claim is not first:
+        fail(f"{name}: a try_claim with a claim outstanding returned {CODE_NAMES.get(again, again)} with error {code}, "
+             f"and claim is {publication.claim!r}; expected ERROR with CAVALRY_ERR_CLAIM_OUTSTANDING and the "
+             f"outstanding claim's view")
+    if publication.commit() != position or publication.claim is not None:
+        fail(f"{name}: the outstanding claim's commit did not return its position {position} and release its view")
+    try:
+        first[0] = 1
+        fail(f"{name}: a claim's view written after its commit, past a refused second claim")
+    except ValueError:
+        pass
+    received = []
+
+    def index(body, header):
+        received.append(int.from_bytes(body[:8], "little"))
+
+    until = deadline()
+    while not received:
+        poll_or_fail(name, subscription, index, 16, 17)
+        if time.monotonic() > until:
+            fail(f"{name}: message 16 did not arrive in {WAIT_SECONDS:.0f} s")
+    if received != [16]:
+        fail(f"{name}: received {received} for the claim committed past a refused one; expected message 16")
+
+    until = deadline()
+    while True:
+        position = publication.try_claim(BODY)
+        if position >= 0:
+            break
+        refused(name, position, 17, until)
+    outstanding = publication.claim
+    publication.close()
+    if publication.claim is not None:
+        fail(f"{name}: the publication's close left claim {publication.claim!r}")
+    try:
+        outstanding[0] = 1
+        fail(f"{name}: a claim's view written after its publication's close")
+    except ValueError:
+        pass
+    poll_or_fail(name, subscription, unexpected, 17, 17)  # the close aborted the claim: padding, never a fragment
+    subscription.close()
+    print(f"conformance/python: {name}: a poll from inside a handler of its own subscription returned -1 with "
+          f"CAVALRY_ERR_POLLING and the outer handler saw messages 13 to 15; a try_claim with a claim outstanding "
+          f"returned ERROR with CAVALRY_ERR_CLAIM_OUTSTANDING, claim stayed the first view and its commit released it; "
+          f"a close with a claim outstanding released its view")
 
 
 def latency(client):

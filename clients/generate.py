@@ -540,13 +540,15 @@ class Publication:
 
     def try_claim(self, length):
         """Claim `length` bytes: the position after the frame, with `self.claim` the writable
-        view over them, or a result code below zero with `self.claim` None. One ABI call; the
-        view is this client's one allocation per message (README, "The runtime's side")."""
+        view over them, or a result code below zero with `self.claim` as it was. That is
+        None when no claim is outstanding. With one outstanding, the ABI refuses the call
+        with `ERROR` and `CAVALRY_ERR_CLAIM_OUTSTANDING` and leaves the claim as it was, so
+        `self.claim` stays its view, which its `commit` or `abort` still releases
+        (spec/c-abi.md, "Calls during a claim or a poll"). One ABI call; the view is this
+        client's one allocation per message (README, "The runtime's side")."""
         result = self._abi.cavalry_publication_try_claim(self._handle, length, self._claim_ref)
         if result >= 0:
             self.claim = memoryview((ctypes.c_uint8 * self._claim.length).from_address(self._claim.data)).cast("B")
-        else:
-            self.claim = None
         return result
 
     def _release(self):
@@ -602,7 +604,11 @@ class Publication:
         return self._abi.cavalry_publication_is_closed(self._handle)
 
     def close(self):
+        """Close the publication. The ABI's close aborts a claim still outstanding, and the
+        claim's view is released first, so a view kept past the close raises ValueError on
+        use instead of writing into a log the close gives back."""
         if self._handle is not None:
+            self._release()
             _check(self._abi, "cavalry_publication_close", self._abi.cavalry_publication_close(self._handle))
             self._handle = None
 
@@ -736,9 +742,18 @@ class Subscription:
 
     def poll(self, handler, fragment_limit):
         """One ABI call; the handler's exceptions, if any, are raised after it returns: one
-        that is not an `Exception` as itself, else the first as `HandlerError`."""
+        that is not an `Exception` as itself, else the first as `HandlerError`. Called from
+        a handler of this subscription's own poll, it passes the call to the ABI, which
+        refuses it with -1 and `CAVALRY_ERR_POLLING`, and touches nothing, so the poll in
+        progress goes on with its own handler and its own count of raises (spec/c-abi.md,
+        "Calls during a claim or a poll")."""
+        if self._handler is not None:
+            return self._abi.cavalry_subscription_poll(self._handle, self._trampoline, None, fragment_limit)
         self._handler = handler
-        fragments = self._abi.cavalry_subscription_poll(self._handle, self._trampoline, None, fragment_limit)
+        try:
+            fragments = self._abi.cavalry_subscription_poll(self._handle, self._trampoline, None, fragment_limit)
+        finally:
+            self._handler = None
         if self._raised:
             pending, interrupt, raised = self._pending, self._interrupt, self._raised
             self._pending = self._interrupt = None

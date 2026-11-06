@@ -26,7 +26,10 @@ JVM and .NET clients (cards 206 to 209) add a language each.
 - `just conformance` runs the client's runner under `conformance/<language>/`: the
   ten-minute path's shape through the client, publish and subscribe over `cavalry:ipc`
   and `cavalry:udp`, record and replay, every message once and in order, the
-  fragment handler's header fields against `spec/frame.md`'s vectors, and a report,
+  fragment handler's header fields against `spec/frame.md`'s vectors, a package of
+  another ABI version refused when it loads the library, the calls `spec/c-abi.md`
+  refuses during a claim or a poll leaving the client's state as they found it, and a
+  report,
   printed and never gated, from two rounds that check nothing else. The one-way p50,
   p99, p99.99 and max, over 100,000 messages so that ten samples lie above the p99.99,
   with the runtime's allocation counters off. The allocations per message on the
