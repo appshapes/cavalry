@@ -153,9 +153,12 @@ succeeds costs one C function call and one comparison more than the ABI's own. A
 call switches the goroutine to the system stack and back, which Go's runtime does in
 14 ns on this laptop for a call that returns at once (`cavalry_abi_version`, 5,000,000
 calls), and cgo's pointer check, on by default, reads each pointer argument once. The
-ABI's reply comes back as the Go integer of the C type. An add, a command or a close
-waits on the driver for up to 10 s (`spec/c-abi.md`, "Threads"); the goroutine blocks
-in the call and the scheduler runs the program's other goroutines meanwhile.
+ABI's reply comes back as the Go integer of the C type. Around the call the runtime
+marks the goroutine as in a system call, `entersyscall`, and back, `exitsyscall`; on
+their fast path these take no lock and make no syscall, and "The call-back, by
+construction" says when their slow path runs and what it costs. An add, a command or a
+close waits on the driver for up to 10 s (`spec/c-abi.md`, "Threads"); the goroutine
+blocks in the call and the scheduler runs the program's other goroutines meanwhile.
 
 ### Threads
 
@@ -222,10 +225,53 @@ frame's header. That function calls the exported Go function `cavalryGoFragment`
 cgo call-back: Go's runtime switches from the system stack to the goroutine that
 called `Poll`, which is what the call costs, and nothing is allocated for it. The Go
 trampoline reads the subscription from the table by the index the ABI handed back as
-`clientd`, makes the body's `[]byte` over the log's bytes with `unsafe.Slice`, no copy
-and no allocation, points the subscription's one `Header` at the frame, and calls the
+`clientd`, which the C trampoline passes as a `uintptr_t`, never as a pointer, since
+Go's stack copier ends the process on a value below 4,096 in a pointer's place. It
+makes the body's `[]byte` over the log's bytes with `unsafe.Slice`, no copy and no
+allocation, points the subscription's one `Header` at the frame, and calls the
 handler inside a function that recovers a panic ("The panic"). By construction, no
 object per received message.
+
+Each call-back crosses the boundary twice more, in Go's runtime (`cgocallbackg` in
+`runtime/cgocall.go`). The runtime first holds the goroutine to the polling thread
+for the call-back, since the C frames below it are on that thread's stack: a count on
+the thread, not a lock and not a syscall. It then calls `exitsyscall` to take back the
+goroutine's P, the runtime's processor, which Go code needs in order to run and which
+the poll's cgo call gave up in `entersyscall`. After the handler, `reentersyscall`
+gives the P up again for the rest of the poll. A poll of n fragments is therefore one
+`entersyscall` and `exitsyscall` pair for the call and n more for the call-backs. The
+client's own `runtime.LockOSThread` ("The thread's error") is on none of them.
+
+`exitsyscall` has a fast path and a slow one (`runtime/proc.go`):
+
+- The fast path takes back the P the call gave up, with a compare-and-swap of the P's
+  status and one of the goroutine's. It takes no lock and makes no syscall, and it is
+  part of the 14 ns of "The call". `entersyscall` stores the two statuses and takes no
+  lock either.
+- The slow path runs when that P is gone. Go's monitor thread, sysmon, retakes the P
+  of a call that is still in C at two of its looks, 20 µs apart at the shortest and
+  10 ms apart once sysmon has had nothing to do for a while (`retake`). It does so
+  only while the P has goroutines waiting in its run queue, or no other P is idle, or
+  sysmon has seen the call for 10 ms. The returning goroutine then takes the
+  scheduler's lock, `sched.lock`, to find an idle P. With none, it waits in the
+  global run queue while its thread parks, on a futex on Linux and a semaphore on
+  macOS, until another thread runs it; inside a call-back the thread is held, so it
+  parks until another thread hands it a P (`stoplockedm`). That is a lock, a sleep
+  and a wake: two context switches and the wait for a free P, all in that message's
+  latency. The retake itself may wake or start a thread to run the P meanwhile, on
+  sysmon's thread, not the caller's.
+
+A per-message call returns in nanoseconds, so the slow path needs the OS to stop the
+thread inside the ABI for at least one of sysmon's intervals, by preemption or by a
+cgroup's CPU throttling, while other goroutines wait for the P. The report's latency
+round runs one goroutine with idle Ps, so sysmon leaves the P with the call unless it
+has seen the call for 10 ms. Two more steps take `sched.lock` with no message as their
+cause: the first cgo call after every P was idle wakes sysmon, once per idle period,
+and a call that begins while the collector is stopping the world gives its P to the
+collector, once per stop. A call that is not a message waits on the driver for long
+enough to take the slow path when other goroutines are runnable; under its
+`runtime.LockOSThread` its thread then parks in `stoplockedm` until a P is handed to
+it, on the control plane.
 
 The `Header`'s `Values` reads `cavalry_header_values` once per fragment, on the first
 call, into the one `cavalry_header_values_t` the subscription keeps, and returns the
@@ -260,7 +306,10 @@ the claim before its commit, and the handler reads the clock first. On the lapto
 unpinned: p50 83 ns, p99 125 ns, p99.99 3,583 ns (10 samples above it, nearest
 rank), max 5,500 ns. That is two cgo calls and one call-back per message
 over the ABI's own one-way latency, which `just bench`'s `one_way_32_ffi` row
-measures.
+measures. The laptop's run came before the per-message calls went through `shim.c`,
+which adds one C call and one comparison to each. One run with the shim, on a CI
+runner (Go 1.24.13, Linux on amd64, unpinned), printed p50 111 ns, p99 210 ns,
+p99.99 6,442 ns and max 21,771 ns, and 0 allocations and 0 bytes per message.
 
 ### The panic
 
