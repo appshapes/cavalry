@@ -549,12 +549,13 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
 
-    // An unknown type: code 6.
+    // An unknown type, 9 in Aeron's reserved gap now that version 5 took 7 and 8
+    // (ADR 0053): code 6.
     let unknown_type = client.correlation_id();
     let mut message = Vec::new();
     message.extend_from_slice(&client.id.to_le_bytes());
     message.extend_from_slice(&unknown_type.to_le_bytes());
-    client.send_raw(7, &message);
+    client.send_raw(9, &message);
     assert_eq!(client.wait_error(unknown_type).0, 6);
 
     // A cavalry:udp channel parses in version 4: a publication sends on one (ADR
