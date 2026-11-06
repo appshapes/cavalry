@@ -286,14 +286,17 @@ message's receiver id, at most the receivers bound of "Values", each with the po
 plus receiver window length of its last accepted status message and the time it
 arrived: an accepted status message adds or updates its receiver's entry, and the
 limit becomes max(L, the least position plus window in the table), so that the slowest
-receiver sets the pace; on every duty cycle an entry whose status message is older
-than the flow control receiver timeout, or whose last status message carried the
-end-of-stream flag, is dropped from the table and counted in
-`sender.flow_control_receivers_timed_out`, and when entries remain the limit becomes
-max(L, the least of them), so that a receiver that went away holds the stream back for
-the timeout and no longer; a status message from a receiver the full table does not
-hold is accepted for the connection below and not tracked, counted in
-`sender.flow_control_receivers_full`. The entries now are the gauge
+receiver sets the pace; a status message with the end-of-stream flag from a receiver
+the table does not hold adds no entry, since the receiver's image has ended; on every
+duty cycle an entry whose status message is older than the flow control receiver
+timeout is dropped from the table and counted in
+`sender.flow_control_receivers_timed_out`, an entry whose last status message carried
+the end-of-stream flag is dropped and not counted, its image ended as every image ends
+after a close, which the receiving driver counts in `image.ended` (ADR 0054), and when
+entries remain the limit becomes max(L, the least of them), so that a receiver that
+went away holds the stream back for the timeout and no longer; a status message from a
+receiver the full table does not hold is accepted for the connection below and not
+tracked, counted in `sender.flow_control_receivers_full`. The entries now are the gauge
 `sender.flow_control_receivers`, keyed as `sender.limit` is. The sender limit never
 falls, under either strategy. A status message outside the window is counted in
 `sender.status_messages_rejected` and ignored, and so is one whose consumption term
@@ -313,8 +316,13 @@ keeps `is connected` to match, unblocks the log as "The driver" there says with 
 sender position as the consumer position, and cleans it only up to a term length behind
 the sender position, Aeron's rule, so that the resend window below the sender position
 is never cleaned (ADR 0041). After the publication is closed
-it lingers for the linger timeout, or until a status message with the end-of-stream flag
-arrives, sending heartbeats with EOS and answering NAKs; then its log is removed. Once
+it lingers for the linger timeout, sending heartbeats with EOS and answering NAKs; then
+its log is removed. On a channel with an endpoint a status message with the
+end-of-stream flag ends the linger when it arrives, since the one receiver it comes
+from has the stream to its end. On a control channel it does not: one destination's end
+of stream says nothing of another's, whose receiver may still be NAKing the tail, so
+the publication lingers for the linger timeout, which is Aeron's rule for a
+multi-destination publication (ADR 0054). Once
 the publication is closed and the sender position has reached the end of stream
 position, the condition under which its heartbeats carry EOS, a status message with the
 send-setup flag is ignored and counted in `sender.status_messages_rejected`: a setup
@@ -538,7 +546,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.naks_received`, `sender.naks_ignored` | a NAK arrives; one lies outside the resend window, or its term offset is not below the publication's term length or its range runs past it (ADR 0043) |
 | `sender.status_messages_received`, `sender.status_messages_rejected` | a status message arrives; one without the send-setup flag lies outside the window or its consumption term offset is not below the publication's term length (ADR 0043), or one with the flag asks a publication at its end of stream for a setup; an elicit the sender answers with a setup frame is not rejected |
 | `sender.rtt_replies_sent` | an RTT measurement is answered |
-| `sender.flow_control_receivers_timed_out` | a receiver is dropped from a `min` publication's table: no status message for the flow control receiver timeout, or its last one carried end of stream |
+| `sender.flow_control_receivers_timed_out` | a receiver is dropped from a `min` publication's table for no status message within the flow control receiver timeout; one dropped because its last status message carried end of stream is not counted (ADR 0054) |
 | `sender.flow_control_receivers_full` | a status message from a receiver a `min` publication's full table does not hold: accepted, not tracked |
 | `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, 0 under `max` |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
