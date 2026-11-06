@@ -16,6 +16,9 @@ bounded at 10 s, and one that runs out says how far it got.
 | Runner | Language | Runs with | Decided in |
 | --- | --- | --- | --- |
 | `c/` | C11, `quickstart.c` through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204) |
+| `python/` | Python 3, `quickstart.py` through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205) |
 
-The runners for Python, Node, Go, the JVM and .NET follow with their clients (ADR
-0046, cards 205 to 209), each the shape card 205 builds, its report included.
+The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046, cards
+206 to 209): the C runner's checks through the client, then a report, printed and never
+gated, of the one-way p50, p99.99 and max and the allocations per message on the client's
+side of the boundary, counted with what the runtime counts.

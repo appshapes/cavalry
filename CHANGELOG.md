@@ -1415,3 +1415,12 @@ user-visible change, added in the same commit as the change. The format follows
   139's run and master's at fa0c352 and 5dedadf, as a row added by hand to an entry that
   already exists: each percentile the largest over the processes, no runs list, and the
   compared value the slowest of the 63 runs. The rows are gated from here on (card 204).
+- The Python client, `clients/python`, generated from the committed C header by
+  `clients/generate.py`: a `ctypes` binding over `libcavalry_ffi` and the client's own
+  code, a `Client` that is a context manager, a `Publication` whose `try_claim` and
+  `offer` return the position or the result code, a `Subscription` polled with a
+  callable fragment handler, a `Recording` and a `Replay`; `just lint` regenerates the
+  package and reads its per-message functions for Python's locks, `async def`, `await`
+  and `raise`; `just conformance` runs `conformance/python/`, the ten-minute path's shape
+  through the client with a report of its one-way latency and allocations per message
+  ([clients/python/README.md](clients/python/README.md); ADR 0046, card 205).
