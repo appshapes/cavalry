@@ -977,6 +977,30 @@ scope = "static"
 doc = "Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5)."
 doctor = ""
 
+[[counter]]
+id = 98
+name = "subscription.add_deferred"
+kind = "counter"
+scope = "static"
+doc = "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049)."
+doctor = ""
+
+[[counter]]
+id = 99
+name = "subscription.add_deferred_timed_out"
+kind = "counter"
+scope = "static"
+doc = "`add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049)."
+doctor = "The receiver did not close a channel's previous receive endpoint within 5 s of an add on it, so the add was refused with code 4: the driver's receiver thread is behind, starved of CPU under a cgroup quota or busy; give the driver's threads the CPU they need, then add the subscription again."
+
+[[counter]]
+id = 100
+name = "subscription.add_deferred_waiting"
+kind = "gauge"
+scope = "static"
+doc = "`add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, each holding a slot of the subscriptions registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049)."
+doctor = ""
+
 # The image's life (spec/udp.md, "The receiver", step 5; ADR 0042): the receiver moves
 # it to live when the conductor hands the image over and to ended, timed out or
 # unsubscribed when it retires it; the conductor moves it to removed when it has

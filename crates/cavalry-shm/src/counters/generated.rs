@@ -299,6 +299,15 @@ pub const IMAGE_UNSUBSCRIBED: CounterId = CounterId(96);
 /// `image.removed`, a static counter: Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5).
 pub const IMAGE_REMOVED: CounterId = CounterId(97);
 
+/// `subscription.add_deferred`, a static counter: `add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049).
+pub const SUBSCRIPTION_ADD_DEFERRED: CounterId = CounterId(98);
+
+/// `subscription.add_deferred_timed_out`, a static counter: `add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049).
+pub const SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT: CounterId = CounterId(99);
+
+/// `subscription.add_deferred_waiting`, a static gauge: `add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, each holding a slot of the subscriptions registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049).
+pub const SUBSCRIPTION_ADD_DEFERRED_WAITING: CounterId = CounterId(100);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1083,6 +1092,30 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5).",
+        doctor: "",
+    },
+    CounterDef {
+        id: SUBSCRIPTION_ADD_DEFERRED,
+        name: "subscription.add_deferred",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049).",
+        doctor: "",
+    },
+    CounterDef {
+        id: SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
+        name: "subscription.add_deferred_timed_out",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "`add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049).",
+        doctor: "The receiver did not close a channel's previous receive endpoint within 5 s of an add on it, so the add was refused with code 4: the driver's receiver thread is behind, starved of CPU under a cgroup quota or busy; give the driver's threads the CPU they need, then add the subscription again.",
+    },
+    CounterDef {
+        id: SUBSCRIPTION_ADD_DEFERRED_WAITING,
+        name: "subscription.add_deferred_waiting",
+        kind: Kind::Gauge,
+        scope: Scope::Static,
+        doc: "`add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, each holding a slot of the subscriptions registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049).",
         doctor: "",
     },
 ];

@@ -53,7 +53,8 @@ use cavalry_shm::counters::generated::{
     RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED,
     RECORDING_STOPPED, RECORDING_SYNCED_POSITION, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
     REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
-    SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_POSITION,
+    SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
+    SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
@@ -283,6 +284,25 @@ struct Subscription {
     /// The receive endpoint a `cavalry:udp` subscription receives on; `None` for
     /// `cavalry:ipc`.
     endpoint: Option<i64>,
+}
+
+/// An `add subscription` on a `cavalry:udp` channel whose previous receive endpoint
+/// was still closing, its socket with the receiver, held until the receiver's
+/// `EndpointClosed` reply frees the slot and then run as if it had just arrived
+/// (`spec/client-protocol.md`, "Commands"; ADR 0049; card 194), or answered with code 4
+/// once it has waited [`spec::CLOSING_ENDPOINT_WAIT`]. It holds a slot of the
+/// subscriptions registry while it waits.
+struct PendingSubscription {
+    client_id: i64,
+    correlation_id: i64,
+    stream_id: i32,
+    /// The channel as the command carried it, so the add runs again as it arrived.
+    channel: Vec<u8>,
+    endpoint: SocketAddr,
+    interface: Option<SocketAddr>,
+    /// When the conductor read the add, on the driver's clock: the closing endpoint
+    /// wait is measured from here.
+    arrived: i64,
 }
 
 /// One receive endpoint the conductor bound: the resolved channel, the socket's
@@ -515,6 +535,9 @@ struct Statics {
     replay_start_failed: Counter,
     channel_opened: Counter,
     channel_closed: Counter,
+    subscription_add_deferred: Counter,
+    subscription_add_deferred_timed_out: Counter,
+    subscription_add_deferred_waiting: Counter,
     image_removed: Counter,
 }
 
@@ -548,6 +571,9 @@ impl Statics {
             replay_start_failed: get(REPLAY_START_FAILED)?,
             channel_opened: get(CHANNEL_OPENED)?,
             channel_closed: get(CHANNEL_CLOSED)?,
+            subscription_add_deferred: get(SUBSCRIPTION_ADD_DEFERRED)?,
+            subscription_add_deferred_timed_out: get(SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT)?,
+            subscription_add_deferred_waiting: get(SUBSCRIPTION_ADD_DEFERRED_WAITING)?,
             image_removed: get(IMAGE_REMOVED)?,
         })
     }
@@ -591,6 +617,8 @@ pub(crate) struct Conductor {
     clients: Vec<Client>,
     publications: Vec<Publication>,
     subscriptions: Vec<Subscription>,
+    /// Adds waiting for a closing receive endpoint, in arrival order (ADR 0049).
+    pending_subscriptions: Vec<PendingSubscription>,
     images: Vec<Image>,
     recordings: Vec<RecordingEntry>,
     replays: Vec<ReplayEntry>,
@@ -706,6 +734,7 @@ impl Conductor {
                 spec::MAX_PUBLICATIONS + spec::MAX_REPLAY_PUBLICATIONS,
             ),
             subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
+            pending_subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
             replays: Vec::with_capacity(spec::MAX_REPLAYS),
@@ -852,6 +881,11 @@ impl Conductor {
         // The receiver the same way: it answers only for endpoints this registry holds.
         if !self.receive_endpoints.is_empty() {
             work += self.take_receiver_replies(now);
+        }
+        // After the replies, so that a close that came this cycle runs its adds first;
+        // an add waits only while the list holds it (ADR 0049).
+        if !self.pending_subscriptions.is_empty() {
+            work += self.time_out_pending_subscriptions(now);
         }
         work += self.flush_receiver_deferred();
         if !self.udp_images.is_empty() {
@@ -2004,14 +2038,15 @@ impl Conductor {
         stream_id: i32,
         channel: &[u8],
     ) {
+        let raw = channel;
         let Some(channel) = self.check_channel(correlation_id, channel, "the channel") else {
             return;
         };
         if let Channel::Udp(udp) = channel {
-            self.add_udp_subscription(client_id, correlation_id, stream_id, udp);
+            self.add_udp_subscription(client_id, correlation_id, stream_id, udp, raw);
             return;
         }
-        if self.subscriptions.len() >= spec::MAX_SUBSCRIPTIONS {
+        if self.subscriptions_full() {
             self.registry_full(correlation_id, "subscriptions", spec::MAX_SUBSCRIPTIONS);
             return;
         }
@@ -2085,6 +2120,66 @@ impl Conductor {
         Some((endpoint, interface))
     }
 
+    /// Whether the subscriptions registry is at capacity: its registered subscriptions
+    /// and the adds waiting for a closing receive endpoint, which hold a slot each
+    /// (`spec/client-protocol.md`, "Sizes"; ADR 0049). Every `add subscription`, on
+    /// `cavalry:ipc` or `cavalry:udp`, asks this one, so neither takes a waiting add's
+    /// slot.
+    fn subscriptions_full(&self) -> bool {
+        self.subscriptions.len() + self.pending_subscriptions.len() >= spec::MAX_SUBSCRIPTIONS
+    }
+
+    /// Stores how many adds wait for a closing receive endpoint now in
+    /// `subscription.add_deferred_waiting`, after every change to the list, so that
+    /// `cavalry doctor` can tell a registry full of waiting adds from one full of
+    /// subscriptions (ADR 0049).
+    fn count_waiting_adds(&self) {
+        self.statics
+            .subscription_add_deferred_waiting
+            .set(i64::try_from(self.pending_subscriptions.len()).unwrap_or(i64::MAX));
+    }
+
+    /// Answers every `add subscription` that has waited [`spec::CLOSING_ENDPOINT_WAIT`]
+    /// for its channel's previous receive endpoint to close with code 4, the bind it
+    /// would have made, and counts it; nothing is registered, and the close that comes
+    /// later runs nothing for it (`spec/client-protocol.md`, "Commands", "Liveness and
+    /// timeouts"; ADR 0049). The receiver falls that far behind when its thread is
+    /// starved, under cgroup CPU throttling, or when the endpoint's remove waits behind a
+    /// full request queue. Returns how many it answered.
+    fn time_out_pending_subscriptions(&mut self, now: i64) -> usize {
+        let wait = spec::nanos(spec::CLOSING_ENDPOINT_WAIT);
+        let waited = |pending: &PendingSubscription| now.saturating_sub(pending.arrived) >= wait;
+        // A cycle with no add due runs this scan and nothing else; `extract_if` below
+        // keeps the adds that stay in their order.
+        if !self.pending_subscriptions.iter().any(waited) {
+            return 0;
+        }
+        let mut due = Vec::with_capacity(self.pending_subscriptions.len());
+        due.extend(
+            self.pending_subscriptions
+                .extract_if(.., |pending| waited(pending)),
+        );
+        self.count_waiting_adds();
+        let answered = due.len();
+        for pending in due {
+            self.statics.subscription_add_deferred_timed_out.increment();
+            self.send_error(
+                pending.correlation_id,
+                ErrorCode::ChannelEndpointError,
+                &format!(
+                    "the channel's endpoint {}: the previous receive endpoint on it has not \
+                     closed in the {} s this add waited, its socket still with the receiver, \
+                     so a new one cannot be bound; the driver's receiver thread is behind, \
+                     starved of CPU or busy: give the driver's threads the CPU they need, then \
+                     add the subscription again; see {ERRORS_DOC}",
+                    pending.endpoint,
+                    spec::CLOSING_ENDPOINT_WAIT.as_secs()
+                ),
+            );
+        }
+        answered
+    }
+
     /// `add subscription` on a `cavalry:udp` channel (`spec/client-protocol.md`,
     /// "Commands"; `spec/udp.md`, "The receiver"; ADR 0042): the host is resolved once,
     /// code 9 when it does not; the first subscription on the resolved channel binds its
@@ -2103,8 +2198,9 @@ impl Conductor {
         correlation_id: i64,
         stream_id: i32,
         channel: UdpChannel<'_>,
+        raw: &[u8],
     ) {
-        if self.subscriptions.len() >= spec::MAX_SUBSCRIPTIONS {
+        if self.subscriptions_full() {
             self.registry_full(correlation_id, "subscriptions", spec::MAX_SUBSCRIPTIONS);
             return;
         }
@@ -2117,11 +2213,14 @@ impl Conductor {
                 && entry.state == ChannelState::Active
         });
         // The channel's previous endpoint, closed with its last subscription and image,
-        // still holds the socket while the receiver drops it: the bind below would fail
-        // on the port in use with a message that blames the operator's port, so the
-        // refusal says what is happening and what to do instead (invariant 6); removing
-        // and adding a subscription on one channel is an ordinary sequence, and code 4
-        // is the code for a socket that cannot be bound.
+        // still holds the socket while the receiver drops it, so the bind below would
+        // fail on the port in use; removing and adding a subscription on one channel is
+        // an ordinary sequence no client should retry around, so the add waits, with
+        // nothing registered and no event sent, until the receiver's `EndpointClosed`
+        // reply frees the slot and `take_receiver_replies` runs it again as it arrived:
+        // one receiver cycle while the receiver keeps up, and at most the closing
+        // endpoint wait, after which `time_out_pending_subscriptions` answers it with
+        // code 4 inside the client's response timeout (ADR 0049).
         if open.is_none()
             && self.receive_endpoints.iter().any(|entry| {
                 entry.endpoint == endpoint
@@ -2129,16 +2228,17 @@ impl Conductor {
                     && entry.state == ChannelState::Closing
             })
         {
-            self.send_error(
+            self.pending_subscriptions.push(PendingSubscription {
+                client_id,
                 correlation_id,
-                ErrorCode::ChannelEndpointError,
-                &format!(
-                    "the channel's endpoint {endpoint}: the previous endpoint on it is still \
-                     closing, its socket with the receiver, so a new one cannot be bound yet; \
-                     add the subscription again after a moment, once the receiver has closed \
-                     it; see {ERRORS_DOC}"
-                ),
-            );
+                stream_id,
+                channel: raw.to_vec(),
+                endpoint,
+                interface,
+                arrived: now_nanos(),
+            });
+            self.statics.subscription_add_deferred.increment();
+            self.count_waiting_adds();
             return;
         }
         // Room in the receiver's queue for an endpoint, an interest and a reader per
@@ -2491,6 +2591,7 @@ impl Conductor {
                     {
                         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
                         let entry = self.receive_endpoints.swap_remove(index);
+                        let (closed_endpoint, closed_interface) = (entry.endpoint, entry.interface);
                         for counter in [
                             entry.status,
                             entry.socket_rcvbuf,
@@ -2499,6 +2600,24 @@ impl Conductor {
                             entry.publications,
                         ] {
                             let _ = self.counters.free(counter.id(), reuse);
+                        }
+                        // The adds that waited for this endpoint's close run now, in
+                        // the order they arrived, each as if it had just arrived: the
+                        // first binds the endpoint again (ADR 0049). They leave the
+                        // list in one pass, which keeps the others in their order.
+                        let mut due = Vec::with_capacity(self.pending_subscriptions.len());
+                        due.extend(self.pending_subscriptions.extract_if(.., |pending| {
+                            pending.endpoint == closed_endpoint
+                                && pending.interface == closed_interface
+                        }));
+                        self.count_waiting_adds();
+                        for pending in due {
+                            self.add_subscription(
+                                pending.client_id,
+                                pending.correlation_id,
+                                pending.stream_id,
+                                &pending.channel,
+                            );
                         }
                     }
                 }
@@ -2921,6 +3040,10 @@ impl Conductor {
     /// client goes, as if removed, and the client is forgotten.
     fn remove_client(&mut self, client_id: i64, now: i64) {
         self.clients.retain(|client| client.id != client_id);
+        // Its adds still waiting for a closing endpoint go with it (ADR 0049).
+        self.pending_subscriptions
+            .retain(|pending| pending.client_id != client_id);
+        self.count_waiting_adds();
         let registrations: Vec<(usize, i64)> = self
             .publications
             .iter()
@@ -11560,11 +11683,13 @@ mod receiving {
     }
 
     /// `add subscription` on a channel whose previous endpoint is still closing, its
-    /// socket with the receiver, is code 4 with a message that says so and what to do,
-    /// not one that blames the operator's port; once the receiver has closed it, the
-    /// add succeeds and opens the endpoint again.
+    /// socket with the receiver, waits for the close with nothing registered and no
+    /// event sent, and runs once the receiver has closed it: the endpoint is bound
+    /// again, the subscription registered and `subscription ready` sent, with
+    /// `channel.opened` at 2 and nothing counted as an error (ADR 0049; card 194). A
+    /// second add from the same client in the window joins the first, in order.
     #[test]
-    fn a_subscription_on_a_channel_whose_endpoint_is_still_closing_is_told_to_add_again() {
+    fn an_add_on_a_channel_whose_endpoint_is_still_closing_waits_for_the_close() {
         let mut h = Harness::new("udp-closing");
         let port = free_port();
         let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
@@ -11578,25 +11703,214 @@ mod receiving {
             h.conductor.receive_endpoints[0].state,
             ChannelState::Closing
         );
-        // Before the receiver's next cycle: the socket is still bound.
+        // Before the receiver's next cycle: the socket is still bound, and the adds
+        // wait.
         h.conductor
             .add_subscription(1, 4, STREAM, channel.as_bytes());
-        let (code, message) = h.last_error(4).expect("refused");
-        assert_eq!(code, 4, "{message}");
-        assert!(message.contains("still closing"), "{message}");
-        assert!(message.contains("add the subscription again"), "{message}");
-        assert!(h.conductor.subscriptions.is_empty(), "nothing registered");
-        assert_eq!(h.conductor.receive_endpoints.len(), 1);
-        // The receiver closes the socket and the conductor frees the entry: the add
-        // succeeds.
-        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
         h.conductor
             .add_subscription(1, 5, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(4), None);
+        assert_eq!(h.last_error(5), None);
+        assert!(h.conductor.subscriptions.is_empty(), "nothing registered");
+        assert_eq!(h.conductor.pending_subscriptions.len(), 2);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED), 2);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_WAITING), 2);
+        assert_eq!(h.conductor.receive_endpoints.len(), 1);
+        // The receiver closes the socket, the conductor frees the entry, and the adds
+        // run in their order: the first binds the endpoint again.
+        assert!(h.cycle_until(|h| h.conductor.subscriptions.len() == 2));
+        assert!(h.conductor.pending_subscriptions.is_empty());
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_WAITING), 0);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT), 0);
+        assert_eq!(h.last_error(4), None);
         assert_eq!(h.last_error(5), None);
         assert_eq!(h.conductor.receive_endpoints.len(), 1);
-        assert_eq!(h.conductor.subscriptions.len(), 1);
+        assert_eq!(h.conductor.receive_endpoints[0].state, ChannelState::Active);
+        assert_eq!(
+            h.conductor
+                .subscriptions
+                .iter()
+                .map(|subscription| subscription.registration_id)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
         assert_eq!(h.counter(CHANNEL_OPENED), 2);
         assert_eq!(h.counter(CHANNEL_CLOSED), 1);
+    }
+
+    /// A waiting add holds a slot of the subscriptions registry, so the registry fills
+    /// with waiting adds as with registered ones and one more is code 10 (invariant
+    /// 3); and the waiting adds go with a client that closes before the endpoint has
+    /// closed, so nothing of them is registered when it does (ADR 0049).
+    #[test]
+    fn waiting_adds_hold_registry_slots_and_go_with_their_client() {
+        let mut h = Harness::new("udp-closing-full");
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 2, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        assert_eq!(
+            h.conductor.receive_endpoints[0].state,
+            ChannelState::Closing
+        );
+        for n in 0..spec::MAX_SUBSCRIPTIONS as i64 {
+            h.conductor
+                .add_subscription(1, 10 + n, STREAM, channel.as_bytes());
+        }
+        assert_eq!(
+            h.conductor.pending_subscriptions.len(),
+            spec::MAX_SUBSCRIPTIONS
+        );
+        assert_eq!(h.last_error(10), None);
+        h.conductor
+            .add_subscription(1, 9_999, STREAM, channel.as_bytes());
+        let (code, message) = h.last_error(9_999).expect("one more is refused");
+        assert_eq!(code, 10, "{message}");
+        assert_eq!(
+            h.conductor.pending_subscriptions.len(),
+            spec::MAX_SUBSCRIPTIONS
+        );
+        // The client goes: its waiting adds go with it, and the endpoint's close
+        // registers nothing.
+        assert_eq!(
+            h.counter(SUBSCRIPTION_ADD_DEFERRED_WAITING),
+            spec::MAX_SUBSCRIPTIONS as i64
+        );
+        h.conductor.remove_client(1, now);
+        assert!(h.conductor.pending_subscriptions.is_empty());
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_WAITING), 0);
+        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
+        assert!(h.conductor.subscriptions.is_empty());
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+    }
+
+    /// An add that has waited the closing endpoint wait for its channel's previous
+    /// receive endpoint, the receiver held for the whole wait, is answered with code 4,
+    /// counted, with nothing registered; and the receiver's close afterwards registers
+    /// nothing for it, so no `subscription ready` reaches a client that has given up
+    /// on the add (`spec/client-protocol.md`, "Liveness and timeouts"; ADR 0049).
+    #[test]
+    fn an_add_that_waits_past_the_closing_endpoint_wait_is_code_4() {
+        let mut h = Harness::new("udp-closing-wait");
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 2, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        assert_eq!(
+            h.conductor.receive_endpoints[0].state,
+            ChannelState::Closing
+        );
+        h.conductor
+            .add_subscription(1, 4, STREAM, channel.as_bytes());
+        assert_eq!(h.conductor.pending_subscriptions.len(), 1);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED), 1);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_WAITING), 1);
+        // The receiver runs no cycle. A millisecond inside the bound the add still
+        // waits; at the bound it is code 4.
+        let arrived = h.conductor.pending_subscriptions[0].arrived;
+        let wait = spec::nanos(spec::CLOSING_ENDPOINT_WAIT);
+        h.conductor.duty_cycle(arrived + wait - MS);
+        assert_eq!(h.last_error(4), None);
+        assert_eq!(h.conductor.pending_subscriptions.len(), 1);
+        h.conductor.duty_cycle(arrived + wait);
+        let (code, message) = h.last_error(4).expect("refused at the bound");
+        assert_eq!(code, 4, "{message}");
+        assert!(message.contains(&format!("127.0.0.1:{port}")), "{message}");
+        assert!(message.contains("has not closed in the 5 s"), "{message}");
+        assert!(message.contains("add the subscription again"), "{message}");
+        assert!(h.conductor.pending_subscriptions.is_empty());
+        assert!(h.conductor.subscriptions.is_empty(), "nothing registered");
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT), 1);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_WAITING), 0);
+        // The receiver runs again and closes the endpoint: the close registers nothing
+        // and binds nothing.
+        h.now = arrived + wait;
+        assert!(h.cycle_until(|h| h.conductor.receive_endpoints.is_empty()));
+        h.settle();
+        assert!(h.conductor.subscriptions.is_empty());
+        assert!(h.conductor.receive_endpoints.is_empty());
+        let mut answered_again = false;
+        while h
+            .receiver
+            .receive(|type_id, message| match Event::parse(type_id, message) {
+                Ok(Event::SubscriptionReady {
+                    correlation_id: 4, ..
+                })
+                | Ok(Event::Error {
+                    offending_correlation_id: 4,
+                    ..
+                }) => answered_again = true,
+                _ => {}
+            })
+            .expect("the receiver reads")
+        {}
+        assert!(!answered_again, "the refused add is answered once");
+        assert_eq!(h.counter(CHANNEL_OPENED), 1);
+        assert_eq!(h.counter(CHANNEL_CLOSED), 1);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT), 1);
+    }
+
+    /// A `cavalry:ipc` add counts the waiting adds against the subscriptions registry
+    /// as a `cavalry:udp` add does, so it cannot take a slot a waiting add holds: with
+    /// 1023 subscriptions registered and one add waiting, the IPC add is code 10 with
+    /// nothing registered, and the close then registers the waiting add
+    /// (`spec/client-protocol.md`, "Sizes"; ADR 0049).
+    #[test]
+    fn an_ipc_add_cannot_take_the_slot_a_waiting_add_holds() {
+        let mut h = Harness::new("udp-closing-ipc");
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 2, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        assert_eq!(
+            h.conductor.receive_endpoints[0].state,
+            ChannelState::Closing
+        );
+        let registered = spec::MAX_SUBSCRIPTIONS as i64 - 1;
+        for n in 0..registered {
+            h.conductor.add_subscription(1, 10 + n, STREAM, IPC_CHANNEL);
+        }
+        assert_eq!(h.last_error(10), None);
+        assert_eq!(h.conductor.subscriptions.len(), spec::MAX_SUBSCRIPTIONS - 1);
+        h.conductor
+            .add_subscription(1, 5_000, STREAM, channel.as_bytes());
+        assert_eq!(h.conductor.pending_subscriptions.len(), 1);
+        // The registry is full, 1023 registered and one waiting: the IPC add is
+        // refused, with nothing registered.
+        h.conductor.add_subscription(1, 6_000, STREAM, IPC_CHANNEL);
+        let (code, message) = h.last_error(6_000).expect("the IPC add is refused");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("subscriptions"), "{message}");
+        assert_eq!(h.conductor.subscriptions.len(), spec::MAX_SUBSCRIPTIONS - 1);
+        assert!(
+            !h.conductor
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.registration_id == 6_000)
+        );
+        // The receiver closes the endpoint: the waiting add takes the slot it held.
+        assert!(h.cycle_until(|h| h.conductor.subscriptions.len() == spec::MAX_SUBSCRIPTIONS));
+        assert_eq!(h.last_error(5_000), None);
+        assert!(h.conductor.pending_subscriptions.is_empty());
+        assert!(
+            h.conductor
+                .subscriptions
+                .iter()
+                .any(|subscription| subscription.registration_id == 5_000)
+        );
+        assert_eq!(h.counter(CHANNEL_OPENED), 2);
     }
 
     /// The receive endpoints registry fills at its capacity, and a 65th is code 10
