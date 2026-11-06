@@ -1563,3 +1563,16 @@ user-visible change, added in the same commit as the change. The format follows
   change lands, and a subscription's channel that names a publication's keys with
   code 1 ([ADR 0053](docs/decisions/0053-add-multi-destination-cast-to-cavalry-udp.md);
   card 225).
+- The driver sends a control channel's publications to every destination a client
+  adds with `add destination`, binding the control address and sending each burst to
+  each destination in turn, a datagram one destination did not take whole going to all
+  again and a destination the socket cannot reach holding the others back by nothing;
+  `fc=min` keeps a table of at most 64 receivers per publication, the sender limit the
+  slowest answering receiver's position plus window, a receiver dropped after 5 s
+  without a status message or on end of stream; the counters
+  `sender.flow_control_receivers_timed_out`, `sender.flow_control_receivers_full`,
+  `sender.flow_control_receivers` and `channel.destinations` explain both, and
+  `cavalry doctor` names a control channel with no destination, a `min` publication
+  with fewer receivers answering than destinations, a dropped receiver and a full
+  table ([ADR 0053](docs/decisions/0053-add-multi-destination-cast-to-cavalry-udp.md);
+  `docs/reference/udp.md`; card 225).

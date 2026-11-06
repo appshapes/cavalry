@@ -91,7 +91,16 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   the publication window while a status message arrived within the connection timeout,
   cleans the log a term behind the sender position so that the resend window stays, and
   lingers a closed publication until the receiver acknowledges the end of stream or the
-  linger passes. Every step has its counter, `sender.*`, `publication.connected` and
+  linger passes. On a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual`,
+  the endpoint's socket is bound to the control address and connected to nothing, and
+  the sender sends every datagram to each destination a client added with `add
+  destination`, at most 64 per endpoint, each resolved when it is added to an address
+  the control address can send to, the datagrams a destination did not take whole
+  going to all of them again and a destination the socket refuses holding the others
+  back by nothing; under `fc=min` it keeps per publication a table of
+  at most 64 receivers by receiver id, the sender limit the least position plus window
+  among them, a receiver dropped after 5 s without a status message (ADR 0053). Every
+  step has its counter, `sender.*`, `publication.connected` and
   `channel.*`, and the socket calls `std` lacks come through `nix`. The sender idles
   with the driver's strategy while it holds an endpoint or a publication and parks
   while it holds none, unparked by the conductor's next request, so a driver that

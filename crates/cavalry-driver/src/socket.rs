@@ -1,10 +1,12 @@
 //! A send endpoint's socket (`spec/udp.md`, "The sender" and "The receiver"; ADR
 //! 0041): a `std::net::UdpSocket` opened, bound to the interface when one is named,
 //! connected to the endpoint and set non-blocking on the control plane as the command
-//! is handled, and `nix` on its descriptor for what `std` lacks: one `sendmmsg` per burst
-//! on Linux and one `sendmsg` per datagram elsewhere, `recvmmsg` or `recvmsg` for the
-//! control frames the endpoint receives, and the buffer lengths read back for
-//! `channel.socket_rcvbuf` and `channel.socket_sndbuf`. The headers the batched calls
+//! is handled, or, for a control channel, bound to the control address and connected to
+//! nothing, every send carrying a destination's address (ADR 0053); and `nix` on its
+//! descriptor for what `std` lacks: one `sendmmsg` per burst and destination on Linux
+//! and one `sendmsg` per datagram elsewhere, `recvmmsg` or `recvmsg` for the control
+//! frames the endpoint receives, with their source addresses, and the buffer lengths
+//! read back for `channel.socket_rcvbuf` and `channel.socket_sndbuf`. The headers the batched calls
 //! fill are [`Headers`], preallocated once by the sender as it is built on its own
 //! thread and lent to every endpoint's calls: `nix`'s `MultiHeaders` holds raw
 //! pointers and cannot be sent between threads, so a socket could not carry its own
@@ -56,9 +58,9 @@ pub(crate) struct Sent {
 /// with its header on the stack.
 pub(crate) struct Headers {
     #[cfg(target_os = "linux")]
-    send: MultiHeaders<()>,
+    send: MultiHeaders<SockaddrStorage>,
     #[cfg(target_os = "linux")]
-    receive: MultiHeaders<()>,
+    receive: MultiHeaders<SockaddrStorage>,
 }
 
 impl Headers {
@@ -79,10 +81,20 @@ impl Headers {
 /// batched calls fill are the sender's [`Headers`], lent to each call.
 pub(crate) struct SendSocket {
     socket: UdpSocket,
-    /// The control datagrams the last poll received, one buffer each.
-    receive_buffers: Box<[[u8; CONTROL_DATAGRAM_LENGTH]; DATAGRAMS_PER_POLL]>,
-    /// How many bytes each of the last poll's datagrams holds.
+    /// What the last poll received, boxed once at open so that the socket stays small
+    /// in the request that carries it to the sender.
+    polled: Box<Polled>,
+}
+
+/// The control datagrams a send endpoint's last poll received.
+struct Polled {
+    /// One buffer per datagram.
+    buffers: [[u8; CONTROL_DATAGRAM_LENGTH]; DATAGRAMS_PER_POLL],
+    /// How many bytes each datagram holds.
     received: [usize; DATAGRAMS_PER_POLL],
+    /// Where each datagram came from: on a control channel's socket, where an RTT
+    /// measurement's answer goes (`spec/udp.md`, "The sender", step 5; ADR 0053).
+    sources: [Option<SockaddrStorage>; DATAGRAMS_PER_POLL],
 }
 
 impl SendSocket {
@@ -102,11 +114,29 @@ impl SendSocket {
         let _ = setsockopt(&socket, sockopt::RcvBuf, &(SOCKET_RCVBUF_LENGTH as usize));
         socket.connect(endpoint)?;
         socket.set_nonblocking(true)?;
-        Ok(Self {
+        Ok(Self::over(socket))
+    }
+
+    /// Opens a control channel's socket: bound to `control`, connected to nothing, set
+    /// non-blocking, with the receive buffer asked for as [`SendSocket::open`] asks it;
+    /// every send names a destination (`spec/udp.md`, "The sender"; ADR 0053). The
+    /// operating system's reason is the error, code 4 to the client.
+    pub(crate) fn open_control(control: SocketAddr) -> io::Result<Self> {
+        let socket = UdpSocket::bind(control)?;
+        let _ = setsockopt(&socket, sockopt::RcvBuf, &(SOCKET_RCVBUF_LENGTH as usize));
+        socket.set_nonblocking(true)?;
+        Ok(Self::over(socket))
+    }
+
+    fn over(socket: UdpSocket) -> Self {
+        Self {
             socket,
-            receive_buffers: Box::new([[0u8; CONTROL_DATAGRAM_LENGTH]; DATAGRAMS_PER_POLL]),
-            received: [0; DATAGRAMS_PER_POLL],
-        })
+            polled: Box::new(Polled {
+                buffers: [[0u8; CONTROL_DATAGRAM_LENGTH]; DATAGRAMS_PER_POLL],
+                received: [0; DATAGRAMS_PER_POLL],
+                sources: [None; DATAGRAMS_PER_POLL],
+            }),
+        }
     }
 
     /// The receive and send buffer lengths the socket holds, read back from it, for
@@ -122,13 +152,15 @@ impl SendSocket {
     }
 
     /// Sends up to [`DATAGRAMS_PER_BURST`] datagrams, each one slice, in one call on Linux
-    /// through `headers` and one call each elsewhere, and says how many the socket took
-    /// whole. `Err` is the operating system's refusal of the first datagram, with
-    /// nothing sent.
+    /// through `headers` and one call each elsewhere, to the connected endpoint, or to
+    /// `to` on a control channel's socket, and says how many the socket took whole.
+    /// `Err` is the operating system's refusal of the first datagram, with nothing
+    /// sent.
     pub(crate) fn send_burst(
         &self,
         headers: &mut Headers,
         datagrams: &[[IoSlice<'_>; 1]],
+        to: Option<&SockaddrStorage>,
     ) -> io::Result<Sent> {
         let count = datagrams.len().min(DATAGRAMS_PER_BURST);
         let datagrams = &datagrams[..count];
@@ -137,12 +169,15 @@ impl SendSocket {
         }
         #[cfg(target_os = "linux")]
         {
-            const NO_ADDRESS: [Option<()>; DATAGRAMS_PER_BURST] = [None; DATAGRAMS_PER_BURST];
+            // One address per datagram, the same one: a copy of 128 bytes each on the
+            // stack, no allocation.
+            let addresses: [Option<SockaddrStorage>; DATAGRAMS_PER_BURST] =
+                std::array::from_fn(|_| to.copied());
             let results = sendmmsg(
                 self.socket.as_raw_fd(),
                 &mut headers.send,
                 datagrams,
-                &NO_ADDRESS[..count],
+                &addresses[..count],
                 [],
                 MsgFlags::MSG_DONTWAIT,
             )
@@ -164,12 +199,12 @@ impl SendSocket {
             let _ = headers;
             let mut sent = Sent::default();
             for datagram in datagrams {
-                match sendmsg::<()>(
+                match sendmsg::<SockaddrStorage>(
                     self.socket.as_raw_fd(),
                     datagram,
                     &[],
                     MsgFlags::MSG_DONTWAIT,
-                    None,
+                    to,
                 ) {
                     Ok(bytes) if bytes >= datagram[0].len() => sent.whole += 1,
                     Ok(_) => {
@@ -187,11 +222,16 @@ impl SendSocket {
         }
     }
 
-    /// Sends one datagram, a control frame; `Ok(false)` when the socket took only part
-    /// of it, `Err` when it refused it.
-    pub(crate) fn send_one(&self, headers: &mut Headers, bytes: &[u8]) -> io::Result<bool> {
+    /// Sends one datagram, a control frame, to the connected endpoint or to `to`;
+    /// `Ok(false)` when the socket took only part of it, `Err` when it refused it.
+    pub(crate) fn send_one(
+        &self,
+        headers: &mut Headers,
+        bytes: &[u8],
+        to: Option<&SockaddrStorage>,
+    ) -> io::Result<bool> {
         let datagram = [[IoSlice::new(bytes)]];
-        let sent = self.send_burst(headers, &datagram)?;
+        let sent = self.send_burst(headers, &datagram, to)?;
         Ok(sent.whole == 1)
     }
 
@@ -201,10 +241,12 @@ impl SendSocket {
     /// refusal other than "nothing to read", which the sender counts in
     /// `receiver.receive_failed`.
     pub(crate) fn receive(&mut self, headers: &mut Headers) -> io::Result<usize> {
-        self.received = [0; DATAGRAMS_PER_POLL];
+        let polled = &mut *self.polled;
+        polled.received = [0; DATAGRAMS_PER_POLL];
+        polled.sources = [None; DATAGRAMS_PER_POLL];
         #[cfg(target_os = "linux")]
         {
-            let buffers: &mut [[u8; CONTROL_DATAGRAM_LENGTH]] = &mut self.receive_buffers[..];
+            let buffers: &mut [[u8; CONTROL_DATAGRAM_LENGTH]] = &mut polled.buffers[..];
             let mut rest = buffers;
             let mut slices: [[IoSliceMut<'_>; 1]; DATAGRAMS_PER_POLL] =
                 std::array::from_fn(|_| match std::mem::take(&mut rest).split_first_mut() {
@@ -227,8 +269,11 @@ impl SendSocket {
                 Err(errno) => return Err(io::Error::from(errno)),
             };
             let mut count = 0;
-            for (result, received) in results.zip(self.received.iter_mut()) {
+            for (result, (received, source)) in
+                results.zip(polled.received.iter_mut().zip(polled.sources.iter_mut()))
+            {
                 *received = result.bytes.min(CONTROL_DATAGRAM_LENGTH);
+                *source = result.address;
                 count += 1;
             }
             Ok(count)
@@ -240,18 +285,19 @@ impl SendSocket {
             let _ = headers;
             let mut count = 0;
             while count < DATAGRAMS_PER_POLL {
-                let Some(buffer) = self.receive_buffers.get_mut(count) else {
+                let Some(buffer) = polled.buffers.get_mut(count) else {
                     break;
                 };
                 let mut slice = [IoSliceMut::new(buffer)];
-                match recvmsg::<()>(
+                match recvmsg::<SockaddrStorage>(
                     self.socket.as_raw_fd(),
                     &mut slice,
                     None,
                     MsgFlags::MSG_DONTWAIT,
                 ) {
                     Ok(message) => {
-                        self.received[count] = message.bytes.min(CONTROL_DATAGRAM_LENGTH);
+                        polled.received[count] = message.bytes.min(CONTROL_DATAGRAM_LENGTH);
+                        polled.sources[count] = message.address;
                         count += 1;
                     }
                     Err(nix::errno::Errno::EAGAIN) => break,
@@ -266,10 +312,22 @@ impl SendSocket {
     /// The bytes of the `index`th datagram the last [`SendSocket::receive`] took, empty
     /// past what it took.
     pub(crate) fn datagram(&self, index: usize) -> &[u8] {
-        match (self.receive_buffers.get(index), self.received.get(index)) {
+        match (
+            self.polled.buffers.get(index),
+            self.polled.received.get(index),
+        ) {
             (Some(buffer), Some(&length)) => &buffer[..length.min(CONTROL_DATAGRAM_LENGTH)],
             _ => &[],
         }
+    }
+
+    /// Where the `index`th datagram the last [`SendSocket::receive`] took came from,
+    /// `None` past what it took or when the operating system gave no address.
+    pub(crate) fn source(&self, index: usize) -> Option<&SockaddrStorage> {
+        self.polled
+            .sources
+            .get(index)
+            .and_then(|source| source.as_ref())
     }
 }
 

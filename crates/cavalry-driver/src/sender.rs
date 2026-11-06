@@ -11,7 +11,10 @@
 //! sender position up to the sender limit in one socket call, a heartbeat when nothing
 //! was sent for the heartbeat interval, the connection timeout, and the end of the
 //! linger. Nothing here allocates per cycle, locks, logs or reads the clock per message;
-//! the syscalls are the endpoint's own sends and receives, one per burst on Linux. The
+//! the syscalls are the endpoint's own sends and receives, one per burst on Linux, one
+//! per burst and destination on a control channel, whose endpoint sends every datagram
+//! to each destination a client added, and whose `min` publications keep a bounded
+//! table of receivers by receiver id for the slowest one's pace (ADR 0053). The
 //! sender is built on its own thread, since the headers its batched calls fill
 //! ([`Headers`]) hold raw pointers and cannot be sent to it (ADR 0041, acceptance).
 
@@ -20,27 +23,30 @@ use std::io::IoSlice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use cavalry_proto::channel::FlowControl;
 use cavalry_proto::frame::Flags;
 use cavalry_proto::udp::{
-    CONNECTION_TIMEOUT, ControlFrame, DATAGRAMS_PER_BURST, HEARTBEAT_INTERVAL, Heartbeat, LINGER,
-    MAX_TERM_LENGTH, Nak, RETRANSMIT_LINGER, RttMeasurement, SETUP_INTERVAL, SetupFrame,
-    StatusMessage, parse, retransmit_window, sender_limit,
+    CONNECTION_TIMEOUT, ControlFrame, DATAGRAMS_PER_BURST, FLOW_CONTROL_RECEIVER_TIMEOUT,
+    HEARTBEAT_INTERVAL, Heartbeat, LINGER, MAX_TERM_LENGTH, Nak, RETRANSMIT_LINGER, RttMeasurement,
+    SETUP_INTERVAL, SetupFrame, StatusMessage, parse, retransmit_window, sender_limit,
 };
 use cavalry_shm::counters::generated::{
     LOG_BUFFER_REJECTED_FRAME, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
-    RECEIVER_RECEIVE_FAILED, SENDER_BYTES_SENT, SENDER_FLOW_CONTROL_LIMITED, SENDER_FRAMES_SENT,
-    SENDER_HEARTBEATS_SENT, SENDER_NAKS_IGNORED, SENDER_NAKS_RECEIVED, SENDER_RETRANSMIT_OVERFLOW,
-    SENDER_RETRANSMITS_SENT, SENDER_RETRANSMITTED_BYTES, SENDER_RTT_REPLIES_SENT,
-    SENDER_SEND_FAILED, SENDER_SETUPS_SENT, SENDER_SHORT_SENDS, SENDER_STATUS_MESSAGES_RECEIVED,
-    SENDER_STATUS_MESSAGES_REJECTED,
+    RECEIVER_RECEIVE_FAILED, SENDER_BYTES_SENT, SENDER_FLOW_CONTROL_LIMITED,
+    SENDER_FLOW_CONTROL_RECEIVERS_FULL, SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT,
+    SENDER_FRAMES_SENT, SENDER_HEARTBEATS_SENT, SENDER_NAKS_IGNORED, SENDER_NAKS_RECEIVED,
+    SENDER_RETRANSMIT_OVERFLOW, SENDER_RETRANSMITS_SENT, SENDER_RETRANSMITTED_BYTES,
+    SENDER_RTT_REPLIES_SENT, SENDER_SEND_FAILED, SENDER_SETUPS_SENT, SENDER_SHORT_SENDS,
+    SENDER_STATUS_MESSAGES_RECEIVED, SENDER_STATUS_MESSAGES_REJECTED,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError};
 use cavalry_shm::log::{Positions, TermReader};
 use cavalry_shm::spsc::{Consumer, Producer};
+use nix::sys::socket::SockaddrStorage;
 
 use crate::conductor::now_nanos;
 use crate::idle::{IdleStrategy, Idler};
-use crate::socket::{Headers, SendSocket};
+use crate::socket::{Headers, SendSocket, Sent};
 use crate::spec;
 
 /// A heartbeat's flags: BEGIN and END (`spec/udp.md`, "Heartbeat"; `spec/frame.md`,
@@ -90,6 +96,30 @@ pub(crate) struct AddPublication {
     pub position: Counter,
     /// Its `sender.limit` counter.
     pub limit: Counter,
+    /// The flow control strategy, the channel's `fc` (`spec/udp.md`, "The sender";
+    /// ADR 0053).
+    pub flow_control: FlowControl,
+    /// Its `sender.flow_control_receivers` gauge: the receivers in its `min` table.
+    pub receivers: Counter,
+    /// The `min` table, allocated by the conductor with room for
+    /// [`cavalry_proto::udp::MAX_FLOW_CONTROL_RECEIVERS`] and empty, or with no room
+    /// under `max`; the sender never grows it.
+    pub receiver_table: Vec<Receiver>,
+}
+
+/// One receiver in a `min` publication's table, by its receiver id: the position plus
+/// window of its last accepted status message and when it arrived (`spec/udp.md`, "The
+/// sender"; ADR 0053).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Receiver {
+    receiver_id: i64,
+    /// Its consumption position plus its receiver window length: what it lets the
+    /// sender send up to.
+    limit: i64,
+    last_status_message_at: i64,
+    /// Its last status message carried the end-of-stream flag: dropped on the next
+    /// sweep.
+    end_of_stream: bool,
 }
 
 /// What the conductor asks the sender.
@@ -99,8 +129,29 @@ pub(crate) enum Request {
         /// The endpoint's registration id: the correlation id of the command that
         /// opened it, which keys its `channel.status` counter.
         registration_id: i64,
-        /// The socket, connected and non-blocking.
+        /// The socket, non-blocking: connected to the endpoint, or bound to a control
+        /// channel's control address and connected to nothing.
         socket: SendSocket,
+        /// A control channel's destinations table, allocated by the conductor with
+        /// room for [`cavalry_proto::udp::MAX_DESTINATIONS`] and empty; `None` for a
+        /// channel with an endpoint (ADR 0053).
+        destinations: Option<Vec<SockaddrStorage>>,
+    },
+    /// A destination for a control channel's endpoint, resolved and checked by the
+    /// conductor against the table's bound and the ones it holds: the sender sends every
+    /// datagram of the endpoint's publications to it from the next cycle.
+    AddDestination {
+        /// The endpoint.
+        registration_id: i64,
+        /// The destination's address, which the sender keeps as the socket's kind.
+        address: std::net::SocketAddr,
+    },
+    /// A destination removed from a control channel's endpoint.
+    RemoveDestination {
+        /// The endpoint.
+        registration_id: i64,
+        /// The destination's address, as it was added.
+        address: std::net::SocketAddr,
     },
     /// Close an endpoint whose last publication's linger ended: the socket is dropped;
     /// answered with [`Reply::EndpointClosed`].
@@ -164,6 +215,8 @@ pub(crate) struct Statics {
     status_messages_received: Counter,
     status_messages_rejected: Counter,
     rtt_replies_sent: Counter,
+    flow_control_receivers_timed_out: Counter,
+    flow_control_receivers_full: Counter,
     publication_connected: Counter,
     publication_disconnected: Counter,
     receive_failed: Counter,
@@ -191,6 +244,8 @@ impl Statics {
             status_messages_received: counter(SENDER_STATUS_MESSAGES_RECEIVED)?,
             status_messages_rejected: counter(SENDER_STATUS_MESSAGES_REJECTED)?,
             rtt_replies_sent: counter(SENDER_RTT_REPLIES_SENT)?,
+            flow_control_receivers_timed_out: counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT)?,
+            flow_control_receivers_full: counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL)?,
             publication_connected: counter(PUBLICATION_CONNECTED)?,
             publication_disconnected: counter(PUBLICATION_DISCONNECTED)?,
             receive_failed: counter(RECEIVER_RECEIVE_FAILED)?,
@@ -267,13 +322,184 @@ struct Live {
     end_of_stream_acknowledged: bool,
     /// A frame to send met no window: `sender.flow_control_limited` counts the entry.
     limited: bool,
+    /// The channel's `fc`: how the sender limit moves on status messages (ADR 0053).
+    flow_control: FlowControl,
+    /// The `min` table: empty with no room under `max`, so nothing below reads it.
+    receivers: Vec<Receiver>,
+    /// Its `sender.flow_control_receivers` gauge.
+    receivers_gauge: Counter,
 }
 
 /// One send endpoint: its socket, on this thread from the conductor's add until its
-/// remove.
+/// remove, and on a control channel its destinations, in the order they were added
+/// (`spec/udp.md`, "The sender"; ADR 0053).
 struct Endpoint {
     registration_id: i64,
     socket: SendSocket,
+    /// `Some` on a control channel, with room for the destinations bound and never
+    /// grown here; `None` on a channel with an endpoint, where the socket is connected.
+    destinations: Option<Vec<SockaddrStorage>>,
+}
+
+/// Why a send was refused (`spec/udp.md`, "The sender", step 2; ADR 0053).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    /// The socket's own: no room in its send buffer, `EAGAIN` or `ENOBUFS`, or an
+    /// interrupted send, `EINTR`; holds the sender position for every destination, as
+    /// a short send does, and on a channel with an endpoint.
+    Socket,
+    /// A destination's own: no route to it from the control address, an address that
+    /// has gone; nobody waits for it.
+    Destination,
+}
+
+impl Refusal {
+    fn of(error: &std::io::Error) -> Self {
+        let socket = matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+        ) || error.raw_os_error() == Some(nix::libc::ENOBUFS);
+        if socket {
+            Refusal::Socket
+        } else {
+            Refusal::Destination
+        }
+    }
+}
+
+/// What a burst came to across an endpoint's targets ([`Endpoint::send_burst`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Delivery {
+    /// Datagrams every target took whole, from the first: how far the sender position
+    /// advances.
+    whole: usize,
+    /// Bytes put on the wire, every target's.
+    bytes: usize,
+    /// Frames put on the wire, every target's.
+    frames: usize,
+}
+
+impl Endpoint {
+    /// Sends a burst to the endpoint, or to each destination of a control channel in
+    /// turn, and counts what each socket call did (`spec/udp.md`, "The sender", step
+    /// 2; ADR 0053). `whole` is how far the sender position advances: the fewest
+    /// datagrams any destination took whole, so a short send or a refusal of the
+    /// socket's own holds the position for all and the destinations that took more get
+    /// those again, a duplicate their receivers drop; a destination the socket refused
+    /// for a reason of its own is not waited for, its datagrams from the refused one on
+    /// lost to it alone and NAKed back, unless every destination was refused so, when
+    /// the position holds as on an endpoint. The bytes and frames are every
+    /// destination's, as the counters count them. With no destination nothing is sent
+    /// and every datagram counts as taken, so that the sender position advances past
+    /// the burst and nothing is counted as on the wire.
+    fn send_burst(
+        &self,
+        headers: &mut Headers,
+        datagrams: &[[IoSlice<'_>; 1]],
+        frames: &[usize],
+        statics: &Statics,
+    ) -> Delivery {
+        let count = datagrams.len();
+        let taken = |whole: usize| Delivery {
+            whole,
+            bytes: datagrams[..whole].iter().map(|d| d[0].len()).sum(),
+            frames: frames[..whole.min(frames.len())].iter().sum(),
+        };
+        match &self.destinations {
+            None => taken(
+                Self::count(
+                    self.socket.send_burst(headers, datagrams, None),
+                    count,
+                    statics,
+                )
+                .unwrap_or(0),
+            ),
+            Some(destinations) if destinations.is_empty() => Delivery {
+                whole: count,
+                bytes: 0,
+                frames: 0,
+            },
+            Some(destinations) => {
+                let mut delivery = Delivery {
+                    whole: count,
+                    bytes: 0,
+                    frames: 0,
+                };
+                let mut refused = 0;
+                for to in destinations {
+                    match Self::count(
+                        self.socket.send_burst(headers, datagrams, Some(to)),
+                        count,
+                        statics,
+                    ) {
+                        Ok(whole) => {
+                            let one = taken(whole);
+                            delivery.whole = delivery.whole.min(one.whole);
+                            delivery.bytes += one.bytes;
+                            delivery.frames += one.frames;
+                        }
+                        Err(Refusal::Socket) => delivery.whole = 0,
+                        Err(Refusal::Destination) => refused += 1,
+                    }
+                }
+                if refused == destinations.len() {
+                    delivery.whole = 0;
+                }
+                delivery
+            }
+        }
+    }
+
+    /// How many datagrams one socket call took whole, at most `count`, with a short
+    /// send and a refusal counted, or which kind of refusal it was.
+    fn count(
+        sent: std::io::Result<Sent>,
+        count: usize,
+        statics: &Statics,
+    ) -> Result<usize, Refusal> {
+        match sent {
+            Ok(sent) => {
+                if sent.short {
+                    statics.short_sends.increment();
+                }
+                if sent.failed {
+                    statics.send_failed.increment();
+                }
+                Ok(sent.whole.min(count))
+            }
+            Err(error) => {
+                statics.send_failed.increment();
+                Err(Refusal::of(&error))
+            }
+        }
+    }
+
+    /// Sends one control frame: to the endpoint; to `to` when the frame answers one
+    /// datagram, an RTT measurement's, on a control channel; else to each destination
+    /// in turn. `counter` counts each send the socket took whole, so a setup frame to
+    /// three destinations counts three and one to none counts nothing.
+    fn send_one(
+        &self,
+        headers: &mut Headers,
+        bytes: &[u8],
+        to: Option<&SockaddrStorage>,
+        statics: &Statics,
+        counter: &Counter,
+    ) {
+        match (&self.destinations, to) {
+            // A connected socket sends to its endpoint alone, whatever the answer's
+            // source: the endpoint is the source.
+            (None, _) => statics.count_one(self.socket.send_one(headers, bytes, None), counter),
+            (Some(_), Some(to)) => {
+                statics.count_one(self.socket.send_one(headers, bytes, Some(to)), counter);
+            }
+            (Some(destinations), None) => {
+                for to in destinations {
+                    statics.count_one(self.socket.send_one(headers, bytes, Some(to)), counter);
+                }
+            }
+        }
+    }
 }
 
 /// What one burst gathered: the datagrams and what each one is in the stream.
@@ -499,12 +725,48 @@ impl Sender {
             Request::AddEndpoint {
                 registration_id,
                 socket,
+                destinations,
             } => {
                 debug_assert!(self.endpoints.len() < spec::MAX_SEND_ENDPOINTS);
                 self.endpoints.push(Endpoint {
                     registration_id,
                     socket,
+                    destinations,
                 });
+            }
+            // The conductor checked the bound and the endpoints held, as written: two
+            // writings of one address are two destinations (`spec/client-protocol.md`,
+            // "Commands", add destination); the table never grows past the room it came
+            // with, so the push allocates nothing.
+            Request::AddDestination {
+                registration_id,
+                address,
+            } => {
+                if let Some(endpoint) = self
+                    .endpoints
+                    .iter_mut()
+                    .find(|endpoint| endpoint.registration_id == registration_id)
+                    && let Some(destinations) = &mut endpoint.destinations
+                    && destinations.len() < destinations.capacity()
+                {
+                    destinations.push(SockaddrStorage::from(address));
+                }
+            }
+            Request::RemoveDestination {
+                registration_id,
+                address,
+            } => {
+                let address = SockaddrStorage::from(address);
+                if let Some(endpoint) = self
+                    .endpoints
+                    .iter_mut()
+                    .find(|endpoint| endpoint.registration_id == registration_id)
+                    && let Some(destinations) = &mut endpoint.destinations
+                    && let Some(index) = destinations.iter().position(|held| *held == address)
+                {
+                    // Shifts the ones after it: the order is the sending order.
+                    destinations.remove(index);
+                }
             }
             Request::RemoveEndpoint { registration_id } => {
                 if let Some(index) = self
@@ -521,6 +783,7 @@ impl Sender {
                 let sender_position = add.reader.position();
                 add.position.store_release(sender_position);
                 add.limit.store_release(0);
+                add.receivers.set(0);
                 self.live.push(Live {
                     registration_id: add.registration_id,
                     endpoint_id: add.endpoint_id,
@@ -544,6 +807,9 @@ impl Sender {
                     closing: None,
                     end_of_stream_acknowledged: false,
                     limited: false,
+                    flow_control: add.flow_control,
+                    receivers: add.receiver_table,
+                    receivers_gauge: add.receivers,
                 });
             }
             Request::Close {
@@ -597,7 +863,7 @@ impl Sender {
                 }
                 Ok(ControlFrame::Nak(nak)) => self.on_nak(index, nak),
                 Ok(ControlFrame::RttMeasurement(measurement)) => {
-                    self.on_rtt_measurement(index, measurement);
+                    self.on_rtt_measurement(index, measurement, datagram);
                 }
                 // A setup frame, a heartbeat or data at a send endpoint, or a frame this
                 // version does not read: nothing of it is a sender's business.
@@ -659,8 +925,49 @@ impl Sender {
         }
         live.answered = true;
         live.last_status_message_at = now;
-        if limit.sender_limit > live.sender_limit {
-            live.sender_limit = limit.sender_limit;
+        // The strategy (`spec/udp.md`, "The sender"; ADR 0053): under `max` the greater
+        // of the limit and this position plus window; under `min` the table's entry
+        // for the receiver id is added or moved, and the limit becomes the greater of
+        // itself and the least in the table. Neither lowers it.
+        let raised = match live.flow_control {
+            FlowControl::Max => limit.sender_limit,
+            FlowControl::Min => {
+                let plus_window = limit
+                    .position
+                    .wrapping_add(i64::from(message.receiver_window_length));
+                let known = live
+                    .receivers
+                    .iter()
+                    .position(|receiver| receiver.receiver_id == message.receiver_id);
+                match known {
+                    Some(index) => {
+                        let receiver = &mut live.receivers[index];
+                        receiver.limit = plus_window;
+                        receiver.last_status_message_at = now;
+                        receiver.end_of_stream = message.is_end_of_stream();
+                    }
+                    None if live.receivers.len() < live.receivers.capacity() => {
+                        live.receivers.push(Receiver {
+                            receiver_id: message.receiver_id,
+                            limit: plus_window,
+                            last_status_message_at: now,
+                            end_of_stream: message.is_end_of_stream(),
+                        });
+                        live.receivers_gauge.set(live.receivers.len() as i64);
+                    }
+                    // The table is full: the status message connects the publication
+                    // below and moves nothing.
+                    None => self.statics.flow_control_receivers_full.increment(),
+                }
+                live.receivers
+                    .iter()
+                    .map(|receiver| receiver.limit)
+                    .min()
+                    .map_or(live.sender_limit, |least| least.max(live.sender_limit))
+            }
+        };
+        if raised > live.sender_limit {
+            live.sender_limit = raised;
             live.limit.store_release(live.sender_limit);
         }
         if message.is_end_of_stream() && live.closing.is_some() {
@@ -721,8 +1028,16 @@ impl Sender {
     }
 
     /// An RTT measurement with the reply flag is answered at once: the same frame without
-    /// the flag, the echo timestamp and receiver id unchanged, a reception delta of 0.
-    fn on_rtt_measurement(&mut self, endpoint_index: usize, measurement: RttMeasurement) {
+    /// the flag, the echo timestamp and receiver id unchanged, a reception delta of 0,
+    /// to the address it came from, which on a channel with an endpoint is the endpoint
+    /// (`spec/udp.md`, "The sender", step 5). `datagram` is the measurement's index in
+    /// the endpoint's last poll, whose source a control channel's socket kept.
+    fn on_rtt_measurement(
+        &mut self,
+        endpoint_index: usize,
+        measurement: RttMeasurement,
+        datagram: usize,
+    ) {
         if !measurement.is_probe()
             || self
                 .find(
@@ -735,10 +1050,19 @@ impl Sender {
             return;
         }
         let bytes = measurement.answer().to_bytes();
-        let sent = self.endpoints[endpoint_index]
-            .socket
-            .send_one(&mut self.headers, &bytes);
-        self.statics.count_one(sent, &self.statics.rtt_replies_sent);
+        let endpoint = &self.endpoints[endpoint_index];
+        let to = endpoint.socket.source(datagram);
+        if endpoint.destinations.is_some() && to.is_none() {
+            // No source to answer: the operating system gave none, which it does not.
+            return;
+        }
+        endpoint.send_one(
+            &mut self.headers,
+            &bytes,
+            to,
+            &self.statics,
+            &self.statics.rtt_replies_sent,
+        );
     }
 
     /// One publication's duties for this cycle; returns how much work they were and
@@ -775,28 +1099,14 @@ impl Sender {
                     // Cleaned, or nothing there: the range is answered as far as it can be.
                     retransmit.end - retransmit.next
                 } else {
-                    match endpoint
-                        .socket
-                        .send_burst(headers, &burst.datagrams[..burst.count])
-                    {
-                        Ok(sent) => {
-                            if sent.short {
-                                statics.short_sends.increment();
-                            }
-                            if sent.failed {
-                                statics.send_failed.increment();
-                            }
-                            let whole = sent.whole.min(burst.count);
-                            let bytes: usize =
-                                burst.datagrams[..whole].iter().map(|d| d[0].len()).sum();
-                            statics.retransmitted_bytes.add(bytes as i64);
-                            burst.lengths[..whole].iter().sum::<usize>() as i64
-                        }
-                        Err(_) => {
-                            statics.send_failed.increment();
-                            0
-                        }
-                    }
+                    let delivery = endpoint.send_burst(
+                        headers,
+                        &burst.datagrams[..burst.count],
+                        &burst.frames[..burst.count],
+                        statics,
+                    );
+                    statics.retransmitted_bytes.add(delivery.bytes as i64);
+                    burst.lengths[..delivery.whole].iter().sum::<usize>() as i64
                 };
                 retransmit.next += advanced;
                 if retransmit.next >= retransmit.end {
@@ -807,6 +1117,39 @@ impl Sender {
                 work += 1;
             } else if now >= retransmit.outstanding_until {
                 live.retransmit = None;
+            }
+        }
+
+        // The `min` table's sweep (`spec/udp.md`, "The sender"; ADR 0053): a receiver
+        // whose status message is older than the flow control receiver timeout, or
+        // whose last one carried end of stream, leaves the table, counted; when any
+        // remain the limit becomes the greater of itself and the least of them, so
+        // that a receiver that went away holds the stream back for the timeout and no
+        // longer. Empty with no room under `max`, so this reads nothing there.
+        if !live.receivers.is_empty() {
+            let before = live.receivers.len();
+            let mut index = 0;
+            while index < live.receivers.len() {
+                let receiver = live.receivers[index];
+                if receiver.end_of_stream
+                    || now.saturating_sub(receiver.last_status_message_at)
+                        >= spec::nanos(FLOW_CONTROL_RECEIVER_TIMEOUT)
+                {
+                    live.receivers.swap_remove(index);
+                    statics.flow_control_receivers_timed_out.increment();
+                } else {
+                    index += 1;
+                }
+            }
+            if live.receivers.len() != before {
+                live.receivers_gauge.set(live.receivers.len() as i64);
+                if let Some(least) = live.receivers.iter().map(|receiver| receiver.limit).min()
+                    && least > live.sender_limit
+                {
+                    live.sender_limit = least;
+                    live.limit.store_release(least);
+                }
+                work += 1;
             }
         }
 
@@ -826,8 +1169,13 @@ impl Sender {
                 mtu_length: live.mtu_length as i32,
                 ttl: 0,
             };
-            let sent = endpoint.socket.send_one(headers, &frame.to_bytes());
-            statics.count_one(sent, &statics.setups_sent);
+            endpoint.send_one(
+                headers,
+                &frame.to_bytes(),
+                None,
+                statics,
+                &statics.setups_sent,
+            );
             live.last_setup_at = now;
             live.elicited = false;
             work += 1;
@@ -846,34 +1194,22 @@ impl Sender {
         );
         let mut limited = burst.limited;
         if burst.count > 0 {
-            match endpoint
-                .socket
-                .send_burst(headers, &burst.datagrams[..burst.count])
-            {
-                Ok(sent) => {
-                    if sent.short {
-                        statics.short_sends.increment();
-                    }
-                    if sent.failed {
-                        statics.send_failed.increment();
-                    }
-                    let whole = sent.whole.min(burst.count);
-                    if whole > 0 {
-                        let bytes: usize =
-                            burst.datagrams[..whole].iter().map(|d| d[0].len()).sum();
-                        let frames: usize = burst.frames[..whole].iter().sum();
-                        let advanced: usize = burst.lengths[..whole].iter().sum();
-                        statics.bytes_sent.add(bytes as i64);
-                        statics.frames_sent.add(frames as i64);
-                        live.sender_position += advanced as i64;
-                        // A burst ends at its term, so the seek is within the term.
-                        let _ = live.reader.seek(live.sender_position);
-                        live.position.store_release(live.sender_position);
-                        live.last_sent_at = now;
-                        live.limited = false;
-                    }
-                }
-                Err(_) => statics.send_failed.increment(),
+            let delivery = endpoint.send_burst(
+                headers,
+                &burst.datagrams[..burst.count],
+                &burst.frames[..burst.count],
+                statics,
+            );
+            if delivery.whole > 0 {
+                let advanced: usize = burst.lengths[..delivery.whole].iter().sum();
+                statics.bytes_sent.add(delivery.bytes as i64);
+                statics.frames_sent.add(delivery.frames as i64);
+                live.sender_position += advanced as i64;
+                // A burst ends at its term, so the seek is within the term.
+                let _ = live.reader.seek(live.sender_position);
+                live.position.store_release(live.sender_position);
+                live.last_sent_at = now;
+                live.limited = false;
             }
             work += 1;
         } else if room <= 0 && !live.limited {
@@ -907,8 +1243,13 @@ impl Sender {
                 term_id: live.positions.term_id_of(live.sender_position),
                 reserved_value: 0,
             };
-            let sent = endpoint.socket.send_one(headers, &frame.to_bytes());
-            statics.count_one(sent, &statics.heartbeats_sent);
+            endpoint.send_one(
+                headers,
+                &frame.to_bytes(),
+                None,
+                statics,
+                &statics.heartbeats_sent,
+            );
             live.last_sent_at = now;
             work += 1;
         }

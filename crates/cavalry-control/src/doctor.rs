@@ -33,11 +33,13 @@ use cavalry_proto::udp::DATAGRAMS_PER_BURST;
 use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, layout::DRIVER_CLOSED};
 use cavalry_shm::counters::generated::{
-    CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF, CHANNEL_SOCKET_SNDBUF,
-    CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER, COUNTERS, COUNTERS_ALLOCATED,
-    COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED, IMAGE_HWM_POSITION,
-    IMAGE_REBUILD_POSITION, PUBLICATION_POSITION, RECORDING_BYTES, RECORDING_INVALIDATED,
-    RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED, SENDER_LIMIT,
+    CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
+    CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER,
+    COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED,
+    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_POSITION, RECORDING_BYTES,
+    RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
+    SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+    SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_LIMIT,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -954,6 +956,9 @@ struct EndpointCounters {
     rcvbuf: Option<i64>,
     publications: Option<i64>,
     images: Option<i64>,
+    /// `channel.destinations`: present on a driver of ADR 0053's version, 0 off a
+    /// control channel.
+    destinations: Option<i64>,
 }
 
 impl EndpointCounters {
@@ -986,13 +991,16 @@ struct ImageCounters {
 
 /// The `cavalry:udp` checks ADR 0039 names, from the counters file alone (ADR 0041,
 /// ADR 0042): a publication no receiver has answered, whose `sender.limit` is 0 while
-/// the driver runs; an endpoint's socket buffer the host capped, a send buffer below
-/// [`SNDBUF_LEAST`] or a receive buffer below [`RCVBUF_EXPECTED`], each finding naming
-/// the sysctl of the platform `doctor` runs on, which is the driver's host; loss on an
-/// image, whose `image.hwm_position` runs ahead of its `image.rebuild_position`; and a
-/// receive endpoint with no image, whose subscriptions wait for a setup frame that has
-/// not come. Every endpoint is listed as a note, as recordings are, with its status, its
-/// publications or images and its buffers.
+/// the driver runs, a control channel's with no destination told apart; an endpoint's
+/// socket buffer the host capped, a send buffer below [`SNDBUF_LEAST`] or a receive
+/// buffer below [`RCVBUF_EXPECTED`], each finding naming the sysctl of the platform
+/// `doctor` runs on, which is the driver's host; loss on an image, whose
+/// `image.hwm_position` runs ahead of its `image.rebuild_position`; a receive endpoint
+/// with no image, whose subscriptions wait for a setup frame that has not come; and
+/// ADR 0053's three, a `min` publication with fewer receivers answering than its
+/// endpoint has destinations, a receiver dropped from a `min` table and a table that
+/// was full. Every endpoint is listed as a note, as recordings are, with its status,
+/// its publications or images, its destinations on a control channel, and its buffers.
 fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
     if !running {
         return 0;
@@ -1003,6 +1011,9 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
     let mut unanswered: Vec<(i64, i32, i32, i64)> = Vec::new();
     let mut images: Vec<ImageCounters> = Vec::new();
     let mut positions: Vec<([u8; 16], i32, i64)> = Vec::new();
+    // Every `sender.flow_control_receivers` gauge: its publication's ids, its
+    // endpoint's registration id and its value (ADR 0053).
+    let mut receivers: Vec<(i64, i32, i32, i64, i64)> = Vec::new();
     let endpoint_id = |key: &[u8]| {
         let mut bytes = [0u8; 8];
         if let Some(head) = key.get(..8) {
@@ -1031,13 +1042,33 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                 rcvbuf: None,
                 publications: None,
                 images: None,
+                destinations: None,
             });
         } else if type_id == CHANNEL_SOCKET_SNDBUF.0
             || type_id == CHANNEL_SOCKET_RCVBUF.0
             || type_id == CHANNEL_PUBLICATIONS.0
             || type_id == CHANNEL_IMAGES.0
+            || type_id == CHANNEL_DESTINATIONS.0
         {
             buffers.push((endpoint_id(fields.key()), type_id, value));
+        } else if type_id == SENDER_FLOW_CONTROL_RECEIVERS.0 {
+            // The label: the name, the correlation id, the session id, the stream id
+            // and the endpoint's registration id, as sender.limit's.
+            let mut words = fields.label().split_whitespace().skip(1);
+            let (Some(correlation), Some(session), Some(stream), Some(endpoint)) =
+                (words.next(), words.next(), words.next(), words.next())
+            else {
+                continue;
+            };
+            let (Ok(correlation_id), Ok(session_id), Ok(stream_id), Ok(endpoint_id)) = (
+                correlation.parse::<i64>(),
+                session.parse::<i32>(),
+                stream.parse::<i32>(),
+                endpoint.parse::<i64>(),
+            ) else {
+                continue;
+            };
+            receivers.push((correlation_id, session_id, stream_id, endpoint_id, value));
         } else if type_id == IMAGE_HWM_POSITION.0 || type_id == IMAGE_REBUILD_POSITION.0 {
             let mut key = [0u8; 16];
             if let Some(head) = fields.key().get(..16) {
@@ -1096,6 +1127,8 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                 endpoint.rcvbuf = Some(value);
             } else if type_id == CHANNEL_PUBLICATIONS.0 {
                 endpoint.publications = Some(value);
+            } else if type_id == CHANNEL_DESTINATIONS.0 {
+                endpoint.destinations = Some(value);
             } else {
                 endpoint.images = Some(value);
             }
@@ -1119,18 +1152,123 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                 |endpoint| endpoint.channel.clone(),
             )
     };
+    let destinations_of = |id: i64| {
+        endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == id)
+            .and_then(|endpoint| endpoint.destinations)
+    };
+    let is_control = |id: i64| {
+        endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == id)
+            .is_some_and(|endpoint| endpoint.channel.contains("control="))
+    };
     for (correlation_id, session_id, stream_id, endpoint_id) in &unanswered {
+        let channel = channel_of(*endpoint_id);
+        let message = if is_control(*endpoint_id) && destinations_of(*endpoint_id) == Some(0) {
+            format!(
+                "publication {correlation_id} on stream {stream_id} (session {session_id}) \
+                 sends on the control channel {channel}, which has no destination: nothing \
+                 goes on the wire, its sender limit is 0 and the publisher reads not \
+                 connected; add a destination with add destination on the publication, \
+                 cavalry:udp?endpoint=<host>:<port> of a host whose driver subscribes to \
+                 stream {stream_id} on that port"
+            )
+        } else if is_control(*endpoint_id) {
+            format!(
+                "publication {correlation_id} on stream {stream_id} (session {session_id}) \
+                 sends on the control channel {channel} to {} destination(s) and none has \
+                 answered: its sender limit is 0, its setup frames go unanswered every 100 \
+                 ms and the publisher reads not connected; check that a subscription on \
+                 stream {stream_id} exists on each destination's host, that its driver \
+                 receives on that port and can reach the control address, and that both \
+                 drivers run the same version; a rising sender.send_failed is a destination \
+                 the control socket cannot send to",
+                destinations_of(*endpoint_id).unwrap_or(0)
+            )
+        } else {
+            format!(
+                "publication {correlation_id} on stream {stream_id} (session {session_id}) \
+                 sends on {channel} and no receiver has answered: its sender limit is 0, its \
+                 setup frames go unanswered every 100 ms and the publisher reads not \
+                 connected; check that a subscription on stream {stream_id} exists on the \
+                 endpoint's host, that its driver receives on that port, and that both \
+                 drivers run the same version"
+            )
+        };
         findings.push(Finding {
             check: "udp-publication-not-connected",
             level: Level::Warn,
+            message,
+            doc: DOC_UDP_SENDER,
+        });
+    }
+    // A `min` publication with fewer receivers in its table than its endpoint has
+    // destinations: a destination that is not answering within 5 s, which holds the
+    // stream back until the timeout drops it and then runs without it (ADR 0053).
+    for (correlation_id, session_id, stream_id, endpoint_id, answering) in &receivers {
+        if let Some(destinations) = destinations_of(*endpoint_id)
+            && destinations > 0
+            && *answering < destinations
+        {
+            findings.push(Finding {
+                check: "udp-flow-control-receivers",
+                level: Level::Warn,
+                message: format!(
+                    "publication {correlation_id} on stream {stream_id} (session \
+                     {session_id}) sends under fc=min on {} to {destinations} destination(s) \
+                     and {answering} answer within 5 s: the sender limit follows the slowest \
+                     receiver that answers, and a destination that stopped answering held the \
+                     stream back for the flow control receiver timeout before it was dropped \
+                     (sender.flow_control_receivers_timed_out); check that destination's \
+                     driver and its subscription on stream {stream_id}, or remove the \
+                     destination with remove destination",
+                    channel_of(*endpoint_id)
+                ),
+                doc: DOC_UDP_SENDER,
+            });
+        }
+    }
+    if let Some(timed_out) = read_static(
+        reader,
+        "sender.flow_control_receivers_timed_out",
+        SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT,
+        findings,
+    ) && timed_out > 0
+    {
+        findings.push(Finding {
+            check: "udp-flow-control-receiver-timed-out",
+            level: Level::Warn,
             message: format!(
-                "publication {correlation_id} on stream {stream_id} (session {session_id}) \
-                 sends on {} and no receiver has answered: its sender limit is 0, its setup \
-                 frames go unanswered every 100 ms and the publisher reads not connected; \
-                 check that a subscription on stream {stream_id} exists on the endpoint's \
-                 host, that its driver receives on that port, and that both drivers run the \
-                 same version",
-                channel_of(*endpoint_id)
+                "sender.flow_control_receivers_timed_out is {timed_out}: that many times a \
+                 receiver of a publication under fc=min sent no status message for 5 s, or \
+                 ended its stream, and was dropped from the publication's table, each time \
+                 after holding the stream back for the timeout; a destination whose driver \
+                 stopped, lost its subscription or lost its route: find it by the \
+                 publication whose sender.flow_control_receivers is below its endpoint's \
+                 channel.destinations, check its driver, or remove the destination"
+            ),
+            doc: DOC_UDP_SENDER,
+        });
+    }
+    if let Some(full) = read_static(
+        reader,
+        "sender.flow_control_receivers_full",
+        SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+        findings,
+    ) && full > 0
+    {
+        findings.push(Finding {
+            check: "udp-flow-control-receivers-full",
+            level: Level::Warn,
+            message: format!(
+                "sender.flow_control_receivers_full is {full}: that many status messages \
+                 came from a receiver a publication's full table of 64 did not hold, so the \
+                 sender limit does not follow that receiver; 64 destinations never produce \
+                 this, but a receiver that restarts draws a new receiver id each time, so a \
+                 flapping destination fills the table: find it from its driver's \
+                 image.created, and let the dropped ids time out"
             ),
             doc: DOC_UDP_SENDER,
         });
@@ -1233,8 +1371,8 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             check: "udp-endpoint",
             level: Level::Note,
             message: format!(
-                "{kind} {}: status {}, {} publication(s), {} image(s), send buffer {} bytes, \
-                 receive buffer {} bytes",
+                "{kind} {}: status {}, {} publication(s), {} image(s){}, send buffer {} \
+                 bytes, receive buffer {} bytes",
                 endpoint.channel,
                 match endpoint.status {
                     0 => "initializing".to_string(),
@@ -1245,13 +1383,18 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
                 },
                 endpoint.publications.unwrap_or(0),
                 endpoint.images.unwrap_or(0),
+                if endpoint.channel.contains("control=") {
+                    format!(", {} destination(s)", endpoint.destinations.unwrap_or(0))
+                } else {
+                    String::new()
+                },
                 endpoint.sndbuf.unwrap_or(0),
                 endpoint.rcvbuf.unwrap_or(0)
             ),
             doc: DOC_UDP_VALUES,
         });
     }
-    let checks = 4 + interface_mtu_checks(&endpoints, findings);
+    let checks = 7 + interface_mtu_checks(&endpoints, findings);
     // Loss on an image: the high-water mark past the rebuild position is a gap the
     // receiver is NAKing, or one the sender no longer answers (ADR 0042).
     for image in &images {
@@ -2100,6 +2243,161 @@ mod tests {
             "{report}"
         );
         assert!(report.findings.iter().any(|f| f.check == "udp-endpoint"));
+    }
+
+    /// ADR 0053's checks from the counters file alone: a control channel with no
+    /// destination is told apart in the not-connected warning, a `min` publication
+    /// with fewer receivers answering than its endpoint has destinations warns naming
+    /// both counts, a dropped receiver and a full table warn from their static
+    /// counters, and the endpoint's note counts its destinations.
+    #[test]
+    fn a_control_channel_without_destinations_and_a_min_publication_short_of_receivers_warn() {
+        let dir = TestDir::new("udp-mdc");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let endpoint_id = 9i64;
+        let channel = "cavalry:udp?control=10.0.0.1:40456|control-mode=manual";
+        let endpoint_key = endpoint_id.to_le_bytes();
+        let status = counters
+            .allocate(
+                CHANNEL_STATUS,
+                &endpoint_key,
+                &format!("channel.status {channel}"),
+            )
+            .expect("room");
+        status.set(1);
+        let sndbuf = counters
+            .allocate(
+                CHANNEL_SOCKET_SNDBUF,
+                &endpoint_key,
+                &format!("channel.socket_sndbuf {channel}"),
+            )
+            .expect("room");
+        sndbuf.set(212_992);
+        let rcvbuf = counters
+            .allocate(
+                CHANNEL_SOCKET_RCVBUF,
+                &endpoint_key,
+                &format!("channel.socket_rcvbuf {channel}"),
+            )
+            .expect("room");
+        rcvbuf.set(RCVBUF_EXPECTED);
+        let publications = counters
+            .allocate(
+                CHANNEL_PUBLICATIONS,
+                &endpoint_key,
+                &format!("channel.publications {channel}"),
+            )
+            .expect("room");
+        publications.set(1);
+        let destinations = counters
+            .allocate(
+                CHANNEL_DESTINATIONS,
+                &endpoint_key,
+                &format!("channel.destinations {channel}"),
+            )
+            .expect("room");
+        destinations.set(0);
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&7i64.to_le_bytes());
+        key[8..12].copy_from_slice(&5i32.to_le_bytes());
+        key[12..].copy_from_slice(&1001i32.to_le_bytes());
+        let limit = counters
+            .allocate(SENDER_LIMIT, &key, "sender.limit 7 5 1001 9")
+            .expect("room");
+        limit.set(0);
+        let receivers = counters
+            .allocate(
+                SENDER_FLOW_CONTROL_RECEIVERS,
+                &key,
+                "sender.flow_control_receivers 7 5 1001 9",
+            )
+            .expect("room");
+        receivers.set(0);
+
+        // No destination: the not-connected warning says to add one.
+        let report = examine(&dir.0);
+        let found = finding(&report, "udp-publication-not-connected");
+        assert_eq!(found.level, Level::Warn);
+        assert!(
+            found.message.contains("has no destination"),
+            "{}",
+            found.message
+        );
+        assert!(
+            found.message.contains("add destination"),
+            "{}",
+            found.message
+        );
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "udp-flow-control-receivers"),
+            "{report}"
+        );
+        let note = finding(&report, "udp-endpoint");
+        assert!(
+            note.message.contains("0 destination(s)"),
+            "{}",
+            note.message
+        );
+
+        // Two destinations and one receiver answering, the publication connected: the
+        // min warning names both counts.
+        destinations.set(2);
+        limit.store_release(131_072);
+        receivers.set(1);
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "udp-publication-not-connected"),
+            "{report}"
+        );
+        let found = finding(&report, "udp-flow-control-receivers");
+        assert_eq!(found.level, Level::Warn);
+        assert!(
+            found.message.contains("2 destination(s)"),
+            "{}",
+            found.message
+        );
+        assert!(found.message.contains("1 answer"), "{}", found.message);
+        assert_eq!(found.doc, "docs/reference/udp.md#the-sender");
+        let note = finding(&report, "udp-endpoint");
+        assert!(
+            note.message.contains("2 destination(s)"),
+            "{}",
+            note.message
+        );
+
+        // Both answer: no warning; the static counters warn on their own.
+        receivers.set(2);
+        counters
+            .counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT.record())
+            .expect("static")
+            .increment();
+        counters
+            .counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL.record())
+            .expect("static")
+            .add(3);
+        let report = examine(&dir.0);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.check == "udp-flow-control-receivers"),
+            "{report}"
+        );
+        let found = finding(&report, "udp-flow-control-receiver-timed-out");
+        assert_eq!(found.level, Level::Warn);
+        assert!(found.message.contains("is 1"), "{}", found.message);
+        let found = finding(&report, "udp-flow-control-receivers-full");
+        assert_eq!(found.level, Level::Warn);
+        assert!(found.message.contains("is 3"), "{}", found.message);
+        assert!(report.ok(), "warnings do not fail: {report}");
     }
 
     /// ADR 0042's two `cavalry:udp` checks for the receiving side, from the counters
@@ -3349,6 +3647,7 @@ mod tests {
             rcvbuf: None,
             publications: Some(publications),
             images: Some(0),
+            destinations: None,
         };
         let narrow = |interface: &str| match interface {
             "eno2" => Some(1280),
