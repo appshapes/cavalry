@@ -196,6 +196,16 @@ a `BufferFinalizer`, a `CallbackInfo` with its mutex, a `BackingStore` and a wea
 global handle at the claim. At the `commit` or `abort` that detaches the view, it is
 the queued callback, the same two locks, and a share of the same wake-up `write`.
 
+A runtime built with V8's sandbox, such as Electron, refuses external buffers:
+`napi_create_external_buffer` returns `napi_no_external_buffers_allowed`, and the
+addon's `view` returns `null`. On such a runtime `tryClaim` returns the position
+after the frame while `publication.claim` is `null`, and the claim stays
+outstanding. Call `publication.abort()`, which turns the frame into padding that a
+subscriber skips, and publish the message with `offer`, which reads the caller's own
+bytes and needs no external `Buffer`. Such a runtime cannot receive either: every
+fragment a poll consumes is counted in `HandlerError.undelivered` ("The exception").
+So run the client on a Node built without the sandbox.
+
 ### The runtime's queue
 
 Node frees the native objects of an external `Buffer` when its event loop turns, not

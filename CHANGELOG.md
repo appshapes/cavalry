@@ -1452,7 +1452,12 @@ user-visible change, added in the same commit as the change. The format follows
   the ABI refuses during a claim or a poll leaves the client's state as it was; `just
   lint` regenerates the package and reads its per-message functions, and the package's
   functions they call, for JavaScript's `async`, `await`, `Promise`, `.then`, `throw`
-  and `Atomics.wait`; `just conformance` runs `conformance/node/`, the ten-minute
+  and `Atomics.wait`, and the addon's per-message C, the trampoline, the `Buffer`s'
+  finalizer, `poll`, `headerField`, `view`, `detach` and the wrappers of the claim, the
+  reserved value, the commit, the abort and the offer, for C's locks
+  (`pthread_mutex_*`, `pthread_rwlock_*`, `mtx_*`, `uv_mutex_*`, `uv_rwlock_*`,
+  `napi_*threadsafe_function*`) and raises (`napi_throw*` and `napi_fatal_*` outside
+  the argument readers); `just conformance` runs `conformance/node/`, the ten-minute
   path's shape through the client and the README's example, with a report of its
   one-way latency over 100,000 messages and its allocations per message
   ([clients/node/README.md](clients/node/README.md); ADR 0046, card 206).
