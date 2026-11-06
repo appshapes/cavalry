@@ -177,7 +177,10 @@ A `Publication`, `Subscription`, `Recording`, `Replay` or `Image` is used from o
 goroutine at a time, as the Rust API's handles are: the client adds no lock to them.
 A program with several goroutines gives each its own `Publication` and
 `Subscription`. Two handles may be used from two goroutines at once, a client and its
-publications and subscriptions among them.
+publications and subscriptions among them. `Client.AddDestination` and
+`RemoveDestination` are calls on the client, not on the `Publication` they name: they
+may run beside that publication's `Offer` or `TryClaim` in another goroutine, but not
+beside its `Close` (`spec/c-abi.md`, "Threads"; ADR 0057).
 
 The table the trampoline reads subscriptions from holds 4,096 subscriptions:
 `AddSubscription` above that returns an `*Error` with `ErrSubscriptionsFull`, and

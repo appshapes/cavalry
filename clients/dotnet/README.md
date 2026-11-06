@@ -162,7 +162,10 @@ share one: an add, a command or a close holds it for its one ABI call, which the
 serialises anyway, and the lock is never on a message's path. A `Publication`, a
 `Subscription` and its `Header` are used from one thread at a time, the ABI's rule
 for every handle; a program with several threads gives each its own, as the Rust
-API's are used.
+API's are used. `Client.AddDestination` and `RemoveDestination` are calls on the
+client, not on the `Publication` they name: they may run beside that publication's
+`Offer` or `TryClaim` in another thread, but not beside its `Close` or `Dispose`
+(`spec/c-abi.md`, "Threads"; ADR 0057).
 
 The ABI's error, `Abi.Errcode()` and `Abi.Errmsg()`, is per operating-system thread,
 and a .NET thread, a pool thread included, is one operating-system thread for its

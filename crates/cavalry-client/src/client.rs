@@ -414,13 +414,22 @@ impl Cavalry {
     /// driver resolves the endpoint once, to the first address of the control address's
     /// family, and the sender sends every datagram of the channel's publications to it
     /// from then on (`spec/client-protocol.md`, "Commands"; `spec/udp.md`, "The
-    /// sender"; ADR 0053). A destination already added, as written, is added again by
-    /// nothing and is success. Refused with [`ClientError::Refused`]: code 3 for a
+    /// sender"; ADR 0053). The driver answers once it has queued the change for the
+    /// sender, and the answer does not wait for the sender. The sender takes its
+    /// requests in the order they were queued, at most 16 at the start of each duty
+    /// cycle and none while its replies wait for room. So the destination gets what the
+    /// endpoint sends from the start of the cycle that takes the change, which is the
+    /// next cycle only when nothing waits ahead of it (ADR 0057). A destination already
+    /// added, as written, is added again by nothing and is success. Refused with
+    /// [`ClientError::Refused`]: code 3 for a
     /// registration this client does not hold; code 1 for a publication whose channel
-    /// names no control address, for a destination that is `cavalry:ipc` or a control
-    /// channel, or for one with no address the control address can send to, an address
-    /// of the other family or one beyond the loopback among them; code 9 for a name with
-    /// no address; code 10 for a 65th destination.
+    /// names no control address, with the reason `control`; code 1 with the reason
+    /// `destination` for a destination that is `cavalry:ipc` or a control channel, one
+    /// that names `interface` or `fc`, or one with no address the control address can
+    /// send to, an address of the other family or one beyond the loopback beside a
+    /// loopback control address among them; code 9 for a host that resolves to no
+    /// address at all; code 10 for a 65th destination on the endpoint, or when the
+    /// sender's request queue has no room for the destination.
     pub fn add_destination(
         &mut self,
         registration_id: i64,
@@ -432,9 +441,19 @@ impl Cavalry {
     /// Removes the destination `channel`, as it was added, from the control channel of
     /// the publication `registration_id`: the driver matches the endpoint as the add
     /// wrote it and resolves nothing, so a name whose address changed since removes the
-    /// address the add resolved (`spec/client-protocol.md`, "Commands"; ADR 0053). One
-    /// not there is removed by nothing and is success. The codes are
-    /// [`add_destination`](Self::add_destination)'s, less 9 and 10.
+    /// address the add resolved (`spec/client-protocol.md`, "Commands"; ADR 0053). The
+    /// driver answers once it has queued the change for the sender, as it does an add,
+    /// so everything the endpoint sends still reaches the destination until the start of
+    /// the cycle that takes the change, which is the next cycle only when nothing waits
+    /// ahead of it (ADR 0057). One not there is removed by nothing and is success.
+    /// Refused with
+    /// [`ClientError::Refused`]: code 3 for a registration this client does not hold;
+    /// code 1 for a publication whose channel names no control address, with the reason
+    /// `control`; code 1 with the reason `destination` for a destination that is
+    /// `cavalry:ipc` or a control channel, or one that names `interface` or `fc`; code
+    /// 10 when the sender's request queue has no room for the removal. A remove
+    /// resolves nothing and adds nothing, so it never meets code 9, the refusal of an
+    /// address the control address cannot send to, or a full table.
     pub fn remove_destination(
         &mut self,
         registration_id: i64,
