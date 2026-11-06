@@ -96,7 +96,19 @@ class Package(unittest.TestCase):
         for fn in self.header.functions:
             self.assertIn(f'"{fn.name}": (', abi)
         self.assertIn("cavalry_fragment_handler_t = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t, c_void_p)", abi)
-        self.assertIn("ctypes.PyDLL(path)", abi)
+
+    def test_the_per_message_functions_are_the_allocation_tests_and_load_through_pydll(self):
+        """The seven functions `crates/cavalry-ffi/tests/allocations.rs` counts are the ones
+        the binding keeps the GIL held across; every other function releases it, so an add
+        that waits on the driver does not stop the process's other threads."""
+        with open(os.path.join(gen.ROOT, "crates", "cavalry-ffi", "tests", "allocations.rs"), encoding="utf-8") as f:
+            doc = "".join(line for line in f if line.startswith("//!"))
+        self.assertEqual(sorted(gen.PER_MESSAGE), sorted(set(re.findall(r"`(cavalry_\w+)`", doc))))
+        abi = gen.write_python(self.header)["cavalry/_abi.py"]
+        self.assertIn("    library = ctypes.CDLL(path)\n    held = ctypes.PyDLL(path)\n", abi)
+        self.assertIn("function = getattr(held if name in PER_MESSAGE else library, name)", abi)
+        for name in gen.PER_MESSAGE:
+            self.assertIn(f'    "{name}",\n', abi.split("PER_MESSAGE = (", 1)[1].split(")", 1)[0])
 
     def test_offer_takes_bytes_and_refuses_a_str(self):
         """`c_void_p` took a `str` as its `wchar_t` buffer, so `offer("hello")` published

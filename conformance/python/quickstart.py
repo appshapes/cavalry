@@ -283,6 +283,13 @@ def main():
         fail("a mismatched ABI version was not refused with CAVALRY_ERR_ABI_VERSION")
     if cavalry.abi_version() != cavalry.ABI_VERSION:
         fail(f"the library's ABI version is {cavalry.abi_version()}, the package's {cavalry.ABI_VERSION}")
+    # The per-message functions keep the GIL held across the call (`ctypes.PyDLL`'s flag)
+    # and every other function releases it (clients/python/README.md, "The call").
+    for name in _abi.FUNCTIONS:
+        held = bool(getattr(abi, name)._flags_ & ctypes._FUNCFLAG_PYTHONAPI)
+        if held != (name in _abi.PER_MESSAGE):
+            fail(f"{name} {'keeps' if held else 'releases'} the GIL across the call; the per-message functions "
+                 f"{', '.join(_abi.PER_MESSAGE)} keep it and every other function releases it")
 
     tracemalloc.start()
     with cavalry.Client() as client:

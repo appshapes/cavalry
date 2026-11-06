@@ -86,13 +86,24 @@ You will see `1000 messages over cavalry:ipc, position 64000`.
 What `ctypes` does per message, measured by `conformance/python/quickstart.py`'s report
 (the figures below are the laptop's; CI prints the runners'):
 
-- **The call.** The package loads the library with `ctypes.PyDLL`, which keeps the
-  GIL held across each foreign call, so a poll's call-backs run with no GIL release
-  and re-acquire pair per message; `ctypes.CDLL` would release the GIL around each
-  call and take it back in each call-back, two lock operations per message, for the
-  sake of other Python threads during the call, which a client on the caller's thread
-  does not need. Every per-message function makes one call; `poll`'s call-backs are
-  the ABI calling the trampoline, not calls of their own.
+- **The call.** The package opens the library twice, which the loader maps once. The
+  seven per-message functions of `crates/cavalry-ffi/README.md` come through
+  `ctypes.PyDLL`, which keeps the GIL held across the foreign call, so an offer, a
+  claim, a commit or abort and a poll's call-backs run with no GIL release and
+  re-acquire pair per message. `ctypes.CDLL` would release the GIL around each call
+  and take it back in each call-back, two lock operations per message. Every other
+  function comes through `ctypes.CDLL`: `cavalry_init`, the adds, the recording and
+  replay commands and the closes wait on the driver, for up to 10 s on a timeout
+  (`spec/c-abi.md`, "Threads"), and with the GIL held every other Python thread of
+  the process would stop for that long, one polling another subscription included.
+  The cost is the pair on each of those calls, which are not per message. Every
+  per-message function makes one call; `poll`'s call-backs are the ABI calling the
+  trampoline, not calls of their own. The runner checks each function's loader.
+- **Threads.** Releasing the GIL lets two Python threads be inside the ABI at once,
+  and the ABI runs one call on a handle at a time (`spec/c-abi.md`, "Threads"). A
+  `Client` takes its own lock around every call on its handle, never on a message's
+  path, so threads may share it. A `Publication`, `Subscription`, `Recording`,
+  `Replay` or `Image` is used from one thread at a time; give each thread its own.
 - **The call-back.** `ctypes` builds the trampoline's arguments as new Python objects
   on every call, an `int` each for the buffer pointer, the length and the header
   pointer; the trampoline then builds the view over the body, a `c_uint8` array at the
