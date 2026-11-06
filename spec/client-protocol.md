@@ -1,4 +1,4 @@
-# Client protocol, version 4
+# Client protocol, version 5
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -25,7 +25,12 @@ codes 4 and 9, adds the two endpoint registries and the `images/` directory, and
 the counters file (ADR 0040); every version 3 encoding is unchanged but those three
 events, so a version 3 client closes on the first `publication ready` or `subscription
 ready` a version 4 driver sends, as the reserved-id rule below says, and an upgrade
-restarts the clients before the driver.
+restarts the clients before the driver. Version 5 adds `add destination` and `remove
+destination`, Aeron's type ids 7 and 8, for a publication on a control channel of
+`spec/udp.md`, version 1, and reads `control`, `control-mode` and `fc` on a
+publication's channel (ADR 0053); every version 4 encoding is unchanged, so a version
+4 client's commands are version 5 commands, and a version 4 driver answers the two
+commands with code 6.
 
 ## The driver directory
 
@@ -89,6 +94,8 @@ whose bytes or padding run past the message is `string`.
 | 4 | add subscription | client id, correlation id, stream id, channel |
 | 5 | remove subscription | client id, correlation id, registration id |
 | 6 | client keepalive | client id, correlation id |
+| 7 | add destination | client id, correlation id, registration id, channel |
+| 8 | remove destination | client id, correlation id, registration id, channel |
 | 11 | client close | client id, correlation id |
 | 257 (`0x0101`) | start recording | client id, correlation id, stream id, channel |
 | 258 (`0x0102`) | stop recording | client id, correlation id, recording id |
@@ -98,9 +105,9 @@ whose bytes or padding run past the message is `string`.
 | 262 (`0x0106`) | purge segments | client id, correlation id, recording id, new start position |
 | 263 (`0x0107`) | purge recording | client id, correlation id, recording id |
 
-Type ids 1 to 255 (`0x01` to `0xFF`) are Aeron's: 7 to 10 and 12 to 255 are reserved for
+Type ids 1 to 255 (`0x01` to `0xFF`) are Aeron's: 9, 10 and 12 to 255 are reserved for
 the commands Aeron's control protocol numbers, present and future, and a later version
-takes one with its feature under Aeron's number. Type ids 257 to 511 (`0x0101` to
+takes one with its feature under Aeron's number, as version 5 took 7 and 8. Type ids 257 to 511 (`0x0101` to
 `0x01FF`) are Cavalry's own, taken in order from 257, and 264 to 511 are reserved for
 later versions; 256, and 512 and above, lie outside both ranges and are reserved too. The
 driver answers any reserved id with an `error` event whose code is 6. Every command
@@ -118,6 +125,8 @@ Then, by command:
 | add publication, add exclusive publication, add subscription, start recording | 16 | 4 | stream id | i32 | any |
 | add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | `cavalry:ipc`, or a `cavalry:udp` channel as `spec/udp.md`, "The channel URI", says; any other string is answered with error code 1, a host that does not resolve with code 9 |
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
+| add destination, remove destination | 16 | 8 | registration id | i64 | 0 or more: the client's registration of the publication, the correlation id of its add publication or add exclusive publication command |
+| add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: a `cavalry:udp` channel with an endpoint (`spec/udp.md`, "The channel URI"), of which only `endpoint` is read; `cavalry:ipc`, a control channel or any other string is answered with error code 1, a host that does not resolve with code 9 |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 | start replay | 24 | 8 | position | i64 | −1 for the recording's retained position, its start position until a purge moves it; else a multiple of 32 from the retained position to the extent |
@@ -154,7 +163,12 @@ What the driver does with each, after the checks of "What the driver rejects":
   its send endpoint, one socket, whose `channel.status` counter the event names as its
   channel status indicator id; the log has the UDP sizes of "Sizes", the publication is
   connected by the first status message and not before, and the sender puts the stream
-  on the wire (`spec/udp.md`, "The sender"). A registry at capacity, a counters file
+  on the wire (`spec/udp.md`, "The sender"). On a control channel the send endpoint's
+  socket is bound to the control address and the stream goes to the endpoint's
+  destinations, none until a client adds one with `add destination`; the publication's
+  flow control strategy is its channel's `fc`, `max` when it names none, and an add
+  that would join a live publication under a different `fc` is error code 1 with the
+  reason `fc`. A registry at capacity, a counters file
   with no free record, or the sender's request queue with no room for the endpoint and
   the publication, or with a remove still waiting for room (ADR 0041), is error code
   10; a log that cannot be created or sized is error code 12; a socket that cannot be
@@ -168,6 +182,26 @@ What the driver does with each, after the checks of "What the driver rejects":
   `spec/udp.md`, "The sender" says, and a send endpoint closes when its last
   publication's linger ends. A registration the
   driver does not know, or that belongs to another client, is error code 3.
+- **add destination.** The command names the client's registration of a publication
+  and a destination channel. The driver resolves the destination's endpoint once, as
+  it resolves every channel's host, and adds it to the publication's send endpoint,
+  whose every publication then sends to it (`spec/udp.md`, "The sender"); it answers
+  `operation success`. A destination the endpoint already has is added again by
+  nothing and answered the same, so that a client that retries after a response
+  timeout is not refused. A registration the driver does not know, or that belongs to
+  another client, is error code 3; a publication whose channel names no control
+  address, a `cavalry:ipc` publication among them, is code 1 with the reason
+  `control` and a message saying what to add to the channel; a destination channel
+  that is `cavalry:ipc` or a control channel is code 1 with the reason `destination`;
+  a host that does not resolve is code 9; a 65th destination on the endpoint is code
+  10 and adds one to `driver.registry_full` ("Sizes"); the sender's request queue with
+  no room for the destination, or with a request still waiting for room, is code 10 as
+  it is for an `add publication`.
+- **remove destination.** The same fields. The driver resolves the destination and
+  removes it from the publication's send endpoint, and answers `operation success`; a
+  destination the endpoint does not have is removed by nothing and answered the same,
+  as `stop recording` of a stopped recording is. The codes are `add destination`'s,
+  but a full table, which a remove never meets.
 - **add subscription.** The driver registers the subscription under the command's
   correlation id and answers `subscription ready`. Then, for every live publication whose
   stream id and channel match, now and whenever one is added later, it allocates a
@@ -179,7 +213,10 @@ What the driver does with each, after the checks of "What the driver rejects":
   event names; an image is created when a setup frame for the stream arrives, with a
   registration id of its own, and `available image` then carries that id, the image's
   log under `images/` and the sender's address as the source identity (`spec/udp.md`,
-  "The receiver"). A registry at capacity, a counters file with no free record, or the
+  "The receiver"). A channel that names `control`, `control-mode` or `fc` is error
+  code 1 with the reason `subscription`: this version receives on no control address
+  and reads no `fc` on a subscription (`spec/udp.md`, "The channel URI"). A registry
+  at capacity, a counters file with no free record, or the
   receiver's request queue with no room for the endpoint and the subscription, or with
   a request still waiting for room (ADR 0042), is error code 10, as it is for an `add
   publication`; a socket that cannot be opened or bound is code 4; a host that does
@@ -551,9 +588,9 @@ whose correlation id, registration id or client id is its own and ignores the re
 
 | Code | Name | When |
 | --- | --- | --- |
-| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its endpoint, or a multicast address (`spec/udp.md`, "What a reader rejects"); the message names the reason and the parameter |
+| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its control address, its endpoint, its `fc`, or a multicast address (`spec/udp.md`, "What a reader rejects"); or a channel that parses where the command does not take it: `control`, `control-mode` or `fc` on an `add subscription`, an `add publication` that would join a live publication under a different `fc`, a destination command on a publication whose channel names no control address, or a destination channel that is `cavalry:ipc` or a control channel; the message names the reason and the parameter |
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
-| 3 | unknown publication | remove publication names a registration id the driver does not know, or another client's |
+| 3 | unknown publication | remove publication, add destination or remove destination names a registration id the driver does not know, or another client's |
 | 4 | channel endpoint error | a `cavalry:udp` endpoint's socket could not be opened, bound or connected, and the message carries the operating system's reason and the endpoint; or an `add subscription` waited the closing endpoint wait for its channel's previous receive endpoint to close, and the message names the endpoint and the wait |
 | 6 | unknown command type | the record's type is not a command of this version |
 | 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read, or start replay's length is below −1 |
@@ -620,15 +657,17 @@ with error code 10 and registers nothing:
 | commands in progress | 64 | every truncate recording, purge segments or purge recording the driver is working on |
 | send endpoints | 64 | every resolved `cavalry:udp` channel a publication sends on |
 | receive endpoints | 64 | every resolved `cavalry:udp` channel a subscription receives on |
+| destinations | 64 per send endpoint | every destination added to a control channel's send endpoint and not removed (`spec/udp.md`, "The sender") |
 
 The counters file is sized so that the registries fill before it does: the static
-counters of `counters.toml`, 82 once the sender and the receiver land their 44 (`spec/udp.md`,
-"Counters"), four per publication (4096: its position, its limit, the sender position and
-the sender limit), three per image (6144: the subscriber's position, the rebuild position
-and the high-water mark), three per recording (3072), one per replay (64), four per replay
-publication (512: its position and its limit, and over `cavalry:udp` the sender position
-and the sender limit beside them; ADR 0043) and five per endpoint (640) come to 14,610,
-fewer than 16384.
+counters of `counters.toml`, 84 once the sender and the receiver land their 46 (`spec/udp.md`,
+"Counters"), five per publication (5120: its position, its limit, the sender position,
+the sender limit and the sender's flow control receivers), three per image (6144: the
+subscriber's position, the rebuild position and the high-water mark), three per
+recording (3072), one per replay (64), five per replay publication (640: its position
+and its limit, and over `cavalry:udp` the sender position, the sender limit and the
+flow control receivers beside them; ADR 0043, ADR 0053) and six per endpoint (768)
+come to 15,892, fewer than 16384.
 
 ## What the driver rejects
 
@@ -648,9 +687,15 @@ The vectors cover these: they are checks on bytes. A command that decodes is the
 checked by the driver against its state, which no vector holds; the checks and their
 codes are the ones "Commands" and "Error codes" name: a channel that is neither
 `cavalry:ipc` nor a `cavalry:udp` channel this version accepts is code 1 with the reason
-`spec/udp.md` names, `grammar`, `key`, `endpoint` or `multicast`, and adds one to
-`client_protocol.rejected_command`; a `cavalry:udp` host that does not resolve is code
-9; a `cavalry:udp` endpoint whose socket fails is code 4;
+`spec/udp.md` names, `grammar`, `key`, `control`, `endpoint`, `fc` or `multicast`, and
+adds one to `client_protocol.rejected_command`; a channel that parses where the
+command does not take it, `control`, `control-mode` or `fc` on an `add subscription`,
+an `add publication` that would join a live publication under a different `fc`, a
+destination command on a publication whose channel names no control address, or a
+destination channel that is `cavalry:ipc` or a control channel, is code 1 with the
+reason `subscription`, `fc`, `control` or `destination` and adds one to
+`client_protocol.rejected_command` too; a `cavalry:udp` host that does not resolve is
+code 9; a `cavalry:udp` endpoint whose socket fails is code 4;
 an unknown or another client's registration is code 2 or 3; a registry or the counters
 file at capacity is code 10 and adds one to `driver.registry_full`; a log that could not
 be created or sized is code 12 and adds one to `driver.log_create_failed`; a stream id and

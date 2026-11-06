@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/client-protocol.json: the test vectors for spec/client-protocol.md,
-version 4.
+version 5.
 
 This script is the spec's reference encoder, independent of the Rust code: it packs
 each command's and event's fields with the standard library and nothing else, so an
@@ -34,6 +34,8 @@ START_REPLAY, STOP_REPLAY = 0x0103, 0x0104
 ON_REPLAY_READY, ON_REPLAY_STOPPED = 0x1003, 0x1004
 # Version 3: the retention commands, answered with operation success or error (ADR 0031).
 TRUNCATE_RECORDING, PURGE_SEGMENTS, PURGE_RECORDING = 0x0105, 0x0106, 0x0107
+# Version 5: the destination commands, under Aeron's ids (ADR 0053).
+ADD_DESTINATION, REMOVE_DESTINATION = 7, 8
 # The replay's conventions, Aeron's: NULL_POSITION, NULL_LENGTH and Long.MAX_VALUE.
 NULL_POSITION, NULL_LENGTH, FOLLOW_LENGTH = -1, -1, 2**63 - 1
 
@@ -67,6 +69,10 @@ COMMANDS = {
                                         ("recording_id", "q"), ("new_start_position", "q"))),
     PURGE_RECORDING: ("purge_recording", (("client_id", "q"), ("correlation_id", "q"),
                                           ("recording_id", "q"))),
+    ADD_DESTINATION: ("add_destination", (("client_id", "q"), ("correlation_id", "q"),
+                                          ("registration_id", "q"), ("channel", "s"))),
+    REMOVE_DESTINATION: ("remove_destination", (("client_id", "q"), ("correlation_id", "q"),
+                                                ("registration_id", "q"), ("channel", "s"))),
 }
 EVENTS = {
     ON_ERROR: ("error", (("offending_correlation_id", "q"), ("error_code", "i"),
@@ -144,6 +150,7 @@ def event(type_id, name, **fields):
 
 IPC = "cavalry:ipc"
 LOG = "publications/7.logbuffer"
+DESTINATION = "cavalry:udp?endpoint=10.0.0.3:40123"
 VECTORS = [
     # Commands, decoded to their fields; the fields encode to the same bytes.
     command(ADD_PUBLICATION, "add-publication", client_id=0, correlation_id=1,
@@ -207,6 +214,18 @@ VECTORS = [
     command(PURGE_RECORDING, "purge-recording", client_id=5, correlation_id=17, recording_id=0),
     command(PURGE_RECORDING, "purge-recording-extremes", client_id=2**63 - 1,
             correlation_id=2**63 - 1, recording_id=2**63 - 1),
+    # Version 5: the destination commands, each naming a publication's registration and
+    # a destination channel.
+    command(ADD_DESTINATION, "add-destination", client_id=3, correlation_id=18, registration_id=4,
+            channel=DESTINATION),
+    command(ADD_DESTINATION, "add-destination-empty-channel", client_id=3, correlation_id=18,
+            registration_id=4, channel=""),
+    command(ADD_DESTINATION, "add-destination-extremes", client_id=2**63 - 1,
+            correlation_id=2**63 - 1, registration_id=2**63 - 1, channel="c" * MAX_STRING),
+    command(REMOVE_DESTINATION, "remove-destination", client_id=3, correlation_id=19,
+            registration_id=4, channel=DESTINATION),
+    command(REMOVE_DESTINATION, "remove-destination-extremes", client_id=2**63 - 1,
+            correlation_id=2**63 - 1, registration_id=2**63 - 1, channel="c" * MAX_STRING),
     # Events.
     event(ON_ERROR, "error-invalid-channel", offending_correlation_id=4, error_code=1,
           error_message="channel must be cavalry:ipc in this version (client-protocol.md, Error codes)"),
@@ -274,13 +293,22 @@ VECTORS = [
           error_message="recording 7 is not in the catalog (client-protocol.md, Error codes)"),
     event(ON_ERROR, "error-position-out-of-range", offending_correlation_id=13, error_code=23,
           error_message="position 4100 is not a multiple of 32 from 0 to 12288, the start position and extent of recording 0 (client-protocol.md, Error codes)"),
+    # Version 5: the destination commands' answers and refusals.
+    event(ON_OPERATION_SUCCESS, "operation-success-destination", correlation_id=18),
+    event(ON_ERROR, "error-no-control-address", offending_correlation_id=18, error_code=1,
+          error_message="the channel (control): publication 4's channel names no control address; add control=<host>:<port>|control-mode=manual to it (udp.md, The channel URI)"),
+    event(ON_ERROR, "error-destination-channel", offending_correlation_id=18, error_code=1,
+          error_message="the destination channel (destination): cavalry:ipc names no endpoint; a destination is cavalry:udp?endpoint=<host>:<port> (udp.md, The channel URI)"),
+    event(ON_ERROR, "error-unknown-publication-for-destination", offending_correlation_id=18,
+          error_code=3,
+          error_message="registration 4 is not a publication of this client (client-protocol.md, Error codes)"),
     # Invalid commands, by the reason a conforming implementation reports, in the order
     # the checks run.
     vector("command", ADD_PUBLICATION, "too-short-before-correlation-id", error="too-short",
            raw=struct.pack("<qi", 0, 1)),
     # The reserved ids, one per range the page names: Aeron's gap, Aeron's ids past this
     # version's, between the ranges, Cavalry's not yet taken, and above both.
-    vector("command", 7, "unknown-type-reserved", error="type",
+    vector("command", 9, "unknown-type-reserved", error="type",
            raw=struct.pack("<qq", 0, 1)),
     vector("command", 12, "unknown-type-aeron-reserved", error="type",
            raw=struct.pack("<qq", 0, 1)),
@@ -310,6 +338,10 @@ VECTORS = [
            error="too-short", raw=struct.pack("<qqq", 5, 16, 0)),
     vector("command", PURGE_RECORDING, "purge-recording-too-short-no-recording-id",
            error="too-short", raw=struct.pack("<qq", 5, 17)),
+    vector("command", ADD_DESTINATION, "add-destination-too-short-no-channel", error="too-short",
+           raw=struct.pack("<qqq", 3, 18, 4)),
+    vector("command", REMOVE_DESTINATION, "remove-destination-too-short-no-registration-id",
+           error="too-short", raw=struct.pack("<qq", 3, 19)),
     vector("command", ADD_PUBLICATION, "string-negative-length", error="string",
            raw=struct.pack("<qqii", 0, 1, 1001, -1)),
     vector("command", ADD_PUBLICATION, "string-over-4096", error="string",
@@ -322,6 +354,8 @@ VECTORS = [
            raw=struct.pack("<qqii", 5, 11, 1001, 11) + b"cavalry:ip"),
     vector("command", START_REPLAY, "start-replay-string-runs-past-message", error="string",
            raw=struct.pack("<qqqqqii", 5, 13, 0, -1, -1, 2001, 11) + b"cavalry:ip"),
+    vector("command", ADD_DESTINATION, "add-destination-string-runs-past-message", error="string",
+           raw=struct.pack("<qqqi", 3, 18, 4, 11) + b"cavalry:ud"),
     vector("command", ADD_PUBLICATION, "length-trailing-bytes", error="length",
            raw=encode(COMMANDS[ADD_PUBLICATION][1],
                       dict(client_id=0, correlation_id=1, stream_id=1001, channel=IPC)) + b"\0\0\0\0"),
@@ -341,6 +375,9 @@ VECTORS = [
            raw=struct.pack("<qqqqi", 5, 16, 0, 134217728, 0)),
     vector("command", PURGE_RECORDING, "purge-recording-length-trailing", error="length",
            raw=struct.pack("<qqqi", 5, 17, 0, 0)),
+    vector("command", REMOVE_DESTINATION, "remove-destination-length-trailing", error="length",
+           raw=encode(COMMANDS[REMOVE_DESTINATION][1],
+                      dict(client_id=3, correlation_id=19, registration_id=4, channel=DESTINATION)) + b"\0\0\0\0"),
     # Invalid events, the same checks on the client's side.
     vector("event", ON_OPERATION_SUCCESS, "event-too-short", error="too-short",
            raw=struct.pack("<i", 3)),
@@ -370,7 +407,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 4,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 5,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")

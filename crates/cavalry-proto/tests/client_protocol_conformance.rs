@@ -129,6 +129,22 @@ fn command_fields(command: &Command<'_>) -> Value {
         } => {
             json!({"name": "purge_recording", "client_id": client_id, "correlation_id": correlation_id, "recording_id": recording_id})
         }
+        Command::AddDestination {
+            client_id,
+            correlation_id,
+            registration_id,
+            channel,
+        } => {
+            json!({"name": "add_destination", "client_id": client_id, "correlation_id": correlation_id, "registration_id": registration_id, "channel": text(channel)})
+        }
+        Command::RemoveDestination {
+            client_id,
+            correlation_id,
+            registration_id,
+            channel,
+        } => {
+            json!({"name": "remove_destination", "client_id": client_id, "correlation_id": correlation_id, "registration_id": registration_id, "channel": text(channel)})
+        }
     }
 }
 
@@ -233,7 +249,7 @@ fn event_fields(event: &Event<'_>) -> Value {
 #[test]
 fn every_vector_in_spec_vectors_client_protocol_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("client-protocol.json parses");
-    assert_eq!(doc["version"], 4, "the vectors are for version 4");
+    assert_eq!(doc["version"], 5, "the vectors are for version 5");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(
         vectors.len() >= 80,

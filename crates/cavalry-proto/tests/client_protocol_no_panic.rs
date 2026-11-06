@@ -23,8 +23,8 @@ impl XorShift {
 
 const REASONS: [&str; 4] = ["too-short", "type", "string", "length"];
 
-const COMMAND_TYPES: [i32; 14] = [
-    1, 2, 3, 4, 5, 6, 11, 0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107,
+const COMMAND_TYPES: [i32; 16] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 11, 0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107,
 ];
 const EVENT_TYPES: [i32; 12] = [
     0x0F01, 0x0F02, 0x0F03, 0x0F04, 0x0F05, 0x0F06, 0x0F07, 0x0F0A, 0x1001, 0x1002, 0x1003, 0x1004,
@@ -105,6 +105,18 @@ fn valid_messages() -> Vec<(i32, Vec<u8>)> {
             correlation_id: 14,
             replay_session_id: 13,
         },
+        Command::AddDestination {
+            client_id: 3,
+            correlation_id: 18,
+            registration_id: 4,
+            channel: b"cavalry:udp?endpoint=10.0.0.3:40123",
+        },
+        Command::RemoveDestination {
+            client_id: 3,
+            correlation_id: 19,
+            registration_id: 4,
+            channel: b"",
+        },
     ];
     let events = [
         Event::Error {
@@ -179,10 +191,10 @@ fn random_bytes_under_every_type_never_panic() {
         for byte in &mut buf[..len] {
             *byte = rng.next() as u8;
         }
-        let pick = rng.next() % 24;
+        let pick = rng.next() % 30;
         let type_id = match pick {
-            0..=10 => COMMAND_TYPES[pick as usize],
-            11..=22 => EVENT_TYPES[(pick - 11) as usize],
+            0..=15 => COMMAND_TYPES[pick as usize],
+            16..=27 => EVENT_TYPES[(pick - 16) as usize],
             _ => rng.next() as i32,
         };
         check(type_id, &buf[..len]);
