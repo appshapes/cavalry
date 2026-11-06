@@ -13,7 +13,8 @@
 // handler included, with each per-message refusal's error in its handle's Err and a refused
 // add's in its *Error, on stream 1003 (edges); checks that a reserved value beyond 2^53 reaches
 // the handler exactly on stream 1005 (reservedValues); checks that a closed subscription's
-// slot in the table is freed (stateFreed); does the same 1,000 over cavalry:udp on the
+// slot in the table is freed (stateFreed); checks that eight goroutines may share the
+// Client, on streams 1101 to 1108 (sharedClient); does the same 1,000 over cavalry:udp on the
 // loopback; and replays the recording onto stream 2001, each frame at the position the
 // recording holds it at, with the end reported. Every wait is bounded at 10 s, and a wait
 // that runs out says how far it got. It exits 1 with the function, the code and
@@ -41,6 +42,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	cavalry "github.com/appshapes/cavalry/clients/go"
@@ -789,6 +791,65 @@ func stateFreed(client *cavalry.Client) {
 	say("a closed subscription's slot in the table is freed: %d held before the add, %d after the close", before, cavalry.Registered())
 }
 
+// sharedClient checks that goroutines may share a Client (clients/go/README.md,
+// "Threads"): eight goroutines at once, each adding a publication and a subscription on a
+// stream of its own through the one client, reading IsClosed, making an add the ABI
+// refuses and closing what it added, four times over. Every add succeeds, every refusal
+// is its own *Error with ErrNotUTF8, and the table holds what it held before.
+func sharedClient(client *cavalry.Client) {
+	const goroutines, rounds = 8, 4
+	name := "shared client"
+	before := cavalry.Registered()
+	failures := make([]string, goroutines)
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			streamID := int32(stream + 100 + g)
+			for r := 0; r < rounds; r++ {
+				publication, err := client.AddPublication("cavalry:ipc", streamID)
+				if err != nil {
+					failures[g] = fmt.Sprintf("goroutine %d, round %d: AddPublication returned %v", g, r, err)
+					return
+				}
+				subscription, err := client.AddSubscription("cavalry:ipc", streamID)
+				if err != nil {
+					failures[g] = fmt.Sprintf("goroutine %d, round %d: AddSubscription returned %v", g, r, err)
+					publication.Close()
+					return
+				}
+				_, refusal := client.AddPublication("cavalry:ipc\xff", streamID)
+				if codeOf(refusal) != cavalry.ErrNotUTF8 || client.IsClosed() {
+					failures[g] = fmt.Sprintf("goroutine %d, round %d: a refused add returned %v and IsClosed is %v; "+
+						"expected *Error with ErrNotUTF8 and an open client", g, r, refusal, client.IsClosed())
+				}
+				if err := subscription.Close(); err != nil && failures[g] == "" {
+					failures[g] = fmt.Sprintf("goroutine %d, round %d: the subscription's close returned %v", g, r, err)
+				}
+				if err := publication.Close(); err != nil && failures[g] == "" {
+					failures[g] = fmt.Sprintf("goroutine %d, round %d: the publication's close returned %v", g, r, err)
+				}
+				if failures[g] != "" {
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for _, failure := range failures {
+		if failure != "" {
+			fail("%s: %s", name, failure)
+		}
+	}
+	if cavalry.Registered() != before {
+		fail("%s: the table holds %d subscriptions after the round, %d before", name, cavalry.Registered(), before)
+	}
+	say("%s: %d goroutines at once added and closed %d publications and %d subscriptions through one Client, and "+
+		"each of their %d refused adds returned its own *Error with ErrNotUTF8", name, goroutines, goroutines*rounds,
+		goroutines*rounds, goroutines*rounds)
+}
+
 func main() {
 	// The load-time check (spec/c-abi.md, "Versions and what a reader rejects"): the check
 	// NewClient makes first refuses a package whose ABIVersion is not the library's, with
@@ -835,6 +896,7 @@ func main() {
 	edges(client)
 	reservedValues(client)
 	stateFreed(client)
+	sharedClient(client)
 
 	// The report's two rounds, which check nothing else.
 	latencies := latency(client)

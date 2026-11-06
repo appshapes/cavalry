@@ -265,8 +265,13 @@ func cString(s string) *C.char { return C.CString(s) }
 func freeCString(s *C.char) { C.free(unsafe.Pointer(s)) }
 
 // Client is a client of one driver: NewClient's cavalry_init over a context with this
-// package's ABI version. Close is idempotent.
+// package's ABI version. Goroutines may share it: every call on its handle holds mu, since
+// the ABI runs one call on a handle at a time and a read of the client never runs beside
+// an add (spec/c-abi.md, "Threads"), so a call waits for the one another goroutine is
+// making on this client, an add or a command for up to 10 s. No message passes through
+// a Client. Close is idempotent.
 type Client struct {
+	mu       sync.Mutex
 	handle   *C.cavalry_t
 	dir      string
 	clientID int64
@@ -307,19 +312,32 @@ func (c *Client) Dir() string { return c.dir }
 func (c *Client) ClientID() int64 { return c.clientID }
 
 // IsClosed is whether the client is closed, by Close or by the driver.
-func (c *Client) IsClosed() bool { return c.handle == nil || bool(C.cavalry_is_closed(c.handle)) }
+func (c *Client) IsClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.handle == nil || bool(C.cavalry_is_closed(c.handle))
+}
 
 // Closed is 0 while open, else why the client closed, Closed* (CAVALRY_CLOSED_*).
 func (c *Client) Closed() int32 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.handle == nil {
 		return ClosedByUser
 	}
 	return int32(C.cavalry_closed(c.handle))
 }
 
-// Close closes the client and every handle it made. Idempotent; the handle is forgotten
+// Close closes the client, cavalry_close, and none of the handles it made: each
+// Publication, Subscription, Recording and Replay is freed by its own Close and by
+// nothing else, and a publication or a subscription answers as closed until then
+// (spec/c-abi.md, "Lifetimes"). An unclosed Subscription keeps its slot in the table of
+// 4096, so a program that closes only its clients fills the table and
+// AddSubscription returns ErrSubscriptionsFull. Idempotent; the handle is forgotten
 // whatever the ABI returns.
 func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.handle == nil {
 		return nil
 	}
@@ -333,6 +351,8 @@ func (c *Client) Close() error {
 // AddPublication adds a publication on channel and streamID, waiting on the driver for
 // up to 10 s.
 func (c *Client) AddPublication(channel string, streamID int32) (*Publication, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
@@ -346,6 +366,8 @@ func (c *Client) AddPublication(channel string, streamID int32) (*Publication, e
 
 // AddExclusivePublication adds a publication of its own session on channel and streamID.
 func (c *Client) AddExclusivePublication(channel string, streamID int32) (*Publication, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
@@ -360,6 +382,8 @@ func (c *Client) AddExclusivePublication(channel string, streamID int32) (*Publi
 // AddSubscription adds a subscription on channel and streamID and registers it in the
 // table the trampoline reads.
 func (c *Client) AddSubscription(channel string, streamID int32) (*Subscription, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
@@ -373,6 +397,8 @@ func (c *Client) AddSubscription(channel string, streamID int32) (*Subscription,
 
 // StartRecording starts recording the live publication on channel and streamID.
 func (c *Client) StartRecording(channel string, streamID int32) (*Recording, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
@@ -386,6 +412,8 @@ func (c *Client) StartRecording(channel string, streamID int32) (*Recording, err
 
 // StopRecording stops the recording.
 func (c *Client) StopRecording(recordingID int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	return check("cavalry_stop_recording", C.cavalry_stop_recording(c.handle, C.int64_t(recordingID)))
@@ -393,6 +421,8 @@ func (c *Client) StopRecording(recordingID int64) error {
 
 // TruncateRecording truncates the recording to position.
 func (c *Client) TruncateRecording(recordingID int64, position int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	return check("cavalry_truncate_recording", C.cavalry_truncate_recording(c.handle, C.int64_t(recordingID), C.int64_t(position)))
@@ -400,6 +430,8 @@ func (c *Client) TruncateRecording(recordingID int64, position int64) error {
 
 // PurgeSegments purges the recording's segments before newStartPosition.
 func (c *Client) PurgeSegments(recordingID int64, newStartPosition int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	return check("cavalry_purge_segments", C.cavalry_purge_segments(c.handle, C.int64_t(recordingID), C.int64_t(newStartPosition)))
@@ -407,6 +439,8 @@ func (c *Client) PurgeSegments(recordingID int64, newStartPosition int64) error 
 
 // PurgeRecording purges the recording.
 func (c *Client) PurgeRecording(recordingID int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	return check("cavalry_purge_recording", C.cavalry_purge_recording(c.handle, C.int64_t(recordingID)))
@@ -415,6 +449,8 @@ func (c *Client) PurgeRecording(recordingID int64) error {
 // StartReplay replays length bytes of the recording from position onto replayStreamID
 // of channel; NullPosition and NullLength replay all of it.
 func (c *Client) StartReplay(recordingID int64, position int64, length int64, replayStreamID int32, channel string) (*Replay, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
@@ -429,6 +465,8 @@ func (c *Client) StartReplay(recordingID int64, position int64, length int64, re
 
 // StopReplay stops the replay session.
 func (c *Client) StopReplay(replaySessionID int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	return check("cavalry_stop_replay", C.cavalry_stop_replay(c.handle, C.int64_t(replaySessionID)))

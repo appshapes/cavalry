@@ -488,8 +488,9 @@ class Clients(unittest.TestCase):
 
     def test_a_go_add_without_the_thread_lock_fails(self):
         self.edit_go("func (c *Client) AddPublication(channel string, streamID int32) (*Publication, error) {\n"
-                     "\truntime.LockOSThread()\n\tdefer runtime.UnlockOSThread()\n",
-                     "func (c *Client) AddPublication(channel string, streamID int32) (*Publication, error) {\n")
+                     "\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n\truntime.LockOSThread()\n\tdefer runtime.UnlockOSThread()\n",
+                     "func (c *Client) AddPublication(channel string, streamID int32) (*Publication, error) {\n"
+                     "\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n")
         [finding] = lint.findings(self.tmp)
         self.assertIn("Client.AddPublication", finding)
         self.assertIn("reads the thread's error through check", finding)

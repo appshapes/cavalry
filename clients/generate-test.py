@@ -744,6 +744,26 @@ class GoPackage(unittest.TestCase):
             self.assertNotIn("Errcode", body, method)
             self.assertIn(f"&{receiver[0].lower()}.err)", body, method)
 
+    def test_every_call_on_the_client_handle_holds_the_clients_mutex(self):
+        """Goroutines may share a Client (clients/go/README.md, "Threads"): the ABI runs
+        one call on a handle at a time, so each method that reaches the client handle
+        begins by taking the client's mutex, and none of the per-message functions does."""
+        files = gen_go.write_go(self.header)
+        code = files["cavalry.go"]
+        module = lint.GoModule([("cavalry.go", code), ("trampoline.go", files["trampoline.go"])])
+        methods = [label for label, (_, _, body, _, _) in module.functions.items()
+                   if label.startswith("Client.") and "c.handle" in body]
+        self.assertEqual(sorted(methods), sorted(
+            ["Client.IsClosed", "Client.Closed", "Client.Close", "Client.AddPublication", "Client.AddExclusivePublication",
+             "Client.AddSubscription", "Client.StartRecording", "Client.StopRecording", "Client.TruncateRecording",
+             "Client.PurgeSegments", "Client.PurgeRecording", "Client.StartReplay", "Client.StopReplay"]))
+        for label in methods:
+            body = module.functions[label][2]
+            self.assertTrue(body.startswith("{\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n"), label)
+        self.assertIn("\tmu       sync.Mutex\n\thandle   *C.cavalry_t\n", code)
+        for label in lint.RULES["go"]["functions"]:
+            self.assertNotIn(".mu.", module.functions[label][2], label)
+
     def test_every_call_that_reads_the_threads_error_holds_its_os_thread(self):
         """The committed module passes lint.py's thread rule, and each function that reads
         the error through check or lastError begins its ABI work under the lock."""

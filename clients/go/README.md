@@ -57,7 +57,13 @@ before it returns.
   exception is a subscription's close from inside a handler of its own poll, which the
   ABI refuses with `ErrPolling`, leaving the subscription open (`spec/c-abi.md`,
   "Calls during a claim or a poll"). `Close` then returns the `*Error` and keeps the
-  handle, so the subscription can be polled and closed after the poll.
+  handle, so the subscription can be polled and closed after the poll. A `Client`'s
+  `Close` does not close the handles it made: each `Publication`, `Subscription`,
+  `Recording` and `Replay` is freed by its own `Close` and by nothing else, and a
+  publication or a subscription answers as closed from the client's close until then
+  (`spec/c-abi.md`, "Lifetimes"). An unclosed `Subscription` also keeps its slot in
+  the table ("Threads"), so a program that closes only its clients fills the table
+  and `AddSubscription` returns `ErrSubscriptionsFull`.
 - Never edit a generated file by hand: `just lint` regenerates the module and fails
   when the committed files differ. `example/main.go` is the one file written by hand,
   and it is this README's program.
@@ -153,13 +159,26 @@ in the call and the scheduler runs the program's other goroutines meanwhile.
 
 ### Threads
 
-A `Client` and the handles it makes are used from one goroutine at a time; the client
-adds no lock, and the ABI runs one call on a handle at a time. A program with several
-goroutines gives each its own `Subscription` and `Publication`; the `Client` may be
-shared, since each of its calls is one ABI call that the ABI serialises. The table the
-trampoline reads subscriptions from is written under a lock when a subscription is
-added or closed, never on a message's path, and read with one atomic load per
-fragment.
+The ABI runs one call on a handle at a time, and a read of a client, such as
+`cavalry_is_closed`, never runs beside an add or a command (`spec/c-abi.md`,
+"Threads"); it serialises nothing itself. So a `Client` takes its own `sync.Mutex`
+around every call on its handle, as the Python client takes its lock, and goroutines
+may share it. A call on a shared client waits for the call another goroutine is
+making on it, an add or a command for up to 10 s; no message passes through a
+`Client`, so the mutex is never on a message's path. `conformance/go/quickstart`
+shares one client among eight goroutines that add and close at once.
+
+A `Publication`, `Subscription`, `Recording`, `Replay` or `Image` is used from one
+goroutine at a time, as the Rust API's handles are: the client adds no lock to them.
+A program with several goroutines gives each its own `Publication` and
+`Subscription`. Two handles may be used from two goroutines at once, a client and its
+publications and subscriptions among them.
+
+The table the trampoline reads subscriptions from holds 4,096 subscriptions:
+`AddSubscription` above that returns an `*Error` with `ErrSubscriptionsFull`, and
+each `Subscription.Close` frees a slot. The table is written under a lock when a
+subscription is added or closed, never on a message's path, and read with one atomic
+load per fragment.
 
 ### The thread's error
 

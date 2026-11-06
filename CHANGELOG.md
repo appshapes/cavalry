@@ -1466,7 +1466,9 @@ user-visible change, added in the same commit as the change. The format follows
   `github.com/appshapes/cavalry/clients/go` over the header through cgo, linked with
   `libcavalry_ffi.a` and depending on nothing beyond Go's standard library, whose
   `NewClient` refuses a library of another ABI version before any other function; a
-  `Client`, a `Publication` whose `TryClaim` and `Offer` return the position or the
+  `Client` that goroutines may share, which holds its own mutex around every call on
+  its handle and whose `Close` leaves each handle it made to its own `Close`, a
+  `Publication` whose `TryClaim` and `Offer` return the position or the
   result code and whose `Claim` is a `[]byte` over the log, a `Subscription` polled
   with a fragment handler that every delivered fragment reaches, the body a `[]byte`
   into the log for the call and a panic recovered and returned by `Poll` as a
