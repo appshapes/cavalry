@@ -142,7 +142,13 @@ whose last status message carried end of stream, is dropped and counted in
 the greater of itself and the least of them; a 65th receiver's status messages are
 accepted for the connection and not tracked, counted in
 `sender.flow_control_receivers_full`; the entries now are the gauge
-`sender.flow_control_receivers`, keyed as `sender.limit` is. The sender limit never
+`sender.flow_control_receivers`, keyed as `sender.limit` is. A removed destination's
+receiver keeps its image until the image liveness timeout, 10 s, sending a status
+message at least every 200 ms that refreshes its entry, so a `remove destination`
+under `min` holds the sender limit at that receiver's position plus window for up to
+the liveness timeout and the flow control receiver timeout together, about 15 s, which
+`sender.flow_control_receivers` above `channel.destinations` shows while it lasts;
+feature 3's membership change meets this. The sender limit never
 falls under either strategy, as version 0's vector `sender-limit-never-falls` pins:
 Aeron's idle path can lower it when a receiver's window shrinks, and a Cavalry
 receiver's window is fixed (`spec/udp.md`, "Values"). Under `max` the sender keeps no
@@ -158,9 +164,16 @@ doctor` explains it from the three counters and `sender.send_failed`.
 **The commands are Aeron's, under its numbers.** `add destination` and `remove
 destination` carry client id, correlation id, the client's registration of the
 publication and the destination channel, and are answered with `operation success`.
-Only the destination channel's `endpoint` is read, resolved once as every channel's
-host is, to an address of the control address's family (above); `cavalry:ipc` or a
-control channel as a destination is code 1. An unknown or
+A destination channel names its `endpoint` and nothing else: `interface` and `fc`
+beside the endpoint are refused with code 1 and the reason `destination`, as a
+subscription's channel refuses a publication's keys, since a key that does nothing is
+a key the reader cannot check. `control` or `control-mode` beside the endpoint never
+reaches that refusal: the reader's `control` check, which runs before any of the
+driver's, refuses a control address beside an endpoint and a mode without a control
+address, so it is code 1 with the reason `control` (`spec/udp.md`, "What a reader
+rejects"). The endpoint is resolved once as every channel's host is, to an address of
+the control address's family (above); `cavalry:ipc` or a control channel as a
+destination is code 1 with the reason `destination`. An unknown or
 another client's registration is code 3; a publication whose channel has no control
 address is code 1, Aeron's `INVALID_CHANNEL`, with a message that says what to add to
 the channel; a 65th destination on an endpoint is code 10 and counts
@@ -229,6 +242,10 @@ commits on the card, each with its evidence.
   response timeout would be refused for a destination it has; Aeron adds it twice,
   which sends every datagram twice to one address, and adding it once is the cheaper
   truth.
+- **Ignore `interface` and `fc` on a destination channel**, as Aeron reads only
+  `endpoint` there. Lost: a key that does nothing is a key the reader cannot check,
+  the rule this ADR gives a subscription's channel; refusing now costs nothing, and a
+  later version can read one with an ADR.
 - **Ignore `control`, `control-mode` and `fc` on a subscription channel**, as Aeron
   ignores `fc` there. Lost: a key that does nothing is a key the reader cannot check
   (`CLAUDE.md`, Protocol); refusing now costs nothing and a later version can accept
