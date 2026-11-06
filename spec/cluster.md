@@ -4,7 +4,7 @@ The cluster protocol makes three or more drivers one replicated state machine: t
 cluster's log is one stream, written by the member that is the leader and sent to
 every other member, a follower, over multi-destination cast (`spec/udp.md`, "The
 sender"); every member records the log into its durable log (`spec/durable-log.md`) so
-that the three recordings are the same bytes at the same positions; the leader commits
+that the three recordings hold every entry at the same position; the leader commits
 an entry once a quorum has recorded it; a service, a subscriber through the client API
 and the C ABI, reads the committed log and nothing else; a client reaches the service
 through a session with the leader; and when the leader is lost the members elect
@@ -100,9 +100,12 @@ the position after the last frame that carries it, the position at which it begi
 plus the aligned length of each of its frames, 32 plus the fragment's payload rounded
 up to a multiple of 32, with a message longer than MTU length − 32 bytes split into
 fragments of that payload length and a last of the remainder. Every member's recording
-holds every entry at that position, since the leader's publication and every follower's
-image carry one stream, and a replay of any member's recording from any position gives
-the same bytes as the leader's.
+holds every entry at that position with the same payload, since the leader's
+publication and every follower's image carry one stream, and a replay of any member's
+recording from any position gives the same entries as the leader's; a span a member
+recorded from a catch-up replay carries the replay's session id in its frame headers
+in this version ("Messages outside an election"), so the bytes of two recordings are
+the same except for those headers until a replay can carry the log's session id.
 
 A leadership term is the span of the log one leader writes. Its leadership term id is
 an `i64` from 0 upward, one more than the term before it, never reused; −1 is no term.
@@ -455,10 +458,10 @@ counter ("Counters").
 | 6 | leader replay | replays its own recording from its log position to its append position into its service, then goes to leader init; a leader with nothing to replay goes at once |
 | 7 | leader init | joins its log as leader for the term at its append position and goes to leader ready |
 | 8 | leader ready | sends new leadership term every leader heartbeat interval until a quorum of members has reported an append position at its log position within the leader heartbeat timeout, then appends the new leadership term event and closes the election |
-| 9 | follower log replication | out of this version: no message of this version asks a peer for the log of an earlier term, so no member of this version enters this state, and a reader of `cluster.election_state` sees 9 from a member of a later version alone. A member of this version whose append position is below the leader's term base log position catches up instead, from its own append position, through states 11 to 13, the leader's replay of its recording of the log starting at that position across the terms between ("Messages outside an election"); each such catch-up is counted in `cluster.catchups` |
+| 9 | follower log replication | out of this version: no message of this version asks a peer for the log of an earlier term, so no member of this version enters this state, and a reader of `cluster.election_state` sees 9 from a member of a later version alone. A member of this version whose append position is below the leader's term base log position cannot rejoin: it fails its election on the new leadership term that tells it so, counted in `cluster.log_replications_unavailable`, begins again at init, and fails the same way until a version with log replication runs on it; `doctor` reads the counter |
 | 10 | follower replay | replays its own recording from its log position to the lesser of its append position and the commit position it was told into its service, then goes to follower catch-up init when its append position is behind the leader's log position, else to follower log init; a replay that ends short of its append position goes back to canvass |
 | 11 | follower catch-up init | subscribes to the log stream on its `catchup` endpoint and sends catch-up position with that endpoint; goes to follower catch-up await once sent, and fails the election when it cannot send within the leader heartbeat timeout |
-| 12 | follower catch-up await | waits for the image of the leader's catch-up replay, by the log session id, and goes to follower catch-up when it has joined it; fails the election when none comes within the leader heartbeat timeout |
+| 12 | follower catch-up await | waits for the image of the leader's catch-up replay, the one image of stream 100 on its `catchup` endpoint, whatever its session id, since a replay's publication has a session id of its own (`spec/client-protocol.md`, "Commands", start replay), and goes to follower catch-up when it has joined it; fails the election when none comes within the leader heartbeat timeout |
 | 13 | follower catch-up | records the catch-up replay, reporting append position with the catch-up flag, and adds its `log` endpoint's live subscription once its position is within the live-add window of the leader's, the lesser of term length ÷ 4 and 1,048,576 bytes; goes to follower log init once its position has reached the position it joined the live log at and the commit position it was told, and the leader has sent stop catch-up; fails the election when the catch-up makes no progress for the leader heartbeat timeout |
 | 14 | follower log init | subscribes to the log stream on its `log` endpoint when it has not, and goes to follower log await; one already subscribed goes to follower ready |
 | 15 | follower log await | waits for the live image by the log session id, joins it at its append position, and goes to follower ready; fails the election when none comes within the leader heartbeat timeout |
@@ -480,17 +483,20 @@ leadership term for the reader's candidate term, in follower ballot or candidate
 ballot, or in canvass for any term, makes the sender the reader's leader and the term
 its term: when the reader's log leadership term id is the message's, a reader whose
 append position is above the next term base log position truncates it to that
-position first, the uncommitted tail of an older term, and every reader then goes to
-follower replay, one whose append position is below the term base log position among
-them, since this version catches up from any position (state 9); when the log
-leadership term ids differ the reader goes back to canvass. Append position is recorded by a candidate or leader against the follower.
+position first, the uncommitted tail of an older term; a reader whose append position
+is below the term base log position fails its election, counted in
+`cluster.log_replications_unavailable` (state 9), and every other reader goes to
+follower replay; when the log leadership term ids differ the reader goes back to
+canvass. Append position is recorded by a candidate or leader against the follower.
 Commit position from the reader's leader raises the commit position it was told.
 
 **Messages outside an election.** A leader reads append position and records it;
-catch-up position and starts a replay of its recording of the log from the position
-asked, whichever term it lies in, to the follower's `catchup` endpoint, with the log
-publication's session id, when the follower has none running, counting it in
-`cluster.catchups`; and sends stop catch-up, stopping the replay, when a
+catch-up position and starts a replay of its recording of the log, a `start replay`
+of the recording from the position asked that follows the live recording, on stream
+100 to `cavalry:udp?endpoint=<the follower's catchup endpoint>`, when the follower
+has none running, counting it in `cluster.catchups`; the replay's publication has a
+session id of its own in this version, so the follower's catch-up image is on its
+`catchup` endpoint alone; and sends stop catch-up, stopping the replay with `stop replay`, when a
 follower whose position was appended from the replay reports an append position at or
 past the leader's log position. A leader that reads canvass position for a term at or
 below its own answers with new leadership term for the reported term, so that a
@@ -527,10 +533,18 @@ gives the session the next session id, appends a session open event, and once th
 entry is committed sends the session event of code ok with the session id, the
 correlation id and an empty detail. The session is open from then. Every refusal is
 counted in `cluster.sessions_refused`. A redirect or a refusal is answered on an egress
-publication to the connect's response channel, which the member holds until the answer
-is sent; a member holds at most the pending answers of "Values" at a time, and a
-connect that arrives with no room is dropped unanswered and counted in
-`cluster.connects_dropped`, the client's connect timeout reporting it. A client that
+publication to the connect's response channel on stream 102, the one egress stream of
+this version, whatever response stream id the connect named; the member holds the
+publication until the answer is sent or the session connect timeout has passed since
+the connect arrived, then closes it, an answer unsent by then counted in
+`cluster.connects_dropped`. A member holds at most the pending answers of "Values" at a
+time, and a connect that arrives with no room is dropped unanswered and counted in
+`cluster.connects_dropped`, the client's connect timeout reporting it; so is a connect
+whose response channel the driver refuses, one that is not `cavalry:udp`, is malformed
+or names a host that does not resolve, since no publication to it can exist. A
+connecting session whose ok event the leader cannot send within the session timeout
+is closed as a timed-out session is, its session close event appended with the reason
+timeout. A client that
 has no session event within the session connect timeout reports the connect lost to
 its caller and may send it again with a new correlation id; one that reads a session
 event whose version has a major other than its own reports the cluster's version to
@@ -540,22 +554,32 @@ An open session carries session messages from the client, each a session message
 with the client's term and session id and the payload; the leader appends each as an
 entry with its own term and timestamp, in the order they arrived, and ignores one for
 a term other than its own or a session that is not open, counting it in
-`cluster.session_messages_ignored`. When the log publication's claim is back-pressured,
-under `min` flow control with a slow follower or at the publication window, the leader
-stops reading its ingress images until the claim succeeds: it buffers no message and
-drops none, so that the back pressure reaches the client's publication and its caller
-(`spec/log-buffer.md`, "Claim, commit and abort"). The client sends session
+`cluster.ingress_ignored`. When the log publication's claim is back-pressured, under
+`min` flow control with a slow follower or at the publication window, the message
+whose claim failed stays unconsumed, the ingress image's position before it, and the
+leader reads nothing more from its ingress images until a claim succeeds and the
+message is appended: it buffers no message and drops none, so that the back pressure
+reaches the client's publication and its caller (`spec/log-buffer.md`, "Claim, commit
+and abort"); an entry of the leader's own, a session open or close event, a timer
+event or the new leadership term event, waits the same way and is tried again on a
+later duty cycle. The client sends session
 keepalive when the keepalive interval has passed since it last sent anything; a session
 with nothing from its client for the session timeout is closed: the leader appends a
 session close event with the reason timeout and sends a session event of code closed
 with the detail `TIMEOUT`. A client closes its session with session close; the leader
 appends a session close event with the reason client action and sends nothing. The
 service's replies to a session are session messages on the egress stream, from the
-leader alone ("The service"). When the leader changes, the new leader sends a new
-leader event to every open session with the ingress endpoints; the client sends its
-next message, a keepalive first, to the new leader's `ingress` endpoint. The session ids
-and open sessions are the log's: a new leader recovers them from the session open and
-close events it has replayed, so that a session survives its leader.
+leader alone ("The service"). When a term begins, its leader sends a new leader event
+to every open session with the ingress endpoints, whether or not the leader changed,
+since the clients' messages carry the term and the leader ignores one for another
+term; the client sends its next message, a keepalive first, with the new term to the
+new leader's `ingress` endpoint. The session ids and open sessions are the log's: a
+new leader recovers them from the session open and close events it has replayed, so
+that a session survives its leader, and counts each session's timeout from the close
+of the election, not from the session's last message under the old leader. A
+keepalive, a close or a session message for another term, or for a session that is
+not open, is ignored and counts as no activity, each counted in
+`cluster.ingress_ignored`.
 
 ## The service
 
@@ -591,8 +615,9 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.votes_for`, `cluster.votes_against` | a vote sent, by its value |
 | `cluster.sessions` | a gauge: open sessions |
 | `cluster.sessions_refused` | a session connect refused, with the version, the response channel or the limit as the detail |
-| `cluster.connects_dropped` | a session connect dropped unanswered because the member's pending answers were at their bound |
-| `cluster.session_messages_ignored` | a session message the leader ignored, for a term not its own or a session not open |
+| `cluster.connects_dropped` | a session connect dropped unanswered: the member's pending answers at their bound, the response channel refused by the driver, or the answer unsent at the session connect timeout |
+| `cluster.ingress_ignored` | a session message, keepalive or close the leader ignored, for a term not its own or a session not open |
+| `cluster.log_replications_unavailable` | a member that failed its election because its append position is below the leader's term base log position, which this version cannot replicate (state 9) |
 | `cluster.sessions_timed_out` | a session closed for the session timeout |
 | `cluster.catchups` | a catch-up begun: on the follower, a catch-up position sent; on the leader, a replay started |
 | `cluster.messages_rejected` | a message of this page a reader rejected, for any reason of "What a reader rejects" |
@@ -619,9 +644,12 @@ that a reader of a counters file knows which transition it saw.
 | cluster time | milliseconds since 1970-01-01T00:00:00Z, the leader's wall clock, time unit 0 |
 | snapshot type id | 1, the consensus module's |
 
-Timeouts are measured on a monotonic clock of the member's own, nanoseconds that never
-step back, Aeron's nano clock, and on no wall clock: a step of the host's clock moves
-no election. The cluster's time, a wall clock's milliseconds, is never used for one.
+Timeouts are measured on a monotonic clock of the process that measures them, a
+member's or a client's, nanoseconds that never step back, and on no wall clock: a step
+of the host's clock moves no election. This departs from Aeron, whose cluster measures
+its timeouts on its cluster clock, the wall clock by default, a step of which would
+start or suppress an election (ADR 0058). The cluster's time, a wall clock's
+milliseconds, is never used for a timeout.
 
 ## What a reader rejects
 

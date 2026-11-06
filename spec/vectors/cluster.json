@@ -601,13 +601,6 @@
     },
     {
       "kind": "message",
-      "name": "reject-version-field-major",
-      "stream": "consensus",
-      "bytes": "20003200010000000200000000000000000001000000000002000000000000000100000000000100",
-      "error": "version"
-    },
-    {
-      "kind": "message",
       "name": "reject-template-reserved",
       "stream": "consensus",
       "bytes": "100007000100000000000000000000000000000000000000",
@@ -647,6 +640,34 @@
       "stream": "ingress",
       "bytes": "10000400010000000300000000000000070000000000000000000000",
       "error": "length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-version-field-major",
+      "stream": "consensus",
+      "bytes": "20003200010000000200000000000000000001000000000002000000000000000100000000000100",
+      "error": "version"
+    },
+    {
+      "kind": "message",
+      "name": "reject-version-field-negative",
+      "stream": "consensus",
+      "bytes": "2000330001000000020000000000000000000100000000000300000000000000010000000000ffff",
+      "error": "version"
+    },
+    {
+      "kind": "message",
+      "name": "reject-length-before-version-field",
+      "stream": "consensus",
+      "bytes": "2000320001000000020000000000000000000100000000000200000000000000010000000000010000000000",
+      "error": "length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-version-field-before-member-id",
+      "stream": "consensus",
+      "bytes": "2000320001000000020000000000000000000100000000000200000000000000feffffff00000100",
+      "error": "version"
     },
     {
       "kind": "message",

@@ -73,9 +73,9 @@ member and service, never from a clock of their own. The timeouts are Aeron's de
 as constants with no configuration key: leader heartbeat interval 200 ms and timeout
 10 s, election timeout 1 s, election status interval 100 ms, startup canvass timeout
 60 s, session timeout 10 s, session connect timeout 5 s, keepalive interval 500 ms,
-`spec/client-protocol.md`'s, each measured on a monotonic clock of the member's own,
-Aeron's nano clock, never a wall clock or the cluster's time, so that a step of a
-host's clock moves no election. A cluster holds at most 10 open sessions, Aeron's
+`spec/client-protocol.md`'s, each measured on a monotonic clock of the process that
+measures it, never a wall clock or the cluster's time, so that a step of a host's
+clock moves no election, which departs from Aeron's cluster clock (Alternatives). A cluster holds at most 10 open sessions, Aeron's
 default, and a member at most 10 pending answers, the redirects and refusals it has
 yet to send, a connect beyond them dropped unanswered and counted; the leader stops
 reading its ingress images while its claim on the log is back-pressured, buffering no
@@ -92,11 +92,17 @@ connect's version is read whatever its major, so that the leader answers it with
 error, as Aeron's `SessionManager` does, and a client that reads a session event of
 another major reports it. Follower log replication, Aeron's replication of a whole
 earlier term from a peer's archive, is out of this version: no message of it asks for
-one, and a member whose append position is below the leader's term base log position
-catches up instead through the catch-up states from its own append position, the
-leader's replay of its recording of the log starting there across the terms between,
-which asks of the replicated log (card 227) that a member's recording of the log span
-its terms at the log's positions. Out of this version: the challenge and challenge
+one, so a member whose append position is below the leader's term base log position
+fails its election on the new leadership term that tells it so, counted in
+`cluster.log_replications_unavailable`, and begins again until a version with log
+replication runs on it. Within a term the catch-up is Aeron's, a replay of the
+leader's recording of the log from the position the follower asked for to its
+`catchup` endpoint on stream 100, with one departure the client protocol forces: a
+replay's publication has a session id of its own, so the follower finds the replay
+as the one image of stream 100 on its `catchup` endpoint and the span it records from
+it carries the replay's session id in its frame headers; every member's recording
+holds every entry at the same position with the same payload, and the bytes of two
+recordings are the same except for those headers. Out of this version: the challenge and challenge
 response, Aeron's authentication, with their template ids reserved; dynamic membership
 and its deprecated messages; the service control protocol of a service in a process of
 its own; the admin request; the backup, heartbeat and standby snapshot queries; the
@@ -130,6 +136,21 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   page with its vectors, as `spec/udp.md` moved to version 1 for a channel key. Every
   field is present in version 0, including those Aeron added over its versions, so a
   reader has one layout per template and the block length is a constant.
+- **Aeron's cluster clock for the timeouts.** Lost. Aeron measures its cluster's
+  timeouts on `ClusterClock.timeNanos()`, which `MillisecondClusterClock`, its default,
+  takes from the wall clock; a step of a member's wall clock would start an election
+  that nothing warranted or suppress one that was due. Every timeout of the page runs
+  on a monotonic clock of the process that measures it instead, a member's or a
+  client's, so that the wall clock moves no election; the cluster's time, which the
+  log carries, stays a wall clock's milliseconds for the service.
+- **Catch-up from any position in place of follower log replication, across the terms
+  a member missed.** Lost. It would need the leader's replay to carry the log's session
+  id, which `start replay` cannot give it, and a member that caught up across terms
+  would hold frame headers of the replay's session id where its peers hold the terms'
+  own; a replay check across members would then differ in those headers. Version 0
+  keeps Aeron's rule, catch-up within a term alone, and a member below the leader's
+  term base log position fails its election, counted, until card 230 brings log
+  replication with a replay that carries the log's session id.
 - **A members string of up to eight fields, as Aeron parses.** Lost. The seventh and
   eighth are Aeron's archive response and egress response endpoints, for response
   channels Cavalry does not have; a string with more than six fields is a grammar
@@ -190,9 +211,13 @@ fields allow one; the consensus messages cross the wire as message payloads insi
 data frames, so a reader walks `spec/frame.md` first and this page second. A member
 at version N+1 must speak this page's header version 0 to a member at version N, since
 a reader rejects any other, and card 231 decides how it does (ADR 0052, feature 7).
-A member that was down across the end of a term rejoins only by the catch-up replay
-from its own append position, so the replicated log's recording must span terms
-(card 227), and a replay across a term boundary is the first thing card 230 proves.
+A member that was down across the end of a term does not rejoin in version 0: it fails
+its election with `cluster.log_replications_unavailable` counting it, so a cluster of
+three with such a member runs with no member to spare until card 230, and `doctor`
+reads the counter. Card 230 then changes two pages: `spec/client-protocol.md`, for a
+`start replay` that carries the log's session id so that a replay's frames are the
+log's bytes, and `spec/durable-log.md` or this page, for the replication of a whole
+term from a peer's recording through the `archive` endpoint.
 
 Revisit: when card 229's client needs the challenge, for Aeron's authentication
 protocol and the two reserved template ids; when a member must be added to or removed
