@@ -73,6 +73,7 @@ version = "0.1.0"
 dependencies = [
  "cavalry-client",
  "cavalry-driver",
+ "cavalry-ffi",
  "cavalry-log",
  "cavalry-shm",
  "core_affinity",
