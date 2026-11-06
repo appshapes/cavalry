@@ -357,6 +357,10 @@ enum Refusal {
 }
 
 impl Refusal {
+    /// Which kind of refusal the operating system's error is: `EAGAIN`, `ENOBUFS` and
+    /// `EINTR` are the socket's own, and every other error a destination's, such as
+    /// `ENETUNREACH`, `EHOSTUNREACH` or the `EINVAL` of a loopback socket sending off
+    /// the host.
     fn of(error: &std::io::Error) -> Self {
         let socket = matches!(
             error.kind(),
@@ -382,6 +386,42 @@ struct Delivery {
     frames: usize,
 }
 
+impl Delivery {
+    /// A control channel's burst of `count` datagrams, folded over what each
+    /// destination's socket call came to, in the order they were sent (`spec/udp.md`,
+    /// "The sender", step 2; ADR 0053): `whole` is the fewest datagrams any destination
+    /// took whole, so a short send holds the sender position for all; a refusal of the
+    /// socket's own holds it at none of the burst for all; a refusal of a destination's
+    /// own holds back no other destination, unless every destination was refused so,
+    /// when the position holds as on an endpoint. The bytes and frames are those of the
+    /// destinations that took any. With no destination every datagram counts as taken
+    /// and nothing as on the wire, so that the sender position advances past the burst.
+    fn fold(count: usize, outcomes: impl Iterator<Item = Result<Delivery, Refusal>>) -> Self {
+        let mut delivery = Delivery {
+            whole: count,
+            bytes: 0,
+            frames: 0,
+        };
+        let (mut destinations, mut refused) = (0usize, 0usize);
+        for outcome in outcomes {
+            destinations += 1;
+            match outcome {
+                Ok(one) => {
+                    delivery.whole = delivery.whole.min(one.whole);
+                    delivery.bytes += one.bytes;
+                    delivery.frames += one.frames;
+                }
+                Err(Refusal::Socket) => delivery.whole = 0,
+                Err(Refusal::Destination) => refused += 1,
+            }
+        }
+        if destinations > 0 && refused == destinations {
+            delivery.whole = 0;
+        }
+        delivery
+    }
+}
+
 impl Endpoint {
     /// Sends a burst to the endpoint, or to each destination of a control channel in
     /// turn, and counts what each socket call did (`spec/udp.md`, "The sender", step
@@ -394,7 +434,8 @@ impl Endpoint {
     /// the position holds as on an endpoint. The bytes and frames are every
     /// destination's, as the counters count them. With no destination nothing is sent
     /// and every datagram counts as taken, so that the sender position advances past
-    /// the burst and nothing is counted as on the wire.
+    /// the burst and nothing is counted as on the wire. [`Delivery::fold`] is the
+    /// rule, over what each destination's call came to.
     fn send_burst(
         &self,
         headers: &mut Headers,
@@ -417,39 +458,17 @@ impl Endpoint {
                 )
                 .unwrap_or(0),
             ),
-            Some(destinations) if destinations.is_empty() => Delivery {
-                whole: count,
-                bytes: 0,
-                frames: 0,
-            },
-            Some(destinations) => {
-                let mut delivery = Delivery {
-                    whole: count,
-                    bytes: 0,
-                    frames: 0,
-                };
-                let mut refused = 0;
-                for to in destinations {
-                    match Self::count(
+            Some(destinations) => Delivery::fold(
+                count,
+                destinations.iter().map(|to| {
+                    Self::count(
                         self.socket.send_burst(headers, datagrams, Some(to)),
                         count,
                         statics,
-                    ) {
-                        Ok(whole) => {
-                            let one = taken(whole);
-                            delivery.whole = delivery.whole.min(one.whole);
-                            delivery.bytes += one.bytes;
-                            delivery.frames += one.frames;
-                        }
-                        Err(Refusal::Socket) => delivery.whole = 0,
-                        Err(Refusal::Destination) => refused += 1,
-                    }
-                }
-                if refused == destinations.len() {
-                    delivery.whole = 0;
-                }
-                delivery
-            }
+                    )
+                    .map(taken)
+                }),
+            ),
         }
     }
 
@@ -1299,5 +1318,140 @@ impl Sender {
             return (work + 1, true);
         }
         (work, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! ADR 0053's refusal split alone: which refusals are the socket's own, and how a
+    //! control channel's burst folds over what each destination's call came to.
+
+    use super::*;
+
+    fn os(code: i32) -> std::io::Error {
+        std::io::Error::from_raw_os_error(code)
+    }
+
+    /// What one destination's call came to: `whole` of the burst's datagrams, 100
+    /// bytes and one frame each.
+    fn took(whole: usize) -> Result<Delivery, Refusal> {
+        Ok(Delivery {
+            whole,
+            bytes: 100 * whole,
+            frames: whole,
+        })
+    }
+
+    /// No room in the send buffer and an interrupted send are the socket's own; no
+    /// route, an address that has gone and a loopback socket sending off the host are
+    /// a destination's.
+    #[test]
+    fn a_refusal_is_the_sockets_own_only_for_no_room_or_an_interrupted_send() {
+        use nix::libc;
+        for code in [libc::EAGAIN, libc::EWOULDBLOCK, libc::ENOBUFS, libc::EINTR] {
+            assert_eq!(Refusal::of(&os(code)), Refusal::Socket, "{}", os(code));
+        }
+        for code in [
+            libc::ENETUNREACH,
+            libc::EHOSTUNREACH,
+            libc::EINVAL,
+            libc::EADDRNOTAVAIL,
+            libc::EACCES,
+            libc::EPERM,
+            libc::EMSGSIZE,
+        ] {
+            assert_eq!(Refusal::of(&os(code)), Refusal::Destination, "{}", os(code));
+        }
+    }
+
+    /// Every destination took the burst whole: the position advances by all of it,
+    /// and the bytes and frames are each destination's.
+    #[test]
+    fn a_burst_every_destination_took_advances_by_all_of_it() {
+        assert_eq!(
+            Delivery::fold(16, [took(16), took(16), took(16)].into_iter()),
+            Delivery {
+                whole: 16,
+                bytes: 4800,
+                frames: 48,
+            }
+        );
+    }
+
+    /// A short send to one destination holds the position at the fewest any took, so
+    /// the others get those datagrams again, a duplicate their receivers drop.
+    #[test]
+    fn a_short_send_to_one_destination_holds_the_position_for_all() {
+        assert_eq!(
+            Delivery::fold(16, [took(16), took(5), took(16)].into_iter()).whole,
+            5
+        );
+    }
+
+    /// A refusal of the socket's own, at any destination, holds the whole burst for
+    /// every destination, so that back-pressure costs none of them a frame.
+    #[test]
+    fn a_refusal_of_the_sockets_own_holds_the_burst_for_every_destination() {
+        for outcomes in [
+            [Err(Refusal::Socket), took(16), took(16)],
+            [took(16), Err(Refusal::Socket), took(16)],
+            [took(16), took(16), Err(Refusal::Socket)],
+            [Err(Refusal::Destination), Err(Refusal::Socket), took(16)],
+        ] {
+            assert_eq!(Delivery::fold(16, outcomes.into_iter()).whole, 0);
+        }
+    }
+
+    /// A refusal of a destination's own holds back no other destination: the position
+    /// advances by what the others took, a short send among them still holding it, and
+    /// the refused one's datagrams are lost to it alone, for its receiver to NAK.
+    #[test]
+    fn a_refusal_of_a_destinations_own_holds_back_no_other() {
+        assert_eq!(
+            Delivery::fold(
+                16,
+                [took(16), Err(Refusal::Destination), took(16)].into_iter()
+            ),
+            Delivery {
+                whole: 16,
+                bytes: 3200,
+                frames: 32,
+            }
+        );
+        assert_eq!(
+            Delivery::fold(16, [Err(Refusal::Destination), took(7)].into_iter()).whole,
+            7
+        );
+    }
+
+    /// When the socket refused every destination for a reason of its own, the
+    /// position holds, as on an endpoint, and nothing is counted as on the wire.
+    #[test]
+    fn a_burst_every_destination_refused_holds_the_position() {
+        assert_eq!(
+            Delivery::fold(
+                16,
+                [Err(Refusal::Destination), Err(Refusal::Destination)].into_iter()
+            ),
+            Delivery::default()
+        );
+        assert_eq!(
+            Delivery::fold(16, [Err(Refusal::Destination)].into_iter()),
+            Delivery::default()
+        );
+    }
+
+    /// With no destination the burst counts as taken and nothing as on the wire, so
+    /// the position advances past it.
+    #[test]
+    fn a_burst_to_no_destination_advances_past_it_and_counts_nothing() {
+        assert_eq!(
+            Delivery::fold(16, std::iter::empty()),
+            Delivery {
+                whole: 16,
+                bytes: 0,
+                frames: 0,
+            }
+        );
     }
 }
