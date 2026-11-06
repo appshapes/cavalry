@@ -403,7 +403,7 @@ typedef struct {
   napi_env env;                      /* valid during a poll */
   napi_ref header_ref;               /* the JS Header object the handler receives */
   napi_ref handler_ref;              /* the handler of the poll in progress, else NULL */
-  napi_ref pending_ref;              /* the first exception a handler threw in this poll */
+  napi_ref holder_ref;               /* an object whose element 0 holds the poll's first exception */
   uint32_t raised;                   /* handler calls that threw in this poll */
   uint32_t undelivered;              /* fragments of this poll the handler never saw */
   first_t first;                     /* what this poll reports as the cause */
@@ -442,16 +442,22 @@ static void undelivered(subscription_state_t *s, const cavalry_header_t *header,
   keep_failure(s, header, what, status);
 }
 
-/* The handler threw on a fragment: counted, and the poll's first exception kept. */
+/* The handler threw on a fragment: counted, and the poll's first exception kept as thrown,
+ * whatever its type, as element 0 of the subscription's holder object. A reference to the
+ * value itself would refuse a string or a number at this N-API version, and a later Error
+ * would then become the first. */
 static void threw(subscription_state_t *s, const cavalry_header_t *header, napi_value exception) {
   s->raised++;
   if (s->first != FIRST_NONE) return;
-  napi_status status = napi_create_reference(s->env, exception, 1, &s->pending_ref);
-  if (status == napi_ok) {
-    s->first = FIRST_EXCEPTION;
+  napi_value holder = NULL;
+  napi_status status = napi_get_reference_value(s->env, s->holder_ref, &holder);
+  if (status != napi_ok || holder == NULL) {
+    keep_failure(s, header, "read the holder of the handler's exception (napi_get_reference_value)",
+                 status == napi_ok ? napi_generic_failure : status);
+  } else if ((status = napi_set_element(s->env, holder, 0, exception)) != napi_ok) {
+    keep_failure(s, header, "keep the fragment handler's exception (napi_set_element)", status);
   } else {
-    s->pending_ref = NULL;
-    keep_failure(s, header, "keep the fragment handler's exception (napi_create_reference)", status);
+    s->first = FIRST_EXCEPTION;
   }
 }
 
@@ -520,10 +526,13 @@ static void free_state(napi_env env, void *data, void *hint) {
   subscription_state_t *s = data;
   if (s->header_ref) napi_delete_reference(env, s->header_ref);
   if (s->handler_ref) napi_delete_reference(env, s->handler_ref);
-  if (s->pending_ref) napi_delete_reference(env, s->pending_ref);
+  if (s->holder_ref) napi_delete_reference(env, s->holder_ref);
   free(s);
 }
 
+/* registerSubscription(header): the subscription's state, holding a reference to its Header
+ * and the holder object a poll keeps its first exception in, made here once per subscription
+ * so that a throwing poll makes nothing new to keep it. */
 static napi_value fn_registerSubscription(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value argv[1];
   if (!read_args(env, info, 1, &argc, argv, "registerSubscription")) return NULL;
@@ -532,8 +541,14 @@ static napi_value fn_registerSubscription(napi_env env, napi_callback_info info)
   if (napi_create_reference(env, argv[0], 1, &s->header_ref) != napi_ok) {
     free(s); type_error(env, "header", "the subscription's Header object"); return NULL;
   }
-  napi_value v;
-  napi_create_external(env, s, free_state, NULL, &v);
+  napi_value holder, v;
+  if (napi_create_object(env, &holder) != napi_ok || napi_create_reference(env, holder, 1, &s->holder_ref) != napi_ok ||
+      napi_create_external(env, s, free_state, NULL, &v) != napi_ok) {
+    free_state(env, s, NULL);
+    napi_throw_error(env, NULL, "registerSubscription: N-API could not make the subscription's state; the runtime is "
+                     "out of memory or shutting down");
+    return NULL;
+  }
   return v;
 }
 
@@ -579,14 +594,16 @@ static napi_value failure_error(napi_env env, const subscription_state_t *s) {
  * [count, raised, first, undelivered], `first` the handler's first exception or the Error
  * failure_error makes, whichever came first; the state is cleared for the next poll. */
 static napi_value report(napi_env env, subscription_state_t *s, int count) {
-  napi_value tuple, first = NULL;
-  if (s->first == FIRST_EXCEPTION && s->pending_ref != NULL) {
-    if (napi_get_reference_value(env, s->pending_ref, &first) != napi_ok) first = NULL;
+  napi_value tuple, first = NULL, holder = NULL;
+  if (s->first == FIRST_EXCEPTION) {
+    if (napi_get_reference_value(env, s->holder_ref, &holder) == napi_ok && holder != NULL) {
+      if (napi_get_element(env, holder, 0, &first) != napi_ok) first = NULL;
+      napi_value undefined;
+      if (napi_get_undefined(env, &undefined) == napi_ok) napi_set_element(env, holder, 0, undefined); /* not kept past the poll */
+    }
   } else if (s->first == FIRST_FAILURE) {
     first = failure_error(env, s);
   }
-  if (s->pending_ref != NULL) napi_delete_reference(env, s->pending_ref);
-  s->pending_ref = NULL;
   if (first == NULL) first = make_null(env);
   napi_create_array_with_length(env, 4, &tuple);
   napi_set_element(env, tuple, 0, make_int32(env, count));

@@ -246,7 +246,8 @@ function indexOf(body) {
  * reach the handler, once and in order, and poll must throw HandlerError with `fragments`
  * 10, `raised` 1 and the Error as its cause. Then a poll whose handler throws an Error on
  * one message and a string on the next: HandlerError with `raised` 2 and the Error, the
- * first, as its cause. Then what `offer` refuses: a string, a number, a plain object and an
+ * first, as its cause; and the reverse, a string and then an Error, with the string as
+ * thrown as its cause. Then what `offer` refuses: a string, a number, a plain object and an
  * array are refused with TypeError and nothing is published. Then the lifetimes: a claim's
  * Buffer kept past its commit, and a body and a header kept past their handler call, read
  * as empty. Then the refusals of spec/c-abi.md, "Calls during a claim or a poll", which
@@ -314,10 +315,34 @@ function edges(client) {
     fail(`${name}: poll threw ${error} and the handler saw ${seen}; expected HandlerError with fragments 2, raised 2 ` +
          `and the first Error as its cause, and messages 0 to 11`);
   }
-  if (subscription.poll(unexpected, 10) !== 0) fail(`${name}: a fragment after all 12 messages`);
+
+  // The reverse order: a string first, then an Error. The string, a value N-API cannot hold
+  // a reference to at this version, must stay the cause, as thrown.
+  offerOrFail(name, publication, message(12), 12);
+  offerOrFail(name, publication, message(13), 13);
+  const throwsStringFirst = (body) => {
+    const index = indexOf(body);
+    seen.push(index);
+    if (index === 12) throw "message 12"; // eslint-disable-line no-throw-literal
+    throw new Error("message 13");
+  };
+  error = null;
+  try {
+    subscription.poll(throwsStringFirst, 10);
+  } catch (thrown) {
+    error = thrown;
+  }
+  if (!(error instanceof cavalry.HandlerError) || !same(seen, range(14)) || error.fragments !== 2 || error.raised !== 2
+      || error.undelivered !== 0 || error.cause !== "message 12") {
+    fail(`${name}: poll threw ${error} with cause ${typeof (error && error.cause)} ${error && error.cause}, and the ` +
+         `handler saw ${seen}; expected HandlerError with fragments 2, raised 2 and the string "message 12", the first ` +
+         `thrown, as its cause, and messages 0 to 13`);
+  }
+  if (subscription.poll(unexpected, 10) !== 0) fail(`${name}: a fragment after all 14 messages`);
   say(`${name}: a handler that threw on message 3 of a poll of 10 saw all 10 once, in order, and poll threw ` +
       `HandlerError (fragments 10, raised 1, the Error as its cause); a handler that threw an Error and then a string ` +
-      `in one poll made poll throw HandlerError with raised 2 and the Error as its cause`);
+      `in one poll made poll throw HandlerError with raised 2 and the Error as its cause; one that threw a string and ` +
+      `then an Error, raised 2 and the string as its cause`);
 
   // What offer refuses: anything that is not an ArrayBuffer, a Buffer, a typed array or a
   // DataView, which the addon refuses before the ABI sees it.
@@ -344,10 +369,10 @@ function edges(client) {
   for (;;) {
     position = publication.tryClaim(BODY);
     if (position >= 0) break;
-    refused(name, position, 12, until);
+    refused(name, position, 14, until);
   }
   const view = publication.claim;
-  view.writeBigUInt64LE(12n, 0);
+  view.writeBigUInt64LE(14n, 0);
   publication.commit();
   if (view.length !== 0) fail(`${name}: a claim's Buffer still has ${view.length} bytes after its commit`);
   try {
@@ -361,7 +386,7 @@ function edges(client) {
   until = deadline();
   while (kept.length === 0) {
     pollOrFail(name, subscription, keeps, 0, 1);
-    if (Date.now() > until) fail(`${name}: message 12 did not arrive in ${WAIT_MS / 1000} s`);
+    if (Date.now() > until) fail(`${name}: message 14 did not arrive in ${WAIT_MS / 1000} s`);
   }
   const [body, header, sessionId, again] = kept[0];
   if (typeof sessionId !== "number" || sessionId !== again) {
@@ -379,7 +404,7 @@ function edges(client) {
   // Calls the ABI refuses during a poll or a claim leave the wrapper as they found it
   // (spec/c-abi.md, "Calls during a claim or a poll").
   name = "refusals";
-  for (let i = 13; i < 16; i++) offerOrFail(name, publication, message(i), i);
+  for (let i = 15; i < 18; i++) offerOrFail(name, publication, message(i), i);
   const outer = [];
   const nested = [];
   const nestedHandler = () => fail(`${name}: a poll from inside a handler of the same subscription delivered a fragment`);
@@ -390,12 +415,12 @@ function edges(client) {
   until = deadline();
   while (outer.length < 3) {
     pollOrFail(name, subscription, outerHandler, outer.length, 3);
-    if (Date.now() > until) fail(`${name}: received messages ${outer} of 13 to 15 in ${WAIT_MS / 1000} s`);
+    if (Date.now() > until) fail(`${name}: received messages ${outer} of 15 to 17 in ${WAIT_MS / 1000} s`);
   }
-  if (!same(outer, [13, 14, 15]) || nested.length !== 3
+  if (!same(outer, [15, 16, 17]) || nested.length !== 3
       || !nested.every(([result, code]) => result === -1 && code === constants.CAVALRY_ERR_POLLING)) {
     fail(`${name}: the outer handler saw ${outer} and the polls from inside it returned (result, code) ` +
-         `${JSON.stringify(nested)}; expected messages 13 to 15, and -1 with CAVALRY_ERR_POLLING ` +
+         `${JSON.stringify(nested)}; expected messages 15 to 17, and -1 with CAVALRY_ERR_POLLING ` +
          `(${constants.CAVALRY_ERR_POLLING}) each time`);
   }
 
@@ -403,10 +428,10 @@ function edges(client) {
   for (;;) {
     position = publication.tryClaim(BODY);
     if (position >= 0) break;
-    refused(name, position, 16, until);
+    refused(name, position, 18, until);
   }
   const first = publication.claim;
-  first.writeBigUInt64LE(16n, 0);
+  first.writeBigUInt64LE(18n, 0);
   const secondClaim = publication.tryClaim(BODY);
   const code = addon.cavalry_errcode();
   if (secondClaim !== cavalry.ERROR || code !== constants.CAVALRY_ERR_CLAIM_OUTSTANDING || publication.claim !== first) {
@@ -421,17 +446,17 @@ function edges(client) {
   const index = (fragment) => received.push(indexOf(fragment));
   until = deadline();
   while (received.length === 0) {
-    pollOrFail(name, subscription, index, 16, 17);
-    if (Date.now() > until) fail(`${name}: message 16 did not arrive in ${WAIT_MS / 1000} s`);
+    pollOrFail(name, subscription, index, 18, 19);
+    if (Date.now() > until) fail(`${name}: message 18 did not arrive in ${WAIT_MS / 1000} s`);
   }
-  if (!same(received, [16])) fail(`${name}: received ${received} for the claim committed past a refused one; expected message 16`);
+  if (!same(received, [18])) fail(`${name}: received ${received} for the claim committed past a refused one; expected message 18`);
 
   // A close from inside a handler of the subscription's own poll: the ABI refuses it with -1
   // and CAVALRY_ERR_POLLING and the subscription stays open, so the wrapper throws
   // CavalryError in the handler and keeps its handle. poll throws HandlerError with that
   // error as its cause, the next message still arrives, and a close after the poll closes it.
-  offerOrFail(name, publication, message(17), 17);
-  offerOrFail(name, publication, message(18), 18);
+  offerOrFail(name, publication, message(19), 19);
+  offerOrFail(name, publication, message(20), 20);
   const closing = [];
   const closesInside = (fragment) => {
     closing.push(indexOf(fragment));
@@ -441,11 +466,11 @@ function edges(client) {
   until = deadline();
   while (closing.length === 0) {
     try {
-      pollOrFail(name, subscription, closesInside, 17, 19);
+      pollOrFail(name, subscription, closesInside, 19, 21);
     } catch (thrown) {
       refusedClose = thrown;
     }
-    if (Date.now() > until) fail(`${name}: message 17 did not arrive in ${WAIT_MS / 1000} s`);
+    if (Date.now() > until) fail(`${name}: message 19 did not arrive in ${WAIT_MS / 1000} s`);
   }
   const closeCause = refusedClose === null ? null : refusedClose.cause;
   if (!(refusedClose instanceof cavalry.HandlerError) || refusedClose.raised !== 1 || refusedClose.undelivered !== 0
@@ -461,29 +486,29 @@ function edges(client) {
   }
   until = deadline();
   while (closing.length < 2) {
-    pollOrFail(name, subscription, closesInside, 17 + closing.length, 19);
-    if (Date.now() > until) fail(`${name}: message 18 did not arrive after the refused close in ${WAIT_MS / 1000} s`);
+    pollOrFail(name, subscription, closesInside, 19 + closing.length, 21);
+    if (Date.now() > until) fail(`${name}: message 20 did not arrive after the refused close in ${WAIT_MS / 1000} s`);
   }
-  if (!same(closing, [17, 18])) fail(`${name}: received ${closing} around the refused close; expected messages 17 and 18`);
+  if (!same(closing, [19, 20])) fail(`${name}: received ${closing} around the refused close; expected messages 19 and 20`);
 
   until = deadline();
   for (;;) {
     position = publication.tryClaim(BODY);
     if (position >= 0) break;
-    refused(name, position, 19, until);
+    refused(name, position, 21, until);
   }
   const outstanding = publication.claim;
   publication.close();
   if (publication.claim !== null) fail(`${name}: the publication's close left claim ${publication.claim}`);
   if (outstanding.length !== 0) fail(`${name}: a claim's Buffer still has ${outstanding.length} bytes after its publication's close`);
-  pollOrFail(name, subscription, unexpected, 19, 19); // the close aborted the claim: padding, never a fragment
+  pollOrFail(name, subscription, unexpected, 21, 21); // the close aborted the claim: padding, never a fragment
   subscription.close();
   if (subscription.handle !== null) fail(`${name}: the close after the poll left the handle ${subscription.handle}`);
   say(`${name}: a poll from inside a handler of its own subscription returned -1 with CAVALRY_ERR_POLLING and the ` +
-      `outer handler saw messages 13 to 15; a tryClaim with a claim outstanding returned ERROR with ` +
+      `outer handler saw messages 15 to 17; a tryClaim with a claim outstanding returned ERROR with ` +
       `CAVALRY_ERR_CLAIM_OUTSTANDING, claim stayed the first Buffer and its commit released it; a close from inside a ` +
       `handler of its own subscription was refused with CAVALRY_ERR_POLLING, poll threw HandlerError with that ` +
-      `CavalryError as its cause, the subscription stayed open, message 18 still arrived and the close after the poll ` +
+      `CavalryError as its cause, the subscription stayed open, message 20 still arrived and the close after the poll ` +
       `closed it; a close with a claim outstanding released its Buffer`);
 }
 

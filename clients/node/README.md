@@ -161,7 +161,12 @@ The trampoline sees the handler's exception as N-API's pending exception
 calling the handler for every later fragment of the poll, so that no fragment is
 consumed unseen; `poll` throws `HandlerError` once the ABI has returned, with
 `fragments`, `raised`, the first exception as its `cause`, and a message that says
-what to do. A value that is not an `Error` is kept as thrown.
+what to do. A value that is not an `Error`, a string or a number, is kept as thrown,
+and stays the first when an `Error` follows it in the same poll. The trampoline keeps
+the first exception as element 0 of a holder object the subscription makes once, when
+it is added, and clears the element when the poll returns. A reference to the value
+itself would not do: at the N-API version the addon builds against, 8,
+`napi_create_reference` refuses a value that is not an object, a function or a symbol.
 
 The ABI has consumed a fragment before it calls the trampoline, so a fragment the
 trampoline cannot hand to the handler is counted and reported, never dropped. That
