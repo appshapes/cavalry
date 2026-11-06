@@ -1461,3 +1461,30 @@ user-visible change, added in the same commit as the change. The format follows
   path's shape through the client and the README's example, with a report of its
   one-way latency over 100,000 messages and its allocations per message
   ([clients/node/README.md](clients/node/README.md); ADR 0046, card 206).
+- The Go client, `clients/go`, generated from the committed C header by
+  `clients/generate.py go` (`just generate-clients`): the module
+  `github.com/appshapes/cavalry/clients/go` over the header through cgo, linked with
+  `libcavalry_ffi.a` and depending on nothing beyond Go's standard library, whose
+  `NewClient` refuses a library of another ABI version before any other function; a
+  `Client` that goroutines may share, which holds its own mutex around every call on
+  its handle and whose `Close` leaves each handle it made to its own `Close`, a
+  `Publication` whose `TryClaim` and `Offer` return the position or the
+  result code and whose `Claim` is a `[]byte` over the log, a `Subscription` polled
+  with a fragment handler that every delivered fragment reaches, the body a `[]byte`
+  into the log for the call and a panic recovered and returned by `Poll` as a
+  `*HandlerError`, a `Recording` and a `Replay`; a per-message call that fails keeps
+  the ABI's code and message in its handle's `Err`, copied in the C call that failed,
+  and every other call returns an `*Error` read on the OS thread of the call that
+  failed, held with `runtime.LockOSThread`, since the ABI's error is the thread's and Go
+  moves goroutines between threads; a call the ABI refuses during a claim
+  or a poll leaves the client's state as it was; `just lint` regenerates the module and
+  reads its per-message functions, and the functions they call, for Go's `sync`, a lock
+  or a wait through a variable or a field (`.Lock()`, `.RLock()`, `.TryLock()`,
+  `.TryRLock()`, `.Wait()`), `go`, channels, `select`, `panic` and `make`, `new` and
+  `append`, and the C shim's locks, and fails a function that reads the thread's error
+  without holding its thread;
+  `just conformance` runs the package's test of its subscription table at its bound of
+  4,096 with `go test`, then `conformance/go/`, the ten-minute path's shape through the
+  client and the README's example, with a report of its one-way latency over 100,000
+  messages and its allocations per message, counted exactly by `runtime.ReadMemStats`
+  ([clients/go/README.md](clients/go/README.md); ADR 0046, card 207).
