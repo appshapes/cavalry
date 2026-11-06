@@ -1,6 +1,7 @@
 //! Publications against a real driver in this process: the full case first, back-pressure
 //! at the window with a subscriber that never reads, then the shared and exclusive
-//! sessions, the refusals with the spec's error codes, and closing
+//! sessions, the refusals with the spec's error codes, and closing, a claim after the
+//! client's close among it
 //! (`spec/log-buffer.md`, "Claim, commit and abort"; `spec/client-protocol.md`,
 //! "Commands" and "Error codes"; ADR 0021; CLAUDE.md, invariants 1 and 3).
 
@@ -332,4 +333,40 @@ fn a_closed_publications_log_goes_and_a_closed_clients_publication_refuses() {
         .expect_err("the client is closed");
     assert_eq!(error.reason(), "closed");
     assert!(error.to_string().contains("driver-closed"), "{error}");
+}
+
+#[test]
+fn a_claim_or_an_offer_after_the_clients_close_is_closed_while_the_limit_has_room() {
+    let dir = TestDir::new("closed-in-window");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
+    let mut client = Cavalry::connect_to(dir.path()).expect("connects");
+    let mut held = client
+        .add_publication("cavalry:ipc", 1007)
+        .expect("a publication");
+    add_idle_subscription(dir.path(), 1007);
+    assert!(
+        wait_until(Duration::from_secs(5), || held.limit()
+            >= i64::from(spec::IPC_PUBLICATION_WINDOW)),
+        "the limit is the subscriber's position plus the window"
+    );
+    let claim = held.try_claim(8).expect("a claim within the window");
+    assert!(claim.commit() > 0);
+
+    // The window still has room, and the driver may not have read `client close` yet,
+    // but it ends the stream at the producer position it loads then: a frame reserved
+    // after the close could land past that end, and no subscriber would be told of
+    // it. So every claim and offer from the close on is refused before anything is
+    // reserved (spec/log-buffer.md, "Closing"; spec/c-abi.md, "Lifetimes").
+    client.close().expect("closes");
+    assert!(held.is_closed());
+    let position = held.position().expect("position");
+    assert_eq!(held.try_claim(8).map(|_| ()), Err(Offer::Closed));
+    assert_eq!(held.offer(b"after"), Err(Offer::Closed));
+    assert_eq!(
+        held.position().expect("position"),
+        position,
+        "nothing was reserved after the close"
+    );
+    drop(held);
+    driver.close().expect("the driver closes");
 }
