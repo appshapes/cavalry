@@ -17,15 +17,17 @@ under Aeron's names where the concept matches (`CLAUDE.md`, Protocol: spec first
 of the transport under it is done: `spec/udp.md` version 1 carries one publication to
 every destination of a control channel under `min` flow control (ADR 0053), the
 durable log records a stream at the positions the stream has (`spec/durable-log.md`),
-and the C ABI at version 1 reaches both from five languages (ADR 0057). Three things
+and the C ABI at version 1 reaches both from five languages (ADR 0057). Four things
 it lacks the page names as dependencies: no command of `spec/client-protocol.md` version
 5 and no key of `spec/udp.md` version 1 creates a publication at a position, which
 every term after the first needs for its log publication; `start recording` records
 an image from its rebuild position when the command is handled, not from the
 position the image joined at, so data that arrived first lands in no recording, where
-a member's recording of the log must begin at the join position; and a replay's
+a member's recording of the log must begin at the join position; a replay's
 publication has a session id of its own, so a span a member records from a replay
-carries that id in its frame headers.
+carries that id in its frame headers; and nothing yet records which terms a member
+has joined, Aeron's `RecordingLog`, which a member's vote and its election need to
+survive a restart.
 
 Aeron Cluster's protocol is its codecs schema, `aeron-cluster-codecs.xml`, id 111 at
 version 17, read on 2026-11-06 at `master` (1.55.0-SNAPSHOT), with the election in
@@ -127,9 +129,16 @@ alone. New leadership term carries Aeron's next fields, −1 for all three when 
 reported term is the leader's own, so a returning leader truncates no more than its
 uncommitted tail and a member two terms behind replicates one term at a time; a
 reader whose message carries no next term for a position below the leader's term base
-fails its election. The leader's log publication of every term after the first starts at the term
-base log position, which needs a publication created at a position that the
-transport does not give yet: the version of `spec/udp.md` and
+fails its election. A member's log leadership term id, which decides its vote, is the last term it has
+recorded, not the term of its last entry, as Aeron's `logLeadershipTermId` is: a
+member records a term when it joins the term's log, when a replication of it ends
+and when it replays its new leadership term event, in a record of terms and their
+base positions kept in its durable log directory and written before it reports an
+append position for the term, so that a member that joined a term before its first
+entry reached it outranks a longer log of an older term and a committed entry is
+never truncated, the Raft paper's figure 8. The leader's log publication of every
+term after the first starts at the term base log position, which needs a publication
+created at a position that the transport does not give yet: the version of `spec/udp.md` and
 `spec/client-protocol.md` that adds one, under its own ADR, is card 227's first
 change. Out of this version: the challenge and challenge
 response, Aeron's authentication, with their template ids reserved; dynamic membership
@@ -257,8 +266,10 @@ join position, as Aeron's Archive records each image of a channel, under its own
 without the first no term after the first can start its log at the term base log
 position, and without the second a follower's recording of the live log or of a
 replay begins past the data that arrived first, a hole its append position never
-passes. That version is card 227's first change. A member rejoins by replicating one term at
-a time from the leader's recordings, so a leader keeps the recordings of every term a
+passes. That version is card 227's first change, and the format of the record of recorded
+terms, the page's fourth dependency, is card 227's as well, written with the
+replicated log that reads it. A member rejoins by replicating one term at a time
+from the leader's recordings, so a leader keeps the recordings of every term a
 member may still lack, and a position retention purged is a replication the leader
 cannot serve, counted in `cluster.log_replications_unavailable`, which `doctor` reads.
 Card 230 may then change two pages: `spec/client-protocol.md`, for a `start replay`
