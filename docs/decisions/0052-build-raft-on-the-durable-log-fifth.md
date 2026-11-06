@@ -379,6 +379,20 @@ events.
   cluster log is multi-destination cast over unicast, each destination a receiver.
 - **Raft with no transport change, over the unicast UDP of ADR 0040.** Lost: that is
   one publication per follower, above.
+- **`max` flow control for the log, Aeron's default.** Lost: under `max` the fastest
+  follower paces the leader, and a follower that falls behind what the leader can
+  still retransmit loses its image and catches up from a peer's recording (feature 6)
+  while the leader and the other follower carry on; under `min` no follower loses its
+  image, so each member's recording stays one stream's bytes without a catch-up in
+  the common case, and the Cluster Tutorial's driver runs `min` (Context). The cost
+  of `min` is under Consequences, Harder. `tagged` with a group of a quorum is what
+  removes that cost, and it is a Revisit clause.
+- **The dynamic control mode for the log.** Lost: in it a receiver names the
+  publication's control address and becomes a destination by sending to it, so any
+  host that reaches the leader joins the stream; a cluster's destinations are the
+  members string, which the leader reads, Aeron Cluster's log is in manual control
+  mode (`MDC_CONTROL_MODE_MANUAL` in `Election.java`), and a destination that joins
+  by itself is dynamic membership by the network, which is out of the slice.
 - **The consensus module as a process of its own beside the driver, as Aeron's is.**
   Lost: `CLAUDE.md` says one daemon per host, the driver embeds in the `cavalry` crate
   already, and a second process is a second thing a stranger runs in ten minutes; the
@@ -449,7 +463,10 @@ core, which Aeron sells or couples.
 
 Harder: a sixth dedicated thread and two more channels per member, each a bounded duty
 cycle with its counters; multi-destination cast adds per-destination state to the
-sender and a control address to the receiver's path; the ABI moves to a new version
+sender and a control address to the receiver's path; under `min` a follower that is
+CPU-throttled but still sends status messages never times out, so it paces the leader
+while the leader and the other follower already make a quorum, which feature 4's
+throttle test shows rather than hides; the ABI moves to a new version
 twice before the first release, for the destinations and for the cluster session,
 and every client regenerates each time; the fault-injection tests run three drivers
 on one runner and the gates grow by them; `conformance/upgrade/` builds the checkout
