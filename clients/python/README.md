@@ -83,8 +83,9 @@ You will see `1000 messages over cavalry:ipc, position 64000`.
 
 ## The runtime's side of the boundary
 
-What `ctypes` does per message, measured by `conformance/python/quickstart.py`'s report
-(the figures below are the laptop's; CI prints the runners'):
+What `ctypes` does per message, and what `conformance/python/quickstart.py`'s report
+measures of it (the figures below are one Linux CI runner's; every CI run prints its
+runners'):
 
 - **The call.** The package opens the library twice, which the loader maps once. The
   seven per-message functions of `crates/cavalry-ffi/README.md` come through
@@ -104,28 +105,42 @@ What `ctypes` does per message, measured by `conformance/python/quickstart.py`'s
   `Client` takes its own lock around every call on its handle, never on a message's
   path, so threads may share it. A `Publication`, `Subscription`, `Recording`,
   `Replay` or `Image` is used from one thread at a time; give each thread its own.
-- **The call-back.** `ctypes` builds the trampoline's arguments as new Python objects
-  on every call, an `int` each for the buffer pointer, the length and the header
-  pointer; the trampoline then builds the view over the body, a `c_uint8` array at the
-  buffer's address, its `memoryview` and that view cast to the native byte format,
-  three objects. Those are the runtime's and the client's allocations per received
-  message, by construction: six objects, every one freed before the next fragment.
-- **The view over a claimed slice.** `publication.claim` is a new `memoryview` per
-  claim, built the same three-object way from the pointer the ABI filled into the one
-  `cavalry_buffer_claim_t` the publication keeps: Python has no view that can be moved
-  to a new address, so the one object per publication the card asks for is the struct,
-  and the view is the client's own code's allocation per sent message, three objects
-  plus the `int` the position comes back as, recorded here with that reason.
-- **The count, measured.** The runner's bare round, 1,000 messages whose handler only
-  counts and whose publisher writes one constant, on this laptop (macOS, Python
-  3.14): `tracemalloc` reads +0.01 traced blocks and −1 byte net per message, so what
-  each message allocates is freed before the next, with a peak of 172 KB traced across
-  the round; `sys.getallocatedblocks` reads +8.3 live blocks net per message, the
-  allocator's own bookkeeping of freed objects it keeps. The checked round's one-way
-  latency, the publisher's `perf_counter_ns` in the body to the handler's read of it,
-  was p50 20.5 µs, p99.99 43.8 µs, max 43.8 µs over 1,000 ipc messages, unpinned; the
-  C runner's figures through the same ABI are the measure of the boundary itself, and
-  the difference is Python's call-back.
+- **The call-back, by construction.** For each received message `ctypes` builds the
+  call's argument tuple and a new `int` for each of the two pointers, the buffer's and
+  the header's; the length is an `int` too, one CPython keeps cached below 257. The
+  trampoline then builds the view over the body: a `c_uint8` array at the buffer's
+  address, the `memoryview` over it with the managed buffer CPython keeps behind a
+  view, and that view cast to the native byte format. That is seven objects per
+  received message, the runtime's three and the client's four, each freed before the
+  next fragment, plus whatever `ctypes` makes inside its own steps, such as finding
+  the array type for the length, which this list does not count.
+- **The view over a claimed slice, by construction.** `publication.claim` is a new
+  `memoryview` per claim, built the same four-object way from the pointer the ABI
+  filled into the one `cavalry_buffer_claim_t` the publication keeps: Python has no
+  view that can be moved to a new address, so the one object per publication the card
+  asks for is the struct, and the view is the client's own code's allocation per sent
+  message, four objects plus the `int` the position comes back as, recorded here with
+  that reason. `ctypes` also converts each argument of each call into an object of
+  its own for the call.
+- **The count, measured.** No counter in Python's standard library sees an object made
+  and freed within one message, so the runner reports net figures. Its allocation
+  round sends 10,000 messages whose handler only counts and whose publisher writes
+  one constant, with `tracemalloc` on for that round alone. On a Linux CI runner
+  (Python 3.12.3): `sys.getallocatedblocks`, read before and after the round with
+  nothing read between, +0.001 live blocks per message; `tracemalloc`, its own
+  snapshots left out, +0.001 traced blocks and +0.0 bytes per message, and a peak of
+  1,156 bytes traced above the round's start. So every object a message makes is
+  freed before the next, and no more than about 1 KB of them is alive at once. The
+  objects listed above are the per-message churn behind those net figures.
+- **The latency, measured.** The runner's latency round sends 100,000 messages over
+  `cavalry:ipc`, one at a time on one thread, with `tracemalloc` off. The publisher
+  writes `perf_counter_ns` into the claim before its commit, and the handler reads the
+  clock first. On the same runner, unpinned: p50 942 ns, p99 982 ns, p99.99 4,359 ns
+  (10 samples above it, nearest rank), max 47,780 ns. That is the whole path through
+  Python, the claim, the commit, the poll and the call-back. The bench's
+  `one_way_<body>_ffi` row measures the path through the C ABI alone, with the
+  publisher and the subscriber pinned on threads of their own
+  (`docs/how-to/run-the-bench.md`).
 - **The exception.** The trampoline wraps the user's handler in `try`; an exception
   is kept on the subscription and the trampoline returns, so no Python frame unwinds
   through C. The handler returns nothing the ABI reads, so the ABI's poll goes on

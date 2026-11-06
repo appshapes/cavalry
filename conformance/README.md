@@ -20,5 +20,8 @@ bounded at 10 s, and one that runs out says how far it got.
 
 The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046, cards
 206 to 209): the C runner's checks through the client, then a report, printed and never
-gated, of the one-way p50, p99.99 and max and the allocations per message on the client's
-side of the boundary, counted with what the runtime counts.
+gated, from two rounds that check nothing else: the one-way p50, p99, p99.99 and max over
+100,000 messages, with the runtime's allocation counters off, and the allocations per
+message on the client's side of the boundary over 10,000 more, counted with what the
+runtime counts, switched on for that round alone (clients/README.md, "What every client
+must pass").

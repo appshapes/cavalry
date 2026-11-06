@@ -27,9 +27,13 @@ JVM and .NET clients (cards 206 to 209) add a language each.
   ten-minute path's shape through the client, publish and subscribe over `cavalry:ipc`
   and `cavalry:udp`, record and replay, every message once and in order, the
   fragment handler's header fields against `spec/frame.md`'s vectors, and a report,
-  printed and never gated: the one-way p50, p99.99 and max, and the allocations per
-  message on the client's side of the boundary, the client's code and the runtime's
-  together, counted with what the runtime counts.
+  printed and never gated, from two rounds that check nothing else. The one-way p50,
+  p99, p99.99 and max, over 100,000 messages so that ten samples lie above the p99.99,
+  with the runtime's allocation counters off. The allocations per message on the
+  client's side of the boundary, the client's code and the runtime's together,
+  counted with what the runtime counts, switched on for that round alone and read
+  with nothing else between the two reads; the README says which objects a message
+  makes and frees that such a net count cannot see.
 - `just lint` runs `clients/lint.py` over the generated per-message functions, the
   wrapper of each of the ABI's seven (`crates/cavalry-ffi/README.md`: the claim, the
   reserved value, the commit and abort, the offer, the poll and the header's values)

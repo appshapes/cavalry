@@ -3,25 +3,29 @@
 ten-minute path's shape through `clients/python`, as `conformance/c/quickstart.c` runs it
 through the header. Against a driver at `CAVALRY_DIR` it checks the ABI version both ways,
 records stream 1001 on `cavalry:ipc`, publishes 1,000 messages of 64 bytes by claim and
-commit, each carrying its index and the publisher's clock, and reads them back through the
-fragment handler once and in order, with the header's type, flags, version, frame length,
-term offset and session id checked against spec/frame.md; waits for the recording to sync
-to the stream's end and stops it; checks where a handler's exception goes and that `offer`
+commit, each carrying its index and a pattern, and reads them back through the fragment
+handler once and in order, with the header's type, flags, version, frame length, term
+offset and session id checked against spec/frame.md; waits for the recording to sync to
+the stream's end and stops it; checks where a handler's exception goes and that `offer`
 refuses what is not bytes, on stream 1003 (`edges`); does the same 1,000 over
-`cavalry:udp` on the loopback;
-and replays the recording onto stream 2001, each frame at the position the recording holds
-it at, with the end reported. Every wait is bounded at 10 s, and a wait that runs out says
-how far it got. It exits 1 with the function, the code and `cavalry_errmsg` when a call
-failed, or with the code's name when a result code did.
+`cavalry:udp` on the loopback; and replays the recording onto stream 2001, each frame at
+the position the recording holds it at, with the end reported. Every wait is bounded at
+10 s, and a wait that runs out says how far it got. It exits 1 with the function, the code
+and `cavalry_errmsg` when a call failed, or with the code's name when a result code did.
 
-Then the report, printed and never gated: the one-way p50, p99.99 and max from the
-publisher's `time.perf_counter_ns` in the body to the handler's read of it, over the ipc
-messages, and the allocations per message on this side of the boundary, the client's code
-and the runtime's together, counted with what the runtime counts, `tracemalloc`'s live
-blocks and bytes and `sys.getallocatedblocks`, over a bare round of 1,000 more messages on
-stream 1002 whose handler only counts and whose publisher writes one constant, so that the
-checks' own objects are not in the count.
-Python 3.9 standard library only (ADR 0003).
+Then the report, printed and never gated, from two rounds that check nothing else. The
+latency round (`latency`): 100,000 messages over `cavalry:ipc` on stream 1004, one at a
+time on this thread, each carrying the publisher's `time.perf_counter_ns` from before its
+commit, which the handler subtracts from the clock it reads first; the one-way p50, p99,
+p99.99 and max, nearest rank, so ten samples lie above the p99.99. The allocation round
+(`allocations`): 10,000 messages on stream 1002 whose handler only counts and whose
+publisher writes one constant, with `tracemalloc` started for this round alone; the
+allocations per message on this side of the boundary, the client's code and the
+runtime's together, counted with what the runtime counts: `sys.getallocatedblocks` read
+before and after the round with nothing else between, and `tracemalloc`'s blocks and
+bytes, its own snapshots left out. Both are net of what was freed: an object made and
+freed within its message is not seen, and clients/python/README.md lists those by
+construction. Python 3.9 standard library only (ADR 0003).
 """
 
 import ctypes
@@ -36,6 +40,8 @@ import cavalry  # noqa: E402
 from cavalry import _abi  # noqa: E402
 
 MESSAGES = 1000
+LATENCY_MESSAGES = 100_000
+ALLOCATION_MESSAGES = 10_000
 BODY = 64
 STREAM = 1001
 REPLAY_STREAM = 2001
@@ -57,8 +63,8 @@ def deadline():
 
 
 class Receiver:
-    """What a subscription has received: the next index expected, the frames' term ids and
-    offsets kept from the handler for the positions, and the one-way latencies."""
+    """What a subscription has received: the next index expected, and the frames' term ids
+    and offsets kept from the handler for the positions."""
 
     def __init__(self, name, subscription):
         self.name = name
@@ -68,7 +74,6 @@ class Receiver:
         self.term_ids = []
         self.term_offsets = []
         self.positions = []
-        self.latencies = []
         self.constants = None
 
     def on_fragment(self, body, header):
@@ -79,8 +84,7 @@ class Receiver:
             fail(f"{self.name}: expected message {self.next}, got {index}")
         if len(body) != BODY:
             fail(f"{self.name}: message {index} has {len(body)} bytes, not {BODY}")
-        sent_at = int.from_bytes(body[8:16], "little")
-        for b in range(16, BODY):
+        for b in range(8, BODY):
             if body[b] != (index + b) & 0xFF:
                 fail(f"{self.name}: message {index} byte {b} is {body[b]}, not {(index + b) & 0xFF}")
         frame = header.values()
@@ -98,7 +102,6 @@ class Receiver:
             fail(f"{self.name}: message {index} from session {frame.session_id}, the stream's is {self.session_id}")
         self.term_ids.append(frame.term_id)
         self.term_offsets.append(frame.term_offset)
-        self.latencies.append(time.perf_counter_ns() - sent_at)
         self.next += 1
 
     def take_constants(self):
@@ -125,7 +128,7 @@ class Receiver:
             fail(f"{self.name}: {count} more fragment(s) after all {MESSAGES} messages")
 
 
-def refused(name, position, sent, until):
+def refused(name, position, sent, until, total=MESSAGES):
     """A claim refused with `position`, below zero: fail at once on a code that does not
     pass, ERROR with the ABI's error, CLOSED or MAX_POSITION_EXCEEDED, or once the round's
     10 s have passed, saying how far the round got; else return, to claim again."""
@@ -134,20 +137,20 @@ def refused(name, position, sent, until):
         raise cavalry.CavalryError("cavalry_publication_try_claim", abi.cavalry_errcode(),
                                    abi.cavalry_errmsg().decode("utf-8", "replace"))
     if position in (cavalry.CLOSED, cavalry.MAX_POSITION_EXCEEDED):
-        fail(f"{name}: try_claim returned {CODE_NAMES[position]} ({position}) after {sent} of {MESSAGES} messages")
+        fail(f"{name}: try_claim returned {CODE_NAMES[position]} ({position}) after {sent} of {total} messages")
     if time.monotonic() > until:
-        fail(f"{name}: published {sent} of {MESSAGES} in {WAIT_SECONDS:.0f} s; the last claim returned "
+        fail(f"{name}: published {sent} of {total} in {WAIT_SECONDS:.0f} s; the last claim returned "
              f"{CODE_NAMES.get(position, position)} ({position})")
 
 
-def poll_or_fail(name, subscription, handler, received):
+def poll_or_fail(name, subscription, handler, received, total=MESSAGES):
     """One poll of up to 16 fragments: the count, or a failure with the subscription's
     fault, saying how far the round got."""
     count = subscription.poll(handler, 16)
     if count < 0:
         code, session_id, position = subscription.fault()
         fail(f"{name}: poll stopped on fault {code} of session {session_id} at position {position} after {received} of "
-             f"{MESSAGES} messages; {cavalry.library().cavalry_errmsg().decode('utf-8', 'replace')}")
+             f"{total} messages; {cavalry.library().cavalry_errmsg().decode('utf-8', 'replace')}")
     return count
 
 
@@ -164,8 +167,7 @@ def publish_and_receive(publication, receiver):
             continue
         claim = publication.claim
         claim[:8] = i.to_bytes(8, "little")
-        claim[8:16] = time.perf_counter_ns().to_bytes(8, "little")
-        claim[16:] = bytes((i + b) & 0xFF for b in range(16, BODY))
+        claim[8:] = bytes((i + b) & 0xFF for b in range(8, BODY))
         if publication.commit() != position:
             fail(f"{receiver.name}: commit did not return the claim's position {position}")
         i += 1
@@ -281,14 +283,121 @@ def edges(client):
           f"nothing was published")
 
 
+def latency(client):
+    """The latency round, for the report: 100,000 messages over cavalry:ipc on stream 1004,
+    one at a time on this thread. The publisher writes `perf_counter_ns` into the claim
+    just before its commit; the handler reads the clock first and keeps the difference.
+    `tracemalloc` is off. The latencies, in order."""
+    name = "the latency round"
+    subscription = client.add_subscription("cavalry:ipc", STREAM + 3)
+    publication = client.add_publication("cavalry:ipc", STREAM + 3)
+    latencies = [0] * LATENCY_MESSAGES
+    received = [0]
+
+    def on_fragment(body, header):
+        now = time.perf_counter_ns()
+        latencies[received[0]] = now - int.from_bytes(body[:8], "little")
+        received[0] += 1
+
+    until = deadline()
+    for i in range(LATENCY_MESSAGES):
+        while True:
+            position = publication.try_claim(BODY)
+            if position >= 0:
+                break
+            refused(name, position, i, until, LATENCY_MESSAGES)
+            poll_or_fail(name, subscription, on_fragment, received[0], LATENCY_MESSAGES)  # the image joins on a poll
+        publication.claim[:8] = time.perf_counter_ns().to_bytes(8, "little")
+        publication.commit()
+        while received[0] <= i:
+            poll_or_fail(name, subscription, on_fragment, received[0], LATENCY_MESSAGES)
+            if time.monotonic() > until:
+                fail(f"{name}: received {received[0]} of {LATENCY_MESSAGES}; message {i} did not arrive in "
+                     f"{WAIT_SECONDS:.0f} s")
+        until = deadline()  # 10 s for each message, outside the interval it measures
+    if subscription.poll(on_fragment, 16) != 0:
+        fail(f"{name}: a fragment after all {LATENCY_MESSAGES:,} messages")
+    publication.close()
+    subscription.close()
+    return latencies
+
+
+def allocations(client):
+    """The allocation round, for the report: 10,000 messages over cavalry:ipc on stream
+    1002 whose handler only counts and whose publisher writes one constant, so that the
+    checks' objects are not in the count, with `tracemalloc` on for this round alone. The
+    counts are read in this order, so that neither reads the other's objects: the
+    snapshot, the traced memory, the live blocks; the round; the live blocks, the traced
+    memory, the snapshot. (messages, live blocks, traced blocks, traced bytes, the peak
+    traced above the round's start)."""
+    name = "the allocation round"
+    subscription = client.add_subscription("cavalry:ipc", STREAM + 1)
+    publication = client.add_publication("cavalry:ipc", STREAM + 1)
+    received = [0]
+
+    def count(body, header):
+        received[0] += 1
+
+    constant = bytes(range(BODY))
+    until = deadline()
+    while True:
+        poll_or_fail(name, subscription, count, received[0], ALLOCATION_MESSAGES)
+        position = publication.try_claim(BODY)
+        if position >= 0:
+            break
+        refused(name, position, 0, until, ALLOCATION_MESSAGES)
+    publication.claim[:] = constant
+    publication.commit()
+    sent = 1
+    poll_or_fail(name, subscription, count, received[0], ALLOCATION_MESSAGES)
+
+    tracemalloc.start()
+    snapshot_before = tracemalloc.take_snapshot()
+    tracemalloc.reset_peak()
+    traced_before = tracemalloc.get_traced_memory()[0]
+    received_before = received[0]
+    blocks_before = sys.getallocatedblocks()
+    until = deadline()
+    while sent < ALLOCATION_MESSAGES:
+        position = publication.try_claim(BODY)
+        if position >= 0:
+            publication.claim[:] = constant
+            publication.commit()
+            sent += 1
+        else:
+            refused(name, position, sent, until, ALLOCATION_MESSAGES)
+        poll_or_fail(name, subscription, count, received[0], ALLOCATION_MESSAGES)
+    while received[0] < ALLOCATION_MESSAGES:
+        poll_or_fail(name, subscription, count, received[0], ALLOCATION_MESSAGES)
+        if time.monotonic() > until:
+            fail(f"{name}: received {received[0]} of {ALLOCATION_MESSAGES} in {WAIT_SECONDS:.0f} s")
+    blocks_after = sys.getallocatedblocks()
+    traced_after, traced_peak = tracemalloc.get_traced_memory()
+    snapshot_after = tracemalloc.take_snapshot()
+    tracemalloc.stop()
+
+    measured = ALLOCATION_MESSAGES - received_before
+    own = (tracemalloc.Filter(False, tracemalloc.__file__),)  # the snapshots' own objects
+    live = snapshot_after.filter_traces(own).compare_to(snapshot_before.filter_traces(own), "lineno")
+    if subscription.poll(count, 16) != 0:
+        fail(f"{name}: a fragment after all {ALLOCATION_MESSAGES:,} messages")
+    publication.close()
+    subscription.close()
+    return (measured, (blocks_after - blocks_before) / measured, sum(s.count_diff for s in live) / measured,
+            (traced_after - traced_before) / measured, traced_peak - traced_before)
+
+
+def percentile(sorted_values, parts, whole):
+    """The nearest-rank percentile `parts / whole`: the smallest value with at least that
+    share of the values at or below it, and how many values lie above it."""
+    rank = max(1, -(-len(sorted_values) * parts // whole))
+    return sorted_values[rank - 1], len(sorted_values) - rank
+
+
 def free_udp_port():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def percentile(sorted_values, p):
-    return sorted_values[min(len(sorted_values) - 1, int(len(sorted_values) * p))]
 
 
 def main():
@@ -309,13 +418,12 @@ def main():
             fail(f"{name} {'keeps' if held else 'releases'} the GIL across the call; the per-message functions "
                  f"{', '.join(_abi.PER_MESSAGE)} keep it and every other function releases it")
 
-    tracemalloc.start()
     with cavalry.Client() as client:
         print(f"conformance/python: client {client.client_id} on {client.dir}, library {cavalry.version()}, "
               f"ABI version {cavalry.abi_version()}")
 
         # 1. Record the stream, then publish 1,000 messages over cavalry:ipc and read them
-        # back, once and in order; the allocations are counted around this round.
+        # back, once and in order.
         ipc_sub = client.add_subscription("cavalry:ipc", STREAM)
         ipc_pub = client.add_publication("cavalry:ipc", STREAM)
         recording = client.start_recording("cavalry:ipc", STREAM)  # the publication first: it records a live one
@@ -335,52 +443,9 @@ def main():
 
         edges(client)
 
-        # The measured round, for the report: 1,000 more messages on stream 1002 with a
-        # handler that does nothing and a publisher that writes one constant, so that the
-        # allocations counted are the client's own code's and the runtime's, not the checks'.
-        bare_sub = client.add_subscription("cavalry:ipc", STREAM + 1)
-        bare_pub = client.add_publication("cavalry:ipc", STREAM + 1)
-        bare = [0]
-
-        def count(body, header):
-            bare[0] += 1
-
-        constant = bytes(range(BODY))
-        name = "the measured round"
-        until = deadline()
-        while True:
-            poll_or_fail(name, bare_sub, count, bare[0])
-            position = bare_pub.try_claim(BODY)
-            if position >= 0:
-                break
-            refused(name, position, 0, until)
-        bare_pub.claim[:] = constant
-        bare_pub.commit()
-        sent, received_before = 1, bare[0]
-        blocks_before = sys.getallocatedblocks()
-        traced_before = tracemalloc.get_traced_memory()[0]
-        snapshot_before = tracemalloc.take_snapshot()
-        until = deadline()
-        while sent < MESSAGES:
-            position = bare_pub.try_claim(BODY)
-            if position >= 0:
-                bare_pub.claim[:] = constant
-                bare_pub.commit()
-                sent += 1
-            else:
-                refused(name, position, sent, until)
-            poll_or_fail(name, bare_sub, count, bare[0])
-        until = deadline()
-        while bare[0] < MESSAGES:
-            poll_or_fail(name, bare_sub, count, bare[0])
-            if time.monotonic() > until:
-                fail(f"{name}: received {bare[0]} of {MESSAGES} in {WAIT_SECONDS:.0f} s")
-        snapshot_after = tracemalloc.take_snapshot()
-        traced_after, traced_peak = tracemalloc.get_traced_memory()
-        blocks_after = sys.getallocatedblocks()
-        measured = MESSAGES - received_before
-        bare_pub.close()
-        bare_sub.close()
+        # The report's two rounds, which check nothing else.
+        latencies = sorted(latency(client))
+        measured, live_blocks, traced_blocks, traced_bytes, traced_peak = allocations(client)
 
         # 2. The same 1,000 over cavalry:udp on the loopback.
         udp_channel = f"cavalry:udp?endpoint=127.0.0.1:{free_udp_port()}"
@@ -427,15 +492,17 @@ def main():
 
     # The report, never gated: the laptop's or the runner's cost of this side of the
     # boundary (clients/python/README.md, "The runtime's side").
-    latencies = sorted(ipc.latencies)
-    live = snapshot_after.compare_to(snapshot_before, "lineno")
-    live_blocks = sum(s.count_diff for s in live)
-    print(f"conformance/python: report: one-way p50 {percentile(latencies, 0.5):,} ns, p99.99 "
-          f"{percentile(latencies, 0.9999):,} ns, max {latencies[-1]:,} ns over {MESSAGES} cavalry:ipc messages; "
-          f"allocations per message, this side of the boundary, over {measured} bare messages (a handler that counts, "
-          f"a publisher that writes a constant): {(blocks_after - blocks_before) / measured:+.3f} live blocks net "
-          f"(sys.getallocatedblocks), {live_blocks / measured:+.3f} traced blocks and "
-          f"{(traced_after - traced_before) / measured:+.1f} bytes net (tracemalloc), peak {traced_peak:,} bytes traced")
+    p50, _ = percentile(latencies, 50, 100)
+    p99, _ = percentile(latencies, 99, 100)
+    p9999, above = percentile(latencies, 9999, 10000)
+    print(f"conformance/python: report: one-way latency over {len(latencies):,} cavalry:ipc messages, one at a time on "
+          f"one thread, tracemalloc off, nearest rank: p50 {p50:,} ns, p99 {p99:,} ns, p99.99 {p9999:,} ns "
+          f"({above} samples above it), max {latencies[-1]:,} ns")
+    print(f"conformance/python: report: allocations per message, this side of the boundary, over {measured:,} messages "
+          f"whose handler counts and whose publisher writes a constant, net of what was freed, so an object made and "
+          f"freed within its message is not seen: {live_blocks:+.3f} live blocks (sys.getallocatedblocks, nothing read "
+          f"between), {traced_blocks:+.3f} traced blocks and {traced_bytes:+.1f} bytes (tracemalloc, its snapshots "
+          f"left out); peak {traced_peak:,} bytes traced above the round's start")
     print("conformance/python: ok")
     return 0
 
