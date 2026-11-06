@@ -179,8 +179,11 @@ A `Client`'s methods are `synchronized`, so threads may share one: an add, a com
 or a close holds the client's lock for its one ABI call, which the ABI serialises
 anyway, and the lock is never on a message's path. A `Publication`, a `Subscription`
 and its `Header` are used from one thread at a time, the ABI's rule for every handle;
-a program with several threads gives each its own, as the Rust API's are used. The
-upcall stub a subscription makes is bound to the subscription itself, so the ABI's
+a program with several threads gives each its own, as the Rust API's are used.
+`Client.addDestination` and `removeDestination` are calls on the client, not on the
+`Publication` they name: they may run beside that publication's `offer` or `tryClaim`
+in another thread, but not beside its `close` (`spec/c-abi.md`, "Threads"; ADR 0057).
+The upcall stub a subscription makes is bound to the subscription itself, so the ABI's
 `clientd` is unused and no table is read per fragment.
 
 The ABI's error, `Abi.errcode()` and `Abi.errmsg()`, is per operating-system thread.

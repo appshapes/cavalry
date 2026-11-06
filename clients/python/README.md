@@ -143,7 +143,10 @@ Releasing the GIL lets two Python threads be inside the ABI at once, and the ABI
 one call on a handle at a time (`spec/c-abi.md`, "Threads"). A `Client` takes its own
 lock around every call on its handle, never on a message's path, so threads may share
 it. A `Publication`, `Subscription`, `Recording`, `Replay` or `Image` is used from one
-thread at a time; give each thread its own.
+thread at a time; give each thread its own. `Client.add_destination` and
+`remove_destination` are calls on the client, not on the `Publication` they name: they
+may run beside that publication's `offer` or `try_claim` in another thread, but not
+beside its `close` (`spec/c-abi.md`, "Threads"; ADR 0057).
 
 ### The call-back, by construction
 

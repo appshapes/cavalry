@@ -193,11 +193,10 @@ static const char *result_name(int64_t code) {
     }
 }
 
-/* Publishes MESSAGES messages by claim and commit on `publication`, polling `r` as it
- * goes, drains `r` to the end and polls it once more for nothing. */
-/* Publishes MESSAGES on the publication while polling every receiver, then polls until
- * each has every message: one receiver for a stream to one endpoint, two for a control
- * channel's stream to two destinations (ADR 0053). */
+/* Publishes MESSAGES by claim and commit on the publication while polling every
+ * receiver, polls until each has every message, then polls each once more for nothing
+ * and computes each one's frame positions: one receiver for a stream to one endpoint,
+ * two for a control channel's stream to two destinations (ADR 0053). */
 static void publish_and_receive_all(cavalry_publication_t *publication, receiver_t **rs, int n) {
     cavalry_buffer_claim_t claim;
     struct timespec publish_until = deadline();
@@ -249,8 +248,10 @@ static void publish_and_receive_all(cavalry_publication_t *publication, receiver
             }
         }
     }
-    expect_no_more(r);
-    compute_positions(r);
+    for (int k = 0; k < n; k++) {
+        expect_no_more(rs[k]);
+        compute_positions(rs[k]);
+    }
 }
 
 static void publish_and_receive(cavalry_publication_t *publication, receiver_t *r) {
