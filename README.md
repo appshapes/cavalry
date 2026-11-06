@@ -9,16 +9,19 @@ replication, written in Rust. One daemon per host; clients map shared-memory log
 buffers; IPC and UDP share one API. Encrypted, observable and highly available in the
 open core, with first-class clients in every language.
 
-**Status:** the first three slices work. `cavalry run` starts a driver; a Rust client
+**Status:** the first four slices work. `cavalry run` starts a driver; a Rust client
 publishes and subscribes over shared memory on one host and over UDP between hosts,
 on one API, with back-pressure returned to the caller; the driver records a stream to
 the durable log and replays it; `cavalry doctor` explains the driver from its
-counters; the ten-minute path below runs in CI on Linux and macOS, and the latency
-gate runs on two dedicated hosts and across the cable between them. Not yet: Raft,
-the C ABI and the language clients, and a release on crates.io
+counters; a C ABI over the client, `cavalry-ffi`, carries the same API to Python,
+Node, Go, the JVM and .NET, each client generated from the header and run against a
+driver by `just conformance`; the ten-minute path below runs in CI on Linux and macOS,
+and the latency gate runs on two dedicated hosts and across the cable between them.
+Not yet: Raft, and a release on crates.io
 ([ADR 0007](docs/decisions/0007-build-ipc-pub-sub-first.md),
 [ADR 0023](docs/decisions/0023-build-the-durable-log-second.md),
-[ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md)).
+[ADR 0039](docs/decisions/0039-build-udp-between-hosts-third.md),
+[ADR 0046](docs/decisions/0046-build-the-c-abi-and-the-clients-fourth.md)).
 
 ## Start here
 
