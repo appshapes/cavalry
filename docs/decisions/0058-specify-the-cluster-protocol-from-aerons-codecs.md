@@ -13,11 +13,16 @@ the cluster protocol, specified before any of `cavalry-raft` is written: the ent
 the cluster's log, the consensus messages between members, the session protocol between
 a client and the cluster, the snapshot marker, the members string, the stream ids, the
 leadership term and its position arithmetic, the timeouts and what a reader rejects,
-under Aeron's names where the concept matches (`CLAUDE.md`, Protocol: spec first). The
-transport under it is done: `spec/udp.md` version 1 carries one publication to every
-destination of a control channel under `min` flow control (ADR 0053), the durable log
-records a stream at the positions the stream has (`spec/durable-log.md`), and the C
-ABI at version 1 reaches both from five languages (ADR 0057).
+under Aeron's names where the concept matches (`CLAUDE.md`, Protocol: spec first). Most
+of the transport under it is done: `spec/udp.md` version 1 carries one publication to
+every destination of a control channel under `min` flow control (ADR 0053), the
+durable log records a stream at the positions the stream has (`spec/durable-log.md`),
+and the C ABI at version 1 reaches both from five languages (ADR 0057). Two things it
+lacks the page names as dependencies: no command of `spec/client-protocol.md` version
+5 and no key of `spec/udp.md` version 1 creates a publication at a position, which
+every term after the first needs for its log publication, and a replay's publication
+has a session id of its own, so a span a member records from a replay carries that
+id in its frame headers.
 
 Aeron Cluster's protocol is its codecs schema, `aeron-cluster-codecs.xml`, id 111 at
 version 17, read on 2026-11-06 at `master` (1.55.0-SNAPSHOT), with the election in
@@ -90,19 +95,26 @@ enumeration, a non-ASCII byte in an ASCII field, a member id below 0 where none 
 allowed, a position below 0 where none is allowed and a term id below −1; a session
 connect's version is read whatever its major, so that the leader answers it with an
 error, as Aeron's `SessionManager` does, and a client that reads a session event of
-another major reports it. Follower log replication, Aeron's replication of a whole
-earlier term from a peer's archive, is out of this version: no message of it asks for
-one, so a member whose append position is below the leader's term base log position
-fails its election on the new leadership term that tells it so, counted in
-`cluster.log_replications_unavailable`, and begins again until a version with log
-replication runs on it. Within a term the catch-up is Aeron's, a replay of the
-leader's recording of the log from the position the follower asked for to its
-`catchup` endpoint on stream 100, with one departure the client protocol forces: a
-replay's publication has a session id of its own, so the follower finds the replay
-as the one image of stream 100 on its `catchup` endpoint and the span it records from
-it carries the replay's session id in its frame headers; every member's recording
-holds every entry at the same position with the same payload, and the bytes of two
-recordings are the same except for those headers. Out of this version: the challenge and challenge
+another major reports it; a version field's major is the value shifted right by 16
+bits, arithmetic, so a negative value is rejected. Follower log replication, Aeron's
+replication of what a follower lacks up to the next term's base, runs in this version
+over the messages the page has: the follower sends catch-up position from its append
+position, and the leader answers with a `start replay` of its recording of the term
+that holds the position, with the length that ends at Aeron's stop position, the next
+term base log position when the append position is below it, else the next log
+position; within the leader's term the catch-up is the same replay following the
+live recording. One departure the client protocol forces: a replay's publication has
+a session id of its own, so the follower finds either replay as the one image of
+stream 100 on its `catchup` endpoint, and the span it records from it carries the
+replay's session id in its frame headers. A member's log is therefore its recordings
+of stream 100 in position order, one per term received live and one per span received
+from a replay; every member's log holds every entry at the same position with the
+same payload, and two members' logs differ in the session ids of their frame headers
+alone. The leader's log publication of every term after the first starts at the term
+base log position, which needs a publication created at a position that the
+transport does not give yet: the version of `spec/udp.md` and
+`spec/client-protocol.md` that adds one, under its own ADR, is card 227's first
+change. Out of this version: the challenge and challenge
 response, Aeron's authentication, with their template ids reserved; dynamic membership
 and its deprecated messages; the service control protocol of a service in a process of
 its own; the admin request; the backup, heartbeat and standby snapshot queries; the
@@ -143,14 +155,21 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   on a monotonic clock of the process that measures it instead, a member's or a
   client's, so that the wall clock moves no election; the cluster's time, which the
   log carries, stays a wall clock's milliseconds for the service.
-- **Catch-up from any position in place of follower log replication, across the terms
-  a member missed.** Lost. It would need the leader's replay to carry the log's session
-  id, which `start replay` cannot give it, and a member that caught up across terms
-  would hold frame headers of the replay's session id where its peers hold the terms'
-  own; a replay check across members would then differ in those headers. Version 0
-  keeps Aeron's rule, catch-up within a term alone, and a member below the leader's
-  term base log position fails its election, counted, until card 230 brings log
-  replication with a replay that carries the log's session id.
+- **Catch-up from any position in place of follower log replication, one replay
+  across the terms a member missed.** Lost. One replay across terms has no stop
+  position a follower can check term by term, and the member's log is one recording
+  per term, so the replication is Aeron's, one term at a time to the next term's base,
+  over the catch-up messages the page has.
+- **Follower log replication out of version 0, a member below the leader's term base
+  log position failing its election until card 230.** Lost: a follower that is behind
+  within the previous term is the ordinary case at failover, and a cluster whose
+  surviving followers cannot replicate commits nothing until the old leader returns,
+  which is the fall-over invariant 3 forbids.
+- **One recording spanning terms, Aeron's extend recording.** Lost for this version: a
+  recording holds one session id (`spec/durable-log.md`) and each term's publication
+  has its own, so the page defines a member's log as its recordings in position order
+  and leaves one recording across terms, and a replay that carries the log's session
+  id, to the Revisit.
 - **A members string of up to eight fields, as Aeron parses.** Lost. The seventh and
   eighth are Aeron's archive response and egress response endpoints, for response
   channels Cavalry does not have; a string with more than six fields is a grammar
@@ -199,9 +218,10 @@ vectors, the evidence the Done-when names.
 Easier: the replicated log (card 227), the election (card 228), the cluster client
 (card 229) and the catch-up and snapshot (card 230) each implement a page that exists,
 with vectors, under names an Aeron reader knows; a reader rejects a message of another
-version by its header before any field is read; every member's recording of the log
-holds the same bytes at the same positions, so `just replay-check` extends to a cluster
-as ADR 0052 asks.
+version by its header before any field is read; every member's log holds every entry
+at the same position with the same payload, so `just replay-check` extends to a
+cluster as ADR 0052 asks, comparing entries and their payloads rather than frame
+headers, whose session ids differ between members.
 
 Harder: the page carries eighteen election states and their transitions before any
 of them runs, so the implementing features must keep it true and amend it by a new
@@ -211,13 +231,17 @@ fields allow one; the consensus messages cross the wire as message payloads insi
 data frames, so a reader walks `spec/frame.md` first and this page second. A member
 at version N+1 must speak this page's header version 0 to a member at version N, since
 a reader rejects any other, and card 231 decides how it does (ADR 0052, feature 7).
-A member that was down across the end of a term does not rejoin in version 0: it fails
-its election with `cluster.log_replications_unavailable` counting it, so a cluster of
-three with such a member runs with no member to spare until card 230, and `doctor`
-reads the counter. Card 230 then changes two pages: `spec/client-protocol.md`, for a
-`start replay` that carries the log's session id so that a replay's frames are the
-log's bytes, and `spec/durable-log.md` or this page, for the replication of a whole
-term from a peer's recording through the `archive` endpoint.
+Before card 227 builds the replicated log, a version of `spec/udp.md` and
+`spec/client-protocol.md` must let a publication be created at a position, Aeron's
+`init-term-id`, `term-id` and `term-offset` keys or their equal, under its own ADR:
+without it no term after the first can start its log at the term base log position.
+That version is card 227's first change. A member rejoins by replicating one term at
+a time from the leader's recordings, so a leader keeps the recordings of every term a
+member may still lack, and a position retention purged is a replication the leader
+cannot serve, counted in `cluster.log_replications_unavailable`, which `doctor` reads.
+Card 230 may then change two pages: `spec/client-protocol.md`, for a `start replay`
+that carries the log's session id so that a replay's frames are the log's bytes, and
+`spec/durable-log.md`, for one recording that spans terms.
 
 Revisit: when card 229's client needs the challenge, for Aeron's authentication
 protocol and the two reserved template ids; when a member must be added to or removed
@@ -225,10 +249,10 @@ from a running cluster, for the membership change event's use and the messages A
 deprecated; when a service runs in a process of its own, for the service control
 protocol, the schedule and cancel timer, the close session and the service ack; when
 card 230 writes the snapshot, for its contents between the markers and the standby
-snapshot message; when card 230 needs Aeron's follower log replication, a whole term
-from a peer's recording through the `archive` endpoint with its request and its stop
-position, which version 0 leaves out for the catch-up replay from any position; when
-a cluster of more than eight members is wanted; when `doctor` shows a host that needs
+snapshot message; when card 230 wants a replay that carries the log's session id, or
+one recording that spans terms, so that two members' logs are the same bytes and a
+replication can run from a peer other than the leader through the `archive`
+endpoint; when a cluster of more than eight members is wanted; when `doctor` shows a host that needs
 a timeout of its own, for the first configuration key of the slice with its
 `why_not_default`.
 

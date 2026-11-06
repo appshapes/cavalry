@@ -260,6 +260,8 @@ VECTORS += [
     message("reject-version-field-major", 50, "consensus", dict(CANVASS, protocol_version=65536), error="version"),
     message("reject-version-field-negative", 51, "consensus", dict(REQUEST_VOTE, protocol_version=-65536),
             error="version"),
+    message("reject-version-field-minus-one", 50, "consensus", dict(CANVASS, protocol_version=-1),
+            error="version"),
     message("reject-length-before-version-field", 50, "consensus", dict(CANVASS, protocol_version=65536),
             error="length", bytes_=encode(50, dict(CANVASS, protocol_version=65536)) + bytes(4)),
     message("reject-version-field-before-member-id", 50, "consensus",
@@ -410,6 +412,18 @@ def candidate(count, reports, own, deadline_passed):
     return {"nominate": False, "unanimous": False}
 
 
+def replication_stop(append_position, next_term_base_log_position, next_log_position):
+    """spec/cluster.md, "follower log replication": the stop position of a follower whose append
+    position is below the leader's term base log position, from the new leadership term's next
+    term base log position and next log position (−1 for none)."""
+    if next_term_base_log_position != NULL and append_position < next_term_base_log_position:
+        return {"replicate": True, "stop_position": next_term_base_log_position}
+    if next_term_base_log_position != NULL and append_position == next_term_base_log_position \
+            and next_log_position != NULL:
+        return {"replicate": True, "stop_position": next_log_position}
+    return {"replicate": False, "stop_position": NULL}
+
+
 def entry_position(position, length, mtu):
     """spec/cluster.md, "The log": the position after an entry of `length` bytes that begins at
     `position`, fragments of mtu − 32 and a last of the remainder, each frame aligned to 32."""
@@ -508,6 +522,18 @@ VECTORS += [
     arithmetic("candidate-short-of-quorum", "candidate",
                {"members": 5, "reports": [[3, 98304], [4, 0], None, None, None], "own": [3, 98304],
                 "deadline_passed": True}, {"nominate": False, "unanimous": False}),
+    arithmetic("replication-stop-below-next-base", "replication-stop",
+               {"append_position": 960, "next_term_base_log_position": 1000, "next_log_position": NULL},
+               replication_stop(960, 1000, NULL)),
+    arithmetic("replication-stop-at-next-base-with-end", "replication-stop",
+               {"append_position": 1000, "next_term_base_log_position": 1000, "next_log_position": 1100},
+               replication_stop(1000, 1000, 1100)),
+    arithmetic("replication-stop-at-next-base-no-end", "replication-stop",
+               {"append_position": 1000, "next_term_base_log_position": 1000, "next_log_position": NULL},
+               replication_stop(1000, 1000, NULL)),
+    arithmetic("replication-stop-nothing-known", "replication-stop",
+               {"append_position": 960, "next_term_base_log_position": NULL, "next_log_position": NULL},
+               replication_stop(960, NULL, NULL)),
     arithmetic("entry-position-one-frame", "entry-position",
                {"position": 65536, "length": 56, "mtu": 1408}, entry_position(65536, 56, 1408)),
     arithmetic("entry-position-aligned", "entry-position",
