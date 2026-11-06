@@ -116,7 +116,8 @@ fn code_of(result: Result<(), ClientError>) -> i32 {
 /// Two subscriptions on two loopback endpoints, a publication on a control channel
 /// under `fc=min`, both endpoints added as destinations: an image on each, every
 /// message at both once and in order; a duplicate add and a remove of one not held are
-/// success; after `remove_destination` the removed subscription gets nothing more.
+/// success; after `remove_destination` the removed subscription gets nothing after the
+/// next message, which a sender cycle already under way may still send it.
 #[test]
 fn a_control_channel_reaches_every_destination_once_and_in_order() {
     let dir = TestDir::new("fan-out");
@@ -177,24 +178,31 @@ fn a_control_channel_reaches_every_destination_once_and_in_order() {
             "destination {index}"
         );
     }
-    // The second removed: the next message reaches the first alone.
+    // The second removed. The driver answers the remove once it has queued it for the
+    // sender, which takes its requests at the start of a duty cycle and sends a burst
+    // at the end, so a cycle that took them before the removal may gather the next
+    // message, 500, after its commit and send it to both. 501 reaches the first alone:
+    // it is committed once the first has 500, after the burst that sent it, and every
+    // cycle after that one takes the removal before it gathers a burst.
     client
         .remove_destination(id, &endpoints[1])
         .expect("removed");
-    let mut message = [0u8; 32];
-    message[..8].copy_from_slice(&MESSAGES.to_le_bytes());
-    offer(&mut publication, &message);
-    assert_eq!(
-        drain_in_order(&mut subscriptions[0], MESSAGES, 1, Duration::from_secs(5)),
-        1
+    for i in MESSAGES..MESSAGES + 2 {
+        let mut message = [0u8; 32];
+        message[..8].copy_from_slice(&i.to_le_bytes());
+        offer(&mut publication, &message);
+        assert_eq!(
+            drain_in_order(&mut subscriptions[0], i, 1, Duration::from_secs(5)),
+            1
+        );
+    }
+    let removed = drain_in_order(
+        &mut subscriptions[1],
+        MESSAGES,
+        2,
+        Duration::from_millis(300),
     );
-    let mut arrived = 0;
-    assert!(!wait_until(Duration::from_millis(300), || {
-        subscriptions[1]
-            .poll(|_, _| arrived += 1, 16)
-            .expect("the poll");
-        arrived > 0
-    }));
+    assert!(removed <= 1, "501 reached the removed destination");
     publication.close().expect("closes");
     for subscription in subscriptions {
         subscription.close().expect("closes");
