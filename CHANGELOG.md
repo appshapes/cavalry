@@ -1587,3 +1587,11 @@ user-visible change, added in the same commit as the change. The format follows
   table
   ([ADR 0054](docs/decisions/0054-linger-a-control-channels-publication-for-its-timeout.md);
   `docs/reference/udp.md`; card 225).
+- An `add publication`, or a replay's publication, on a channel whose previous send
+  endpoint is still closing after its last publication's linger, its socket still
+  holding the control address or the interface's port, is answered with code 4 and a
+  message saying so and to send the command again after a moment, in place of a
+  message about a port in use; an add during the linger uses the endpoint that is
+  still open, as before
+  ([ADR 0055](docs/decisions/0055-answer-an-add-publication-on-a-closing-send-endpoint-with-a-retry.md);
+  card 225).

@@ -1891,7 +1891,9 @@ impl Conductor {
     /// endpoint's index and the socket when it is new, or the code and message for the
     /// caller to answer with, the refusal counted here: the registry at capacity or the
     /// counters file with no free record is code 10, a socket the operating system
-    /// refused code 4. The caller checks the sender's room first (`sender_has_room`).
+    /// refused code 4, whose message says to send the command again when a closing
+    /// endpoint on the channel still holds its address (ADR 0055). The caller checks
+    /// the sender's room first (`sender_has_room`).
     fn open_send_endpoint(
         &mut self,
         correlation_id: i64,
@@ -1915,6 +1917,28 @@ impl Conductor {
         };
         let socket = match opened {
             Ok(socket) => socket,
+            // The channel's previous endpoint, closed with its last publication's linger,
+            // still holds the address while the sender drops its socket, one sender cycle
+            // while the sender keeps up: the driver's own timing, not the operator's port,
+            // so the message says to send the command again (ADR 0055, answering ADR
+            // 0049's Revisit). An add during the linger met the open endpoint above.
+            Err(error)
+                if self.send_endpoints.iter().any(|entry| {
+                    entry.target == target && entry.state == ChannelState::Closing
+                }) =>
+            {
+                return Err((
+                    ErrorCode::ChannelEndpointError,
+                    format!(
+                        "the channel {}: its previous send endpoint is still closing, its \
+                         socket with the sender after its last publication's linger, so a new \
+                         socket cannot be bound to {}: {error}; send the command again after a \
+                         moment, once the sender has closed it; see {ERRORS_DOC}",
+                        target.resolved(),
+                        target.interface.unwrap_or(target.address)
+                    ),
+                ));
+            }
             Err(error) => {
                 return Err((
                     ErrorCode::ChannelEndpointError,
@@ -7485,6 +7509,75 @@ mod recording {
         h.sender.duty_cycle(closed_at + linger);
         h.sender.duty_cycle(closed_at + linger);
         assert_eq!(h.sender.positions_of(2), None, "closed at the timeout");
+    }
+
+    /// An `add publication` on a control channel whose send endpoint is closing (ADR
+    /// 0055): one during the last publication's linger opens its publication on the
+    /// endpoint that is still active; one after the linger has ended and before the
+    /// sender has dropped the socket is code 4, its message saying the endpoint is
+    /// closing and to send the command again, with nothing registered; and the same add
+    /// after the sender's close binds the control address again.
+    #[test]
+    fn an_add_publication_on_a_closing_send_endpoint_is_code_4_and_says_to_retry() {
+        let mut h = Harness::new("udp-mdc-closing");
+        let control = control_channel();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        let closed_at = now_nanos();
+        h.sender.duty_cycle(closed_at);
+        h.conductor.remove_publication(1, 20, 2, closed_at);
+        // During the linger the endpoint is open: an add opens its publication there.
+        h.conductor
+            .add_publication(1, 3, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(3), None);
+        assert_eq!(h.conductor.publications.len(), 2);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(
+            h.conductor.publications[1]
+                .udp
+                .as_ref()
+                .map(|udp| udp.endpoint_id),
+            Some(2),
+            "the endpoint still active"
+        );
+        h.conductor.remove_publication(1, 21, 3, closed_at);
+        // Both lingers end at the timeout, with no destination and so no connection;
+        // the conductor takes the closes and closes the endpoint, whose socket is still
+        // with the sender until its next cycle.
+        h.sender.duty_cycle(closed_at);
+        h.sender
+            .duty_cycle(closed_at + spec::nanos(cavalry_proto::udp::LINGER));
+        assert_eq!(h.sender.positions_of(2), None);
+        assert_eq!(h.sender.positions_of(3), None);
+        h.conductor.duty_cycle(now_nanos());
+        assert!(h.conductor.publications.is_empty());
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Closing);
+        // The window: code 4, saying why and what to do, and nothing registered.
+        h.conductor
+            .add_publication(1, 4, 7, control.as_bytes(), false, now);
+        let (code, message) = h.last_error(4).expect("an error");
+        assert_eq!(code, 4, "{message}");
+        assert!(
+            message.contains("previous send endpoint is still closing"),
+            "{message}"
+        );
+        assert!(message.contains("send the command again"), "{message}");
+        assert!(h.conductor.publications.is_empty());
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        // The sender drops the socket, the conductor frees the slot, and the add binds
+        // the control address again.
+        h.sender.duty_cycle(now_nanos());
+        h.conductor.duty_cycle(now_nanos());
+        assert!(h.conductor.send_endpoints.is_empty());
+        h.conductor
+            .add_publication(1, 5, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(5), None);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].registration_id, 5);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Active);
     }
 
     /// The send endpoints registry holds 64: the 65th resolved channel is code 10

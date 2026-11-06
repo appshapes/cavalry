@@ -97,3 +97,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0052. Build Raft on the durable log fifth, in eight features](decisions/0052-build-raft-on-the-durable-log-fifth.md)
 - [0053. Add multi-destination cast to `cavalry:udp` with add and remove destination](decisions/0053-add-multi-destination-cast-to-cavalry-udp.md)
 - [0054. Linger a control channel's publication for its timeout, and drop an ended receiver uncounted](decisions/0054-linger-a-control-channels-publication-for-its-timeout.md)
+- [0055. Answer an add publication on a closing send endpoint with code 4 and a retry](decisions/0055-answer-an-add-publication-on-a-closing-send-endpoint-with-a-retry.md)
