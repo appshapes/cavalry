@@ -413,8 +413,13 @@ class Client:
         finally:
             self._abi.cavalry_context_close(context)
         self._handle = handle.value
-        self.dir = self._abi.cavalry_dir(self._handle).decode()
-        self.client_id = self._abi.cavalry_client_id(self._handle)
+        try:
+            self.dir = os.fsdecode(self._abi.cavalry_dir(self._handle))
+            self.client_id = self._abi.cavalry_client_id(self._handle)
+        except BaseException:  # no handle is left behind with its conductor running
+            self._abi.cavalry_close(self._handle)
+            self._handle = None
+            raise
 
     def __enter__(self):
         return self
@@ -519,14 +524,28 @@ class Publication:
             self.claim = None
         return result
 
-    def commit(self):
-        """Commit the claim: the position after the frame, or -1."""
+    def _release(self):
+        """Release the view over the claim, so that a view kept past its commit or abort
+        raises ValueError on use instead of writing into the log. A view the caller has
+        exported and still holds, a `numpy.frombuffer` array say, cannot be released and
+        stays the caller's to drop before the next claim."""
+        claim = self.claim
         self.claim = None
+        if claim is not None:
+            try:
+                claim.release()
+            except BufferError:
+                pass
+
+    def commit(self):
+        """Commit the claim, releasing its view first: the position after the frame, or -1."""
+        self._release()
         return self._abi.cavalry_buffer_claim_commit(self._claim_ref)
 
     def abort(self):
-        """Abort the claim, leaving padding: the position after the frame, or -1."""
-        self.claim = None
+        """Abort the claim, leaving padding, releasing its view first: the position after
+        the frame, or -1."""
+        self._release()
         return self._abi.cavalry_buffer_claim_abort(self._claim_ref)
 
     def set_reserved_value(self, value):
@@ -565,7 +584,10 @@ class Publication:
 
 class Header:
     """The frame header a poll hands the handler, valid for the call: `values()` reads the
-    header's fields through `cavalry_header_values` into the one struct this object keeps."""
+    header's fields through `cavalry_header_values` into the one struct this object keeps.
+    The trampoline clears its pointer once the handler returns, so outside the call
+    `values()` is None and a property raises AttributeError, and the ABI is never handed
+    a stale pointer."""
 
     def __init__(self, abi):
         self._abi = abi
@@ -663,9 +685,17 @@ class Subscription:
         self.stream_id = constants.stream_id
 
     def _on_fragment(self, clientd, buffer, length, header):
-        self._header._pointer = header
+        # Once the handler returns, the header's pointer is cleared and the body's view
+        # released, so a kept body raises ValueError on use; a BufferError says the
+        # handler kept an export of the body past its call.
         try:
-            self._handler(memoryview((ctypes.c_uint8 * length).from_address(buffer)).cast("B"), self._header)
+            body = memoryview((ctypes.c_uint8 * length).from_address(buffer)).cast("B")
+            self._header._pointer = header
+            try:
+                self._handler(body, self._header)
+            finally:
+                self._header._pointer = None
+                body.release()
         except BaseException as exc:  # kept for poll to raise once the ABI has returned
             self._keep(exc)
 

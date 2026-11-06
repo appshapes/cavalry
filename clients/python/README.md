@@ -34,6 +34,17 @@ the ABI's page promises (ADR 0046's boundary; ADR 0051). The package has no depe
   across offers. A `str`, a `bytearray`, a `memoryview` or anything else is refused
   by `ctypes` with `ctypes.ArgumentError` before the ABI is called, so nothing is
   published; pass `bytes(view)`, or claim and write into `publication.claim`.
+- Never let a view or a header outlive its call unnoticed. The views and the header
+  point into the log, which is reused and unmapped later. Once the handler returns,
+  the trampoline releases `body` and clears the header's pointer, so a kept `body`
+  raises `ValueError` when used, and a kept header's `values()` is None (its
+  properties raise `AttributeError`). `commit` and `abort` release `publication.claim`
+  in the same way. This costs one call per message on each side. A slice of a view,
+  or an export of it such as a `numpy.frombuffer` array, is not released and must not
+  outlive the call: copy with `bytes(body)`. A handler that still holds an export of
+  `body` when it returns makes `poll` raise `HandlerError` with a `BufferError`; an
+  export of the claim held across `commit` is left to the caller to drop before the
+  next claim.
 - Never drop a fragment and never swallow the user's exception: the ABI's poll
   consumes every fragment it delivers, so every one reaches the handler, once and in
   order, even after a call raised; `poll` raises once the ABI has returned, the one
@@ -139,9 +150,10 @@ runners'):
 - **The latency, measured.** The runner's latency round sends 100,000 messages over
   `cavalry:ipc`, one at a time on one thread, with `tracemalloc` off. The publisher
   writes `perf_counter_ns` into the claim before its commit, and the handler reads the
-  clock first. On the same runner, unpinned: p50 942 ns, p99 982 ns, p99.99 4,359 ns
-  (10 samples above it, nearest rank), max 47,780 ns. That is the whole path through
-  Python, the claim, the commit, the poll and the call-back. The bench's
+  clock first. On the same runner, unpinned: p50 981 ns, p99 1,522 ns, p99.99
+  7,515 ns (10 samples above it, nearest rank), max 62,257 ns. That is the whole path
+  through Python, the claim, the commit, the poll and the call-back, the release of
+  each view included ("What it must never do"). The bench's
   `one_way_<body>_ffi` row measures the path through the C ABI alone, with the
   publisher and the subscriber pinned on threads of their own
   (`docs/how-to/run-the-bench.md`).

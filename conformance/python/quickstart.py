@@ -6,9 +6,9 @@ records stream 1001 on `cavalry:ipc`, publishes 1,000 messages of 64 bytes by cl
 commit, each carrying its index and a pattern, and reads them back through the fragment
 handler once and in order, with the header's type, flags, version, frame length, term
 offset and session id checked against spec/frame.md; waits for the recording to sync to
-the stream's end and stops it; checks where a handler's exception goes and that `offer`
-refuses what is not bytes, on stream 1003 (`edges`); does the same 1,000 over
-`cavalry:udp` on the loopback; and replays the recording onto stream 2001, each frame at
+the stream's end and stops it; checks where a handler's exception goes, that `offer`
+refuses what is not bytes and that a view or a header kept past its call fails in Python,
+on stream 1003 (`edges`); does the same 1,000 over `cavalry:udp` on the loopback; and replays the recording onto stream 2001, each frame at
 the position the recording holds it at, with the end reported. Every wait is bounded at
 10 s, and a wait that runs out says how far it got. It exits 1 with the function, the code
 and `cavalry_errmsg` when a call failed, or with the code's name when a result code did.
@@ -201,7 +201,9 @@ def edges(client):
     `fragments` 10, `raised` 1 and the ValueError as its cause. Then a poll whose handler
     raises a ValueError on one message and SystemExit(2) on the next: poll raises the
     SystemExit as itself. Then what `offer` refuses: a `str`, a `bytearray` and a
-    `memoryview` are refused with `ctypes.ArgumentError` and nothing is published."""
+    `memoryview` are refused with `ctypes.ArgumentError` and nothing is published. Then
+    the lifetimes: a claim's view kept past its commit, and a body and a header kept past
+    their handler call, fail in Python when used."""
     name = "handler exceptions"
     subscription = client.add_subscription("cavalry:ipc", STREAM + 2)
     publication = client.add_publication("cavalry:ipc", STREAM + 2)
@@ -277,10 +279,49 @@ def edges(client):
         fail(f"{name}: took a {type(refused).__name__} and returned {position}; it takes bytes only")
     if subscription.poll(unexpected, 10) != 0:
         fail(f"{name}: a refused offer published a fragment")
-    publication.close()
-    subscription.close()
     print(f"conformance/python: {name}: a str, a bytearray and a memoryview were refused with ctypes.ArgumentError and "
           f"nothing was published")
+
+    # A view or a header kept past its call, on purpose: the claim's view is released by
+    # its commit, the body's view and the header by the trampoline once the handler has
+    # returned, so each use below fails in Python and none reaches the log.
+    name = "lifetimes"
+    until = deadline()
+    while True:
+        position = publication.try_claim(BODY)
+        if position >= 0:
+            break
+        refused(name, position, 12, until)
+    view = publication.claim
+    view[:8] = (12).to_bytes(8, "little")
+    publication.commit()
+    try:
+        view[0] = 1
+        fail(f"{name}: a claim's view written after its commit")
+    except ValueError:
+        pass
+    kept = []
+
+    def keeps(body, header):
+        kept.append((body, header))
+
+    until = deadline()
+    while not kept:
+        poll_or_fail(name, subscription, keeps, 0, 1)
+        if time.monotonic() > until:
+            fail(f"{name}: message 12 did not arrive in {WAIT_SECONDS:.0f} s")
+    body, header = kept[0]
+    try:
+        body[0]
+        fail(f"{name}: a body read after its handler call")
+    except ValueError:
+        pass
+    if header.values() is not None:
+        fail(f"{name}: a header's values read after its handler call")
+    publication.close()
+    subscription.close()
+    print(f"conformance/python: {name}: a claim's view written after its commit and a body read after its handler "
+          f"call raised ValueError, and a header read after the call gave None")
 
 
 def latency(client):
