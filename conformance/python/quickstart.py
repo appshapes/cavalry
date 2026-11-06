@@ -272,12 +272,12 @@ def edges(client):
     # What offer refuses: a str, whose wchar_t bytes a `c_void_p` buffer published, and
     # the other forms that are not bytes.
     name = "offer"
-    for refused in ("hello", bytearray(b"hello"), memoryview(b"hello")):
+    for not_bytes in ("hello", bytearray(b"hello"), memoryview(b"hello")):  # not `refused`, the claim check below
         try:
-            position = publication.offer(refused)
+            position = publication.offer(not_bytes)
         except ctypes.ArgumentError:
             continue
-        fail(f"{name}: took a {type(refused).__name__} and returned {position}; it takes bytes only")
+        fail(f"{name}: took a {type(not_bytes).__name__} and returned {position}; it takes bytes only")
     if subscription.poll(unexpected, 10) != 0:
         fail(f"{name}: a refused offer published a fragment")
     print(f"conformance/python: {name}: a str, a bytearray and a memoryview were refused with ctypes.ArgumentError and "
