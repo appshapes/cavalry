@@ -98,6 +98,21 @@ pub const MAX_SEND_ENDPOINTS: usize = 64;
 /// How many receive endpoints a driver holds; a 65th is error code 10.
 pub const MAX_RECEIVE_ENDPOINTS: usize = 64;
 
+/// Destinations per send endpoint of a control channel; a 65th is error code 10
+/// (`spec/udp.md`, "Values"; ADR 0053).
+pub const MAX_DESTINATIONS: usize = 64;
+
+/// Receivers a `min` publication's table holds, keyed by receiver id; a 65th's status
+/// messages are accepted and not tracked, counted in
+/// `sender.flow_control_receivers_full` (`spec/udp.md`, "The sender"; ADR 0053).
+pub const MAX_FLOW_CONTROL_RECEIVERS: usize = 64;
+
+/// How long a receiver stays in a `min` publication's table without a status
+/// message before it is dropped from the accounting, counted in
+/// `sender.flow_control_receivers_timed_out`: Aeron's
+/// `aeron.flow.control.receiver.timeout` (`spec/udp.md`, "Values"; ADR 0053).
+pub const FLOW_CONTROL_RECEIVER_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Why a reader rejected a frame or a datagram. The variants are the spec's checks in
 /// the order they run, and [`UdpError::reason`] is the name the spec and the vectors
 /// use.

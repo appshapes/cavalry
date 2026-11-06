@@ -34,6 +34,7 @@ use cavalry_proto::client_protocol::{
     ProtocolError, ReplayStopReason,
 };
 use cavalry_proto::frame::FRAME_ALIGNMENT;
+use cavalry_proto::udp::{MAX_DESTINATIONS, MAX_FLOW_CONTROL_RECEIVERS};
 use cavalry_proto::udp::{SetupFrame, image_start};
 use cavalry_shm::broadcast::{BroadcastBuffer, Transmitter};
 use cavalry_shm::command_ring::{
@@ -41,8 +42,8 @@ use cavalry_shm::command_ring::{
     UnblockOutcome as RingUnblock,
 };
 use cavalry_shm::counters::generated::{
-    CHANNEL_CLOSED, CHANNEL_IMAGES, CHANNEL_OPENED, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
-    CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CLIENT_PROTOCOL_ERRORS,
+    CHANNEL_CLOSED, CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_OPENED, CHANNEL_PUBLICATIONS,
+    CHANNEL_SOCKET_RCVBUF, CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CLIENT_PROTOCOL_ERRORS,
     CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT, COMMAND_RING_REJECTED_RECORD,
     COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED, CONDUCTOR_IDLE_STRATEGY,
     DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL, IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION,
@@ -53,8 +54,8 @@ use cavalry_shm::counters::generated::{
     RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED,
     RECORDING_STOPPED, RECORDING_SYNCED_POSITION, RECORDING_TRUNCATED, REPLAY_ENDED, REPLAY_FAILED,
     REPLAY_NOT_CONNECTED, REPLAY_POSITION, REPLAY_START_FAILED, REPLAY_STARTED, REPLAY_STOPPED,
-    SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_ADD_DEFERRED, SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT,
-    SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_POSITION,
+    SENDER_FLOW_CONTROL_RECEIVERS, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_ADD_DEFERRED,
+    SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT, SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_POSITION,
 };
 use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
 use cavalry_shm::log::layout as log_layout;
@@ -235,6 +236,42 @@ struct UdpPublication {
     close_sent: bool,
     /// The sender's linger ended and it dropped the publication.
     sender_closed: bool,
+    /// The channel's `fc`, read from the command that created the publication: a join
+    /// under another is refused (`spec/udp.md`, "The channel URI"; ADR 0053).
+    flow_control: FlowControl,
+    /// The id of the sender's `sender.flow_control_receivers` gauge, freed with the
+    /// others.
+    receivers_id: u32,
+}
+
+/// Where a send endpoint's socket sends (`spec/udp.md`, "The channel URI"; ADR 0053):
+/// a channel's resolved endpoint and interface, connected; or a control channel's
+/// resolved control address, which the socket binds and sends from to the endpoint's
+/// destinations. Two channels are the same channel when these are the same.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SendTarget {
+    /// The endpoint, or the control address.
+    address: SocketAddr,
+    /// The interface, when the channel names one; never with a control address.
+    interface: Option<SocketAddr>,
+    /// Whether `address` is a control address.
+    control: bool,
+}
+
+impl SendTarget {
+    /// The resolved channel, as the endpoint's counters are labelled with it.
+    fn resolved(&self) -> String {
+        match (self.control, self.interface) {
+            (true, _) => format!("cavalry:udp?control={}|control-mode=manual", self.address),
+            (false, Some(interface)) => {
+                format!(
+                    "cavalry:udp?endpoint={}|interface={interface}",
+                    self.address
+                )
+            }
+            (false, None) => format!("cavalry:udp?endpoint={}", self.address),
+        }
+    }
 }
 
 /// Where one send endpoint is in its life (`spec/udp.md`, "The receiver", the
@@ -265,15 +302,29 @@ enum ChannelState {
 struct SendEndpoint {
     /// The correlation id of the `add publication` that opened it: keys `channel.status`.
     registration_id: i64,
-    endpoint: SocketAddr,
-    interface: Option<SocketAddr>,
+    target: SendTarget,
     state: ChannelState,
     status: Counter,
     socket_rcvbuf: Counter,
     socket_sndbuf: Counter,
     images: Counter,
     publications: Counter,
+    /// `channel.destinations`: how many the endpoint sends to; 0 off a control channel.
+    destinations: Counter,
+    /// A control channel's destinations in the order added, the sender's copy kept in
+    /// step through its requests; room for [`MAX_DESTINATIONS`] and a 65th is code 10
+    /// (`spec/client-protocol.md`, "Sizes"; ADR 0053).
+    destination_list: Vec<Destination>,
     publication_count: usize,
+}
+
+/// One destination of a control channel's endpoint: the endpoint as its add wrote it,
+/// which an add compares byte for byte and a remove names, beside the address it
+/// resolved to, which the sender sends to (`spec/udp.md`, "The sender"; ADR 0053).
+struct Destination {
+    host: String,
+    port: u16,
+    address: SocketAddr,
 }
 
 /// One subscription: a client's interest in a stream.
@@ -444,7 +495,7 @@ struct ReplayEntry {
     /// The resolved endpoint and interface of a `cavalry:udp` replay channel, kept from
     /// the command for the publication the replayer's reply creates (ADR 0043); `None`
     /// for `cavalry:ipc`.
-    udp: Option<(SocketAddr, Option<SocketAddr>)>,
+    udp: Option<(SendTarget, FlowControl)>,
     /// Over `cavalry:udp`, whether a receiver answers the publication's setup frames,
     /// as the sender last said: the replay's subscriber for the connect timeout.
     connected: bool,
@@ -1084,13 +1135,210 @@ impl Conductor {
                 recording_id,
                 ..
             } => self.retention(correlation_id, replayer::Retention::Delete { recording_id }),
-            Command::AddDestination { correlation_id, .. } => {
-                self.not_yet(correlation_id, "add destination");
-            }
-            Command::RemoveDestination { correlation_id, .. } => {
-                self.not_yet(correlation_id, "remove destination");
+            Command::AddDestination {
+                client_id,
+                correlation_id,
+                registration_id,
+                channel,
+            } => self.change_destination(client_id, correlation_id, registration_id, channel, true),
+            Command::RemoveDestination {
+                client_id,
+                correlation_id,
+                registration_id,
+                channel,
+            } => {
+                self.change_destination(client_id, correlation_id, registration_id, channel, false);
             }
         }
+    }
+
+    /// `add destination` and `remove destination` (`spec/client-protocol.md`,
+    /// "Commands"; ADR 0053): the client's registration of a publication on a control
+    /// channel and a destination channel of which only `endpoint` is read. An add
+    /// resolves the endpoint to the first address of the control address's family, a
+    /// loopback one beside a loopback control address, puts it in the endpoint's table
+    /// beside the endpoint as written and hands the address to the sender; one whose
+    /// endpoint as written is there already is added by nothing; a 65th is code 10. A
+    /// remove names the endpoint as written, resolves nothing, and takes it out; one
+    /// not there is removed by nothing. Each is answered with `operation success`. A
+    /// registration the driver does not know or another client's is code 3; a
+    /// publication whose channel names no control address is code 1 with the reason
+    /// `control`; a destination channel that is `cavalry:ipc` or a control channel, one
+    /// that names `interface` or `fc`, or one whose endpoint has no address the control
+    /// address can send to, is code 1 with the reason `destination`; a host that
+    /// resolves to no address at all is code 9.
+    fn change_destination(
+        &mut self,
+        client_id: i64,
+        correlation_id: i64,
+        registration_id: i64,
+        channel: &[u8],
+        add: bool,
+    ) {
+        let what = if add {
+            "add destination"
+        } else {
+            "remove destination"
+        };
+        let Some(index) = self.publications.iter().position(|publication| {
+            publication.registrations.iter().any(|registration| {
+                registration.correlation_id == registration_id
+                    && registration.client_id == client_id
+            })
+        }) else {
+            self.send_error(
+                correlation_id,
+                ErrorCode::UnknownPublication,
+                &format!(
+                    "registration {registration_id} is not a publication of client \
+                     {client_id}; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        };
+        let endpoint_id = self.publications[index]
+            .udp
+            .as_ref()
+            .map(|udp| udp.endpoint_id);
+        let endpoint_index = endpoint_id.and_then(|endpoint_id| {
+            self.send_endpoints
+                .iter()
+                .position(|entry| entry.registration_id == endpoint_id && entry.target.control)
+        });
+        let Some(endpoint_index) = endpoint_index else {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::InvalidChannel,
+                &format!(
+                    "the channel: channel refused (control): publication {registration_id}'s \
+                     channel names no control address, so {what} has nowhere to put one; add \
+                     control=<host>:<port>|control-mode=manual to the publication's channel \
+                     in place of its endpoint; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        };
+        let Some(parsed) = self.check_channel(correlation_id, channel, "the destination channel")
+        else {
+            return;
+        };
+        // A destination names its endpoint and nothing else: `interface` or `fc` on it
+        // is refused, as a subscription's channel refuses a publication's keys, since a
+        // key that does nothing is a key the reader cannot check (ADR 0053).
+        let destination = match parsed {
+            Channel::Udp(udp)
+                if !udp.is_control() && udp.interface().is_none() && !udp.names_flow_control() =>
+            {
+                udp.endpoint()
+            }
+            _ => None,
+        };
+        let Some(destination) = destination else {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::InvalidChannel,
+                &format!(
+                    "the destination channel: channel refused (destination): a destination is \
+                     cavalry:udp?endpoint=<host>:<port> and names nothing else; remove any \
+                     other parameter, or name an endpoint; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        };
+        let control = self.send_endpoints[endpoint_index].target.address;
+        let host = destination.host();
+        let port = destination.port().unwrap_or(0);
+        // The endpoint as written keys the table: an add compares it byte for byte, a
+        // remove names it and resolves nothing (ADR 0053).
+        let held = self.send_endpoints[endpoint_index]
+            .destination_list
+            .iter()
+            .position(|known| known.host == host && known.port == port);
+        let request = match (add, held) {
+            (true, Some(_)) | (false, None) => None,
+            (true, None) => {
+                // Resolved once, to the first address of the control address's family,
+                // a loopback one beside a loopback control address: the socket can send
+                // to no other, so one with none is refused here, as `connect` refuses
+                // an endpoint of the other family on a channel with an endpoint.
+                let address = match resolve_in_family(host, port, control) {
+                    Ok(address) => address,
+                    Err(Unreachable::NoAddress(reason)) => {
+                        self.send_error(
+                            correlation_id,
+                            ErrorCode::UnknownHost,
+                            &format!(
+                                "the destination's host `{host}` does not resolve: {reason}; \
+                                 check the name, or use an address; see {ERRORS_DOC}"
+                            ),
+                        );
+                        return;
+                    }
+                    Err(Unreachable::Family(reason)) => {
+                        self.statics.rejected_command.increment();
+                        self.send_error(
+                            correlation_id,
+                            ErrorCode::InvalidChannel,
+                            &format!(
+                                "the destination channel: channel refused (destination): the \
+                                 control socket bound to {control} cannot send to {host}:{port}: \
+                                 {reason}; name a destination the control address can send \
+                                 to, or a control address of the destination's kind; see \
+                                 {ERRORS_DOC}"
+                            ),
+                        );
+                        return;
+                    }
+                };
+                if self.send_endpoints[endpoint_index].destination_list.len() >= MAX_DESTINATIONS {
+                    self.statics.registry_full.increment();
+                    self.send_error(
+                        correlation_id,
+                        ErrorCode::ResourceTemporarilyUnavailable,
+                        &registry_full_message("destinations", MAX_DESTINATIONS),
+                    );
+                    return;
+                }
+                if !self.sender_has_room() {
+                    self.sender_queue_full(correlation_id);
+                    return;
+                }
+                let entry = &mut self.send_endpoints[endpoint_index];
+                entry.destination_list.push(Destination {
+                    host: host.to_string(),
+                    port,
+                    address,
+                });
+                entry
+                    .destinations
+                    .set(i64::try_from(entry.destination_list.len()).unwrap_or(i64::MAX));
+                Some(sender::Request::AddDestination {
+                    registration_id: entry.registration_id,
+                    address,
+                })
+            }
+            (false, Some(position)) => {
+                if !self.sender_has_room() {
+                    self.sender_queue_full(correlation_id);
+                    return;
+                }
+                let entry = &mut self.send_endpoints[endpoint_index];
+                let removed = entry.destination_list.remove(position);
+                entry
+                    .destinations
+                    .set(i64::try_from(entry.destination_list.len()).unwrap_or(i64::MAX));
+                Some(sender::Request::RemoveDestination {
+                    registration_id: entry.registration_id,
+                    address: removed.address,
+                })
+            }
+        };
+        if let Some(request) = request {
+            self.sender_request(request);
+        }
+        self.send(&Event::OperationSuccess { correlation_id });
     }
 
     /// Records that `client_id` sent a command now; registers a new client, or returns
@@ -1327,50 +1575,18 @@ impl Conductor {
             self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
             return;
         }
-        let Some(address) = self.endpoint_of(correlation_id, &channel) else {
+        let Some(target) = self.resolve_target(correlation_id, &channel) else {
             return;
         };
-        let host = address.host();
-        let endpoint = match resolve(host, address.port().unwrap_or(0)) {
-            Ok(address) => address,
-            Err(reason) => {
-                self.send_error(
-                    correlation_id,
-                    ErrorCode::UnknownHost,
-                    &format!(
-                        "the channel's endpoint host `{host}` does not resolve: {reason}; check \
-                         the name, or use an address; see {ERRORS_DOC}"
-                    ),
-                );
-                return;
-            }
-        };
-        let interface = match channel.interface() {
-            None => None,
-            Some(address) => match resolve(address.host(), address.port().unwrap_or(0)) {
-                Ok(resolved) => Some(resolved),
-                Err(reason) => {
-                    self.send_error(
-                        correlation_id,
-                        ErrorCode::UnknownHost,
-                        &format!(
-                            "the channel's interface `{}` does not resolve: {reason}; check \
-                             the name, or use an address; see {ERRORS_DOC}",
-                            address.host()
-                        ),
-                    );
-                    return;
-                }
-            },
-        };
+        let flow_control = channel.flow_control();
         let registration = Registration {
             client_id,
             correlation_id,
         };
-        // A shared publication on the same stream and resolved channel joins the first.
-        if !exclusive
-            && let Some(endpoint_index) = self.open_send_endpoint_index(endpoint, interface)
-        {
+        // A shared publication on the same stream and resolved channel joins the first,
+        // under the first's flow control strategy: one that names another is refused
+        // (`spec/udp.md`, "The channel URI"; ADR 0053).
+        if !exclusive && let Some(endpoint_index) = self.open_send_endpoint_index(target) {
             let endpoint_id = self.send_endpoints[endpoint_index].registration_id;
             let live = self.publications.iter().position(|publication| {
                 !publication.exclusive
@@ -1382,6 +1598,26 @@ impl Conductor {
                         .is_some_and(|udp| udp.endpoint_id == endpoint_id)
             });
             if let Some(index) = live {
+                let held = self.publications[index]
+                    .udp
+                    .as_ref()
+                    .map_or(FlowControl::Max, |udp| udp.flow_control);
+                if held != flow_control {
+                    self.statics.rejected_command.increment();
+                    self.send_error(
+                        correlation_id,
+                        ErrorCode::InvalidChannel,
+                        &format!(
+                            "the channel: channel refused (fc): the live publication on stream \
+                             {stream_id} and this channel has fc={}, and a join keeps one \
+                             strategy; name fc={} to join it, or another stream; see \
+                             {ERRORS_DOC}",
+                            held.name(),
+                            held.name()
+                        ),
+                    );
+                    return;
+                }
                 let publication = &mut self.publications[index];
                 publication.registrations.push(registration);
                 self.registration_count += 1;
@@ -1412,14 +1648,13 @@ impl Conductor {
         }
         // The endpoint: the open one on the resolved channel, or a new one, through the
         // path a replay's publication takes too (ADR 0043).
-        let (endpoint_index, socket) =
-            match self.open_send_endpoint(correlation_id, endpoint, interface, now) {
-                Ok(opened) => opened,
-                Err((code, message)) => {
-                    self.send_error(correlation_id, code, &message);
-                    return;
-                }
-            };
+        let (endpoint_index, socket) = match self.open_send_endpoint(correlation_id, target, now) {
+            Ok(opened) => opened,
+            Err((code, message)) => {
+                self.send_error(correlation_id, code, &message);
+                return;
+            }
+        };
         let endpoint_id = self.send_endpoints[endpoint_index].registration_id;
         // The log, with the UDP sizes, and the four counters.
         let session_id = self.advance_session_id(stream_id);
@@ -1458,21 +1693,31 @@ impl Conductor {
             }
         };
         let key = position_key(correlation_id, session_id, stream_id);
-        // The sender's two labels end in the endpoint's registration id, so that `doctor`
-        // names a publication's endpoint from the counters file alone.
+        // The sender's labels end in the endpoint's registration id, so that `doctor`
+        // names a publication's endpoint from the counters file alone, and the receivers
+        // gauge's in the strategy after it, so that `doctor` reads which publications
+        // keep a `min` table (ADR 0053).
         let label = |name: &str, endpoint: bool| {
+            let mut label = format!("{name} {correlation_id} {session_id} {stream_id}");
             if endpoint {
-                format!("{name} {correlation_id} {session_id} {stream_id} {endpoint_id}")
-            } else {
-                format!("{name} {correlation_id} {session_id} {stream_id}")
+                label.push_str(&format!(" {endpoint_id}"));
             }
+            if name == "sender.flow_control_receivers" {
+                label.push_str(&format!(" fc={}", flow_control.name()));
+            }
+            label
         };
-        let mut allocated: Vec<Counter> = Vec::with_capacity(4);
+        let mut allocated: Vec<Counter> = Vec::with_capacity(5);
         for (id, name, endpoint) in [
             (PUBLICATION_POSITION, "publication.position", false),
             (PUBLICATION_LIMIT, "publication.limit", false),
             (SENDER_POSITION, "sender.position", true),
             (SENDER_LIMIT, "sender.limit", true),
+            (
+                SENDER_FLOW_CONTROL_RECEIVERS,
+                "sender.flow_control_receivers",
+                true,
+            ),
         ] {
             match self.counters.allocate(id, &key, &label(name, endpoint)) {
                 Ok(counter) => allocated.push(counter),
@@ -1489,18 +1734,32 @@ impl Conductor {
             }
         }
         let mut counters = allocated.into_iter();
-        let (Some(position), Some(limit), Some(sender_position), Some(sender_limit)) = (
+        let (
+            Some(position),
+            Some(limit),
+            Some(sender_position),
+            Some(sender_limit),
+            Some(receivers),
+        ) = (
             counters.next(),
             counters.next(),
             counters.next(),
             counters.next(),
-        ) else {
+            counters.next(),
+        )
+        else {
             return;
         };
         let reader = match log.reader(0) {
             Ok(reader) => reader,
             Err(error) => {
-                for counter in [&position, &limit, &sender_position, &sender_limit] {
+                for counter in [
+                    &position,
+                    &limit,
+                    &sender_position,
+                    &sender_limit,
+                    &receivers,
+                ] {
                     let _ = self.counters.free(counter.id(), reuse);
                 }
                 drop(log);
@@ -1543,6 +1802,8 @@ impl Conductor {
                 connected: false,
                 close_sent: false,
                 sender_closed: false,
+                flow_control,
+                receivers_id: receivers.id(),
             }),
         };
         let add = sender::AddPublication {
@@ -1556,6 +1817,9 @@ impl Conductor {
             reader,
             position: sender_position,
             limit: sender_limit,
+            flow_control,
+            receivers,
+            receiver_table: receiver_table(flow_control),
         };
         self.hand_to_sender(endpoint_index, socket, add);
         let status_id = counter_id(&self.send_endpoints[endpoint_index].status);
@@ -1596,22 +1860,17 @@ impl Conductor {
             entry.socket_sndbuf,
             entry.images,
             entry.publications,
+            entry.destinations,
         ] {
             let _ = self.counters.free(counter.id(), reuse);
         }
     }
 
     /// The index of the open send endpoint on the resolved channel, if any.
-    fn open_send_endpoint_index(
-        &self,
-        endpoint: SocketAddr,
-        interface: Option<SocketAddr>,
-    ) -> Option<usize> {
-        self.send_endpoints.iter().position(|entry| {
-            entry.endpoint == endpoint
-                && entry.interface == interface
-                && entry.state == ChannelState::Active
-        })
+    fn open_send_endpoint_index(&self, target: SendTarget) -> Option<usize> {
+        self.send_endpoints
+            .iter()
+            .position(|entry| entry.target == target && entry.state == ChannelState::Active)
     }
 
     /// Whether the sender's request queue has room for an endpoint and a publication,
@@ -1624,22 +1883,24 @@ impl Conductor {
 
     /// The send endpoint a `cavalry:udp` publication sends on (`spec/udp.md`, "The
     /// sender"; ADR 0041): the open one on the resolved channel, or a new one, its
-    /// socket opened, bound and connected here, its five counters allocated and
+    /// socket opened, bound and connected here, or bound to a control address and
+    /// connected to nothing (ADR 0053), its six counters allocated and
     /// `channel.status` at 0 until `hand_to_sender` gives the sender the socket.
     /// `correlation_id` names the command that opens it, a client's `add publication`
     /// or a replay's `start replay` (ADR 0043), and keys `channel.status`. Returns the
     /// endpoint's index and the socket when it is new, or the code and message for the
     /// caller to answer with, the refusal counted here: the registry at capacity or the
     /// counters file with no free record is code 10, a socket the operating system
-    /// refused code 4. The caller checks the sender's room first (`sender_has_room`).
+    /// refused code 4, whose message says to send the command again when a closing
+    /// endpoint on the channel still holds its address (ADR 0055). The caller checks
+    /// the sender's room first (`sender_has_room`).
     fn open_send_endpoint(
         &mut self,
         correlation_id: i64,
-        endpoint: SocketAddr,
-        interface: Option<SocketAddr>,
+        target: SendTarget,
         now: i64,
     ) -> Result<(usize, Option<SendSocket>), (ErrorCode, String)> {
-        if let Some(index) = self.open_send_endpoint_index(endpoint, interface) {
+        if let Some(index) = self.open_send_endpoint_index(target) {
             return Ok((index, None));
         }
         if self.send_endpoints.len() >= spec::MAX_SEND_ENDPOINTS {
@@ -1649,36 +1910,71 @@ impl Conductor {
                 registry_full_message("send endpoints", spec::MAX_SEND_ENDPOINTS),
             ));
         }
-        let socket = match SendSocket::open(endpoint, interface) {
+        let opened = if target.control {
+            SendSocket::open_control(target.address)
+        } else {
+            SendSocket::open(target.address, target.interface)
+        };
+        let socket = match opened {
             Ok(socket) => socket,
-            Err(error) => {
+            // The channel's previous endpoint, closed with its last publication's linger,
+            // still holds the address while the sender drops its socket, one sender cycle
+            // while the sender keeps up: the driver's own timing, not the operator's port,
+            // so the message says to send the command again (ADR 0055, answering ADR
+            // 0049's Revisit). An add during the linger met the open endpoint above.
+            Err(error)
+                if self.send_endpoints.iter().any(|entry| {
+                    entry.target == target && entry.state == ChannelState::Closing
+                }) =>
+            {
                 return Err((
                     ErrorCode::ChannelEndpointError,
                     format!(
-                        "the channel's endpoint {endpoint}{}: the socket could not be opened, \
-                         bound or connected: {error}; check that the interface is this host's \
-                         and its port is free; see {ERRORS_DOC}",
-                        interface.map_or(String::new(), |i| format!(" from interface {i}"))
+                        "the channel {}: its previous send endpoint is still closing, its \
+                         socket with the sender after its last publication's linger, so a new \
+                         socket cannot be bound to {}: {error}; send the command again after a \
+                         moment, once the sender has closed it; see {ERRORS_DOC}",
+                        target.resolved(),
+                        target.interface.unwrap_or(target.address)
                     ),
                 ));
             }
-        };
-        let resolved = match interface {
-            Some(interface) => {
-                format!("cavalry:udp?endpoint={endpoint}|interface={interface}")
+            Err(error) => {
+                return Err((
+                    ErrorCode::ChannelEndpointError,
+                    if target.control {
+                        format!(
+                            "the channel's control address {}: the socket could not be opened \
+                             or bound: {error}; check that the address is this host's and its \
+                             port is free; see {ERRORS_DOC}",
+                            target.address
+                        )
+                    } else {
+                        format!(
+                            "the channel's endpoint {}{}: the socket could not be opened, \
+                             bound or connected: {error}; check that the interface is this \
+                             host's and its port is free; see {ERRORS_DOC}",
+                            target.address,
+                            target
+                                .interface
+                                .map_or(String::new(), |i| format!(" from interface {i}"))
+                        )
+                    },
+                ));
             }
-            None => format!("cavalry:udp?endpoint={endpoint}"),
         };
+        let resolved = target.resolved();
         let key = correlation_id.to_le_bytes();
         let label = |name: &str| format!("{name} {resolved}");
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
-        let mut allocated: Vec<Counter> = Vec::with_capacity(5);
+        let mut allocated: Vec<Counter> = Vec::with_capacity(6);
         for (id, name) in [
             (CHANNEL_STATUS, "channel.status"),
             (CHANNEL_SOCKET_RCVBUF, "channel.socket_rcvbuf"),
             (CHANNEL_SOCKET_SNDBUF, "channel.socket_sndbuf"),
             (CHANNEL_IMAGES, "channel.images"),
             (CHANNEL_PUBLICATIONS, "channel.publications"),
+            (CHANNEL_DESTINATIONS, "channel.destinations"),
         ] {
             match self.counters.allocate(id, &key, &label(name)) {
                 Ok(counter) => allocated.push(counter),
@@ -1696,36 +1992,44 @@ impl Conductor {
         }
         // One record per name above; a count that does not match cannot happen, and is
         // freed and refused like a full counters file rather than left behind.
-        let [status, socket_rcvbuf, socket_sndbuf, images, publications] =
-            match <[Counter; 5]>::try_from(allocated) {
-                Ok(five) => five,
-                Err(held) => {
-                    for counter in held {
-                        let _ = self.counters.free(counter.id(), reuse);
-                    }
-                    self.statics.registry_full.increment();
-                    return Err((
-                        ErrorCode::ResourceTemporarilyUnavailable,
-                        counters_miscounted_message(),
-                    ));
+        let [
+            status,
+            socket_rcvbuf,
+            socket_sndbuf,
+            images,
+            publications,
+            destinations,
+        ] = match <[Counter; 6]>::try_from(allocated) {
+            Ok(six) => six,
+            Err(held) => {
+                for counter in held {
+                    let _ = self.counters.free(counter.id(), reuse);
                 }
-            };
+                self.statics.registry_full.increment();
+                return Err((
+                    ErrorCode::ResourceTemporarilyUnavailable,
+                    counters_miscounted_message(),
+                ));
+            }
+        };
         let (rcvbuf, sndbuf) = socket.buffer_lengths();
         status.set(0);
         socket_rcvbuf.set(rcvbuf);
         socket_sndbuf.set(sndbuf);
         images.set(0);
         publications.set(0);
+        destinations.set(0);
         self.send_endpoints.push(SendEndpoint {
             registration_id: correlation_id,
-            endpoint,
-            interface,
+            target,
             state: ChannelState::Initializing,
             status,
             socket_rcvbuf,
             socket_sndbuf,
             images,
             publications,
+            destinations,
+            destination_list: Vec::with_capacity(if target.control { MAX_DESTINATIONS } else { 0 }),
             publication_count: 0,
         });
         Ok((self.send_endpoints.len() - 1, Some(socket)))
@@ -1744,12 +2048,19 @@ impl Conductor {
     ) {
         let endpoint_id = add.endpoint_id;
         if let Some(socket) = socket {
+            // A control channel's destinations table, with its room, allocated here on
+            // the control plane so that the sender never grows it (ADR 0053).
+            let destinations = self.send_endpoints[endpoint_index]
+                .target
+                .control
+                .then(|| Vec::with_capacity(MAX_DESTINATIONS));
             if self
                 .sender
                 .requests
                 .offer(sender::Request::AddEndpoint {
                     registration_id: endpoint_id,
                     socket,
+                    destinations,
                 })
                 .is_err()
             {
@@ -1864,6 +2175,7 @@ impl Conductor {
                             entry.socket_sndbuf,
                             entry.images,
                             entry.publications,
+                            entry.destinations,
                         ] {
                             let _ = self.counters.free(counter.id(), reuse);
                         }
@@ -2085,45 +2397,41 @@ impl Conductor {
         }
     }
 
-    /// The endpoint of a channel this driver sends on or receives on. A control
-    /// channel and `fc=min` are version 1 of `spec/udp.md`, parsed here and sent by
-    /// nothing yet: multi-destination cast lands with card 225's sender change (ADR
-    /// 0053, Interim), so until then each is answered with code 11 naming the card, as
-    /// a `cavalry:udp` channel was before cards 180 and 181 landed it (ADR 0040);
-    /// counted in `client_protocol.errors` alone, as a well-formed command's refusal
-    /// is, since a channel of version 1 is not code 1's invalid channel.
-    fn endpoint_of<'a>(
+    /// Where a publication's channel sends (`spec/udp.md`, "The channel URI"; ADR 0053):
+    /// a control channel's control address resolved once, code 9 when it does not
+    /// resolve, or the endpoint and interface as `resolve_channel` resolves them.
+    fn resolve_target(
         &mut self,
         correlation_id: i64,
-        channel: &UdpChannel<'a>,
-    ) -> Option<cavalry_proto::channel::Address<'a>> {
-        let Some(endpoint) = channel.endpoint() else {
-            self.not_yet(
-                correlation_id,
-                "a control channel, control=<host>:<port>|control-mode=manual,",
-            );
-            return None;
-        };
-        if channel.flow_control() == FlowControl::Min {
-            self.not_yet(correlation_id, "fc=min");
-            return None;
+        channel: &UdpChannel<'_>,
+    ) -> Option<SendTarget> {
+        if let Some(control) = channel.control() {
+            let host = control.host();
+            return match resolve(host, control.port().unwrap_or(0)) {
+                Ok(address) => Some(SendTarget {
+                    address,
+                    interface: None,
+                    control: true,
+                }),
+                Err(reason) => {
+                    self.send_error(
+                        correlation_id,
+                        ErrorCode::UnknownHost,
+                        &format!(
+                            "the channel's control host `{host}` does not resolve: {reason}; \
+                             check the name, or use an address; see {ERRORS_DOC}"
+                        ),
+                    );
+                    None
+                }
+            };
         }
-        Some(endpoint)
-    }
-
-    /// Code 11 for what version 1 of `spec/udp.md` and version 5 of
-    /// `spec/client-protocol.md` specify and this driver does not yet do
-    /// (`endpoint_of`).
-    fn not_yet(&mut self, correlation_id: i64, what: &str) {
-        self.send_error(
-            correlation_id,
-            ErrorCode::GenericError,
-            &format!(
-                "{what} is specified (spec/udp.md, version 1; spec/client-protocol.md, version \
-                 5; ADR 0053) and lands with card 225's driver change; until then name an \
-                 endpoint and fc=max, and add no destination; see {ERRORS_DOC}"
-            ),
-        );
+        let (address, interface) = self.resolve_channel(correlation_id, channel)?;
+        Some(SendTarget {
+            address,
+            interface,
+            control: false,
+        })
     }
 
     /// Resolves a `cavalry:udp` channel's endpoint and interface once, on the control
@@ -2134,7 +2442,9 @@ impl Conductor {
         correlation_id: i64,
         channel: &UdpChannel<'_>,
     ) -> Option<(SocketAddr, Option<SocketAddr>)> {
-        let address = self.endpoint_of(correlation_id, channel)?;
+        // A control channel never reaches here: a publication's goes through
+        // `resolve_target`, and a subscription's is refused before.
+        let address = channel.endpoint()?;
         let host = address.host();
         let endpoint = match resolve(host, address.port().unwrap_or(0)) {
             Ok(address) => address,
@@ -3449,6 +3759,7 @@ impl Conductor {
         if let Some(udp) = publication.udp {
             let _ = self.counters.free(udp.sender_position.id(), reuse);
             let _ = self.counters.free(udp.sender_limit_id, reuse);
+            let _ = self.counters.free(udp.receivers_id, reuse);
             self.release_send_endpoint(udp.endpoint_id, reuse);
         }
         true
@@ -3527,13 +3838,13 @@ impl Conductor {
         // 0042), the lowest registration id not yet recorded first, as over IPC.
         let udp = match parsed {
             Channel::Ipc => None,
-            Channel::Udp(udp) => match self.resolve_channel(correlation_id, &udp) {
+            Channel::Udp(udp) => match self.resolve_target(correlation_id, &udp) {
                 Some(resolved) => Some(resolved),
                 None => return,
             },
         };
-        if let Some((endpoint, interface)) = udp {
-            self.start_udp_recording(correlation_id, stream_id, endpoint, interface, now);
+        if let Some(target) = udp {
+            self.start_udp_recording(correlation_id, stream_id, target, now);
             return;
         }
         let mut live = false;
@@ -3675,24 +3986,25 @@ impl Conductor {
         &mut self,
         correlation_id: i64,
         stream_id: i32,
-        endpoint: SocketAddr,
-        interface: Option<SocketAddr>,
+        target: SendTarget,
         now: i64,
     ) {
-        let resolved = match interface {
-            Some(interface) => format!("cavalry:udp?endpoint={endpoint}|interface={interface}"),
-            None => format!("cavalry:udp?endpoint={endpoint}"),
-        };
+        let resolved = target.resolved();
         let send_endpoints: Vec<i64> = self
             .send_endpoints
             .iter()
-            .filter(|entry| entry.endpoint == endpoint && entry.interface == interface)
+            .filter(|entry| entry.target == target)
             .map(|entry| entry.registration_id)
             .collect();
+        // A control channel is a publication's: no receive endpoint carries it.
         let receive_endpoints: Vec<i64> = self
             .receive_endpoints
             .iter()
-            .filter(|entry| entry.endpoint == endpoint && entry.interface == interface)
+            .filter(|entry| {
+                !target.control
+                    && entry.endpoint == target.address
+                    && entry.interface == target.interface
+            })
             .map(|entry| entry.registration_id)
             .collect();
         // The candidates: (registration id, is an image), live and on the stream.
@@ -4289,12 +4601,12 @@ impl Conductor {
         else {
             return;
         };
-        // A `cavalry:udp` replay channel is resolved once, here, and kept for the
-        // publication the replayer's reply creates (ADR 0043).
+        // A `cavalry:udp` replay channel is resolved once, here, and kept with its `fc`
+        // for the publication the replayer's reply creates (ADR 0043, ADR 0053).
         let udp = match channel {
             Channel::Ipc => None,
-            Channel::Udp(udp) => match self.resolve_channel(correlation_id, &udp) {
-                Some(resolved) => Some(resolved),
+            Channel::Udp(udp) => match self.resolve_target(correlation_id, &udp) {
+                Some(resolved) => Some((resolved, udp.flow_control())),
                 None => return,
             },
         };
@@ -4552,9 +4864,12 @@ impl Conductor {
         // Over UDP, the sender's room and the endpoint before anything is made, in the
         // order `add publication` keeps; a new endpoint is abandoned on any failure
         // below, as a client's is.
+        let flow_control = self.replays[index]
+            .udp
+            .map_or(FlowControl::Max, |(_, flow_control)| flow_control);
         let endpoint = match self.replays[index].udp {
             None => None,
-            Some((endpoint, interface)) => {
+            Some((target, _)) => {
                 if !self.sender_has_room() {
                     self.statics.registry_full.increment();
                     self.fail_replay(
@@ -4564,7 +4879,7 @@ impl Conductor {
                     );
                     return;
                 }
-                match self.open_send_endpoint(replay_session_id, endpoint, interface, now) {
+                match self.open_send_endpoint(replay_session_id, target, now) {
                     Ok(opened) => Some(opened),
                     Err((code, message)) => {
                         self.fail_replay(index, code, &message);
@@ -4607,9 +4922,10 @@ impl Conductor {
             }
         };
         // The counters: the publication's two and `replay.position`, and over UDP the
-        // sender's two, labelled as a publication's with the endpoint's registration id
-        // last, so that `doctor` names the endpoint from the counters file alone; one
-        // the counters file refuses frees the ones before it.
+        // sender's three, labelled as a publication's with the endpoint's registration
+        // id after, and the strategy after that on the receivers gauge, so that `doctor`
+        // names the endpoint and reads a `min` publication from the counters file alone;
+        // one the counters file refuses frees the ones before it.
         let key = position_key(replay_session_id, session_id, stream_id);
         let replay_key = replay_session_id.to_le_bytes();
         let label = |name: &str| format!("{name} {replay_session_id} {session_id} {stream_id}");
@@ -4625,11 +4941,16 @@ impl Conductor {
             ),
         ];
         if let Some(endpoint_id) = endpoint_id {
-            for (id, name) in [
-                (SENDER_POSITION, "sender.position"),
-                (SENDER_LIMIT, "sender.limit"),
+            for (id, name, strategy) in [
+                (SENDER_POSITION, "sender.position", String::new()),
+                (SENDER_LIMIT, "sender.limit", String::new()),
+                (
+                    SENDER_FLOW_CONTROL_RECEIVERS,
+                    "sender.flow_control_receivers",
+                    format!(" fc={}", flow_control.name()),
+                ),
             ] {
-                wanted.push((id, &key, format!("{} {endpoint_id}", label(name))));
+                wanted.push((id, &key, format!("{} {endpoint_id}{strategy}", label(name))));
             }
         }
         let mut allocated: Vec<Counter> = Vec::with_capacity(wanted.len());
@@ -4656,7 +4977,7 @@ impl Conductor {
         // One counter per entry of `wanted`, in its order; a count that does not match
         // cannot happen, and is undone like a refusal rather than left behind.
         let (position, limit, replay_position, sender) = if endpoint_id.is_some() {
-            match <[Counter; 5]>::try_from(allocated) {
+            match <[Counter; 6]>::try_from(allocated) {
                 Ok(
                     [
                         position,
@@ -4664,12 +4985,13 @@ impl Conductor {
                         replay_position,
                         sender_position,
                         sender_limit,
+                        receivers,
                     ],
                 ) => (
                     position,
                     limit,
                     replay_position,
-                    Some((sender_position, sender_limit)),
+                    Some((sender_position, sender_limit, receivers)),
                 ),
                 Err(held) => {
                     self.undo_replay_ready(
@@ -4726,13 +5048,14 @@ impl Conductor {
         // like a refusal rather than left behind.
         let udp_start = match (endpoint, sender) {
             (None, None) => None,
-            (Some((endpoint_index, socket)), Some((sender_position, sender_limit))) => {
+            (Some((endpoint_index, socket)), Some((sender_position, sender_limit, receivers))) => {
                 match log.reader(start_position) {
                     Ok(reader) => Some((
                         endpoint_index,
                         socket,
                         sender_position,
                         sender_limit,
+                        receivers,
                         reader,
                     )),
                     Err(error) => {
@@ -4743,7 +5066,7 @@ impl Conductor {
                                 &position,
                                 &limit,
                                 &replay_position,
-                                Some(&(sender_position, sender_limit)),
+                                Some(&(sender_position, sender_limit, receivers)),
                             ),
                             Some(log),
                             Some((endpoint_index, socket)),
@@ -4778,7 +5101,9 @@ impl Conductor {
         let limit_handle = limit.clone();
         // Over UDP: the publication's sender side, and the hand-off to the sender.
         let mut udp = None;
-        if let Some((endpoint_index, socket, sender_position, sender_limit, reader)) = udp_start {
+        if let Some((endpoint_index, socket, sender_position, sender_limit, receivers, reader)) =
+            udp_start
+        {
             let endpoint_id = self.send_endpoints[endpoint_index].registration_id;
             // The sender position starts where the replay does, before the sender's
             // first cycle stores it from its reader, so that the limit the conductor
@@ -4792,6 +5117,8 @@ impl Conductor {
                 connected: false,
                 close_sent: false,
                 sender_closed: false,
+                flow_control,
+                receivers_id: receivers.id(),
             });
             let add = sender::AddPublication {
                 registration_id: replay_session_id,
@@ -4804,6 +5131,9 @@ impl Conductor {
                 reader,
                 position: sender_position,
                 limit: sender_limit,
+                flow_control,
+                receivers,
+                receiver_table: receiver_table(flow_control),
             };
             self.hand_to_sender(endpoint_index, socket, add);
         }
@@ -5652,14 +5982,81 @@ fn replay_counters(
     position: &Counter,
     limit: &Counter,
     replay_position: &Counter,
-    sender: Option<&(Counter, Counter)>,
+    sender: Option<&(Counter, Counter, Counter)>,
 ) -> Vec<Counter> {
     let mut held = vec![position.clone(), limit.clone(), replay_position.clone()];
-    if let Some((sender_position, sender_limit)) = sender {
+    if let Some((sender_position, sender_limit, receivers)) = sender {
         held.push(sender_position.clone());
         held.push(sender_limit.clone());
+        held.push(receivers.clone());
     }
     held
+}
+
+/// A `min` publication's receivers table with its room, allocated on the control plane
+/// so that the sender never grows it; no room under `max`, which keeps no table
+/// (`spec/udp.md`, "The sender"; ADR 0053).
+fn receiver_table(flow_control: FlowControl) -> Vec<sender::Receiver> {
+    Vec::with_capacity(match flow_control {
+        FlowControl::Min => MAX_FLOW_CONTROL_RECEIVERS,
+        FlowControl::Max => 0,
+    })
+}
+
+/// Why a destination could not be resolved to an address the control socket sends to
+/// (`resolve_in_family`).
+enum Unreachable {
+    /// The name resolves to no address at all: code 9.
+    NoAddress(String),
+    /// It resolves, but to no address of the control address's family, or to none
+    /// that is a loopback address beside a loopback control address: code 1, reason
+    /// `destination`.
+    Family(String),
+}
+
+/// A destination's endpoint resolved to the first address of the control address's
+/// family, IPv4 or IPv6, that the resolver returns, a loopback one when the control
+/// address is a loopback address, since a socket bound to the control address sends
+/// to no other (`spec/client-protocol.md`, "Commands", add destination; ADR 0053).
+fn resolve_in_family(
+    host: &str,
+    port: u16,
+    control: SocketAddr,
+) -> Result<SocketAddr, Unreachable> {
+    let addresses = match (host, port).to_socket_addrs() {
+        Ok(addresses) => addresses,
+        Err(error) => return Err(Unreachable::NoAddress(error.to_string())),
+    };
+    let loopback = control.ip().is_loopback();
+    let family = if control.is_ipv4() { "IPv4" } else { "IPv6" };
+    let mut any = false;
+    let mut of_family = false;
+    for address in addresses {
+        any = true;
+        if address.is_ipv4() != control.is_ipv4() {
+            continue;
+        }
+        of_family = true;
+        if loopback && !address.ip().is_loopback() {
+            continue;
+        }
+        return Ok(address);
+    }
+    if !any {
+        Err(Unreachable::NoAddress(
+            "the name resolves to no address".to_string(),
+        ))
+    } else if !of_family {
+        Err(Unreachable::Family(format!(
+            "it has no {family} address, the control address's family"
+        )))
+    } else {
+        Err(Unreachable::Family(
+            "it is not a loopback address, and a socket bound to a loopback control address \
+             sends to no other host"
+                .to_string(),
+        ))
+    }
 }
 
 /// The message of error code 10 for the sender's request queue with no room, or with
@@ -6031,12 +6428,15 @@ mod recording {
     use std::time::Instant;
 
     use cavalry_proto::udp::{
-        CONNECTION_TIMEOUT, ControlFrame, Datagram, MAX_TERM_LENGTH, STATUS_MESSAGE_END_OF_STREAM,
+        CONNECTION_TIMEOUT, ControlFrame, Datagram, FLOW_CONTROL_RECEIVER_TIMEOUT, MAX_TERM_LENGTH,
+        RTT_MEASUREMENT_REPLY, RttMeasurement, SETUP_INTERVAL, STATUS_MESSAGE_END_OF_STREAM,
         SetupFrame, StatusMessage, parse as parse_udp,
     };
     use cavalry_shm::counters::generated::{
         COUNTERS_ALLOCATED, COUNTERS_FREED, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
-        SENDER_FRAMES_SENT, SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
+        SENDER_BYTES_SENT, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
+        SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_FRAMES_SENT, SENDER_RETRANSMITS_SENT,
+        SENDER_RTT_REPLIES_SENT, SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
     };
 
     /// A receiver by hand: a socket of its own that reads what the sender puts on the
@@ -6115,6 +6515,13 @@ mod recording {
                     })
                     .collect(),
             )
+        }
+
+        /// Sends bytes of the test's own making to the peer the last datagram came from.
+        pub(super) fn send_bytes(&self, bytes: &[u8]) {
+            self.socket
+                .send_to(bytes, self.peer.expect("a setup frame arrived first"))
+                .expect("the bytes are sent");
         }
 
         /// How long a read waits for a datagram.
@@ -6435,94 +6842,771 @@ mod recording {
         assert!(h.conductor.replays.is_empty());
     }
 
-    /// Version 1 of `spec/udp.md` and version 5 of `spec/client-protocol.md` parse
-    /// before the sender sends to a destination (ADR 0053, Interim): a control channel,
-    /// `fc=min` and the destination commands are code 11 naming card 225 with nothing
-    /// registered, and a subscription's channel that names a publication's keys is
-    /// code 1 with the reason `subscription`, the page's own rule.
+    /// A control channel of this test's own on a free loopback port.
+    fn control_channel() -> String {
+        let port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .expect("a loopback socket")
+            .local_addr()
+            .expect("bound")
+            .port();
+        format!("cavalry:udp?control=127.0.0.1:{port}|control-mode=manual")
+    }
+
+    /// Cycles the sender and the conductor on the real clock until `condition` holds,
+    /// for up to five seconds; returns whether it held.
+    fn wait_for(h: &mut Harness, mut condition: impl FnMut(&mut Harness) -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = now_nanos();
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if condition(h) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Cycles the sender and the conductor at one time of the sender's clock until
+    /// `condition` holds, for up to five seconds of real time: what a status message
+    /// sent on the loopback is timed at is the `now` the cycle that reads it carries.
+    fn wait_at(h: &mut Harness, now: i64, mut condition: impl FnMut(&mut Harness) -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            h.sender.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            if condition(h) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The next setup frame at the receiver, or a panic naming what came instead.
+    fn expect_setup(receiver: &mut TestReceiver) -> SetupFrame {
+        match receiver.next_control() {
+            Some(ControlFrame::Setup(setup)) => setup,
+            other => panic!("expected a setup frame, got {other:?}"),
+        }
+    }
+
+    /// The next datagram of data frames at the receiver, heartbeats and control frames
+    /// skipped; `None` at the read timeout.
+    fn next_frames(receiver: &mut TestReceiver) -> Option<Vec<(DataFrameHeader, Vec<u8>)>> {
+        loop {
+            match receiver.next_data(spec::UDP_TERM_LENGTH) {
+                Some(frames) if frames.is_empty() => continue,
+                other => return other,
+            }
+        }
+    }
+
+    /// The label of counter record `id`, read from the counters file as `doctor` reads it.
+    fn label_of(h: &Harness, id: u32) -> String {
+        cavalry_shm::counters::CountersReader::open(h.dir.path())
+            .expect("the counters file opens")
+            .record(id)
+            .expect("a record")
+            .expect("allocated")
+            .label()
+            .to_string()
+    }
+
+    /// A status message answering `setup` from the receiver `receiver_id` with `window`.
+    fn status(setup: &SetupFrame, window: i32, receiver_id: i64) -> StatusMessage {
+        StatusMessage {
+            flags: 0,
+            session_id: setup.session_id,
+            stream_id: 7,
+            consumption_term_id: setup.active_term_id,
+            consumption_term_offset: 0,
+            receiver_window_length: window,
+            receiver_id,
+            group_tag: None,
+        }
+    }
+
+    /// A control channel's publication (`spec/udp.md`, "The sender"; ADR 0053): the
+    /// endpoint's socket binds the control address and sends to no one until a client
+    /// adds a destination, then every datagram goes to each destination in turn, a
+    /// setup frame, a burst, each counted once per destination; under `max` the limit
+    /// is the greatest position plus window the destinations' receivers report; a
+    /// duplicate add and a remove of one not held answer success and change nothing;
+    /// a removed destination gets nothing more; with none left a burst is dropped, the
+    /// sender position advances past it and nothing is counted as on the wire.
     #[test]
-    fn multi_destination_cast_is_refused_with_code_11_until_the_sender_change() {
-        let mut h = Harness::new("udp-mdc-interim");
+    fn a_control_channel_sends_every_datagram_to_each_destination() {
+        let mut h = Harness::new("udp-mdc-fan-out");
+        let mut a = TestReceiver::bind();
+        let mut b = TestReceiver::bind();
+        let control = control_channel();
         let now = h.now;
-        let control: &[u8] = b"cavalry:udp?control=127.0.0.1:40456|control-mode=manual";
-        h.conductor.add_publication(1, 2, 7, control, false, now);
-        let (code, message) = h.last_error(2).expect("an error");
-        assert_eq!(code, 11, "{message}");
-        assert!(message.contains("card 225"), "{message}");
-        h.conductor.add_publication(
-            1,
-            3,
-            7,
-            b"cavalry:udp?endpoint=127.0.0.1:40123|fc=min",
-            false,
-            now,
-        );
-        let (code, message) = h.last_error(3).expect("an error");
-        assert_eq!(code, 11, "{message}");
-        assert!(message.contains("fc=min"), "{message}");
-        assert!(h.conductor.send_endpoints.is_empty());
-        assert!(h.conductor.publications.is_empty());
-        // `fc=max` names what the driver does and is accepted on a publication.
-        h.conductor.add_publication(
-            1,
-            4,
-            7,
-            b"cavalry:udp?endpoint=127.0.0.1:40123|fc=max",
-            false,
-            now,
-        );
-        assert_eq!(h.last_error(4), None);
-        assert_eq!(h.conductor.publications.len(), 1);
         h.conductor
-            .add_subscription(1, 5, 7, b"cavalry:udp?endpoint=127.0.0.1:40124|fc=max");
-        let (code, message) = h.last_error(5).expect("an error");
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        {
+            let endpoint = &h.conductor.send_endpoints[0];
+            assert!(endpoint.target.control);
+            assert_eq!(endpoint.destinations.get(), 0);
+            assert_eq!(endpoint.status.get(), 1);
+            assert_eq!(endpoint.publications.get(), 1);
+        }
+        // No destination: the setup frame that is due goes nowhere and counts nothing.
+        h.sender.duty_cycle(now);
+        assert_eq!(h.counter(SENDER_SETUPS_SENT), 0);
+        // Two destinations by the command, and a duplicate that adds nothing.
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        h.conductor.change_destination(1, 4, 2, &b.channel(), true);
+        h.conductor.change_destination(1, 5, 2, &a.channel(), true);
+        for correlation_id in 3..=5 {
+            assert_eq!(h.last_error(correlation_id), None);
+        }
+        assert_eq!(h.conductor.send_endpoints[0].destinations.get(), 2);
+        assert_eq!(h.conductor.send_endpoints[0].destination_list.len(), 2);
+        // The sender takes them, and the next setup frame reaches both.
+        let now = now + spec::nanos(SETUP_INTERVAL);
+        h.sender.duty_cycle(now);
+        let setup_a = expect_setup(&mut a);
+        let setup_b = expect_setup(&mut b);
+        assert_eq!(setup_a.session_id, setup_b.session_id);
+        assert_eq!(h.counter(SENDER_SETUPS_SENT), 2, "once per destination");
+        // The receivers gauge names the strategy last, so that `doctor` reads a `max`
+        // publication's 0 as no table (ADR 0053).
+        let receivers_id = h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .expect("a cavalry:udp publication")
+            .receivers_id;
+        assert_eq!(
+            label_of(&h, receivers_id),
+            format!(
+                "sender.flow_control_receivers 2 {} 7 2 fc=max",
+                setup_a.session_id
+            )
+        );
+        // Each answers with a receiver id of its own: under max the greater window wins.
+        a.send_status_message(&status(&setup_a, 4096, 9));
+        b.send_status_message(&status(&setup_b, 8192, 10));
+        assert!(
+            wait_for(&mut h, |h| {
+                h.sender.positions_of(2) == Some((0, 8192))
+                    && h.conductor.publications[0]
+                        .udp
+                        .as_ref()
+                        .is_some_and(|udp| udp.connected)
+            }),
+            "both status messages arrived and the greater window set the limit"
+        );
+        h.conductor.duty_cycle(now_nanos());
+        // One message: one burst, to each destination, counted once per destination.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        assert!(limit > 0, "connected: the publisher's limit is up");
+        appender.offer(b"cavalry!", limit, 0).expect("offered");
+        h.sender.duty_cycle(now_nanos());
+        for (name, receiver) in [("a", &mut a), ("b", &mut b)] {
+            let frames = next_frames(receiver).unwrap_or_else(|| panic!("a datagram at {name}"));
+            assert_eq!(frames.len(), 1, "{name}");
+            assert_eq!(frames[0].1, b"cavalry!", "{name}");
+        }
+        assert_eq!(h.counter(SENDER_FRAMES_SENT), 2, "once per destination");
+        assert_eq!(
+            h.counter(SENDER_BYTES_SENT),
+            128,
+            "a 64-byte datagram to each"
+        );
+        assert_eq!(
+            h.sender.positions_of(2).map(|(position, _)| position),
+            Some(64)
+        );
+        // b removed: the next message reaches a alone; removing it again succeeds too.
+        h.conductor.change_destination(1, 6, 2, &b.channel(), false);
+        h.conductor.change_destination(1, 7, 2, &b.channel(), false);
+        assert_eq!(h.last_error(6), None);
+        assert_eq!(h.last_error(7), None);
+        assert_eq!(h.conductor.send_endpoints[0].destinations.get(), 1);
+        let limit = h.conductor.publications[0].limit.get();
+        appender.offer(b"again!!!", limit, 0).expect("offered");
+        h.sender.duty_cycle(now_nanos());
+        assert_eq!(next_frames(&mut a).map(|frames| frames.len()), Some(1));
+        b.set_read_timeout(Duration::from_millis(200));
+        assert!(
+            b.next_data(spec::UDP_TERM_LENGTH).is_none(),
+            "nothing reaches b after its remove"
+        );
+        assert_eq!(h.counter(SENDER_FRAMES_SENT), 3);
+        // None left: the burst is dropped, the position advances past it, nothing on
+        // the wire is counted.
+        h.conductor.change_destination(1, 8, 2, &a.channel(), false);
+        assert_eq!(h.last_error(8), None);
+        assert_eq!(h.conductor.send_endpoints[0].destinations.get(), 0);
+        let limit = h.conductor.publications[0].limit.get();
+        appender.offer(b"nowhere!", limit, 0).expect("offered");
+        h.sender.duty_cycle(now_nanos());
+        assert_eq!(
+            h.sender.positions_of(2).map(|(position, _)| position),
+            Some(192)
+        );
+        assert_eq!(
+            h.counter(SENDER_FRAMES_SENT),
+            3,
+            "nothing counted as on the wire"
+        );
+        assert_eq!(h.counter(SENDER_BYTES_SENT), 192);
+        a.set_read_timeout(Duration::from_millis(200));
+        assert!(a.next_data(spec::UDP_TERM_LENGTH).is_none());
+        drop(appender);
+    }
+
+    /// `fc=min` (`spec/udp.md`, "The sender"; ADR 0053): the sender limit follows the
+    /// slowest receiver in the publication's table, by receiver id, and never falls; a
+    /// receiver that sends nothing for the flow control receiver timeout is dropped and
+    /// counted, and the limit follows the rest; one whose status message carries end
+    /// of stream is dropped on the next cycle; a 65th receiver is accepted for the
+    /// connection and not tracked, counted; the gauge says how many are in the table.
+    #[test]
+    fn min_flow_control_follows_the_slowest_receiver_and_drops_one_that_times_out() {
+        let mut h = Harness::new("udp-mdc-min");
+        let mut a = TestReceiver::bind();
+        let mut b = TestReceiver::bind();
+        let control = format!("{}|fc=min", control_channel());
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        let udp = h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .expect("a cavalry:udp publication");
+        assert_eq!(udp.flow_control, FlowControl::Min);
+        let receivers_id = udp.receivers_id;
+        assert!(
+            label_of(&h, receivers_id).ends_with(" 2 fc=min"),
+            "{}",
+            label_of(&h, receivers_id)
+        );
+        let gauge = |h: &Harness| {
+            h.conductor
+                .counters
+                .counter(receivers_id)
+                .expect("the gauge")
+                .get()
+        };
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        h.conductor.change_destination(1, 4, 2, &b.channel(), true);
+        // The first cycle takes the destinations and sends the setup frame that is due.
+        let at = now_nanos();
+        h.sender.duty_cycle(at);
+        let setup_a = expect_setup(&mut a);
+        let setup_b = expect_setup(&mut b);
+        a.send_status_message(&status(&setup_a, 4096, 9));
+        b.send_status_message(&status(&setup_b, 8192, 10));
+        assert!(wait_at(&mut h, at, |h| gauge(h) == 2));
+        assert_eq!(
+            h.sender.positions_of(2),
+            Some((0, 4096)),
+            "the slowest sets the pace"
+        );
+        // b runs ahead: the limit stays at a's.
+        b.send_status_message(&status(&setup_b, 16384, 10));
+        assert!(wait_at(&mut h, at, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == 3
+        }));
+        assert_eq!(h.sender.positions_of(2), Some((0, 4096)));
+        // Three seconds on, b answers again and a does not; at the timeout a is
+        // dropped and counted, and the limit follows b.
+        let later = at + spec::nanos(Duration::from_secs(3));
+        b.send_status_message(&status(&setup_b, 16384, 10));
+        assert!(wait_at(&mut h, later, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == 4
+        }));
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 0);
+        let timed_out =
+            at + spec::nanos(FLOW_CONTROL_RECEIVER_TIMEOUT) + spec::nanos(Duration::from_millis(1));
+        h.sender.duty_cycle(timed_out);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 1);
+        assert_eq!(gauge(&h), 1);
+        assert_eq!(h.sender.positions_of(2), Some((0, 16384)));
+        assert!(
+            h.conductor.publications[0]
+                .udp
+                .as_ref()
+                .is_some_and(|udp| udp.connected),
+            "b's status message kept the publication connected"
+        );
+        // The table fills with 63 more receiver ids from a's socket, each far ahead,
+        // and a 65th is counted and not tracked: the limit stays b's.
+        for receiver_id in 100..163 {
+            a.send_status_message(&status(&setup_a, 1_000_000, receiver_id));
+        }
+        assert!(wait_at(&mut h, timed_out, |h| gauge(h) == 64));
+        a.send_status_message(&status(&setup_a, 2_000_000, 999));
+        assert!(wait_at(&mut h, timed_out, |h| {
+            h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL) == 1
+        }));
+        assert_eq!(gauge(&h), 64);
+        assert_eq!(h.sender.positions_of(2), Some((0, 16384)));
+        // The end-of-stream flag from a receiver the full table does not hold adds no
+        // entry and is not counted as full: its image has ended (ADR 0054).
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        a.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            ..status(&setup_a, 3_000_000, 501)
+        });
+        assert!(wait_at(&mut h, timed_out, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 1
+        }));
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 1);
+        assert_eq!(gauge(&h), 64);
+        // b ends its stream: dropped on the next cycle and not counted as a timeout, and
+        // the limit follows the rest (ADR 0054).
+        b.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            ..status(&setup_b, 16384, 10)
+        });
+        assert!(wait_at(&mut h, timed_out, |h| gauge(h) == 63));
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 1);
+        assert_eq!(h.sender.positions_of(2), Some((0, 1_000_000)));
+        // b's flag again, as a receiver sends it five times: no entry, nothing counted.
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        b.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            ..status(&setup_b, 16384, 10)
+        });
+        assert!(wait_at(&mut h, timed_out, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 1
+        }));
+        h.sender.duty_cycle(timed_out);
+        assert_eq!(gauge(&h), 63);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 1);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 1);
+        assert_eq!(h.sender.positions_of(2), Some((0, 1_000_000)));
+    }
+
+    /// A clean close of a `min` publication on a control channel with two destinations
+    /// (`spec/udp.md`, "The sender"; ADR 0054, ADR 0056): each receiver's five status
+    /// messages with the end-of-stream flag keep its entry in the table through the
+    /// linger, once and never a second time, so that what `doctor` reads until the
+    /// linger ends, the gauge beside the endpoint's `channel.destinations` and a
+    /// sender limit above 0, says no destination stopped answering; at the timeout
+    /// the publication closes with no receiver counted in
+    /// `sender.flow_control_receivers_timed_out` and no disconnection.
+    #[test]
+    fn a_clean_close_of_a_min_publication_counts_no_receiver_timed_out() {
+        let mut h = Harness::new("udp-mdc-min-close");
+        let mut a = TestReceiver::bind();
+        let mut b = TestReceiver::bind();
+        let control = format!("{}|fc=min", control_channel());
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        let receivers_id = h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .expect("a cavalry:udp publication")
+            .receivers_id;
+        assert!(
+            label_of(&h, receivers_id).ends_with(" fc=min"),
+            "{}",
+            label_of(&h, receivers_id)
+        );
+        let gauge = |h: &Harness| {
+            h.conductor
+                .counters
+                .counter(receivers_id)
+                .expect("the gauge")
+                .get()
+        };
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        h.conductor.change_destination(1, 4, 2, &b.channel(), true);
+        let at = now_nanos();
+        h.sender.duty_cycle(at);
+        let setup_a = expect_setup(&mut a);
+        let setup_b = expect_setup(&mut b);
+        a.send_status_message(&status(&setup_a, 131072, 9));
+        b.send_status_message(&status(&setup_b, 131072, 10));
+        assert!(wait_at(&mut h, at, |h| gauge(h) == 2));
+        // The close, with nothing to send: the sender position is the end of stream.
+        h.conductor.remove_publication(1, 20, 2, at);
+        h.sender.duty_cycle(at);
+        // Each receiver's image ends a moment after the close, and each sends its five
+        // status messages with the flag.
+        let ended = at + spec::nanos(Duration::from_millis(1));
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        for (receiver, setup, receiver_id) in [(&mut a, &setup_a, 9), (&mut b, &setup_b, 10)] {
+            for _ in 0..5 {
+                receiver.send_status_message(&StatusMessage {
+                    flags: STATUS_MESSAGE_END_OF_STREAM,
+                    ..status(setup, 131072, receiver_id)
+                });
+            }
+        }
+        assert!(wait_at(&mut h, ended, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 10
+        }));
+        h.sender.duty_cycle(ended);
+        assert_eq!(gauge(&h), 2, "kept once each, added a second time never");
+        // Until the linger ends the counters `doctor` reads show both destinations
+        // answered: the gauge at the endpoint's destinations, the limit above 0,
+        // nothing timed out.
+        let linger = spec::nanos(cavalry_proto::udp::LINGER);
+        let last = at + linger - 1;
+        h.sender.duty_cycle(last);
+        assert!(
+            h.sender.positions_of(2).is_some_and(|(_, limit)| limit > 0),
+            "still lingering, its limit above 0"
+        );
+        assert_eq!(gauge(&h), 2);
+        assert_eq!(h.conductor.send_endpoints[0].destinations.get(), 2);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 0);
+        // The linger ends at its timeout, a control channel's, and nothing timed out.
+        h.sender.duty_cycle(at + linger);
+        assert_eq!(h.sender.positions_of(2), None, "closed at the timeout");
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 0);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 0);
+        assert_eq!(h.counter(PUBLICATION_DISCONNECTED), 0);
+    }
+
+    /// The destination commands' refusals, and the channel rules of version 1
+    /// (`spec/client-protocol.md`, "Commands" and "What the driver rejects"; ADR 0053):
+    /// add destination on a publication with no control address is code 1 with the
+    /// reason `control`; an unknown or another client's registration is code 3; a
+    /// destination that is `cavalry:ipc` or a control channel, one naming `interface`
+    /// or `fc`, one with no address of the control address's family, or one beyond the
+    /// loopback a loopback control address is on, is code 1 with the reason
+    /// `destination`, one that fails the
+    /// grammar code 1 with the reader's reason; a name with no address is code 9; a 65th
+    /// destination is code 10, counted; a subscription's channel that names a
+    /// publication's keys is code 1 with the reason `subscription`; a join under
+    /// another `fc` is code 1 with the reason `fc`, and under the same joins.
+    #[test]
+    fn destination_commands_and_a_control_channel_are_refused_with_the_spec_codes() {
+        let mut h = Harness::new("udp-mdc-refusals");
+        let receiver = TestReceiver::bind();
+        let unicast = String::from_utf8(receiver.channel()).expect("utf-8");
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, unicast.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor
+            .change_destination(1, 3, 2, unicast.as_bytes(), true);
+        let (code, message) = h.last_error(3).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(control)"), "{message}");
+        h.conductor
+            .change_destination(1, 4, 99, unicast.as_bytes(), true);
+        assert_eq!(h.last_error(4).expect("an error").0, 3);
+        h.conductor
+            .change_destination(2, 5, 2, unicast.as_bytes(), true);
+        assert_eq!(h.last_error(5).expect("an error").0, 3);
+        let control = control_channel();
+        h.conductor
+            .add_publication(1, 6, 8, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(6), None);
+        h.conductor
+            .change_destination(1, 7, 6, b"cavalry:ipc", true);
+        let (code, message) = h.last_error(7).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(destination)"), "{message}");
+        h.conductor
+            .change_destination(1, 8, 6, control.as_bytes(), true);
+        assert_eq!(h.last_error(8).expect("an error").0, 1);
+        h.conductor.change_destination(
+            1,
+            17,
+            6,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|fc=min",
+            true,
+        );
+        let (code, message) = h.last_error(17).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("names nothing else"), "{message}");
+        // An address of the other family, and a host beyond the loopback the control
+        // address is on: code 1, reason destination; a name with no address: code 9.
+        h.conductor
+            .change_destination(1, 9, 6, b"cavalry:udp?endpoint=[::1]:40123", true);
+        let (code, message) = h.last_error(9).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(destination)"), "{message}");
+        assert!(message.contains("IPv4"), "{message}");
+        h.conductor
+            .change_destination(1, 15, 6, b"cavalry:udp?endpoint=10.0.0.9:40123", true);
+        let (code, message) = h.last_error(15).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("loopback"), "{message}");
+        h.conductor.change_destination(
+            1,
+            16,
+            6,
+            b"cavalry:udp?endpoint=no-such-host.invalid:40123",
+            true,
+        );
+        let (code, message) = h.last_error(16).expect("an error");
+        assert_eq!(code, 9, "{message}");
+        h.conductor
+            .change_destination(1, 10, 6, b"cavalry:udp?endpoint=", true);
+        let (code, message) = h.last_error(10).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(grammar)"), "{message}");
+        assert_eq!(h.conductor.send_endpoints[1].destinations.get(), 0);
+        let registry_full = h.counter(DRIVER_REGISTRY_FULL);
+        for i in 0..MAX_DESTINATIONS {
+            let destination = format!("cavalry:udp?endpoint=127.0.0.1:{}", 40_000 + i);
+            h.conductor
+                .change_destination(1, 100 + i as i64, 6, destination.as_bytes(), true);
+            assert_eq!(h.last_error(100 + i as i64), None, "destination {i}");
+        }
+        assert_eq!(h.conductor.send_endpoints[1].destinations.get(), 64);
+        h.conductor
+            .change_destination(1, 200, 6, b"cavalry:udp?endpoint=127.0.0.1:41000", true);
+        let (code, message) = h.last_error(200).expect("an error");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("destinations"), "{message}");
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), registry_full + 1);
+        h.conductor
+            .change_destination(1, 201, 6, b"cavalry:udp?endpoint=127.0.0.1:41000", false);
+        assert_eq!(h.last_error(201), None, "a remove of one not held");
+        assert_eq!(h.conductor.send_endpoints[1].destinations.get(), 64);
+        // A subscription's channel that names a publication's keys.
+        h.conductor
+            .add_subscription(1, 11, 7, b"cavalry:udp?endpoint=127.0.0.1:40123|fc=max");
+        let (code, message) = h.last_error(11).expect("an error");
         assert_eq!(code, 1, "{message}");
         assert!(message.contains("(subscription)"), "{message}");
-        h.conductor.add_subscription(1, 6, 7, control);
-        let (code, message) = h.last_error(6).expect("an error");
-        assert_eq!(code, 1, "{message}");
+        h.conductor.add_subscription(1, 12, 7, control.as_bytes());
+        assert_eq!(h.last_error(12).expect("an error").0, 1);
         assert!(h.conductor.receive_endpoints.is_empty());
-        assert!(h.conductor.subscriptions.is_empty());
-        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 2);
-        h.conductor.start_recording(7, 7, control, now);
-        let (code, message) = h.last_error(7).expect("an error");
-        assert_eq!(code, 11, "{message}");
-        h.conductor.start_replay(8, 0, -1, -1, 7, control);
-        let (code, message) = h.last_error(8).expect("an error");
-        assert_eq!(code, 11, "{message}");
-        assert!(h.conductor.replays.is_empty());
-        // The two commands, through the ring's decoder: code 11, the publication of
-        // correlation id 4 untouched.
-        let mut bytes = [0u8; 96];
-        for (correlation_id, command) in [
-            (
-                9,
-                Command::AddDestination {
-                    client_id: 1,
-                    correlation_id: 9,
-                    registration_id: 4,
-                    channel: b"cavalry:udp?endpoint=127.0.0.1:40125",
-                },
-            ),
-            (
-                10,
-                Command::RemoveDestination {
-                    client_id: 1,
-                    correlation_id: 10,
-                    registration_id: 4,
-                    channel: b"cavalry:udp?endpoint=127.0.0.1:40125",
-                },
-            ),
-        ] {
-            let length = command.write(&mut bytes).expect("the command encodes");
-            h.conductor
-                .handle(command.command_type() as i32, &bytes[..length], now);
-            let (code, message) = h.last_error(correlation_id).expect("an error");
-            assert_eq!(code, 11, "{message}");
-            assert!(message.contains("destination"), "{message}");
+        // A join under another fc, and under the same.
+        let min = format!("{unicast}|fc=min");
+        h.conductor
+            .add_publication(1, 13, 7, min.as_bytes(), false, now);
+        let (code, message) = h.last_error(13).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(fc)"), "{message}");
+        let max = format!("{unicast}|fc=max");
+        h.conductor
+            .add_publication(1, 14, 7, max.as_bytes(), false, now);
+        assert_eq!(h.last_error(14), None);
+        assert_eq!(
+            h.conductor.publications[0].registrations.len(),
+            2,
+            "14 joined 2"
+        );
+        assert_eq!(h.conductor.publications.len(), 2);
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 10);
+    }
+
+    /// An RTT measurement that reaches a control channel's socket is answered to the
+    /// address it came from (`spec/udp.md`, "The sender", step 5; ADR 0053).
+    #[test]
+    fn an_rtt_measurement_on_a_control_channel_is_answered_to_its_source() {
+        let mut h = Harness::new("udp-mdc-rtt");
+        let mut a = TestReceiver::bind();
+        let control = control_channel();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        h.sender.duty_cycle(now);
+        let setup = expect_setup(&mut a);
+        let probe = RttMeasurement {
+            flags: RTT_MEASUREMENT_REPLY,
+            session_id: setup.session_id,
+            stream_id: 7,
+            echo_timestamp: 77,
+            reception_delta: 0,
+            receiver_id: 9,
+        };
+        a.send_bytes(&probe.to_bytes());
+        assert!(wait_for(&mut h, |h| h.counter(SENDER_RTT_REPLIES_SENT) == 1));
+        // Setup frames keep coming while nothing answers: the answer is among them.
+        let answer = loop {
+            match a.next_control() {
+                Some(ControlFrame::RttMeasurement(answer)) => break answer,
+                Some(ControlFrame::Setup(_)) => continue,
+                other => panic!("expected the RTT answer, got {other:?}"),
+            }
+        };
+        assert_eq!(answer.flags, 0);
+        assert_eq!(answer.echo_timestamp, 77);
+        assert_eq!(answer.receiver_id, 9);
+        assert_eq!(answer.reception_delta, 0);
+    }
+
+    /// A control channel's closed publication lingers for the linger timeout
+    /// (`spec/udp.md`, "The sender"; ADR 0054): a status message with the end-of-stream
+    /// flag from one destination after the close does not end it, the other
+    /// destination's NAK for the tail is still answered, and the sender closes the
+    /// publication once the linger timeout has passed since the close and not before.
+    #[test]
+    fn a_control_channel_lingers_past_one_destinations_end_of_stream() {
+        let mut h = Harness::new("udp-mdc-linger");
+        let mut a = TestReceiver::bind();
+        let mut b = TestReceiver::bind();
+        let control = control_channel();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        h.conductor.change_destination(1, 4, 2, &b.channel(), true);
+        h.sender.duty_cycle(now_nanos());
+        let setup_a = expect_setup(&mut a);
+        let setup_b = expect_setup(&mut b);
+        a.send_status_message(&status(&setup_a, 131072, 9));
+        b.send_status_message(&status(&setup_b, 131072, 10));
+        assert!(
+            wait_for(&mut h, |h| {
+                h.conductor.publications[0]
+                    .udp
+                    .as_ref()
+                    .is_some_and(|udp| udp.connected)
+            }),
+            "the status messages connected the publication"
+        );
+        h.conductor.duty_cycle(now_nanos());
+        // One message, the stream's tail, to both.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        appender.offer(b"the tail", limit, 0).expect("offered");
+        drop(appender);
+        h.sender.duty_cycle(now_nanos());
+        for (name, receiver) in [("a", &mut a), ("b", &mut b)] {
+            let frames = next_frames(receiver).unwrap_or_else(|| panic!("a datagram at {name}"));
+            assert_eq!(frames[0].1, b"the tail", "{name}");
         }
+        // The close, taken by the sender at `closed_at`; a's receiver has the stream to
+        // its end and says so.
+        let closed_at = now_nanos();
+        h.conductor.remove_publication(1, 20, 2, closed_at);
+        h.sender.duty_cycle(closed_at);
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        a.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            consumption_term_offset: 64,
+            ..status(&setup_a, 131072, 9)
+        });
+        assert!(wait_at(&mut h, closed_at, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) > received
+        }));
+        assert!(
+            h.sender.positions_of(2).is_some(),
+            "one destination's end of stream does not end the linger"
+        );
         assert_eq!(h.conductor.publications.len(), 1);
-        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 2);
+        // b lost the tail and NAKs it: answered, to both destinations, as every
+        // retransmit is.
+        b.send_bytes(
+            &cavalry_proto::udp::Nak {
+                flags: 0,
+                session_id: setup_b.session_id,
+                stream_id: 7,
+                term_id: setup_b.active_term_id,
+                term_offset: 0,
+                length: 64,
+            }
+            .to_bytes(),
+        );
+        let nak_at = closed_at + spec::nanos(Duration::from_secs(1));
+        assert!(wait_at(&mut h, nak_at, |h| {
+            h.counter(SENDER_RETRANSMITS_SENT) == 1
+        }));
+        let again = next_frames(&mut b).expect("the retransmit at b");
+        assert_eq!(again[0].1, b"the tail");
+        // Still held just before the linger timeout, and closed at it. The connection
+        // timeout is the linger's, 5 s, and a's status message came at the close, so the
+        // first cycle at the timeout disconnects the publication and the next ends its
+        // linger.
+        let linger = spec::nanos(cavalry_proto::udp::LINGER);
+        h.sender
+            .duty_cycle(closed_at + linger - spec::nanos(Duration::from_millis(1)));
+        assert!(h.sender.positions_of(2).is_some(), "held until the timeout");
+        h.sender.duty_cycle(closed_at + linger);
+        h.sender.duty_cycle(closed_at + linger);
+        assert_eq!(h.sender.positions_of(2), None, "closed at the timeout");
+    }
+
+    /// An `add publication` on a control channel whose send endpoint is closing (ADR
+    /// 0055): one during the last publication's linger opens its publication on the
+    /// endpoint that is still active; one after the linger has ended and before the
+    /// sender has dropped the socket is code 4, its message saying the endpoint is
+    /// closing and to send the command again, with nothing registered; and the same add
+    /// after the sender's close binds the control address again.
+    #[test]
+    fn an_add_publication_on_a_closing_send_endpoint_is_code_4_and_says_to_retry() {
+        let mut h = Harness::new("udp-mdc-closing");
+        let control = control_channel();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        let closed_at = now_nanos();
+        h.sender.duty_cycle(closed_at);
+        h.conductor.remove_publication(1, 20, 2, closed_at);
+        // During the linger the endpoint is open: an add opens its publication there.
+        h.conductor
+            .add_publication(1, 3, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(3), None);
+        assert_eq!(h.conductor.publications.len(), 2);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(
+            h.conductor.publications[1]
+                .udp
+                .as_ref()
+                .map(|udp| udp.endpoint_id),
+            Some(2),
+            "the endpoint still active"
+        );
+        h.conductor.remove_publication(1, 21, 3, closed_at);
+        // Both lingers end at the timeout, with no destination and so no connection;
+        // the conductor takes the closes and closes the endpoint, whose socket is still
+        // with the sender until its next cycle.
+        h.sender.duty_cycle(closed_at);
+        h.sender
+            .duty_cycle(closed_at + spec::nanos(cavalry_proto::udp::LINGER));
+        assert_eq!(h.sender.positions_of(2), None);
+        assert_eq!(h.sender.positions_of(3), None);
+        h.conductor.duty_cycle(now_nanos());
+        assert!(h.conductor.publications.is_empty());
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Closing);
+        // The window: code 4, saying why and what to do, and nothing registered.
+        h.conductor
+            .add_publication(1, 4, 7, control.as_bytes(), false, now);
+        let (code, message) = h.last_error(4).expect("an error");
+        assert_eq!(code, 4, "{message}");
+        assert!(
+            message.contains("previous send endpoint is still closing"),
+            "{message}"
+        );
+        assert!(message.contains("send the command again"), "{message}");
+        assert!(h.conductor.publications.is_empty());
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        // The sender drops the socket, the conductor frees the slot, and the add binds
+        // the control address again.
+        h.sender.duty_cycle(now_nanos());
+        h.conductor.duty_cycle(now_nanos());
+        assert!(h.conductor.send_endpoints.is_empty());
+        h.conductor
+            .add_publication(1, 5, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(5), None);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].registration_id, 5);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Active);
     }
 
     /// The send endpoints registry holds 64: the 65th resolved channel is code 10
@@ -6917,7 +8001,7 @@ mod recording {
     /// passed. A driver that kept the sender's two would lose two of the counters
     /// file's records per publication for its life.
     #[test]
-    fn a_closed_udp_publication_frees_its_nine_records_and_they_are_reused_after_the_timeout() {
+    fn a_closed_udp_publication_frees_its_eleven_records_and_they_are_reused_after_the_timeout() {
         let mut h = Harness::new("udp-counters-freed");
         let mut receiver = TestReceiver::bind();
         let allocated_before = h.counter(COUNTERS_ALLOCATED);
@@ -6932,15 +8016,17 @@ mod recording {
                 publication.limit.id(),
                 udp.sender_position.id(),
                 udp.sender_limit_id,
+                udp.receivers_id,
                 endpoint.status.id(),
                 endpoint.socket_rcvbuf.id(),
                 endpoint.socket_sndbuf.id(),
                 endpoint.images.id(),
                 endpoint.publications.id(),
+                endpoint.destinations.id(),
             ]
         };
         held.sort_unstable();
-        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated_before + 9);
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated_before + 11);
 
         // The close: handed to the sender, acknowledged by the receiver with the
         // end-of-stream flag, completed by the conductor with the endpoint's.
@@ -6976,12 +8062,12 @@ mod recording {
             );
         }
         assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated_before);
-        assert_eq!(h.counter(COUNTERS_FREED), freed_before + 9);
+        assert_eq!(h.counter(COUNTERS_FREED), freed_before + 11);
 
-        // Reusable once the reuse timeout has passed: the next nine allocations take
+        // Reusable once the reuse timeout has passed: the next eleven allocations take
         // exactly these records, the lowest that are free.
         std::thread::sleep(spec::COUNTER_REUSE_TIMEOUT + Duration::from_millis(100));
-        let mut reused: Vec<u32> = (0..9u8)
+        let mut reused: Vec<u32> = (0..11u8)
             .map(|i| {
                 h.conductor
                     .counters
@@ -9372,7 +10458,7 @@ mod replay {
             .conductor
             .send_endpoints
             .iter()
-            .position(|endpoint| endpoint.endpoint.port() == 40_200)
+            .position(|endpoint| endpoint.target.address.port() == 40_200)
             .expect("the first endpoint");
         start_udp_replay(
             &mut h,
@@ -9391,7 +10477,11 @@ mod replay {
             "shared"
         );
         assert_eq!(h.conductor.send_endpoints[shared].publications.get(), 2);
-        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated + 5);
+        assert_eq!(
+            h.counter(COUNTERS_ALLOCATED),
+            allocated + 6,
+            "the publication's two, replay.position and the sender's three"
+        );
         assert_eq!(h.counter(REPLAY_STARTED), 1);
         let publication = h
             .conductor
@@ -9433,8 +10523,8 @@ mod replay {
         {
             filler.push(counter);
         }
-        assert!(filler.len() > 7, "the counters file had free records");
-        for counter in filler.split_off(filler.len() - 7) {
+        assert!(filler.len() > 8, "the counters file had free records");
+        for counter in filler.split_off(filler.len() - 8) {
             h.conductor
                 .counters
                 .free(counter.id(), 0)
@@ -9445,7 +10535,7 @@ mod replay {
         let registry_full = h.counter(DRIVER_REGISTRY_FULL);
 
         // Code 10 from the replayer's ready reply, the endpoint abandoned with its
-        // five records and the publication's two, nothing left.
+        // six records and the publication's two, nothing left.
         start_udp_replay(
             &mut h,
             604,
@@ -9478,8 +10568,8 @@ mod replay {
         );
         assert_eq!(
             h.counter(COUNTERS_FREED),
-            freed + 7,
-            "the endpoint's five and the publication's two"
+            freed + 8,
+            "the endpoint's six and the publication's two"
         );
         assert_eq!(h.counter(CHANNEL_OPENED), 0);
         assert_eq!(h.counter(DRIVER_REGISTRY_FULL), registry_full + 1);
@@ -9508,11 +10598,7 @@ mod replay {
         assert_eq!(h.conductor.send_endpoints.len(), 1);
         assert_eq!(h.conductor.send_endpoints[0].registration_id, 605);
         assert_eq!(h.conductor.send_endpoints[0].publications.get(), 1);
-        assert_eq!(
-            h.counter(COUNTERS_ALLOCATED),
-            allocated + 10,
-            "five and five"
-        );
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated + 12, "six and six");
         assert_eq!(h.counter(CHANNEL_OPENED), 1);
         assert_eq!(h.counter(REPLAY_STARTED), 1);
         drop(appender);
@@ -9573,11 +10659,7 @@ mod replay {
         assert_eq!(h.conductor.send_endpoints[0].status.get(), 1);
         assert_eq!(h.conductor.send_endpoints[0].publications.get(), 1);
         assert_eq!(h.counter(CHANNEL_OPENED), 1);
-        assert_eq!(
-            h.counter(COUNTERS_ALLOCATED),
-            allocated + 10,
-            "five and five"
-        );
+        assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated + 12, "six and six");
         assert_eq!(h.counter(REPLAY_STARTED), 1);
         {
             let publication = h
@@ -9593,6 +10675,19 @@ mod replay {
                 publication.limit.get(),
                 3200,
                 "the limit stands at the start"
+            );
+            // The receivers gauge's label names the endpoint and the replay channel's
+            // strategy, as a client's publication's does.
+            let label = cavalry_shm::counters::CountersReader::open(h.dir.path())
+                .expect("the counters file opens")
+                .record(udp.receivers_id)
+                .expect("a record")
+                .expect("allocated")
+                .label()
+                .to_string();
+            assert_eq!(
+                label,
+                format!("sender.flow_control_receivers 6 {session_id} {REPLAY_STREAM} 6 fc=max")
             );
             assert_eq!(publication.log.header().term_length(), term);
         }
@@ -9742,8 +10837,8 @@ mod replay {
         assert_eq!(h.counter(CHANNEL_CLOSED), 1);
         assert_eq!(
             h.counter(COUNTERS_FREED),
-            freed + 9,
-            "the endpoint's five and the publication's four; replay.position went at the stop"
+            freed + 11,
+            "the endpoint's six and the publication's five; replay.position went at the stop"
         );
         assert_eq!(h.sender.positions_of(6), None, "the sender dropped it");
         drop(appender);
@@ -10838,6 +11933,106 @@ mod receiving {
             .expect("the receiver reads")
         {}
         found
+    }
+
+    /// A control channel's publication reaches two subscriptions on two endpoints of
+    /// this driver, each a destination (ADR 0053): an image per endpoint, each with the
+    /// message, under `fc=min`, whose table holds the driver's one receiver id.
+    #[test]
+    fn a_control_channel_reaches_an_image_on_each_destination() {
+        let mut h = Harness::new("udp-mdc-images");
+        let ports = [free_port(), free_port()];
+        for (i, port) in ports.iter().enumerate() {
+            let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+            h.conductor
+                .add_subscription(1, 2 + i as i64, STREAM, channel.as_bytes());
+            assert_eq!(h.last_error(2 + i as i64), None);
+        }
+        let control = format!(
+            "cavalry:udp?control=127.0.0.1:{}|control-mode=manual|fc=min",
+            free_port()
+        );
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 4, STREAM, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(4), None);
+        for (i, port) in ports.iter().enumerate() {
+            let destination = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+            h.conductor
+                .change_destination(1, 5 + i as i64, 4, destination.as_bytes(), true);
+            assert_eq!(h.last_error(5 + i as i64), None);
+        }
+        let cycle_all = |h: &mut Harness, condition: &mut dyn FnMut(&mut Harness) -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                h.sender.duty_cycle(h.now);
+                h.cycle();
+                if condition(h) {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        assert!(
+            cycle_all(&mut h, &mut |h| h.conductor.udp_images.len() == 2),
+            "an image per destination"
+        );
+        assert!(
+            cycle_all(&mut h, &mut |h| {
+                h.conductor.publications.iter().any(|publication| {
+                    publication.registration_id == 4
+                        && publication.udp.as_ref().is_some_and(|udp| udp.connected)
+                        && publication.limit.get() > 0
+                })
+            }),
+            "connected by the destinations' status messages"
+        );
+        let images: Vec<i64> = h
+            .conductor
+            .udp_images
+            .iter()
+            .map(|image| image.registration_id)
+            .collect();
+        let index = h
+            .conductor
+            .publications
+            .iter()
+            .position(|publication| publication.registration_id == 4)
+            .expect("the publication");
+        let mut appender = h.conductor.publications[index]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[index].limit.get();
+        appender.offer(b"to both!", limit, 0).expect("offered");
+        assert!(
+            cycle_all(&mut h, &mut |h| {
+                images
+                    .iter()
+                    .all(|&id| positions(h, id).map(|(_, rebuild, _)| rebuild) == Some(64))
+            }),
+            "both images rebuilt the frame"
+        );
+        let receivers_id = h.conductor.publications[index]
+            .udp
+            .as_ref()
+            .expect("udp")
+            .receivers_id;
+        // One driver receives on both endpoints with one receiver id, so its two images
+        // answer as one receiver of the table (`spec/udp.md`, "The receiver").
+        assert_eq!(
+            h.conductor
+                .counters
+                .counter(receivers_id)
+                .expect("the gauge")
+                .get(),
+            1,
+            "one receiver id for the driver's two images"
+        );
+        drop(appender);
     }
 
     /// The high-water mark, the rebuild position and the last status message's

@@ -1563,3 +1563,42 @@ user-visible change, added in the same commit as the change. The format follows
   change lands, and a subscription's channel that names a publication's keys with
   code 1 ([ADR 0053](docs/decisions/0053-add-multi-destination-cast-to-cavalry-udp.md);
   card 225).
+- The driver sends a control channel's publications to every destination a client
+  adds with `add destination`, binding the control address and sending each burst to
+  each destination in turn, a datagram one destination did not take whole going to all
+  again and a destination the socket cannot reach holding the others back by nothing;
+  `fc=min` keeps a table of at most 64 receivers per publication, the sender limit the
+  slowest answering receiver's position plus window, a receiver dropped after 5 s
+  without a status message or on end of stream; the counters
+  `sender.flow_control_receivers_timed_out`, `sender.flow_control_receivers_full`,
+  `sender.flow_control_receivers` and `channel.destinations` explain both, and
+  `cavalry doctor` names a control channel with no destination, a `min` publication
+  with fewer receivers answering than destinations, a dropped receiver and a full
+  table ([ADR 0053](docs/decisions/0053-add-multi-destination-cast-to-cavalry-udp.md);
+  `docs/reference/udp.md`; card 225).
+- A control channel's closed publication lingers for the linger timeout, 5 s, sending
+  heartbeats with EOS and answering every destination's NAKs: a status message with
+  the end-of-stream flag from one destination no longer ends the linger for all of
+  them, so a slower destination still recovers the stream's tail; on a channel with an
+  endpoint the flag ends the linger as before. Under `fc=min` a receiver dropped from
+  the table because its stream ended is no longer counted in
+  `sender.flow_control_receivers_timed_out`, so a clean close leaves `cavalry doctor`
+  with nothing to report, and a status message with the flag adds no receiver to the
+  table
+  ([ADR 0054](docs/decisions/0054-linger-a-control-channels-publication-for-its-timeout.md);
+  `docs/reference/udp.md`; card 225).
+- An `add publication`, or a replay's publication, on a channel whose previous send
+  endpoint is still closing after its last publication's linger, its socket still
+  holding the control address or the interface's port, is answered with code 4 and a
+  message saying so and to send the command again after a moment, in place of a
+  message about a port in use; an add during the linger uses the endpoint that is
+  still open, as before
+  ([ADR 0055](docs/decisions/0055-answer-an-add-publication-on-a-closing-send-endpoint-with-a-retry.md);
+  card 225).
+- Under `fc=min`, a receiver whose stream ended stays in a closed publication's table
+  until the linger ends, so `sender.flow_control_receivers` keeps counting it, and
+  `cavalry doctor` no longer warns for 5 s after every clean close on a control
+  channel that the destinations stopped answering; on a live publication such a
+  receiver is still dropped on the next cycle
+  ([ADR 0056](docs/decisions/0056-keep-an-ended-receiver-in-a-closed-publications-table.md);
+  card 225).
