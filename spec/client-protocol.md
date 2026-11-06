@@ -126,7 +126,7 @@ Then, by command:
 | add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | `cavalry:ipc`, or a `cavalry:udp` channel as `spec/udp.md`, "The channel URI", says; any other string is answered with error code 1, a host that does not resolve with code 9 |
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
 | add destination, remove destination | 16 | 8 | registration id | i64 | 0 or more: the client's registration of the publication, the correlation id of its add publication or add exclusive publication command |
-| add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: a `cavalry:udp` channel with an endpoint (`spec/udp.md`, "The channel URI"), of which only `endpoint` is read; `cavalry:ipc`, a control channel or any other string is answered with error code 1, a host that does not resolve with code 9 |
+| add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: a `cavalry:udp` channel with an endpoint (`spec/udp.md`, "The channel URI"), of which only `endpoint` is read; `cavalry:ipc`, a control channel, an endpoint the control address cannot send to (add destination) or any other string is answered with error code 1, a host that does not resolve with code 9 |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 | start replay | 24 | 8 | position | i64 | −1 for the recording's retained position, its start position until a purge moves it; else a multiple of 32 from the retained position to the extent |
@@ -184,24 +184,34 @@ What the driver does with each, after the checks of "What the driver rejects":
   driver does not know, or that belongs to another client, is error code 3.
 - **add destination.** The command names the client's registration of a publication
   and a destination channel. The driver resolves the destination's endpoint once, as
-  it resolves every channel's host, and adds it to the publication's send endpoint,
-  whose every publication then sends to it (`spec/udp.md`, "The sender"); it answers
-  `operation success`. A destination the endpoint already has is added again by
-  nothing and answered the same, so that a client that retries after a response
-  timeout is not refused. A registration the driver does not know, or that belongs to
+  it resolves every channel's host, to the first address of the control address's
+  family, IPv4 or IPv6, that the resolver returns, and adds it to the publication's
+  send endpoint, whose every publication then sends to it (`spec/udp.md`, "The
+  sender"); it answers `operation success`. A destination is its endpoint as the add
+  writes it, the host compared byte for byte and the port by value: one the endpoint
+  already has is added again by nothing and answered the same, so that a client that
+  retries after a response timeout is not refused, and two writings of one address
+  are two destinations. A registration the driver does not know, or that belongs to
   another client, is error code 3; a publication whose channel names no control
   address, a `cavalry:ipc` publication among them, is code 1 with the reason
   `control` and a message saying what to add to the channel; a destination channel
-  that is `cavalry:ipc` or a control channel is code 1 with the reason `destination`;
-  a host that does not resolve is code 9; a 65th destination on the endpoint is code
+  that is `cavalry:ipc` or a control channel, or whose endpoint has no address of the
+  control address's family, an address of the other family written in the channel
+  among them, or is not a loopback address beside a loopback control address, is code
+  1 with the reason `destination` and a message naming the destination, the control
+  address and what to change; a host that resolves to no address at all is code 9; a
+  65th destination on the endpoint is code
   10 and adds one to `driver.registry_full` ("Sizes"); the sender's request queue with
   no room for the destination, or with a request still waiting for room, is code 10 as
   it is for an `add publication`.
-- **remove destination.** The same fields. The driver resolves the destination and
-  removes it from the publication's send endpoint, and answers `operation success`; a
+- **remove destination.** The same fields. The driver removes from the publication's
+  send endpoint the destination whose endpoint, as its add wrote it, is the one this
+  command writes, and resolves nothing, so that a name whose address changed after the
+  add removes the address the add resolved; it answers `operation success`. A
   destination the endpoint does not have is removed by nothing and answered the same,
   as `stop recording` of a stopped recording is. The codes are `add destination`'s,
-  but a full table, which a remove never meets.
+  but code 9, the refusal of an endpoint the control address cannot send to and a
+  full table, which a remove that resolves nothing and adds nothing never meets.
 - **add subscription.** The driver registers the subscription under the command's
   correlation id and answers `subscription ready`. Then, for every live publication whose
   stream id and channel match, now and whenever one is added later, it allocates a
@@ -588,7 +598,7 @@ whose correlation id, registration id or client id is its own and ignores the re
 
 | Code | Name | When |
 | --- | --- | --- |
-| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its control address, its endpoint, its `fc`, or a multicast address (`spec/udp.md`, "What a reader rejects"); or a channel that parses where the command does not take it: `control`, `control-mode` or `fc` on an `add subscription`, an `add publication` that would join a live publication under a different `fc`, a destination command on a publication whose channel names no control address, or a destination channel that is `cavalry:ipc` or a control channel; the message names the reason and the parameter |
+| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its control address, its endpoint, its `fc`, or a multicast address (`spec/udp.md`, "What a reader rejects"); or a channel that parses where the command does not take it: `control`, `control-mode` or `fc` on an `add subscription`, an `add publication` that would join a live publication under a different `fc`, a destination command on a publication whose channel names no control address, or a destination channel that is `cavalry:ipc` or a control channel or whose endpoint has no address the control address can send to; the message names the reason and the parameter |
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
 | 3 | unknown publication | remove publication, add destination or remove destination names a registration id the driver does not know, or another client's |
 | 4 | channel endpoint error | a `cavalry:udp` endpoint's socket could not be opened, bound or connected, and the message carries the operating system's reason and the endpoint; or an `add subscription` waited the closing endpoint wait for its channel's previous receive endpoint to close, and the message names the endpoint and the wait |
@@ -692,8 +702,9 @@ adds one to `client_protocol.rejected_command`; a channel that parses where the
 command does not take it, `control`, `control-mode` or `fc` on an `add subscription`,
 an `add publication` that would join a live publication under a different `fc`, a
 destination command on a publication whose channel names no control address, or a
-destination channel that is `cavalry:ipc` or a control channel, is code 1 with the
-reason `subscription`, `fc`, `control` or `destination` and adds one to
+destination channel that is `cavalry:ipc` or a control channel or whose endpoint has
+no address the control address can send to, is code 1 with the reason
+`subscription`, `fc`, `control` or `destination` and adds one to
 `client_protocol.rejected_command` too; a `cavalry:udp` host that does not resolve is
 code 9; a `cavalry:udp` endpoint whose socket fails is code 4;
 an unknown or another client's registration is code 2 or 3; a registry or the counters

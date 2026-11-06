@@ -156,7 +156,8 @@ publication on the channel goes to every destination, which is multi-destination
 control mode of this version, and a control channel names no `endpoint` and no
 `interface`: the control address is the local address, and the destinations are the
 remote ones. A destination channel is `cavalry:udp?endpoint=<host>:<port>`, of which
-only `endpoint` is read.
+only `endpoint` is read, resolved to an address the control address can send to ("The
+sender").
 
 A publication's channel, with an endpoint or a control address, may name
 `fc=max` or `fc=min`, the *flow control* strategy of "The sender": `max`, the default,
@@ -188,8 +189,19 @@ buffer. On a channel with an endpoint the socket is connected to the endpoint an
 bound to the interface when one is named, and every datagram goes to the endpoint. On
 a control channel the socket is bound to the control address and connected to
 nothing, and the endpoint keeps a table of *destinations*, at most the destinations
-bound of "Values", each a resolved endpoint address, added and removed by the
-commands and gone when the endpoint closes; every datagram of every publication on
+bound of "Values", each the endpoint its add named, as written, and the address that
+endpoint resolved to, added and removed by the commands and gone when the endpoint
+closes. A destination is resolved once, when it is added, to the first address of the
+control address's family, IPv4 or IPv6, that the resolver returns, since a socket
+bound to the control address sends to no address of the other family; and when the
+control address is a loopback address the destination's must be one too, since the
+operating system sends from a loopback address to no other host. A destination with no
+such address is refused when it is added (`spec/client-protocol.md`, "Commands", add
+destination), as a connected socket's `connect` refuses an endpoint of the other
+family beside an interface, so that the table holds no destination the socket can
+never send to. A remove names the endpoint as its add wrote it and resolves nothing,
+so a name whose address changed after the add removes the address the add resolved.
+Every datagram of every publication on
 the endpoint, setup frames, data, heartbeats and retransmits, goes to each destination
 in the order they were added, the datagrams per burst of "Values" to each, so that a
 cycle sends at most that many times the destinations. The control frames a
@@ -204,8 +216,10 @@ joins at the producer's; no status message arrives, so the publication stays not
 connected, or disconnects at the connection timeout once its last destination is
 removed. The counters of a send, `sender.bytes_sent`, `sender.frames_sent`,
 `sender.setups_sent`, `sender.heartbeats_sent` and `sender.retransmitted_bytes`,
-count each destination's send, so a frame to three destinations counts three times
-and a burst to none counts nothing. `channel.destinations`, keyed as `channel.status`
+count each destination's send, and `sender.short_sends` and `sender.send_failed` each
+destination's short or refused send, so a frame to three destinations counts three
+times, a datagram two destinations refused counts two, and a burst to none counts
+nothing. `channel.destinations`, keyed as `channel.status`
 is, counts the endpoint's destinations. Per publication, on every duty cycle, with p
 the sender position and L the sender limit:
 
@@ -220,9 +234,21 @@ the sender position and L the sender limit:
    advances by what was sent, a padding frame counted as sent whether or not it was
    put on the wire. A datagram the socket did not take whole leaves p at its first
    frame and counts `sender.short_sends`; a send the socket refused counts
-   `sender.send_failed`; on a control channel a datagram some destination did not take
-   whole is one the socket did not take whole, and the destinations that took it get
-   it again on the next cycle, a duplicate their receivers drop as any duplicate. A
+   `sender.send_failed` and leaves p there too, so the burst goes again on the next
+   cycle. On a control channel the burst goes to each destination, and p advances by
+   the datagrams every destination took whole: the destinations that took more get
+   those again on the next cycle, a duplicate their receivers drop as any duplicate,
+   so that a socket short of room, one that refuses with `EAGAIN` or `ENOBUFS` on
+   Linux, or a send interrupted, `EINTR`, costs no destination a frame. A destination
+   the socket refused for any other reason, a reason of the destination's own such as
+   no route to it from the control address, is not waited for: the burst's datagrams
+   from the one refused on are lost to that destination alone, as datagrams lost
+   between the hosts are, and its receiver NAKs them as it NAKs any loss ("The
+   receiver", step 3), so that a destination the socket cannot reach holds back none
+   of the others; when the socket refused every destination so, p advances by none of
+   the burst, as on an endpoint. Step 4's retransmit moves through its range by the
+   same rule, and a setup frame, heartbeat or RTT answer the socket refuses to a
+   destination is sent again when its own step next sends one. A
    cycle with a frame to send and L − p ≤ 0, or with a committed
    frame that L − p does not cover whole, counts `sender.flow_control_limited` once, on
    entry into that state.
@@ -471,7 +497,9 @@ there is error code 4 to that command, with nothing registered and no counter ke
 initializing is the moment between the slot and the socket, which a client never
 observes. No failure on a live socket moves an endpoint to errored in this version: a
 send the operating system refuses is counted in `sender.send_failed` and the burst is
-retried on the next cycle as a short send is; a port unreachable the connected socket
+retried on the next cycle as a short send is, on a control channel for a refusal of
+the socket's own and not for a destination's ("The sender", step 2); a port
+unreachable the connected socket
 reports after an ICMP error, `ECONNREFUSED` on Linux, the normal case for a publisher
 started before its subscriber or whose subscriber's driver restarts, is counted the
 same way and ignored, and so are `EAGAIN`, `ENOBUFS` and `EINTR`; a receive the
@@ -505,7 +533,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.setups_sent`, `sender.heartbeats_sent` | a setup frame or a heartbeat is sent; once per destination on a control channel |
 | `sender.retransmits_sent`, `sender.retransmitted_bytes` | a NAK is answered; the bytes once per destination on a control channel |
 | `sender.retransmit_overflow` | a NAK for another range arrives while a retransmit is outstanding |
-| `sender.short_sends`, `sender.send_failed` | the socket took part of a datagram, or refused one |
+| `sender.short_sends`, `sender.send_failed` | the socket took part of a datagram, or refused one; once per destination on a control channel |
 | `sender.flow_control_limited` | a publication enters the state of having a frame to send and no window |
 | `sender.naks_received`, `sender.naks_ignored` | a NAK arrives; one lies outside the resend window, or its term offset is not below the publication's term length or its range runs past it (ADR 0043) |
 | `sender.status_messages_received`, `sender.status_messages_rejected` | a status message arrives; one without the send-setup flag lies outside the window or its consumption term offset is not below the publication's term length (ADR 0043), or one with the flag asks a publication at its end of stream for a setup; an elicit the sender answers with a setup frame is not rejected |
@@ -604,8 +632,9 @@ code 1 with the reason in the message; then `host` (the name does not resolve), 
 code 9. A string wrong in two ways reports the earlier check, as the vectors pin. The
 socket that cannot be opened, bound or connected is error code 4 with the operating
 system's reason. The driver's own checks on a channel that parses, a control channel
-or `fc` on an `add subscription`, a join under a different `fc`, and a destination
-channel that is `cavalry:ipc` or a control channel, are error code 1 too
+or `fc` on an `add subscription`, a join under a different `fc`, a destination
+channel that is `cavalry:ipc` or a control channel, and a destination with no address
+the control address can send to ("The sender"), are error code 1 too
 (`spec/client-protocol.md`, "What the driver rejects").
 
 ## Vectors

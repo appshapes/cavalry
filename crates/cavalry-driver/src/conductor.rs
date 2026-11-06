@@ -2360,9 +2360,6 @@ impl Conductor {
         }
     }
 
-    /// Resolves a `cavalry:udp` channel's endpoint and interface once, on the control
-    /// plane, answering code 9 for a name that does not resolve (`spec/udp.md`, "The
-    /// channel URI").
     /// Where a publication's channel sends (`spec/udp.md`, "The channel URI"; ADR 0053):
     /// a control channel's control address resolved once, code 9 when it does not
     /// resolve, or the endpoint and interface as `resolve_channel` resolves them.
@@ -2400,6 +2397,9 @@ impl Conductor {
         })
     }
 
+    /// Resolves a `cavalry:udp` channel's endpoint and interface once, on the control
+    /// plane, answering code 9 for a name that does not resolve (`spec/udp.md`, "The
+    /// channel URI").
     fn resolve_channel(
         &mut self,
         correlation_id: i64,
@@ -2505,13 +2505,16 @@ impl Conductor {
     }
 
     /// `add subscription` on a `cavalry:udp` channel (`spec/client-protocol.md`,
-    /// "Commands"; `spec/udp.md`, "The receiver"; ADR 0042): the host is resolved once,
-    /// code 9 when it does not; the first subscription on the resolved channel binds its
-    /// receive endpoint, one socket bound to the endpoint and set non-blocking, code 4
-    /// when the operating system refuses, with the five counters of `channel.*` and
-    /// `channel.opened`, handed to the receiver with the list its interests live in; the
-    /// subscription is registered on the endpoint, the receiver told the stream is
-    /// wanted, and `subscription ready` names the endpoint's `channel.status` counter.
+    /// "Commands"; `spec/udp.md`, "The receiver"; ADR 0042): a channel that names
+    /// `control`, `control-mode` or `fc`, a publication's keys, is code 1 with the reason
+    /// `subscription`, counted in `client_protocol.rejected_command`, with nothing
+    /// registered; the host is resolved once, code 9 when it does not; the first
+    /// subscription on the resolved channel binds its receive endpoint, one socket bound
+    /// to the endpoint and set non-blocking, code 4 when the operating system refuses,
+    /// with the five counters of `channel.*` and `channel.opened`, handed to the receiver
+    /// with the list its interests live in; the subscription is registered on the
+    /// endpoint, the receiver told the stream is wanted, and `subscription ready` names
+    /// the endpoint's `channel.status` counter.
     /// An image already live on the endpoint and stream gets a `subscription.position`
     /// for the client at the image's rebuild position, an `available image`, and a
     /// reader with the receiver. A registry at capacity, a counters file with no free
