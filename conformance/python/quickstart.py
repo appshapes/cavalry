@@ -125,24 +125,42 @@ class Receiver:
             fail(f"{self.name}: {count} more fragment(s) after all {MESSAGES} messages")
 
 
+def refused(name, position, sent, until):
+    """A claim refused with `position`, below zero: fail at once on a code that does not
+    pass, ERROR with the ABI's error, CLOSED or MAX_POSITION_EXCEEDED, or once the round's
+    10 s have passed, saying how far the round got; else return, to claim again."""
+    if position == cavalry.ERROR:
+        abi = cavalry.library()
+        raise cavalry.CavalryError("cavalry_publication_try_claim", abi.cavalry_errcode(),
+                                   abi.cavalry_errmsg().decode("utf-8", "replace"))
+    if position in (cavalry.CLOSED, cavalry.MAX_POSITION_EXCEEDED):
+        fail(f"{name}: try_claim returned {CODE_NAMES[position]} ({position}) after {sent} of {MESSAGES} messages")
+    if time.monotonic() > until:
+        fail(f"{name}: published {sent} of {MESSAGES} in {WAIT_SECONDS:.0f} s; the last claim returned "
+             f"{CODE_NAMES.get(position, position)} ({position})")
+
+
+def poll_or_fail(name, subscription, handler, received):
+    """One poll of up to 16 fragments: the count, or a failure with the subscription's
+    fault, saying how far the round got."""
+    count = subscription.poll(handler, 16)
+    if count < 0:
+        code, session_id, position = subscription.fault()
+        fail(f"{name}: poll stopped on fault {code} of session {session_id} at position {position} after {received} of "
+             f"{MESSAGES} messages; {cavalry.library().cavalry_errmsg().decode('utf-8', 'replace')}")
+    return count
+
+
 def publish_and_receive(publication, receiver):
     until = deadline()
     i = 0
     while i < MESSAGES:
         # The image joins on a poll; take its constants once a frame from it is read.
-        receiver.subscription.poll(receiver.on_fragment, 16)
+        poll_or_fail(receiver.name, receiver.subscription, receiver.on_fragment, receiver.next)
         receiver.take_constants()
         position = publication.try_claim(BODY)
-        if position == cavalry.ERROR:
-            abi = cavalry.library()
-            raise cavalry.CavalryError("cavalry_publication_try_claim", abi.cavalry_errcode(),
-                                       abi.cavalry_errmsg().decode("utf-8", "replace"))
-        if position in (cavalry.CLOSED, cavalry.MAX_POSITION_EXCEEDED):
-            fail(f"{receiver.name}: try_claim returned {CODE_NAMES[position]} ({position}) after {i} of {MESSAGES} messages")
         if position < 0:
-            if time.monotonic() > until:
-                fail(f"{receiver.name}: published {i} of {MESSAGES} in {WAIT_SECONDS:.0f} s; the last claim returned "
-                     f"{CODE_NAMES.get(position, position)} ({position})")
+            refused(receiver.name, position, i, until)
             continue
         claim = publication.claim
         claim[:8] = i.to_bytes(8, "little")
@@ -153,7 +171,7 @@ def publish_and_receive(publication, receiver):
         i += 1
     until = deadline()
     while receiver.next < MESSAGES:
-        receiver.subscription.poll(receiver.on_fragment, 16)
+        poll_or_fail(receiver.name, receiver.subscription, receiver.on_fragment, receiver.next)
         receiver.take_constants()
         if time.monotonic() > until:
             fail(f"{receiver.name}: received {receiver.next} of {MESSAGES} in {WAIT_SECONDS:.0f} s")
@@ -328,27 +346,35 @@ def main():
             bare[0] += 1
 
         constant = bytes(range(BODY))
+        name = "the measured round"
         until = deadline()
-        while bare_sub.poll(count, 16) >= 0 and bare_pub.try_claim(BODY) < 0:
-            if time.monotonic() > until:
-                fail("the measured round's publication did not connect in 10 s")
+        while True:
+            poll_or_fail(name, bare_sub, count, bare[0])
+            position = bare_pub.try_claim(BODY)
+            if position >= 0:
+                break
+            refused(name, position, 0, until)
         bare_pub.claim[:] = constant
         bare_pub.commit()
         sent, received_before = 1, bare[0]
         blocks_before = sys.getallocatedblocks()
         traced_before = tracemalloc.get_traced_memory()[0]
         snapshot_before = tracemalloc.take_snapshot()
+        until = deadline()
         while sent < MESSAGES:
-            if bare_pub.try_claim(BODY) >= 0:
+            position = bare_pub.try_claim(BODY)
+            if position >= 0:
                 bare_pub.claim[:] = constant
                 bare_pub.commit()
                 sent += 1
-            bare_sub.poll(count, 16)
+            else:
+                refused(name, position, sent, until)
+            poll_or_fail(name, bare_sub, count, bare[0])
         until = deadline()
         while bare[0] < MESSAGES:
-            bare_sub.poll(count, 16)
+            poll_or_fail(name, bare_sub, count, bare[0])
             if time.monotonic() > until:
-                fail(f"the measured round received {bare[0]} of {MESSAGES} in {WAIT_SECONDS:.0f} s")
+                fail(f"{name}: received {bare[0]} of {MESSAGES} in {WAIT_SECONDS:.0f} s")
         snapshot_after = tracemalloc.take_snapshot()
         traced_after, traced_peak = tracemalloc.get_traced_memory()
         blocks_after = sys.getallocatedblocks()
@@ -375,7 +401,7 @@ def main():
         replayed = Receiver("replay", replay_sub)
         until = deadline()
         while True:
-            replay_sub.poll(replayed.on_fragment, 16)
+            poll_or_fail("replay", replay_sub, replayed.on_fragment, replayed.next)
             replayed.take_constants()
             done, ended_at, reason = replay.ended()
             if replayed.next >= MESSAGES and done:
