@@ -31,11 +31,14 @@ p99.99 and no runs list (docs/how-to/run-the-bench.md, step 4); a join carries i
 through as such, each percentile the larger of the row's and the new process's and the
 p99.99 the slowest run of both, still with no list (card 221). Only
 the rows a message passes through, claim_commit_*, one_way_* and udp_round_trip_*, can
-fail the gate; the timer and slot_padding_* rows hold no Cavalry code, they probe the host
-and the clock at 30 to 60 ns, where one 10 ns step of the clock is 15 to 33 percent, and
-they are printed with their change marked "reported" (ADR 0017), as is udp_one_way_*, the
-one-way row across the two bench hosts, which carries the offset between their clocks
-(ADR 0039, ADR 0044).
+fail the gate, and of those not the *_udp_mdc rows; the timer and slot_padding_* rows hold
+no Cavalry code, they probe the host and the clock at 30 to 60 ns, where one 10 ns step of
+the clock is 15 to 33 percent, and they are printed with their change marked "reported"
+(ADR 0017), as is udp_one_way_*, the one-way row across the two bench hosts, which carries
+the offset between their clocks (ADR 0039, ADR 0044), and as are claim_commit_*_udp_mdc
+and one_way_*_udp_mdc, the multi-destination cast rows: every isolated core of both bench
+hosts is taken, and they join the gate with the host change that gives them cores (ADR
+0052, feature 1).
 
     bench-compare.py                        compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>               compare that result file instead

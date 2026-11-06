@@ -159,10 +159,16 @@ shared runner is
    every row's 21 runs spread 10 to 20 percent inside one process, which a 5 percent
    rule on medians would fail on an unchanged commit; the slowest run leaves about 20
    percent between a row's median and its failing number. Only the rows a message passes
-   through, `claim_commit_*` and `one_way_*`, can fail; the `timer` and
-   `slot_padding_*` rows run no Cavalry code and sit where one 10 ns step of the clock
-   is 15 to 33 percent, so their change is printed and marked `reported`
+   through, `claim_commit_*`, `one_way_*` and `udp_round_trip_*`, can fail; the `timer`
+   and `slot_padding_*` rows run no Cavalry code and sit where one 10 ns step of the
+   clock is 15 to 33 percent, so their change is printed and marked `reported`
    ([ADR 0017](../decisions/0017-gate-the-message-rows-and-report-the-host-probes.md)).
+   Some message rows are `reported` and never fail as well: `udp_one_way_*`,
+   which carries the two hosts' clock offset (step 5), and the multi-destination cast
+   rows, `claim_commit_*_udp_mdc` and `one_way_*_udp_mdc`, since every isolated core of
+   both bench hosts is taken and they join the gate with the host change that gives
+   them cores
+   ([ADR 0052](../decisions/0052-build-raft-on-the-durable-log-fifth.md), feature 1).
    Max is shown but does not fail the gate. A profile with no baseline is reported and
    passes: a laptop has none unless you record one, and the shared CI runners have
    none on purpose, because their own noise moved p99.99 by 40 to 100 percent between

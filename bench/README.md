@@ -95,7 +95,9 @@ nothing depends on it.
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
   for the profile, on the `claim_commit`, `one_way` and `udp_round_trip` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017), and so is `udp_one_way`, which
-  carries two clocks' offset (ADR 0044). The bench hosts' profiles have
+  carries two clocks' offset (ADR 0044), and so are the `_udp_mdc` rows,
+  `claim_commit_32_udp_mdc` and `one_way_32_udp_mdc`, until a host change gives them
+  cores (ADR 0052, feature 1). The bench hosts' profiles have
   baselines, `bench-linux` and `grip-linux` with their `-unchecked` twins, grip's
   recorded on 2026-10-31 at 0782ec5 from four of its job's processes at the tree, and
   CI runs the gate on each host, as `bench (linux)` and `bench (grip)`
