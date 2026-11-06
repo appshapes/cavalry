@@ -129,6 +129,23 @@
     },
     {
       "kind": "message",
+      "name": "session-event-error-channel",
+      "stream": "egress",
+      "bytes": "2c00020001000000ffffffffffffffff2900000000000000030000000000000000000000010000000000000000e40b540200000018000000696e76616c696420726573706f6e7365206368616e6e656c",
+      "template": "session-event",
+      "fields": {
+        "cluster_session_id": -1,
+        "correlation_id": 41,
+        "leadership_term_id": 3,
+        "leader_member_id": 0,
+        "code": 1,
+        "version": 0,
+        "leader_heartbeat_timeout_ns": 10000000000,
+        "detail": "invalid response channel"
+      }
+    },
+    {
+      "kind": "message",
       "name": "session-event-closed-timeout",
       "stream": "egress",
       "bytes": "2c000200010000000700000000000000ffffffffffffffff030000000000000000000000040000000000000000e40b54020000000700000054494d454f5554",
@@ -169,6 +186,21 @@
         "correlation_id": 41,
         "response_stream_id": 102,
         "version": 0,
+        "response_channel": "cavalry:udp?endpoint=10.0.0.9:31000",
+        "encoded_credentials": "",
+        "client_info": ""
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-connect-other-major",
+      "stream": "ingress",
+      "bytes": "10000300010000002900000000000000660000000000010023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a33313030300000000000000000",
+      "template": "session-connect",
+      "fields": {
+        "correlation_id": 41,
+        "response_stream_id": 102,
+        "version": 65536,
         "response_channel": "cavalry:udp?endpoint=10.0.0.9:31000",
         "encoded_credentials": "",
         "client_info": ""
@@ -572,13 +604,6 @@
       "name": "reject-version-field-major",
       "stream": "consensus",
       "bytes": "20003200010000000200000000000000000001000000000002000000000000000100000000000100",
-      "error": "version"
-    },
-    {
-      "kind": "message",
-      "name": "reject-version-connect-major",
-      "stream": "ingress",
-      "bytes": "10000300010000002900000000000000660000000000010023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a33313030300000000000000000",
       "error": "version"
     },
     {
@@ -1111,6 +1136,24 @@
     },
     {
       "kind": "members",
+      "name": "members-grammar-id-not-ascii-digit",
+      "string": "1\u00b2,a:1,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-port-not-ascii-digit",
+      "string": "0,a:\u0663,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-ipv6-unbracketed",
+      "string": "0,::1:20000,[::1]:20001,[::1]:20002,[::1]:20003,[::1]:20004",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
       "name": "members-grammar-before-duplicate",
       "string": "0,a:1,a:2,a:3,a:4,a:5|0,b:1,b:2,b:3,b",
       "error": "members-grammar"
@@ -1630,6 +1673,216 @@
       "fields": {
         "leader": true,
         "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-unanimous",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            98304
+          ],
+          [
+            2,
+            65536
+          ]
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "nominate": true,
+        "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-one-silent-before-deadline",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            98304
+          ],
+          null
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-one-silent-at-deadline",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            98304
+          ],
+          null
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": true,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-one-ahead-reported",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            131072
+          ],
+          [
+            3,
+            65536
+          ]
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-one-ahead-at-deadline",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            131072
+          ],
+          [
+            3,
+            65536
+          ]
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": true,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-ahead-by-term",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            0
+          ],
+          [
+            2,
+            131072
+          ],
+          [
+            2,
+            131072
+          ]
+        ],
+        "own": [
+          3,
+          0
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "nominate": true,
+        "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-short-of-quorum",
+      "rule": "candidate",
+      "inputs": {
+        "members": 5,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            4,
+            0
+          ],
+          null,
+          null,
+          null
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
       }
     },
     {

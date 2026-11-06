@@ -196,11 +196,15 @@ VECTORS = [
             dict(SESSION_EVENT_OK, cluster_session_id=NULL, code=1), {"detail": "invalid client version"}),
     message("session-event-error-limit", 2, "egress",
             dict(SESSION_EVENT_OK, cluster_session_id=NULL, code=1), {"detail": "concurrent session limit"}),
+    message("session-event-error-channel", 2, "egress",
+            dict(SESSION_EVENT_OK, cluster_session_id=NULL, code=1), {"detail": "invalid response channel"}),
     message("session-event-closed-timeout", 2, "egress",
             dict(SESSION_EVENT_OK, correlation_id=NULL, code=4), {"detail": "TIMEOUT"}),
     message("session-connect", 3, "ingress", SESSION_CONNECT,
             {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": "quickstart 0.1"}),
     message("session-connect-empty-info", 3, "ingress", SESSION_CONNECT,
+            {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": ""}),
+    message("session-connect-other-major", 3, "ingress", dict(SESSION_CONNECT, version=65536),
             {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": ""}),
     message("session-close", 4, "ingress", SESSION_CLOSE),
     message("session-keepalive", 5, "ingress", SESSION_CLOSE),
@@ -243,9 +247,6 @@ VECTORS += [
     message("reject-schema", 55, "consensus", COMMIT, error="schema", bytes_=encode(55, COMMIT, schema_id=2)),
     message("reject-version-header", 55, "consensus", COMMIT, error="version", bytes_=encode(55, COMMIT, version=1)),
     message("reject-version-field-major", 50, "consensus", dict(CANVASS, protocol_version=65536), error="version"),
-    message("reject-version-connect-major", 3, "ingress", dict(SESSION_CONNECT, version=65536), error="version",
-            bytes_=encode(3, dict(SESSION_CONNECT, version=65536),
-                          {"response_channel": CHANNEL, "encoded_credentials": b"", "client_info": ""})),
     message("reject-template-reserved", 55, "consensus", COMMIT, error="template",
             bytes_=HEADER.pack(16, 7, SCHEMA_ID, VERSION) + bytes(16)),
     message("reject-template-unknown", 55, "consensus", COMMIT, error="template",
@@ -280,13 +281,19 @@ VECTORS += [
 # ---- members strings ----------------------------------------------------------------
 
 
+def ascii_digits(text):
+    return text != "" and all("0" <= c <= "9" for c in text)
+
+
 def parse_endpoint(text):
     host, sep, port = text.rpartition(":")
     if not sep or not host:
         raise ValueError("members-grammar")
-    if host.startswith("[") and host.endswith("]"):
+    if host.startswith("[") and host.endswith("]") and len(host) > 2:
         host = host[1:-1]
-    if not port.isdigit() or not 1 <= int(port) <= 65535:
+    elif ":" in host:
+        raise ValueError("members-grammar")  # an IPv6 literal is written in brackets
+    if not ascii_digits(port) or not 1 <= int(port) <= 65535:
         raise ValueError("members-grammar")
     return {"host": host, "port": int(port)}
 
@@ -300,7 +307,7 @@ def parse_members(text, self_id=None):
         fields = item.split(",")
         if len(fields) != 6:
             raise ValueError("members-grammar")
-        if not fields[0].isdigit() or int(fields[0]) > 2**31 - 1:
+        if not ascii_digits(fields[0]) or int(fields[0]) > 2**31 - 1:
             raise ValueError("members-grammar")
         member = {"id": int(fields[0])}
         for name, endpoint in zip(("ingress", "consensus", "log", "catchup", "archive"), fields[1:]):
@@ -343,6 +350,9 @@ VECTORS += [
     members("members-grammar-empty-host", "0,:1,a:2,a:3,a:4,a:5"),
     members("members-grammar-port-zero", "0,a:0,a:2,a:3,a:4,a:5"),
     members("members-grammar-port-too-large", "0,a:65536,a:2,a:3,a:4,a:5"),
+    members("members-grammar-id-not-ascii-digit", "1\u00b2,a:1,a:2,a:3,a:4,a:5"),
+    members("members-grammar-port-not-ascii-digit", "0,a:\u0663,a:2,a:3,a:4,a:5"),
+    members("members-grammar-ipv6-unbracketed", "0,::1:20000,[::1]:20001,[::1]:20002,[::1]:20003,[::1]:20004"),
     members("members-grammar-before-duplicate", ONE + "|0,b:1,b:2,b:3,b"),
     members("members-duplicate", ONE + "|0,b:1,b:2,b:3,b:4,b:5"),
     members("members-count", EIGHT + "|8,h8:1,h8:2,h8:3,h8:4,h8:5"),
@@ -378,6 +388,20 @@ def ballot(count, votes, timeout_passed):
     if timeout_passed and all(v for v in cast.values()) and sum(1 for v in cast.values() if v) >= quorum(count):
         return {"leader": True, "unanimous": False}
     return {"leader": False, "unanimous": False}
+
+
+def candidate(count, reports, own, deadline_passed):
+    """spec/cluster.md, "canvass": a unanimous candidate at once when every member has reported
+    and none has a log ahead of the member's own; a quorum candidate once the deadline has
+    passed when those that reported with a log not ahead, the member itself among them, make a
+    quorum. `reports[i]` is member i's (term, position) or None; member 0 is the member itself."""
+    reported = [r for r in reports if r is not None]
+    not_ahead = [r for r in reported if at_least(own[0], own[1], r[0], r[1])]
+    if len(reported) == count and len(not_ahead) == count:
+        return {"nominate": True, "unanimous": True}
+    if deadline_passed and len(not_ahead) >= quorum(count):
+        return {"nominate": True, "unanimous": False}
+    return {"nominate": False, "unanimous": False}
 
 
 def entry_position(position, length, mtu):
@@ -457,6 +481,27 @@ VECTORS += [
     arithmetic("ballot-single-member", "ballot",
                {"members": 1, "votes": [{"member": 0, "vote": True}], "timeout_passed": False},
                {"leader": True, "unanimous": True}),
+    arithmetic("candidate-unanimous", "candidate",
+               {"members": 3, "reports": [[3, 98304], [3, 98304], [2, 65536]], "own": [3, 98304],
+                "deadline_passed": False}, {"nominate": True, "unanimous": True}),
+    arithmetic("candidate-one-silent-before-deadline", "candidate",
+               {"members": 3, "reports": [[3, 98304], [3, 98304], None], "own": [3, 98304],
+                "deadline_passed": False}, {"nominate": False, "unanimous": False}),
+    arithmetic("candidate-one-silent-at-deadline", "candidate",
+               {"members": 3, "reports": [[3, 98304], [3, 98304], None], "own": [3, 98304],
+                "deadline_passed": True}, {"nominate": True, "unanimous": False}),
+    arithmetic("candidate-one-ahead-reported", "candidate",
+               {"members": 3, "reports": [[3, 98304], [3, 131072], [3, 65536]], "own": [3, 98304],
+                "deadline_passed": False}, {"nominate": False, "unanimous": False}),
+    arithmetic("candidate-one-ahead-at-deadline", "candidate",
+               {"members": 3, "reports": [[3, 98304], [3, 131072], [3, 65536]], "own": [3, 98304],
+                "deadline_passed": True}, {"nominate": True, "unanimous": False}),
+    arithmetic("candidate-ahead-by-term", "candidate",
+               {"members": 3, "reports": [[3, 0], [2, 131072], [2, 131072]], "own": [3, 0],
+                "deadline_passed": False}, {"nominate": True, "unanimous": True}),
+    arithmetic("candidate-short-of-quorum", "candidate",
+               {"members": 5, "reports": [[3, 98304], [4, 0], None, None, None], "own": [3, 98304],
+                "deadline_passed": True}, {"nominate": False, "unanimous": False}),
     arithmetic("entry-position-one-frame", "entry-position",
                {"position": 65536, "length": 56, "mtu": 1408}, entry_position(65536, 56, 1408)),
     arithmetic("entry-position-aligned", "entry-position",
