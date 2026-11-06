@@ -37,7 +37,17 @@ run a goroutine's next cgo call on another OS thread and the ABI's error is the 
 thread's, so for Go it also fails any function of the package that reads that error,
 through `check` or `lastError`, without `runtime.LockOSThread()` and then
 `defer runtime.UnlockOSThread()` before its first ABI call (clients/go/README.md, "The
-thread's error").
+thread's error"). For Java, read from the eleven files of `clients/jvm/src/com/appshapes/cavalry` by
+the same tokenizer, the forms are `synchronized`, as a modifier or a block, the locks of
+`java.util.concurrent` and a lock taken on any receiver, `.lock(`, `.tryLock(` or
+`.acquire(`, a blocking wait, `wait`, `join`, `await`, `park`, `sleep` or `take`, a future
+or an executor, a thread started, `throw`, building an exception, and `new`, Java's
+allocation; the one exception built on the per-message path is the `HandlerException`
+that `poll` throws after its ABI call; the compiler demands a `catch (Throwable)` around
+every `invokeExact`, a block that cannot run once the handle is bound, so what that block
+throws is not a raise on the path; and `Header.ensure` is the guard that throws for a
+header read outside its handler call, before the ABI is reached, as the Node addon's
+argument readers throw for an argument the ABI cannot take.
 
 It fails on generated code under `clients/` in a language it has no rules for, and on a
 package in which it finds none of the per-message functions, so that a client cannot slip
@@ -165,6 +175,41 @@ RULES = {
         # its first ABI call (clients/go/README.md, "The thread's error").
         "thread_readers": ["check", "lastError"],
     },
+    # The JVM client calls the ABI through java.lang.foreign's downcall handles
+    # (clients/jvm/README.md): the per-message methods are in Publication.java,
+    # Subscription.java and Header.java, the upcall the ABI reaches is
+    # Subscription.onFragment, and Abi.java holds the helpers they call, so every file of
+    # the package is read. `poll` builds the HandlerException after its ABI call, the one
+    # exception built on the path; the compiler demands a `catch (Throwable)` around every
+    # `invokeExact`, whose block cannot run once the handle is bound, so a throw inside it
+    # is not one; and `Header.ensure` is the guard that throws for a header read outside
+    # its handler call, before the ABI is reached.
+    "jvm": {
+        "file": os.path.join("src", "com", "appshapes", "cavalry", "Publication.java"),
+        "files": [os.path.join("src", "com", "appshapes", "cavalry", name) for name in (
+            "Abi.java", "CavalryException.java", "Client.java", "FragmentHandler.java", "HandlerException.java",
+            "Header.java", "Image.java", "Publication.java", "Recording.java", "Replay.java", "Subscription.java")],
+        "functions": [
+            "Publication.tryClaim",
+            "Publication.setReservedValue",
+            "Publication.commit",
+            "Publication.abort",
+            "Publication.offer",
+            "Subscription.poll",
+            "Subscription.onFragment",
+            "Header.frameLength",
+            "Header.version",
+            "Header.flags",
+            "Header.type",
+            "Header.termOffset",
+            "Header.sessionId",
+            "Header.streamId",
+            "Header.termId",
+            "Header.reservedValue",
+        ],
+        "raise_after": ("Subscription.poll", "cavalry_subscription_poll.invokeExact"),
+        "guards": ["Header.ensure"],
+    },
 }
 HELP = "see clients/README.md, \"What every client must pass\""
 WHY = {
@@ -174,6 +219,7 @@ WHY = {
              "returns, nothing else on the per-message path raises",
     "promise": "no promise on the per-message path: the call returns when the ABI returns",
     "wait": "no blocking wait on the per-message path",
+    "thread": "no thread started on the per-message path: the call returns when the ABI returns",
     "goroutine": "no goroutine started on the per-message path: the call returns when the ABI returns",
     "channel": "no channel on the per-message path: a send or receive may block",
     "alloc": "no allocation on the per-message path",
@@ -838,7 +884,245 @@ def go_thread_findings(language: str, module: GoModule, readers) -> list[str]:
     return findings
 
 
-CHECKERS = {"python": python_findings, "node": node_findings, "go": go_findings}
+# ------------------------------------------------------------------ Java, the JVM client
+
+JAVA_FORMS = (
+    # (kind, pattern over the code with comments and strings blanked, what the finding says)
+    ("threading", re.compile(r"(?<![\w.])synchronized(?![\w])"), "uses `synchronized`"),
+    ("threading", re.compile(r"(?<![\w.])java\s*\.\s*util\s*\.\s*concurrent(?![\w])"), "uses `java.util.concurrent`"),
+    ("threading", re.compile(r"(?<![\w.])(?:Reentrant(?:ReadWrite)?Lock|StampedLock|Semaphore|CountDownLatch|CyclicBarrier"
+                             r"|Phaser|Exchanger|LockSupport)(?![\w])"), "uses a lock class of `java.util.concurrent`"),
+    ("threading", re.compile(r"\.\s*(?:lock|lockInterruptibly|tryLock|acquire|acquireUninterruptibly|acquireShared)\s*\("),
+     "takes a lock, `.lock(`, `.tryLock(` or `.acquire(`"),
+    ("wait", re.compile(r"(?<![\w])(?<!String\.)(?:wait|join|await|awaitUninterruptibly|park|parkNanos|parkUntil|sleep|take)"
+                        r"\s*\("), "blocks, with `wait`, `join`, `await`, `park`, `sleep` or `take`"),
+    ("promise", re.compile(r"(?<![\w.])(?:CompletableFuture|Future|FutureTask|ExecutorService|Executors|ForkJoinPool|Flow)"
+                           r"(?![\w])"), "uses a future or an executor"),
+    ("thread", re.compile(r"(?<![\w.])Thread\s*\.\s*(?:ofVirtual|ofPlatform|startVirtualThread)\s*\(|(?<![\w.])new\s+Thread\s*\("),
+     "starts a thread"),
+    ("raise", re.compile(r"(?<![\w.])throw(?![\w])"), "throws"),
+)
+JAVA_WORDS = {"if", "for", "while", "switch", "catch", "synchronized", "try", "return", "new", "else", "do", "throw",
+              "super", "this", "instanceof", "assert"}
+JAVA_FOREIGN = {"System", "Math", "Long", "Integer", "Short", "Byte", "Boolean", "String", "Objects", "MemorySegment",
+                "MemoryLayout", "Arena", "Linker", "ValueLayout", "FunctionDescriptor", "MethodHandles", "MethodType",
+                "SymbolLookup", "Paths", "Path", "Files", "Runtime", "Thread", "List", "ArrayList"}
+
+
+class JavaModule:
+    """The package's own methods across its files, as `Class.method` for a method and
+    `Class.Class` for a constructor, each with its file, line, head (the modifiers before
+    its name), body and where the body starts, found inside a class body at member level
+    as a name before `(`, its parameters, an optional `throws` list and `{`; the package's
+    own exception classes, those whose `extends` reaches a Throwable; and what each
+    method reaches, as `Module.reach` does for JavaScript. The block of a `catch
+    (Throwable)` that follows a `try` holding `invokeExact` is the compiler's demand and
+    cannot run once the handle is bound, so a form inside it is not on the path; a guard
+    throws for a call made outside the handler call, before the ABI is reached, so its
+    raise is not one either."""
+
+    CLASS = re.compile(r"(?<![\w.])(?:class|interface|record|enum)\s+(\w+)(?:\s*\([^)]*\))?(?:\s+extends\s+([\w.]+))?"
+                       r"(?:\s+implements\s+[\w.,\s]+?)?\s*\{")
+    METHOD = re.compile(r"(?<![\w.])(\w+)\s*\(")
+    CATCH = re.compile(r"\s*catch\s*\(\s*(?:final\s+)?Throwable\s+\w+\s*\)\s*\{")
+
+    def __init__(self, files: list, guards=()):
+        self.files = [(path, blank(text)) for path, text in files]
+        self.functions: dict[str, tuple[str, int, str, str, int, str]] = {}  # label: (file, line, head, body, start, code)
+        self.classes: dict[str, set[str]] = {}
+        self.guards = set(guards)
+        extends: dict[str, str] = {}
+        for path, code in self.files:
+            for m in self.CLASS.finditer(code):
+                name, base = m.group(1), m.group(2)
+                body_start = m.end() - 1
+                body_end = block_end(code, body_start)
+                self.classes.setdefault(name, set())
+                if base:
+                    extends[name] = base.split(".")[-1]
+                i = body_start + 1
+                while i < body_end:
+                    mm = self.METHOD.search(code, i, body_end)
+                    if mm is None:
+                        break
+                    method = mm.group(1)
+                    params_end = self._close(code, mm.end() - 1)
+                    brace = code.find("{", params_end)
+                    semicolon = code.find(";", params_end)
+                    between = code[params_end + 1:brace] if brace >= 0 else ""
+                    if (method in JAVA_WORDS or params_end < 0 or brace < 0 or brace >= body_end
+                            or (0 <= semicolon < brace) or not re.fullmatch(r"\s*(?:throws\s+[\w.,\s]+)?", between)):
+                        i = mm.end()
+                        continue
+                    end = block_end(code, brace)
+                    self.classes[name].add(method)
+                    head = code[max(code.rfind(c, 0, mm.start()) for c in ";{}") + 1:mm.start()]
+                    self.functions[f"{name}.{method}"] = (path, line_of(code, mm.start()), head, code[brace:end], brace, code)
+                    i = end
+        self.exceptions: set[str] = set()
+        while True:
+            more = {name for name, base in extends.items() if name not in self.exceptions
+                    and (base.endswith(("Exception", "Error", "Throwable")) or base in self.exceptions)}
+            if not more:
+                break
+            self.exceptions |= more
+        self.reached: dict[str, dict[str, str]] = {}
+
+    @staticmethod
+    def _close(code: str, start: int) -> int:
+        """The index of the `)` that closes the `(` at `start`, or -1."""
+        depth = 0
+        for i in range(start, len(code)):
+            if code[i] == "(":
+                depth += 1
+            elif code[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+        return -1
+
+    def exempt(self, body: str) -> list:
+        """(start, end) of each `catch (Throwable)` block that follows a `try` block holding
+        `invokeExact`, offsets into `body`."""
+        spans = []
+        for m in re.finditer(r"(?<![\w.])try\s*\{", body):
+            brace = m.end() - 1
+            end = block_end(body, brace)
+            if ".invokeExact(" not in body[brace:end]:
+                continue
+            c = self.CATCH.match(body, end)
+            if c is not None:
+                spans.append((c.end() - 1, block_end(body, c.end() - 1)))
+        return spans
+
+    def callees(self, cls: str, text: str) -> list:
+        """(offset, label) for each call in `text` that reaches one of the package's own
+        methods: `name(` a method of the same class, `new Name(` a class's constructor,
+        `this.name(` the same class's method, `Class.name(` that class's method, and
+        `x.name(` any class's method of that name."""
+        out = []
+        for m in re.finditer(r"(?<![\w.])(?:(new)\s+)?(?:([\w.]+)\s*\.\s*)?(\w+)\s*\(", text):
+            is_new, owner, name = m.group(1), m.group(2), m.group(3)
+            if is_new:
+                if name in self.classes and name in self.classes[name]:
+                    out.append((m.start(), f"{name}.{name}"))
+            elif owner is None:
+                if name in self.classes.get(cls, ()) and name not in JAVA_WORDS:
+                    out.append((m.start(), f"{cls}.{name}"))
+            else:
+                last = owner.split(".")[-1]
+                if last in ("this", "super"):
+                    if name in self.classes.get(cls, ()):
+                        out.append((m.start(), f"{cls}.{name}"))
+                elif last in self.classes:
+                    if name in self.classes[last]:
+                        out.append((m.start(), f"{last}.{name}"))
+                elif last not in JAVA_FOREIGN:
+                    for c, methods in self.classes.items():
+                        if name in methods:
+                            out.append((m.start(), f"{c}.{name}"))
+        return out
+
+    def forms(self, label: str, raise_after):
+        """Each form in the method's own body as (kind, line, text), and each call to the
+        package's own methods as ("call" or "call-allowed", line, callee); a throw or an
+        exception built inside the compiler's catch, in a guard, or on a line after
+        `raise_after` is allowed and not yielded, and a call from there is allowed to
+        raise."""
+        path, line, head, body, start, code = self.functions[label]
+        cls = label.split(".", 1)[0]
+        base = line_of(code, start) - 1
+        spans = self.exempt(body)
+
+        def place(offset):
+            at = base + body.count("\n", 0, offset) + 1
+            allowed = any(a <= offset < b for a, b in spans) or (raise_after is not None and at > raise_after)
+            return at, allowed
+
+        if re.search(r"(?<![\w.])synchronized(?![\w])", head):
+            yield "threading", line, f"is `synchronized` at line {line}"
+        for kind, pattern, what in JAVA_FORMS:
+            for m in pattern.finditer(body):
+                at, allowed = place(m.start())
+                if kind == "raise" and (allowed or label in self.guards):
+                    continue
+                yield kind, at, f"{what} at line {at}"
+        for m in re.finditer(r"(?<![\w.])new\s+([\w.]+)\s*(?:<[^>]*>)?\s*[(\[]", body):
+            name = m.group(1).split(".")[-1]
+            at, allowed = place(m.start())
+            if name in self.exceptions or name.endswith(("Exception", "Error", "Throwable")):
+                if not (allowed or label in self.guards):
+                    yield "raise", at, f"builds {name} at line {at}"
+            else:
+                yield "alloc", at, f"allocates {name} with `new` at line {at}"
+        for offset, callee in self.callees(cls, body):
+            if callee == label:
+                continue
+            at, allowed = place(offset)
+            yield ("call-allowed" if allowed else "call"), at, callee
+
+    def reach(self, label: str) -> dict[str, str]:
+        """{kind: how `label` reaches it}, for the first form of each kind in its body or in
+        the package's methods it calls; memoized, as `Package.reach`. A guard's raise does
+        not reach its callers."""
+        if label in self.reached:
+            return self.reached[label]
+        found: dict[str, str] = {}
+        self.reached[label] = found
+        for kind, line, what in self.forms(label, None):
+            if kind in WHY:
+                found.setdefault(kind, f"{label} {what}")
+            else:
+                for k, how in self.reach(what).items():
+                    if kind == "call-allowed" and k == "raise":
+                        continue
+                    found.setdefault(k, f"{label} calls {what} at line {line}, and {how}")
+        if label in self.guards:
+            found.pop("raise", None)
+        return found
+
+
+def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
+    findings = []
+    package = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(path)))))
+    files = []
+    for name in rules["files"]:
+        file = os.path.join(package, name)
+        if not os.path.exists(file):
+            findings.append(f"{language}: {os.path.relpath(file, ROOT)} is missing; run `python3 clients/generate.py {language}`")
+            continue
+        with open(file, encoding="utf-8") as f:
+            files.append((file, f.read()))
+    module = JavaModule(files, rules.get("guards", ()))
+    present = [name for name in rules["functions"] if name in module.functions]
+    if not present:
+        return findings + [f"{language}: none of the per-message functions {', '.join(rules['functions'])} is in "
+                           f"{os.path.relpath(package, ROOT)}; the generator renamed them or the rules are stale; {HELP}"]
+    for name in rules["functions"]:
+        if name not in module.functions:
+            findings.append(f"{language}: the per-message function {name} is not in {os.path.relpath(package, ROOT)}; {HELP}")
+    allowed_in, abi_call = rules["raise_after"]
+    for name in present:
+        file, line, head, body, start, code = module.functions[name]
+        where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
+        abi_line = None
+        if name == allowed_in:  # the last line that calls the ABI's poll
+            base = line_of(code, start) - 1
+            for m in re.finditer(re.escape(abi_call) + r"\s*\(", body):
+                at = base + body.count("\n", 0, m.start()) + 1
+                abi_line = at if abi_line is None else max(abi_line, at)
+        for kind, at, what in module.forms(name, abi_line):
+            if kind in WHY:
+                findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
+            else:
+                for k, how in module.reach(what).items():
+                    if kind == "call-allowed" and k == "raise":
+                        continue
+                    findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
+    return findings
+
+
+CHECKERS = {"python": python_findings, "node": node_findings, "go": go_findings, "jvm": jvm_findings}
 
 
 def findings(clients: str = CLIENTS) -> list[str]:
@@ -869,7 +1153,7 @@ def main(argv: list[str]) -> int:
         return 1
     languages = [e for e in sorted(os.listdir(CLIENTS)) if e in RULES]
     print(f"lint-clients: {', '.join(languages)}: the per-message functions, and the package's functions they call, "
-          f"hold no lock, no await, no promise, no goroutine, no channel, no allocation and no raise")
+          f"hold no lock, no await, no promise, no goroutine, no channel, no thread, no allocation and no raise")
     return 0
 
 
