@@ -82,7 +82,9 @@ pub(crate) const COMMAND_SCRATCH: usize = 4096 + 64;
 /// What the two threads share. The state is 0 while the client is open and a
 /// [`Closed`] code after; the first thread to close wins, by compare-and-swap.
 pub(crate) struct Shared {
-    state: AtomicI32,
+    /// Loaded by every claim and offer before the limit, so in a slot of its own,
+    /// apart from `last_sent`, which the conductor stores at each keepalive.
+    state: StateSlot,
     /// The driver's clock, nanoseconds since the Unix epoch, when a command was last
     /// sent by either thread.
     last_sent: AtomicI64,
@@ -92,10 +94,17 @@ pub(crate) struct Shared {
     pending: AtomicI64,
 }
 
+/// The client's state word in a 128-byte slot of its own: a publisher loads it on
+/// every claim and offer in its hot loop, and a store to a word beside it would make
+/// that load fetch the line back from the storing core (ADR 0011;
+/// `.claude/rules/data-plane.md`).
+#[repr(C, align(128))]
+struct StateSlot(AtomicI32);
+
 impl Shared {
     pub(crate) fn new(now: i64) -> Self {
         Self {
-            state: AtomicI32::new(0),
+            state: StateSlot(AtomicI32::new(0)),
             last_sent: AtomicI64::new(now),
             pending: AtomicI64::new(NO_PENDING),
         }
@@ -113,12 +122,13 @@ impl Shared {
 
     /// Why the client is closed, or `None` while it is open.
     pub(crate) fn closed(&self) -> Option<Closed> {
-        Closed::from_code(self.state.load(Ordering::Acquire))
+        Closed::from_code(self.state.0.load(Ordering::Acquire))
     }
 
     /// Closes with `reason` unless already closed; returns whether this call closed it.
     pub(crate) fn close(&self, reason: Closed) -> bool {
         self.state
+            .0
             .compare_exchange(0, reason.code(), Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }

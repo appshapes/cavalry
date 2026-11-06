@@ -57,8 +57,10 @@ bench-compare:
 # the client protocol, and the UDP transport's frames, datagram and channel URI),
 # cavalry-shm's (the counters file, the log buffer, the command ring and the broadcast
 # buffer), cavalry-log's, and cavalry-ffi's (the committed C header against the C ABI's
-# vectors, spec/c-abi.md); every vector test also runs in `just test`. A client in
-# clients/ joins here with its own runner.
+# vectors, spec/c-abi.md); every vector test also runs in `just test`. Then each
+# client's runner under conformance/ (conformance/README.md): today
+# conformance/c/run.sh, a C program over the header against a driver of its own
+# (ADR 0051). A client in clients/ joins here with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance
@@ -69,6 +71,7 @@ conformance:
     cargo test -p cavalry-shm --test broadcast_buffer_conformance
     cargo test -p cavalry-log --test conformance
     cargo test -p cavalry-ffi --test conformance
+    conformance/c/run.sh
 
 # Deterministic replay test (CLAUDE.md, gate 1; ADR 0030): a driver on a directory of
 # its own records 100,000 hash-chained messages while a live subscriber prints them,
@@ -101,7 +104,8 @@ lint-header:
     [ "$version" = "0.29.4" ] || { echo "lint-header: cbindgen $version is installed and the header is written by 0.29.4; cargo install --locked cbindgen@0.29.4" >&2; exit 1; }
     tmp=$(mktemp)
     trap 'rm -f "$tmp"' EXIT
-    cbindgen --config crates/cavalry-ffi/cbindgen.toml --crate cavalry-ffi --output "$tmp" 2>/dev/null
+    cbindgen --config crates/cavalry-ffi/cbindgen.toml --crate cavalry-ffi --output "$tmp" 2>"$tmp.err" || { cat "$tmp.err" >&2; echo "lint-header: cbindgen could not write the header from crates/cavalry-ffi; fix what it reported above, then run just lint-header again" >&2; rm -f "$tmp.err"; exit 1; }
+    rm -f "$tmp.err"
     if ! diff -u crates/cavalry-ffi/include/cavalry.h "$tmp"; then
         echo "lint-header: crates/cavalry-ffi/include/cavalry.h differs from what cbindgen writes; regenerate it with 'cbindgen --config crates/cavalry-ffi/cbindgen.toml --crate cavalry-ffi --output crates/cavalry-ffi/include/cavalry.h' and commit it with its ADR (spec/c-abi.md)" >&2
         exit 1
