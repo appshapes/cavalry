@@ -8,8 +8,9 @@
 use cavalry_proto::cluster::{
     Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
     EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
-    ReplicationStop, SnapshotMark, Stream, TimeUnit, VERSION, ballot, candidate, commit_position,
-    entry_position, log_at_least, parse_members, quorum, replication_stop,
+    NewLeadershipTermAction, ReplicationStop, SnapshotMark, Stream, TermFields, TimeUnit, VERSION,
+    ballot, candidate, commit_position, entry_position, log_at_least, new_leadership_term_action,
+    parse_members, quorum, replication_stop,
 };
 use serde_json::{Map, Value, json};
 
@@ -434,6 +435,25 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 int(inputs, "next_log_position"),
             );
             json!({"replicate": replicate, "stop_position": stop_position})
+        }
+        "new-leadership-term" => {
+            let m = &inputs["message"];
+            let NewLeadershipTermAction {
+                action,
+                truncate_to,
+                stop_position,
+            } = new_leadership_term_action(
+                int(inputs, "log_leadership_term_id"),
+                int(inputs, "append_position"),
+                TermFields {
+                    log_leadership_term_id: int(m, "log_leadership_term_id"),
+                    next_leadership_term_id: int(m, "next_leadership_term_id"),
+                    next_term_base_log_position: int(m, "next_term_base_log_position"),
+                    next_log_position: int(m, "next_log_position"),
+                    term_base_log_position: int(m, "term_base_log_position"),
+                },
+            );
+            json!({"action": action.name(), "truncate_to": truncate_to, "stop_position": stop_position})
         }
         "entry-position" => {
             let after = entry_position(
