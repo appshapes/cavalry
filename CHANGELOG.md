@@ -1595,3 +1595,10 @@ user-visible change, added in the same commit as the change. The format follows
   still open, as before
   ([ADR 0055](docs/decisions/0055-answer-an-add-publication-on-a-closing-send-endpoint-with-a-retry.md);
   card 225).
+- Under `fc=min`, a receiver whose stream ended stays in a closed publication's table
+  until the linger ends, so `sender.flow_control_receivers` keeps counting it, and
+  `cavalry doctor` no longer warns for 5 s after every clean close on a control
+  channel that the destinations stopped answering; on a live publication such a
+  receiver is still dropped on the next cycle
+  ([ADR 0056](docs/decisions/0056-keep-an-ended-receiver-in-a-closed-publications-table.md);
+  card 225).

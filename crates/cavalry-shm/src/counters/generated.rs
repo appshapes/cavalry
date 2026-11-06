@@ -314,7 +314,7 @@ pub const SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT: CounterId = CounterId(101);
 /// `sender.flow_control_receivers_full`, a static counter: Status messages from a receiver a min publication's full table of 64 does not hold: accepted for the connection and not tracked, so the sender limit does not follow that receiver (spec/udp.md, The sender; ADR 0053).
 pub const SENDER_FLOW_CONTROL_RECEIVERS_FULL: CounterId = CounterId(102);
 
-/// `sender.flow_control_receivers`, a instance gauge: The receivers in one cavalry:udp publication's min table, each answering within the flow control receiver timeout; 0 under max, which keeps no table; key as sender.position; label text: sender.position's four, then the publication's strategy as fc=max or fc=min, space-separated, so that doctor reads which publications keep a table (ADR 0053).
+/// `sender.flow_control_receivers`, a instance gauge: The receivers in one cavalry:udp publication's min table, each answering within the flow control receiver timeout, and once the publication is closed each whose stream ended too, kept until the linger ends, so that a clean close leaves it at the receivers that took the stream to its end; 0 under max, which keeps no table; key as sender.position; label text: sender.position's four, then the publication's strategy as fc=max or fc=min, space-separated, so that doctor reads which publications keep a table (ADR 0053, ADR 0056).
 pub const SENDER_FLOW_CONTROL_RECEIVERS: CounterId = CounterId(103);
 
 /// `channel.destinations`, a instance gauge: How many destinations one send endpoint of a control channel sends to, added with add destination and removed with remove destination; 0 on any other endpoint; key and label as channel.status (spec/udp.md, The sender; ADR 0053).
@@ -1151,7 +1151,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.flow_control_receivers",
         kind: Kind::Gauge,
         scope: Scope::Instance,
-        doc: "The receivers in one cavalry:udp publication's min table, each answering within the flow control receiver timeout; 0 under max, which keeps no table; key as sender.position; label text: sender.position's four, then the publication's strategy as fc=max or fc=min, space-separated, so that doctor reads which publications keep a table (ADR 0053).",
+        doc: "The receivers in one cavalry:udp publication's min table, each answering within the flow control receiver timeout, and once the publication is closed each whose stream ended too, kept until the linger ends, so that a clean close leaves it at the receivers that took the stream to its end; 0 under max, which keeps no table; key as sender.position; label text: sender.position's four, then the publication's strategy as fc=max or fc=min, space-separated, so that doctor reads which publications keep a table (ADR 0053, ADR 0056).",
         doctor: "A min publication whose receivers are fewer than its endpoint's channel.destinations has a destination that is not answering: the stream waits for it until the timeout drops it, then runs without it.",
     },
     CounterDef {

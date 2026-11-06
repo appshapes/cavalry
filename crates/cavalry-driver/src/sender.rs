@@ -119,7 +119,8 @@ pub(crate) struct Receiver {
     limit: i64,
     last_status_message_at: i64,
     /// Its last status message carried the end-of-stream flag: dropped on the next
-    /// sweep, and not counted as a timeout (ADR 0054).
+    /// sweep, and not counted as a timeout (ADR 0054); once the publication is closed,
+    /// kept until the linger ends (ADR 0056).
     end_of_stream: bool,
 }
 
@@ -959,8 +960,9 @@ impl Sender {
         // for the receiver id is added or moved, and the limit becomes the greater of
         // itself and the least in the table. Neither lowers it. A status message with
         // the end-of-stream flag moves its receiver's entry, which the next sweep
-        // drops, and adds none for a receiver the table does not hold, whose image has
-        // ended: Aeron's `!isEos` (ADR 0054).
+        // drops, or keeps once the publication is closed (ADR 0056), and adds none for
+        // a receiver the table does not hold, whose image has ended: Aeron's `!isEos`
+        // (ADR 0054).
         let raised = match live.flow_control {
             FlowControl::Max => limit.sender_limit,
             FlowControl::Min => {
@@ -1162,20 +1164,30 @@ impl Sender {
             }
         }
 
-        // The `min` table's sweep (`spec/udp.md`, "The sender"; ADR 0053, ADR 0054): a
-        // receiver whose status message is older than the flow control receiver
-        // timeout leaves the table, counted; one whose last status message carried end
-        // of stream leaves it uncounted, its image ended as every image ends after a
-        // close, which its own driver counts in `image.ended`; when any remain the
-        // limit becomes the greater of itself and the least of them, so that a
-        // receiver that went away holds the stream back for the timeout and no longer.
-        // Empty with no room under `max`, so this reads nothing there.
+        // The `min` table's sweep (`spec/udp.md`, "The sender"; ADR 0053, ADR 0054, ADR
+        // 0056): a receiver whose status message is older than the flow control
+        // receiver timeout leaves the table, counted; one whose last status message
+        // carried end of stream leaves it uncounted, its image ended as every image
+        // ends after a close, which its own driver counts in `image.ended`, except
+        // once the publication is closed, when it stays until the linger ends and
+        // is never counted as timed out, so that the gauge still counts every
+        // receiver that took the stream to its end and `doctor` reads a clean close
+        // as no destination lost; it holds nothing back there, since a receiver ends
+        // its stream only after the heartbeat with EOS, which goes once the sender
+        // position has reached the end of stream position, and the retransmits a
+        // NAK asks for after that meet no limit. When any remain the limit becomes
+        // the greater of itself and the least of them, so that a receiver that went
+        // away holds the stream back for the timeout and no longer. Empty with no
+        // room under `max`, so this reads nothing there.
         if !live.receivers.is_empty() {
+            let closed = live.closing.is_some();
             let before = live.receivers.len();
             let mut index = 0;
             while index < live.receivers.len() {
                 let receiver = live.receivers[index];
-                if receiver.end_of_stream {
+                if receiver.end_of_stream && closed {
+                    index += 1;
+                } else if receiver.end_of_stream {
                     live.receivers.swap_remove(index);
                 } else if now.saturating_sub(receiver.last_status_message_at)
                     >= spec::nanos(FLOW_CONTROL_RECEIVER_TIMEOUT)

@@ -102,7 +102,9 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   among them, a receiver dropped after 5 s without a status message (ADR 0053). A
   control channel's closed publication lingers for the linger timeout, 5 s, whatever a
   destination's status message says, since one destination's end of stream says
-  nothing of another's, which may still be NAKing the tail (ADR 0054). Every
+  nothing of another's, which may still be NAKing the tail (ADR 0054); a receiver
+  whose stream ended stays in a closed publication's `min` table until the linger
+  ends, so that `sender.flow_control_receivers` still counts it (ADR 0056). Every
   step has its counter, `sender.*`, `publication.connected` and
   `channel.*`, and the socket calls `std` lacks come through `nix`. The sender idles
   with the driver's strategy while it holds an endpoint or a publication and parks
