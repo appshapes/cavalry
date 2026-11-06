@@ -54,7 +54,10 @@ long-term release that holds it.
   keeps every later fragment of that poll reaching the handler, and `poll` throws a
   `HandlerException` once the ABI has returned, with the first throwable as its cause
   and the counts. An exception must not unwind through the ABI's frames, where the
-  runtime would end the process, so the upcall catches every one.
+  runtime would end the process, so the upcall catches every throwable the handler
+  raises. The upcall's two lines before the handler's call, the body's `reinterpret`
+  and the header's two field stores, are outside that catch: a throwable the runtime
+  raises there, an `OutOfMemoryError` as the body's segment is made, ends the process.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `close()` forgets the handle once the ABI's close has returned. The one
   exception is a subscription's close from inside a handler of its own poll, which the
@@ -141,9 +144,9 @@ You will see `1000 messages over cavalry:ipc, position 64000`.
 ## The runtime's side of the boundary
 
 What the foreign function and memory API does per message, and what
-`conformance/jvm/Quickstart.java`'s report measures of it. The figures below are one
-run's, on the laptop (OpenJDK 25.0.5, macOS 26.6 on arm64, unpinned); every CI run
-prints its runners'.
+`conformance/jvm/Quickstart.java`'s report measures of it. A figure below is one run's
+on the laptop (OpenJDK 25.0.5, macOS 26.6 on arm64, unpinned) unless it names a CI
+run; every CI run prints its runners'.
 
 ### The call
 
@@ -248,23 +251,29 @@ into the log, as a body does.
 
 The form that lost reads the address as a segment, `get(ADDRESS, …)`, which makes a
 segment of length zero, and calls `reinterpret` on it for the claimed length, which
-makes a second segment: two objects per claim. The count below was measured with that
-form.
+makes a second segment: two objects per claim. Both forms measured 206.5 bytes per
+message ("The count, measured"), since the compiler removed that form's first segment.
+The one slice won because its one object per claim is the construction's and does not
+depend on what the compiler removes.
 
 ### The count, measured
 
 The runner's allocation round sends 10,000 messages whose handler only counts and whose
 publisher copies one constant, with the thread's allocated bytes read from
 `com.sun.management.ThreadMXBean` before and after the round with nothing between,
-which counts every object the thread allocated, freed or not. With the claim's
-two-object form: 206.5 bytes per message on the laptop, and 206.5 on CI's Linux runner
-(Temurin 25.0.4, run 42205547531), with 0 collections during the round. That is about
-five objects' worth where that construction made six, the claim's two and the
-call-back's four, since the compiler removes an object it can prove dies inside the
-call and the count is what it left. The construction now makes five, the claim's one
-and the call-back's four. This page has no measured count for it yet, because the
-change was made on a machine without Java 25. Every CI run prints it, in the line
-`conformance/jvm: report: allocations per message` of the gates job.
+which counts every object the thread allocated, freed or not. The construction makes
+five objects per message, the claim's one slice and the call-back's four. With it:
+206.5 bytes per message, with 0 collections during the round, on CI's Linux runner
+(Temurin 25.0.4, x64) and on CI's macOS runner (Temurin 25.0.5, arm64), both in run
+42208103147.
+
+The claim's two-object form, six objects per message, measured the same 206.5 bytes on
+the laptop and on CI's Linux runner (Temurin 25.0.4, run 42205547531), with 0
+collections. The two counts are equal, so with that form the compiler had already
+removed one object, the claim's segment of length zero, which it can prove dies inside
+`tryClaim`. The one-slice form makes five objects without that removal, and its count
+is the same five objects' worth, 41.3 bytes for each. Every CI run prints the count, in
+the line `conformance/jvm: report: allocations per message` of the gates job.
 
 ### The latency, measured
 
