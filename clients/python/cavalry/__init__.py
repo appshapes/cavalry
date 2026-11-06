@@ -45,12 +45,19 @@ class CavalryError(Exception):
 
 
 class HandlerError(Exception):
-    """The user's fragment handler raised during a poll: `fragments` is the count the poll
-    returned once the ABI was done, and `__cause__` the handler's exception."""
+    """The user's fragment handler raised an `Exception` during a poll. The ABI's poll had
+    consumed every fragment it delivered, so the poll handed every one to the handler,
+    once and in order, the ones after a raise included: `fragments` is the poll's result,
+    the count, or -1 when the poll also stopped on a fault `Subscription.fault` reads;
+    `raised` is how many of the handler's calls raised; `__cause__` is the first of their
+    exceptions. A `KeyboardInterrupt`, `SystemExit` or any other exception that is not an
+    `Exception` is raised by poll as itself."""
 
-    def __init__(self, fragments, cause):
-        super().__init__(f"the fragment handler raised after {fragments} fragment(s): {cause!r}")
+    def __init__(self, fragments, raised, cause):
+        super().__init__(f"the fragment handler raised on {raised} of the fragments this poll delivered ({fragments});"
+                         f" every fragment reached the handler once, in order; the first exception: {cause!r}")
         self.fragments = fragments
+        self.raised = raised
         self.__cause__ = cause
 
 
@@ -331,8 +338,10 @@ class Image:
 class Subscription:
     """A subscription: `poll(handler, fragment_limit)` calls `handler(body, header)` for each
     fragment, `body` a `memoryview` into the log valid for the call and `header` the one
-    `Header` this object keeps, and returns the fragment count. The handler's exception is
-    kept until the ABI has returned, then raised as `HandlerError`."""
+    `Header` this object keeps, and returns the fragment count. Every fragment the ABI
+    delivers reaches the handler, whether or not an earlier call raised; the exceptions
+    are kept until the ABI has returned, then the first is raised as `HandlerError`, or one
+    that is not an `Exception` as itself."""
 
     def __init__(self, abi, handle):
         self._abi = abi
@@ -340,6 +349,8 @@ class Subscription:
         self._header = Header(abi)
         self._handler = None
         self._pending = None
+        self._interrupt = None
+        self._raised = 0
         self._trampoline = _abi.cavalry_fragment_handler_t(self._on_fragment)
         constants = _abi.cavalry_subscription_constants_t()
         _check(abi, "cavalry_subscription_constants", abi.cavalry_subscription_constants(handle, ctypes.byref(constants)))
@@ -348,23 +359,34 @@ class Subscription:
         self.stream_id = constants.stream_id
 
     def _on_fragment(self, clientd, buffer, length, header):
-        if self._pending is not None:
-            return
         self._header._pointer = header
         try:
             self._handler(memoryview((ctypes.c_uint8 * length).from_address(buffer)).cast("B"), self._header)
         except BaseException as exc:  # kept for poll to raise once the ABI has returned
-            self._pending = exc
+            self._keep(exc)
+
+    def _keep(self, exc):
+        """Count a handler call that raised; keep the first `Exception` and the first
+        exception that is not one, a `KeyboardInterrupt` or a `SystemExit`."""
+        self._raised += 1
+        if isinstance(exc, Exception):
+            if self._pending is None:
+                self._pending = exc
+        elif self._interrupt is None:
+            self._interrupt = exc
 
     def poll(self, handler, fragment_limit):
-        """One ABI call; the handler's exception, if any, is raised after it returns."""
+        """One ABI call; the handler's exceptions, if any, are raised after it returns: one
+        that is not an `Exception` as itself, else the first as `HandlerError`."""
         self._handler = handler
-        self._pending = None
         fragments = self._abi.cavalry_subscription_poll(self._handle, self._trampoline, None, fragment_limit)
-        pending = self._pending
-        if pending is not None:
-            self._pending = None
-            raise HandlerError(fragments, pending)
+        if self._raised:
+            pending, interrupt, raised = self._pending, self._interrupt, self._raised
+            self._pending = self._interrupt = None
+            self._raised = 0
+            if interrupt is not None:
+                raise interrupt
+            raise HandlerError(fragments, raised, pending)
         return fragments
 
     def fault(self):

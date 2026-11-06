@@ -6,7 +6,8 @@ records stream 1001 on `cavalry:ipc`, publishes 1,000 messages of 64 bytes by cl
 commit, each carrying its index and the publisher's clock, and reads them back through the
 fragment handler once and in order, with the header's type, flags, version, frame length,
 term offset and session id checked against spec/frame.md; waits for the recording to sync
-to the stream's end and stops it; does the same 1,000 over `cavalry:udp` on the loopback;
+to the stream's end and stops it; checks where a handler's exception goes, on stream 1003
+(`handler_exceptions`); does the same 1,000 over `cavalry:udp` on the loopback;
 and replays the recording onto stream 2001, each frame at the position the recording holds
 it at, with the end reported. Every wait is bounded at 10 s, and a wait that runs out says
 how far it got. It exits 1 with the function, the code and `cavalry_errmsg` when a call
@@ -158,6 +159,92 @@ def publish_and_receive(publication, receiver):
     receiver.compute_positions()
 
 
+def offer_or_fail(name, publication, message, sent):
+    """Offer `message`, retrying a refusal that passes, NOT_CONNECTED, BACK_PRESSURED or
+    ADMIN_ACTION, for up to 10 s; the position."""
+    until = deadline()
+    while True:
+        position = publication.offer(message)
+        if position >= 0:
+            return position
+        if position in (cavalry.CLOSED, cavalry.MAX_POSITION_EXCEEDED, cavalry.ERROR) or time.monotonic() > until:
+            fail(f"{name}: offer returned {CODE_NAMES.get(position, position)} ({position}) after {sent} messages")
+
+
+def handler_exceptions(client):
+    """Where a handler's exception goes (clients/python/README.md, "The exception"): ten
+    messages offered on stream 1003, then one poll of ten whose handler raises on message
+    3. The ABI's poll consumes all ten, so every one must reach the handler, once and in
+    order, and poll must raise HandlerError with `fragments` 10, `raised` 1 and the
+    ValueError as its cause. Then a poll whose handler raises a ValueError on one message
+    and SystemExit(2) on the next: poll raises the SystemExit as itself."""
+    name = "handler exceptions"
+    subscription = client.add_subscription("cavalry:ipc", STREAM + 2)
+    publication = client.add_publication("cavalry:ipc", STREAM + 2)
+    seen = []
+
+    def unexpected(body, header):
+        fail(f"{name}: a fragment the test did not expect, after {seen}")
+
+    def message(i):
+        return i.to_bytes(8, "little") + bytes(BODY - 8)
+
+    until = deadline()
+    while True:
+        subscription.poll(unexpected, 10)  # nothing is offered yet; the image joins on a poll
+        position = publication.offer(message(0))
+        if position >= 0:
+            break
+        if position in (cavalry.CLOSED, cavalry.MAX_POSITION_EXCEEDED, cavalry.ERROR) or time.monotonic() > until:
+            fail(f"{name}: the first offer returned {CODE_NAMES.get(position, position)} ({position})")
+    for i in range(1, 10):
+        offer_or_fail(name, publication, message(i), i)
+
+    def raises_on_3(body, header):
+        index = int.from_bytes(body[:8], "little")
+        seen.append(index)
+        if index == 3:
+            raise ValueError("message 3")
+
+    try:
+        subscription.poll(raises_on_3, 10)
+        error = None
+    except cavalry.HandlerError as raised:
+        error = raised
+    if error is None:
+        fail(f"{name}: a handler that raised on message 3 did not make poll raise HandlerError; it saw {seen}")
+    if seen != list(range(10)) or error.fragments != 10 or error.raised != 1 or not isinstance(error.__cause__, ValueError):
+        fail(f"{name}: the handler saw {seen}; HandlerError has fragments {error.fragments}, raised {error.raised}, "
+             f"cause {error.__cause__!r}; expected messages 0 to 9 once and in order, 10, 1 and the ValueError")
+
+    offer_or_fail(name, publication, message(10), 10)
+    offer_or_fail(name, publication, message(11), 11)
+
+    def raises_then_exits(body, header):
+        index = int.from_bytes(body[:8], "little")
+        seen.append(index)
+        if index == 10:
+            raise ValueError("message 10")
+        sys.exit(2)
+
+    exited = None
+    try:
+        subscription.poll(raises_then_exits, 10)
+    except SystemExit as exit_:
+        exited = exit_
+    except cavalry.HandlerError as wrapped:
+        fail(f"{name}: poll raised HandlerError for a handler's SystemExit: {wrapped}")
+    if exited is None or exited.code != 2 or seen != list(range(12)):
+        fail(f"{name}: poll raised {exited!r} and the handler saw {seen}; expected SystemExit(2) and messages 0 to 11")
+    if subscription.poll(unexpected, 10) != 0:
+        fail(f"{name}: a fragment after all 12 messages")
+    publication.close()
+    subscription.close()
+    print(f"conformance/python: {name}: a handler that raised on message 3 of a poll of 10 saw all 10 once, in order, "
+          f"and poll raised HandlerError (fragments 10, raised 1, the ValueError as its cause); a SystemExit after a "
+          f"ValueError in one poll was raised as itself")
+
+
 def free_udp_port():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -203,6 +290,8 @@ def main():
         recording_id = recording.recording_id
         recording.close()
         ipc_pub.close()
+
+        handler_exceptions(client)
 
         # The measured round, for the report: 1,000 more messages on stream 1002 with a
         # handler that does nothing and a publisher that writes one constant, so that the

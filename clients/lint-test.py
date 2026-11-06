@@ -68,9 +68,15 @@ class Clients(unittest.TestCase):
         self.assertIn("raises", finding)
 
     def test_a_raise_in_the_trampoline_fails(self):
-        self.edit("            self._pending = exc\n", "            self._pending = exc\n            raise\n")
+        self.edit("            self._keep(exc)\n", "            self._keep(exc)\n            raise\n")
         [finding] = lint.findings(self.tmp)
         self.assertIn("Subscription._on_fragment", finding)
+
+    def test_a_raise_in_the_helper_the_trampoline_calls_fails(self):
+        self.edit("        self._raised += 1\n", "        self._raised += 1\n        raise exc\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Subscription._on_fragment", finding)
+        self.assertIn("calls Subscription._keep", finding)
 
     def test_a_raise_in_set_reserved_value_fails(self):
         self.edit("    def set_reserved_value(self, value):\n",

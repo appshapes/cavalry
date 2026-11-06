@@ -29,9 +29,10 @@ the ABI's page promises (ADR 0046's boundary; ADR 0051). The package has no depe
   the frame or the code below zero (`cavalry.BACK_PRESSURED`, `NOT_CONNECTED`,
   `ADMIN_ACTION`, `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the
   caller branches, as a Rust caller matches `Offer`.
-- Never swallow the user's exception: a fragment handler that raises stops the poll's
-  handler calls for that poll, and `poll` raises the exception once the ABI has
-  returned, the one raise the per-message path allows.
+- Never drop a fragment and never swallow the user's exception: the ABI's poll
+  consumes every fragment it delivers, so every one reaches the handler, once and in
+  order, even after a call raised; `poll` raises once the ABI has returned, the one
+  raise the per-message path allows ("The exception", below).
 - Never edit a generated file by hand: `just lint` regenerates the package and fails
   when the committed files differ.
 
@@ -110,10 +111,19 @@ What `ctypes` does per message, measured by `conformance/python/quickstart.py`'s
   C runner's figures through the same ABI are the measure of the boundary itself, and
   the difference is Python's call-back.
 - **The exception.** The trampoline wraps the user's handler in `try`; an exception
-  is kept on the subscription and the trampoline returns, so the ABI's poll finishes
-  its fragments without a Python frame unwinding through C; `poll` raises it after the
-  ABI has returned, with the fragment count the poll reached as its `fragments`
-  attribute.
+  is kept on the subscription and the trampoline returns, so no Python frame unwinds
+  through C. The handler returns nothing the ABI reads, so the ABI's poll goes on
+  delivering up to its `fragment_limit`, and every fragment it delivers is consumed:
+  the image's position moves past it. The trampoline therefore calls the handler for
+  every one of them, the ones after a raise included, so that no message is lost
+  (invariant 1). Once the ABI has returned, `poll` raises `HandlerError`, with the
+  first exception as its `__cause__`, the poll's result as `fragments` (the count, or
+  −1 when the poll also stopped on a fault, which `fault()` reads) and the number of
+  handler calls that raised as `raised`. An exception that is not an `Exception`, a
+  `KeyboardInterrupt` or a `SystemExit`, is raised as itself and outranks the others,
+  so Ctrl-C and `sys.exit(2)` in a handler do what they do anywhere else. The runner
+  checks both: a handler that raises on message 3 of a poll of 10 sees all 10, and a
+  `SystemExit(2)` after a `ValueError` in one poll comes out as `SystemExit(2)`.
 
 ## What to read next
 
