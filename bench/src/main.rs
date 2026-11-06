@@ -2133,23 +2133,36 @@ fn mdc_rows(
             break;
         }
         if Instant::now() > deadline {
+            let image = |subscription: &Subscription| {
+                if subscription.is_connected() {
+                    "has its image"
+                } else {
+                    "has no image"
+                }
+            };
+            let second_state = match drained.as_ref() {
+                Some(drained) => format!(
+                    "the second destination's subscription on {second_channel} {}",
+                    image(drained)
+                ),
+                None => format!(
+                    "the second destination is the peer's endpoint {second_channel}, whose answer \
+                     the wait does not need"
+                ),
+            };
             return Err(format!(
                 "the control channel's stream did not connect in {} s: the publication on \
-                 {control} is {}, the subscription on {first} {}, the second destination \
-                 {second_channel}; a setup frame goes to each destination every 100 ms, so a \
-                 receiver on it whose subscription wants the stream answers within one \
-                 (docs/how-to/run-the-bench.md#when-it-does-not-work)",
+                 {control} is {}, and a status message from either destination connects it; \
+                 the subscription on {first} {}; {second_state}; a setup frame goes to each \
+                 destination every 100 ms, so a receiver on it whose subscription wants the \
+                 stream answers within one (docs/how-to/run-the-bench.md#when-it-does-not-work)",
                 timeout.as_secs(),
                 if publication.is_connected() {
                     "connected"
                 } else {
                     "not connected"
                 },
-                if subscription.is_connected() {
-                    "has its image"
-                } else {
-                    "has no image"
-                }
+                image(&subscription),
             ));
         }
         std::thread::sleep(Duration::from_micros(100));

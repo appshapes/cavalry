@@ -760,6 +760,28 @@ shared runner is
   other's, on both hosts, and `cavalry doctor` on either host says
   `udp-publication-not-connected` or `udp-subscription-no-image` while the harness
   waits ([Publish between two hosts](publish-between-two-hosts.md)).
+- `the udp_mdc benchmark failed: the control channel's stream did not connect in 10 s`,
+  or after the link rows `the link rows failed: the control channel's stream did not
+  connect in 600 s`: the multi-destination cast rows' publication had no status message
+  from either destination, which is what connects a publication on a control channel
+  (`spec/udp.md`, "The sender"), or a subscription of this driver had no image. The
+  line says `connected` or `not connected` for the publication and `has its image` or
+  `has no image` for the measured subscription and, on the loopback, for the second
+  destination's subscription.
+  - On the loopback, both destinations are ports of `127.0.0.1` that the harness found
+    free a moment before. A port that another process took in between fails earlier,
+    at the subscription's add, with `Address already in use`, so here the ports were
+    bound and the driver did not carry the stream. Run again. If it fails again, run
+    `cavalry doctor --dir /dev/shm/cavalry-bench-<pid>-udp-mdc` while the harness waits,
+    with the harness's process id (the directory is under the system's temporary
+    directory on macOS), which says `udp-publication-not-connected` or
+    `udp-subscription-no-image`, and read `channel.destinations` for the control
+    channel's endpoint, which is 2 once both `add_destination` calls have landed.
+  - Across the link, the control channel and the measured subscription are on the
+    host part of this host's `--link-here`, and the wait does not need the peer's
+    answer, so the line is about this host alone; the link rows connected just before
+    on the same address. Check that the address is this host's with `ip -brief
+    address`, and that nothing on the host filters UDP between two of its own ports.
 - `message N of M did not reach the subscriber in 10 s`: with one message in flight the
   stream stopped. Across the link the peer stopped echoing, or the cable lost a datagram
   the sender no longer holds; on the loopback the driver's sender or receiver stalled.
