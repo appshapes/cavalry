@@ -40,8 +40,12 @@ and wait on each other: bench runs run X's `bench (udp)`, waiting for X's peer, 
 grip behind run Y's peer, which grip runs, waiting for Y's `bench (udp)`, queued on bench
 behind X's. Neither queue moves until the bound, and both gate hosts stand idle. So while
 the partner is queued, at the first poll and every LOOK_EVERY after it, this reads the
-workflow's runs in progress for the job that holds the partner's host: a job in progress
-with the partner's labels. When that job is named as the partner and its own run's job
+workflow's runs listed as in progress and as queued for the job that holds the partner's
+host: a job in progress with the partner's labels. Both lists, because GitHub lists a run
+whose jobs are part queued and part in progress under queued: on 2026-11-06 runs
+42133574089 and 42143752791 each held a host that way and appeared under queued alone, so
+the first version of this script, which read the runs in progress alone, never saw the
+holder, and two pairs crossed for 38 and 23 minutes until a person cancelled one end. When that job is named as the partner and its own run's job
 named as this one is still queued, the pair is crossed, and the end in the newer run, the
 higher run id, ends at once, naming the older run; the older run's end keeps waiting. Both
 ends read the same two runs, so both decide the same, and the older pair meets once the
@@ -49,8 +53,8 @@ newer end has freed its host. Its other end then finds it completed and ends too
 
 The job token has 1,000 requests an hour for the repository. At most two ends wait at
 once, one on each host, and each makes 3 reads a minute, 180 an hour, plus 20 looks an
-hour at 1 + (the workflow's other runs in progress) reads each, stopping at the holder:
-with 5 other runs in progress, about 310 an hour for an end, and 620 for both.
+hour at 2 + (the workflow's other runs listed) reads each, stopping at the holder: with
+5 other runs listed, about 320 an hour for an end, and 640 for both.
 
 It exits 0 once the partner is in progress, and 1, with a message that says which reason
 ended the wait and what to do, when:
@@ -259,7 +263,14 @@ class Wait:
             self.workflow = run.get("workflow_id") if isinstance(run, dict) else None
             if not self.workflow:
                 raise Fail(f"GET /actions/runs/{self.run_id} answered without a workflow_id: {str(run)[:200]}")
-        runs = self.listed(f"/actions/workflows/{self.workflow}/runs?status=in_progress&per_page=100", "workflow_runs")
+        # A run with one job in progress and the other queued is listed under queued, not
+        # in progress (the module doc names two), so both lists are read, each run once.
+        runs, seen = [], set()
+        for status in ("in_progress", "queued"):
+            for run in self.listed(f"/actions/workflows/{self.workflow}/runs?status={status}&per_page=100", "workflow_runs"):
+                if run.get("id") not in seen:
+                    seen.add(run.get("id"))
+                    runs.append(run)
         for run in runs:
             if run.get("id") == self.run_id:
                 continue

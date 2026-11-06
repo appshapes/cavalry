@@ -1330,3 +1330,8 @@ user-visible change, added in the same commit as the change. The format follows
   `subscription.add_deferred_timed_out`, which `cavalry doctor` reports
   ([ADR 0049](docs/decisions/0049-hold-an-add-until-the-closing-endpoint-has-closed.md);
   card 194).
+- The udp pair's wait reads the workflow's runs listed as queued as well as in progress
+  when it looks for a crossed pair: GitHub lists a run whose jobs are part queued and
+  part in progress under queued, so the wait never saw the other run's end holding the
+  partner's host, and on 2026-11-06 two pairs crossed for 38 and 23 minutes until a
+  person cancelled one end (card 212).

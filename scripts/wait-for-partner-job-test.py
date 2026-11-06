@@ -66,9 +66,10 @@ class Clock:
 
 
 class FakeGitHub:
-    """Serves routes by path, the query dropped, and records every request. A route is a
-    body, served with 200, or a function of the request's count on that path that returns
-    a body or (status, body, headers)."""
+    """Serves routes by path and query when a route names the query, else by path with the
+    query dropped, and records every request. A route is a body, served with 200, or a
+    function of the request's count on that path that returns a body or (status, body,
+    headers)."""
 
     def __init__(self):
         self.routes, self.seen, self.on_request = {}, [], None
@@ -80,7 +81,7 @@ class FakeGitHub:
                 fake.seen.append((self.path, dict(self.headers)))
                 if fake.on_request:
                     fake.on_request(path)
-                route = fake.routes.get(path)
+                route = fake.routes.get(self.path, fake.routes.get(path))
                 if callable(route):
                     route = route(sum(1 for p, _ in fake.seen if urlsplit(p).path == path))
                 status, body, headers = route if isinstance(route, tuple) else (200, route, {})
@@ -130,6 +131,12 @@ class Base(unittest.TestCase):
         """The workflow's runs in progress, newest first, as GitHub lists them."""
         runs = [{"id": r, "html_url": f"https://github.example/{REPO}/actions/runs/{r}"} for r in sorted(run_ids, reverse=True)]
         self.route(f"/actions/workflows/{self.WORKFLOW}/runs", {"total_count": len(runs), "workflow_runs": runs})
+
+    def listed_under(self, status, *run_ids):
+        """The workflow's runs GitHub lists under one status, newest first, as the script asks
+        for them; a run whose jobs are part queued and part in progress is under queued."""
+        runs = [{"id": r, "html_url": f"https://github.example/{REPO}/actions/runs/{r}"} for r in sorted(run_ids, reverse=True)]
+        self.route(f"/actions/workflows/{self.WORKFLOW}/runs?status={status}&per_page=100", {"total_count": len(runs), "workflow_runs": runs})
 
     def jobs(self, run_id, body):
         self.route(f"/actions/runs/{run_id}/jobs", body if callable(body) or isinstance(body, tuple) else {"jobs": body})
@@ -350,7 +357,7 @@ class Crossed(Base):
         self.jobs(self.OLDER, pair(self.OLDER, "completed", "completed"))
         self.jobs(self.RUN, lambda n: {"jobs": queued if n <= 20 else pair(self.RUN, "in_progress", "in_progress")})
         self.passes(f"{PEER} is in progress after 400 s")
-        self.assertEqual(self.gh.count(f"/actions/workflows/{self.WORKFLOW}/runs"), 3)    # at 0, 180 and 360 s
+        self.assertEqual(self.gh.count(f"/actions/workflows/{self.WORKFLOW}/runs"), 6)    # two lists at 0, 180 and 360 s
         self.assertEqual(self.gh.count(f"/actions/runs/{self.RUN}"), 1)
 
     def test_a_run_without_a_workflow_id_is_not_read_as_waiting(self):
@@ -367,6 +374,32 @@ class Crossed(Base):
         self.fails("did not start within 45 minutes")
         per_hour = len(self.gh.seen) / (wait.BOUND / 3600)
         self.assertLessEqual(per_hour, 1000 / 3, f"{len(self.gh.seen)} requests in 45 minutes")
+
+
+class CrossedUnderQueued(Base):
+    """The same crossing, with the older run listed under queued alone, as GitHub lists a run
+    whose jobs are part queued and part in progress (runs 42133574089 and 42143752791 on
+    2026-11-06). A read of the runs in progress alone never sees it."""
+
+    def setUp(self):
+        super().setUp()
+        self.listed_under("in_progress", self.RUN)
+        self.listed_under("queued", self.OLDER)
+        self.jobs(self.OLDER, pair(self.OLDER, "in_progress", "queued"))
+        self.jobs(self.RUN, pair(self.RUN, "queued", "in_progress"))
+
+    def test_the_newer_end_ends_naming_the_older_run_listed_under_queued(self):
+        self.fails(f"{UDP} is queued, and its host runs {UDP} of run 150", "Run 150 is the older, so this job ends",
+                   partner=UDP, env={"RUNNER_NAME": "grip"})
+        self.assertEqual(self.gh.count(f"/actions/workflows/{self.WORKFLOW}/runs"), 2, "both lists read at the one look")
+
+    def test_the_older_end_listed_under_queued_keeps_waiting(self):
+        self.listed_under("in_progress", self.OLDER)
+        self.listed_under("queued", self.RUN)
+        crossed = pair(self.OLDER, "in_progress", "queued")
+        self.jobs(self.OLDER, then(crossed, crossed, pair(self.OLDER, "in_progress", "in_progress")))
+        self.passes(f"{PEER}'s host runs {PEER} of run 200", "that run is the newer, so its end ends and this one keeps waiting",
+                    env={"GITHUB_RUN_ID": str(self.OLDER)})
 
 
 class Refused(Base):
