@@ -178,7 +178,11 @@ The table the trampoline reads subscriptions from holds 4,096 subscriptions:
 `AddSubscription` above that returns an `*Error` with `ErrSubscriptionsFull`, and
 each `Subscription.Close` frees a slot. The table is written under a lock when a
 subscription is added or closed, never on a message's path, and read with one atomic
-load per fragment.
+load per fragment. The package's own test, `cavalry_test.go`, which
+`conformance/go/run.sh` runs with `go test` and which needs no driver, fills the
+table to its bound. It checks the refusal past the bound and its message, that a freed
+slot is the next one taken, and that the trampoline calls no handler for a slot of 0,
+a slot past the table or an empty slot.
 
 ### The thread's error
 

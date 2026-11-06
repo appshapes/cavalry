@@ -529,9 +529,8 @@ class Clients(unittest.TestCase):
         self.assertIn("panics", finding)
 
     def test_a_lock_in_the_go_shim_fails(self):
-        self.edit_go("  cavalryGoFragment(clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);\n",
-                     "  pthread_mutex_lock(&lock);\n  cavalryGoFragment(clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);\n",
-                     file=self.go_shim)
+        call = "  cavalryGoFragment((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);\n"
+        self.edit_go(call, "  pthread_mutex_lock(&lock);\n" + call, file=self.go_shim)
         [finding] = lint.findings(self.tmp)
         self.assertIn("cavalry_go_trampoline", finding)
         self.assertIn("pthread_mutex_*", finding)

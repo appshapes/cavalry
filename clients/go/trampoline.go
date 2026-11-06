@@ -15,17 +15,20 @@ import "C"
 
 import "unsafe"
 
-// cavalryGoFragment is the fragment handler the ABI reaches through shim.c: clientd is
-// the subscription's 1-based index in the table, which the subscription registered under
-// a lock when it was added and which stays valid for the poll, since the ABI refuses a
-// close from inside the poll's handler. The body is a slice over the log's bytes, made
-// with unsafe.Slice and never copied; the header is valid for the call. The handler runs
-// inside deliver, which recovers its panic, so that no panic unwinds through the ABI's
-// frames and every fragment of the poll reaches the handler (README, "The panic").
+// cavalryGoFragment is the fragment handler the ABI reaches through shim.c: slot is the
+// poll's clientd, the subscription's 1-based index in the table, which the subscription
+// registered under a lock when it was added and which stays valid for the poll, since the
+// ABI refuses a close from inside the poll's handler. The C trampoline passes it as a
+// uintptr_t, never as a pointer: Go's stack copier ends the process on a value below
+// 4,096 in a pointer's place. A slot of 0, one past the table or one the table does not
+// hold calls no handler, which cavalry_test.go checks. The body is a slice over the log's
+// bytes, made with unsafe.Slice and never copied; the header is valid for the call. The
+// handler runs inside deliver, which recovers its panic, so that no panic unwinds through
+// the ABI's frames and every fragment of the poll reaches the handler (README, "The
+// panic").
 //
 //export cavalryGoFragment
-func cavalryGoFragment(clientd unsafe.Pointer, buffer *C.uint8_t, length C.size_t, header *C.cavalry_header_t) {
-	slot := uintptr(clientd)
+func cavalryGoFragment(slot C.uintptr_t, buffer *C.uint8_t, length C.size_t, header *C.cavalry_header_t) {
 	if slot == 0 || slot > 4096 {
 		return
 	}

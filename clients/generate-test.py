@@ -13,12 +13,15 @@ binding, the trampoline, compiled with `cc` against a stand-in for N-API, counts
 reports every fragment the handler did not see, `HandlerError`'s message and the addon's
 Error for such a fragment say what to do and name a heading of the README, and `--check`
 fails on a package that differs. `just test` runs this through `test-scripts`. Python 3.9
-standard library only. The same for the Go module (`GoPackage`): the committed five
+standard library only. The same for the Go module (`GoPackage`): the committed six
 generated files are what the parse gives, a header change changes the constants, every
 define is a constant under its Go name with the ABI's name beside it, the shim installs
-the exported trampoline around the one poll call, `HandlerError`'s message says what to
-do and names a heading of the README, the generated files are gofmt's own and vet clean
-when `go` is on the path, and `--check` fails on a module that differs.
+the exported trampoline around the one poll call, each per-message call keeps its error
+in the C call that failed, every call that reads the thread's error holds its OS thread,
+every call on the client handle holds the client's mutex, the package tests its
+subscription table at the bound and `run.sh` runs that test, `HandlerError`'s message
+says what to do and names a heading of the README, the generated files are gofmt's own
+and vet clean when `go` is on the path, and `--check` fails on a module that differs.
 """
 
 import ctypes
@@ -667,7 +670,7 @@ class NodePackage(unittest.TestCase):
 class GoPackage(unittest.TestCase):
     """The Go module, `clients/go` (clients/go/README.md; ADR 0046, card 207)."""
 
-    FILES = ["cavalry.go", "go.mod", "shim.c", "shim.h", "trampoline.go"]
+    FILES = ["cavalry.go", "cavalry_test.go", "go.mod", "shim.c", "shim.h", "trampoline.go"]
 
     @classmethod
     def setUpClass(cls):
@@ -705,7 +708,8 @@ class GoPackage(unittest.TestCase):
 
     def test_the_shim_installs_the_exported_trampoline_around_the_one_poll(self):
         files = gen_go.write_go(self.header)
-        self.assertIn("cavalryGoFragment(clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);", files["shim.c"])
+        self.assertIn("cavalryGoFragment((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);",
+                      files["shim.c"])
         self.assertIn("cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, fragment_limit)",
                       files["shim.c"])
         self.assertEqual(files["shim.c"].count("cavalry_subscription_poll("), 1)
@@ -743,6 +747,28 @@ class GoPackage(unittest.TestCase):
             self.assertNotIn("cavalry_errcode", body, method)
             self.assertNotIn("Errcode", body, method)
             self.assertIn(f"&{receiver[0].lower()}.err)", body, method)
+
+    def test_the_package_tests_the_table_at_its_bound_and_run_sh_runs_them(self):
+        """The subscription table is bounded (CLAUDE.md, invariant 3; gate 3: a test at
+        capacity), so the module carries a test that fills it and calls the trampoline with
+        slots the table does not hold, and conformance/go/run.sh runs it beside go vet. The
+        trampoline takes its slot as an integer, never as a pointer, so the test calls it
+        with constants and Go's stack copier never meets a small value in a pointer."""
+        files = gen_go.write_go(self.header)
+        test = files["cavalry_test.go"]
+        self.assertIn("func TestTheTableAtItsBound(t *testing.T) {", test)
+        self.assertIn("for len(held) < maxSubscriptions {", test)
+        self.assertIn("abi.Code != ErrSubscriptionsFull", test)
+        self.assertIn('"see clients/go/README.md#threads"', test)
+        for call in ("cavalryGoFragment(0, nil, 0, nil)", "cavalryGoFragment(maxSubscriptions+1, nil, 0, nil)",
+                     "cavalryGoFragment(1, nil, 0, nil)"):
+            self.assertIn(call, test)
+        self.assertNotIn('import "C"', test)
+        self.assertIn("func cavalryGoFragment(slot C.uintptr_t, buffer *C.uint8_t,", files["trampoline.go"])
+        self.assertNotIn("unsafe.Pointer(clientd)", files["trampoline.go"])
+        self.assertIn("see clients/go/README.md#threads", files["cavalry.go"])
+        with open(os.path.join(gen.ROOT, "conformance", "go", "run.sh"), encoding="utf-8") as f:
+            self.assertIn("(cd clients/go && go vet ./... && go build ./... && go test -count=1 ./...)", f.read())
 
     def test_every_call_on_the_client_handle_holds_the_clients_mutex(self):
         """Goroutines may share a Client (clients/go/README.md, "Threads"): the ABI runs

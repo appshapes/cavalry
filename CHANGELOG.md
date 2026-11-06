@@ -1483,7 +1483,8 @@ user-visible change, added in the same commit as the change. The format follows
   `.TryRLock()`, `.Wait()`), `go`, channels, `select`, `panic` and `make`, `new` and
   `append`, and the C shim's locks, and fails a function that reads the thread's error
   without holding its thread;
-  `just conformance` runs `conformance/go/`, the ten-minute path's shape through the
+  `just conformance` runs the package's test of its subscription table at its bound of
+  4,096 with `go test`, then `conformance/go/`, the ten-minute path's shape through the
   client and the README's example, with a report of its one-way latency over 100,000
   messages and its allocations per message, counted exactly by `runtime.ReadMemStats`
   ([clients/go/README.md](clients/go/README.md); ADR 0046, card 207).

@@ -73,7 +73,7 @@ int64_t cavalry_go_offer(cavalry_publication_t *publication, const uint8_t *buff
  * do not carry; the Go side reads and never writes through them. */
 static void cavalry_go_trampoline(void *clientd, const uint8_t *buffer, size_t length,
                                   const cavalry_header_t *header) {
-  cavalryGoFragment(clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);
+  cavalryGoFragment((uintptr_t) clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);
 }
 
 int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, size_t fragment_limit,

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Builds the driver and cavalry-ffi's static library in release, vets and builds the Go
-# client (cgo against the header and the library; nothing from a module proxy), checks that
+# Builds the driver and cavalry-ffi's static library in release, vets, builds and tests the
+# Go client (cgo against the header and the library; nothing from a module proxy), its
+# tests being the subscription table at its bound and the trampoline's refusal of a slot
+# the table does not hold, which need no driver; checks that
 # its generated files are gofmt's, starts a driver on a directory of its own, runs
 # conformance/go/quickstart through clients/go with the runner's Go, then
 # clients/go/README.md's example through conformance/go/readme, and cleans up.
@@ -26,13 +28,13 @@ echo "conformance/go: build the driver and the library"
 cargo build --release -p cavalry --bin cavalry
 cargo build --release -p cavalry-ffi --lib
 
-echo "conformance/go: vet and build the client with $(go version)"
+echo "conformance/go: vet, build and test the client with $(go version)"
 unformatted=$(gofmt -l clients/go conformance/go)
 if [ -n "$unformatted" ]; then
     echo "conformance/go: not gofmt's: $unformatted; the generator writes gofmt's own layout, so fix clients/generate_go.py" >&2
     exit 1
 fi
-(cd clients/go && go vet ./... && go build ./...)
+(cd clients/go && go vet ./... && go build ./... && go test -count=1 ./...)
 
 echo "conformance/go: cavalry run, in the background, on $CAVALRY_DIR"
 target/release/cavalry run &
