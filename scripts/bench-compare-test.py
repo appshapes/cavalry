@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests of bench-compare.py's rule on made-up results and baselines: a gated row fails only
 beyond 5 percent and beyond one step of the harness's clock, the smaller of the result's
-step and the baseline's (ADR 0029); the probe rows are reported; `--update` writes the step
+step and the baseline's (ADR 0029); the probe rows, the link's one-way row and the
+multi-destination cast rows are reported (ADR 0017, ADR 0044, ADR 0052); `--update` writes the step
 into the baseline and the next comparison reads it back; a bench host's baseline from
 every process at one tree holds every process's runs, a later process of the tree joins
 it with `--join`, and the gate compares with the slowest over all of them (ADR 0033). Standard library only; `just test-scripts` runs it.
@@ -102,6 +103,24 @@ class Rule(unittest.TestCase):
         code, out = run(result(10, one_way_32_udp=row(12000)), baseline(step=10, one_way_32_udp=row(10000)))
         self.assertEqual(code, 1, out)
         self.assertIn("+20.0% REGRESSION", out)
+
+    def test_the_multi_destination_cast_rows_are_reported_and_the_udp_row_beside_them_gated(self):
+        # Every isolated core of both bench hosts is taken, so the `_udp_mdc` rows are
+        # reported until a host change gives them cores (ADR 0052, feature 1).
+        code, out = run(result(10, claim_commit_32_udp_mdc=row(2000), one_way_32_udp_mdc=row(40000)),
+                        baseline(step=10, claim_commit_32_udp_mdc=row(1000), one_way_32_udp_mdc=row(20000)))
+        self.assertEqual(code, 0, out)
+        verdicts = {line.split()[0]: line for line in out.splitlines()[2:-1]}
+        self.assertTrue(verdicts["claim_commit_32_udp_mdc"].endswith("+100.0% reported"), out)
+        self.assertTrue(verdicts["one_way_32_udp_mdc"].endswith("+100.0% reported"), out)
+        self.assertIn("bench-compare: ok", out)
+        # The suffix does not swallow the UDP row whose name the mdc row's contains.
+        code, out = run(result(10, one_way_32_udp=row(20000), one_way_32_udp_mdc=row(40000)),
+                        baseline(step=10, one_way_32_udp=row(10000), one_way_32_udp_mdc=row(20000)))
+        self.assertEqual(code, 1, out)
+        verdicts = {line.split()[0]: line for line in out.splitlines()[2:-1]}
+        self.assertTrue(verdicts["one_way_32_udp"].endswith("+100.0% REGRESSION"), out)
+        self.assertTrue(verdicts["one_way_32_udp_mdc"].endswith("+100.0% reported"), out)
 
     def test_a_probe_row_is_reported_never_failed(self):
         code, out = run(result(10, timer=row(40)), baseline(step=10, timer=row(20)))

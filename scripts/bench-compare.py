@@ -31,11 +31,14 @@ p99.99 and no runs list (docs/how-to/run-the-bench.md, step 4); a join carries i
 through as such, each percentile the larger of the row's and the new process's and the
 p99.99 the slowest run of both, still with no list (card 221). Only
 the rows a message passes through, claim_commit_*, one_way_* and udp_round_trip_*, can
-fail the gate; the timer and slot_padding_* rows hold no Cavalry code, they probe the host
-and the clock at 30 to 60 ns, where one 10 ns step of the clock is 15 to 33 percent, and
-they are printed with their change marked "reported" (ADR 0017), as is udp_one_way_*, the
-one-way row across the two bench hosts, which carries the offset between their clocks
-(ADR 0039, ADR 0044).
+fail the gate, and of those not the *_udp_mdc rows; the timer and slot_padding_* rows hold
+no Cavalry code, they probe the host and the clock at 30 to 60 ns, where one 10 ns step of
+the clock is 15 to 33 percent, and they are printed with their change marked "reported"
+(ADR 0017), as is udp_one_way_*, the one-way row across the two bench hosts, which carries
+the offset between their clocks (ADR 0039, ADR 0044), and as are claim_commit_*_udp_mdc
+and one_way_*_udp_mdc, the multi-destination cast rows: every isolated core of both bench
+hosts is taken, and they join the gate with the host change that gives them cores (ADR
+0052, feature 1).
 
     bench-compare.py                        compare the newest result; what `just bench-compare` and CI run
     bench-compare.py <result>               compare that result file instead
@@ -76,6 +79,10 @@ SHOWN = ("p50_ns", "p99_ns", "p99_99_ns", "max_ns")
 # the round trip (ADR 0039, ADR 0044). Named in full here, so that which row gates is
 # this list and not the order of the words in a name.
 REPORTED_ROWS = ("udp_one_way_",)
+# The rows that are reported and never gated by their suffix: the multi-destination cast
+# rows run beside the UDP rows on hosts whose isolated cores the gated rows take, and join
+# the gate with the host change that gives them cores (ADR 0052, feature 1; ADR 0053).
+REPORTED_SUFFIXES = ("_udp_mdc",)
 # The rows a message passes through; every other row is a probe of the host (ADR 0017).
 GATED_ROWS = ("claim_commit_", "one_way_", "udp_round_trip_")
 
@@ -141,7 +148,7 @@ def compare(result: dict, baseline: dict) -> int:
             slowest = max(then.get("p99_99_ns_runs") or [then[GATED]])
             ratio = now[GATED] / slowest - 1
             verdict = f"{ratio:+.1%}"
-            if name.startswith(REPORTED_ROWS) or not name.startswith(GATED_ROWS):
+            if name.startswith(REPORTED_ROWS) or name.endswith(REPORTED_SUFFIXES) or not name.startswith(GATED_ROWS):
                 verdict += " reported"
             elif ratio > TOLERANCE and now[GATED] - slowest > floor:
                 verdict += " REGRESSION"

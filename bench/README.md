@@ -61,7 +61,22 @@ nothing depends on it.
   then; a tenth
   of `--messages` per run, at ten microseconds a message, after a warm-up of 10,000
   messages, since the driver pre-touches both logs. The driver's threads
-  busy-spin under `--pin` and back off otherwise. With `--link-here <host>:<port>` and
+  busy-spin under `--pin` and back off otherwise. Measures the same two rows over a
+  control channel to two destinations, `claim_commit_32_udp_mdc` and
+  `one_way_32_udp_mdc`: a publication on
+  `cavalry:udp?control=127.0.0.1:<port>|control-mode=manual|fc=min` whose sender
+  sends every datagram to two subscriptions of the driver on two loopback ports, the
+  first measured and the second drained on a thread of its own, one message in flight;
+  under `--pin` the drain runs on the housekeeping CPU with the driver's conductor, so
+  that no pinned CPU holds a second thread, and sleeps 100 µs after a poll that found
+  nothing, well inside the 20 ms its image's receiver window of 128 KiB lasts at the
+  row's pace, so that it does not pace the sender. The rows are
+  reported and never gated since every isolated core of both bench hosts is taken
+  (ADR 0052, feature 1; ADR 0053); under `--link-here` and `--link-peer` the same two
+  rows run after the link rows with the peer's endpoint as the second destination,
+  over the cable and this host at once, once per process; the peer's `--echo` reads
+  them as a second image of the stream and echoes none of it, so that nothing comes
+  back to this host beside the link rows' echo. With `--link-here <host>:<port>` and
   `--link-peer <host>:<port>` it runs the link rows alone instead, `udp_round_trip_32`
   and `udp_one_way_32`, across the direct cable between the two bench hosts to a peer
   running `--echo`, the harness on the other host, which claims every message it
@@ -80,7 +95,9 @@ nothing depends on it.
   step, the smaller of the result's and the baseline's, against `bench/baseline.json`
   for the profile, on the `claim_commit`, `one_way` and `udp_round_trip` rows ([ADR 0029](../docs/decisions/0029-fail-a-gated-row-only-beyond-one-clock-step.md)); the `timer` and `slot_padding` rows are host
   probes and are reported, never failed (ADR 0017), and so is `udp_one_way`, which
-  carries two clocks' offset (ADR 0044). The bench hosts' profiles have
+  carries two clocks' offset (ADR 0044), and so are the `_udp_mdc` rows,
+  `claim_commit_32_udp_mdc` and `one_way_32_udp_mdc`, until a host change gives them
+  cores (ADR 0052, feature 1). The bench hosts' profiles have
   baselines, `bench-linux` and `grip-linux` with their `-unchecked` twins, grip's
   recorded on 2026-10-31 at 0782ec5 from four of its job's processes at the tree, and
   CI runs the gate on each host, as `bench (linux)` and `bench (grip)`
