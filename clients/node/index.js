@@ -335,17 +335,36 @@ class CavalryError extends Error {
 }
 
 class HandlerError extends Error {
-  /** The fragment handler threw during a poll: `fragments` is the count the poll returned once
-   * the ABI was done, `raised` how many handler calls threw, and `cause` the first exception. */
-  constructor(fragments, raised, cause) {
+  /** A fragment of a poll did not reach the handler cleanly: `fragments` is the count the poll
+   * returned once the ABI was done, `raised` how many handler calls threw, `undelivered` how
+   * many fragments the handler never saw because the runtime refused a step of the call, and
+   * `cause` the first of these, the handler's exception as thrown or an Error naming the N-API
+   * call that failed. The ABI consumed every one of the poll's fragments. */
+  constructor(fragments, raised, cause, undelivered = 0) {
     const delivered = fragments >= 0 ? `the ${fragments} fragment(s) this poll delivered` :
       "the fragments this poll delivered before it stopped on a fault, which subscription.fault() reads";
-    super(`the fragment handler threw on ${raised} of ${delivered}; every fragment reached the handler once, in ` +
-      `order. Fix the handler: its first exception, ${String(cause)}, is this error's cause; polling again does ` +
-      `not deliver these fragments again. See clients/node/README.md#the-exception`, { cause });
+    const what = undelivered === 0 ?
+      `the fragment handler threw on ${raised} of ${delivered}; every fragment reached the handler once, in ` +
+      `order. Fix the handler: its first exception, ${describe(cause)}, is this error's cause; polling again does ` +
+      `not deliver these fragments again.` :
+      `${undelivered} of ${delivered} never reached the fragment handler, and the handler threw on ${raised}; the ` +
+      `ABI consumed them, so polling again does not deliver them. The first failure, ${describe(cause)}, is this ` +
+      `error's cause and says what to do.`;
+    super(`${what} See clients/node/README.md#the-exception`, { cause });
     this.name = "HandlerError";
     this.fragments = fragments;
     this.raised = raised;
+    this.undelivered = undelivered;
+  }
+}
+
+/** A thrown value as text for a message: `String` of it, or its tag when it has no string
+ * form, such as an object without a prototype. */
+function describe(value) {
+  try {
+    return String(value);
+  } catch (_) {
+    return Object.prototype.toString.call(value);
   }
 }
 
@@ -525,7 +544,8 @@ class Subscription {
   /** A subscription: `poll(handler, fragmentLimit)` calls `handler(body, header)` for each
    * fragment, `body` a Buffer into the log valid for the call and `header` the one `Header` this
    * object keeps, and returns the fragment count. A handler's exception is kept until the ABI has
-   * returned, every later fragment still reaching the handler, then thrown as `HandlerError`. */
+   * returned, every later fragment still reaching the handler, then thrown as `HandlerError`, as
+   * is a fragment the runtime kept from the handler, counted in its `undelivered`. */
   constructor(handle) {
     this.handle = handle;
     this._header = new Header(null);
@@ -541,7 +561,7 @@ class Subscription {
   poll(handler, fragmentLimit) {
     const result = addon.poll(this._state, this.handle, handler, fragmentLimit);
     if (typeof result === "number") return result;
-    throw new HandlerError(result[0], result[1], result[2]);
+    throw new HandlerError(result[0], result[1], result[2], result[3]);
   }
   /** What the last poll stopped on: {code, sessionId, position}; code 0 for none. */
   fault() {

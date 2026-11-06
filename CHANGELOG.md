@@ -1437,7 +1437,9 @@ user-visible change, added in the same commit as the change. The format follows
   `index.d.ts`, a `Client`, a `Publication` whose `tryClaim` and `offer` return the
   position or the result code and whose `claim` is a `Buffer` over the log, a
   `Subscription` polled with a fragment handler that every delivered fragment reaches,
-  the body a `Buffer` into the log for the call, a `Recording` and a `Replay`; a call
+  the body a `Buffer` into the log for the call, whose `poll` throws `HandlerError`
+  with the counts when a handler threw or the runtime kept a fragment from the
+  handler, a `Recording` and a `Replay`; a call
   the ABI refuses during a claim or a poll leaves the client's state as it was; `just
   lint` regenerates the package and reads its per-message functions, and the package's
   functions they call, for JavaScript's `async`, `await`, `Promise`, `.then`, `throw`

@@ -32,10 +32,11 @@ needs and both CI runners and the ten-minute path's machines have.
 - Never throw for an `Offer` code: `tryClaim` and `offer` return the position after
   the frame or the code below zero (`NOT_CONNECTED`, `BACK_PRESSURED`, `ADMIN_ACTION`,
   `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the caller branches.
-- Never swallow the handler's exception: a fragment handler that throws keeps every
-  later fragment of that poll reaching the handler, and `poll` throws a
-  `HandlerError` once the ABI has returned, with the first exception as its `cause`
-  and the counts, the one throw the per-message path allows.
+- Never swallow the handler's exception, or a fragment: a fragment handler that throws
+  keeps every later fragment of that poll reaching the handler, a fragment the runtime
+  keeps from the handler is counted, and `poll` throws a `HandlerError` once the ABI
+  has returned, with the first exception or failure as its `cause` and the counts, the
+  one throw the per-message path allows.
 - Never edit a generated file by hand: `just lint` regenerates the package and fails
   when the committed files differ.
 
@@ -154,6 +155,23 @@ calling the handler for every later fragment of the poll, so that no fragment is
 consumed unseen; `poll` throws `HandlerError` once the ABI has returned, with
 `fragments`, `raised`, the first exception as its `cause`, and a message that says
 what to do. A value that is not an `Error` is kept as thrown.
+
+The ABI has consumed a fragment before it calls the trampoline, so a fragment the
+trampoline cannot hand to the handler is counted and reported, never dropped. That
+happens when N-API refuses a step of the call: the handle scope, the body's `Buffer`,
+the read of the `Header` or of the handler, or the call itself. One documented case is
+a runtime built with V8's sandbox, such as Electron, on which
+`napi_create_external_buffer` returns `napi_no_external_buffers_allowed`. The
+trampoline counts such a fragment in `undelivered` and keeps the first failure: the
+N-API call, its status, and the frame's session id and term offset, read through
+`cavalry_header_values`, which needs no N-API. `poll` then throws `HandlerError` with
+`undelivered` above 0. Its `cause` is an `Error` whose message names the call, the
+status and the frame and says what to do, with `napiStatus`, `sessionId` and
+`termOffset` as its properties. The `cause` is the poll's first failure or first
+exception, whichever came first, and `raised` and `undelivered` count every one.
+`clients/generate-test.py` compiles the generated trampoline against a stand-in for
+N-API that fails each of its calls in turn, and checks that every fragment the handler
+did not return from is counted once, with the first failure kept.
 
 ## What to read next
 

@@ -380,6 +380,23 @@ static napi_value make_external(napi_env env, void *p) {
   napi_value v; napi_create_external(env, p, NULL, NULL, &v); return v;
 }
 
+/* N-API's statuses by number, for the Error a poll reports when the runtime refused a step
+ * of a fragment's call; by number, since the header of an older Node lacks the later names. */
+static const char *const status_names[] = {
+  "napi_ok", "napi_invalid_arg", "napi_object_expected", "napi_string_expected", "napi_name_expected",
+  "napi_function_expected", "napi_number_expected", "napi_boolean_expected", "napi_array_expected",
+  "napi_generic_failure", "napi_pending_exception", "napi_cancelled", "napi_escape_called_twice",
+  "napi_handle_scope_mismatch", "napi_callback_scope_mismatch", "napi_queue_full", "napi_closing",
+  "napi_bigint_expected", "napi_date_expected", "napi_arraybuffer_expected",
+  "napi_detachable_arraybuffer_expected", "napi_would_deadlock", "napi_no_external_buffers_allowed",
+  "napi_cannot_run_js",
+};
+#define NO_EXTERNAL_BUFFERS 22 /* napi_no_external_buffers_allowed: a runtime built with V8's sandbox */
+
+/* What a poll reports as the cause: the first fragment of the poll that did not reach the
+ * handler cleanly, by the handler's exception or by an N-API call that failed. */
+typedef enum { FIRST_NONE, FIRST_EXCEPTION, FIRST_FAILURE } first_t;
+
 /* The per-subscription state the trampoline needs, made by registerSubscription and freed
  * with the external that holds it. */
 typedef struct {
@@ -388,11 +405,115 @@ typedef struct {
   napi_ref handler_ref;              /* the handler of the poll in progress, else NULL */
   napi_ref pending_ref;              /* the first exception a handler threw in this poll */
   uint32_t raised;                   /* handler calls that threw in this poll */
+  uint32_t undelivered;              /* fragments of this poll the handler never saw */
+  first_t first;                     /* what this poll reports as the cause */
+  const char *failed;                /* FIRST_FAILURE: what the addon could not do, by which N-API call */
+  int failed_status;                 /* FIRST_FAILURE: that call's napi_status */
+  bool failed_frame;                 /* FIRST_FAILURE: whether the frame's two fields below were read */
+  int32_t failed_session_id;
+  int32_t failed_term_offset;
   const cavalry_header_t *current;   /* the frame's header during a handler call */
   cavalry_header_values_t values;    /* read once per fragment, on the first field read */
   bool values_read;
   bool polling;
 } subscription_state_t;
+
+/* The first fragment of a poll that did not reach the handler cleanly for want of an N-API
+ * call: what the addon could not do, the call's status and the frame, read through the ABI,
+ * which needs no N-API, so that poll reports it once the ABI has returned. A later one is
+ * counted by the caller and not kept. */
+static void keep_failure(subscription_state_t *s, const cavalry_header_t *header, const char *what, napi_status status) {
+  if (s->first != FIRST_NONE) return;
+  s->first = FIRST_FAILURE;
+  s->failed = what;
+  s->failed_status = (int) status;
+  cavalry_header_values_t values;
+  s->failed_frame = cavalry_header_values(header, &values) == 0;
+  if (s->failed_frame) {
+    s->failed_session_id = values.frame.session_id;
+    s->failed_term_offset = values.frame.term_offset;
+  }
+}
+
+/* A fragment the handler never saw: the ABI has consumed it, so it is counted, and poll
+ * reports it (invariant 1: a message is delivered once, or its absence is reported). */
+static void undelivered(subscription_state_t *s, const cavalry_header_t *header, const char *what, napi_status status) {
+  s->undelivered++;
+  keep_failure(s, header, what, status);
+}
+
+/* The handler threw on a fragment: counted, and the poll's first exception kept. */
+static void threw(subscription_state_t *s, const cavalry_header_t *header, napi_value exception) {
+  s->raised++;
+  if (s->first != FIRST_NONE) return;
+  napi_status status = napi_create_reference(s->env, exception, 1, &s->pending_ref);
+  if (status == napi_ok) {
+    s->first = FIRST_EXCEPTION;
+  } else {
+    s->pending_ref = NULL;
+    keep_failure(s, header, "keep the fragment handler's exception (napi_create_reference)", status);
+  }
+}
+
+/* The ABI calls this for each fragment: the body as a Buffer over the log's bytes, no copy,
+ * and the subscription's one Header object, whose fields read through headerField. The
+ * handler's exception is N-API's pending exception when the call returns: the first is kept,
+ * every one is counted, and the handler goes on being called for the poll's later fragments.
+ * A fragment the addon cannot hand to the handler, because N-API refused a step of the call,
+ * is counted too, and the first such failure kept, so that no fragment is consumed unseen
+ * and unreported (clients/node/README.md, "The exception"). The body is detached after the
+ * call, so a kept body reads as empty. */
+static void trampoline(void *clientd, const uint8_t *buffer, size_t length, const cavalry_header_t *header) {
+  subscription_state_t *s = clientd;
+  napi_env env = s->env;
+  napi_handle_scope scope;
+  napi_status status = napi_open_handle_scope(env, &scope);
+  if (status != napi_ok) {
+    undelivered(s, header, "open a handle scope (napi_open_handle_scope)", status);
+    return;
+  }
+  napi_value body = NULL, hdr = NULL, handler = NULL, undefined = NULL, result = NULL;
+  if ((status = napi_create_external_buffer(env, length, (void *) buffer, NULL, NULL, &body)) != napi_ok) {
+    body = NULL;
+    undelivered(s, header, "make the body's Buffer (napi_create_external_buffer)", status);
+  } else if ((status = napi_get_reference_value(env, s->header_ref, &hdr)) != napi_ok || hdr == NULL) {
+    undelivered(s, header, "read the subscription's Header (napi_get_reference_value)",
+                status == napi_ok ? napi_generic_failure : status);
+  } else if ((status = napi_get_reference_value(env, s->handler_ref, &handler)) != napi_ok || handler == NULL) {
+    undelivered(s, header, "read the fragment handler (napi_get_reference_value)",
+                status == napi_ok ? napi_generic_failure : status);
+  } else if ((status = napi_get_undefined(env, &undefined)) != napi_ok) {
+    undelivered(s, header, "read undefined for the handler's this (napi_get_undefined)", status);
+  } else {
+    s->current = header;
+    s->values_read = false;
+    napi_value args[2] = { body, hdr };
+    status = napi_call_function(env, undefined, handler, 2, args, &result);
+    s->current = NULL;
+    if (status != napi_ok) {
+      /* An exception pending means the handler ran and threw; none means N-API refused the
+       * call before the handler ran. When N-API cannot say, the fragment counts as unseen. */
+      bool pending = false;
+      napi_value exception;
+      napi_status asked = napi_is_exception_pending(env, &pending);
+      if (asked != napi_ok) {
+        undelivered(s, header, "learn whether the fragment handler threw (napi_is_exception_pending)", asked);
+      } else if (!pending) {
+        undelivered(s, header, "call the fragment handler (napi_call_function)", status);
+      } else if ((status = napi_get_and_clear_last_exception(env, &exception)) != napi_ok) {
+        s->raised++;
+        keep_failure(s, header, "read the fragment handler's exception (napi_get_and_clear_last_exception)", status);
+      } else {
+        threw(s, header, exception);
+      }
+    }
+  }
+  if (body != NULL) {
+    napi_typedarray_type t; size_t n; void *data; napi_value ab; size_t offset;
+    if (napi_get_typedarray_info(env, body, &t, &n, &data, &ab, &offset) == napi_ok) napi_detach_arraybuffer(env, ab);
+  }
+  napi_close_handle_scope(env, scope);
+}
 
 static void free_state(napi_env env, void *data, void *hint) {
   (void) hint;
@@ -416,46 +537,70 @@ static napi_value fn_registerSubscription(napi_env env, napi_callback_info info)
   return v;
 }
 
-/* The ABI calls this for each fragment: the body as a Buffer over the log's bytes, no copy,
- * and the subscription's one Header object, whose fields read through headerField. The
- * handler's exception is N-API's pending exception when the call returns: the first is kept,
- * every one is counted, and the handler goes on being called for the poll's later fragments,
- * so that no fragment is consumed unseen (clients/node/README.md, "The exception"). The body
- * is detached after the call, so a kept body reads as empty. */
-static void trampoline(void *clientd, const uint8_t *buffer, size_t length, const cavalry_header_t *header) {
-  subscription_state_t *s = clientd;
-  napi_env env = s->env;
-  napi_handle_scope scope;
-  if (napi_open_handle_scope(env, &scope) != napi_ok) return;
-  napi_value body, hdr, handler, undefined, result;
-  if (napi_create_external_buffer(env, length, (void *) buffer, NULL, NULL, &body) != napi_ok ||
-      napi_get_reference_value(env, s->header_ref, &hdr) != napi_ok ||
-      napi_get_reference_value(env, s->handler_ref, &handler) != napi_ok ||
-      napi_get_undefined(env, &undefined) != napi_ok) {
-    napi_close_handle_scope(env, scope);
-    return;
+/* The Error a poll reports for its first fragment that N-API kept from the handler: what the
+ * addon could not do, by which call, N-API's status by number and name, the frame's session
+ * and term offset, and what to do; the three numbers are its properties too. NULL when N-API
+ * cannot make it either. */
+static napi_value failure_error(napi_env env, const subscription_state_t *s) {
+  char frame[96];
+  char message[768];
+  if (s->failed_frame) {
+    snprintf(frame, sizeof frame, "the fragment of session %d at term offset %d", (int) s->failed_session_id,
+             (int) s->failed_term_offset);
+  } else {
+    snprintf(frame, sizeof frame, "a fragment whose header cavalry_header_values could not read");
   }
-  s->current = header;
-  s->values_read = false;
-  napi_value args[2] = { body, hdr };
-  napi_status status = napi_call_function(env, undefined, handler, 2, args, &result);
-  s->current = NULL;
-  if (status != napi_ok) {
-    napi_value exception;
-    if (napi_get_and_clear_last_exception(env, &exception) == napi_ok) {
-      s->raised++;
-      if (s->pending_ref == NULL) napi_create_reference(env, exception, 1, &s->pending_ref);
-    }
+  int known = (int) (sizeof status_names / sizeof status_names[0]);
+  const char *name = s->failed_status >= 0 && s->failed_status < known ? status_names[s->failed_status] :
+                     "a status this addon does not name";
+  const char *next = s->failed_status == NO_EXTERNAL_BUFFERS ?
+      "this runtime forbids external buffers, as a Node or an Electron built with V8's sandbox does, and the "
+      "client needs one to hand the handler the log's bytes without a copy: run the client on a Node built "
+      "without the sandbox" :
+      "the runtime refused a call the addon makes for every fragment: call poll on the thread that made the "
+      "client, on a Node that package.json's engines admits";
+  snprintf(message, sizeof message, "the addon could not %s for %s: N-API status %d, %s; %s. The ABI consumed the "
+           "fragment, so polling again does not deliver it. See clients/node/README.md#the-exception", s->failed, frame,
+           s->failed_status, name, next);
+  napi_value text, error;
+  if (napi_create_string_utf8(env, message, NAPI_AUTO_LENGTH, &text) != napi_ok ||
+      napi_create_error(env, NULL, text, &error) != napi_ok) {
+    return NULL;
   }
-  napi_typedarray_type t; size_t n; void *data; napi_value ab; size_t offset;
-  if (napi_get_typedarray_info(env, body, &t, &n, &data, &ab, &offset) == napi_ok) napi_detach_arraybuffer(env, ab);
-  napi_close_handle_scope(env, scope);
+  napi_set_named_property(env, error, "napiStatus", make_int32(env, s->failed_status));
+  if (s->failed_frame) {
+    napi_set_named_property(env, error, "sessionId", make_int32(env, s->failed_session_id));
+    napi_set_named_property(env, error, "termOffset", make_int32(env, s->failed_term_offset));
+  }
+  return error;
+}
+
+/* What poll returns when a fragment of the poll did not reach the handler cleanly:
+ * [count, raised, first, undelivered], `first` the handler's first exception or the Error
+ * failure_error makes, whichever came first; the state is cleared for the next poll. */
+static napi_value report(napi_env env, subscription_state_t *s, int count) {
+  napi_value tuple, first = NULL;
+  if (s->first == FIRST_EXCEPTION && s->pending_ref != NULL) {
+    if (napi_get_reference_value(env, s->pending_ref, &first) != napi_ok) first = NULL;
+  } else if (s->first == FIRST_FAILURE) {
+    first = failure_error(env, s);
+  }
+  if (s->pending_ref != NULL) napi_delete_reference(env, s->pending_ref);
+  s->pending_ref = NULL;
+  if (first == NULL) first = make_null(env);
+  napi_create_array_with_length(env, 4, &tuple);
+  napi_set_element(env, tuple, 0, make_int32(env, count));
+  napi_set_element(env, tuple, 1, make_int32(env, (int32_t) s->raised));
+  napi_set_element(env, tuple, 2, first);
+  napi_set_element(env, tuple, 3, make_int32(env, (int32_t) s->undelivered));
+  s->first = FIRST_NONE; s->raised = 0; s->undelivered = 0;
+  return tuple;
 }
 
 /* poll(state, subscription, handler, fragmentLimit): the one cavalry_subscription_poll call.
- * Returns the count the ABI returned, or, when a handler threw, [count, raised, first]. From
- * a handler of this subscription's own poll it passes the call to the ABI, which refuses it
- * with -1 and CAVALRY_ERR_POLLING, and touches nothing. */
+ * Returns the count the ABI returned, or, when a fragment did not reach the handler cleanly,
+ * what report makes. From a handler of this subscription's own poll it passes the call to the
+ * ABI, which refuses it with -1 and CAVALRY_ERR_POLLING, and touches nothing. */
 static napi_value fn_poll(napi_env env, napi_callback_info info) {
   size_t argc = 4; napi_value argv[4];
   if (!read_args(env, info, 4, &argc, argv, "poll")) return NULL;
@@ -469,23 +614,13 @@ static napi_value fn_poll(napi_env env, napi_callback_info info) {
   napi_valuetype t;
   if (napi_typeof(env, argv[2], &t) != napi_ok || t != napi_function) { type_error(env, "handler", "a function"); return NULL; }
   if (napi_create_reference(env, argv[2], 1, &s->handler_ref) != napi_ok) { type_error(env, "handler", "a function"); return NULL; }
-  s->env = env; s->polling = true; s->raised = 0;
+  s->env = env; s->polling = true;
+  s->first = FIRST_NONE; s->raised = 0; s->undelivered = 0;
   int count = cavalry_subscription_poll(subscription, trampoline, s, limit);
   s->polling = false;
   napi_delete_reference(env, s->handler_ref); s->handler_ref = NULL;
-  if (s->raised == 0) return make_int32(env, count);
-  napi_value tuple, first;
-  napi_create_array_with_length(env, 3, &tuple);
-  napi_set_element(env, tuple, 0, make_int32(env, count));
-  napi_set_element(env, tuple, 1, make_int32(env, (int32_t) s->raised));
-  if (s->pending_ref && napi_get_reference_value(env, s->pending_ref, &first) == napi_ok) {
-    napi_set_element(env, tuple, 2, first);
-    napi_delete_reference(env, s->pending_ref);
-  } else {
-    napi_set_element(env, tuple, 2, make_null(env));
-  }
-  s->pending_ref = NULL; s->raised = 0;
-  return tuple;
+  if (s->raised == 0 && s->undelivered == 0) return make_int32(env, count);
+  return report(env, s, count);
 }
 
 /* headerField(state, index): the current frame's header field, read through
@@ -674,17 +809,36 @@ class CavalryError extends Error {
 }
 
 class HandlerError extends Error {
-  /** The fragment handler threw during a poll: `fragments` is the count the poll returned once
-   * the ABI was done, `raised` how many handler calls threw, and `cause` the first exception. */
-  constructor(fragments, raised, cause) {
+  /** A fragment of a poll did not reach the handler cleanly: `fragments` is the count the poll
+   * returned once the ABI was done, `raised` how many handler calls threw, `undelivered` how
+   * many fragments the handler never saw because the runtime refused a step of the call, and
+   * `cause` the first of these, the handler's exception as thrown or an Error naming the N-API
+   * call that failed. The ABI consumed every one of the poll's fragments. */
+  constructor(fragments, raised, cause, undelivered = 0) {
     const delivered = fragments >= 0 ? `the ${fragments} fragment(s) this poll delivered` :
       "the fragments this poll delivered before it stopped on a fault, which subscription.fault() reads";
-    super(`the fragment handler threw on ${raised} of ${delivered}; every fragment reached the handler once, in ` +
-      `order. Fix the handler: its first exception, ${String(cause)}, is this error's cause; polling again does ` +
-      `not deliver these fragments again. See clients/node/README.md#the-exception`, { cause });
+    const what = undelivered === 0 ?
+      `the fragment handler threw on ${raised} of ${delivered}; every fragment reached the handler once, in ` +
+      `order. Fix the handler: its first exception, ${describe(cause)}, is this error's cause; polling again does ` +
+      `not deliver these fragments again.` :
+      `${undelivered} of ${delivered} never reached the fragment handler, and the handler threw on ${raised}; the ` +
+      `ABI consumed them, so polling again does not deliver them. The first failure, ${describe(cause)}, is this ` +
+      `error's cause and says what to do.`;
+    super(`${what} See clients/node/README.md#the-exception`, { cause });
     this.name = "HandlerError";
     this.fragments = fragments;
     this.raised = raised;
+    this.undelivered = undelivered;
+  }
+}
+
+/** A thrown value as text for a message: `String` of it, or its tag when it has no string
+ * form, such as an object without a prototype. */
+function describe(value) {
+  try {
+    return String(value);
+  } catch (_) {
+    return Object.prototype.toString.call(value);
   }
 }
 
@@ -864,7 +1018,8 @@ class Subscription {
   /** A subscription: `poll(handler, fragmentLimit)` calls `handler(body, header)` for each
    * fragment, `body` a Buffer into the log valid for the call and `header` the one `Header` this
    * object keeps, and returns the fragment count. A handler's exception is kept until the ABI has
-   * returned, every later fragment still reaching the handler, then thrown as `HandlerError`. */
+   * returned, every later fragment still reaching the handler, then thrown as `HandlerError`, as
+   * is a fragment the runtime kept from the handler, counted in its `undelivered`. */
   constructor(handle) {
     this.handle = handle;
     this._header = new Header(null);
@@ -880,7 +1035,7 @@ class Subscription {
   poll(handler, fragmentLimit) {
     const result = addon.poll(this._state, this.handle, handler, fragmentLimit);
     if (typeof result === "number") return result;
-    throw new HandlerError(result[0], result[1], result[2]);
+    throw new HandlerError(result[0], result[1], result[2], result[3]);
   }
   /** What the last poll stopped on: {code, sessionId, position}; code 0 for none. */
   fault() {
@@ -997,10 +1152,12 @@ export class CavalryError extends Error {
   abiMessage: string;
 }
 
-/** The fragment handler threw during a poll; `cause` is the first exception. */
+/** A fragment of a poll did not reach the handler cleanly: the handler threw on `raised` of
+ * them, `undelivered` never reached it, and `cause` is the first of these. */
 export class HandlerError extends Error {
   fragments: number;
   raised: number;
+  undelivered: number;
 }
 
 /** The body as a Buffer into the log, valid for the call, and the frame's header. */

@@ -285,9 +285,10 @@ function edges(client) {
   }
   if (error === null) fail(`${name}: a handler that threw on message 3 did not make poll throw HandlerError; it saw ${seen}`);
   if (!(error instanceof cavalry.HandlerError) || !same(seen, range(10)) || error.fragments !== 10 || error.raised !== 1
-      || !(error.cause instanceof Error) || error.cause.message !== "message 3") {
+      || error.undelivered !== 0 || !(error.cause instanceof Error) || error.cause.message !== "message 3") {
     fail(`${name}: the handler saw ${seen}; poll threw ${error} with fragments ${error.fragments}, raised ` +
-         `${error.raised}, cause ${error.cause}; expected messages 0 to 9 once and in order, HandlerError, 10, 1 and the Error`);
+         `${error.raised}, undelivered ${error.undelivered}, cause ${error.cause}; expected messages 0 to 9 once and in ` +
+         `order, HandlerError, 10, 1, 0 and the Error`);
   }
   if (!error.message.includes("Fix the handler") || !error.message.endsWith("See clients/node/README.md#the-exception")) {
     fail(`${name}: HandlerError's message does not say what to do and where it is explained: ${error.message}`);
@@ -740,7 +741,7 @@ freeUdpPort((udpPort) => {
     process.exitCode = main(udpPort);
   } catch (thrown) {
     if (thrown instanceof cavalry.CavalryError) fail(`${thrown.fn} failed with error ${thrown.code}: ${thrown.abiMessage}`);
-    if (thrown instanceof cavalry.HandlerError) fail(`the fragment handler threw: ${thrown.cause}`);
+    if (thrown instanceof cavalry.HandlerError) fail(`a poll threw HandlerError: ${thrown.message}`);
     throw thrown;
   }
 });

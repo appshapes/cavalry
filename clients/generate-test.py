@@ -9,9 +9,11 @@ for the Node package (`NodePackage`): the committed five files are what the pars
 a header change changes the addon and the client, the addon wraps every function but the
 poll, which is its own `poll` around the one `cavalry_subscription_poll` call, the struct
 layout the client reads its `DataView`s by is the layout `ctypes` gives the Python
-binding, `HandlerError`'s message says what to do and names a heading of the README, and
-`--check` fails on a package that differs. `just test` runs this through `test-scripts`.
-Python 3.9 standard library only.
+binding, the trampoline, compiled with `cc` against a stand-in for N-API, counts and
+reports every fragment the handler did not see, `HandlerError`'s message and the addon's
+Error for such a fragment say what to do and name a heading of the README, and `--check`
+fails on a package that differs. `just test` runs this through `test-scripts`. Python 3.9
+standard library only.
 """
 
 import ctypes
@@ -19,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -27,6 +30,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate as gen  # noqa: E402
 import generate_node as gen_node  # noqa: E402
+import lint  # noqa: E402
 
 VECTORS = os.path.join(gen.ROOT, "spec", "vectors", "c-abi.json")
 
@@ -260,6 +264,202 @@ class Package(unittest.TestCase):
                 gen.ROOT, gen.HEADER = root, header
 
 
+# The generated trampoline and its helpers, from N-API's status names to the trampoline's
+# closing brace, compiled against a stand-in for the N-API calls they make: each call is
+# recorded by name, and the one at index `fail_at` returns napi_generic_failure. `main` runs
+# one fragment with no failure to learn its calls, then the same fragment with each of them
+# failing in turn, for a handler that returns and one that throws, and checks what the
+# state kept; it prints each finding and the clean run's calls, and exits 1 on a finding.
+TRAMPOLINE_HARNESS = r'''#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "cavalry.h"
+
+typedef struct napi_env__ *napi_env;
+typedef struct napi_value__ *napi_value;
+typedef struct napi_ref__ *napi_ref;
+typedef struct napi_handle_scope__ *napi_handle_scope;
+typedef enum { napi_ok = 0, napi_generic_failure = 9, napi_pending_exception = 10 } napi_status;
+typedef enum { napi_uint8_array = 1 } napi_typedarray_type;
+typedef void (*napi_finalize)(napi_env env, void *data, void *hint);
+
+static const char *calls[64];
+static int ncalls, fail_at = -1;
+static const napi_status fail_with = napi_generic_failure;
+static bool handler_throws, pending;
+static int handler_ran, scopes_open, buffers_live;
+static char handles[8];
+#define HANDLE(i) ((void *) &handles[i])
+
+static napi_status step(const char *name) {
+  int at = ncalls;
+  if (ncalls < 64) calls[ncalls++] = name;
+  return at == fail_at ? fail_with : napi_ok;
+}
+
+napi_status napi_open_handle_scope(napi_env env, napi_handle_scope *scope) {
+  (void) env;
+  napi_status s = step("napi_open_handle_scope");
+  if (s == napi_ok) { *scope = HANDLE(0); scopes_open++; }
+  return s;
+}
+napi_status napi_close_handle_scope(napi_env env, napi_handle_scope scope) {
+  (void) env; (void) scope;
+  scopes_open--;
+  return step("napi_close_handle_scope");
+}
+napi_status napi_create_external_buffer(napi_env env, size_t length, void *data, napi_finalize cb, void *hint,
+                                        napi_value *result) {
+  (void) env; (void) length; (void) data; (void) cb; (void) hint;
+  napi_status s = step("napi_create_external_buffer");
+  if (s == napi_ok) { *result = HANDLE(1); buffers_live++; }
+  return s;
+}
+napi_status napi_get_reference_value(napi_env env, napi_ref ref, napi_value *result) {
+  (void) env; (void) ref;
+  napi_status s = step("napi_get_reference_value");
+  if (s == napi_ok) *result = HANDLE(2);
+  return s;
+}
+napi_status napi_create_reference(napi_env env, napi_value value, uint32_t count, napi_ref *result) {
+  (void) env; (void) value; (void) count;
+  napi_status s = step("napi_create_reference");
+  if (s == napi_ok) *result = HANDLE(3);
+  return s;
+}
+napi_status napi_set_element(napi_env env, napi_value object, uint32_t index, napi_value value) {
+  (void) env; (void) object; (void) index; (void) value;
+  return step("napi_set_element");
+}
+napi_status napi_get_undefined(napi_env env, napi_value *result) {
+  (void) env;
+  napi_status s = step("napi_get_undefined");
+  if (s == napi_ok) *result = HANDLE(4);
+  return s;
+}
+napi_status napi_call_function(napi_env env, napi_value recv, napi_value func, size_t argc, const napi_value *argv,
+                               napi_value *result) {
+  (void) env; (void) recv; (void) func; (void) argc; (void) argv;
+  napi_status s = step("napi_call_function");
+  if (s != napi_ok) return s;
+  handler_ran++;
+  if (handler_throws) { pending = true; return napi_pending_exception; }
+  *result = HANDLE(5);
+  return napi_ok;
+}
+napi_status napi_is_exception_pending(napi_env env, bool *result) {
+  (void) env;
+  napi_status s = step("napi_is_exception_pending");
+  if (s == napi_ok) *result = pending;
+  return s;
+}
+napi_status napi_get_and_clear_last_exception(napi_env env, napi_value *result) {
+  (void) env;
+  napi_status s = step("napi_get_and_clear_last_exception");
+  if (s == napi_ok) { *result = HANDLE(6); pending = false; }
+  return s;
+}
+napi_status napi_get_typedarray_info(napi_env env, napi_value array, napi_typedarray_type *type, size_t *length,
+                                     void **data, napi_value *arraybuffer, size_t *offset) {
+  (void) env; (void) array; (void) type; (void) length; (void) data; (void) offset;
+  napi_status s = step("napi_get_typedarray_info");
+  if (s == napi_ok) *arraybuffer = HANDLE(7);
+  return s;
+}
+napi_status napi_detach_arraybuffer(napi_env env, napi_value arraybuffer) {
+  (void) env; (void) arraybuffer;
+  napi_status s = step("napi_detach_arraybuffer");
+  if (s == napi_ok) buffers_live--;
+  return s;
+}
+int cavalry_header_values(const cavalry_header_t *header, cavalry_header_values_t *values) {
+  (void) header;
+  memset(values, 0, sizeof *values);
+  values->frame.session_id = 7;
+  values->frame.term_offset = 4096;
+  return 0;
+}
+
+@TRAMPOLINE@
+
+static int failures;
+#define EXPECT(cond, ...) do { if (!(cond)) { failures++; printf(__VA_ARGS__); printf("\n"); } } while (0)
+
+static void reset(int at, bool throws) {
+  ncalls = 0; fail_at = at; handler_throws = throws; pending = false;
+  handler_ran = 0; scopes_open = 0; buffers_live = 0;
+}
+
+static void fragment(subscription_state_t *s) {
+  trampoline(s, (const uint8_t *) "body", 4, (const cavalry_header_t *) HANDLE(1));
+}
+
+static void one(int at, bool throws) {
+  subscription_state_t s;
+  memset(&s, 0, sizeof s);
+  s.env = (napi_env) HANDLE(0);
+  reset(at, throws);
+  fragment(&s);
+  const char *failed = at < ncalls ? calls[at] : NULL;
+  char where[160];
+  snprintf(where, sizeof where, "with %s failing (call %d), the handler %s", failed ? failed : "no call", at,
+           throws ? "throwing" : "returning");
+  if (handler_ran && !throws) {
+    EXPECT(s.raised == 0 && s.undelivered == 0 && s.first == FIRST_NONE,
+           "%s: the handler returned, yet the fragment was counted (raised %u, undelivered %u)", where,
+           (unsigned) s.raised, (unsigned) s.undelivered);
+  } else {
+    EXPECT(s.raised + s.undelivered == 1, "%s: the fragment was counted %u time(s) (raised %u, undelivered %u), not once",
+           where, (unsigned) (s.raised + s.undelivered), (unsigned) s.raised, (unsigned) s.undelivered);
+    EXPECT(s.first != FIRST_NONE, "%s: nothing kept for poll to report", where);
+    if (!handler_ran) EXPECT(s.undelivered == 1, "%s: the handler never ran, yet undelivered is %u", where, (unsigned) s.undelivered);
+  }
+  if (s.first == FIRST_FAILURE) {
+    EXPECT(failed != NULL && s.failed != NULL && strstr(s.failed, failed) != NULL,
+           "%s: the failure kept says \"%s\", not the call that failed", where, s.failed ? s.failed : "(nothing)");
+    EXPECT(s.failed_status == (int) fail_with, "%s: the failure kept has status %d, not %d", where, s.failed_status,
+           (int) fail_with);
+    EXPECT(s.failed_frame && s.failed_session_id == 7 && s.failed_term_offset == 4096,
+           "%s: the failure kept does not name the frame's session and term offset", where);
+  }
+  EXPECT(scopes_open == 0, "%s: %d handle scope(s) left open", where, scopes_open);
+  if (failed == NULL || (strcmp(failed, "napi_get_typedarray_info") != 0 && strcmp(failed, "napi_detach_arraybuffer") != 0)) {
+    EXPECT(buffers_live == 0, "%s: %d body Buffer(s) left attached", where, buffers_live);
+  }
+}
+
+int main(void) {
+  for (int throws = 0; throws < 2; throws++) {
+    subscription_state_t s;
+    memset(&s, 0, sizeof s);
+    reset(-1, throws);
+    fragment(&s);
+    int n = ncalls;
+    printf("a fragment whose handler %s calls:", throws ? "throws" : "returns");
+    for (int i = 0; i < n; i++) printf(" %s", calls[i]);
+    printf("\n");
+    for (int at = 0; at <= n; at++) one(at, throws);
+  }
+  /* The first failure of a poll stays its cause: a later fragment's throw is counted only. */
+  subscription_state_t s;
+  memset(&s, 0, sizeof s);
+  reset(0, false);
+  fragment(&s);
+  reset(-1, true);
+  fragment(&s);
+  EXPECT(s.undelivered == 1 && s.raised == 1 && s.first == FIRST_FAILURE && s.failed != NULL &&
+         strstr(s.failed, "napi_open_handle_scope") != NULL,
+         "a fragment kept from the handler, then one whose handler threw: undelivered %u, raised %u, and the cause "
+         "is not the first failure", (unsigned) s.undelivered, (unsigned) s.raised);
+  (void) status_names;
+  printf("%d failure(s)\n", failures);
+  return failures != 0;
+}
+'''
+
+
 class NodePackage(unittest.TestCase):
     """The Node package, `clients/node` (clients/node/README.md; ADR 0046, card 206)."""
 
@@ -326,18 +526,57 @@ class NodePackage(unittest.TestCase):
 
     def test_handler_errors_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
         """CLAUDE.md: every error message says what to do next and names the docs anchor
-        that explains it. The anchor `HandlerError` names is a heading of the README; the
-        message is read from the generated source, since the test does not need Node."""
-        index = gen_node.write_node(self.header)["index.js"]
-        body = index.split("class HandlerError extends Error {", 1)[1].split("\n}\n", 1)[0]
+        that explains it. The anchor `HandlerError` names is a heading of the README, and so
+        is the one the addon's Error for a fragment N-API kept from the handler names; the
+        messages are read from the generated source, since the test does not need Node."""
+        files = gen_node.write_node(self.header)
+        body = files["index.js"].split("class HandlerError extends Error {", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which subscription.fault() reads", body)
-        self.assertIn("Fix the handler: its first exception, ${String(cause)}, is this error's cause", body)
-        self.assertIn("See clients/node/README.md#the-exception`, { cause });", body)
+        self.assertIn("Fix the handler: its first exception, ${describe(cause)}, is this error's cause", body)
+        self.assertIn("never reached the fragment handler", body)
+        self.assertIn("The first failure, ${describe(cause)}, is this ` +\n      `error's cause and says what to do.", body)
+        self.assertIn("super(`${what} See clients/node/README.md#the-exception`, { cause });", body)
+        failure = files["src/addon.c"].split("static napi_value failure_error(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("run the client on a Node built", failure)
+        self.assertIn("polling again does not deliver it. See clients/node/README.md#the-exception", failure)
         with open(os.path.join(gen.ROOT, "clients", "node", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}
         self.assertIn("the-exception", slugs)
+
+    def test_the_trampoline_counts_and_reports_every_fragment_the_handler_did_not_see(self):
+        """Invariant 1: the ABI has consumed a fragment before the trampoline runs, so a
+        fragment the handler does not see, because N-API refused a step of the call, is
+        counted and its failure kept for poll to report, never dropped. The generated
+        trampoline and its helpers are compiled with the runner's `cc` against
+        TRAMPOLINE_HARNESS, a stand-in for N-API that fails each call of a fragment in turn,
+        for a handler that returns and one that throws: a fragment the handler returned from
+        is counted nowhere, every other is counted once, in `raised` or `undelivered`, with
+        the first failure naming the call that failed, its status and the frame; every handle
+        scope opened is closed and every body made is detached; and a later fragment does not
+        replace the poll's first failure."""
+        cc = shutil.which("cc")
+        if cc is None:
+            self.skipTest("no C compiler on PATH; the Node client's install needs one, and both CI runners have it")
+        addon = gen_node.write_node(self.header)["src/addon.c"]
+        start = addon.index("/* N-API's statuses by number")
+        brace = addon.index("{", addon.index("static void trampoline("))
+        end = lint.block_end(lint.blank(addon), brace)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "harness.c")
+            with open(source, "w", encoding="utf-8") as f:
+                f.write(TRAMPOLINE_HARNESS.replace("@TRAMPOLINE@", addon[start:end]))
+            binary = os.path.join(tmp, "harness")
+            include = os.path.join(gen.ROOT, "crates", "cavalry-ffi", "include")
+            built = subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-I", include, source, "-o", binary],
+                                   capture_output=True, text=True)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            ran = subprocess.run([binary], capture_output=True, text=True)
+        self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+        self.assertIn("napi_create_external_buffer", ran.stdout)
+        self.assertIn("napi_call_function", ran.stdout)
+        self.assertIn("0 failure(s)", ran.stdout)
 
     def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
         with tempfile.TemporaryDirectory() as tmp:
