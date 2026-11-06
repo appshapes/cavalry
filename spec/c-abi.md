@@ -312,6 +312,12 @@ a `&mut self` one:
   the new client.
 - An image is part of its subscription, so a call on an image counts as a call on its
   subscription.
+- `cavalry_add_destination` and `cavalry_remove_destination` count as calls on the
+  client and not on the publication they name: each reads only the registration id
+  the publication handle copied when it was made, which no function of the
+  publication writes. So either may run in one thread beside any call on the
+  publication in another, an offer or a claim among them, but not beside the
+  publication's close, which frees the handle ("Lifetimes"; ADR 0057).
 - Two handles may be used from two threads at once, a client and its publications,
   subscriptions, recordings and replays among them.
 
