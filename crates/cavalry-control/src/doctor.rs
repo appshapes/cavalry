@@ -998,8 +998,9 @@ struct ImageCounters {
 /// `image.hwm_position` runs ahead of its `image.rebuild_position`; a receive endpoint
 /// with no image, whose subscriptions wait for a setup frame that has not come; and
 /// ADR 0053's three, a `min` publication with fewer receivers answering than its
-/// endpoint has destinations, a receiver dropped from a `min` table and a table that
-/// was full. Every endpoint is listed as a note, as recordings are, with its status,
+/// endpoint has destinations, read from the gauges whose label names `fc=min`, a
+/// receiver dropped from a `min` table and a table that was full. Every endpoint is
+/// listed as a note, as recordings are, with its status,
 /// its publications or images, its destinations on a control channel, and its buffers.
 fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
     if !running {
@@ -1011,8 +1012,9 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
     let mut unanswered: Vec<(i64, i32, i32, i64)> = Vec::new();
     let mut images: Vec<ImageCounters> = Vec::new();
     let mut positions: Vec<([u8; 16], i32, i64)> = Vec::new();
-    // Every `sender.flow_control_receivers` gauge: its publication's ids, its
-    // endpoint's registration id and its value (ADR 0053).
+    // Every `sender.flow_control_receivers` gauge of a `min` publication: its
+    // publication's ids, its endpoint's registration id and its value; a `max`
+    // publication's, which the sender holds at 0, is not read (ADR 0053).
     let mut receivers: Vec<(i64, i32, i32, i64, i64)> = Vec::new();
     let endpoint_id = |key: &[u8]| {
         let mut bytes = [0u8; 8];
@@ -1053,11 +1055,16 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             buffers.push((endpoint_id(fields.key()), type_id, value));
         } else if type_id == SENDER_FLOW_CONTROL_RECEIVERS.0 {
             // The label: the name, the correlation id, the session id, the stream id
-            // and the endpoint's registration id, as sender.limit's.
+            // and the endpoint's registration id, as sender.limit's, then the
+            // strategy, `fc=max` or `fc=min`; only a `min` publication keeps a table.
             let mut words = fields.label().split_whitespace().skip(1);
-            let (Some(correlation), Some(session), Some(stream), Some(endpoint)) =
-                (words.next(), words.next(), words.next(), words.next())
-            else {
+            let (Some(correlation), Some(session), Some(stream), Some(endpoint), Some("fc=min")) = (
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+                words.next(),
+            ) else {
                 continue;
             };
             let (Ok(correlation_id), Ok(session_id), Ok(stream_id), Ok(endpoint_id)) = (
@@ -1230,6 +1237,8 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             });
         }
     }
+    // The counter counts a receiver dropped for the timeout alone; one whose stream
+    // ended, as every receiver's does after a clean close, is not in it (ADR 0054).
     if let Some(timed_out) = read_static(
         reader,
         "sender.flow_control_receivers_timed_out",
@@ -1242,11 +1251,12 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             level: Level::Warn,
             message: format!(
                 "sender.flow_control_receivers_timed_out is {timed_out}: that many times a \
-                 receiver of a publication under fc=min sent no status message for 5 s, or \
-                 ended its stream, and was dropped from the publication's table, each time \
-                 after holding the stream back for the timeout; a destination whose driver \
-                 stopped, lost its subscription or lost its route: find it by the \
-                 publication whose sender.flow_control_receivers is below its endpoint's \
+                 receiver of a publication under fc=min sent no status message for 5 s and \
+                 was dropped from the publication's table, each time after holding the \
+                 stream back for the timeout; a receiver whose stream ended is not counted, \
+                 so this is a destination whose driver stopped, lost its subscription or \
+                 lost its route: find it by the publication whose \
+                 sender.flow_control_receivers is below its endpoint's \
                  channel.destinations, check its driver, or remove the destination"
             ),
             doc: DOC_UDP_SENDER,
@@ -2311,7 +2321,7 @@ mod tests {
             .allocate(
                 SENDER_FLOW_CONTROL_RECEIVERS,
                 &key,
-                "sender.flow_control_receivers 7 5 1001 9",
+                "sender.flow_control_receivers 7 5 1001 9 fc=min",
             )
             .expect("room");
         receivers.set(0);
@@ -2398,6 +2408,188 @@ mod tests {
         assert_eq!(found.level, Level::Warn);
         assert!(found.message.contains("is 3"), "{}", found.message);
         assert!(report.ok(), "warnings do not fail: {report}");
+    }
+
+    /// A control channel's send endpoint in `counters` as the conductor allocates one:
+    /// active, its buffers, one publication and `destinations` destinations.
+    fn control_endpoint(counters: &mut CountersFile, endpoint_id: i64, destinations: i64) {
+        let channel = "cavalry:udp?control=10.0.0.1:40456|control-mode=manual";
+        let key = endpoint_id.to_le_bytes();
+        for (id, name, value) in [
+            (CHANNEL_STATUS, "channel.status", 1),
+            (CHANNEL_SOCKET_SNDBUF, "channel.socket_sndbuf", 212_992),
+            (
+                CHANNEL_SOCKET_RCVBUF,
+                "channel.socket_rcvbuf",
+                RCVBUF_EXPECTED,
+            ),
+            (CHANNEL_PUBLICATIONS, "channel.publications", 1),
+            (CHANNEL_DESTINATIONS, "channel.destinations", destinations),
+        ] {
+            counters
+                .allocate(id, &key, &format!("{name} {channel}"))
+                .expect("room")
+                .set(value);
+        }
+    }
+
+    /// A publication's `sender.limit` and `sender.flow_control_receivers` on stream
+    /// 1001, session 5, labelled as the conductor labels them, `strategy` last.
+    fn sender_gauges(
+        counters: &mut CountersFile,
+        correlation_id: i64,
+        endpoint_id: i64,
+        strategy: &str,
+        (limit, receivers): (i64, i64),
+    ) {
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&correlation_id.to_le_bytes());
+        key[8..12].copy_from_slice(&5i32.to_le_bytes());
+        key[12..].copy_from_slice(&1001i32.to_le_bytes());
+        counters
+            .allocate(
+                SENDER_LIMIT,
+                &key,
+                &format!("sender.limit {correlation_id} 5 1001 {endpoint_id}"),
+            )
+            .expect("room")
+            .set(limit);
+        counters
+            .allocate(
+                SENDER_FLOW_CONTROL_RECEIVERS,
+                &key,
+                &format!(
+                    "sender.flow_control_receivers {correlation_id} 5 1001 {endpoint_id} \
+                     {strategy}"
+                ),
+            )
+            .expect("room")
+            .set(receivers);
+    }
+
+    /// A `max` publication keeps no table, and the sender holds its
+    /// `sender.flow_control_receivers` at 0 (ADR 0053): `doctor` reads the strategy
+    /// from the gauge's label, so a `max` publication on a control channel with two
+    /// destinations, connected, gets no `udp-flow-control-receivers` warning, and a
+    /// `min` one beside it with one receiver answering gets the one warning.
+    #[test]
+    fn a_max_publication_on_a_control_channel_is_not_read_as_short_of_receivers() {
+        let dir = TestDir::new("udp-mdc-max");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        control_endpoint(&mut counters, 9, 2);
+        sender_gauges(&mut counters, 7, 9, "fc=max", (131_072, 0));
+        let report = examine(&dir.0);
+        for check in [
+            "udp-flow-control-receivers",
+            "udp-publication-not-connected",
+        ] {
+            assert!(
+                !report.findings.iter().any(|f| f.check == check),
+                "{check}: {report}"
+            );
+        }
+        sender_gauges(&mut counters, 8, 9, "fc=min", (131_072, 1));
+        let report = examine(&dir.0);
+        let found: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.check == "udp-flow-control-receivers")
+            .collect();
+        assert_eq!(found.len(), 1, "{report}");
+        assert!(
+            found[0].message.contains("publication 8 on stream"),
+            "{}",
+            found[0].message
+        );
+    }
+
+    /// A `min` publication on a control channel during the linger after a clean close
+    /// (ADR 0056), its counters as the driver's
+    /// `a_clean_close_of_a_min_publication_counts_no_receiver_timed_out` reads them
+    /// before the linger ends: both destinations' receivers ended their streams and
+    /// stay in the table, so the gauge reads the endpoint's 2 destinations, the limit
+    /// is above 0 and nothing timed out, and `doctor` gives no `udp-` warning. A live
+    /// `min` publication beside it with one of the two answering still warns, and the
+    /// warning names it alone.
+    #[test]
+    fn a_min_publication_lingering_after_a_clean_close_leaves_doctor_with_no_warning() {
+        let dir = TestDir::new("udp-mdc-min-linger");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        control_endpoint(&mut counters, 9, 2);
+        sender_gauges(&mut counters, 8, 9, "fc=min", (131_072, 2));
+        // The udp checks: the test's directory may be on a disk, which another warns of.
+        let report = examine(&dir.0);
+        let warnings: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.level == Level::Warn && f.check.starts_with("udp-"))
+            .collect();
+        assert!(warnings.is_empty(), "{report}");
+        sender_gauges(&mut counters, 10, 9, "fc=min", (131_072, 1));
+        let report = examine(&dir.0);
+        let found: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.check == "udp-flow-control-receivers")
+            .collect();
+        assert_eq!(found.len(), 1, "{report}");
+        assert!(
+            found[0].message.contains("publication 10 on stream"),
+            "{}",
+            found[0].message
+        );
+        assert!(
+            found[0].message.contains("1 answer"),
+            "{}",
+            found[0].message
+        );
+    }
+
+    /// A clean close of a `min` publication on a control channel (ADR 0054, ADR 0056):
+    /// its receiver ended its stream, so the sender kept it in the table uncounted
+    /// until the linger ended, and the close then freed the publication's counters.
+    /// What the close leaves, the endpoint open for a `max` publication beside it to
+    /// its one destination and both static counters at 0, gives `doctor` no warning.
+    #[test]
+    fn a_clean_close_of_a_min_publication_leaves_doctor_with_no_warning() {
+        let dir = TestDir::new("udp-mdc-min-close");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        control_endpoint(&mut counters, 9, 1);
+        sender_gauges(&mut counters, 8, 9, "fc=max", (131_072, 0));
+        // The udp checks: the test's directory may be on a disk, which another warns of.
+        let report = examine(&dir.0);
+        let warnings: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.level == Level::Warn && f.check.starts_with("udp-"))
+            .collect();
+        assert!(warnings.is_empty(), "{report}");
+        // The counter the sweep used to raise on that close: now it means a timeout,
+        // and the finding says so.
+        counters
+            .counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT.record())
+            .expect("static")
+            .increment();
+        let report = examine(&dir.0);
+        let found = finding(&report, "udp-flow-control-receiver-timed-out");
+        assert!(
+            found
+                .message
+                .contains("a receiver whose stream ended is not counted"),
+            "{}",
+            found.message
+        );
+        assert!(
+            !found.message.contains("or ended its stream"),
+            "{}",
+            found.message
+        );
     }
 
     /// ADR 0042's two `cavalry:udp` checks for the receiving side, from the counters

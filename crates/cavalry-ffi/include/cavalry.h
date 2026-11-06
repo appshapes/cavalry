@@ -780,7 +780,7 @@ int cavalry_stop_recording(cavalry_t *client,
 /*
  Adds the destination `channel` to `publication`'s control channel, waiting for the
  driver's answer or the 10 s response timeout (`spec/client-protocol.md`,
- "Commands", add destination; ADR 0053, ADR 0054). The publication's registration
+ "Commands", add destination; ADR 0053, ADR 0057). The publication's registration
  id is read from the handle's copy, so the call is allowed during a claim.
 
  # Safety
