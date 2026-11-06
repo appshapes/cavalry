@@ -1614,6 +1614,7 @@ user-visible change, added in the same commit as the change. The format follows
 - `just bench` measures multi-destination cast on the loopback, `claim_commit_32_udp_mdc`
   and `one_way_32_udp_mdc`, a control channel under `fc=min` to two subscriptions of the
   driver, and the link pass runs the same rows over the cable to the peer and this host
-  at once after the link rows; both are reported and never gated until a host change
+  at once after the link rows, the peer's `--echo` reading the second stream without
+  echoing it; both are reported and never gated until a host change
   gives them cores ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md),
   feature 1; `docs/how-to/run-the-bench.md`; card 225).

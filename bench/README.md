@@ -74,8 +74,9 @@ nothing depends on it.
   reported and never gated since every isolated core of both bench hosts is taken
   (ADR 0052, feature 1; ADR 0053); under `--link-here` and `--link-peer` the same two
   rows run after the link rows with the peer's endpoint as the second destination,
-  over the cable and this host at once, the peer echoing them onto the held link
-  subscription. With `--link-here <host>:<port>` and
+  over the cable and this host at once, once per process; the peer's `--echo` reads
+  them as a second image of the stream and echoes none of it, so that nothing comes
+  back to this host beside the link rows' echo. With `--link-here <host>:<port>` and
   `--link-peer <host>:<port>` it runs the link rows alone instead, `udp_round_trip_32`
   and `udp_one_way_32`, across the direct cable between the two bench hosts to a peer
   running `--echo`, the harness on the other host, which claims every message it

@@ -75,7 +75,7 @@ shared runner is
    | `claim_commit_<body>_udp` | The client row's claim, write and commit on a `cavalry:udp` publication whose endpoint is a port of `127.0.0.1`, with one message in flight: the publisher claims the next message once the subscriber's handler has had the last, so the window is never full and the row is the claim path, with the wait for a connection that dropped in it as in the other rows ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). Gated as the other message rows once the host's baseline holds it, `no baseline` until then. A tenth of `--messages` per run, after a warm-up of 10,000 messages rather than a rotation, since the driver pre-touches both logs when it makes them. |
    | `one_way_<body>_udp` | From the publisher's timestamp to `Subscription::poll`'s handler through the driver's sender, the loopback and the driver's receiver, one message in flight, so a sample is the path's latency and not the depth of the sender's window, which a publisher that runs ahead fills to 8 MiB. Under `--pin` the sender has the third CPU and the receiver the fourth, and the driver's threads busy-spin; unpinned they back off, as a driver on a laptop does. |
    | `claim_commit_<body>_udp_mdc` | The UDP row's claim, write and commit on a publication whose channel is a control channel, `cavalry:udp?control=127.0.0.1:<port>\|control-mode=manual\|fc=min`, with two destinations, a subscription of the driver on each of two loopback ports, one message in flight; under `--link-here` and `--link-peer` the second destination is the peer's endpoint across the cable, so the row runs over the cable and this host at once ([ADR 0053](../decisions/0053-add-multi-destination-cast-to-cavalry-udp.md)). Reported and never gated: every isolated core of both bench hosts is taken, and the row joins the gate with a host change that gives it cores ([ADR 0052](../decisions/0052-build-raft-on-the-durable-log-fifth.md), feature 1). |
-   | `one_way_<body>_udp_mdc` | From the publisher's timestamp to the first destination's `Subscription::poll` handler through the sender's two sends per datagram, the loopback and the receiver, under `fc=min`, so the slower of the two destinations' readers paces the sender; the second destination is drained on a thread of its own in the loopback pass, and echoed by the peer in the link pass. Under `--pin` the drain runs on the housekeeping CPU with the driver's conductor, never on a measured thread's CPU, and sleeps 100 µs after a poll that found nothing: its image's receiver window of 128 KiB lasts about 20 ms of 64-byte frames at the row's pace, so the drain does not pace the sender. |
+   | `one_way_<body>_udp_mdc` | From the publisher's timestamp to the first destination's `Subscription::poll` handler through the sender's two sends per datagram, the loopback and the receiver, under `fc=min`, so the slower of the two destinations' readers paces the sender; the second destination is drained on a thread of its own in the loopback pass, and read by the peer's `--echo` in the link pass, which echoes none of it (step 5). In the link pass the two rows run once per process, after the `--repeat` runs of the link rows, over a tenth of `--messages`: 10,000 samples in CI, where the p99.99 is the second-slowest sample. Under `--pin` the drain runs on the housekeeping CPU with the driver's conductor, never on a measured thread's CPU, and sleeps 100 µs after a poll that found nothing: its image's receiver window of 128 KiB lasts about 20 ms of 64-byte frames at the row's pace, so the drain does not pace the sender. |
    | `claim_commit_<body>_ffi` | The client row's claim, write and commit made through the C ABI: `cavalry_publication_try_claim`, the body written through the `cavalry_buffer_claim_t` it fills, and `cavalry_buffer_claim_commit`, called in the bench's own binary through `cavalry-ffi`'s `harness` module, so the row needs no C compiler and the allocation gate counts the ABI's path as it counts the client's ([ADR 0051](../decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md)). The driver, the pins, the warm-up and the counting window are the client row's, so the two rows differ by the boundary alone. Gated as the other message rows once the host's baseline holds it, `no baseline` until then. |
    | `one_way_<body>_ffi` | From the publisher's timestamp to the C fragment handler that `cavalry_subscription_poll` calls, which hands the body to the harness's Rust closure: the client row's path with the ABI on both sides. Gated as the other message rows once the host's baseline holds it, `no baseline` until then. |
    | `udp_round_trip_<body>` | The link rows, run alone with `--link-here` and `--link-peer` (step 5): from the publisher's timestamp on `bench` to its subscriber's handler after the peer on `grip` has echoed the message across the direct cable, one message in flight, measured on one clock and gated against `bench-linux-link`. |
@@ -468,11 +468,22 @@ shared runner is
 
    The peer prints
    `the stream from <address> is connected, echoing`, then, when `bench`'s run ends the
-   stream, `echoed N messages from <address> back to <host:port> in <s> s`, and exits 0;
-   it exits 1 when the stream goes without its end. The measuring side prints the two
-   link rows alone under the profile with `-link` appended, `bench-linux-link` in CI,
+   stream, `echoed N messages from <address> back to <host:port> in <s> s, R claim(s)
+   refused, K of the multi-destination cast rows' image read and not echoed`, and exits
+   0; it exits 1 when the stream goes without its end. After the link rows, `bench`
+   runs the multi-destination cast rows with the peer's endpoint as the second
+   destination (step 2's table), which makes a second image of the same stream on the
+   peer. The peer echoes only the first image, the link stream's, by its session id,
+   and reads the second to its end without echoing it: under `fc=min` its image must
+   keep up, and an echo of it would fill `bench`'s link subscription, which nothing
+   polls then. So K is the mdc rows' messages and warm-up, 20,000 in CI, and both hosts
+   run the harness of one commit, as the pair's jobs do; a peer from before this
+   behaviour echoes the second image, and `bench`'s mdc run then slows to about a
+   message a second ([When it does not work](#when-it-does-not-work)). The measuring side prints the two
+   link rows under the profile with `-link` appended, `bench-linux-link` in CI,
    which `just bench-compare` holds to its own baseline once one is recorded from three
-   of the job's processes at one tree, as the host's are, and writes no other row.
+   of the job's processes at one tree, as the host's are, and the two `_udp_mdc` rows,
+   reported and never gated; it writes no other row.
    `--messages` is the count per run as given, since every message waits for its echo:
    100,000 at about 100 µs is ten seconds a run, after the UDP rows' warm-up of 10,000.
    The one-way row needs the offset
@@ -746,7 +757,17 @@ shared runner is
 - `message N of M did not reach the subscriber in 10 s`: with one message in flight the
   stream stopped. Across the link the peer stopped echoing, or the cable lost a datagram
   the sender no longer holds; on the loopback the driver's sender or receiver stalled.
-  `cavalry doctor` on the host names the image's loss from its counters.
+  `cavalry doctor` on the host names the image's loss from its counters. On the
+  `_udp_mdc` rows, the sender's `fc=min` waits for the slower of the two destinations'
+  images, so the stall can be the destination that is not measured: on the loopback the
+  line says `at either destination`, and the drain's own error comes first when the
+  drain failed; across the link it says `the peer stopped reading the second
+  destination's image`. A peer built from a commit before the echo skipped that image
+  echoes it, and once the echo has filled its publication's window of 8 MiB and
+  `bench`'s receiver window of 128 KiB, since nothing on `bench` polls the link
+  subscription then, each claim waits a second before the peer drops the message: the run then crawls at about a message a second instead of
+  stopping, which at `--body 448` and `--messages 100000` outlasted ten minutes on a
+  CI runner's loopback. Run the same commit's harness on both hosts.
 - The peer's `the stream from <address> went after N messages without its end`: the
   measuring side's harness stopped before it closed its publication, or the image timed
   out on the peer after 10 s without a datagram; the measuring side's own error says

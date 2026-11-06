@@ -1795,7 +1795,8 @@ struct Published {
 }
 
 /// One run of a stream with one message in flight: its warm-up and its length, the
-/// body, the clock reading its stamps count from, and whether it crosses the link.
+/// body, the clock reading its stamps count from, whether it crosses the link, and what
+/// a message that does not reach the subscriber means on its path, for the stall's error.
 #[derive(Clone, Copy)]
 struct Run {
     warmup: u64,
@@ -1803,6 +1804,7 @@ struct Run {
     body: usize,
     epoch: u64,
     link: bool,
+    stall: &'static str,
 }
 
 /// One run with one message in flight: this thread, the publisher, claims message i
@@ -1824,6 +1826,7 @@ fn publish_one_in_flight<T>(
         body,
         epoch,
         link,
+        stall,
     } = run;
     const STALL_CHECK: u64 = 4096;
     const STALL_LIMIT: Duration = Duration::from_secs(10);
@@ -1847,16 +1850,10 @@ fn publish_one_in_flight<T>(
                 }
                 if span_ns(waited, tick()) > STALL_LIMIT.as_nanos() as u64 {
                     return Err(format!(
-                        "message {} of {total} did not reach the subscriber in {} s: {}; see \
-                         docs/how-to/run-the-bench.md#when-it-does-not-work",
+                        "message {} of {total} did not reach the subscriber in {} s: {stall}; \
+                         see docs/how-to/run-the-bench.md#when-it-does-not-work",
                         i.saturating_sub(1),
                         STALL_LIMIT.as_secs(),
-                        if link {
-                            "the peer stopped echoing, or the link lost a datagram the sender \
-                             no longer holds"
-                        } else {
-                            "the stream stopped on the loopback"
-                        }
                     ));
                 }
             }
@@ -2007,11 +2004,10 @@ fn bench_udp(options: &Options) -> Result<LogRun, String> {
 /// host. In the loopback pass the second destination is a subscription of this driver
 /// too, drained on a thread of its own, on the housekeeping CPU under `--pin`, so that
 /// `fc=min` paces the sender by the slower of two readers that both keep up; in the link
-/// pass it is the peer's endpoint across
-/// the cable, where the peer's echo claims every message back onto the link
-/// subscription, held and not polled, as it echoes the link rows'. Reported and never
-/// gated: every isolated core of both bench hosts is taken (ADR 0044), and the row
-/// joins the gate with the host change that gives it cores (ADR 0052's Revisit).
+/// pass it is the peer's endpoint across the cable, where the peer's `--echo` reads the
+/// stream as its second image and echoes none of it. Reported and never gated: every
+/// isolated core of both bench hosts is taken (ADR 0044), and the row joins the gate
+/// with the host change that gives it cores (ADR 0052's Revisit).
 fn bench_udp_mdc(options: &Options) -> Result<LogRun, String> {
     with_bench_dir("udp-mdc", |dir| {
         let pins = Arc::new(DriverPins::new());
@@ -2027,7 +2023,7 @@ fn bench_udp_mdc(options: &Options) -> Result<LogRun, String> {
             &mut client,
             &pins,
             "127.0.0.1",
-            &second,
+            Second::Drained(&second),
             CONNECT_TIMEOUT,
         )?;
         client.close().map_err(|e| e.to_string())?;
@@ -2045,19 +2041,54 @@ fn bench_udp_mdc(options: &Options) -> Result<LogRun, String> {
     })
 }
 
+/// Where the multi-destination cast rows' second destination is, by the channel of its
+/// endpoint.
+#[derive(Clone, Copy)]
+enum Second<'a> {
+    /// A subscription of this driver, drained on a thread of its own ([`spawn_drain`]):
+    /// the loopback pass.
+    Drained(&'a str),
+    /// The peer's endpoint, whose `--echo` reads the stream and echoes none of it: the
+    /// link pass.
+    Peer(&'a str),
+}
+
+impl<'a> Second<'a> {
+    fn channel(self) -> &'a str {
+        match self {
+            Second::Drained(channel) | Second::Peer(channel) => channel,
+        }
+    }
+
+    /// What a message that does not reach the measured subscriber means, for the
+    /// stall's error: under `fc=min` either destination's image holds the sender back.
+    fn stall(self) -> &'static str {
+        match self {
+            Second::Drained(_) => {
+                "the stream stopped on the loopback, at either destination, since under \
+                 fc=min the slower image holds the sender back"
+            }
+            Second::Peer(_) => {
+                "the peer stopped reading the second destination's image, which under fc=min \
+                 holds the sender back, or the link lost a datagram the sender no longer holds"
+            }
+        }
+    }
+}
+
 /// One run of the multi-destination cast rows on `client`, whose driver already runs:
 /// a subscription on a free port of `host`, the measured destination, a second
-/// subscription on `second` when it is this host's, drained on its own thread
-/// ([`spawn_drain`]), a publication on a control channel of `host` with both as its
-/// destinations, connected within `timeout`, the measured run, the drain stopped and
-/// joined whatever the run's outcome, and the handles closed in the order
-/// `close_stream` keeps, the publication first so that the stream's end goes out.
+/// subscription on the second destination when it is [`Second::Drained`], a
+/// publication on a control channel of `host` with both as its destinations, connected
+/// within `timeout`, the measured run, the drain stopped and joined whatever the run's
+/// outcome, and the handles closed in the order `close_stream` keeps, the publication
+/// first so that the stream's end goes out.
 fn mdc_rows(
     options: &Options,
     client: &mut Cavalry,
     pins: &DriverPins,
     host: &str,
-    second: &str,
+    second: Second<'_>,
     timeout: Duration,
 ) -> Result<LogRun, String> {
     let control = format!(
@@ -2068,16 +2099,15 @@ fn mdc_rows(
     let mut subscription = client
         .add_subscription(&first, STREAM_ID)
         .map_err(|e| e.to_string())?;
-    let local_second = second.contains(&format!("endpoint={host}:"));
-    let mut drained = if local_second {
-        Some(
+    let mut drained = match second {
+        Second::Drained(channel) => Some(
             client
-                .add_subscription(second, STREAM_ID)
+                .add_subscription(channel, STREAM_ID)
                 .map_err(|e| e.to_string())?,
-        )
-    } else {
-        None
+        ),
+        Second::Peer(_) => None,
     };
+    let second_channel = second.channel();
     pins.check(DriverThread::Conductor)?;
     let mut publication = client
         .add_publication(&control, STREAM_ID)
@@ -2087,7 +2117,7 @@ fn mdc_rows(
         .add_destination(id, &first)
         .map_err(|e| e.to_string())?;
     client
-        .add_destination(id, second)
+        .add_destination(id, second_channel)
         .map_err(|e| e.to_string())?;
     pin_to(options.pin.map(|pin| pin.publisher))?;
     let deadline = Instant::now() + timeout;
@@ -2106,7 +2136,7 @@ fn mdc_rows(
             return Err(format!(
                 "the control channel's stream did not connect in {} s: the publication on \
                  {control} is {}, the subscription on {first} {}, the second destination \
-                 {second}; a setup frame goes to each destination every 100 ms, so a \
+                 {second_channel}; a setup frame goes to each destination every 100 ms, so a \
                  receiver on it whose subscription wants the stream answers within one \
                  (docs/how-to/run-the-bench.md#when-it-does-not-work)",
                 timeout.as_secs(),
@@ -2133,6 +2163,7 @@ fn mdc_rows(
         body: options.body,
         epoch: tick(),
         link: false,
+        stall: second.stall(),
     };
     let received = Arc::new(AtomicU64::new(0));
     let subscriber = spawn_subscriber(
@@ -2248,6 +2279,7 @@ fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
         body: options.body,
         epoch: tick(),
         link: false,
+        stall: "the stream stopped on the loopback",
     };
     let received = Arc::new(AtomicU64::new(0));
     let subscriber = spawn_subscriber(
@@ -2322,6 +2354,8 @@ fn run_link(
             body: options.body,
             epoch: tick(),
             link: true,
+            stall: "the peer stopped echoing, or the link lost a datagram the sender no longer \
+                    holds",
         };
         let received = Arc::new(AtomicU64::new(0));
         let held = subscription
@@ -2354,14 +2388,15 @@ fn run_link(
     // The multi-destination cast rows over the cable and this host at once (ADR 0052,
     // feature 1): a control channel on this host's link address with the peer's
     // endpoint and a subscription of this driver as its destinations, measured here;
-    // the peer echoes the stream onto the link subscription as it echoes the link
-    // rows', which is held unpolled until the close.
+    // the peer reads the stream as a second image and echoes none of it, so the link
+    // subscription, held unpolled until the close, gets nothing.
+    let peer = link.peer_channel();
     let mdc = mdc_rows(
         options,
         &mut client,
         &pins,
         &link.here_host(),
-        &link.peer_channel(),
+        Second::Peer(&peer),
         LINK_TIMEOUT,
     )?;
     let subscription = subscription
@@ -2376,10 +2411,16 @@ fn run_link(
 /// the peer's; every message the subscription delivers is claimed on the publication
 /// with the same body, this host's wall clock written at its third eight bytes, and
 /// committed, so that the other host times the round trip on its own clock and the
-/// one-way against this host's. The loop ends when the image ends with the stream's end,
-/// and fails when the image goes without one or no message comes for the link timeout
-/// (ADR 0044). Under `--pin` the echo runs on the publisher's CPU, with the sender and
-/// the receiver on theirs.
+/// one-way against this host's. Only the link stream's image is echoed, the first image,
+/// by its session id: the multi-destination cast rows' publication, which the other
+/// host opens after the link rows with this endpoint as its second destination, makes a
+/// second image of the same stream id here, which is read to keep up under its `fc=min`
+/// and echoed nowhere, so that nothing of it fills the other host's link subscription,
+/// which nothing polls then, or lands on its receiver beside the measured datagrams. The
+/// loop ends when the link stream's image ends with the stream's end, and fails when
+/// that image goes without one or no message comes for the link timeout (ADR 0044).
+/// Under `--pin` the echo runs on the publisher's CPU, with the sender and the receiver
+/// on theirs.
 fn run_echo(options: &Options, link: &Link) -> Result<(), String> {
     with_bench_dir("echo", |dir| echo(options, dir, link))
 }
@@ -2408,20 +2449,33 @@ fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), Str
         &link.peer_channel(),
         LINK_TIMEOUT,
     )?;
-    let source = subscription.images().first().map_or_else(
-        || link.peer.clone(),
-        |image| image.source_identity().to_string(),
-    );
+    let Some((session, source)) = subscription
+        .images()
+        .first()
+        .map(|image| (image.session_id(), image.source_identity().to_string()))
+    else {
+        return Err(format!(
+            "the stream from {} lost its image as it connected: run the harness on both hosts \
+             again",
+            link.peer
+        ));
+    };
     println!("cavalry-bench: the stream from {source} is connected, echoing");
     let started = Instant::now();
     let mut echoed: u64 = 0;
     let mut refused: u64 = 0;
+    // Messages of another image, the multi-destination cast rows', read and not echoed.
+    let mut unechoed: u64 = 0;
     let mut last = tick();
     let mut ended = false;
     loop {
         let delivered = subscription
             .poll(
-                |body, _| {
+                |body, header| {
+                    if header.session_id() != session {
+                        unechoed += 1;
+                        return;
+                    }
                     let now = realtime_nanos();
                     let t0 = tick();
                     loop {
@@ -2459,19 +2513,23 @@ fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), Str
             last = tick();
             continue;
         }
-        if subscription
+        match subscription
             .images()
             .iter()
-            .any(|image| image.is_end_of_stream())
+            .find(|image| image.session_id() == session)
         {
             // The image has read everything the stream wrote, so every echo is claimed:
             // leave now, and not when the receiver retires the image, which it does in
-            // the same cycle, so that the exit does not wait on the retire.
-            ended = true;
-            break;
-        }
-        if !subscription.is_connected() {
-            break;
+            // the same cycle, so that the exit does not wait on the retire. The other
+            // image's end, which comes first, is not the link stream's.
+            Some(image) if image.is_end_of_stream() => {
+                ended = true;
+                break;
+            }
+            Some(_) => {}
+            // The link stream's image went, with its end or without it: the counters
+            // below say which.
+            None => break,
         }
         if span_ns(last, tick()) > LINK_TIMEOUT.as_nanos() as u64 {
             return Err(format!(
@@ -2511,7 +2569,8 @@ fn echo(options: &Options, dir: &std::path::Path, link: &Link) -> Result<(), Str
     }
     println!(
         "cavalry-bench: echoed {echoed} messages from {source} back to {} in {:.1} s, {refused} \
-         claim(s) refused",
+         claim(s) refused, {unechoed} of the multi-destination cast rows' image read and not \
+         echoed",
         link.peer,
         started.elapsed().as_secs_f64()
     );
