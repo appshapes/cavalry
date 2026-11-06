@@ -99,7 +99,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   going to all of them again and a destination the socket refuses holding the others
   back by nothing; under `fc=min` it keeps per publication a table of
   at most 64 receivers by receiver id, the sender limit the least position plus window
-  among them, a receiver dropped after 5 s without a status message (ADR 0053). Every
+  among them, a receiver dropped after 5 s without a status message (ADR 0053). A
+  control channel's closed publication lingers for the linger timeout, 5 s, whatever a
+  destination's status message says, since one destination's end of stream says
+  nothing of another's, which may still be NAKing the tail (ADR 0054). Every
   step has its counter, `sender.*`, `publication.connected` and
   `channel.*`, and the socket calls `std` lacks come through `nix`. The sender idles
   with the driver's strategy while it holds an endpoint or a publication and parks

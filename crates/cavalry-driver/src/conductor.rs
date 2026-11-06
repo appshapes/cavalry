@@ -6404,8 +6404,8 @@ mod recording {
     use cavalry_shm::counters::generated::{
         COUNTERS_ALLOCATED, COUNTERS_FREED, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
         SENDER_BYTES_SENT, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
-        SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_FRAMES_SENT, SENDER_RTT_REPLIES_SENT,
-        SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
+        SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_FRAMES_SENT, SENDER_RETRANSMITS_SENT,
+        SENDER_RTT_REPLIES_SENT, SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
     };
 
     /// A receiver by hand: a socket of its own that reads what the sender puts on the
@@ -7269,6 +7269,102 @@ mod recording {
         assert_eq!(answer.echo_timestamp, 77);
         assert_eq!(answer.receiver_id, 9);
         assert_eq!(answer.reception_delta, 0);
+    }
+
+    /// A control channel's closed publication lingers for the linger timeout
+    /// (`spec/udp.md`, "The sender"; ADR 0054): a status message with the end-of-stream
+    /// flag from one destination after the close does not end it, the other
+    /// destination's NAK for the tail is still answered, and the sender closes the
+    /// publication once the linger timeout has passed since the close and not before.
+    #[test]
+    fn a_control_channel_lingers_past_one_destinations_end_of_stream() {
+        let mut h = Harness::new("udp-mdc-linger");
+        let mut a = TestReceiver::bind();
+        let mut b = TestReceiver::bind();
+        let control = control_channel();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        h.conductor.change_destination(1, 4, 2, &b.channel(), true);
+        h.sender.duty_cycle(now_nanos());
+        let setup_a = expect_setup(&mut a);
+        let setup_b = expect_setup(&mut b);
+        a.send_status_message(&status(&setup_a, 131072, 9));
+        b.send_status_message(&status(&setup_b, 131072, 10));
+        assert!(
+            wait_for(&mut h, |h| {
+                h.conductor.publications[0]
+                    .udp
+                    .as_ref()
+                    .is_some_and(|udp| udp.connected)
+            }),
+            "the status messages connected the publication"
+        );
+        h.conductor.duty_cycle(now_nanos());
+        // One message, the stream's tail, to both.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        appender.offer(b"the tail", limit, 0).expect("offered");
+        drop(appender);
+        h.sender.duty_cycle(now_nanos());
+        for (name, receiver) in [("a", &mut a), ("b", &mut b)] {
+            let frames = next_frames(receiver).unwrap_or_else(|| panic!("a datagram at {name}"));
+            assert_eq!(frames[0].1, b"the tail", "{name}");
+        }
+        // The close, taken by the sender at `closed_at`; a's receiver has the stream to
+        // its end and says so.
+        let closed_at = now_nanos();
+        h.conductor.remove_publication(1, 20, 2, closed_at);
+        h.sender.duty_cycle(closed_at);
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        a.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            consumption_term_offset: 64,
+            ..status(&setup_a, 131072, 9)
+        });
+        assert!(wait_at(&mut h, closed_at, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) > received
+        }));
+        assert!(
+            h.sender.positions_of(2).is_some(),
+            "one destination's end of stream does not end the linger"
+        );
+        assert_eq!(h.conductor.publications.len(), 1);
+        // b lost the tail and NAKs it: answered, to both destinations, as every
+        // retransmit is.
+        b.send_bytes(
+            &cavalry_proto::udp::Nak {
+                flags: 0,
+                session_id: setup_b.session_id,
+                stream_id: 7,
+                term_id: setup_b.active_term_id,
+                term_offset: 0,
+                length: 64,
+            }
+            .to_bytes(),
+        );
+        let nak_at = closed_at + spec::nanos(Duration::from_secs(1));
+        assert!(wait_at(&mut h, nak_at, |h| {
+            h.counter(SENDER_RETRANSMITS_SENT) == 1
+        }));
+        let again = next_frames(&mut b).expect("the retransmit at b");
+        assert_eq!(again[0].1, b"the tail");
+        // Still held just before the linger timeout, and closed at it. The connection
+        // timeout is the linger's, 5 s, and a's status message came at the close, so the
+        // first cycle at the timeout disconnects the publication and the next ends its
+        // linger.
+        let linger = spec::nanos(cavalry_proto::udp::LINGER);
+        h.sender
+            .duty_cycle(closed_at + linger - spec::nanos(Duration::from_millis(1)));
+        assert!(h.sender.positions_of(2).is_some(), "held until the timeout");
+        h.sender.duty_cycle(closed_at + linger);
+        h.sender.duty_cycle(closed_at + linger);
+        assert_eq!(h.sender.positions_of(2), None, "closed at the timeout");
     }
 
     /// The send endpoints registry holds 64: the 65th resolved channel is code 10

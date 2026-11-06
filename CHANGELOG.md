@@ -1576,3 +1576,10 @@ user-visible change, added in the same commit as the change. The format follows
   with fewer receivers answering than destinations, a dropped receiver and a full
   table ([ADR 0053](docs/decisions/0053-add-multi-destination-cast-to-cavalry-udp.md);
   `docs/reference/udp.md`; card 225).
+- A control channel's closed publication lingers for the linger timeout, 5 s, sending
+  heartbeats with EOS and answering every destination's NAKs: a status message with
+  the end-of-stream flag from one destination no longer ends the linger for all of
+  them, so a slower destination still recovers the stream's tail; on a channel with an
+  endpoint the flag ends the linger as before
+  ([ADR 0054](docs/decisions/0054-linger-a-control-channels-publication-for-its-timeout.md);
+  `docs/reference/udp.md`; card 225).

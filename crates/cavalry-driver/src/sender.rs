@@ -163,8 +163,9 @@ pub(crate) enum Request {
     AddPublication(AddPublication),
     /// The publication was closed: the sender sends what is left, heartbeats with EOS
     /// once the sender position reaches the end, answers NAKs through the linger, and
-    /// answers with [`Reply::Closed`] when a status message with the end of stream flag
-    /// arrives or the linger passes.
+    /// answers with [`Reply::Closed`] when the linger passes, or on a channel with an
+    /// endpoint when a status message with the end of stream flag arrives first (ADR
+    /// 0054).
     Close {
         /// The publication.
         registration_id: i64,
@@ -318,7 +319,9 @@ struct Live {
     retransmit: Option<Retransmit>,
     /// The end of stream position once the publication is closed, and when it was.
     closing: Option<(i64, i64)>,
-    /// A status message with the end of stream flag arrived after the close.
+    /// A status message with the end of stream flag arrived after the close, on a
+    /// channel with an endpoint; never set on a control channel, whose publication
+    /// lingers for the linger timeout (ADR 0054).
     end_of_stream_acknowledged: bool,
     /// A frame to send met no window: `sender.flow_control_limited` counts the entry.
     limited: bool,
@@ -886,11 +889,16 @@ impl Sender {
     /// A status message (`spec/udp.md`, "The sender"): one with the send-setup flag asks
     /// for a setup frame and nothing else; one without it moves the sender limit when
     /// its position lies within the window around the sender position, and connects the
-    /// publication.
+    /// publication; one with the end-of-stream flag after the close ends the linger on
+    /// a channel with an endpoint and not on a control channel (ADR 0054).
     fn on_status_message(&mut self, endpoint_index: usize, message: StatusMessage, now: i64) {
         let Some(index) = self.find(endpoint_index, message.session_id, message.stream_id) else {
             return;
         };
+        let control = self
+            .endpoints
+            .get(endpoint_index)
+            .is_some_and(|endpoint| endpoint.destinations.is_some());
         self.statics.status_messages_received.increment();
         let live = &mut self.live[index];
         // An offset the publication's term does not hold: rejected as one outside the
@@ -970,7 +978,12 @@ impl Sender {
             live.sender_limit = raised;
             live.limit.store_release(live.sender_limit);
         }
-        if message.is_end_of_stream() && live.closing.is_some() {
+        // The flag says the receiver it came from has the stream to its end: on a
+        // channel with an endpoint that is the one receiver, and the linger ends; on a
+        // control channel another destination's receiver may still be NAKing the tail,
+        // so the publication lingers for the linger timeout, Aeron's rule for a
+        // multi-destination publication (`spec/udp.md`, "The sender"; ADR 0054).
+        if message.is_end_of_stream() && live.closing.is_some() && !control {
             live.end_of_stream_acknowledged = true;
         }
         if live.connection == ConnectionState::Disconnected && self.pending.len() < PENDING_REPLIES
@@ -1266,8 +1279,8 @@ impl Sender {
             return (work + 1, false);
         }
 
-        // 6. The end of the linger: a status message with the end of stream flag, or the
-        //    linger timeout since the close.
+        // 6. The end of the linger: the linger timeout since the close, or on a channel
+        //    with an endpoint a status message with the end of stream flag (ADR 0054).
         if let Some((_, closed_at)) = live.closing
             && (live.end_of_stream_acknowledged
                 || now.saturating_sub(closed_at) >= spec::nanos(LINGER))

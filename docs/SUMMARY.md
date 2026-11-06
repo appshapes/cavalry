@@ -96,3 +96,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0050. Re-record a bench baseline at a tree where pull requests read red while master passes](decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)
 - [0052. Build Raft on the durable log fifth, in eight features](decisions/0052-build-raft-on-the-durable-log-fifth.md)
 - [0053. Add multi-destination cast to `cavalry:udp` with add and remove destination](decisions/0053-add-multi-destination-cast-to-cavalry-udp.md)
+- [0054. Linger a control channel's publication for its timeout, and drop an ended receiver uncounted](decisions/0054-linger-a-control-channels-publication-for-its-timeout.md)
