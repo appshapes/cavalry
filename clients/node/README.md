@@ -115,15 +115,18 @@ per-subscription state belongs to the subscription.
 The ABI calls the addon's trampoline with the body's address and length and the
 frame's header. The trampoline opens a handle scope, makes a `Buffer` over the body's
 bytes with `napi_create_external_buffer`, no copy, takes the subscription's one
-`Header` object and the handler from the references it keeps, calls the handler
-through `napi_call_function`, detaches the `Buffer`'s `ArrayBuffer` so that a kept body
+`Header` object from the reference it keeps, calls the handler through
+`napi_call_function`, detaches the `Buffer`'s `ArrayBuffer` so that a kept body
 reads as empty, and closes the scope. That is two objects per received message, the
 `Buffer` and the `ArrayBuffer` under it, both the runtime's, freed by the next
 collection. The `Header`'s getters each call the addon's `headerField`, which reads
 `cavalry_header_values` once per fragment, on the first getter, into the one
 `cavalry_header_values_t` the addon keeps per subscription, and returns the field as a
 number, which V8 keeps on the stack for a small integer; outside the handler call every
-getter is `undefined`, since the header is valid for the call alone.
+getter is `undefined`, since the header is valid for the call alone. The handler is the
+poll's own argument: the addon's `poll` keeps its value in the subscription's state for
+the call, and N-API keeps that value valid until the call returns, so a poll makes no
+reference of its own.
 
 ### The view over a claimed slice, by construction
 

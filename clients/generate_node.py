@@ -402,7 +402,7 @@ typedef enum { FIRST_NONE, FIRST_EXCEPTION, FIRST_FAILURE } first_t;
 typedef struct {
   napi_env env;                      /* valid during a poll */
   napi_ref header_ref;               /* the JS Header object the handler receives */
-  napi_ref handler_ref;              /* the handler of the poll in progress, else NULL */
+  napi_value handler;                /* the handler of the poll in progress, else NULL; see fn_poll */
   napi_ref holder_ref;               /* an object whose element 0 holds the poll's first exception */
   uint32_t raised;                   /* handler calls that threw in this poll */
   uint32_t undelivered;              /* fragments of this poll the handler never saw */
@@ -478,15 +478,12 @@ static void trampoline(void *clientd, const uint8_t *buffer, size_t length, cons
     undelivered(s, header, "open a handle scope (napi_open_handle_scope)", status);
     return;
   }
-  napi_value body = NULL, hdr = NULL, handler = NULL, undefined = NULL, result = NULL;
+  napi_value body = NULL, hdr = NULL, undefined = NULL, result = NULL;
   if ((status = napi_create_external_buffer(env, length, (void *) buffer, NULL, NULL, &body)) != napi_ok) {
     body = NULL;
     undelivered(s, header, "make the body's Buffer (napi_create_external_buffer)", status);
   } else if ((status = napi_get_reference_value(env, s->header_ref, &hdr)) != napi_ok || hdr == NULL) {
     undelivered(s, header, "read the subscription's Header (napi_get_reference_value)",
-                status == napi_ok ? napi_generic_failure : status);
-  } else if ((status = napi_get_reference_value(env, s->handler_ref, &handler)) != napi_ok || handler == NULL) {
-    undelivered(s, header, "read the fragment handler (napi_get_reference_value)",
                 status == napi_ok ? napi_generic_failure : status);
   } else if ((status = napi_get_undefined(env, &undefined)) != napi_ok) {
     undelivered(s, header, "read undefined for the handler's this (napi_get_undefined)", status);
@@ -494,7 +491,7 @@ static void trampoline(void *clientd, const uint8_t *buffer, size_t length, cons
     s->current = header;
     s->values_read = false;
     napi_value args[2] = { body, hdr };
-    status = napi_call_function(env, undefined, handler, 2, args, &result);
+    status = napi_call_function(env, undefined, s->handler, 2, args, &result);
     s->current = NULL;
     if (status != napi_ok) {
       /* An exception pending means the handler ran and threw; none means N-API refused the
@@ -525,7 +522,6 @@ static void free_state(napi_env env, void *data, void *hint) {
   (void) hint;
   subscription_state_t *s = data;
   if (s->header_ref) napi_delete_reference(env, s->header_ref);
-  if (s->handler_ref) napi_delete_reference(env, s->handler_ref);
   if (s->holder_ref) napi_delete_reference(env, s->holder_ref);
   free(s);
 }
@@ -617,7 +613,9 @@ static napi_value report(napi_env env, subscription_state_t *s, int count) {
 /* poll(state, subscription, handler, fragmentLimit): the one cavalry_subscription_poll call.
  * Returns the count the ABI returned, or, when a fragment did not reach the handler cleanly,
  * what report makes. From a handler of this subscription's own poll it passes the call to the
- * ABI, which refuses it with -1 and CAVALRY_ERR_POLLING, and touches nothing. */
+ * ABI, which refuses it with -1 and CAVALRY_ERR_POLLING, and touches nothing. The state holds
+ * the handler's napi_value for the poll, no reference: the value is valid until this call
+ * returns, and every trampoline call, a nested one included, runs inside it. */
 static napi_value fn_poll(napi_env env, napi_callback_info info) {
   size_t argc = 4; napi_value argv[4];
   if (!read_args(env, info, 4, &argc, argv, "poll")) return NULL;
@@ -630,12 +628,10 @@ static napi_value fn_poll(napi_env env, napi_callback_info info) {
   if (s->polling) return make_int32(env, cavalry_subscription_poll(subscription, trampoline, s, limit));
   napi_valuetype t;
   if (napi_typeof(env, argv[2], &t) != napi_ok || t != napi_function) { type_error(env, "handler", "a function"); return NULL; }
-  if (napi_create_reference(env, argv[2], 1, &s->handler_ref) != napi_ok) { type_error(env, "handler", "a function"); return NULL; }
-  s->env = env; s->polling = true;
+  s->env = env; s->handler = argv[2]; s->polling = true;
   s->first = FIRST_NONE; s->raised = 0; s->undelivered = 0;
   int count = cavalry_subscription_poll(subscription, trampoline, s, limit);
-  s->polling = false;
-  napi_delete_reference(env, s->handler_ref); s->handler_ref = NULL;
+  s->polling = false; s->handler = NULL;
   if (s->raised == 0 && s->undelivered == 0) return make_int32(env, count);
   return report(env, s, count);
 }

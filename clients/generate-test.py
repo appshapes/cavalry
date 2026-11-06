@@ -574,9 +574,26 @@ class NodePackage(unittest.TestCase):
             self.assertEqual(built.returncode, 0, built.stderr)
             ran = subprocess.run([binary], capture_output=True, text=True)
         self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
-        self.assertIn("napi_create_external_buffer", ran.stdout)
-        self.assertIn("napi_call_function", ran.stdout)
+        # What the runtime is asked for per fragment, which clients/node/README.md, "The
+        # call-back, by construction", records: one reference read, the Header's, and none made.
+        self.assertIn("a fragment whose handler returns calls: napi_open_handle_scope napi_create_external_buffer "
+                      "napi_get_reference_value napi_get_undefined napi_call_function napi_get_typedarray_info "
+                      "napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
         self.assertIn("0 failure(s)", ran.stdout)
+
+    def test_a_poll_makes_no_reference_of_its_own(self):
+        """ADR 0046: the client's own code makes no allocation of its own per message. A
+        reference is a native object and a V8 global handle, so the addon's poll holds the
+        handler's napi_value, valid for the call, and neither the poll nor the trampoline
+        and its helpers make or delete a reference."""
+        addon = gen_node.write_node(self.header)["src/addon.c"]
+        code = lint.blank(addon)
+        for name in ("fn_poll", "trampoline", "keep_failure", "undelivered", "threw", "report", "failure_error"):
+            start = code.index("{", re.search(rf"^static \w+ \*?{name}\(", code, re.M).start())
+            body = code[start:lint.block_end(code, start)]
+            for made in ("napi_create_reference(", "napi_delete_reference(", "napi_reference_ref(", "napi_reference_unref("):
+                self.assertNotIn(made, body, f"{name} calls {made}")
+        self.assertIn("s->handler = argv[2];", addon)
 
     def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
         with tempfile.TemporaryDirectory() as tmp:
