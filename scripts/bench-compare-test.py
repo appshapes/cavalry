@@ -361,6 +361,53 @@ class Processes(Update):
                          [122, 124, 154, 102, 106, 160, 96, 102, 123, 128, 134, 162])
         self.assertEqual(entry["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns"], 134)
 
+    def test_join_carries_a_row_added_by_hand_through_with_no_runs_list(self):
+        """A row added by hand to the entry holds its slowest run as its p99.99 and no runs
+        list (the how-to's step 4); a join keeps it so, each percentile the larger of the
+        row's and the new process's and the p99.99 the slowest run of both, and a second
+        join does the same again (card 221). Before the fix, `joined` padded the row with
+        its p99.99 and sliced it per process, so every process after the first had no runs
+        and the join exited with "has 0 runs where the harness setting is 3"."""
+        a, b, c = self.processes()
+        self.update(a, b, c)
+        baseline = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        by_hand = {"p50_ns": 100, "p99_ns": 150, "p99_99_ns": 320, "max_ns": 1000}
+        baseline["profiles"]["test-host"]["benchmarks"]["one_way_32_ffi"] = dict(by_hand)
+        d = result(1, claim_commit_32_exclusive=row(134, runs=[128, 134, 162]),
+                   one_way_32_ffi={"p50_ns": 110, "p99_ns": 140, "p99_99_ns": 300, "max_ns": 900,
+                                   "p99_99_ns_runs": [290, 300, 330]})
+        d["date_unix"] = c["date_unix"] + 3600
+        d["repeat"] = 3
+        with contextlib.redirect_stdout(io.StringIO()):
+            bench_compare.update([d], baseline, join=True)
+        joined = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))
+        entry = joined["profiles"]["test-host"]
+        self.assertEqual(entry["processes"], 4)
+        self.assertEqual(entry["benchmarks"]["one_way_32_ffi"],
+                         {"p50_ns": 110, "p99_ns": 150, "p99_99_ns": 330, "max_ns": 1000})
+        self.assertEqual(entry["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns_runs"],
+                         [122, 124, 154, 102, 106, 160, 96, 102, 123, 128, 134, 162])
+        e = result(1, claim_commit_32_exclusive=row(130, runs=[120, 130, 140]),
+                   one_way_32_ffi={"p50_ns": 105, "p99_ns": 145, "p99_99_ns": 310, "max_ns": 950,
+                                   "p99_99_ns_runs": [305, 310, 325]})
+        e["date_unix"] = d["date_unix"] + 3600
+        e["repeat"] = 3
+        with contextlib.redirect_stdout(io.StringIO()):
+            bench_compare.update([e], joined, join=True)
+        again = json.loads(bench_compare.BASELINE.read_text(encoding="utf-8"))["profiles"]["test-host"]
+        self.assertEqual(again["processes"], 5)
+        self.assertEqual(again["benchmarks"]["one_way_32_ffi"],
+                         {"p50_ns": 110, "p99_ns": 150, "p99_99_ns": 330, "max_ns": 1000})
+        self.assertEqual(len(again["benchmarks"]["claim_commit_32_exclusive"]["p99_99_ns_runs"]), 15)
+        # The gate then compares a result with the row's p99.99, as it did before the join.
+        f = result(1, claim_commit_32_exclusive=row(130, runs=[120, 130, 140]),
+                   one_way_32_ffi={"p50_ns": 105, "p99_ns": 145, "p99_99_ns": 360, "max_ns": 950,
+                                   "p99_99_ns_runs": [350, 360, 370]})
+        code, out = run(f, {"schema": 0, "profiles": {"test-host": again}})
+        self.assertEqual(code, 1)
+        self.assertIn("330", out)
+        self.assertIn("REGRESSION", out)
+
     def test_join_refuses_a_profile_with_no_baseline_and_another_harness_setting(self):
         a, b, c = self.processes()
         with self.assertRaises(SystemExit) as refused:
