@@ -19,21 +19,22 @@ impl XorShift {
     }
 }
 
-const REASONS: [&str; 4] = ["grammar", "key", "endpoint", "multicast"];
+const REASONS: [&str; 6] = ["grammar", "key", "control", "endpoint", "fc", "multicast"];
 
 fn check(bytes: &[u8]) {
     match Channel::parse(bytes) {
         Ok(Channel::Ipc) => assert_eq!(bytes, b"cavalry:ipc", "{bytes:02x?}: ipc"),
         Ok(Channel::Udp(udp)) => {
-            assert!(udp.endpoint_port() >= 1, "{bytes:02x?}: endpoint port");
+            let endpoint = udp
+                .endpoint()
+                .or(udp.control())
+                .expect("an endpoint or a control address");
             assert!(
-                !udp.endpoint().host().is_empty(),
-                "{bytes:02x?}: endpoint host"
+                endpoint.port().unwrap_or(0) >= 1,
+                "{bytes:02x?}: endpoint port"
             );
-            assert!(
-                !udp.endpoint().is_multicast(),
-                "{bytes:02x?}: multicast accepted"
-            );
+            assert!(!endpoint.host().is_empty(), "{bytes:02x?}: endpoint host");
+            assert!(!endpoint.is_multicast(), "{bytes:02x?}: multicast accepted");
             if let Some(interface) = udp.interface() {
                 assert!(!interface.host().is_empty(), "{bytes:02x?}: interface host");
                 assert_ne!(interface.port(), Some(0), "{bytes:02x?}: interface port 0");

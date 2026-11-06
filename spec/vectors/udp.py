@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/udp.json: the test vectors for spec/udp.md, version 0.
+"""Write spec/vectors/udp.json: the test vectors for spec/udp.md, version 1.
 The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/udp.py
@@ -144,10 +144,20 @@ def datagram(name, frames, term_length=TERM_LENGTH, error=None):
 
 # ---- channels -----------------------------------------------------------------------
 
-def channel(name, string, endpoint_host, endpoint_port, interface_host=None, interface_port=None):
+def channel(name, string, endpoint_host, endpoint_port, interface_host=None, interface_port=None,
+            control_host=None, control_port=None, control_mode=None, fc="max"):
+    """A channel and its fields: an endpoint or a control address (version 1), and `fc`,
+    `max` when the string names none."""
     return {"name": name, "kind": "channel", "string": string,
             "fields": {"endpoint_host": endpoint_host, "endpoint_port": endpoint_port,
-                       "interface_host": interface_host, "interface_port": interface_port}}
+                       "interface_host": interface_host, "interface_port": interface_port,
+                       "control_host": control_host, "control_port": control_port,
+                       "control_mode": control_mode, "fc": fc}}
+
+
+def control_channel(name, string, control_host, control_port, fc="max"):
+    return channel(name, string, None, None, control_host=control_host, control_port=control_port,
+                   control_mode="manual", fc=fc)
 
 
 def bad_channel(name, string, error, code=1):
@@ -308,6 +318,62 @@ VECTORS = [
     bad_channel("channel-grammar-before-endpoint", "cavalry:udp?endpoint=10.0.0.2:0|endpoint=10.0.0.2:0",
                 "grammar"),
     bad_channel("channel-endpoint-before-multicast", "cavalry:udp?endpoint=224.0.1.1:0", "endpoint"),
+    # Version 1 (ADR 0053): a control channel, the flow control strategy, and the checks
+    # `control` and `fc` in their place in the order.
+    control_channel("channel-control-manual", "cavalry:udp?control=10.0.0.1:40456|control-mode=manual",
+                    "10.0.0.1", 40456),
+    control_channel("channel-control-name", "cavalry:udp?control=bench-link:40456|control-mode=manual",
+                    "bench-link", 40456),
+    control_channel("channel-control-ipv6", "cavalry:udp?control=[fd00::1]:40456|control-mode=manual",
+                    "fd00::1", 40456),
+    control_channel("channel-control-min", "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|fc=min",
+                    "10.0.0.1", 40456, fc="min"),
+    control_channel("channel-control-max", "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|fc=max",
+                    "10.0.0.1", 40456, fc="max"),
+    control_channel("channel-control-parameters-in-any-order",
+                    "cavalry:udp?fc=min|control-mode=manual|control=10.0.0.1:1", "10.0.0.1", 1, fc="min"),
+    channel("channel-endpoint-fc-min", "cavalry:udp?endpoint=10.0.0.2:40123|fc=min", "10.0.0.2", 40123,
+            fc="min"),
+    channel("channel-endpoint-fc-max", "cavalry:udp?endpoint=10.0.0.2:40123|fc=max", "10.0.0.2", 40123,
+            fc="max"),
+    channel("channel-endpoint-interface-fc", "cavalry:udp?endpoint=10.0.0.2:40123|interface=10.0.0.1|fc=min",
+            "10.0.0.2", 40123, "10.0.0.1", None, fc="min"),
+    bad_channel("channel-control-without-mode", "cavalry:udp?control=10.0.0.1:40456", "control"),
+    bad_channel("channel-mode-without-control", "cavalry:udp?control-mode=manual", "control"),
+    bad_channel("channel-control-mode-dynamic", "cavalry:udp?control=10.0.0.1:40456|control-mode=dynamic",
+                "control"),
+    bad_channel("channel-control-mode-unknown", "cavalry:udp?control=10.0.0.1:40456|control-mode=response",
+                "control"),
+    bad_channel("channel-control-with-endpoint",
+                "cavalry:udp?endpoint=10.0.0.2:40123|control=10.0.0.1:40456|control-mode=manual", "control"),
+    bad_channel("channel-control-with-interface",
+                "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|interface=10.0.0.1", "control"),
+    bad_channel("channel-control-no-port", "cavalry:udp?control=10.0.0.1|control-mode=manual", "control"),
+    bad_channel("channel-control-port-zero", "cavalry:udp?control=10.0.0.1:0|control-mode=manual", "control"),
+    bad_channel("channel-control-port-too-large", "cavalry:udp?control=10.0.0.1:70000|control-mode=manual",
+                "control"),
+    bad_channel("channel-control-ipv6-no-brackets", "cavalry:udp?control=fd00::1:40456|control-mode=manual",
+                "control"),
+    bad_channel("channel-fc-alone", "cavalry:udp?fc=min", "endpoint"),
+    bad_channel("channel-fc-unknown", "cavalry:udp?endpoint=10.0.0.2:40123|fc=tagged", "fc"),
+    bad_channel("channel-fc-with-options", "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|fc=min,t:5s",
+                "fc"),
+    bad_channel("channel-fc-upper-case", "cavalry:udp?endpoint=10.0.0.2:40123|fc=MIN", "fc"),
+    bad_channel("channel-control-multicast-ipv4", "cavalry:udp?control=224.0.1.1:40456|control-mode=manual",
+                "multicast"),
+    bad_channel("channel-control-multicast-ipv6", "cavalry:udp?control=[ff02::1]:40456|control-mode=manual",
+                "multicast"),
+    # The order between the new checks and the old: grammar, key, control, endpoint, fc,
+    # multicast, each over the whole string.
+    bad_channel("channel-key-before-control", "cavalry:udp?control=10.0.0.1:40456|mtu=1408", "key"),
+    bad_channel("channel-control-before-endpoint",
+                "cavalry:udp?endpoint=10.0.0.2:0|control=10.0.0.1:40456|control-mode=manual", "control"),
+    bad_channel("channel-endpoint-before-fc", "cavalry:udp?endpoint=10.0.0.2:0|fc=tagged", "endpoint"),
+    bad_channel("channel-control-before-fc", "cavalry:udp?control=10.0.0.1:0|control-mode=manual|fc=tagged",
+                "control"),
+    bad_channel("channel-fc-before-multicast",
+                "cavalry:udp?control=224.0.1.1:40456|control-mode=manual|fc=tagged", "fc"),
+    bad_channel("channel-control-before-multicast", "cavalry:udp?control=224.0.1.1:40456", "control"),
     # Arithmetic: the rules of "The sender" and "The receiver" on given inputs.
     sender_limit("sender-limit-first-status-message", 0, 0, INITIAL_TERM_ID, 0, 131072),
     sender_limit("sender-limit-rises", 8192, 131072, INITIAL_TERM_ID, 8192, 131072),
@@ -339,7 +405,7 @@ def main():
     assert len(names) == len(set(names)), "vector names must be unique"
     doc = {
         "spec": "spec/udp.md",
-        "version": 0,
+        "version": 1,
         "generated_by": "spec/vectors/udp.py; do not edit by hand",
         "vectors": VECTORS,
     }

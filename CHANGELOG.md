@@ -1549,3 +1549,17 @@ user-visible change, added in the same commit as the change. The format follows
   third host after card 159's week, the one card that needs a hand on a host
   ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md); cards 224
   to 232).
+- ADR 0053, Accepted: multi-destination cast on `cavalry:udp`, the fifth slice's
+  first feature, specified: `spec/udp.md` moves to version 1 with a publication
+  channel `cavalry:udp?control=<host>:<port>|control-mode=manual` whose sender binds
+  the control address and sends every datagram to the destinations a client names,
+  `fc=max|min` on a publication's channel with `min` the slowest receiver's pace and a
+  receiver dropped after 5 s without a status message, and the counters for both;
+  `spec/client-protocol.md` moves to version 5 with `add destination` and `remove
+  destination` under Aeron's type ids 7 and 8; every frame's version byte stays 0.
+  31 channel vectors and 13 client protocol vectors pin the grammar and the layouts,
+  `cavalry-proto` parses and encodes them, and the driver answers a control channel,
+  `fc=min` and the two commands with error code 11 naming card 225 until its sender
+  change lands, and a subscription's channel that names a publication's keys with
+  code 1 ([ADR 0053](docs/decisions/0053-add-multi-destination-cast-to-cavalry-udp.md);
+  card 225).

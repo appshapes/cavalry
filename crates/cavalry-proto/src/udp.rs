@@ -1,4 +1,4 @@
-//! The UDP transport's frames, datagram and arithmetic: `spec/udp.md`, version 0
+//! The UDP transport's frames, datagram and arithmetic: `spec/udp.md`, version 1
 //! (ADR 0040).
 //!
 //! [`parse`] reads one control frame, or recognises a datagram of data frames, from the
@@ -16,8 +16,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::frame::{DataFrameHeader, FRAME_ALIGNMENT, FrameError, FrameType, HEADER_LENGTH};
 
-/// The version of `spec/udp.md` this crate reads and writes: the version byte of every
-/// frame on the wire.
+/// The version byte of every frame on the wire: 0, unchanged by version 1 of
+/// `spec/udp.md`, which moved for its channel grammar and the sender's per-destination
+/// state and not for any frame (ADR 0053), so that a receiver of version 0 reads a
+/// sender of version 1.
 pub const VERSION: i8 = 0;
 
 /// The docs anchor every error message names.

@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cavalry_log::dir::Recovery;
 
-use cavalry_proto::channel::{Channel, ChannelError, UdpChannel};
+use cavalry_proto::channel::{Channel, ChannelError, FlowControl, UdpChannel};
 use cavalry_proto::client_protocol::{
     Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NO_CHANNEL_STATUS, NULL_LENGTH,
     ProtocolError, ReplayStopReason,
@@ -1084,6 +1084,12 @@ impl Conductor {
                 recording_id,
                 ..
             } => self.retention(correlation_id, replayer::Retention::Delete { recording_id }),
+            Command::AddDestination { correlation_id, .. } => {
+                self.not_yet(correlation_id, "add destination");
+            }
+            Command::RemoveDestination { correlation_id, .. } => {
+                self.not_yet(correlation_id, "remove destination");
+            }
         }
     }
 
@@ -1321,8 +1327,11 @@ impl Conductor {
             self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
             return;
         }
-        let host = channel.endpoint().host();
-        let endpoint = match resolve(host, channel.endpoint_port()) {
+        let Some(address) = self.endpoint_of(correlation_id, &channel) else {
+            return;
+        };
+        let host = address.host();
+        let endpoint = match resolve(host, address.port().unwrap_or(0)) {
             Ok(address) => address,
             Err(reason) => {
                 self.send_error(
@@ -2076,6 +2085,47 @@ impl Conductor {
         }
     }
 
+    /// The endpoint of a channel this driver sends on or receives on. A control
+    /// channel and `fc=min` are version 1 of `spec/udp.md`, parsed here and sent by
+    /// nothing yet: multi-destination cast lands with card 225's sender change (ADR
+    /// 0053, Interim), so until then each is answered with code 11 naming the card, as
+    /// a `cavalry:udp` channel was before cards 180 and 181 landed it (ADR 0040);
+    /// counted in `client_protocol.errors` alone, as a well-formed command's refusal
+    /// is, since a channel of version 1 is not code 1's invalid channel.
+    fn endpoint_of<'a>(
+        &mut self,
+        correlation_id: i64,
+        channel: &UdpChannel<'a>,
+    ) -> Option<cavalry_proto::channel::Address<'a>> {
+        let Some(endpoint) = channel.endpoint() else {
+            self.not_yet(
+                correlation_id,
+                "a control channel, control=<host>:<port>|control-mode=manual,",
+            );
+            return None;
+        };
+        if channel.flow_control() == FlowControl::Min {
+            self.not_yet(correlation_id, "fc=min");
+            return None;
+        }
+        Some(endpoint)
+    }
+
+    /// Code 11 for what version 1 of `spec/udp.md` and version 5 of
+    /// `spec/client-protocol.md` specify and this driver does not yet do
+    /// (`endpoint_of`).
+    fn not_yet(&mut self, correlation_id: i64, what: &str) {
+        self.send_error(
+            correlation_id,
+            ErrorCode::GenericError,
+            &format!(
+                "{what} is specified (spec/udp.md, version 1; spec/client-protocol.md, version \
+                 5; ADR 0053) and lands with card 225's driver change; until then name an \
+                 endpoint and fc=max, and add no destination; see {ERRORS_DOC}"
+            ),
+        );
+    }
+
     /// Resolves a `cavalry:udp` channel's endpoint and interface once, on the control
     /// plane, answering code 9 for a name that does not resolve (`spec/udp.md`, "The
     /// channel URI").
@@ -2084,8 +2134,9 @@ impl Conductor {
         correlation_id: i64,
         channel: &UdpChannel<'_>,
     ) -> Option<(SocketAddr, Option<SocketAddr>)> {
-        let host = channel.endpoint().host();
-        let endpoint = match resolve(host, channel.endpoint_port()) {
+        let address = self.endpoint_of(correlation_id, channel)?;
+        let host = address.host();
+        let endpoint = match resolve(host, address.port().unwrap_or(0)) {
             Ok(address) => address,
             Err(reason) => {
                 self.send_error(
@@ -2181,13 +2232,16 @@ impl Conductor {
     }
 
     /// `add subscription` on a `cavalry:udp` channel (`spec/client-protocol.md`,
-    /// "Commands"; `spec/udp.md`, "The receiver"; ADR 0042): the host is resolved once,
-    /// code 9 when it does not; the first subscription on the resolved channel binds its
-    /// receive endpoint, one socket bound to the endpoint and set non-blocking, code 4
-    /// when the operating system refuses, with the five counters of `channel.*` and
-    /// `channel.opened`, handed to the receiver with the list its interests live in; the
-    /// subscription is registered on the endpoint, the receiver told the stream is
-    /// wanted, and `subscription ready` names the endpoint's `channel.status` counter.
+    /// "Commands"; `spec/udp.md`, "The receiver"; ADR 0042): a channel that names
+    /// `control`, `control-mode` or `fc`, a publication's keys, is code 1 with the reason
+    /// `subscription`, counted in `client_protocol.rejected_command`, with nothing
+    /// registered; the host is resolved once, code 9 when it does not; the first
+    /// subscription on the resolved channel binds its receive endpoint, one socket bound
+    /// to the endpoint and set non-blocking, code 4 when the operating system refuses,
+    /// with the five counters of `channel.*` and `channel.opened`, handed to the receiver
+    /// with the list its interests live in; the subscription is registered on the
+    /// endpoint, the receiver told the stream is wanted, and `subscription ready` names
+    /// the endpoint's `channel.status` counter.
     /// An image already live on the endpoint and stream gets a `subscription.position`
     /// for the client at the image's rebuild position, an `available image`, and a
     /// reader with the receiver. A registry at capacity, a counters file with no free
@@ -2202,6 +2256,22 @@ impl Conductor {
     ) {
         if self.subscriptions_full() {
             self.registry_full(correlation_id, "subscriptions", spec::MAX_SUBSCRIPTIONS);
+            return;
+        }
+        // `control`, `control-mode` and `fc` are a publication's (`spec/udp.md`, "The
+        // channel URI"; `spec/client-protocol.md`, "Commands", add subscription).
+        if channel.is_control() || channel.names_flow_control() {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::InvalidChannel,
+                &format!(
+                    "the channel: channel refused (subscription): it names control, \
+                     control-mode or fc, which this version reads on a publication's channel \
+                     only; remove them, since a subscription receives on its endpoint; see \
+                     {ERRORS_DOC}"
+                ),
+            );
             return;
         }
         let Some((endpoint, interface)) = self.resolve_channel(correlation_id, &channel) else {
@@ -6363,6 +6433,96 @@ mod recording {
         assert_eq!(code, 9, "{message}");
         assert!(message.contains("no-such-host.invalid"), "{message}");
         assert!(h.conductor.replays.is_empty());
+    }
+
+    /// Version 1 of `spec/udp.md` and version 5 of `spec/client-protocol.md` parse
+    /// before the sender sends to a destination (ADR 0053, Interim): a control channel,
+    /// `fc=min` and the destination commands are code 11 naming card 225 with nothing
+    /// registered, and a subscription's channel that names a publication's keys is
+    /// code 1 with the reason `subscription`, the page's own rule.
+    #[test]
+    fn multi_destination_cast_is_refused_with_code_11_until_the_sender_change() {
+        let mut h = Harness::new("udp-mdc-interim");
+        let now = h.now;
+        let control: &[u8] = b"cavalry:udp?control=127.0.0.1:40456|control-mode=manual";
+        h.conductor.add_publication(1, 2, 7, control, false, now);
+        let (code, message) = h.last_error(2).expect("an error");
+        assert_eq!(code, 11, "{message}");
+        assert!(message.contains("card 225"), "{message}");
+        h.conductor.add_publication(
+            1,
+            3,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|fc=min",
+            false,
+            now,
+        );
+        let (code, message) = h.last_error(3).expect("an error");
+        assert_eq!(code, 11, "{message}");
+        assert!(message.contains("fc=min"), "{message}");
+        assert!(h.conductor.send_endpoints.is_empty());
+        assert!(h.conductor.publications.is_empty());
+        // `fc=max` names what the driver does and is accepted on a publication.
+        h.conductor.add_publication(
+            1,
+            4,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|fc=max",
+            false,
+            now,
+        );
+        assert_eq!(h.last_error(4), None);
+        assert_eq!(h.conductor.publications.len(), 1);
+        h.conductor
+            .add_subscription(1, 5, 7, b"cavalry:udp?endpoint=127.0.0.1:40124|fc=max");
+        let (code, message) = h.last_error(5).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(subscription)"), "{message}");
+        h.conductor.add_subscription(1, 6, 7, control);
+        let (code, message) = h.last_error(6).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(h.conductor.receive_endpoints.is_empty());
+        assert!(h.conductor.subscriptions.is_empty());
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 2);
+        h.conductor.start_recording(7, 7, control, now);
+        let (code, message) = h.last_error(7).expect("an error");
+        assert_eq!(code, 11, "{message}");
+        h.conductor.start_replay(8, 0, -1, -1, 7, control);
+        let (code, message) = h.last_error(8).expect("an error");
+        assert_eq!(code, 11, "{message}");
+        assert!(h.conductor.replays.is_empty());
+        // The two commands, through the ring's decoder: code 11, the publication of
+        // correlation id 4 untouched.
+        let mut bytes = [0u8; 96];
+        for (correlation_id, command) in [
+            (
+                9,
+                Command::AddDestination {
+                    client_id: 1,
+                    correlation_id: 9,
+                    registration_id: 4,
+                    channel: b"cavalry:udp?endpoint=127.0.0.1:40125",
+                },
+            ),
+            (
+                10,
+                Command::RemoveDestination {
+                    client_id: 1,
+                    correlation_id: 10,
+                    registration_id: 4,
+                    channel: b"cavalry:udp?endpoint=127.0.0.1:40125",
+                },
+            ),
+        ] {
+            let length = command.write(&mut bytes).expect("the command encodes");
+            h.conductor
+                .handle(command.command_type() as i32, &bytes[..length], now);
+            let (code, message) = h.last_error(correlation_id).expect("an error");
+            assert_eq!(code, 11, "{message}");
+            assert!(message.contains("destination"), "{message}");
+        }
+        assert_eq!(h.conductor.publications.len(), 1);
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 2);
     }
 
     /// The send endpoints registry holds 64: the 65th resolved channel is code 10

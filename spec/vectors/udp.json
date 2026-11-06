@@ -1,6 +1,6 @@
 {
   "spec": "spec/udp.md",
-  "version": 0,
+  "version": 1,
   "generated_by": "spec/vectors/udp.py; do not edit by hand",
   "vectors": [
     {
@@ -624,7 +624,11 @@
         "endpoint_host": "10.0.0.2",
         "endpoint_port": 40123,
         "interface_host": null,
-        "interface_port": null
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max"
       }
     },
     {
@@ -635,7 +639,11 @@
         "endpoint_host": "grip-link",
         "endpoint_port": 40123,
         "interface_host": null,
-        "interface_port": null
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max"
       }
     },
     {
@@ -646,7 +654,11 @@
         "endpoint_host": "fd00::2",
         "endpoint_port": 40123,
         "interface_host": null,
-        "interface_port": null
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max"
       }
     },
     {
@@ -657,7 +669,11 @@
         "endpoint_host": "10.0.0.2",
         "endpoint_port": 40123,
         "interface_host": "10.0.0.1",
-        "interface_port": null
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max"
       }
     },
     {
@@ -668,7 +684,11 @@
         "endpoint_host": "10.0.0.2",
         "endpoint_port": 40123,
         "interface_host": "10.0.0.1",
-        "interface_port": 5000
+        "interface_port": 5000,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max"
       }
     },
     {
@@ -679,7 +699,11 @@
         "endpoint_host": "10.0.0.2",
         "endpoint_port": 1,
         "interface_host": "10.0.0.1",
-        "interface_port": null
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max"
       }
     },
     {
@@ -813,6 +837,295 @@
       "kind": "channel",
       "string": "cavalry:udp?endpoint=224.0.1.1:0",
       "error": "endpoint",
+      "code": 1
+    },
+    {
+      "name": "channel-control-manual",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|control-mode=manual",
+      "fields": {
+        "endpoint_host": null,
+        "endpoint_port": null,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": "10.0.0.1",
+        "control_port": 40456,
+        "control_mode": "manual",
+        "fc": "max"
+      }
+    },
+    {
+      "name": "channel-control-name",
+      "kind": "channel",
+      "string": "cavalry:udp?control=bench-link:40456|control-mode=manual",
+      "fields": {
+        "endpoint_host": null,
+        "endpoint_port": null,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": "bench-link",
+        "control_port": 40456,
+        "control_mode": "manual",
+        "fc": "max"
+      }
+    },
+    {
+      "name": "channel-control-ipv6",
+      "kind": "channel",
+      "string": "cavalry:udp?control=[fd00::1]:40456|control-mode=manual",
+      "fields": {
+        "endpoint_host": null,
+        "endpoint_port": null,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": "fd00::1",
+        "control_port": 40456,
+        "control_mode": "manual",
+        "fc": "max"
+      }
+    },
+    {
+      "name": "channel-control-min",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|fc=min",
+      "fields": {
+        "endpoint_host": null,
+        "endpoint_port": null,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": "10.0.0.1",
+        "control_port": 40456,
+        "control_mode": "manual",
+        "fc": "min"
+      }
+    },
+    {
+      "name": "channel-control-max",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|fc=max",
+      "fields": {
+        "endpoint_host": null,
+        "endpoint_port": null,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": "10.0.0.1",
+        "control_port": 40456,
+        "control_mode": "manual",
+        "fc": "max"
+      }
+    },
+    {
+      "name": "channel-control-parameters-in-any-order",
+      "kind": "channel",
+      "string": "cavalry:udp?fc=min|control-mode=manual|control=10.0.0.1:1",
+      "fields": {
+        "endpoint_host": null,
+        "endpoint_port": null,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": "10.0.0.1",
+        "control_port": 1,
+        "control_mode": "manual",
+        "fc": "min"
+      }
+    },
+    {
+      "name": "channel-endpoint-fc-min",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|fc=min",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "min"
+      }
+    },
+    {
+      "name": "channel-endpoint-fc-max",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|fc=max",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max"
+      }
+    },
+    {
+      "name": "channel-endpoint-interface-fc",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|interface=10.0.0.1|fc=min",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": "10.0.0.1",
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "min"
+      }
+    },
+    {
+      "name": "channel-control-without-mode",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-mode-without-control",
+      "kind": "channel",
+      "string": "cavalry:udp?control-mode=manual",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-control-mode-dynamic",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|control-mode=dynamic",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-control-mode-unknown",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|control-mode=response",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-control-with-endpoint",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|control=10.0.0.1:40456|control-mode=manual",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-control-with-interface",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|interface=10.0.0.1",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-control-no-port",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1|control-mode=manual",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-control-port-zero",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:0|control-mode=manual",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-control-port-too-large",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:70000|control-mode=manual",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-control-ipv6-no-brackets",
+      "kind": "channel",
+      "string": "cavalry:udp?control=fd00::1:40456|control-mode=manual",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-fc-alone",
+      "kind": "channel",
+      "string": "cavalry:udp?fc=min",
+      "error": "endpoint",
+      "code": 1
+    },
+    {
+      "name": "channel-fc-unknown",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|fc=tagged",
+      "error": "fc",
+      "code": 1
+    },
+    {
+      "name": "channel-fc-with-options",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|fc=min,t:5s",
+      "error": "fc",
+      "code": 1
+    },
+    {
+      "name": "channel-fc-upper-case",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|fc=MIN",
+      "error": "fc",
+      "code": 1
+    },
+    {
+      "name": "channel-control-multicast-ipv4",
+      "kind": "channel",
+      "string": "cavalry:udp?control=224.0.1.1:40456|control-mode=manual",
+      "error": "multicast",
+      "code": 1
+    },
+    {
+      "name": "channel-control-multicast-ipv6",
+      "kind": "channel",
+      "string": "cavalry:udp?control=[ff02::1]:40456|control-mode=manual",
+      "error": "multicast",
+      "code": 1
+    },
+    {
+      "name": "channel-key-before-control",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|mtu=1408",
+      "error": "key",
+      "code": 1
+    },
+    {
+      "name": "channel-control-before-endpoint",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:0|control=10.0.0.1:40456|control-mode=manual",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-endpoint-before-fc",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:0|fc=tagged",
+      "error": "endpoint",
+      "code": 1
+    },
+    {
+      "name": "channel-control-before-fc",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:0|control-mode=manual|fc=tagged",
+      "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-fc-before-multicast",
+      "kind": "channel",
+      "string": "cavalry:udp?control=224.0.1.1:40456|control-mode=manual|fc=tagged",
+      "error": "fc",
+      "code": 1
+    },
+    {
+      "name": "channel-control-before-multicast",
+      "kind": "channel",
+      "string": "cavalry:udp?control=224.0.1.1:40456",
+      "error": "control",
       "code": 1
     },
     {

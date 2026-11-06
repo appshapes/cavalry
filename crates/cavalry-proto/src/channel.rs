@@ -1,11 +1,14 @@
-//! The channel URI: `cavalry:ipc`, and `cavalry:udp?endpoint=<host>:<port>` with its one
-//! option, `interface` (`spec/udp.md`, "The channel URI"; `spec/client-protocol.md`,
-//! version 4; ADR 0040).
+//! The channel URI: `cavalry:ipc`; `cavalry:udp?endpoint=<host>:<port>` with its option
+//! `interface`; and, from version 1 of `spec/udp.md`, the control channel
+//! `cavalry:udp?control=<host>:<port>|control-mode=manual` of multi-destination cast,
+//! and `fc=max|min`, the flow control strategy, on a publication's channel
+//! (`spec/udp.md`, "The channel URI"; `spec/client-protocol.md`, version 5; ADR 0040,
+//! ADR 0053).
 //!
 //! [`Channel::parse`] reads a channel string, borrowing from it, and runs the spec's
-//! checks in the spec's order: `grammar`, `key`, `endpoint`, `multicast`. Resolving a
-//! host name is the driver's, on its control plane, and its failure is error code 9;
-//! every refusal here is error code 1.
+//! checks in the spec's order: `grammar`, `key`, `control`, `endpoint`, `fc`,
+//! `multicast`. Resolving a host name is the driver's, on its control plane, and its
+//! failure is error code 9; every refusal here is error code 1.
 
 use core::fmt;
 use core::net::{Ipv4Addr, Ipv6Addr};
@@ -30,32 +33,50 @@ pub enum ChannelError {
         /// What was wrong, in words.
         what: &'static str,
     },
-    /// A key this version does not name: not `endpoint` or `interface`.
+    /// A key this version does not name: not `endpoint`, `interface`, `control`,
+    /// `control-mode` or `fc`.
     Key {
         /// The byte offset of the key within the channel string.
         at: usize,
         /// The key's length in bytes.
         len: usize,
     },
-    /// The endpoint is missing or malformed: no `<host>:<port>`, a port of 0 or above
-    /// 65535, an empty host, a host with characters outside names and addresses, or an
-    /// IPv6 address outside brackets.
+    /// A control address without `control-mode=manual` or `control-mode` without a
+    /// control address, a control mode other than `manual`, a control address beside
+    /// an endpoint or an interface, or a control address with no port, a port of 0 or
+    /// above 65535, an empty host, a host with characters outside names and addresses,
+    /// or an IPv6 address outside brackets.
+    Control {
+        /// What was wrong, in words.
+        what: &'static str,
+    },
+    /// Neither an endpoint nor a control address; or an endpoint or interface with no
+    /// `<host>:<port>`, a port of 0 or above 65535, an empty host, a host with
+    /// characters outside names and addresses, or an IPv6 address outside brackets.
     Endpoint {
         /// What was wrong, in words.
         what: &'static str,
     },
-    /// The endpoint is a multicast address, which this version refuses.
+    /// An `fc` value other than `max` or `min`.
+    FlowControl {
+        /// What was wrong, in words.
+        what: &'static str,
+    },
+    /// The endpoint or the control address is a multicast address, which this version
+    /// refuses.
     Multicast,
 }
 
 impl ChannelError {
     /// The reason's name in `spec/udp.md`, "What a reader rejects": `grammar`, `key`,
-    /// `endpoint` or `multicast`.
+    /// `control`, `endpoint`, `fc` or `multicast`.
     pub const fn reason(self) -> &'static str {
         match self {
             ChannelError::Grammar { .. } => "grammar",
             ChannelError::Key { .. } => "key",
+            ChannelError::Control { .. } => "control",
             ChannelError::Endpoint { .. } => "endpoint",
+            ChannelError::FlowControl { .. } => "fc",
             ChannelError::Multicast => "multicast",
         }
     }
@@ -80,26 +101,39 @@ impl fmt::Display for ChannelError {
         match *self {
             ChannelError::Grammar { what } => write!(
                 f,
-                "channel refused (grammar): {what}; a channel is cavalry:ipc or \
-                 cavalry:udp?endpoint=<host>:<port> with |interface=<address> as its one \
-                 option; see {DOC}"
+                "channel refused (grammar): {what}; a channel is cavalry:ipc, \
+                 cavalry:udp?endpoint=<host>:<port> with |interface=<address> and |fc=max|min \
+                 as its options, or cavalry:udp?control=<host>:<port>|control-mode=manual with \
+                 |fc=max|min; see {DOC}"
             ),
             ChannelError::Key { at, len } => write!(
                 f,
                 "channel refused (key): the {len}-byte parameter at byte {at} is not one this \
-                 version names, endpoint or interface; remove it, or upgrade the driver to a \
-                 version that names it; see {DOC}"
+                 version names, endpoint, interface, control, control-mode or fc; remove it, or \
+                 upgrade the driver to a version that names it; see {DOC}"
+            ),
+            ChannelError::Control { what } => write!(
+                f,
+                "channel refused (control): {what}; a control channel is \
+                 cavalry:udp?control=<host>:<port>|control-mode=manual, with no endpoint and no \
+                 interface, the port from 1 to 65535 and an IPv6 address in brackets; see {DOC}"
             ),
             ChannelError::Endpoint { what } => write!(
                 f,
                 "channel refused (endpoint): {what}; the endpoint is <host>:<port> with a \
-                 port from 1 to 65535 and an IPv6 address in brackets; see {DOC}"
+                 port from 1 to 65535 and an IPv6 address in brackets, or the channel names a \
+                 control address instead; see {DOC}"
+            ),
+            ChannelError::FlowControl { what } => write!(
+                f,
+                "channel refused (fc): {what}; the flow control strategy is fc=max or fc=min, \
+                 max when the channel names none; see {DOC}"
             ),
             ChannelError::Multicast => write!(
                 f,
-                "channel refused (multicast): the endpoint is a multicast address, which \
-                 this version does not send to or receive on; name a unicast address; see \
-                 {DOC}"
+                "channel refused (multicast): the endpoint or control address is a multicast \
+                 address, which this version does not send to or receive on; name a unicast \
+                 address; see {DOC}"
             ),
         }
     }
@@ -107,8 +141,8 @@ impl fmt::Display for ChannelError {
 
 impl core::error::Error for ChannelError {}
 
-/// An address in a channel: a host and, for an endpoint always and an interface
-/// sometimes, a port.
+/// An address in a channel: a host and, for an endpoint and a control address always
+/// and an interface sometimes, a port.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Address<'a> {
     host: &'a str,
@@ -143,29 +177,97 @@ impl<'a> Address<'a> {
     }
 }
 
-/// A `cavalry:udp` channel, parsed: its endpoint and its interface, borrowed from the
-/// string.
+/// The control mode of a control channel: `manual`, the one this version names, where
+/// a client adds and removes the destinations (`spec/udp.md`, "The channel URI").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ControlMode {
+    /// `control-mode=manual`.
+    Manual,
+}
+
+impl ControlMode {
+    /// The mode's name in the channel string.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ControlMode::Manual => "manual",
+        }
+    }
+}
+
+/// The flow control strategy of a publication: how its sender limit moves on the
+/// status messages of its receivers (`spec/udp.md`, "The sender").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FlowControl {
+    /// `fc=max`, the default: the fastest receiver sets the pace.
+    Max,
+    /// `fc=min`: the slowest receiver sets the pace, one that goes quiet for the flow
+    /// control receiver timeout dropped from the accounting.
+    Min,
+}
+
+impl FlowControl {
+    /// The strategy's name in the channel string.
+    pub const fn name(self) -> &'static str {
+        match self {
+            FlowControl::Max => "max",
+            FlowControl::Min => "min",
+        }
+    }
+}
+
+/// A `cavalry:udp` channel, parsed: its endpoint and interface, or its control address
+/// and mode, and its flow control strategy, borrowed from the string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct UdpChannel<'a> {
-    endpoint: Address<'a>,
+    endpoint: Option<Address<'a>>,
     interface: Option<Address<'a>>,
+    control: Option<Address<'a>>,
+    control_mode: Option<ControlMode>,
+    flow_control: Option<FlowControl>,
 }
 
 impl<'a> UdpChannel<'a> {
-    /// The endpoint: the address a sender sends to and a receiver binds.
-    pub const fn endpoint(&self) -> Address<'a> {
+    /// The endpoint: the address a sender sends to and a receiver binds. None for a
+    /// control channel, which names a control address instead.
+    pub const fn endpoint(&self) -> Option<Address<'a>> {
         self.endpoint
-    }
-
-    /// The endpoint's port.
-    pub fn endpoint_port(&self) -> u16 {
-        self.endpoint.port.unwrap_or(0)
     }
 
     /// The interface, when one was named: the local address a sender sends from or a
     /// receiver binds beside the endpoint.
     pub const fn interface(&self) -> Option<Address<'a>> {
         self.interface
+    }
+
+    /// The control address, when the channel is a control channel: the local address
+    /// the sender binds, where its destinations' status messages and NAKs arrive.
+    pub const fn control(&self) -> Option<Address<'a>> {
+        self.control
+    }
+
+    /// The control mode, when the channel is a control channel.
+    pub const fn control_mode(&self) -> Option<ControlMode> {
+        self.control_mode
+    }
+
+    /// Whether the channel names a control address: a publication's channel whose
+    /// sender sends to destinations.
+    pub const fn is_control(&self) -> bool {
+        self.control.is_some()
+    }
+
+    /// The flow control strategy: what `fc` names, or [`FlowControl::Max`] when the
+    /// channel names none.
+    pub const fn flow_control(&self) -> FlowControl {
+        match self.flow_control {
+            Some(strategy) => strategy,
+            None => FlowControl::Max,
+        }
+    }
+
+    /// Whether the channel names `fc` at all, which an `add subscription` refuses.
+    pub const fn names_flow_control(&self) -> bool {
+        self.flow_control.is_some()
     }
 }
 
@@ -191,7 +293,8 @@ impl<'a> Channel<'a> {
         let Some(params) = text.strip_prefix(UDP_PREFIX) else {
             return Err(ChannelError::Grammar {
                 what: if text.starts_with("cavalry:udp") {
-                    "cavalry:udp has no parameters; it needs ?endpoint=<host>:<port>"
+                    "cavalry:udp has no parameters; it needs ?endpoint=<host>:<port> or \
+                     ?control=<host>:<port>|control-mode=manual"
                 } else if text.starts_with("cavalry:ipc") {
                     "cavalry:ipc takes no parameters"
                 } else {
@@ -199,9 +302,9 @@ impl<'a> Channel<'a> {
                 },
             });
         };
-        // `grammar` over every parameter first, then `key`, then `endpoint`, then
-        // `multicast`: the page's order, so that a string wrong in two ways reports the
-        // earlier check whatever the order of its parameters.
+        // `grammar` over every parameter first, then `key`, `control`, `endpoint`, `fc`
+        // and `multicast`: the page's order, so that a string wrong in two ways reports
+        // the earlier check whatever the order of its parameters.
         //
         // `grammar`: the key=value form, the key's characters, a non-empty value, and no
         // key twice, whether or not this version names the key. The repeated-key check
@@ -242,34 +345,109 @@ impl<'a> Channel<'a> {
         let mut at = UDP_PREFIX.len();
         for param in params.split('|') {
             let key = key_of(param);
-            if key != "endpoint" && key != "interface" {
+            if !matches!(
+                key,
+                "endpoint" | "interface" | "control" | "control-mode" | "fc"
+            ) {
                 return Err(ChannelError::Key { at, len: key.len() });
             }
             at += param.len() + 1;
         }
-        // `endpoint`: each address left to right, then that there is an endpoint.
-        let mut endpoint = None;
-        let mut interface = None;
+        // `control`: a control address and its mode come together, the mode is manual,
+        // nothing stands beside the control address that it already is, and the
+        // address has the shape of an endpoint's.
+        let mut control_value = None;
+        let mut mode_value = None;
+        let mut endpoint_value = None;
+        let mut interface_value = None;
+        let mut fc_value = None;
         for param in params.split('|') {
             let (key, value) = param.split_once('=').unwrap_or((param, ""));
             match key {
-                "endpoint" => endpoint = Some(parse_address(value, true)?),
-                "interface" => interface = Some(parse_address(value, false)?),
+                "control" => control_value = Some(value),
+                "control-mode" => mode_value = Some(value),
+                "endpoint" => endpoint_value = Some(value),
+                "interface" => interface_value = Some(value),
+                "fc" => fc_value = Some(value),
                 _ => {}
             }
         }
-        let Some(endpoint) = endpoint else {
+        let (control, control_mode) = match (control_value, mode_value) {
+            (None, None) => (None, None),
+            (Some(_), None) => {
+                return Err(ChannelError::Control {
+                    what: "a control address needs control-mode=manual beside it",
+                });
+            }
+            (None, Some(_)) => {
+                return Err(ChannelError::Control {
+                    what: "control-mode needs a control address beside it",
+                });
+            }
+            (Some(value), Some(mode)) => {
+                if mode != "manual" {
+                    return Err(ChannelError::Control {
+                        what: "the control mode is not manual, the one this version names",
+                    });
+                }
+                if endpoint_value.is_some() {
+                    return Err(ChannelError::Control {
+                        what: "a channel names a control address or an endpoint, not both",
+                    });
+                }
+                if interface_value.is_some() {
+                    return Err(ChannelError::Control {
+                        what: "an interface has no meaning beside a control address, which \
+                               is the local address itself",
+                    });
+                }
+                let address =
+                    parse_address(value, true).map_err(|what| ChannelError::Control { what })?;
+                (Some(address), Some(ControlMode::Manual))
+            }
+        };
+        // `endpoint`: the endpoint and the interface, each left to right, then that the
+        // channel names an endpoint or a control address.
+        let endpoint = match endpoint_value {
+            Some(value) => {
+                Some(parse_address(value, true).map_err(|what| ChannelError::Endpoint { what })?)
+            }
+            None => None,
+        };
+        let interface = match interface_value {
+            Some(value) => {
+                Some(parse_address(value, false).map_err(|what| ChannelError::Endpoint { what })?)
+            }
+            None => None,
+        };
+        if endpoint.is_none() && control.is_none() {
             return Err(ChannelError::Endpoint {
-                what: "no endpoint parameter",
+                what: "no endpoint parameter and no control address",
             });
+        }
+        // `fc`: max or min, bare.
+        let flow_control = match fc_value {
+            None => None,
+            Some("max") => Some(FlowControl::Max),
+            Some("min") => Some(FlowControl::Min),
+            Some(_) => {
+                return Err(ChannelError::FlowControl {
+                    what: "the fc value is not max or min",
+                });
+            }
         };
         // `multicast`.
-        if endpoint.is_multicast() {
+        if endpoint.is_some_and(|address| address.is_multicast())
+            || control.is_some_and(|address| address.is_multicast())
+        {
             return Err(ChannelError::Multicast);
         }
         Ok(Channel::Udp(UdpChannel {
             endpoint,
             interface,
+            control,
+            control_mode,
+            flow_control,
         }))
     }
 }
@@ -280,28 +458,23 @@ fn key_of(param: &str) -> &str {
     param.split_once('=').map_or(param, |(key, _)| key)
 }
 
-/// `<host>:<port>`, or `[<ipv6>]:<port>`, with the port required for an endpoint and
-/// optional for an interface.
-fn parse_address(value: &str, port_required: bool) -> Result<Address<'_>, ChannelError> {
+/// `<host>:<port>`, or `[<ipv6>]:<port>`, with the port required for an endpoint or a
+/// control address and optional for an interface; what was wrong, in words, when it
+/// is refused, for the caller to name the check.
+fn parse_address(value: &str, port_required: bool) -> Result<Address<'_>, &'static str> {
     let bracketed = value.starts_with('[');
     let (host, port) = if let Some(rest) = value.strip_prefix('[') {
         let Some((inside, after)) = rest.split_once(']') else {
-            return Err(ChannelError::Endpoint {
-                what: "an IPv6 address needs its closing bracket",
-            });
+            return Err("an IPv6 address needs its closing bracket");
         };
         if inside.parse::<Ipv6Addr>().is_err() {
-            return Err(ChannelError::Endpoint {
-                what: "the bracketed host is not an IPv6 address",
-            });
+            return Err("the bracketed host is not an IPv6 address");
         }
         let port = match after.strip_prefix(':') {
             Some(port) => Some(port),
             None if after.is_empty() => None,
             None => {
-                return Err(ChannelError::Endpoint {
-                    what: "the bracketed address is followed by something other than :<port>",
-                });
+                return Err("the bracketed address is followed by something other than :<port>");
             }
         };
         (inside, port)
@@ -312,44 +485,26 @@ fn parse_address(value: &str, port_required: bool) -> Result<Address<'_>, Channe
         }
     };
     if host.is_empty() {
-        return Err(ChannelError::Endpoint {
-            what: "the host is empty",
-        });
+        return Err("the host is empty");
     }
     if !bracketed {
         if host.contains(':') {
-            return Err(ChannelError::Endpoint {
-                what: "an IPv6 address goes in brackets",
-            });
+            return Err("an IPv6 address goes in brackets");
         }
         if !host
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
         {
-            return Err(ChannelError::Endpoint {
-                what: "the host has a character outside a name or an address",
-            });
+            return Err("the host has a character outside a name or an address");
         }
     }
     let port = match port {
         Some(port) => match port.parse::<u16>() {
-            Ok(0) => {
-                return Err(ChannelError::Endpoint {
-                    what: "the port is 0",
-                });
-            }
+            Ok(0) => return Err("the port is 0"),
             Ok(port) => Some(port),
-            Err(_) => {
-                return Err(ChannelError::Endpoint {
-                    what: "the port is not a number from 1 to 65535",
-                });
-            }
+            Err(_) => return Err("the port is not a number from 1 to 65535"),
         },
-        None if port_required => {
-            return Err(ChannelError::Endpoint {
-                what: "the endpoint has no port",
-            });
-        }
+        None if port_required => return Err("the address has no port"),
         None => None,
     };
     Ok(Address { host, port })
@@ -361,11 +516,11 @@ mod tests {
 
     /// A channel wrong in two ways reports the earlier check whichever parameter
     /// carries each fault (`spec/udp.md`, "What a reader rejects"): the grammar of the
-    /// whole string before any key, every key before any address, every address before
-    /// the multicast check. A repeated key is `grammar` whether or not this version
-    /// names the key, so `mtu` twice is `grammar` and not `key`. Four of these strings
-    /// are vectors in `spec/vectors/udp.py` too; these pin the order between every pair
-    /// of checks.
+    /// whole string before any key, every key before the control checks, those before
+    /// any address, every address before `fc`, and `fc` before the multicast check. A
+    /// repeated key is `grammar` whether or not this version names the key, so `mtu`
+    /// twice is `grammar` and not `key`. Some of these strings are vectors in
+    /// `spec/vectors/udp.py` too; these pin the order between every pair of checks.
     #[test]
     fn a_channel_wrong_in_two_ways_reports_the_earlier_check() {
         let cases = [
@@ -377,10 +532,28 @@ mod tests {
             ("cavalry:udp?mtu=1|mtu=2", "grammar"),
             ("cavalry:udp?endpoint=10.0.0.2:0|mtu=1408", "key"),
             ("cavalry:udp?interface=10.0.0.1|mtu=1408", "key"),
+            ("cavalry:udp?control=10.0.0.1:0|mtu=1408", "key"),
+            ("cavalry:udp?control-mode=manual|fc=x", "control"),
+            (
+                "cavalry:udp?endpoint=10.0.0.2:0|control=10.0.0.1:1|control-mode=manual",
+                "control",
+            ),
+            (
+                "cavalry:udp?control=10.0.0.1:0|control-mode=manual|fc=x",
+                "control",
+            ),
+            ("cavalry:udp?control=224.0.1.1:1", "control"),
             ("cavalry:udp?endpoint=224.0.1.1:0", "endpoint"),
+            ("cavalry:udp?endpoint=10.0.0.2:0|fc=x", "endpoint"),
+            ("cavalry:udp?fc=x", "endpoint"),
             (
                 "cavalry:udp?endpoint=224.0.1.1:40123|interface=10.0.0.1:0",
                 "endpoint",
+            ),
+            ("cavalry:udp?endpoint=224.0.1.1:40123|fc=x", "fc"),
+            (
+                "cavalry:udp?control=224.0.1.1:1|control-mode=manual|fc=x",
+                "fc",
             ),
         ];
         for (string, reason) in cases {
@@ -401,11 +574,44 @@ mod tests {
                 "cavalry:udp?endpoint=10.0.0.2:0|term-length=65536",
                 "term-length",
             ),
+            (
+                "cavalry:udp?control=10.0.0.1:1|control-mode=manual|group=1",
+                "group",
+            ),
         ] {
             match Channel::parse(string.as_bytes()) {
                 Err(error) => assert_eq!(error.key(string.as_bytes()), key.as_bytes(), "{string}"),
                 Ok(channel) => panic!("{string}: accepted as {channel:?}"),
             }
         }
+    }
+
+    /// A control channel parses to its control address and mode with no endpoint, and
+    /// `fc` is `max` unless named, with whether it was named kept for the driver's
+    /// `add subscription` check.
+    #[test]
+    fn a_control_channel_and_fc_parse_to_their_fields() {
+        let Ok(Channel::Udp(control)) =
+            Channel::parse(b"cavalry:udp?control=10.0.0.1:40456|control-mode=manual")
+        else {
+            panic!("a control channel parses");
+        };
+        assert!(control.is_control());
+        assert!(control.endpoint().is_none());
+        assert_eq!(control.control().map(|a| a.host()), Some("10.0.0.1"));
+        assert_eq!(control.control().and_then(|a| a.port()), Some(40456));
+        assert_eq!(control.control_mode(), Some(ControlMode::Manual));
+        assert_eq!(control.flow_control(), FlowControl::Max);
+        assert!(!control.names_flow_control());
+        let Ok(Channel::Udp(min)) = Channel::parse(b"cavalry:udp?endpoint=10.0.0.2:40123|fc=min")
+        else {
+            panic!("fc=min parses");
+        };
+        assert!(!min.is_control());
+        assert_eq!(min.endpoint().map(|a| a.host()), Some("10.0.0.2"));
+        assert_eq!(min.flow_control(), FlowControl::Min);
+        assert!(min.names_flow_control());
+        assert_eq!(FlowControl::Min.name(), "min");
+        assert_eq!(ControlMode::Manual.name(), "manual");
     }
 }

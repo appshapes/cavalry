@@ -1,7 +1,8 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 4
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 5
 //! (ADR 0019; the recording commands and events are ADR 0025, the replay commands and
 //! events ADR 0030, the retention commands ADR 0031, the `cavalry:udp` channel, the
-//! channel status indicator id and error codes 4 and 9 ADR 0040).
+//! channel status indicator id and error codes 4 and 9 ADR 0040, the destination
+//! commands ADR 0053).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -43,7 +44,7 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 4;
+pub const VERSION: i32 = 5;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
@@ -100,6 +101,11 @@ pub enum CommandType {
     RemoveSubscription = 5,
     /// Refresh the client's liveness. No answer.
     ClientKeepalive = 6,
+    /// Add a destination to a publication's send endpoint on a control channel, under
+    /// Aeron's number (`spec/client-protocol.md`, version 5; ADR 0053).
+    AddDestination = 7,
+    /// Remove a destination from a publication's send endpoint.
+    RemoveDestination = 8,
     /// Remove everything of the client's and forget it. No answer.
     ClientClose = 11,
     /// Record the live publication on a stream and channel to the durable log; the first
@@ -135,6 +141,8 @@ impl TryFrom<i32> for CommandType {
             4 => Ok(CommandType::AddSubscription),
             5 => Ok(CommandType::RemoveSubscription),
             6 => Ok(CommandType::ClientKeepalive),
+            7 => Ok(CommandType::AddDestination),
+            8 => Ok(CommandType::RemoveDestination),
             11 => Ok(CommandType::ClientClose),
             0x0101 => Ok(CommandType::StartRecording),
             0x0102 => Ok(CommandType::StopRecording),
@@ -467,6 +475,31 @@ pub enum Command<'a> {
         /// This command's id.
         correlation_id: i64,
     },
+    /// Type 7: a destination for a publication on a control channel (`spec/udp.md`,
+    /// "The channel URI").
+    AddDestination {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; the answer names it.
+        correlation_id: i64,
+        /// The client's registration of the publication: the correlation id of its add
+        /// command.
+        registration_id: i64,
+        /// The destination: `cavalry:udp?endpoint=<host>:<port>` and nothing else
+        /// (`spec/client-protocol.md`, "Commands").
+        channel: &'a [u8],
+    },
+    /// Type 8.
+    RemoveDestination {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; the answer names it.
+        correlation_id: i64,
+        /// The client's registration of the publication.
+        registration_id: i64,
+        /// The destination to remove, as it was added.
+        channel: &'a [u8],
+    },
     /// Type 11. No answer.
     ClientClose {
         /// The client's id.
@@ -569,6 +602,8 @@ impl<'a> Command<'a> {
             Command::AddSubscription { .. } => CommandType::AddSubscription,
             Command::RemoveSubscription { .. } => CommandType::RemoveSubscription,
             Command::ClientKeepalive { .. } => CommandType::ClientKeepalive,
+            Command::AddDestination { .. } => CommandType::AddDestination,
+            Command::RemoveDestination { .. } => CommandType::RemoveDestination,
             Command::ClientClose { .. } => CommandType::ClientClose,
             Command::StartRecording { .. } => CommandType::StartRecording,
             Command::StopRecording { .. } => CommandType::StopRecording,
@@ -589,6 +624,8 @@ impl<'a> Command<'a> {
             | Command::AddSubscription { client_id, .. }
             | Command::RemoveSubscription { client_id, .. }
             | Command::ClientKeepalive { client_id, .. }
+            | Command::AddDestination { client_id, .. }
+            | Command::RemoveDestination { client_id, .. }
             | Command::ClientClose { client_id, .. }
             | Command::StartRecording { client_id, .. }
             | Command::StopRecording { client_id, .. }
@@ -609,6 +646,8 @@ impl<'a> Command<'a> {
             | Command::AddSubscription { correlation_id, .. }
             | Command::RemoveSubscription { correlation_id, .. }
             | Command::ClientKeepalive { correlation_id, .. }
+            | Command::AddDestination { correlation_id, .. }
+            | Command::RemoveDestination { correlation_id, .. }
             | Command::ClientClose { correlation_id, .. }
             | Command::StartRecording { correlation_id, .. }
             | Command::StopRecording { correlation_id, .. }
@@ -668,6 +707,18 @@ impl<'a> Command<'a> {
             CommandType::ClientKeepalive => Command::ClientKeepalive {
                 client_id,
                 correlation_id,
+            },
+            CommandType::AddDestination => Command::AddDestination {
+                client_id,
+                correlation_id,
+                registration_id: cursor.i64()?,
+                channel: cursor.string()?,
+            },
+            CommandType::RemoveDestination => Command::RemoveDestination {
+                client_id,
+                correlation_id,
+                registration_id: cursor.i64()?,
+                channel: cursor.string()?,
             },
             CommandType::ClientClose => Command::ClientClose {
                 client_id,
@@ -770,6 +821,19 @@ impl<'a> Command<'a> {
             | Command::RemoveSubscription {
                 registration_id, ..
             } => out.i64(registration_id),
+            Command::AddDestination {
+                registration_id,
+                channel,
+                ..
+            }
+            | Command::RemoveDestination {
+                registration_id,
+                channel,
+                ..
+            } => {
+                out.i64(registration_id)?;
+                out.string(channel)
+            }
             Command::StopRecording { recording_id, .. } => out.i64(recording_id),
             Command::StartReplay {
                 recording_id,

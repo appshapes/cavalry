@@ -5,7 +5,7 @@
 //! vector's fields are computed from its inputs (`spec/README.md`, "Conventions";
 //! ADR 0040). `just conformance` runs this test alone; `just test` runs it with the rest.
 
-use cavalry_proto::channel::{Channel, ChannelError};
+use cavalry_proto::channel::{Channel, ChannelError, ControlMode};
 use cavalry_proto::frame::{FrameType, HEADER_LENGTH};
 use cavalry_proto::udp::{
     ControlFrame, Datagram, Heartbeat, Nak, RttMeasurement, SetupFrame, StatusMessage, image_start,
@@ -223,15 +223,55 @@ fn channel_vector(name: &str, vector: &Value) {
     let Channel::Udp(udp) = parsed else {
         panic!("{name}: parsed as IPC");
     };
+    match fields["endpoint_host"].as_str() {
+        None => assert!(udp.endpoint().is_none(), "{name}: endpoint"),
+        Some(host) => {
+            let endpoint = udp
+                .endpoint()
+                .unwrap_or_else(|| panic!("{name}: no endpoint"));
+            assert_eq!(endpoint.host(), host, "{name}: endpoint host");
+            assert_eq!(
+                endpoint.port().map(i64::from),
+                fields["endpoint_port"].as_i64(),
+                "{name}: endpoint port"
+            );
+        }
+    }
+    // Version 1: a control address and its mode, and `fc`, `max` when the string
+    // names none (ADR 0053).
+    match fields["control_host"].as_str() {
+        None => {
+            assert!(udp.control().is_none(), "{name}: control");
+            assert!(udp.control_mode().is_none(), "{name}: control mode");
+            assert!(!udp.is_control(), "{name}: is_control");
+        }
+        Some(host) => {
+            let control = udp
+                .control()
+                .unwrap_or_else(|| panic!("{name}: no control address"));
+            assert_eq!(control.host(), host, "{name}: control host");
+            assert_eq!(
+                control.port().map(i64::from),
+                fields["control_port"].as_i64(),
+                "{name}: control port"
+            );
+            assert_eq!(
+                udp.control_mode().map(ControlMode::name),
+                fields["control_mode"].as_str(),
+                "{name}: control mode"
+            );
+            assert!(udp.is_control(), "{name}: is_control");
+        }
+    }
     assert_eq!(
-        udp.endpoint().host(),
-        fields["endpoint_host"].as_str().expect("endpoint_host"),
-        "{name}: endpoint host"
+        udp.flow_control().name(),
+        fields["fc"].as_str().expect("fc"),
+        "{name}: fc"
     );
     assert_eq!(
-        i64::from(udp.endpoint_port()),
-        int(fields, "endpoint_port"),
-        "{name}: endpoint port"
+        udp.names_flow_control(),
+        string.contains("fc="),
+        "{name}: names_flow_control"
     );
     match fields["interface_host"].as_str() {
         None => assert!(udp.interface().is_none(), "{name}: interface"),
@@ -349,7 +389,7 @@ fn arithmetic_vector(name: &str, vector: &Value) {
 #[test]
 fn every_vector_in_spec_vectors_udp_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("udp.json parses");
-    assert_eq!(doc["version"], 0, "the vectors are for version 0");
+    assert_eq!(doc["version"], 1, "the vectors are for version 1");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(vectors.len() >= 96, "udp.py writes at least 96 vectors");
     for vector in vectors {
