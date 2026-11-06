@@ -1318,6 +1318,18 @@ user-visible change, added in the same commit as the change. The format follows
   gates, and name the files and the resolution in the commit message or the pull
   request body, where the two skills said to stop and hand it back; rebase, a force
   push and `git merge --abort` as a way out stay out (card 218).
+- Removing and adding a subscription on one `cavalry:udp` channel in one client no
+  longer needs a retry: an `add subscription` that finds the channel's previous
+  receive endpoint still closing waits in the driver, with nothing registered, until
+  the receiver has closed it and then runs as it arrived, binding the endpoint again;
+  waiting adds hold slots of the subscriptions registry, on `cavalry:ipc` adds as on
+  `cavalry:udp` ones, and go with a client that closes first;
+  `subscription.add_deferred` counts them and `subscription.add_deferred_waiting` says
+  how many wait now; an add still waiting after 5 s, a receiver starved that long, is
+  refused with code 4 inside the client's response timeout, counted in
+  `subscription.add_deferred_timed_out`, which `cavalry doctor` reports
+  ([ADR 0049](docs/decisions/0049-hold-an-add-until-the-closing-endpoint-has-closed.md);
+  card 194).
 - A pull request that changes none of the bench's tree paths and reads red on a bench
   row, at a tree where master's own runs pass against an entry recorded at an older
   tree, now has a rule: the first such red on a row of a profile is a rerun, which a

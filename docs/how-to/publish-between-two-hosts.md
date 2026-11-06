@@ -138,4 +138,8 @@ doctor](run-the-driver.md#when-it-does-not-work) explains each in full.
 - **`command refused (refused, error code 4, ChannelEndpointError)`**: the socket could
   not be opened, bound or connected: on the subscriber's host the port is in use, or
   the address is not one of the host's; on the publisher's, the interface named does
-  not exist. The message names the endpoint.
+  not exist. The message names the endpoint. A message that says the previous receive
+  endpoint has not closed in the 5 s the add waited, with **`WARN
+  subscription.add_deferred_timed_out`** from `cavalry doctor` on the subscriber's
+  host, is a receiver thread starved of CPU: give the driver's threads CPU, then add
+  the subscription again.
