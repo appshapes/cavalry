@@ -50,6 +50,9 @@ long-term release that holds it.
   `PUBLICATION_BACK_PRESSURED`, `PUBLICATION_ADMIN_ACTION`, `PUBLICATION_CLOSED`,
   `PUBLICATION_MAX_POSITION_EXCEEDED`, `PUBLICATION_ERROR`), as the ABI does; the
   caller branches.
+- Never write into a received body: the handler's `body` is a `ReadOnlySpan<byte>`, so
+  the compiler refuses a write, which is what the log allows, since the subscriber maps
+  it read-only and a write through it would end the process.
 - Never swallow the handler's exception, or a fragment: a fragment handler that throws
   keeps every later fragment of that poll reaching the handler, and `Poll` throws a
   `HandlerException` once the ABI has returned, with the first exception as its inner
@@ -63,7 +66,10 @@ long-term release that holds it.
   the handle, so the subscription can be polled and closed after the poll. A call
   after a close hands the ABI a null handle, as the Python and Go clients do, and the
   ABI refuses it with `Abi.ERR_NULL`: a poll answers -1, a claim
-  `PUBLICATION_ERROR`, never a delivery and never a frame.
+  `PUBLICATION_ERROR`, never a delivery and never a frame. The close clears the claim
+  struct too, so `Commit`, `Abort` and `SetReservedValue` after it answer -1 with
+  `Abi.ERR_NO_CLAIM` and the ABI reads no freed handle through the struct's
+  `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never edit a generated file by hand: `just lint` regenerates the library and fails
   when the committed files differ. `example/Program.cs` and `example/Example.csproj`
   are the files written by hand, and the program is this README's.

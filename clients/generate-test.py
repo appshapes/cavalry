@@ -940,6 +940,16 @@ class DotnetPackage(unittest.TestCase):
         self.assertEqual(subscription.count("[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]"), 1)
         self.assertEqual(subscription.count("Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit)"), 2)
 
+    def test_the_publications_close_clears_the_claim_struct(self):
+        """A close leaves no claim, so the struct's `publication` must not name the freed
+        handle: the close clears the struct before the ABI's close, and the claim's calls
+        after it answer ERR_NO_CLAIM through the null-publication branch (spec/c-abi.md,
+        "Which claim a struct names"); the runner checks the answers, this checks the clear."""
+        code = gen_dotnet.write_dotnet(self.header)["Publication.cs"]
+        body = code.split("    public void Close()\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("claim = default;", body)
+        self.assertLess(body.index("claim = default;"), body.index("Abi.cavalry_publication_close(closing)"))
+
     def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
         code = gen_dotnet.write_dotnet(self.header)["HandlerException.cs"]
         body = code.split("public HandlerException(int fragments, int raised, Exception cause)", 1)[1].split("\n    {\n", 1)[0]

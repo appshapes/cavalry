@@ -98,9 +98,9 @@ public sealed unsafe class Subscription : IDisposable
     /// reaches the handler.</summary>
     private void Deliver(byte* buffer, nuint length, void* frame)
     {
-        header.Set((nint) frame);
         try
         {
+            header.Set((nint) frame);
             handler!(new ReadOnlySpan<byte>(buffer, (int) length), header);
         }
         catch (Exception e)

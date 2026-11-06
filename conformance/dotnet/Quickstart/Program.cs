@@ -10,8 +10,9 @@
 // checks where a handler's exception goes, in both orders of two exception types, that a
 // header kept past its call throws and a committed claim's span is empty, and the refusals
 // of spec/c-abi.md, "Calls during a claim or a poll", a close from inside the handler
-// included, and that a poll, a claim and a commit after the closes are answered by the ABI,
-// on stream 1003 (Edges); checks that a reserved value beyond 2^53 reaches the handler
+// included, that the claim's calls after a close with a claim outstanding answer
+// ERR_NO_CLAIM, and that a poll, a claim and a commit after the closes are answered by the
+// ABI, on stream 1003 (Edges); checks that a reserved value beyond 2^53 reaches the handler
 // exactly on stream 1005 (ReservedValues); adds publications from four threads through one
 // Client at once (SharedClient); does the same 1,000 over cavalry:udp on the loopback; and
 // replays the recording onto stream 2001, each frame at the position the recording holds it
@@ -505,6 +506,22 @@ public static class Quickstart
         ClaimOrFail(name, publication, 17);
         publication.Close();
         if (!publication.Claim.IsEmpty) Fail(name + ": the publication's close left a claim of " + publication.Claim.Length + " bytes");
+        // The close cleared the claim struct, so the claim's calls after it read no freed
+        // handle through the struct's publication: each answers -1 with ERR_NO_CLAIM
+        // (spec/c-abi.md, "Which claim a struct names").
+        long commitClosed = publication.Commit();
+        int commitClosedCode = Abi.Errcode();
+        long abortClosed = publication.Abort();
+        int abortClosedCode = Abi.Errcode();
+        int reservedClosed = publication.SetReservedValue(1);
+        int reservedClosedCode = Abi.Errcode();
+        if (commitClosed != -1 || commitClosedCode != Abi.ERR_NO_CLAIM || abortClosed != -1 || abortClosedCode != Abi.ERR_NO_CLAIM
+            || reservedClosed != -1 || reservedClosedCode != Abi.ERR_NO_CLAIM)
+        {
+            Fail(name + ": after a close with claim 17 outstanding, Commit returned " + commitClosed + " with error " + commitClosedCode
+                + ", Abort " + abortClosed + " with error " + abortClosedCode + ", SetReservedValue " + reservedClosed + " with error "
+                + reservedClosedCode + "; expected -1 with ERR_NO_CLAIM (" + Abi.ERR_NO_CLAIM + ") from each");
+        }
         PollOrFail(name, subscription, unexpected, 17, 17); // the close aborted the claim: padding, never a fragment
 
         // A close from inside the handler: refused with ERR_POLLING, the handle kept, the next
@@ -567,7 +584,8 @@ public static class Quickstart
         }
         Say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING and the outer handler saw"
             + " messages 13 to 15; a TryClaim with a claim outstanding returned ERROR with ERR_CLAIM_OUTSTANDING, the claim stayed"
-            + " the first span and its commit left it empty; a close with a claim outstanding left the claim empty; a close"
+            + " the first span and its commit left it empty; a close with a claim outstanding left the claim empty and its"
+            + " Commit, Abort and SetReservedValue answered -1 with ERR_NO_CLAIM; a close"
             + " from inside the handler threw CavalryException with ERR_POLLING, kept the subscription open for message 18, and"
             + " the close after the poll closed it; after the closes, Poll and TryClaim were refused by the ABI with ERR_NULL"
             + " and Commit with ERR_NO_CLAIM");

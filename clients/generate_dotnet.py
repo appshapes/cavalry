@@ -728,8 +728,11 @@ public sealed unsafe class Publication : IDisposable
     /// <summary>Closes the publication, aborting an outstanding claim. Idempotent; the handle
     /// is forgotten whatever the ABI returns, and a call after it hands the ABI a null handle,
     /// which it refuses with <see cref="Abi.ERR_NULL"/> (<see cref="Abi.PUBLICATION_ERROR"/>
-    /// from <see cref="TryClaim"/> and <see cref="Offer"/>; the claim's calls answer -1 with
-    /// <see cref="Abi.ERR_NO_CLAIM"/>, since the close left no claim).</summary>
+    /// from <see cref="TryClaim"/> and <see cref="Offer"/>). The claim struct is cleared too,
+    /// so that <see cref="Commit"/>, <see cref="Abort"/> and <see cref="SetReservedValue"/>
+    /// after the close answer -1 with <see cref="Abi.ERR_NO_CLAIM"/> and the ABI reads no
+    /// freed handle through the struct's <c>publication</c> (spec/c-abi.md, "Which claim a
+    /// struct names").</summary>
     public void Close()
     {
         if (handle == 0)
@@ -737,6 +740,7 @@ public sealed unsafe class Publication : IDisposable
             return;
         }
         data = null;
+        claim = default;
         nint closing = handle;
         handle = 0;
         Abi.Check("cavalry_publication_close", Abi.cavalry_publication_close(closing));
@@ -847,9 +851,9 @@ public sealed unsafe class Subscription : IDisposable
     /// reaches the handler.</summary>
     private void Deliver(byte* buffer, nuint length, void* frame)
     {
-        header.Set((nint) frame);
         try
         {
+            header.Set((nint) frame);
             handler!(new ReadOnlySpan<byte>(buffer, (int) length), header);
         }
         catch (Exception e)
