@@ -1472,8 +1472,10 @@ user-visible change, added in the same commit as the change. The format follows
   into the log for the call and a panic recovered and returned by `Poll` as a
   `*HandlerError`, a `Recording` and a `Replay`; a call the ABI refuses during a claim
   or a poll leaves the client's state as it was; `just lint` regenerates the module and
-  reads its per-message functions, and the functions they call, for Go's `sync`, `go`,
-  channels, `select`, `panic` and `make`, `new` and `append`, and the C shim's locks;
+  reads its per-message functions, and the functions they call, for Go's `sync`, a lock
+  or a wait through a variable or a field (`.Lock()`, `.RLock()`, `.TryLock()`,
+  `.TryRLock()`, `.Wait()`), `go`, channels, `select`, `panic` and `make`, `new` and
+  `append`, and the C shim's locks;
   `just conformance` runs `conformance/go/`, the ten-minute path's shape through the
   client and the README's example, with a report of its one-way latency over 100,000
   messages and its allocations per message, counted exactly by `runtime.ReadMemStats`

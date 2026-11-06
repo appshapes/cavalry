@@ -20,8 +20,11 @@ failing and naming the function and the form; an argument reader's throw passes 
 same throw in a helper the poll calls fails; a missing per-message function, an addon with
 none, and a missing addon fail. `just test` runs this through `test-scripts`. The same for the Go client's `cavalry.go` and
 `trampoline.go`: a per-message function that starts a goroutine, sends or receives on a
-channel, uses `sync`, panics, allocates with `make`, uses `select`, or calls the
-package's `lastError`, which builds an `*Error`, fails naming the function and the form;
+channel, uses `sync`, takes a lock through a variable or a field (`registryMu.Lock()`,
+and `.Lock()`, `.RLock()`, `.TryLock()` and `.TryRLock()` on a field), waits with
+`.Wait()`, panics, allocates with `make`, uses `select`, or calls the package's
+`unregister`, which takes `registryMu`, or its `lastError`, which builds an `*Error`,
+fails naming the function and the form;
 building the `*HandlerError` in `Poll` after the shim's poll call passes and before it
 fails; a panic in the exported trampoline fails naming `trampoline.go`; a lock in
 `shim.c`'s trampoline fails; a module with none of the per-message functions fails, and a
@@ -395,9 +398,47 @@ class Clients(unittest.TestCase):
     def test_sync_in_go_fails(self):
         self.edit_go("func (p *Publication) Offer(message []byte) int64 {\n",
                      "func (p *Publication) Offer(message []byte) int64 {\n\tvar mu sync.Mutex\n\tmu.Lock()\n")
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        self.assertTrue(all("Publication.Offer" in f for f in found), found)
+        self.assertTrue(any("uses `sync`" in f for f in found), found)
+        self.assertTrue(any("takes a lock with `.Lock()`" in f for f in found), found)
+
+    def test_a_lock_through_a_package_variable_in_go_fails(self):
+        """Go takes a lock through a variable or a field, which names no `sync.`."""
+        self.edit_go("\ts.handler = handler\n\ts.polling = true\n",
+                     "\tregistryMu.Lock()\n\tdefer registryMu.Unlock()\n\ts.handler = handler\n\ts.polling = true\n")
         [finding] = lint.findings(self.tmp)
-        self.assertIn("Publication.Offer", finding)
-        self.assertIn("uses `sync`", finding)
+        self.assertIn("Subscription.Poll", finding)
+        self.assertIn("takes a lock with `.Lock()`", finding)
+        self.assertIn("no lock on the per-message path", finding)
+
+    def test_each_lock_method_on_a_field_in_go_fails(self):
+        for method in ("Lock", "RLock", "TryLock", "TryRLock"):
+            with self.subTest(method=method):
+                self.setUp()
+                self.edit_go("func (p *Publication) Commit() int64 {\n",
+                             f"func (p *Publication) Commit() int64 {{\n\tp.mu.{method}()\n")
+                [finding] = lint.findings(self.tmp)
+                self.assertIn("Publication.Commit", finding)
+                self.assertIn(f"takes a lock with `.{method}()`", finding)
+
+    def test_a_wait_on_a_field_in_go_fails(self):
+        self.edit_go("func (p *Publication) Abort() int64 {\n", "func (p *Publication) Abort() int64 {\n\tp.done.Wait()\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Abort", finding)
+        self.assertIn("waits with `.Wait()`", finding)
+        self.assertIn("no blocking wait on the per-message path", finding)
+
+    def test_a_call_to_unregister_in_go_fails(self):
+        """`unregister` takes `registryMu`, so a per-message function that calls it takes a
+        lock per message, though neither function names `sync.`."""
+        self.edit_go("\ts.handler = handler\n\ts.polling = true\n",
+                     "\tunregister(s)\n\ts.handler = handler\n\ts.polling = true\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Subscription.Poll", finding)
+        self.assertIn("calls unregister", finding)
+        self.assertIn("unregister takes a lock with `.Lock()`", finding)
 
     def test_a_panic_in_go_fails(self):
         self.edit_go("func (p *Publication) Abort() int64 {\n", "func (p *Publication) Abort() int64 {\n\tpanic(\"no\")\n")

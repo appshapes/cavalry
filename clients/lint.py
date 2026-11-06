@@ -26,9 +26,11 @@ user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
 such as the refused poll from inside a handler and the poll's own call, is not after the
 poll. For Go, read from `clients/go/cavalry.go` and `trampoline.go` by the same tokenizer,
-the forms are `sync`, a `go` statement, a channel send or receive, `select`, `chan`,
-`panic`, building the package's own error types, and `make`, `new` and `append`, Go's
-allocations; the one error built on the per-message path is the `*HandlerError` that
+the forms are `sync`, a lock or a wait through a variable or a field on any receiver,
+`.Lock()`, `.RLock()`, `.TryLock()`, `.TryRLock()` and `.Wait()`, which name no `sync.`, a
+`go` statement, a channel send or receive, `select`, `chan`, `panic`, building the
+package's own error types, and `make`, `new` and `append`, Go's allocations; the one
+error built on the per-message path is the `*HandlerError` that
 `Poll` returns after its ABI call, and `recover` in the trampoline is what keeps a panic
 from unwinding through the ABI. The C of `shim.c` is read as the Node addon's is.
 
@@ -634,8 +636,14 @@ def node_findings(language: str, path: str, rules: dict) -> list[str]:
 # ------------------------------------------------------------------ Go
 
 GO_FORMS = (
-    # (kind, pattern over the code with comments and strings blanked, what the finding says)
+    # (kind, pattern over the code with comments and strings blanked, what the finding says,
+    # with the pattern's group in place of `{0}`)
     ("threading", re.compile(r"(?<![\w.])sync\s*\.\s*\w+"), "uses `sync`"),
+    # Go takes a lock through a variable or a field, `registryMu.Lock()` or `s.mu.Lock()`,
+    # which names no `sync.`: the lock methods of sync's Mutex and RWMutex, and the wait of
+    # its Cond and WaitGroup, on any receiver (ADR 0046, item 4).
+    ("threading", re.compile(r"\.\s*(Lock|RLock|TryLock|TryRLock)\s*\("), "takes a lock with `.{0}()`"),
+    ("wait", re.compile(r"\.\s*(Wait)\s*\("), "waits with `.{0}()`"),
     ("goroutine", re.compile(r"(?<![\w.])go\s+(?=[\w(])"), "starts a goroutine with `go`"),
     ("channel", re.compile(r"<-"), "sends or receives on a channel"),
     ("channel", re.compile(r"(?<![\w.])select\s*\{"), "uses `select`"),
@@ -696,7 +704,7 @@ class GoModule:
                     out.append((m.start(), name))
             elif owner not in GO_FOREIGN:
                 for t, methods in self.types.items():
-                    if name in methods and (cls is None or owner != cls or True):
+                    if name in methods:
                         out.append((m.start(), f"{t}.{name}"))
         return out
 
@@ -709,7 +717,7 @@ class GoModule:
                 at = base + body.count("\n", 0, m.start()) + 1
                 if kind == "raise" and raise_after is not None and at > raise_after:
                     continue
-                yield kind, at, f"{what} at line {at}"
+                yield kind, at, f"{what.format(*m.groups())} at line {at}"
         for m in re.finditer(r"&\s*(\w+)\s*\{", body):
             if m.group(1) in self.exceptions:
                 at = base + body.count("\n", 0, m.start()) + 1

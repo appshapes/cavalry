@@ -31,11 +31,12 @@ before it returns.
   channel, no allocation, no copy of a fragment for the handler. `clients/lint.py`
   reads the per-message functions of `cavalry.go` and `trampoline.go`, the claim, the
   reserved value, the commit, the abort, the offer, the poll, the header's values and
-  the trampoline, for Go's forms of each (`sync`, a `go` statement, a channel send or
-  receive, `select`, `panic`, and `make`, `new` and `append`), and those of `shim.c`,
-  the C trampoline and the poll, for C's (`pthread_mutex_*`, `pthread_rwlock_*`,
-  `mtx_*`). `just lint` fails on any of them, in the function's own body or in a
-  function of the package it calls.
+  the trampoline, for Go's forms of each (`sync`, a lock or a wait through a variable
+  or a field, such as `registryMu.Lock()`, which names no `sync.`, a `go` statement, a
+  channel send or receive, `select`, `panic`, and `make`, `new` and `append`), and
+  those of `shim.c`, the C trampoline and the poll, for C's (`pthread_mutex_*`,
+  `pthread_rwlock_*`, `mtx_*`). `just lint` fails on any of them, in the function's
+  own body or in a function of the package it calls.
 - Never return an error for an `Offer` code: `TryClaim` and `Offer` return the position
   after the frame or the code below zero (`PublicationNotConnected`,
   `PublicationBackPressured`, `PublicationAdminAction`, `PublicationClosed`,
