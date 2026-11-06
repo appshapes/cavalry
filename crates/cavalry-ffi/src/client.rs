@@ -387,7 +387,15 @@ pub unsafe extern "C" fn cavalry_add_destination(
     channel: *const c_char,
 ) -> c_int {
     // SAFETY: the caller's conventions above.
-    unsafe { destination("cavalry_add_destination", client, publication, channel, true) }
+    unsafe {
+        destination(
+            "cavalry_add_destination",
+            client,
+            publication,
+            channel,
+            true,
+        )
+    }
 }
 
 /// Removes the destination `channel`, as it was added, from `publication`'s control

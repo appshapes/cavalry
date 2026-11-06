@@ -59,8 +59,13 @@ fn offer(publication: &mut Publication, message: &[u8]) {
     loop {
         match publication.offer(message) {
             Ok(_) => return,
-            Err(error) if error.reason() == "back-pressured" || error.reason() == "admin-action" => {
-                assert!(Instant::now() < deadline, "the offer did not go through: {error}");
+            Err(error)
+                if error.reason() == "back-pressured" || error.reason() == "admin-action" =>
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "the offer did not go through: {error}"
+                );
                 std::thread::sleep(Duration::from_micros(50));
             }
             Err(error) => panic!("offer: {error}"),
@@ -149,7 +154,10 @@ fn a_control_channel_reaches_every_destination_once_and_in_order() {
             subscription.poll(|_, _| {}, 0).expect("the poll applies");
             subscription.image_count() == 1
         }));
-        assert_eq!(subscription.images()[0].session_id(), publication.session_id());
+        assert_eq!(
+            subscription.images()[0].session_id(),
+            publication.session_id()
+        );
     }
     const MESSAGES: u64 = 500;
     for i in 0..MESSAGES {
@@ -206,7 +214,10 @@ fn destination_commands_are_refused_with_the_spec_codes() {
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
     let unicast = format!("cavalry:udp?endpoint=127.0.0.1:{}", free_port());
     let plain = client.add_publication(&unicast, 7).expect("a publication");
-    assert_eq!(code_of(client.add_destination(plain.registration_id(), &unicast)), 1);
+    assert_eq!(
+        code_of(client.add_destination(plain.registration_id(), &unicast)),
+        1
+    );
     assert_eq!(code_of(client.add_destination(999, &unicast)), 3);
     let control = format!(
         "cavalry:udp?control=127.0.0.1:{}|control-mode=manual",
