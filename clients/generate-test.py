@@ -26,7 +26,8 @@ files are what the parse gives, a header change changes the constants, every def
 constant under its Java name with the ABI's name beside it, the binding reads
 `cavalry_abi_version` before it binds any other function and refuses a header without the
 check's names, the offer's handle alone is critical and each subscription makes one upcall
-stub bound to its own `onFragment`, `HandlerException`'s message says what to do and names
+stub bound to its own `onFragment`, a publication's close zeroes the claim struct before
+the ABI frees the handle the struct names, `HandlerException`'s message says what to do and names
 a heading of the README, the generated files compile under Java 25 with every lint an error
 when a `javac` of that release is on the path, and `--check` fails on a package that
 differs.
@@ -941,6 +942,24 @@ class JvmPackage(unittest.TestCase):
         self.assertIn('findVirtual(Subscription.class, "onFragment"', subscription)
         self.assertIn(".bindTo(this)", subscription)
         self.assertEqual(subscription.count("Abi.cavalry_subscription_poll.invokeExact("), 2)  # the refused nested poll and the poll
+
+    def test_a_publications_close_zeroes_the_claim_struct_before_the_abi_frees_its_handle(self):
+        """The claim struct's `publication` field names the handle the close frees, and the
+        ABI reads that field on a commit, an abort or a reserved value, so `close()` zeroes
+        the struct before the ABI's close: a claim's call after it hands the ABI a struct
+        that names no publication, which it answers with NO_CLAIM without reading a handle
+        (spec/c-abi.md, "Which claim a struct names"). The runner's refusals round makes
+        those calls; this check fails without the zeroing every time, where a read of the
+        freed handle may still answer NO_CLAIM by luck."""
+        code = gen_jvm.write_jvm(self.header)[self.BASE + "Publication.java"]
+        close = code.split("    public void close() {\n", 1)[1].split("\n    }\n", 1)[0]
+        guard = close.index("if (handle.address() == 0) {")
+        zeroed = close.index("claimStruct.fill((byte) 0);")
+        freed = close.index("Abi.cavalry_publication_close.invokeExact(")
+        self.assertLess(guard, zeroed)
+        self.assertLess(zeroed, freed)
+        for call in ("cavalry_buffer_claim_commit", "cavalry_buffer_claim_abort", "cavalry_buffer_claim_set_reserved_value"):
+            self.assertIn("Abi." + call + ".invokeExact(claimStruct", code)
 
     def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
         code = gen_jvm.write_jvm(self.header)[self.BASE + "HandlerException.java"]

@@ -10,8 +10,9 @@
 // where a handler's throwable goes, in both orders of an Error and an exception, that a
 // header kept past its call throws and a committed claim's segment is null, and the
 // refusals of spec/c-abi.md, "Calls during a claim or a poll", a close from inside the
-// handler included, and that a poll, a claim and a commit after the closes are answered
-// by the ABI, on stream 1003 (edges); checks that a reserved value beyond 2^53 reaches
+// handler included, that a commit, an abort and a reserved value after a close with a
+// claim outstanding answer NO_CLAIM, and that a poll, a claim and a commit after the
+// closes are answered by the ABI, on stream 1003 (edges); checks that a reserved value beyond 2^53 reaches
 // the handler exactly on stream 1005 (reservedValues); adds publications from four threads
 // through one Client at once (sharedClient); does the same 1,000 over cavalry:udp on the
 // loopback; and replays the recording onto stream 2001, each frame at the position the
@@ -278,8 +279,9 @@ public final class Quickstart {
      * header kept past its handler call throws IllegalStateException. Then the refusals of
      * spec/c-abi.md, "Calls during a claim or a poll", which leave the wrapper as they found
      * it: a poll from inside a handler of its own subscription, a second claim with one
-     * outstanding, a close with a claim outstanding, and a close from inside the handler,
-     * which keeps the handle. */
+     * outstanding, a close with a claim outstanding, after which the claim's commit, abort
+     * and reserved value answer NO_CLAIM, and a close from inside the handler, which keeps
+     * the handle. */
     static void edges(Client client) {
         String name = "handler exceptions";
         Subscription subscription = client.addSubscription("cavalry:ipc", STREAM + 2);
@@ -424,6 +426,22 @@ public final class Quickstart {
         claimOrFail(name, publication, 17);
         publication.close();
         if (publication.claim() != null) fail(name + ": the publication's close left the claim " + publication.claim());
+        // The struct claim 17 filled names the handle the close freed; the close zeroed it
+        // first, so the claim's calls after it hand the ABI a struct that names no
+        // publication, which it answers -1 with ERR_NO_CLAIM without reading a handle
+        // (spec/c-abi.md, "Which claim a struct names").
+        long staleCommit = publication.commit();
+        int staleCommitCode = Abi.errcode();
+        long staleAbort = publication.abort();
+        int staleAbortCode = Abi.errcode();
+        int staleReserved = publication.setReservedValue(1);
+        int staleReservedCode = Abi.errcode();
+        if (staleCommit != -1 || staleCommitCode != Abi.ERR_NO_CLAIM || staleAbort != -1 || staleAbortCode != Abi.ERR_NO_CLAIM
+            || staleReserved != -1 || staleReservedCode != Abi.ERR_NO_CLAIM) {
+            fail(name + ": after a close with a claim outstanding, commit returned " + staleCommit + " with error " + staleCommitCode
+                + ", abort " + staleAbort + " with error " + staleAbortCode + ", setReservedValue " + staleReserved + " with error "
+                + staleReservedCode + "; expected -1 with ERR_NO_CLAIM (" + Abi.ERR_NO_CLAIM + ") from each");
+        }
         pollOrFail(name, subscription, unexpected, 17, 17); // the close aborted the claim: padding, never a fragment
 
         // A close from inside the handler: refused with ERR_POLLING, the handle kept, the next
@@ -478,7 +496,8 @@ public final class Quickstart {
         }
         say(name + ": a poll from inside a handler of its own subscription returned -1 with ERR_POLLING and the outer handler saw"
             + " messages 13 to 15; a tryClaim with a claim outstanding returned ERROR with ERR_CLAIM_OUTSTANDING, the claim stayed"
-            + " the first segment and its commit set it to null; a close with a claim outstanding set the claim to null; a close"
+            + " the first segment and its commit set it to null; a close with a claim outstanding set the claim to null, and the"
+            + " claim's commit, abort and reserved value after it returned -1 with ERR_NO_CLAIM; a close"
             + " from inside the handler threw CavalryException with ERR_POLLING, kept the subscription open for message 18, and"
             + " the close after the poll closed it; after the closes, poll and tryClaim were refused by the ABI with ERR_NULL"
             + " and commit with ERR_NO_CLAIM");

@@ -64,6 +64,16 @@ long-term release that holds it.
   after a close hands the ABI a null handle, as the Python and Go clients do, and the
   ABI refuses it with `Abi.ERR_NULL`: a poll answers -1, a claim
   `PUBLICATION_ERROR`, never a delivery and never a frame.
+- Never hand the ABI a claim struct that names a freed publication. The one
+  `cavalry_buffer_claim_t` a publication keeps names its handle in its `publication`
+  field, and the ABI reads that field on a commit, an abort and a reserved value. So
+  `Publication.close()` zeroes the struct before the ABI's close frees the handle. A
+  commit, an abort or a reserved value after the close then names no publication, and
+  the ABI answers -1 with `Abi.ERR_NO_CLAIM` without reading a handle (`spec/c-abi.md`,
+  "Which claim a struct names"). A struct left as its last claim filled it would make
+  the ABI read freed memory. A new publication can be allocated at the same address,
+  so the stale struct could then commit that publication's claim before its body was
+  written.
 - Never edit a generated file by hand: `just lint` regenerates the library and fails
   when the committed files differ. `example/Example.java` is the one file written by
   hand, and it is this README's program.

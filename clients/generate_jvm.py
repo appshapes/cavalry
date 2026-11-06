@@ -804,13 +804,19 @@ public final class Publication implements AutoCloseable {
      * forgotten whatever the ABI returns, and a call after it hands the ABI a null handle,
      * which it refuses with {@link Abi#ERR_NULL} ({@link Abi#PUBLICATION_ERROR} from
      * {@link #tryClaim} and {@link #offer}; the claim's calls answer -1 with
-     * {@link Abi#ERR_NO_CLAIM}, since the close left no claim). */
+     * {@link Abi#ERR_NO_CLAIM}, since the close left no claim). The claim struct is zeroed
+     * first: its {@code publication} field names this handle, which the close frees, and
+     * the ABI reads that field on a commit, an abort or a reserved value, so a struct left
+     * as the last claim filled it would hand the ABI freed memory (spec/c-abi.md, "Which
+     * claim a struct names"). A zeroed struct names no publication, and the ABI answers
+     * it without reading a handle. */
     @Override
     public void close() {
         if (handle.address() == 0) {
             return;
         }
         claim = null;
+        claimStruct.fill((byte) 0);
         MemorySegment closing = handle;
         handle = MemorySegment.NULL;
         try {

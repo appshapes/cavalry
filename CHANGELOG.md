@@ -1500,7 +1500,9 @@ user-visible change, added in the same commit as the change. The format follows
   into the log for the call and the `Header`'s `reservedValue` a `long`, whose `poll`
   throws `HandlerException` with the counts and the first throwable once the ABI has
   returned, a `Recording` and a `Replay`; a call the ABI refuses during a claim or a
-  poll leaves the client's state as it was; `just lint` regenerates the package and
+  poll leaves the client's state as it was, and a commit, an abort or a reserved value
+  after a publication's close answers `ERR_NO_CLAIM`, since the close zeroes the claim
+  struct before the ABI frees the handle it names; `just lint` regenerates the package and
   reads its per-message methods, and the package's methods they call, for Java's
   `synchronized`, the locks of `java.util.concurrent`, a lock taken on any receiver, a
   blocking wait, a future, a thread started, `throw` and `new`; `just conformance` runs
