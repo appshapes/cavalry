@@ -414,8 +414,11 @@ impl Cavalry {
     /// driver resolves the endpoint once, to the first address of the control address's
     /// family, and the sender sends every datagram of the channel's publications to it
     /// from then on (`spec/client-protocol.md`, "Commands"; `spec/udp.md`, "The
-    /// sender"; ADR 0053). A destination already added, as written, is added again by
-    /// nothing and is success. Refused with [`ClientError::Refused`]: code 3 for a
+    /// sender"; ADR 0053). The driver answers once it has queued the change for the
+    /// sender, which takes it at the start of its next duty cycle, so the burst under
+    /// way may not yet go to the destination and every later one does (ADR 0057). A
+    /// destination already added, as written, is added again by nothing and is
+    /// success. Refused with [`ClientError::Refused`]: code 3 for a
     /// registration this client does not hold; code 1 for a publication whose channel
     /// names no control address, with the reason `control`; code 1 with the reason
     /// `destination` for a destination that is `cavalry:ipc` or a control channel, one
@@ -435,8 +438,12 @@ impl Cavalry {
     /// Removes the destination `channel`, as it was added, from the control channel of
     /// the publication `registration_id`: the driver matches the endpoint as the add
     /// wrote it and resolves nothing, so a name whose address changed since removes the
-    /// address the add resolved (`spec/client-protocol.md`, "Commands"; ADR 0053). One
-    /// not there is removed by nothing and is success. Refused with
+    /// address the add resolved (`spec/client-protocol.md`, "Commands"; ADR 0053). The
+    /// driver answers once it has queued the change for the sender, so the burst under
+    /// way, one at most, may still reach the removed destination, and a message
+    /// committed after a remaining destination has received one committed after the
+    /// answer does not (ADR 0057). One not there is removed by nothing and is success.
+    /// Refused with
     /// [`ClientError::Refused`]: code 3 for a registration this client does not hold;
     /// code 1 for a publication whose channel names no control address, with the reason
     /// `control`; code 1 with the reason `destination` for a destination that is

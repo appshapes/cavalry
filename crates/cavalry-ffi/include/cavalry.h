@@ -781,7 +781,10 @@ int cavalry_stop_recording(cavalry_t *client,
  Adds the destination `channel` to `publication`'s control channel, waiting for the
  driver's answer or the 10 s response timeout (`spec/client-protocol.md`,
  "Commands", add destination; ADR 0053, ADR 0057). The publication's registration
- id is read from the handle's copy, so the call is allowed during a claim.
+ id is read from the handle's copy, so the call is allowed during a claim. The
+ driver answers once it has queued the change for its sender, which takes it at the
+ start of its next duty cycle, so the burst under way may not yet reach the
+ destination.
 
  # Safety
 
@@ -795,7 +798,9 @@ int cavalry_add_destination(cavalry_t *client,
 
 /*
  Removes the destination `channel`, as it was added, from `publication`'s control
- channel; one not there is removed by nothing and answered the same.
+ channel; one not there is removed by nothing and answered the same. The driver
+ answers once it has queued the change for its sender, so the burst under way, one
+ at most, may still reach the removed destination and no later one does.
 
  # Safety
 

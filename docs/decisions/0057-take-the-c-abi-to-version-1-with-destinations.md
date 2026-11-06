@@ -45,7 +45,12 @@ publication it names, since no function of the publication writes the copied id:
 either may run in one thread beside any call on the publication in another, an offer
 or a claim among them, but not beside the publication's close, which frees the
 handle. Aeron's usual pattern, one thread offering while another adds a destination,
-is then defined. The Rust client gains `Cavalry::add_destination(registration_id,
+is then defined. Each returns on the driver's answer, which the driver gives once it
+has queued the change for its sender, as ADR 0053's commands have it: the sender takes
+the change at the start of its next duty cycle, so the burst under way may still reach
+a removed destination, one burst at most, and may not yet reach an added one; neither
+function waits for the sender, as Aeron's destination commands do not, and the client
+protocol page says so. The Rust client gains `Cavalry::add_destination(registration_id,
 channel)` and `Cavalry::remove_destination(registration_id, channel)` beside
 `stop_recording`, `Publication::registration_id()` giving the id. The five generated
 clients gain the
