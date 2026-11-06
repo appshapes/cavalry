@@ -46,14 +46,18 @@ either may run in one thread beside any call on the publication in another, an o
 or a claim among them, but not beside the publication's close, which frees the
 handle. Aeron's usual pattern, one thread offering while another adds a destination,
 is then defined. Each returns on the driver's answer, which the driver gives once it
-has queued the change for its sender, as ADR 0053's commands have it: the sender takes
-the change at the start of its next duty cycle, so the burst under way may still reach
-a removed destination, one burst at most, and may not yet reach an added one; neither
-function waits for the sender, as Aeron's destination commands do not, and the client
-protocol page says so. The Rust client gains `Cavalry::add_destination(registration_id,
-channel)` and `Cavalry::remove_destination(registration_id, channel)` beside
-`stop_recording`, `Publication::registration_id()` giving the id. The five generated
-clients gain the
+has queued the change for its sender (`spec/client-protocol.md`, "Commands"). The
+sender takes its requests in the order they were queued, at most 16
+(`SENDER_REQUESTS_PER_CYCLE`) at the start of each duty cycle and none while its
+replies wait for room. So a change takes effect at the start of the cycle that takes
+it, which is the next cycle only when nothing else waits ahead of it. Until then,
+everything the send endpoint sends, the data, retransmits, setup frames and heartbeats
+of each of its publications, still reaches a removed destination, and nothing reaches
+an added one. Neither function waits for the sender, as Aeron's destination commands
+do not, and the client protocol page says so. The Rust client gains
+`Cavalry::add_destination(registration_id, channel)` and
+`Cavalry::remove_destination(registration_id, channel)` beside `stop_recording`,
+`Publication::registration_id()` giving the id. The five generated clients gain the
 method on their client object, `add_destination(publication, channel)` in Python's
 spelling and each language's own, bound as every function of the header is, and a
 package regenerated from version 1's header refuses a version 0 library when it loads,

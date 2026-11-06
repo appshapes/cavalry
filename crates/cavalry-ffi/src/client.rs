@@ -374,9 +374,9 @@ pub unsafe extern "C" fn cavalry_stop_recording(
 /// driver's answer or the 10 s response timeout (`spec/client-protocol.md`,
 /// "Commands", add destination; ADR 0053, ADR 0057). The publication's registration
 /// id is read from the handle's copy, so the call is allowed during a claim. The
-/// driver answers once it has queued the change for its sender, which takes it at the
-/// start of its next duty cycle, so the burst under way may not yet reach the
-/// destination.
+/// driver answers once it has queued the change for its sender, which takes requests
+/// in queue order, at most 16 at the start of a duty cycle: until the cycle that takes
+/// this one, nothing the endpoint sends reaches the destination.
 ///
 /// # Safety
 ///
@@ -403,8 +403,9 @@ pub unsafe extern "C" fn cavalry_add_destination(
 
 /// Removes the destination `channel`, as it was added, from `publication`'s control
 /// channel; one not there is removed by nothing and answered the same. The driver
-/// answers once it has queued the change for its sender, so the burst under way, one
-/// at most, may still reach the removed destination and no later one does.
+/// answers once it has queued the change for its sender, which takes requests in queue
+/// order, at most 16 at the start of a duty cycle: until the cycle that takes this
+/// one, everything the endpoint sends still reaches the destination.
 ///
 /// # Safety
 ///
