@@ -30,10 +30,11 @@ pub enum Offer {
     /// The stream reached the largest position its term length allows.
     MaxPositionExceeded,
     /// The client this publication belongs to is closed, by [`crate::Cavalry::close`]
-    /// or by what its conductor found, and [`crate::Cavalry::closed`] says which. The
-    /// driver removes the client's publications, so the limit will not move again: the
-    /// first claim or offer the limit refuses after the close says so, as Aeron's
-    /// `CLOSED` does.
+    /// or by what its conductor found, and [`crate::Cavalry::closed`] says which. Every
+    /// claim and offer after the close is refused so before anything is reserved, as
+    /// Aeron's offer checks `isClosed` before the limit: the driver ends the stream at
+    /// the producer position it loads on `client close`, and a frame reserved past it
+    /// would be one no subscriber is told of (`spec/log-buffer.md`, "Closing").
     Closed,
     /// The message is longer than this log allows.
     TooLong {
@@ -112,9 +113,8 @@ impl std::error::Error for Offer {}
 
 /// What a refusal of the appender is to the caller. A refusal that waits on the
 /// subscribers, `not-connected` or `back-pressured`, is `closed` once the client is,
-/// since the limit will not move again. The client's state is read on the refusal path
-/// alone, so a claim the limit allows stays one acquire load (invariant 2); a claim
-/// within the last limit still writes after the close, as in Aeron between two checks.
+/// since the limit will not move again: the client may close between the state's load
+/// before the claim and the claim's refusal.
 fn refusal(shared: &Shared, error: ClaimError) -> Offer {
     match error {
         ClaimError::NotConnected | ClaimError::BackPressured if shared.closed().is_some() => {
@@ -179,11 +179,14 @@ impl Publication {
 
     /// Claims a frame for a body of `length` bytes: write it in place through
     /// [`BufferClaim::body`], then [`BufferClaim::commit`], or [`BufferClaim::abort`].
-    /// Nothing is allocated; the limit is one acquire load. The refusals are
-    /// [`Offer`]'s; `length` over [`Publication::max_payload_length`] is
-    /// [`Offer::TooLong`] before anything is reserved, and a refusal after the client
-    /// closed is [`Offer::Closed`].
+    /// Nothing is allocated; the client's state and the limit are one acquire load
+    /// each. The refusals are [`Offer`]'s; a claim after the client closed is
+    /// [`Offer::Closed`] and `length` over [`Publication::max_payload_length`] is
+    /// [`Offer::TooLong`], each before anything is reserved.
     pub fn try_claim(&mut self, length: usize) -> Result<BufferClaim<'_>, Offer> {
+        if self.shared.closed().is_some() {
+            return Err(Offer::Closed);
+        }
         let limit = self.limit.load_acquire();
         let shared = &self.shared;
         self.appender
@@ -193,10 +196,13 @@ impl Publication {
 
     /// Copies `message` in, as one frame or as fragments of
     /// [`Publication::max_payload_length`] bytes committed in order, and returns the
-    /// position after it. A message over [`Publication::max_message_length`] is
-    /// [`Offer::TooLong`] before anything is reserved, and a refusal after the client
-    /// closed is [`Offer::Closed`].
+    /// position after it. An offer after the client closed is [`Offer::Closed`] and a
+    /// message over [`Publication::max_message_length`] is [`Offer::TooLong`], each
+    /// before anything is reserved.
     pub fn offer(&mut self, message: &[u8]) -> Result<i64, Offer> {
+        if self.shared.closed().is_some() {
+            return Err(Offer::Closed);
+        }
         let limit = self.limit.load_acquire();
         self.appender
             .offer(message, limit, 0)
@@ -256,9 +262,9 @@ impl Publication {
         self.exclusive
     }
 
-    /// Whether the client this publication belongs to is closed, so that every refusal
-    /// from here is [`Offer::Closed`]. [`Publication::close`] consumes the handle, so a
-    /// publication the caller still holds is closed only with its client.
+    /// Whether the client this publication belongs to is closed, so that every claim
+    /// and offer from here is [`Offer::Closed`]. [`Publication::close`] consumes the
+    /// handle, so a publication the caller still holds is closed only with its client.
     pub fn is_closed(&self) -> bool {
         self.shared.closed().is_some()
     }

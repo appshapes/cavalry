@@ -723,9 +723,19 @@ fn a_closed_client_answers_closed_on_every_handle() {
         assert_eq!(cavalry_close(client), 0);
         assert!(cavalry_publication_is_closed(publication));
         assert!(cavalry_subscription_is_closed(subscription));
+        // The first claim after the close is `CLOSED`, though the limit may still have
+        // room ("Lifetimes": the handle answers `CLOSED` from then), and the refusal
+        // clears the struct as every refused claim does ("Which claim a struct names").
         let mut claim = std::mem::zeroed::<cavalry_buffer_claim_t>();
         assert_eq!(
             cavalry_publication_try_claim(publication, 1, &mut claim),
+            CAVALRY_PUBLICATION_CLOSED
+        );
+        assert!(claim.data.is_null());
+        assert!(claim.publication.is_null());
+        assert_eq!(claim.position_after, CAVALRY_NULL_POSITION);
+        assert_eq!(
+            cavalry_publication_offer(publication, b"after".as_ptr(), 5),
             CAVALRY_PUBLICATION_CLOSED
         );
         assert_eq!(
@@ -804,6 +814,12 @@ fn a_recording_and_a_replay_cross_the_abi() {
         assert_eq!(replay_constants.stream_id, 2001);
         let mut received: Vec<Fragment> = Vec::new();
         let mut ended = (0i64, -1i32);
+        // A null out pointer is refused as any null required pointer is (spec/c-abi.md,
+        // "When a function cannot answer").
+        assert!(!cavalry_replay_ended(replay, ptr::null_mut(), &mut ended.1));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+        assert!(!cavalry_replay_ended(replay, &mut ended.0, ptr::null_mut()));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let polled = cavalry_subscription_poll(
