@@ -7,9 +7,9 @@
 
 use cavalry_proto::cluster::{
     Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
-    EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message, SnapshotMark,
-    Stream, TimeUnit, VERSION, ballot, candidate, commit_position, entry_position, log_at_least,
-    parse_members, quorum,
+    EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
+    ReplicationStop, SnapshotMark, Stream, TimeUnit, VERSION, ballot, candidate, commit_position,
+    entry_position, log_at_least, parse_members, quorum, replication_stop,
 };
 use serde_json::{Map, Value, json};
 
@@ -423,6 +423,17 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                     .expect("deadline_passed"),
             );
             json!({"nominate": nominate, "unanimous": unanimous})
+        }
+        "replication-stop" => {
+            let ReplicationStop {
+                replicate,
+                stop_position,
+            } = replication_stop(
+                int(inputs, "append_position"),
+                int(inputs, "next_term_base_log_position"),
+                int(inputs, "next_log_position"),
+            );
+            json!({"replicate": replicate, "stop_position": stop_position})
         }
         "entry-position" => {
             let after = entry_position(
