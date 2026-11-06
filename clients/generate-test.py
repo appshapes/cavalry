@@ -13,7 +13,12 @@ binding, the trampoline, compiled with `cc` against a stand-in for N-API, counts
 reports every fragment the handler did not see, `HandlerError`'s message and the addon's
 Error for such a fragment say what to do and name a heading of the README, and `--check`
 fails on a package that differs. `just test` runs this through `test-scripts`. Python 3.9
-standard library only.
+standard library only. The same for the Go module (`GoPackage`): the committed five
+generated files are what the parse gives, a header change changes the constants, every
+define is a constant under its Go name with the ABI's name beside it, the shim installs
+the exported trampoline around the one poll call, `HandlerError`'s message says what to
+do and names a heading of the README, the generated files are gofmt's own and vet clean
+when `go` is on the path, and `--check` fails on a module that differs.
 """
 
 import ctypes
@@ -29,6 +34,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate as gen  # noqa: E402
+import generate_go as gen_go  # noqa: E402
 import generate_node as gen_node  # noqa: E402
 import lint  # noqa: E402
 
@@ -654,6 +660,107 @@ class NodePackage(unittest.TestCase):
                     self.assertEqual(gen.main(["generate.py", "node", "--check"]), 1)
                 self.assertIn("differs from what the header gives in src/addon.c", err.getvalue())
                 self.assertIn("python3 clients/generate.py node", err.getvalue())
+            finally:
+                gen.ROOT, gen.HEADER = root, header
+
+
+class GoPackage(unittest.TestCase):
+    """The Go module, `clients/go` (clients/go/README.md; ADR 0046, card 207)."""
+
+    FILES = ["cavalry.go", "go.mod", "shim.c", "shim.h", "trampoline.go"]
+
+    @classmethod
+    def setUpClass(cls):
+        with open(gen.HEADER, encoding="utf-8") as f:
+            cls.text = f.read()
+        cls.header = gen.parse(cls.text)
+
+    def committed(self, name):
+        with open(os.path.join(gen.ROOT, "clients", "go", name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_the_committed_module_is_what_the_header_gives(self):
+        files = gen_go.write_go(self.header)
+        self.assertEqual(sorted(files), self.FILES)
+        for name, content in files.items():
+            self.assertEqual(self.committed(name), content, name)
+        self.assertIs(gen.WRITERS["go"], gen_go.write_go)
+        self.assertEqual(gen.LANGUAGES["go"], "go")
+
+    def test_a_header_change_changes_the_constants(self):
+        changed = gen.parse(self.text.replace("#define CAVALRY_MAX_IMAGES 256", "#define CAVALRY_MAX_IMAGES 512"))
+        code = gen_go.write_go(changed)["cavalry.go"]
+        self.assertRegex(code, r"MaxImages\s+= 512\s+// CAVALRY_MAX_IMAGES")
+        self.assertNotEqual(code, self.committed("cavalry.go"))
+
+    def test_every_define_is_a_constant_under_its_go_name(self):
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        for name, _ in self.header.defines:
+            if name != "CAVALRY_H":
+                self.assertRegex(code, r"\t" + gen_go.go_name(name) + r"\s+= \S.*// " + name + r"\n")
+        self.assertEqual(gen_go.go_name("CAVALRY_ABI_VERSION"), "ABIVersion")
+        self.assertEqual(gen_go.go_name("CAVALRY_ERR_NOT_UTF8"), "ErrNotUTF8")
+        self.assertEqual(gen_go.go_name("CAVALRY_PUBLICATION_BACK_PRESSURED"), "PublicationBackPressured")
+        self.assertEqual(gen_go.go_value("INT64_MAX"), "math.MaxInt64")
+
+    def test_the_shim_installs_the_exported_trampoline_around_the_one_poll(self):
+        files = gen_go.write_go(self.header)
+        self.assertIn("cavalryGoFragment(clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);", files["shim.c"])
+        self.assertIn("cavalry_subscription_poll(subscription, cavalry_go_trampoline, (void *) index, fragment_limit)",
+                      files["shim.c"])
+        self.assertEqual(files["shim.c"].count("cavalry_subscription_poll("), 1)
+        self.assertIn("//export cavalryGoFragment\n", files["trampoline.go"])
+        self.assertIn("C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit))", files["cavalry.go"])
+        self.assertNotIn("C.cavalry_subscription_poll(", files["cavalry.go"])
+
+    def test_handler_errors_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        body = code.split("func (e *HandlerError) Error() string {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("fragment(s) this poll delivered", body)
+        self.assertIn("before it stopped on a fault, which Subscription.Fault reads", body)
+        self.assertIn("Fix the handler: its first panic's value, %v, is this error's Cause", body)
+        self.assertIn("See clients/go/README.md#the-panic", body)
+        with open(os.path.join(gen.ROOT, "clients", "go", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("the-panic", slugs)
+
+    def test_the_generated_go_is_gofmts_and_vets_clean_when_go_is_on_the_path(self):
+        """gofmt's layout is the generator's own, so the committed files never need a
+        formatter; `go vet` compiles the module's cgo against the header, which needs the
+        C compiler and no library. Without `go`, as on a machine that builds no client,
+        the check is CI's (`just conformance`)."""
+        if shutil.which("go") is None or shutil.which("gofmt") is None:
+            print("generate-test: no go on the path; gofmt and vet are checked in CI")
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, content in gen_go.write_go(self.header).items():
+                with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                    f.write(content)
+            listed = subprocess.run(["gofmt", "-l", tmp], capture_output=True, text=True, check=True).stdout
+            self.assertEqual(listed.strip(), "", listed)
+        vet = subprocess.run(["go", "vet", "./..."], cwd=os.path.join(gen.ROOT, "clients", "go"), capture_output=True, text=True)
+        self.assertEqual(vet.returncode, 0, vet.stderr)
+
+    def test_check_fails_on_a_module_that_differs_and_says_what_to_do(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(gen.ROOT, "clients", "go"), os.path.join(tmp, "clients", "go"))
+            os.makedirs(os.path.join(tmp, "crates", "cavalry-ffi", "include"))
+            shutil.copy(gen.HEADER, os.path.join(tmp, "crates", "cavalry-ffi", "include", "cavalry.h"))
+            root, header = gen.ROOT, gen.HEADER
+            gen.ROOT = tmp
+            gen.HEADER = os.path.join(tmp, "crates", "cavalry-ffi", "include", "cavalry.h")
+            try:
+                self.assertEqual(gen.main(["generate.py", "go", "--check"]), 0)
+                with open(os.path.join(tmp, "clients", "go", "shim.c"), "a", encoding="utf-8") as f:
+                    f.write("/* edited by hand */\n")
+                import io
+                import contextlib
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(gen.main(["generate.py", "go", "--check"]), 1)
+                self.assertIn("differs from what the header gives in shim.c", err.getvalue())
+                self.assertIn("python3 clients/generate.py go", err.getvalue())
             finally:
                 gen.ROOT, gen.HEADER = root, header
 

@@ -1461,3 +1461,20 @@ user-visible change, added in the same commit as the change. The format follows
   path's shape through the client and the README's example, with a report of its
   one-way latency over 100,000 messages and its allocations per message
   ([clients/node/README.md](clients/node/README.md); ADR 0046, card 206).
+- The Go client, `clients/go`, generated from the committed C header by
+  `clients/generate.py go` (`just generate-clients`): the module
+  `github.com/appshapes/cavalry/clients/go` over the header through cgo, linked with
+  `libcavalry_ffi.a` and depending on nothing beyond Go's standard library, whose
+  `NewClient` refuses a library of another ABI version before any other function; a
+  `Client`, a `Publication` whose `TryClaim` and `Offer` return the position or the
+  result code and whose `Claim` is a `[]byte` over the log, a `Subscription` polled
+  with a fragment handler that every delivered fragment reaches, the body a `[]byte`
+  into the log for the call and a panic recovered and returned by `Poll` as a
+  `*HandlerError`, a `Recording` and a `Replay`; a call the ABI refuses during a claim
+  or a poll leaves the client's state as it was; `just lint` regenerates the module and
+  reads its per-message functions, and the functions they call, for Go's `sync`, `go`,
+  channels, `select`, `panic` and `make`, `new` and `append`, and the C shim's locks;
+  `just conformance` runs `conformance/go/`, the ten-minute path's shape through the
+  client and the README's example, with a report of its one-way latency over 100,000
+  messages and its allocations per message, counted exactly by `runtime.ReadMemStats`
+  ([clients/go/README.md](clients/go/README.md); ADR 0046, card 207).

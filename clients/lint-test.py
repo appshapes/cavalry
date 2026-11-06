@@ -18,7 +18,14 @@ the trampoline calls, `uv_rwlock_*` in the header's field, an N-API thread-safe 
 the offer, `napi_throw*` in the commit and `napi_fatal_*` in the Buffers' finalizer, each
 failing and naming the function and the form; an argument reader's throw passes and the
 same throw in a helper the poll calls fails; a missing per-message function, an addon with
-none, and a missing addon fail. `just test` runs this through `test-scripts`.
+none, and a missing addon fail. `just test` runs this through `test-scripts`. The same for the Go client's `cavalry.go` and
+`trampoline.go`: a per-message function that starts a goroutine, sends or receives on a
+channel, uses `sync`, panics, allocates with `make`, uses `select`, or calls the
+package's `lastError`, which builds an `*Error`, fails naming the function and the form;
+building the `*HandlerError` in `Poll` after the shim's poll call passes and before it
+fails; a panic in the exported trampoline fails naming `trampoline.go`; a lock in
+`shim.c`'s trampoline fails; a module with none of the per-message functions fails, and a
+missing `cavalry.go` says to generate.
 """
 
 import os
@@ -42,6 +49,10 @@ class Clients(unittest.TestCase):
         shutil.copytree(os.path.join(lint.CLIENTS, "node"), os.path.join(self.tmp, "node"),
                         ignore=shutil.ignore_patterns("build", "node_modules", "package-lock.json"))
         self.node = os.path.join(self.tmp, "node", "index.js")
+        shutil.copytree(os.path.join(lint.CLIENTS, "go"), os.path.join(self.tmp, "go"))
+        self.go = os.path.join(self.tmp, "go", "cavalry.go")
+        self.go_trampoline = os.path.join(self.tmp, "go", "trampoline.go")
+        self.go_shim = os.path.join(self.tmp, "go", "shim.c")
         self.addon = os.path.join(self.tmp, "node", "src", "addon.c")
 
     def edit(self, old, new, count=1, file=None):
@@ -54,6 +65,9 @@ class Clients(unittest.TestCase):
 
     def edit_node(self, old, new, count=1):
         self.edit(old, new, count, file=self.node)
+
+    def edit_go(self, old, new, count=1, file=None):
+        self.edit(old, new, count, file=file or self.go)
 
     def add_to_addon(self, function, line):
         """`line` as the first statement of the addon's C function `function`."""
@@ -362,6 +376,93 @@ class Clients(unittest.TestCase):
         self.assertNotIn("x", blanked)
         self.assertIn("throw a;", blanked)
         self.assertEqual(lint.line_of(blanked, blanked.index("throw a;")), 3)
+
+
+    # The Go client's cavalry.go and trampoline.go, read by the tokenizer (clients/go/README.md).
+
+    def test_a_goroutine_in_a_go_per_message_function_fails(self):
+        self.edit_go("func (p *Publication) TryClaim(length int) int64 {\n",
+                     "func (p *Publication) TryClaim(length int) int64 {\n\tgo func() {}()\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.TryClaim", finding)
+        self.assertIn("starts a goroutine", finding)
+
+    def test_a_channel_in_go_fails(self):
+        self.edit_go("func (p *Publication) Commit() int64 {\n", "func (p *Publication) Commit() int64 {\n\tvar done chan int\n\t<-done\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("Publication.Commit" in f and "sends or receives on a channel" in f for f in found), found)
+
+    def test_sync_in_go_fails(self):
+        self.edit_go("func (p *Publication) Offer(message []byte) int64 {\n",
+                     "func (p *Publication) Offer(message []byte) int64 {\n\tvar mu sync.Mutex\n\tmu.Lock()\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Offer", finding)
+        self.assertIn("uses `sync`", finding)
+
+    def test_a_panic_in_go_fails(self):
+        self.edit_go("func (p *Publication) Abort() int64 {\n", "func (p *Publication) Abort() int64 {\n\tpanic(\"no\")\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Abort", finding)
+        self.assertIn("panics", finding)
+
+    def test_an_allocation_in_go_fails(self):
+        self.edit_go("func (p *Publication) SetReservedValue(value int64) int32 {\n",
+                     "func (p *Publication) SetReservedValue(value int64) int32 {\n\t_ = make([]byte, 1)\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.SetReservedValue", finding)
+        self.assertIn("allocates", finding)
+
+    def test_a_select_in_go_fails(self):
+        self.edit_go("func (h *Header) Values() (Frame, bool) {\n",
+                     "func (h *Header) Values() (Frame, bool) {\n\tselect {\n\tdefault:\n\t}\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Header.Values", finding)
+        self.assertIn("uses `select`", finding)
+
+    def test_the_handler_error_after_the_polls_shim_call_passes_and_before_it_fails(self):
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_go("\ts.handler = handler\n\ts.polling = true\n",
+                     "\t_ = &HandlerError{}\n\ts.handler = handler\n\ts.polling = true\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Subscription.Poll", finding)
+        self.assertIn("builds HandlerError", finding)
+
+    def test_a_call_to_last_error_in_go_fails(self):
+        self.edit_go("func (p *Publication) TryClaim(length int) int64 {\n",
+                     "func (p *Publication) TryClaim(length int) int64 {\n\t_ = lastError(\"x\")\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.TryClaim", finding)
+        self.assertIn("calls lastError", finding)
+        self.assertIn("builds Error", finding)
+
+    def test_a_panic_in_the_go_trampoline_fails(self):
+        self.edit_go("\ts.deliver(body)\n", "\tpanic(\"x\")\n\ts.deliver(body)\n", file=self.go_trampoline)
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("cavalryGoFragment", finding)
+        self.assertIn("trampoline.go", finding)
+        self.assertIn("panics", finding)
+
+    def test_a_lock_in_the_go_shim_fails(self):
+        self.edit_go("  cavalryGoFragment(clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);\n",
+                     "  pthread_mutex_lock(&lock);\n  cavalryGoFragment(clientd, (uint8_t *) buffer, length, (cavalry_header_t *) header);\n",
+                     file=self.go_shim)
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("cavalry_go_trampoline", finding)
+        self.assertIn("pthread_mutex_*", finding)
+
+    def test_a_go_module_without_the_per_message_functions_fails(self):
+        with open(self.go, "w", encoding="utf-8") as f:
+            f.write("package cavalry\n\nfunc nothing() int { return 1 }\n")
+        with open(self.go_trampoline, "w", encoding="utf-8") as f:
+            f.write("package cavalry\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("none of the per-message functions", finding)
+        self.assertIn("Publication.TryClaim", finding)
+
+    def test_a_missing_go_file_says_to_generate(self):
+        os.remove(self.go)
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("cavalry.go is missing" in f and "python3 clients/generate.py go" in f for f in found), found)
 
     def test_a_language_without_rules_fails(self):
         os.makedirs(os.path.join(self.tmp, "ruby", "cavalry"))

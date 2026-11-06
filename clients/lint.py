@@ -25,7 +25,12 @@ The one raise allowed is in `poll`, after the last line that calls the ABI, wher
 user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
 such as the refused poll from inside a handler and the poll's own call, is not after the
-poll.
+poll. For Go, read from `clients/go/cavalry.go` and `trampoline.go` by the same tokenizer,
+the forms are `sync`, a `go` statement, a channel send or receive, `select`, `chan`,
+`panic`, building the package's own error types, and `make`, `new` and `append`, Go's
+allocations; the one error built on the per-message path is the `*HandlerError` that
+`Poll` returns after its ABI call, and `recover` in the trampoline is what keeps a panic
+from unwinding through the ABI. The C of `shim.c` is read as the Node addon's is.
 
 It fails on generated code under `clients/` in a language it has no rules for, and on a
 package in which it finds none of the per-message functions, so that a client cannot slip
@@ -119,6 +124,32 @@ RULES = {
                         "string_arg", "int64_arg", "int32_arg", "size_arg", "bool_arg"],
         },
     },
+    # The Go client calls the ABI through cgo (clients/go/README.md): the per-message
+    # functions are in cavalry.go, and the trampoline the ABI reaches through shim.c is
+    # the exported function of trampoline.go. `Poll` returns the *HandlerError it builds
+    # after the ABI's call, the one error built on the path.
+    "go": {
+        "file": "cavalry.go",
+        "files": ["cavalry.go", "trampoline.go"],
+        "functions": [
+            "Publication.TryClaim",
+            "Publication.SetReservedValue",
+            "Publication.Commit",
+            "Publication.Abort",
+            "Publication.Offer",
+            "Subscription.Poll",
+            "Subscription.deliver",
+            "Header.Values",
+            "cavalryGoFragment",
+        ],
+        "raise_after": ("Subscription.Poll", "C.cavalry_go_poll"),
+        # The C of shim.c: the trampoline the ABI calls and the poll that installs it.
+        "shim": {
+            "file": "shim.c",
+            "functions": ["cavalry_go_trampoline", "cavalry_go_poll"],
+            "readers": [],
+        },
+    },
 }
 HELP = "see clients/README.md, \"What every client must pass\""
 WHY = {
@@ -128,6 +159,9 @@ WHY = {
              "returns, nothing else on the per-message path raises",
     "promise": "no promise on the per-message path: the call returns when the ABI returns",
     "wait": "no blocking wait on the per-message path",
+    "goroutine": "no goroutine started on the per-message path: the call returns when the ABI returns",
+    "channel": "no channel on the per-message path: a send or receive may block",
+    "alloc": "no allocation on the per-message path",
 }
 
 
@@ -597,7 +631,161 @@ def node_findings(language: str, path: str, rules: dict) -> list[str]:
     return findings
 
 
-CHECKERS = {"python": python_findings, "node": node_findings}
+# ------------------------------------------------------------------ Go
+
+GO_FORMS = (
+    # (kind, pattern over the code with comments and strings blanked, what the finding says)
+    ("threading", re.compile(r"(?<![\w.])sync\s*\.\s*\w+"), "uses `sync`"),
+    ("goroutine", re.compile(r"(?<![\w.])go\s+(?=[\w(])"), "starts a goroutine with `go`"),
+    ("channel", re.compile(r"<-"), "sends or receives on a channel"),
+    ("channel", re.compile(r"(?<![\w.])select\s*\{"), "uses `select`"),
+    ("channel", re.compile(r"(?<![\w.])chan\s"), "makes a channel"),
+    ("raise", re.compile(r"(?<![\w.])panic\s*\("), "panics"),
+    ("alloc", re.compile(r"(?<![\w.])(?:make|new|append)\s*\("), "allocates with `make`, `new` or `append`"),
+)
+GO_WORDS = {"if", "for", "switch", "return", "func", "defer", "go", "range", "select", "case", "len", "cap",
+            "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "bool",
+            "string", "byte", "rune", "any", "error", "recover", "copy", "delete", "close", "print", "println",
+            "make", "new", "append", "panic", "min", "max", "clear"}
+GO_FOREIGN = {"C", "unsafe", "atomic", "fmt", "math", "errors", "os", "time", "runtime", "sync"}
+
+
+class GoModule:
+    """The module's own functions across its files, as `Type.Name` for a method and the
+    bare name for a function, each with its file, line, body and where the body starts;
+    the module's own error types, those with an `Error() string` method; and what each
+    function reaches, as `Module.reach` does for JavaScript."""
+
+    FUNCTION = re.compile(r"^func\s+(?:\(\s*\w+\s+\*?(\w+)\s*\)\s+)?(\w+)\s*\(", re.M)
+
+    def __init__(self, files: list):
+        self.files = [(path, blank(text)) for path, text in files]
+        self.functions: dict[str, tuple[str, int, str, int, str]] = {}  # label: (file, line, body, start, code)
+        self.types: dict[str, set[str]] = {}
+        for path, code in self.files:
+            for m in self.FUNCTION.finditer(code):
+                depth, i, brace = 0, m.end() - 1, -1
+                while i < len(code):
+                    c = code[i]
+                    if c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                    elif c == "{" and depth == 0:
+                        brace = i
+                        break
+                    elif c == "\n" and depth == 0 and code[m.start():i].count("{") == 0 and i > m.end() + 1 \
+                            and code[i - 1] not in ",(" and ")" in code[m.end():i] and code[i - 1] != ")":
+                        break
+                    i += 1
+                if brace < 0:
+                    continue
+                label = f"{m.group(1)}.{m.group(2)}" if m.group(1) else m.group(2)
+                if m.group(1):
+                    self.types.setdefault(m.group(1), set()).add(m.group(2))
+                self.functions[label] = (path, line_of(code, m.start()), code[brace:block_end(code, brace)], brace, code)
+        self.exceptions = {t for t, methods in self.types.items() if "Error" in methods}
+        self.reached: dict[str, dict[str, str]] = {}
+
+    def callees(self, cls, text: str):
+        out = []
+        for m in re.finditer(r"(?<![\w.])(?:(\w+)\s*\.\s*)?(\w+)\s*\(", text):
+            owner, name = m.group(1), m.group(2)
+            if owner is None:
+                if name in self.functions and name not in GO_WORDS:
+                    out.append((m.start(), name))
+            elif owner not in GO_FOREIGN:
+                for t, methods in self.types.items():
+                    if name in methods and (cls is None or owner != cls or True):
+                        out.append((m.start(), f"{t}.{name}"))
+        return out
+
+    def forms(self, label: str, raise_after):
+        path, line, body, start, code = self.functions[label]
+        cls = label.split(".", 1)[0] if "." in label else None
+        base = line_of(code, start) - 1
+        for kind, pattern, what in GO_FORMS:
+            for m in pattern.finditer(body):
+                at = base + body.count("\n", 0, m.start()) + 1
+                if kind == "raise" and raise_after is not None and at > raise_after:
+                    continue
+                yield kind, at, f"{what} at line {at}"
+        for m in re.finditer(r"&\s*(\w+)\s*\{", body):
+            if m.group(1) in self.exceptions:
+                at = base + body.count("\n", 0, m.start()) + 1
+                if raise_after is not None and at > raise_after:
+                    continue
+                yield "raise", at, f"builds {m.group(1)} at line {at}"
+        for offset, callee in self.callees(cls, body):
+            if callee == label:
+                continue
+            at = base + body.count("\n", 0, offset) + 1
+            allowed = raise_after is not None and at > raise_after
+            yield ("call-allowed" if allowed else "call"), at, callee
+
+    def reach(self, label: str) -> dict[str, str]:
+        if label in self.reached:
+            return self.reached[label]
+        found: dict[str, str] = {}
+        self.reached[label] = found
+        for kind, line, what in self.forms(label, None):
+            if kind in WHY:
+                found.setdefault(kind, f"{label} {what}")
+            else:
+                for k, how in self.reach(what).items():
+                    found.setdefault(k, f"{label} calls {what} at line {line}, and {how}")
+        return found
+
+
+def go_findings(language: str, path: str, rules: dict) -> list[str]:
+    findings = []
+    directory = os.path.dirname(path)
+    shim = rules.get("shim")
+    if shim is not None:
+        source = os.path.join(directory, shim["file"])
+        if os.path.exists(source):
+            findings.extend(c_findings(language, source, shim))
+        else:
+            findings.append(f"{language}: {os.path.relpath(source, ROOT)} is missing; run "
+                            f"`python3 clients/generate.py {language}`")
+    files = []
+    for name in rules["files"]:
+        file = os.path.join(directory, name)
+        if not os.path.exists(file):
+            findings.append(f"{language}: {os.path.relpath(file, ROOT)} is missing; run `python3 clients/generate.py {language}`")
+            continue
+        with open(file, encoding="utf-8") as f:
+            files.append((file, f.read()))
+    module = GoModule(files)
+    present = [name for name in rules["functions"] if name in module.functions]
+    if not present:
+        return findings + [f"{language}: none of the per-message functions {', '.join(rules['functions'])} is in "
+                           f"{path}; the generator renamed them or the rules are stale; {HELP}"]
+    for name in rules["functions"]:
+        if name not in module.functions:
+            findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
+    allowed_in, abi_call = rules["raise_after"]
+    for name in present:
+        file, line, body, start, code = module.functions[name]
+        where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
+        abi_line = None
+        if name == allowed_in:  # the last line that calls the ABI through the shim
+            base = line_of(code, start) - 1
+            for m in re.finditer(re.escape(abi_call) + r"\s*\(", body):
+                at = base + body.count("\n", 0, m.start()) + 1
+                abi_line = at if abi_line is None else max(abi_line, at)
+        for kind, at, what in module.forms(name, abi_line):
+            if kind in WHY:
+                findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
+            else:
+                for k, how in module.reach(what).items():
+                    if kind == "call-allowed" and k == "raise":
+                        continue
+                    findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
+    return findings
+
+
+CHECKERS = {"python": python_findings, "node": node_findings, "go": go_findings}
 
 
 def findings(clients: str = CLIENTS) -> list[str]:
@@ -628,7 +816,7 @@ def main(argv: list[str]) -> int:
         return 1
     languages = [e for e in sorted(os.listdir(CLIENTS)) if e in RULES]
     print(f"lint-clients: {', '.join(languages)}: the per-message functions, and the package's functions they call, "
-          f"hold no lock, no await, no promise and no raise")
+          f"hold no lock, no await, no promise, no goroutine, no channel, no allocation and no raise")
     return 0
 
 
