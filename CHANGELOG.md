@@ -1417,11 +1417,13 @@ user-visible change, added in the same commit as the change. The format follows
   compared value the slowest of the 63 runs. The rows are gated from here on (card 204).
 - The Python client, `clients/python`, generated from the committed C header by
   `clients/generate.py` (`just generate-clients`): a `ctypes` binding over
-  `libcavalry_ffi` and the client's own code, a `Client` that is a context manager and
-  may be shared between threads, a `Publication` whose `try_claim` and `offer` return
-  the position or the result code and whose `offer` takes `bytes`, a `Subscription`
-  polled with a callable fragment handler that every delivered fragment reaches, a
-  `Recording` and a `Replay`; `just lint` regenerates the package and reads its
+  `libcavalry_ffi` that refuses a library of another ABI version when it loads it,
+  before any other function, and the client's own code, a `Client` that is a context
+  manager and may be shared between threads, a `Publication` whose `try_claim` and
+  `offer` return the position or the result code and whose `offer` takes `bytes`, a
+  `Subscription` polled with a callable fragment handler that every delivered fragment
+  reaches, a `Recording` and a `Replay`; a call the ABI refuses during a claim or a poll
+  leaves the client's state as it was; `just lint` regenerates the package and reads its
   per-message functions, and the package's functions they call, for Python's locks,
   `async def`, `await` and `raise`; `just conformance` runs `conformance/python/`, the
   ten-minute path's shape through the client and the README's example, with a report

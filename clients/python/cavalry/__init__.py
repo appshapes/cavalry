@@ -58,8 +58,12 @@ class HandlerError(Exception):
     `Exception` is raised by poll as itself."""
 
     def __init__(self, fragments, raised, cause):
-        super().__init__(f"the fragment handler raised on {raised} of the fragments this poll delivered ({fragments});"
-                         f" every fragment reached the handler once, in order; the first exception: {cause!r}")
+        delivered = (f"the {fragments} fragment(s) this poll delivered" if fragments >= 0 else
+                     "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads")
+        super().__init__(f"the fragment handler raised on {raised} of {delivered}; every fragment reached the handler "
+                         f"once, in order. Fix the handler: its first exception, {cause!r}, is this error's __cause__, "
+                         f"whose traceback Python prints above this one; polling again does not deliver these "
+                         f"fragments again. See clients/python/README.md#the-exception")
         self.fragments = fragments
         self.raised = raised
         self.__cause__ = cause

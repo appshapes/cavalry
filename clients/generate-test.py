@@ -3,8 +3,8 @@
 `spec/vectors/c-abi.json` each way, the committed Python package is what the parse gives,
 a change to the header changes the package, `offer` takes bytes and refuses a `str`,
 `load` refuses a library of another ABI version before it touches any other function,
-`Header.values()` returns the one frame struct it keeps, and `--check` fails on a package
-that differs.
+`Header.values()` returns the one frame struct it keeps, `HandlerError` says what to do and
+names a heading of the README, and `--check` fails on a package that differs.
 `just test` runs this through `test-scripts`. Python 3.9 standard library only.
 """
 
@@ -213,6 +213,22 @@ class Package(unittest.TestCase):
         self.assertEqual(frame.session_id, 3)
         header._pointer = None
         self.assertIsNone(header.values())
+
+    def test_handler_errors_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
+        """CLAUDE.md: every error message says what to do next and names the docs anchor
+        that explains it. The anchor `HandlerError` names is a heading of the README."""
+        cavalry = load_package()
+        cause = ValueError("message 3")
+        for fragments, delivered in ((10, "raised on 1 of the 10 fragment(s) this poll delivered;"),
+                                     (-1, "before it stopped on a fault, which Subscription.fault() reads;")):
+            message = str(cavalry.HandlerError(fragments, 1, cause))
+            self.assertIn(delivered, message)
+            self.assertIn(f"Fix the handler: its first exception, {cause!r}, is this error's __cause__", message)
+            self.assertTrue(message.endswith("See clients/python/README.md#the-exception"), message)
+        with open(os.path.join(gen.ROOT, "clients", "python", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("the-exception", slugs)
 
     def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
         with tempfile.TemporaryDirectory() as tmp:

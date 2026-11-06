@@ -246,6 +246,8 @@ def edges(client):
     if seen != list(range(10)) or error.fragments != 10 or error.raised != 1 or not isinstance(error.__cause__, ValueError):
         fail(f"{name}: the handler saw {seen}; HandlerError has fragments {error.fragments}, raised {error.raised}, "
              f"cause {error.__cause__!r}; expected messages 0 to 9 once and in order, 10, 1 and the ValueError")
+    if "Fix the handler" not in str(error) or not str(error).endswith("See clients/python/README.md#the-exception"):
+        fail(f"{name}: HandlerError's message does not say what to do and where it is explained: {error}")
 
     offer_or_fail(name, publication, message(10), 10)
     offer_or_fail(name, publication, message(11), 11)
