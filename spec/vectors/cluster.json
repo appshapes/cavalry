@@ -1549,6 +1549,34 @@
     },
     {
       "kind": "arithmetic",
+      "name": "compare-log-joined-term-no-entries",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 1,
+        "position": 1100,
+        "other_term": 2,
+        "other_position": 1000
+      },
+      "fields": {
+        "at_least": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-joined-term-outranks-longer-log",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 2,
+        "position": 1000,
+        "other_term": 1,
+        "other_position": 1100
+      },
+      "fields": {
+        "at_least": true
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "compare-log-empty",
       "rule": "compare-log",
       "inputs": {
@@ -1881,6 +1909,34 @@
       "fields": {
         "nominate": true,
         "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-voter-joined-later-term",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            1,
+            1100
+          ],
+          [
+            2,
+            1000
+          ],
+          null
+        ],
+        "own": [
+          1,
+          1100
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
       }
     },
     {

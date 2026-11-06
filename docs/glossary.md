@@ -135,6 +135,7 @@ pages elsewhere mention Aeron at most once.
 | leader | The member that writes the cluster's log and commits it; one per leadership term. | leader | `docs/reference/cluster.md` |
 | follower | A member that records the leader's log and reports its append position. | follower | `docs/reference/cluster.md` |
 | candidate | A follower asking the members for votes to lead the next term. | candidate | `docs/reference/cluster.md` |
+| log leadership term id | The last term a member has recorded, which decides its vote: recorded when it joins a term's log, when a replication of the term ends or when it replays the term's first entry, not the term of its last entry. | log leadership term id | `docs/reference/cluster.md` |
 | leadership term | The span of the log one leader writes, numbered from 0 by its leadership term id, which only rises. | leadership term | `docs/reference/cluster.md` |
 | term base log position | The log position at which a leadership term's first entry, its new leadership term event, begins. | term base log position | `docs/reference/cluster.md` |
 | append position | The end of the contiguous span a member's recordings of the cluster's log hold from its start, reported to the leader. | append position | `docs/reference/cluster.md` |
