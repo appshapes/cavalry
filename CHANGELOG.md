@@ -1404,3 +1404,8 @@ user-visible change, added in the same commit as the change. The format follows
   under ADR 0033 and which this rule does not count
   ([ADR 0050](docs/decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md);
   card 199).
+- The udp pair's wait reads the workflow's runs listed as queued as well as in progress
+  when it looks for a crossed pair: GitHub lists a run whose jobs are part queued and
+  part in progress under queued, so the wait never saw the other run's end holding the
+  partner's host, and on 2026-11-06 two pairs crossed for 38 and 23 minutes until a
+  person cancelled one end (card 212).
