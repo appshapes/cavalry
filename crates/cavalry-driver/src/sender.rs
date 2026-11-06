@@ -118,7 +118,7 @@ pub(crate) struct Receiver {
     limit: i64,
     last_status_message_at: i64,
     /// Its last status message carried the end-of-stream flag: dropped on the next
-    /// sweep.
+    /// sweep, and not counted as a timeout (ADR 0054).
     end_of_stream: bool,
 }
 
@@ -936,7 +936,10 @@ impl Sender {
         // The strategy (`spec/udp.md`, "The sender"; ADR 0053): under `max` the greater
         // of the limit and this position plus window; under `min` the table's entry
         // for the receiver id is added or moved, and the limit becomes the greater of
-        // itself and the least in the table. Neither lowers it.
+        // itself and the least in the table. Neither lowers it. A status message with
+        // the end-of-stream flag moves its receiver's entry, which the next sweep
+        // drops, and adds none for a receiver the table does not hold, whose image has
+        // ended: Aeron's `!isEos` (ADR 0054).
         let raised = match live.flow_control {
             FlowControl::Max => limit.sender_limit,
             FlowControl::Min => {
@@ -954,12 +957,13 @@ impl Sender {
                         receiver.last_status_message_at = now;
                         receiver.end_of_stream = message.is_end_of_stream();
                     }
+                    None if message.is_end_of_stream() => {}
                     None if live.receivers.len() < live.receivers.capacity() => {
                         live.receivers.push(Receiver {
                             receiver_id: message.receiver_id,
                             limit: plus_window,
                             last_status_message_at: now,
-                            end_of_stream: message.is_end_of_stream(),
+                            end_of_stream: false,
                         });
                         live.receivers_gauge.set(live.receivers.len() as i64);
                     }
@@ -1133,20 +1137,23 @@ impl Sender {
             }
         }
 
-        // The `min` table's sweep (`spec/udp.md`, "The sender"; ADR 0053): a receiver
-        // whose status message is older than the flow control receiver timeout, or
-        // whose last one carried end of stream, leaves the table, counted; when any
-        // remain the limit becomes the greater of itself and the least of them, so
-        // that a receiver that went away holds the stream back for the timeout and no
-        // longer. Empty with no room under `max`, so this reads nothing there.
+        // The `min` table's sweep (`spec/udp.md`, "The sender"; ADR 0053, ADR 0054): a
+        // receiver whose status message is older than the flow control receiver
+        // timeout leaves the table, counted; one whose last status message carried end
+        // of stream leaves it uncounted, its image ended as every image ends after a
+        // close, which its own driver counts in `image.ended`; when any remain the
+        // limit becomes the greater of itself and the least of them, so that a
+        // receiver that went away holds the stream back for the timeout and no longer.
+        // Empty with no room under `max`, so this reads nothing there.
         if !live.receivers.is_empty() {
             let before = live.receivers.len();
             let mut index = 0;
             while index < live.receivers.len() {
                 let receiver = live.receivers[index];
-                if receiver.end_of_stream
-                    || now.saturating_sub(receiver.last_status_message_at)
-                        >= spec::nanos(FLOW_CONTROL_RECEIVER_TIMEOUT)
+                if receiver.end_of_stream {
+                    live.receivers.swap_remove(index);
+                } else if now.saturating_sub(receiver.last_status_message_at)
+                    >= spec::nanos(FLOW_CONTROL_RECEIVER_TIMEOUT)
                 {
                     live.receivers.swap_remove(index);
                     statics.flow_control_receivers_timed_out.increment();

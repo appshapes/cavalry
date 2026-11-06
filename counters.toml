@@ -1061,7 +1061,7 @@ id = 101
 name = "sender.flow_control_receivers_timed_out"
 kind = "counter"
 scope = "static"
-doc = "Receivers dropped from a min publication's table: no status message for the flow control receiver timeout, 5 s, or the last one carried end of stream; the sender limit then follows the slowest of the receivers that remain (spec/udp.md, The sender; ADR 0053)."
+doc = "Receivers dropped from a min publication's table for no status message within the flow control receiver timeout, 5 s; one dropped because its last status message carried end of stream, as every receiver's does after a clean close, is not counted; the sender limit then follows the slowest of the receivers that remain (spec/udp.md, The sender; ADR 0053, ADR 0054)."
 doctor = "A destination whose driver stopped answering held the stream back for the timeout: check that its driver runs and that its subscription is live, or remove the destination with remove destination; sender.flow_control_receivers says how many answer now."
 
 [[counter]]

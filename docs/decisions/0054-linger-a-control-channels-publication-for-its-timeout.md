@@ -94,8 +94,12 @@ destination's NAK, and closed only once the linger timeout has passed. The test 
 already covered a channel with an endpoint, where the flag ends the linger, still
 passes unchanged. `min_flow_control_follows_the_slowest_receiver_and_drops_one_that_times_out`
 drops a receiver whose status message carried the flag with
-`sender.flow_control_receivers_timed_out` unmoved, and adds no entry for the flag from
-a receiver the table does not hold. `doctor`'s
+`sender.flow_control_receivers_timed_out` unmoved, and at a full table adds no entry
+for the flag from a receiver the table does not hold, counting nothing in
+`sender.flow_control_receivers_full`.
+`a_clean_close_of_a_min_publication_counts_no_receiver_timed_out`: a receiver's five
+status messages with the flag after the close drop it once and add it back never, and
+the publication closes at the linger timeout with both counters at 0. `doctor`'s
 `a_clean_close_of_a_min_publication_leaves_doctor_with_no_warning` reads the counters
 file a clean close leaves and finds no warning.
 

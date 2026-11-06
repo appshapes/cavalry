@@ -308,7 +308,7 @@ pub const SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT: CounterId = CounterId(99);
 /// `subscription.add_deferred_waiting`, a static gauge: `add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, each holding a slot of the subscriptions registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049).
 pub const SUBSCRIPTION_ADD_DEFERRED_WAITING: CounterId = CounterId(100);
 
-/// `sender.flow_control_receivers_timed_out`, a static counter: Receivers dropped from a min publication's table: no status message for the flow control receiver timeout, 5 s, or the last one carried end of stream; the sender limit then follows the slowest of the receivers that remain (spec/udp.md, The sender; ADR 0053).
+/// `sender.flow_control_receivers_timed_out`, a static counter: Receivers dropped from a min publication's table for no status message within the flow control receiver timeout, 5 s; one dropped because its last status message carried end of stream, as every receiver's does after a clean close, is not counted; the sender limit then follows the slowest of the receivers that remain (spec/udp.md, The sender; ADR 0053, ADR 0054).
 pub const SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT: CounterId = CounterId(101);
 
 /// `sender.flow_control_receivers_full`, a static counter: Status messages from a receiver a min publication's full table of 64 does not hold: accepted for the connection and not tracked, so the sender limit does not follow that receiver (spec/udp.md, The sender; ADR 0053).
@@ -1135,7 +1135,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "sender.flow_control_receivers_timed_out",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Receivers dropped from a min publication's table: no status message for the flow control receiver timeout, 5 s, or the last one carried end of stream; the sender limit then follows the slowest of the receivers that remain (spec/udp.md, The sender; ADR 0053).",
+        doc: "Receivers dropped from a min publication's table for no status message within the flow control receiver timeout, 5 s; one dropped because its last status message carried end of stream, as every receiver's does after a clean close, is not counted; the sender limit then follows the slowest of the receivers that remain (spec/udp.md, The sender; ADR 0053, ADR 0054).",
         doctor: "A destination whose driver stopped answering held the stream back for the timeout: check that its driver runs and that its subscription is live, or remove the destination with remove destination; sender.flow_control_receivers says how many answer now.",
     },
     CounterDef {

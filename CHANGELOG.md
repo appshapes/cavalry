@@ -1580,6 +1580,10 @@ user-visible change, added in the same commit as the change. The format follows
   heartbeats with EOS and answering every destination's NAKs: a status message with
   the end-of-stream flag from one destination no longer ends the linger for all of
   them, so a slower destination still recovers the stream's tail; on a channel with an
-  endpoint the flag ends the linger as before
+  endpoint the flag ends the linger as before. Under `fc=min` a receiver dropped from
+  the table because its stream ended is no longer counted in
+  `sender.flow_control_receivers_timed_out`, so a clean close leaves `cavalry doctor`
+  with nothing to report, and a status message with the flag adds no receiver to the
+  table
   ([ADR 0054](docs/decisions/0054-linger-a-control-channels-publication-for-its-timeout.md);
   `docs/reference/udp.md`; card 225).

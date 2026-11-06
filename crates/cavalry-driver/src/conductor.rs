@@ -7131,14 +7131,97 @@ mod recording {
         }));
         assert_eq!(gauge(&h), 64);
         assert_eq!(h.sender.positions_of(2), Some((0, 16384)));
-        // b ends its stream: dropped on the next cycle, and the limit follows the rest.
+        // The end-of-stream flag from a receiver the full table does not hold adds no
+        // entry and is not counted as full: its image has ended (ADR 0054).
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        a.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            ..status(&setup_a, 3_000_000, 501)
+        });
+        assert!(wait_at(&mut h, timed_out, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 1
+        }));
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 1);
+        assert_eq!(gauge(&h), 64);
+        // b ends its stream: dropped on the next cycle and not counted as a timeout, and
+        // the limit follows the rest (ADR 0054).
         b.send_status_message(&StatusMessage {
             flags: STATUS_MESSAGE_END_OF_STREAM,
             ..status(&setup_b, 16384, 10)
         });
         assert!(wait_at(&mut h, timed_out, |h| gauge(h) == 63));
-        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 2);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 1);
         assert_eq!(h.sender.positions_of(2), Some((0, 1_000_000)));
+        // b's flag again, as a receiver sends it five times: no entry, nothing counted.
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        b.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            ..status(&setup_b, 16384, 10)
+        });
+        assert!(wait_at(&mut h, timed_out, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 1
+        }));
+        h.sender.duty_cycle(timed_out);
+        assert_eq!(gauge(&h), 63);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 1);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 1);
+        assert_eq!(h.sender.positions_of(2), Some((0, 1_000_000)));
+    }
+
+    /// A clean close of a `min` publication (`spec/udp.md`, "The sender"; ADR 0054):
+    /// its receiver's five status messages with the end-of-stream flag drop it from the
+    /// table once and add it back never, and the close counts no receiver in
+    /// `sender.flow_control_receivers_timed_out`, which `doctor` reads as a receiver
+    /// that stopped answering.
+    #[test]
+    fn a_clean_close_of_a_min_publication_counts_no_receiver_timed_out() {
+        let mut h = Harness::new("udp-mdc-min-close");
+        let mut a = TestReceiver::bind();
+        let control = format!("{}|fc=min", control_channel());
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        let receivers_id = h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .expect("a cavalry:udp publication")
+            .receivers_id;
+        let gauge = |h: &Harness| {
+            h.conductor
+                .counters
+                .counter(receivers_id)
+                .expect("the gauge")
+                .get()
+        };
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        let at = now_nanos();
+        h.sender.duty_cycle(at);
+        let setup = expect_setup(&mut a);
+        a.send_status_message(&status(&setup, 131072, 9));
+        assert!(wait_at(&mut h, at, |h| gauge(h) == 1));
+        // The close, with nothing to send: the sender position is the end of stream.
+        h.conductor.remove_publication(1, 20, 2, at);
+        h.sender.duty_cycle(at);
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        for _ in 0..5 {
+            a.send_status_message(&StatusMessage {
+                flags: STATUS_MESSAGE_END_OF_STREAM,
+                ..status(&setup, 131072, 9)
+            });
+        }
+        assert!(wait_at(&mut h, at, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 5
+        }));
+        h.sender.duty_cycle(at);
+        assert_eq!(gauge(&h), 0, "dropped once, added back never");
+        // The linger ends at its timeout, a control channel's, and nothing timed out.
+        let linger = spec::nanos(cavalry_proto::udp::LINGER);
+        h.sender.duty_cycle(at + linger);
+        h.sender.duty_cycle(at + linger);
+        assert_eq!(h.sender.positions_of(2), None, "closed at the timeout");
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 0);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 0);
     }
 
     /// The destination commands' refusals, and the channel rules of version 1
