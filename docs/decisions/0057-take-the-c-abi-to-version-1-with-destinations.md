@@ -45,9 +45,10 @@ publication it names, since no function of the publication writes the copied id:
 either may run in one thread beside any call on the publication in another, an offer
 or a claim among them, but not beside the publication's close, which frees the
 handle. Aeron's usual pattern, one thread offering while another adds a destination,
-is then defined. The Rust client gains `Cavalry::add_destination(registration_id, channel)` and
-`Cavalry::remove_destination(registration_id, channel)` beside `stop_recording`,
-`Publication::registration_id()` giving the id. The five generated clients gain the
+is then defined. The Rust client gains `Cavalry::add_destination(registration_id,
+channel)` and `Cavalry::remove_destination(registration_id, channel)` beside
+`stop_recording`, `Publication::registration_id()` giving the id. The five generated
+clients gain the
 method on their client object, `add_destination(publication, channel)` in Python's
 spelling and each language's own, bound as every function of the header is, and a
 package regenerated from version 1's header refuses a version 0 library when it loads,
@@ -80,10 +81,16 @@ None measured: two declarations and a number. What informed it: the page's own
 version rule and `CAVALRY_ERR_ABI_VERSION`; the ABI's `command` helper; Aeron's C and
 Java clients, read on 2026-11-06. The change that accepts this ADR carries the page
 at version 1, the vectors with the two functions and the version, the header
-regenerated, the functions in `cavalry-ffi` with their tests, the Rust client's two
-methods with a test over the public API, the five generators and their regenerated
-packages, and the C runner's two-destination round; `just conformance` on the laptop
-is the acceptance.
+regenerated, the functions in `cavalry-ffi` with their test, both called during a
+claim and with each argument null in `tests/abi.rs`, the Rust client's two methods
+with a test over the public API, `tests/destinations.rs`, the five generators and
+their regenerated packages, and the C runner's two-destination round. `just
+conformance` is the acceptance. On the laptop, and on the CI runner the review's
+fixes ran on, the Rust suites and the C, Python, Node and Go runners passed, and the
+JVM runner stopped at the machine's Java, a missing runtime on the laptop and `javac`
+17 on the runner, so the .NET runner after it did not run on either. CI's `gates (linux)` and `gates
+(macos)` jobs ran all six runners, the JVM's on Java 25 and the .NET one on .NET 10,
+each to `ok` against ABI version 1, and are the acceptance for those two.
 
 ## Consequences
 
