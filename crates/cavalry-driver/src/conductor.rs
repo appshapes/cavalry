@@ -1693,14 +1693,19 @@ impl Conductor {
             }
         };
         let key = position_key(correlation_id, session_id, stream_id);
-        // The sender's two labels end in the endpoint's registration id, so that `doctor`
-        // names a publication's endpoint from the counters file alone.
+        // The sender's labels end in the endpoint's registration id, so that `doctor`
+        // names a publication's endpoint from the counters file alone, and the receivers
+        // gauge's in the strategy after it, so that `doctor` reads which publications
+        // keep a `min` table (ADR 0053).
         let label = |name: &str, endpoint: bool| {
+            let mut label = format!("{name} {correlation_id} {session_id} {stream_id}");
             if endpoint {
-                format!("{name} {correlation_id} {session_id} {stream_id} {endpoint_id}")
-            } else {
-                format!("{name} {correlation_id} {session_id} {stream_id}")
+                label.push_str(&format!(" {endpoint_id}"));
             }
+            if name == "sender.flow_control_receivers" {
+                label.push_str(&format!(" fc={}", flow_control.name()));
+            }
+            label
         };
         let mut allocated: Vec<Counter> = Vec::with_capacity(5);
         for (id, name, endpoint) in [
@@ -1886,7 +1891,9 @@ impl Conductor {
     /// endpoint's index and the socket when it is new, or the code and message for the
     /// caller to answer with, the refusal counted here: the registry at capacity or the
     /// counters file with no free record is code 10, a socket the operating system
-    /// refused code 4. The caller checks the sender's room first (`sender_has_room`).
+    /// refused code 4, whose message says to send the command again when a closing
+    /// endpoint on the channel still holds its address (ADR 0055). The caller checks
+    /// the sender's room first (`sender_has_room`).
     fn open_send_endpoint(
         &mut self,
         correlation_id: i64,
@@ -1910,6 +1917,28 @@ impl Conductor {
         };
         let socket = match opened {
             Ok(socket) => socket,
+            // The channel's previous endpoint, closed with its last publication's linger,
+            // still holds the address while the sender drops its socket, one sender cycle
+            // while the sender keeps up: the driver's own timing, not the operator's port,
+            // so the message says to send the command again (ADR 0055, answering ADR
+            // 0049's Revisit). An add during the linger met the open endpoint above.
+            Err(error)
+                if self.send_endpoints.iter().any(|entry| {
+                    entry.target == target && entry.state == ChannelState::Closing
+                }) =>
+            {
+                return Err((
+                    ErrorCode::ChannelEndpointError,
+                    format!(
+                        "the channel {}: its previous send endpoint is still closing, its \
+                         socket with the sender after its last publication's linger, so a new \
+                         socket cannot be bound to {}: {error}; send the command again after a \
+                         moment, once the sender has closed it; see {ERRORS_DOC}",
+                        target.resolved(),
+                        target.interface.unwrap_or(target.address)
+                    ),
+                ));
+            }
             Err(error) => {
                 return Err((
                     ErrorCode::ChannelEndpointError,
@@ -4893,9 +4922,10 @@ impl Conductor {
             }
         };
         // The counters: the publication's two and `replay.position`, and over UDP the
-        // sender's two, labelled as a publication's with the endpoint's registration id
-        // last, so that `doctor` names the endpoint from the counters file alone; one
-        // the counters file refuses frees the ones before it.
+        // sender's three, labelled as a publication's with the endpoint's registration
+        // id after, and the strategy after that on the receivers gauge, so that `doctor`
+        // names the endpoint and reads a `min` publication from the counters file alone;
+        // one the counters file refuses frees the ones before it.
         let key = position_key(replay_session_id, session_id, stream_id);
         let replay_key = replay_session_id.to_le_bytes();
         let label = |name: &str| format!("{name} {replay_session_id} {session_id} {stream_id}");
@@ -4911,15 +4941,16 @@ impl Conductor {
             ),
         ];
         if let Some(endpoint_id) = endpoint_id {
-            for (id, name) in [
-                (SENDER_POSITION, "sender.position"),
-                (SENDER_LIMIT, "sender.limit"),
+            for (id, name, strategy) in [
+                (SENDER_POSITION, "sender.position", String::new()),
+                (SENDER_LIMIT, "sender.limit", String::new()),
                 (
                     SENDER_FLOW_CONTROL_RECEIVERS,
                     "sender.flow_control_receivers",
+                    format!(" fc={}", flow_control.name()),
                 ),
             ] {
-                wanted.push((id, &key, format!("{} {endpoint_id}", label(name))));
+                wanted.push((id, &key, format!("{} {endpoint_id}{strategy}", label(name))));
             }
         }
         let mut allocated: Vec<Counter> = Vec::with_capacity(wanted.len());
@@ -6404,8 +6435,8 @@ mod recording {
     use cavalry_shm::counters::generated::{
         COUNTERS_ALLOCATED, COUNTERS_FREED, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
         SENDER_BYTES_SENT, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
-        SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_FRAMES_SENT, SENDER_RTT_REPLIES_SENT,
-        SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
+        SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_FRAMES_SENT, SENDER_RETRANSMITS_SENT,
+        SENDER_RTT_REPLIES_SENT, SENDER_SETUPS_SENT, SENDER_STATUS_MESSAGES_RECEIVED,
     };
 
     /// A receiver by hand: a socket of its own that reads what the sender puts on the
@@ -6876,6 +6907,17 @@ mod recording {
         }
     }
 
+    /// The label of counter record `id`, read from the counters file as `doctor` reads it.
+    fn label_of(h: &Harness, id: u32) -> String {
+        cavalry_shm::counters::CountersReader::open(h.dir.path())
+            .expect("the counters file opens")
+            .record(id)
+            .expect("a record")
+            .expect("allocated")
+            .label()
+            .to_string()
+    }
+
     /// A status message answering `setup` from the receiver `receiver_id` with `window`.
     fn status(setup: &SetupFrame, window: i32, receiver_id: i64) -> StatusMessage {
         StatusMessage {
@@ -6934,6 +6976,20 @@ mod recording {
         let setup_b = expect_setup(&mut b);
         assert_eq!(setup_a.session_id, setup_b.session_id);
         assert_eq!(h.counter(SENDER_SETUPS_SENT), 2, "once per destination");
+        // The receivers gauge names the strategy last, so that `doctor` reads a `max`
+        // publication's 0 as no table (ADR 0053).
+        let receivers_id = h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .expect("a cavalry:udp publication")
+            .receivers_id;
+        assert_eq!(
+            label_of(&h, receivers_id),
+            format!(
+                "sender.flow_control_receivers 2 {} 7 2 fc=max",
+                setup_a.session_id
+            )
+        );
         // Each answers with a receiver id of its own: under max the greater window wins.
         a.send_status_message(&status(&setup_a, 4096, 9));
         b.send_status_message(&status(&setup_b, 8192, 10));
@@ -7033,6 +7089,11 @@ mod recording {
             .expect("a cavalry:udp publication");
         assert_eq!(udp.flow_control, FlowControl::Min);
         let receivers_id = udp.receivers_id;
+        assert!(
+            label_of(&h, receivers_id).ends_with(" 2 fc=min"),
+            "{}",
+            label_of(&h, receivers_id)
+        );
         let gauge = |h: &Harness| {
             h.conductor
                 .counters
@@ -7094,14 +7155,126 @@ mod recording {
         }));
         assert_eq!(gauge(&h), 64);
         assert_eq!(h.sender.positions_of(2), Some((0, 16384)));
-        // b ends its stream: dropped on the next cycle, and the limit follows the rest.
+        // The end-of-stream flag from a receiver the full table does not hold adds no
+        // entry and is not counted as full: its image has ended (ADR 0054).
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        a.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            ..status(&setup_a, 3_000_000, 501)
+        });
+        assert!(wait_at(&mut h, timed_out, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 1
+        }));
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 1);
+        assert_eq!(gauge(&h), 64);
+        // b ends its stream: dropped on the next cycle and not counted as a timeout, and
+        // the limit follows the rest (ADR 0054).
         b.send_status_message(&StatusMessage {
             flags: STATUS_MESSAGE_END_OF_STREAM,
             ..status(&setup_b, 16384, 10)
         });
         assert!(wait_at(&mut h, timed_out, |h| gauge(h) == 63));
-        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 2);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 1);
         assert_eq!(h.sender.positions_of(2), Some((0, 1_000_000)));
+        // b's flag again, as a receiver sends it five times: no entry, nothing counted.
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        b.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            ..status(&setup_b, 16384, 10)
+        });
+        assert!(wait_at(&mut h, timed_out, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 1
+        }));
+        h.sender.duty_cycle(timed_out);
+        assert_eq!(gauge(&h), 63);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 1);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 1);
+        assert_eq!(h.sender.positions_of(2), Some((0, 1_000_000)));
+    }
+
+    /// A clean close of a `min` publication on a control channel with two destinations
+    /// (`spec/udp.md`, "The sender"; ADR 0054, ADR 0056): each receiver's five status
+    /// messages with the end-of-stream flag keep its entry in the table through the
+    /// linger, once and never a second time, so that what `doctor` reads until the
+    /// linger ends, the gauge beside the endpoint's `channel.destinations` and a
+    /// sender limit above 0, says no destination stopped answering; at the timeout
+    /// the publication closes with no receiver counted in
+    /// `sender.flow_control_receivers_timed_out` and no disconnection.
+    #[test]
+    fn a_clean_close_of_a_min_publication_counts_no_receiver_timed_out() {
+        let mut h = Harness::new("udp-mdc-min-close");
+        let mut a = TestReceiver::bind();
+        let mut b = TestReceiver::bind();
+        let control = format!("{}|fc=min", control_channel());
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        let receivers_id = h.conductor.publications[0]
+            .udp
+            .as_ref()
+            .expect("a cavalry:udp publication")
+            .receivers_id;
+        assert!(
+            label_of(&h, receivers_id).ends_with(" fc=min"),
+            "{}",
+            label_of(&h, receivers_id)
+        );
+        let gauge = |h: &Harness| {
+            h.conductor
+                .counters
+                .counter(receivers_id)
+                .expect("the gauge")
+                .get()
+        };
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        h.conductor.change_destination(1, 4, 2, &b.channel(), true);
+        let at = now_nanos();
+        h.sender.duty_cycle(at);
+        let setup_a = expect_setup(&mut a);
+        let setup_b = expect_setup(&mut b);
+        a.send_status_message(&status(&setup_a, 131072, 9));
+        b.send_status_message(&status(&setup_b, 131072, 10));
+        assert!(wait_at(&mut h, at, |h| gauge(h) == 2));
+        // The close, with nothing to send: the sender position is the end of stream.
+        h.conductor.remove_publication(1, 20, 2, at);
+        h.sender.duty_cycle(at);
+        // Each receiver's image ends a moment after the close, and each sends its five
+        // status messages with the flag.
+        let ended = at + spec::nanos(Duration::from_millis(1));
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        for (receiver, setup, receiver_id) in [(&mut a, &setup_a, 9), (&mut b, &setup_b, 10)] {
+            for _ in 0..5 {
+                receiver.send_status_message(&StatusMessage {
+                    flags: STATUS_MESSAGE_END_OF_STREAM,
+                    ..status(setup, 131072, receiver_id)
+                });
+            }
+        }
+        assert!(wait_at(&mut h, ended, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) == received + 10
+        }));
+        h.sender.duty_cycle(ended);
+        assert_eq!(gauge(&h), 2, "kept once each, added a second time never");
+        // Until the linger ends the counters `doctor` reads show both destinations
+        // answered: the gauge at the endpoint's destinations, the limit above 0,
+        // nothing timed out.
+        let linger = spec::nanos(cavalry_proto::udp::LINGER);
+        let last = at + linger - 1;
+        h.sender.duty_cycle(last);
+        assert!(
+            h.sender.positions_of(2).is_some_and(|(_, limit)| limit > 0),
+            "still lingering, its limit above 0"
+        );
+        assert_eq!(gauge(&h), 2);
+        assert_eq!(h.conductor.send_endpoints[0].destinations.get(), 2);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 0);
+        // The linger ends at its timeout, a control channel's, and nothing timed out.
+        h.sender.duty_cycle(at + linger);
+        assert_eq!(h.sender.positions_of(2), None, "closed at the timeout");
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT), 0);
+        assert_eq!(h.counter(SENDER_FLOW_CONTROL_RECEIVERS_FULL), 0);
+        assert_eq!(h.counter(PUBLICATION_DISCONNECTED), 0);
     }
 
     /// The destination commands' refusals, and the channel rules of version 1
@@ -7269,6 +7442,171 @@ mod recording {
         assert_eq!(answer.echo_timestamp, 77);
         assert_eq!(answer.receiver_id, 9);
         assert_eq!(answer.reception_delta, 0);
+    }
+
+    /// A control channel's closed publication lingers for the linger timeout
+    /// (`spec/udp.md`, "The sender"; ADR 0054): a status message with the end-of-stream
+    /// flag from one destination after the close does not end it, the other
+    /// destination's NAK for the tail is still answered, and the sender closes the
+    /// publication once the linger timeout has passed since the close and not before.
+    #[test]
+    fn a_control_channel_lingers_past_one_destinations_end_of_stream() {
+        let mut h = Harness::new("udp-mdc-linger");
+        let mut a = TestReceiver::bind();
+        let mut b = TestReceiver::bind();
+        let control = control_channel();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        h.conductor.change_destination(1, 3, 2, &a.channel(), true);
+        h.conductor.change_destination(1, 4, 2, &b.channel(), true);
+        h.sender.duty_cycle(now_nanos());
+        let setup_a = expect_setup(&mut a);
+        let setup_b = expect_setup(&mut b);
+        a.send_status_message(&status(&setup_a, 131072, 9));
+        b.send_status_message(&status(&setup_b, 131072, 10));
+        assert!(
+            wait_for(&mut h, |h| {
+                h.conductor.publications[0]
+                    .udp
+                    .as_ref()
+                    .is_some_and(|udp| udp.connected)
+            }),
+            "the status messages connected the publication"
+        );
+        h.conductor.duty_cycle(now_nanos());
+        // One message, the stream's tail, to both.
+        let mut appender = h.conductor.publications[0]
+            .log
+            .appender()
+            .expect("an appender");
+        let limit = h.conductor.publications[0].limit.get();
+        appender.offer(b"the tail", limit, 0).expect("offered");
+        drop(appender);
+        h.sender.duty_cycle(now_nanos());
+        for (name, receiver) in [("a", &mut a), ("b", &mut b)] {
+            let frames = next_frames(receiver).unwrap_or_else(|| panic!("a datagram at {name}"));
+            assert_eq!(frames[0].1, b"the tail", "{name}");
+        }
+        // The close, taken by the sender at `closed_at`; a's receiver has the stream to
+        // its end and says so.
+        let closed_at = now_nanos();
+        h.conductor.remove_publication(1, 20, 2, closed_at);
+        h.sender.duty_cycle(closed_at);
+        let received = h.counter(SENDER_STATUS_MESSAGES_RECEIVED);
+        a.send_status_message(&StatusMessage {
+            flags: STATUS_MESSAGE_END_OF_STREAM,
+            consumption_term_offset: 64,
+            ..status(&setup_a, 131072, 9)
+        });
+        assert!(wait_at(&mut h, closed_at, |h| {
+            h.counter(SENDER_STATUS_MESSAGES_RECEIVED) > received
+        }));
+        assert!(
+            h.sender.positions_of(2).is_some(),
+            "one destination's end of stream does not end the linger"
+        );
+        assert_eq!(h.conductor.publications.len(), 1);
+        // b lost the tail and NAKs it: answered, to both destinations, as every
+        // retransmit is.
+        b.send_bytes(
+            &cavalry_proto::udp::Nak {
+                flags: 0,
+                session_id: setup_b.session_id,
+                stream_id: 7,
+                term_id: setup_b.active_term_id,
+                term_offset: 0,
+                length: 64,
+            }
+            .to_bytes(),
+        );
+        let nak_at = closed_at + spec::nanos(Duration::from_secs(1));
+        assert!(wait_at(&mut h, nak_at, |h| {
+            h.counter(SENDER_RETRANSMITS_SENT) == 1
+        }));
+        let again = next_frames(&mut b).expect("the retransmit at b");
+        assert_eq!(again[0].1, b"the tail");
+        // Still held just before the linger timeout, and closed at it. The connection
+        // timeout is the linger's, 5 s, and a's status message came at the close, so the
+        // first cycle at the timeout disconnects the publication and the next ends its
+        // linger.
+        let linger = spec::nanos(cavalry_proto::udp::LINGER);
+        h.sender
+            .duty_cycle(closed_at + linger - spec::nanos(Duration::from_millis(1)));
+        assert!(h.sender.positions_of(2).is_some(), "held until the timeout");
+        h.sender.duty_cycle(closed_at + linger);
+        h.sender.duty_cycle(closed_at + linger);
+        assert_eq!(h.sender.positions_of(2), None, "closed at the timeout");
+    }
+
+    /// An `add publication` on a control channel whose send endpoint is closing (ADR
+    /// 0055): one during the last publication's linger opens its publication on the
+    /// endpoint that is still active; one after the linger has ended and before the
+    /// sender has dropped the socket is code 4, its message saying the endpoint is
+    /// closing and to send the command again, with nothing registered; and the same add
+    /// after the sender's close binds the control address again.
+    #[test]
+    fn an_add_publication_on_a_closing_send_endpoint_is_code_4_and_says_to_retry() {
+        let mut h = Harness::new("udp-mdc-closing");
+        let control = control_channel();
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 2, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        let closed_at = now_nanos();
+        h.sender.duty_cycle(closed_at);
+        h.conductor.remove_publication(1, 20, 2, closed_at);
+        // During the linger the endpoint is open: an add opens its publication there.
+        h.conductor
+            .add_publication(1, 3, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(3), None);
+        assert_eq!(h.conductor.publications.len(), 2);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(
+            h.conductor.publications[1]
+                .udp
+                .as_ref()
+                .map(|udp| udp.endpoint_id),
+            Some(2),
+            "the endpoint still active"
+        );
+        h.conductor.remove_publication(1, 21, 3, closed_at);
+        // Both lingers end at the timeout, with no destination and so no connection;
+        // the conductor takes the closes and closes the endpoint, whose socket is still
+        // with the sender until its next cycle.
+        h.sender.duty_cycle(closed_at);
+        h.sender
+            .duty_cycle(closed_at + spec::nanos(cavalry_proto::udp::LINGER));
+        assert_eq!(h.sender.positions_of(2), None);
+        assert_eq!(h.sender.positions_of(3), None);
+        h.conductor.duty_cycle(now_nanos());
+        assert!(h.conductor.publications.is_empty());
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Closing);
+        // The window: code 4, saying why and what to do, and nothing registered.
+        h.conductor
+            .add_publication(1, 4, 7, control.as_bytes(), false, now);
+        let (code, message) = h.last_error(4).expect("an error");
+        assert_eq!(code, 4, "{message}");
+        assert!(
+            message.contains("previous send endpoint is still closing"),
+            "{message}"
+        );
+        assert!(message.contains("send the command again"), "{message}");
+        assert!(h.conductor.publications.is_empty());
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        // The sender drops the socket, the conductor frees the slot, and the add binds
+        // the control address again.
+        h.sender.duty_cycle(now_nanos());
+        h.conductor.duty_cycle(now_nanos());
+        assert!(h.conductor.send_endpoints.is_empty());
+        h.conductor
+            .add_publication(1, 5, 7, control.as_bytes(), false, now);
+        assert_eq!(h.last_error(5), None);
+        assert_eq!(h.conductor.send_endpoints.len(), 1);
+        assert_eq!(h.conductor.send_endpoints[0].registration_id, 5);
+        assert_eq!(h.conductor.send_endpoints[0].state, ChannelState::Active);
     }
 
     /// The send endpoints registry holds 64: the 65th resolved channel is code 10
@@ -10337,6 +10675,19 @@ mod replay {
                 publication.limit.get(),
                 3200,
                 "the limit stands at the start"
+            );
+            // The receivers gauge's label names the endpoint and the replay channel's
+            // strategy, as a client's publication's does.
+            let label = cavalry_shm::counters::CountersReader::open(h.dir.path())
+                .expect("the counters file opens")
+                .record(udp.receivers_id)
+                .expect("a record")
+                .expect("allocated")
+                .label()
+                .to_string();
+            assert_eq!(
+                label,
+                format!("sender.flow_control_receivers 6 {session_id} {REPLAY_STREAM} 6 fc=max")
             );
             assert_eq!(publication.log.header().term_length(), term);
         }
