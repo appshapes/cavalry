@@ -808,7 +808,7 @@ class Clients(unittest.TestCase):
         found = lint.findings(self.tmp)
         self.assertTrue(any(f.startswith("dotnet: Publication.Claim ") and "throws" in f for f in found), found)
 
-    def test_building_handler_exception_before_the_polls_call_fails(self):
+    def test_building_handler_exception_before_the_polls_call_in_dotnet_fails(self):
         self.edit_dotnet("        int count = Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);\n",
                          "        HandlerException early = new HandlerException(0, 0, first!);\n"
                          "        int count = Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);\n",
@@ -839,7 +839,7 @@ class Clients(unittest.TestCase):
         self.assertIn("calls Abi.Check", finding)
         self.assertIn("Abi.Check throws", finding)
 
-    def test_the_guards_throw_passes_and_a_raising_helper_a_getter_calls_fails(self):
+    def test_the_dotnet_guards_throw_passes_and_a_raising_helper_a_getter_calls_fails(self):
         """Header.Ensure throws for a read outside the handler call, and the committed
         package passes with it; a getter that calls Abi.LastError, which builds the
         exception, is a raise on the path."""
