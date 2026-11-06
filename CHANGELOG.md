@@ -1313,6 +1313,11 @@ user-visible change, added in the same commit as the change. The format follows
   conductor's `drop_subscription`, which allocates, while the window was still open
   once in twenty million messages on the macOS gate; the first backtrace the harness
   printed named the frame ([Run the bench](docs/how-to/run-the-bench.md); card 176).
+- A merge conflict anywhere is the session's to resolve: `CLAUDE.md`'s working rules,
+  the `pr` skill and the `commit` skill say to keep what both changes meant, run the
+  gates, and name the files and the resolution in the commit message or the pull
+  request body, where the two skills said to stop and hand it back; rebase, a force
+  push and `git merge --abort` as a way out stay out (card 218).
 - A pull request that changes none of the bench's tree paths and reads red on a bench
   row, at a tree where master's own runs pass against an entry recorded at an older
   tree, now has a rule: the first such red on a row of a profile is a rerun, which a
