@@ -1409,3 +1409,9 @@ user-visible change, added in the same commit as the change. The format follows
   part in progress under queued, so the wait never saw the other run's end holding the
   partner's host, and on 2026-11-06 two pairs crossed for 38 and 23 minutes until a
   person cancelled one end (card 212).
+- The two rows through the C ABI, `claim_commit_32_ffi` and `one_way_32_ffi`, have their
+  baselines on both bench hosts, in `bench-linux`, `bench-linux-unchecked`, `grip-linux`
+  and `grip-linux-unchecked`, from the three processes at c208279's tree, pull request
+  139's run and master's at fa0c352 and 5dedadf, as a row added by hand to an entry that
+  already exists: each percentile the largest over the processes, no runs list, and the
+  compared value the slowest of the 63 runs. The rows are gated from here on (card 204).
