@@ -39,8 +39,13 @@ through on its value as every driver code does, and `CAVALRY_ABI_VERSION` moves 
 with `cavalry_abi_version()`. The functions take the client, which owns the command
 ring and the answers, and read the publication handle's registration id, which the
 handle copied when it was made, so they are allowed during a claim as
-`cavalry_publication_constants` is and reach nothing the claim borrows. The Rust
-client gains `Cavalry::add_destination(registration_id, channel)` and
+`cavalry_publication_constants` is and reach nothing the claim borrows. For the same
+reason the page's "Threads" counts each as a call on the client and not on the
+publication it names, since no function of the publication writes the copied id:
+either may run in one thread beside any call on the publication in another, an offer
+or a claim among them, but not beside the publication's close, which frees the
+handle. Aeron's usual pattern, one thread offering while another adds a destination,
+is then defined. The Rust client gains `Cavalry::add_destination(registration_id, channel)` and
 `Cavalry::remove_destination(registration_id, channel)` beside `stop_recording`,
 `Publication::registration_id()` giving the id. The five generated clients gain the
 method on their client object, `add_destination(publication, channel)` in Python's
@@ -63,6 +68,11 @@ destinations.
   free to move until the release freezes it (ADR 0051).
 - **The Rust API taking `&Publication`.** Lost: the ABI reads the handle's copied id,
   and the Rust method that takes the id serves both, as `stop_recording(id)` does.
+- **A destination call counting as a call on the publication as well as on the
+  client, as `cavalry_init` counts on its context.** Lost: the call reads only the
+  copy that no function of the publication writes, so the rule would forbid what is
+  safe, and a program that offers in one thread while another adds a destination
+  would need a lock of its own around every offer, on the message's path.
 
 ## Evidence
 
@@ -90,7 +100,8 @@ subscription, under ADR 0053's Revisit.
 ## References
 
 - `spec/c-abi.md`, "Functions", "Constants", "Calls during a claim or a poll",
-  "Versions and what a reader rejects", "Out of this version"; `spec/README.md`
+  "Threads", "Versions and what a reader rejects", "Out of this version";
+  `spec/README.md`
 - ADR 0046, ADR 0051, ADR 0052, ADR 0053
 - `crates/cavalry-ffi/src/client.rs`, `cavalry_add_destination`,
   `cavalry_remove_destination`; `crates/cavalry-client/src/client.rs`,
