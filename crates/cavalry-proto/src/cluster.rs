@@ -2307,6 +2307,114 @@ pub const fn replication_stop(
     }
 }
 
+/// What a reader of new leadership term does with its log (`spec/cluster.md`,
+/// "Messages during an election").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TermAction {
+    /// The message's log leadership term id is not the reader's: back to canvass.
+    Canvass,
+    /// Below the leader's term base with a stop position: follower log replication.
+    Replicate,
+    /// At or above the leader's term base: follower replay.
+    Replay,
+    /// At the next term's base with no end carried: wait for a later message.
+    Wait,
+    /// Below the leader's term base with no next term carried: the election fails.
+    Fail,
+}
+
+impl TermAction {
+    /// The action's name as the vectors spell it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            TermAction::Canvass => "canvass",
+            TermAction::Replicate => "replicate",
+            TermAction::Replay => "replay",
+            TermAction::Wait => "wait",
+            TermAction::Fail => "fail",
+        }
+    }
+}
+
+/// A reader's answer to new leadership term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NewLeadershipTermAction {
+    /// What the reader does next.
+    pub action: TermAction,
+    /// The position it truncates its log to first, or −1 for no truncation.
+    pub truncate_to: i64,
+    /// The stop position of a replication, or −1.
+    pub stop_position: i64,
+}
+
+/// The fields of new leadership term a reader decides by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TermFields {
+    /// The term the message describes, the reader's reported log leadership term id.
+    pub log_leadership_term_id: i64,
+    /// The term after it in the leader's log, or −1.
+    pub next_leadership_term_id: i64,
+    /// That term's base position, or −1.
+    pub next_term_base_log_position: i64,
+    /// That term's end position, or −1.
+    pub next_log_position: i64,
+    /// The position at which the leader's term began.
+    pub term_base_log_position: i64,
+}
+
+/// What a reader with `log_leadership_term_id` and `append_position` does with a new
+/// leadership term whose fields are `message` (`spec/cluster.md`, "Messages during an
+/// election"): canvass when the log terms differ; else truncate to a next term base
+/// log position the message carries when above it; then, below the leader's term
+/// base, fail with no next term, replicate to the stop position, or wait; at or above
+/// it, replay.
+pub const fn new_leadership_term_action(
+    log_leadership_term_id: i64,
+    append_position: i64,
+    message: TermFields,
+) -> NewLeadershipTermAction {
+    if message.log_leadership_term_id != log_leadership_term_id {
+        return NewLeadershipTermAction {
+            action: TermAction::Canvass,
+            truncate_to: NULL_VALUE,
+            stop_position: NULL_VALUE,
+        };
+    }
+    let next_base = message.next_term_base_log_position;
+    let (truncate_to, append) = if next_base != NULL_VALUE && append_position > next_base {
+        (next_base, next_base)
+    } else {
+        (NULL_VALUE, append_position)
+    };
+    if append < message.term_base_log_position {
+        if message.next_leadership_term_id == NULL_VALUE {
+            return NewLeadershipTermAction {
+                action: TermAction::Fail,
+                truncate_to,
+                stop_position: NULL_VALUE,
+            };
+        }
+        let stop = replication_stop(append, next_base, message.next_log_position);
+        if stop.replicate {
+            return NewLeadershipTermAction {
+                action: TermAction::Replicate,
+                truncate_to,
+                stop_position: stop.stop_position,
+            };
+        }
+        return NewLeadershipTermAction {
+            action: TermAction::Wait,
+            truncate_to,
+            stop_position: NULL_VALUE,
+        };
+    }
+    NewLeadershipTermAction {
+        action: TermAction::Replay,
+        truncate_to,
+        stop_position: NULL_VALUE,
+    }
+}
+
 /// The position after an entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EntryPosition {
