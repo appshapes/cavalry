@@ -1531,3 +1531,13 @@ user-visible change, added in the same commit as the change. The format follows
   ten-minute path's shape through the client and the README's example, with a report
   of its one-way latency over 100,000 messages and its allocations per message
   ([clients/dotnet/README.md](clients/dotnet/README.md); ADR 0046, card 209).
+- ADR 0052, Accepted: the fifth slice is Raft on the durable log, in eight features,
+  one card each: multi-destination cast on `cavalry:udp` as the fan-out, decided over
+  one publication per follower; the cluster protocol page under Aeron Cluster's names;
+  the replicated log with a commit at a quorum and the service a subscriber in any
+  language; the election with gate 3's fault injection; the cluster client through the
+  ABI and the five clients; catch-up, snapshots and standby in the open core; a rolling
+  upgrade that builds `conformance/upgrade/`; and the cross-host gate with `kip` as the
+  third host after card 159's week, the one card that needs a hand on a host
+  ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md); cards 224
+  to 232).
