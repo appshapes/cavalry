@@ -364,6 +364,7 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 .map(|p| MemberPosition {
                     position: int(p, "position"),
                     age_ns: u64::try_from(int(p, "age_ns")).expect("age"),
+                    term: int(p, "term"),
                 })
                 .collect();
             let CommitPosition {
@@ -372,6 +373,8 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             } = commit_position(
                 &positions,
                 int(inputs, "leader_position"),
+                int(inputs, "leader_term"),
+                int(inputs, "term_base"),
                 cavalry_proto::cluster::LEADER_HEARTBEAT_TIMEOUT_NS,
             );
             json!({"quorum_position": quorum_position, "commit_position": commit})

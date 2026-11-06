@@ -2121,14 +2121,16 @@ pub const fn quorum(members: usize) -> usize {
     members / 2 + 1
 }
 
-/// One member's last append position and how long ago it arrived, for
-/// [`commit_position`].
+/// One member's last append position, the term it was reported for and how long ago
+/// it arrived, for [`commit_position`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MemberPosition {
     /// The append position.
     pub position: i64,
     /// How long ago it arrived, in nanoseconds; 0 for the leader's own.
     pub age_ns: u64,
+    /// The leadership term id the report carried, the leader's own for its position.
+    pub term: i64,
 }
 
 /// The quorum position and the commit position.
@@ -2142,19 +2144,24 @@ pub struct CommitPosition {
 }
 
 /// The commit position from the members' append positions, the leader's own among
-/// them, and the leader's append position (`spec/cluster.md`, "The commit position"):
-/// a member is active while its position is younger than `timeout_ns`. At most
+/// them, and the leader's append position, term and term base log position
+/// (`spec/cluster.md`, "The commit position"): a member counts when it is active, its
+/// position younger than `timeout_ns`, its last report was for `leader_term` and its
+/// position is at or past `term_base`; Raft's rule, not Aeron's. At most
 /// [`MAX_MEMBERS`] positions are ranked; any beyond are ignored.
 pub fn commit_position(
     positions: &[MemberPosition],
     leader_position: i64,
+    leader_term: i64,
+    term_base: i64,
     timeout_ns: u64,
 ) -> CommitPosition {
     let count = positions.len().min(MAX_MEMBERS);
     let mut ranked = [0i64; MAX_MEMBERS];
     let mut active = 0usize;
     for member in positions.iter().take(count) {
-        if member.age_ns >= timeout_ns {
+        if member.age_ns >= timeout_ns || member.term != leader_term || member.position < term_base
+        {
             continue;
         }
         active += 1;
