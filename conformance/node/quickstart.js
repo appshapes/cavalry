@@ -365,7 +365,25 @@ function edges(client) {
     fail(`${name}: took ${JSON.stringify(notBytes)} and returned ${position}; it takes bytes only`);
   }
   if (subscription.poll(unexpected, 10) !== 0) fail(`${name}: a refused offer published a fragment`);
-  say(`${name}: a string, a number, an object and an array were refused with TypeError and nothing was published`);
+  // A struct argument smaller than its struct, or misaligned for it, through the addon's
+  // public wrappers: refused with RangeError before the ABI reads or writes past it.
+  const struct = new ArrayBuffer(64);
+  for (const [what, call] of [
+    ["an 8-byte constants struct", () => addon.cavalry_publication_constants(publication.handle, new ArrayBuffer(8))],
+    ["an 8-byte claim struct", () => addon.cavalry_buffer_claim_commit(new ArrayBuffer(8))],
+    ["a claim struct at an odd address", () => addon.cavalry_buffer_claim_abort(new DataView(struct, 1, 40))],
+  ]) {
+    try {
+      call();
+    } catch (thrown) {
+      if (thrown instanceof RangeError) continue;
+      fail(`${name}: ${what} was refused with ${thrown}, not a RangeError`);
+    }
+    fail(`${name}: ${what} reached the ABI; the addon must refuse a struct argument smaller than the struct or ` +
+         `misaligned for it`);
+  }
+  say(`${name}: a string, a number, an object and an array were refused with TypeError and nothing was published; ` +
+      `struct arguments smaller than their struct or misaligned for it were refused with RangeError`);
 
   // A Buffer or a header kept past its call, on purpose: the claim's Buffer is detached by
   // its commit, the body's by the trampoline once the handler has returned, so each reads

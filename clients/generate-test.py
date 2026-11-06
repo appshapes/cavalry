@@ -581,6 +581,27 @@ class NodePackage(unittest.TestCase):
                       "napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
         self.assertIn("0 failure(s)", ran.stdout)
 
+    def test_every_struct_argument_is_checked_for_its_size_and_alignment(self):
+        """`module.exports.addon` makes every wrapper public, and the ABI reads and writes a
+        whole struct at the address it is given, so a wrapper reads a struct argument with
+        struct_arg, which refuses a buffer smaller than the struct or not aligned for it,
+        never with bytes_arg alone."""
+        addon = gen_node.write_node(self.header)["src/addon.c"]
+        structs = {s.name for s in self.header.structs}
+        checked = 0
+        for fn in self.header.functions:
+            for p in fn.params:
+                t = " ".join(p.type.split())
+                base = t[6:] if t.startswith("const ") else t
+                if base.endswith(" *") and base[:-2] in structs:
+                    inner = base[:-2]
+                    body = addon.split(f"static napi_value fn_{fn.name}(", 1)[1].split("\n}\n", 1)[0]
+                    self.assertIn(f"struct_arg(env, argv[", body, fn.name)
+                    self.assertIn(f"sizeof({inner}), _Alignof({inner}), \"{p.name}\")", body, fn.name)
+                    checked += 1
+        self.assertGreaterEqual(checked, 10)
+        self.assertNotRegex(addon, r"bytes_arg\(env, argv\[\d+\], NULL,")
+
     def test_a_poll_makes_no_reference_of_its_own(self):
         """ADR 0046: the client's own code makes no allocation of its own per message. A
         reference is a native object and a V8 global handle, so the addon's poll holds the

@@ -103,8 +103,11 @@ EPYC, unpinned); every CI run prints its runners'.
 Each per-message function is one N-API call into the addon, which reads its arguments
 without copying, the handle as an external, the claim struct and the offered bytes
 through their `ArrayBuffer`'s memory, and makes the one ABI call on the caller's
-thread. A position comes back as a number (`napi_create_int64`), exact below 2^53,
-which every position is. Node has one thread for JavaScript, so a call holds it for the
+thread. A struct argument smaller than its struct, or not aligned for it, is refused
+with a `RangeError` before the ABI is called, since the ABI reads and writes the whole
+struct at the address it is given. A position comes back as a number
+(`napi_create_int64`), exact below 2^53, which every position is. Node has one
+thread for JavaScript, so a call holds it for the
 call, and an add, a command or a close, which waits on the driver for up to 10 s
 (`spec/c-abi.md`, "Threads"), holds it as long: the client is synchronous, and a
 program that must not block its event loop runs the client on a worker thread.
@@ -217,9 +220,10 @@ collection and after the turn.
 The runner's allocation round sends 10,000 messages whose handler only counts and whose
 publisher copies one constant, with V8's sampling heap profiler on for that round
 alone, the objects a collection freed included, and a full collection before and after
-(`node --expose-gc`). On this Linux runner: 456 bytes of V8's heap allocated per
+(`node --expose-gc`). On this Linux runner: 458 bytes of V8's heap allocated per
 message, an unbiased estimate from samples every 64 bytes, which is the four objects
-above and what V8 makes around a call; and 2.6 bytes kept per message after the
+of V8's heap above, a `Buffer` and its `ArrayBuffer` on each side, and what V8 makes
+around a call; and 2.6 bytes kept per message after the
 collection (`process.memoryUsage().heapUsed`, nothing read between), so what a message
 makes on V8's heap is freed by the next collection. Neither figure sees the native
 heap: what a message holds there is counted in `Buffer`s and freed by the next turn
@@ -230,11 +234,11 @@ of the event loop ("The runtime's queue").
 The runner's latency round sends 100,000 messages over `cavalry:ipc`, one at a time on
 one thread, with the profiler off. The publisher writes `process.hrtime.bigint()` into
 the claim before its commit, and the handler reads the clock first. On this Linux
-runner: p50 682 ns, p99 1,432 ns, p99.99 86,222 ns (10 samples above it, nearest
-rank), max 155,272 ns. The `BigInt` each side makes for the clock is the round's own
+runner: p50 661 ns, p99 1,493 ns, p99.99 53,330 ns (10 samples above it, nearest
+rank), max 124,544 ns. The `BigInt` each side makes for the clock is the round's own
 cost, not the client's. The round does not return to the event loop for its 100,000
 messages, so it holds 200,000 `Buffer`s by its end ("The runtime's queue"); the
-allocation round after it starts on a turn of its own.
+allocation round, which runs last, starts on a turn of its own.
 
 ### The exception
 
