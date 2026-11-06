@@ -791,11 +791,52 @@ func stateFreed(client *cavalry.Client) {
 	say("a closed subscription's slot in the table is freed: %d held before the add, %d after the close", before, cavalry.Registered())
 }
 
+// exchange offers one message carrying value on publication and polls subscription until
+// it arrives, for up to 10 s: "", or what went wrong.
+func exchange(publication *cavalry.Publication, subscription *cavalry.Subscription, value uint64) string {
+	message := make([]byte, bodyLength)
+	binary.LittleEndian.PutUint64(message, value)
+	var got []uint64
+	onFragment := func(body []byte, header *cavalry.Header) { got = append(got, binary.LittleEndian.Uint64(body)) }
+	sent := false
+	until := deadline()
+	for len(got) == 0 {
+		count, err := subscription.Poll(onFragment, 10)
+		if err != nil {
+			return fmt.Sprintf("the handler panicked: %v", err)
+		}
+		if count < 0 {
+			return fmt.Sprintf("the poll stopped on a fault: %v", subscription.Err())
+		}
+		if !sent {
+			position := publication.Offer(message)
+			if position >= 0 {
+				sent = true
+			} else if position == cavalry.PublicationClosed || position == cavalry.PublicationMaxPositionExceeded ||
+				position == cavalry.PublicationError {
+				return fmt.Sprintf("Offer returned %s (%d): %v", codeName(position), position, publication.Err())
+			}
+		}
+		if time.Now().After(until) {
+			return fmt.Sprintf("message %d did not arrive in %v; offered: %v", value, wait, sent)
+		}
+	}
+	if len(got) != 1 || got[0] != value {
+		return fmt.Sprintf("received %v; expected message %d once", got, value)
+	}
+	return ""
+}
+
 // sharedClient checks that goroutines may share a Client (clients/go/README.md,
 // "Threads"): eight goroutines at once, each adding a publication and a subscription on a
-// stream of its own through the one client, reading IsClosed, making an add the ABI
-// refuses and closing what it added, four times over. Every add succeeds, every refusal
-// is its own *Error with ErrNotUTF8, and the table holds what it held before.
+// stream of its own through the one client, sending one message from the one to the
+// other, reading IsClosed, making an add the ABI refuses and closing what it added, four
+// times over. Every add succeeds, every message arrives once, every refusal is its own
+// *Error with ErrNotUTF8, and the table holds what it held before. The message also has
+// the subscription hold its image before its close: a subscription closed while the
+// client's conductor has yet to read its `available image` can close the client as
+// corrupt, a race of the Rust client's own, not of this package, which a goroutine alone
+// meets (the pull request's record, card 207).
 func sharedClient(client *cavalry.Client) {
 	const goroutines, rounds = 8, 4
 	name := "shared client"
@@ -819,8 +860,11 @@ func sharedClient(client *cavalry.Client) {
 					publication.Close()
 					return
 				}
+				if problem := exchange(publication, subscription, uint64(g*rounds+r)); problem != "" {
+					failures[g] = fmt.Sprintf("goroutine %d, round %d: %s", g, r, problem)
+				}
 				_, refusal := client.AddPublication("cavalry:ipc\xff", streamID)
-				if codeOf(refusal) != cavalry.ErrNotUTF8 || client.IsClosed() {
+				if (codeOf(refusal) != cavalry.ErrNotUTF8 || client.IsClosed()) && failures[g] == "" {
 					failures[g] = fmt.Sprintf("goroutine %d, round %d: a refused add returned %v and IsClosed is %v; "+
 						"expected *Error with ErrNotUTF8 and an open client", g, r, refusal, client.IsClosed())
 				}
@@ -837,17 +881,22 @@ func sharedClient(client *cavalry.Client) {
 		}()
 	}
 	wg.Wait()
+	var failed []string
 	for _, failure := range failures {
 		if failure != "" {
-			fail("%s: %s", name, failure)
+			failed = append(failed, failure)
 		}
+	}
+	if len(failed) > 0 {
+		fail("%s: the client's Closed is %d (spec/c-abi.md, CAVALRY_CLOSED_*); %s", name, client.Closed(),
+			strings.Join(failed, "; "))
 	}
 	if cavalry.Registered() != before {
 		fail("%s: the table holds %d subscriptions after the round, %d before", name, cavalry.Registered(), before)
 	}
-	say("%s: %d goroutines at once added and closed %d publications and %d subscriptions through one Client, and "+
-		"each of their %d refused adds returned its own *Error with ErrNotUTF8", name, goroutines, goroutines*rounds,
-		goroutines*rounds, goroutines*rounds)
+	say("%s: %d goroutines at once added and closed %d publications and %d subscriptions through one Client, each "+
+		"pair's message arrived once, and each of their %d refused adds returned its own *Error with ErrNotUTF8", name,
+		goroutines, goroutines*rounds, goroutines*rounds, goroutines*rounds)
 }
 
 func main() {
