@@ -47,7 +47,8 @@ that `poll` throws after its ABI call; the compiler demands a `catch (Throwable)
 every `invokeExact`, a block that cannot run once the handle is bound, so what that block
 throws is not a raise on the path; and `Header.ensure` is the guard that throws for a
 header read outside its handler call, before the ABI is reached, as the Node addon's
-argument readers throw for an argument the ABI cannot take. For C#, read from the files of `clients/dotnet` by the same tokenizer, the forms are
+argument readers throw for an argument the ABI cannot take.
+For C#, read from the files of `clients/dotnet` by the same tokenizer, the forms are
 `lock`, `Monitor`, `Mutex`, `Semaphore`, `SpinLock` and the other waits of
 `System.Threading`, `async`, `await`, `Task`, `ValueTask`, `.Wait(`, `.Result`,
 `Thread.Sleep`, a thread started, `throw`, building an exception, `new`, C#'s allocation,
