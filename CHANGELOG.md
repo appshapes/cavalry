@@ -1380,3 +1380,27 @@ user-visible change, added in the same commit as the change. The format follows
   two whole processes that card 219 holds, where one run of a third process also
   reaches the checked `one_way_32_concurrent` row's new 250 ns. The commit is the
   owner's under ADR 0032 (card 216).
+- A pull request that changes none of the bench's tree paths and reads red on a bench
+  row, at a tree where master's own runs pass against an entry recorded at an older
+  tree, now has a rule: the first such red on a row of a profile is a rerun, which a
+  person's session starts, and the second on the same row re-records that profile's
+  baseline at the tree from every process at it whose artifact is still kept and
+  from every red's record, as a person's commit naming the reds. The second red
+  re-records only when no commit since the entry's tree touched the tree's paths
+  outside `crates/cavalry-control` and `crates/cavalry`: a data-plane crate, built by
+  the harness or not yet, its tests, the harness, its host check or the build.
+  Otherwise it is a card on those commits, and the pull request waits for the card's
+  answer. A third red on the row,
+  or a later one, is recorded the same way and waits on that re-record or card. A
+  disturbed run, whose row moved as a whole, counts for nothing and joins no entry,
+  and a red read before master's own run at the tree waits for that run. Each red
+  that counts is recorded before its re-run in a comment on its pull request that
+  carries the attempt's result files and starts with a key that the next session
+  lists the repository's comments for (`docs/how-to/run-the-bench.md`, step 4). An
+  agent's session that holds a red, the fixer, records it, reruns nothing and
+  changes no baseline, and its pull request waits for a person's session. Pull request 111's red on `grip`'s unchecked client row at
+  7248621's tree on 2026-11-04 was such a red, with no rule then; pull requests 102,
+  103 and 106 read red on the same row at trees of their own, which stay changes
+  under ADR 0033 and which this rule does not count
+  ([ADR 0050](docs/decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md);
+  card 199).

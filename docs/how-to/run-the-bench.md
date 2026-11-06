@@ -187,10 +187,26 @@ shared runner is
    `gh run rerun <run id>` (step 5). Download each attempt's artifact before the next
    re-run, `bench-results-bench-linux` from `bench (linux)` for `bench`,
    `bench-results-grip-linux` from `bench (grip)` for `grip` or
-   `bench-results-bench-linux-link` from `bench (udp)` for the link: a re-run replaces
-   the run's artifact of the same name, and the run's page and the artifacts endpoint
-   keep only the newest attempt's, so an attempt whose artifact was not saved first is
-   a lost process (attempts 1 and 2 of run 41196273792 went that way on 2026-10-31).
+   `bench-results-bench-linux-link` from `bench (udp)` for the link. After a re-run of
+   one job, the run's artifacts endpoint lists two artifacts of that name, one per
+   attempt (runs 42104363740 and 42105029604 on 2026-11-05, and run 41853288029 in
+   ADR 0050's Evidence), and `gh run download <run id> --name <artifact>` fetches one
+   of them, not always the newest. So list them, tell the attempts apart (an artifact's
+   `expires_at` less seven days is its attempt's `run_started_at`, to within 3 seconds
+   on those runs), and take each attempt's artifact by its id into a new directory each:
+
+   ```sh
+   # ignore: needs gh signed in; the run id, the attempt number and the artifact name are the job's
+   gh api repos/appshapes/cavalry/actions/runs/<run id>/artifacts --jq '.artifacts[] | select(.name == "<artifact>") | "\(.id) \(.expires_at)"'
+   gh api repos/appshapes/cavalry/actions/runs/<run id>/attempts/<n> --jq .run_started_at
+   gh api repos/appshapes/cavalry/actions/artifacts/<id>/zip > <id>.zip && unzip -d <a new directory> <id>.zip
+   ```
+
+   After a re-run of every job, which a link row's whole-run re-run is
+   (step 5), the run's page and the artifacts endpoint keep the newest attempt's
+   alone, so an attempt whose artifact was not saved first is a lost process (attempts
+   1 and 2 of run 41196273792 went that way on 2026-10-31). Every artifact expires
+   seven days after its attempt began.
    Pass one profile's
    files to one `--update`, the `bench-linux` results in one call and the
    `bench-linux-unchecked` results in another, or the `grip-linux` and
@@ -213,15 +229,164 @@ shared runner is
    with its p99.99 and its rate fell against the other processes at the tree, the
    host was disturbed during the run (the troubleshooting list below); re-run the job,
    or for a link row the whole run (step 5), and name the disturbance where the host's
-   journal shows it. A baseline is re-recorded at a new tree when master's own run fails or
-   brushes the gate there with no data-plane change behind it, from the tree's first
-   three processes and every one after them; the commit lists every gated row's
-   slowest run before and after and names the cause of every row that loosens by more
-   than 5 percent, or the card that will find it. A new row joins a baseline that
-   already exists by adding its entry from the tree's processes that have it and
-   leaving the other rows as they were recorded, in a commit that names the row and
-   the runs; `--update` rewrites the whole profile, which is for a host whose numbers
-   moved, never for one new row.
+   journal shows it.
+
+   A baseline is re-recorded at a new tree when master's own run fails or brushes the
+   gate there with no data-plane change behind it, from the tree's first three
+   processes and every one after them; the commit lists every gated row's slowest run
+   before and after and names the cause of every row that loosens by more than 5
+   percent, or the card that will find it. It is re-recorded at master's tree as well
+   when pull requests at that tree read red while master's own runs there pass,
+   against an entry recorded at an older tree, and no commit on the guard's paths,
+   item 4 below, lies between the entry's tree and master's
+   ([ADR 0050](../decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)).
+   Four rules decide which reds count:
+
+   - A pull request at master's tree is one that changes none of the tree's paths. A
+     red at a pull request's own tree is a change and does not count.
+   - A disturbed run, whose row moved as a whole, does not count. Re-run it as above,
+     and record it in no entry.
+   - Count the reds on one row of one profile. A red on another row, or in the host's
+     other profile, starts a count of its own.
+   - A red counts once master has a passing run at the tree. A red read before
+     master's own run there waits for it: a master run that fails or brushes the gate
+     is ADR 0033's own case, above, and the red counts nothing; a passing one makes
+     the red count from then. Record it at once all the same; a record the other case
+     overtakes stays where it is.
+
+   Record each red that counts before you do anything else about it: the first before
+   its re-run, the second before the re-record or the card. The second red can come
+   days later, on another pull request and in another session, and the re-record
+   needs the first red's process. After a re-run, each attempt's artifact is under the
+   same name and is taken by its id, and the artifact expires after seven days. So the
+   record is a
+   comment on the pull request that carries the attempt's result files. A file
+   downloaded into a CI workspace, where the writer and the fixer run, is gone when
+   the job ends.
+
+   1. **Download.** Download the red attempt's artifact by its id into a new directory,
+      with the three commands above.
+   2. **Find the tree.** The result's `git` is the run's merge of the pull request
+      with master, and its first parent is master's commit. The tree's first commit is
+      the newest commit in that commit's history that changed the tree's paths. For
+      pull request 111's red:
+
+      ```sh
+      # ignore: needs gh signed in and master fetched; the commit is the red result's `git`
+      gh api repos/appshapes/cavalry/commits/ab9cf24b84c159f37e5cccae506aeede7a5175ee --jq '.parents[0].sha'
+      git log -1 --format='%H %cI' 72486215fbb884cedfd5866839ed93e49d1dedef -- crates/ bench/src bench/host bench/Cargo.toml Cargo.toml Cargo.lock justfile
+      ```
+
+      The first command prints master's commit,
+      `72486215fbb884cedfd5866839ed93e49d1dedef`. The second, given that commit,
+      prints the tree's first commit and its date,
+      `72486215fbb884cedfd5866839ed93e49d1dedef 2026-11-04T14:53:53Z`.
+   3. **Look for an earlier red** on the same row of the same profile at the tree,
+      with the date and the commit that **Find the tree** printed:
+
+      ```sh
+      # ignore: needs gh signed in; the date, profile, row and commit are the red's
+      gh api --method GET --paginate repos/appshapes/cavalry/issues/comments -f since=2026-11-04T14:53:53Z -f per_page=100 --jq '.[] | select(.body | startswith("ADR 0050 red: grip-linux-unchecked claim_commit_32_client at the tree of 72486215fbb884cedfd5866839ed93e49d1dedef")) | .html_url'
+      ```
+
+      It reads every comment on the repository's issues and pull requests since the
+      tree began, and prints the address of each record of a red on that row there.
+      If it prints nothing, your red is the first. If it prints one address, your red
+      is the second. If it prints two or more, your red is a later one: record it as
+      a second red, linking the record before it, and do not re-run it. Its pull
+      request waits on the re-record or the card the second red already has; nothing
+      is re-recorded or carded twice.
+   4. **List the changes**, at a second red only: the changes behind the band. These
+      are the commits on master after the entry's tree, up to master's commit from
+      **Find the tree**, on the tree's paths except `crates/cavalry-control` and
+      `crates/cavalry`, the two crates CLAUDE.md does not mark data plane. The list
+      keeps, on purpose, the data-plane crates the harness does not build yet,
+      `crates/cavalry-ffi` and `crates/cavalry-raft`, and test files, which it never
+      compiles: the guard errs toward a card. Start the range at
+      one of the entry's `git` commits that is on master (`git merge-base
+      --is-ancestor <commit> origin/master` exits 0 for one), or, for a pull request's
+      merge commit, at its first parent, read as in **Find the tree**. For a second
+      red at 7248621's tree, against the entry of 2026-10-31,
+      whose commits are 0782ec5, on master, and 11be900, a pull request's merge commit
+      whose first parent is 0782ec5:
+
+      ```sh
+      # ignore: needs master fetched; the range runs from the entry's commit to master's commit
+      git log --oneline 0782ec5c7f44465a38c65d7cf31eae9b45611268..72486215fbb884cedfd5866839ed93e49d1dedef -- crates/ bench/src bench/host bench/Cargo.toml Cargo.toml Cargo.lock justfile ':!crates/cavalry-control' ':!crates/cavalry'
+      ```
+
+      It prints eighteen commits, from b6fc3ed back to e5943f9, with pull request
+      102's 06e3ccc among them.
+   5. **Post the record.** Write the record to a file and post it with `gh pr comment
+      <number> --body-file <file>`, as a comment of its own, so that the key is its
+      first line. An agent's session writes the file with its file tools. Pull
+      request 111's red would have read:
+
+      ````text
+      ADR 0050 red: grip-linux-unchecked claim_commit_32_client at the tree of 72486215fbb884cedfd5866839ed93e49d1dedef
+
+      First red. Run 41853288029, attempt 1, job 126655372604, pull request 111 at 1545bab, git ab9cf24.
+      p99.99 127 ns (runs 119 to 134) against the entry's 119 ns, +6.7%. p50 21 ns, 14,589,196 claims a second.
+
+      ~~~json grip-linux-<time>.json
+      <the attempt's grip-linux result file, whole>
+      ~~~
+
+      ~~~json grip-linux-unchecked-<time>.json
+      <the attempt's grip-linux-unchecked result file, whole>
+      ~~~
+      ````
+
+      The key is `ADR 0050 red:`, the profile, the row, and `at the tree of` with the
+      full hash of the tree's first commit. Each result file goes in a `~~~json` fence
+      that names the file. A `grip` result file is about 5 KB, and a comment holds
+      65,536 characters. A second red's record says `Second red.`, links the first's,
+      and carries what **List the changes** printed; a later red's says `Third red.`,
+      and so on, and links the record before it.
+
+   After a first red, a person's session re-runs the job, or for a link row the whole
+   run (step 5); an agent's session cannot,
+   as below. After a second red or a later one, nobody re-runs. What a second red does
+   depends on what **List the changes** printed:
+
+   - **Nothing.** The second red re-records that profile's entry at the tree from
+     every process at it whose artifact is still kept and from every red's record,
+     so that the red runs are among them, in the form above, in a commit that names
+     the reds by run, attempt and row.
+   - **One commit or more.** The second red re-records nothing. The band may have
+     risen with those changes rather than with the host, and one process at each
+     change's own tree could not tell the two apart. A person's session opens a card
+     that names the two reds and the commits on the row's path. The pull request
+     waits until the card's answer is on master. The answer is either a fix, which
+     begins a new tree, or a person's re-record whose message says why each row
+     loosened, by any amount, as `REGRESSION` on a p99.99 under
+     [When it does not work](#when-it-does-not-work) says.
+
+   A re-record takes each red's result files from its record, one file at a time,
+   with the comment's id (the number after `issuecomment-` in its address) and the
+   file's name from its fence:
+
+   ```sh
+   # ignore: needs gh signed in; the comment id and the file name are the record's
+   gh api repos/appshapes/cavalry/issues/comments/<comment id> --jq '.body | gsub("\r"; "") | split("\n~~~json grip-linux-unchecked-<time>.json\n")[1] | split("\n~~~")[0]' > grip-linux-unchecked-<time>.json
+   ```
+
+   The re-record is a person's commit on a branch of its own, and so is the re-run of
+   a first red: an agent's job can read runs and start none. The agent's session that
+   holds a red is the fixer, when the reviewer blocked on a red bench job at the head
+   before it; the writer's session ends before its pull request's first run. The
+   fixer records the red as above, re-runs nothing, changes no `bench/baseline.json`
+   and opens no card, and its run ends with no push, which fails as
+   `.claude/agents/developer.md` designs it. A person's session then re-runs the job
+   after a first red, and after a second makes the re-record or opens the card. The
+   pull request that holds the second red waits, and its job is not re-run: its next
+   run is the one that a merge of master into the branch starts once the re-record or
+   the card's answer is on master, judged against the entry master then holds.
+
+   A new row joins a baseline that already exists by adding its entry from the tree's
+   processes that have it and leaving the other rows as they were recorded, in a
+   commit that names the row and the runs; `--update` rewrites the whole profile,
+   which is for a host whose numbers moved, never for one new row.
 
 5. Measure the link between the two bench hosts, which the `bench (udp)` job does on
    every push with its peer job `bench (udp peer)`
