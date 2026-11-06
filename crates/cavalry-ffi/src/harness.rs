@@ -14,11 +14,15 @@ use std::ptr;
 use crate::client::{
     cavalry_add_publication, cavalry_add_subscription, cavalry_close, cavalry_init, cavalry_t,
 };
-use crate::codes::CAVALRY_ABI_VERSION;
+use crate::codes::{
+    CAVALRY_ABI_VERSION, CAVALRY_PUBLICATION_ADMIN_ACTION, CAVALRY_PUBLICATION_BACK_PRESSURED,
+    CAVALRY_PUBLICATION_CLOSED, CAVALRY_PUBLICATION_ERROR,
+    CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED, CAVALRY_PUBLICATION_NOT_CONNECTED,
+};
 use crate::context::{
     cavalry_context_close, cavalry_context_init_v, cavalry_context_set_dir, cavalry_context_t,
 };
-use crate::error::{cavalry_errcode, cavalry_errmsg};
+use crate::error::{DOC, cavalry_errcode, cavalry_errmsg};
 use crate::publication::{
     cavalry_buffer_claim_commit, cavalry_buffer_claim_t, cavalry_publication_close,
     cavalry_publication_position, cavalry_publication_t, cavalry_publication_try_claim,
@@ -36,6 +40,57 @@ fn last_error(function: &str) -> String {
         "{function} failed with code {}: {message}",
         cavalry_errcode()
     )
+}
+
+/// What a claim's result `code`, one of `CAVALRY_PUBLICATION_*`, tells its caller, as
+/// `Offer`'s message tells the Rust client's: the define, what to do next, the thread's
+/// error after `CAVALRY_PUBLICATION_ERROR`, and the page's anchor (`spec/c-abi.md`,
+/// "Result codes"). It allocates, so it is for the error path, after a refusal the
+/// caller does not retry.
+pub fn refusal(code: i64) -> String {
+    let (name, next) = match code {
+        CAVALRY_PUBLICATION_NOT_CONNECTED => (
+            "CAVALRY_PUBLICATION_NOT_CONNECTED",
+            "no subscriber has a position on this stream; nothing is lost, try again when \
+             one connects",
+        ),
+        CAVALRY_PUBLICATION_BACK_PRESSURED => (
+            "CAVALRY_PUBLICATION_BACK_PRESSURED",
+            "the slowest subscriber is a window behind; try again later, and read \
+             cavalry_image_position to find it",
+        ),
+        CAVALRY_PUBLICATION_ADMIN_ACTION => (
+            "CAVALRY_PUBLICATION_ADMIN_ACTION",
+            "the term rotated; try again at once",
+        ),
+        CAVALRY_PUBLICATION_CLOSED => (
+            "CAVALRY_PUBLICATION_CLOSED",
+            "the client is closed, and cavalry_closed says why; connect a new client and add \
+             the publication again",
+        ),
+        CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED => (
+            "CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED",
+            "the stream reached the largest position its term length allows; close the \
+             publication and add a new one",
+        ),
+        CAVALRY_PUBLICATION_ERROR => {
+            // SAFETY: the message is NUL-terminated and valid until the next failing
+            // call, and none runs before it is copied here.
+            let message = unsafe { CStr::from_ptr(cavalry_errmsg()) }.to_string_lossy();
+            return format!(
+                "claim refused (CAVALRY_PUBLICATION_ERROR, {code}): the thread's error, code \
+                 {}, says what happened and what to do next: {message}; see \
+                 {DOC}#result-codes",
+                cavalry_errcode()
+            );
+        }
+        _ => (
+            "a value spec/c-abi.md does not define",
+            "a claim returns a position or one of the six; report this message as a bug in \
+             cavalry-ffi",
+        ),
+    };
+    format!("claim refused ({name}, {code}): {next}; see {DOC}#result-codes")
 }
 
 /// A client made through the ABI: a context and a client handle.
@@ -255,5 +310,80 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         // SAFETY: a wrapper dropped without `close` closes its handle once, here.
         unsafe { cavalry_subscription_close(self.0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cavalry_client::Offer;
+
+    use super::*;
+    use crate::codes::CAVALRY_ERR_TOO_LONG;
+    use crate::error::offer_code;
+
+    const ANCHOR: &str = "; see docs/reference/c-abi.md#result-codes";
+
+    #[test]
+    fn a_refusal_names_its_define_and_what_to_do_next() {
+        for (code, name, next) in [
+            (
+                CAVALRY_PUBLICATION_NOT_CONNECTED,
+                "CAVALRY_PUBLICATION_NOT_CONNECTED",
+                "try again when one connects",
+            ),
+            (
+                CAVALRY_PUBLICATION_BACK_PRESSURED,
+                "CAVALRY_PUBLICATION_BACK_PRESSURED",
+                "try again later",
+            ),
+            (
+                CAVALRY_PUBLICATION_ADMIN_ACTION,
+                "CAVALRY_PUBLICATION_ADMIN_ACTION",
+                "try again at once",
+            ),
+            (
+                CAVALRY_PUBLICATION_CLOSED,
+                "CAVALRY_PUBLICATION_CLOSED",
+                "connect a new client",
+            ),
+            (
+                CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED,
+                "CAVALRY_PUBLICATION_MAX_POSITION_EXCEEDED",
+                "close the publication and add a new one",
+            ),
+            (
+                -7,
+                "a value spec/c-abi.md does not define",
+                "report this message",
+            ),
+        ] {
+            let message = refusal(code);
+            assert!(
+                message.starts_with(&format!("claim refused ({name}, {code}): ")),
+                "{message}"
+            );
+            assert!(message.contains(next), "{message}");
+            assert!(message.ends_with(ANCHOR), "{message}");
+        }
+    }
+
+    #[test]
+    fn an_error_refusal_carries_the_threads_error() {
+        let too_long = Offer::TooLong {
+            found: 9000,
+            limit: 8160,
+        };
+        assert_eq!(offer_code(&too_long), CAVALRY_PUBLICATION_ERROR);
+        let message = refusal(CAVALRY_PUBLICATION_ERROR);
+        assert!(
+            message.starts_with("claim refused (CAVALRY_PUBLICATION_ERROR, -6): "),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("code {CAVALRY_ERR_TOO_LONG}")),
+            "{message}"
+        );
+        assert!(message.contains(&too_long.to_string()), "{message}");
+        assert!(message.ends_with(ANCHOR), "{message}");
     }
 }

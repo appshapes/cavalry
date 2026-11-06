@@ -17,7 +17,10 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
   `staticlib`, which `conformance/c/` links, and `rlib`, which the bench and this
   README's example call. The `harness` module is the bench's way in: one safe call
   per `extern "C"` function for the `ffi` rows, since `bench/` may hold no `unsafe`;
-  it is not part of the ABI, and the header declares none of it.
+  it is not part of the ABI, and the header declares none of it. Its `refusal` turns
+  a claim's result code into the message a run that stops on it prints: the
+  `CAVALRY_PUBLICATION_*` define, what to do next, the thread's error after
+  `CAVALRY_PUBLICATION_ERROR`, and the page's anchor.
 
 In Aeron, this is the C client, which re-implements the Java one; here the Rust core is
 the only implementation and the C ABI is a thin layer over it

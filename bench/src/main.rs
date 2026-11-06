@@ -1491,7 +1491,7 @@ fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
                     }
                     std::hint::spin_loop();
                 }
-                other => return Err(format!("the claim through the ABI returned {other}")),
+                other => return Err(harness::refusal(other)),
             }
         }
         stalled = 0;
