@@ -10,7 +10,15 @@ forms are `threading`'s locks and anything else of `threading`, `async def`, `aw
 `clients/node/index.js` without a parser, by a tokenizer that drops comments and strings
 and matches braces, they are `async` on the function, `await`, `Promise`, `.then(`,
 `throw`, building one of the package's own `Error` classes, and `Atomics.wait`, the one
-blocking wait the language has. A call reaches the package's own functions by name: a
+blocking wait the language has. The Node client's addon, `clients/node/src/addon.c`, is
+generated client code in C on the same path, so its per-message functions, the trampoline,
+the finalizer of each Buffer, the addon's own `poll`, `headerField`, `view` and `detach`,
+and the wrappers of the claim, the reserved value, the commit, the abort and the offer, are
+read by the same tokenizer for C's forms: a lock, `pthread_mutex_*`, `pthread_rwlock_*`,
+C11's `mtx_*`, libuv's `uv_mutex_*` and `uv_rwlock_*`, and N-API's
+`napi_*threadsafe_function*`; and a raise, `napi_throw*` and `napi_fatal_*`, except in the
+argument readers, which throw a TypeError for an argument of the wrong type before the ABI
+is called. A call reaches the package's own functions by name: a
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
 The one raise allowed is in `poll`, after the last line that calls the ABI, where the
@@ -87,6 +95,29 @@ RULES = {
             "Header.reservedValue",
         ],
         "raise_after": ("Subscription.poll", "addon.poll"),
+        # The addon is generated client code in C on the same path: the functions the
+        # per-message functions above call and the trampoline the ABI calls, with the
+        # finalizer Node calls for each of their Buffers. The argument readers may throw a
+        # TypeError or a RangeError for an argument of the wrong type, before the ABI is
+        # called, as `offer("hello")` does; nothing else on the path throws.
+        "addon": {
+            "file": os.path.join("src", "addon.c"),
+            "functions": [
+                "trampoline",
+                "buffer_freed",
+                "fn_poll",
+                "fn_headerField",
+                "fn_view",
+                "fn_detach",
+                "fn_cavalry_publication_try_claim",
+                "fn_cavalry_buffer_claim_set_reserved_value",
+                "fn_cavalry_buffer_claim_commit",
+                "fn_cavalry_buffer_claim_abort",
+                "fn_cavalry_publication_offer",
+            ],
+            "readers": ["read_args", "type_error", "is_nullish", "external_arg", "bytes_arg", "struct_arg",
+                        "string_arg", "int64_arg", "int32_arg", "size_arg", "bool_arg"],
+        },
     },
 }
 HELP = "see clients/README.md, \"What every client must pass\""
@@ -432,14 +463,113 @@ class Module:
         return found
 
 
-def node_findings(language: str, path: str, rules: dict) -> list[str]:
+# ------------------------------------------------------------------ C, the Node addon
+
+C_FORMS = (
+    # (kind, pattern over the code with comments and strings blanked, what the finding says)
+    ("threading", re.compile(r"(?<![\w$])pthread_mutex_\w+\s*\("), "calls `pthread_mutex_*`"),
+    ("threading", re.compile(r"(?<![\w$])pthread_rwlock_\w+\s*\("), "calls `pthread_rwlock_*`"),
+    ("threading", re.compile(r"(?<![\w$])mtx_\w+\s*\("), "calls C11's `mtx_*`"),
+    ("threading", re.compile(r"(?<![\w$])uv_mutex_\w+\s*\("), "calls libuv's `uv_mutex_*`"),
+    ("threading", re.compile(r"(?<![\w$])uv_rwlock_\w+\s*\("), "calls libuv's `uv_rwlock_*`"),
+    ("threading", re.compile(r"(?<![\w$])napi_\w*threadsafe_function\w*\s*\("),
+     "calls an N-API thread-safe function, `napi_*threadsafe_function*`"),
+    ("raise", re.compile(r"(?<![\w$])napi_throw\w*\s*\("), "throws, `napi_throw*`"),
+    ("raise", re.compile(r"(?<![\w$])napi_fatal_(?:error|exception)\s*\("), "calls `napi_fatal_*`"),
+)
+C_WORDS = {"if", "for", "while", "switch", "return", "sizeof", "defined", "_Alignof", "_Static_assert"}
+
+
+class CModule:
+    """The addon's C, read as Module reads JavaScript: its functions at file scope, each with
+    its line, body and where the body starts, found by a definition at the start of a line,
+    and what each reaches, through calls to the module's own functions by name. A raise in
+    one of the argument readers, `readers`, is not one: a reader throws a TypeError or a
+    RangeError for an argument of the wrong type, before the ABI is called."""
+
+    FUNCTION = re.compile(r"^(?:static\s+)?(?:inline\s+)?[A-Za-z_][\w \t*]*?[\s*]([A-Za-z_]\w*)\s*\(([^;{}]*?)\)\s*\{",
+                          re.M)
+
+    def __init__(self, text: str, readers):
+        self.code = blank(text)
+        self.functions: dict[str, tuple[int, str, int]] = {}  # name: (line, body, body's start)
+        for m in self.FUNCTION.finditer(self.code):
+            brace = m.end() - 1
+            self.functions[m.group(1)] = (line_of(self.code, m.start()), self.code[brace:block_end(self.code, brace)],
+                                          brace)
+        self.readers = set(readers)
+        self.reached: dict[str, dict[str, str]] = {}
+
+    def forms(self, label: str):
+        """Each form in the function's own body as (kind, line, text), a reader's raise
+        left out, and each call to the module's own functions as ("call", line, callee)."""
+        _, body, start = self.functions[label]
+        base = line_of(self.code, start) - 1
+        for kind, pattern, what in C_FORMS:
+            if kind == "raise" and label in self.readers:
+                continue
+            for m in pattern.finditer(body):
+                at = base + body.count("\n", 0, m.start()) + 1
+                yield kind, at, f"{what} at line {at}"
+        for m in re.finditer(r"(?<![\w$])([A-Za-z_]\w*)\s*\(", body):
+            name = m.group(1)
+            if name in self.functions and name != label and name not in C_WORDS:
+                yield "call", base + body.count("\n", 0, m.start()) + 1, name
+
+    def reach(self, label: str) -> dict[str, str]:
+        """{kind: how `label` reaches it}, for the first form of each kind in its body or in
+        the module's functions it calls; memoized, as `Package.reach`."""
+        if label in self.reached:
+            return self.reached[label]
+        found: dict[str, str] = {}
+        self.reached[label] = found
+        for kind, line, what in self.forms(label):
+            if kind in WHY:
+                found.setdefault(kind, f"{label} {what}")
+                continue
+            for k, how in self.reach(what).items():
+                found.setdefault(k, f"{label} calls {what} at line {line}, and {how}")
+        return found
+
+
+def c_findings(language: str, path: str, rules: dict) -> list[str]:
+    """The addon's per-message functions, and the module's functions they call, against
+    C_FORMS."""
     with open(path, encoding="utf-8") as f:
-        module = Module(f.read())
-    findings = []
+        module = CModule(f.read(), rules["readers"])
     present = [name for name in rules["functions"] if name in module.functions]
     if not present:
-        return [f"{language}: none of the per-message functions {', '.join(rules['functions'])} is in {path}; "
+        return [f"{language}: none of the addon's per-message functions {', '.join(rules['functions'])} is in {path}; "
                 f"the generator renamed them or the rules are stale; {HELP}"]
+    findings = [f"{language}: the addon's per-message function {name} is not in {path}; {HELP}"
+                for name in rules["functions"] if name not in module.functions]
+    for name in present:
+        where = f"{language}: {name} ({os.path.relpath(path, ROOT)}:{module.functions[name][0]})"
+        for kind, at, what in module.forms(name):
+            if kind in WHY:
+                findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
+                continue
+            for k, how in module.reach(what).items():
+                findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
+    return findings
+
+
+def node_findings(language: str, path: str, rules: dict) -> list[str]:
+    findings = []
+    addon = rules.get("addon")
+    if addon is not None:
+        source = os.path.join(os.path.dirname(path), addon["file"])
+        if os.path.exists(source):
+            findings.extend(c_findings(language, source, addon))
+        else:
+            findings.append(f"{language}: {os.path.relpath(source, ROOT)} is missing; run "
+                            f"`python3 clients/generate.py {language}`")
+    with open(path, encoding="utf-8") as f:
+        module = Module(f.read())
+    present = [name for name in rules["functions"] if name in module.functions]
+    if not present:
+        return findings + [f"{language}: none of the per-message functions {', '.join(rules['functions'])} is in "
+                           f"{path}; the generator renamed them or the rules are stale; {HELP}"]
     for name in rules["functions"]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")

@@ -11,7 +11,14 @@ rules fails. The same for the Node client's `index.js`: a per-message function t
 `Atomics.wait` or calls the module's throwing `check`, fails naming the function and the
 form; a throw in `poll` after the addon's `poll` call passes and one before it fails; a
 header getter that throws fails; a module with none of the per-message functions fails,
-and a missing `index.js` says to generate. `just test` runs this through `test-scripts`.
+and a missing `index.js` says to generate. The same for the Node client's addon,
+`src/addon.c`: one test per C form, `pthread_mutex_*` in the trampoline,
+`pthread_rwlock_*` in the view, C11's `mtx_*` in the poll, libuv's `uv_mutex_*` in a helper
+the trampoline calls, `uv_rwlock_*` in the header's field, an N-API thread-safe function in
+the offer, `napi_throw*` in the commit and `napi_fatal_*` in the Buffers' finalizer, each
+failing and naming the function and the form; an argument reader's throw passes and the
+same throw in a helper the poll calls fails; a missing per-message function, an addon with
+none, and a missing addon fail. `just test` runs this through `test-scripts`.
 """
 
 import os
@@ -35,6 +42,7 @@ class Clients(unittest.TestCase):
         shutil.copytree(os.path.join(lint.CLIENTS, "node"), os.path.join(self.tmp, "node"),
                         ignore=shutil.ignore_patterns("build", "node_modules", "package-lock.json"))
         self.node = os.path.join(self.tmp, "node", "index.js")
+        self.addon = os.path.join(self.tmp, "node", "src", "addon.c")
 
     def edit(self, old, new, count=1, file=None):
         file = file or self.file
@@ -46,6 +54,21 @@ class Clients(unittest.TestCase):
 
     def edit_node(self, old, new, count=1):
         self.edit(old, new, count, file=self.node)
+
+    def add_to_addon(self, function, line):
+        """`line` as the first statement of the addon's C function `function`."""
+        opening = f"static napi_value {function}(napi_env env, napi_callback_info info) {{\n"
+        if function in ("trampoline", "buffer_freed", "keep_failure", "report"):
+            opening = {"trampoline": "  subscription_state_t *s = clientd;\n",
+                       "buffer_freed": "  (void) env; (void) data; (void) hint;\n",
+                       "keep_failure": "  if (s->first != FIRST_NONE) return;\n  s->first = FIRST_FAILURE;\n",
+                       "report": "  napi_value tuple, first = NULL, holder = NULL;\n"}[function]
+        self.edit(opening, opening + f"  {line}\n", file=self.addon)
+
+    def assert_addon_finding(self, function, form):
+        found = lint.findings(self.tmp)
+        self.assertTrue(any(f.startswith(f"node: {function} (") and form in f for f in found), found)
+        return found
 
     def test_the_committed_package_passes(self):
         self.assertEqual(lint.findings(lint.CLIENTS), [])
@@ -252,6 +275,82 @@ class Clients(unittest.TestCase):
         [finding] = lint.findings(self.tmp)
         self.assertIn("index.js is missing", finding)
         self.assertIn("python3 clients/generate.py node", finding)
+
+    # The Node client's addon, src/addon.c, read by the same tokenizer for C's forms.
+
+    def test_a_pthread_mutex_in_the_trampoline_fails(self):
+        self.add_to_addon("trampoline", "pthread_mutex_lock(&lock);")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("node: trampoline (", finding)
+        self.assertIn("calls `pthread_mutex_*`", finding)
+
+    def test_a_pthread_rwlock_in_the_view_fails(self):
+        self.add_to_addon("fn_view", "pthread_rwlock_rdlock(&lock);")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("node: fn_view (", finding)
+        self.assertIn("calls `pthread_rwlock_*`", finding)
+
+    def test_a_c11_mtx_in_the_poll_fails(self):
+        self.add_to_addon("fn_poll", "mtx_lock(&lock);")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("node: fn_poll (", finding)
+        self.assertIn("calls C11's `mtx_*`", finding)
+
+    def test_a_uv_mutex_in_a_helper_the_trampoline_calls_fails(self):
+        self.add_to_addon("keep_failure", "uv_mutex_lock(&lock);")
+        self.assert_addon_finding("trampoline", "calls keep_failure")
+        self.assert_addon_finding("trampoline", "keep_failure calls libuv's `uv_mutex_*`")
+
+    def test_a_uv_rwlock_in_the_header_field_fails(self):
+        self.add_to_addon("fn_headerField", "uv_rwlock_rdlock(&lock);")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("node: fn_headerField (", finding)
+        self.assertIn("calls libuv's `uv_rwlock_*`", finding)
+
+    def test_a_threadsafe_function_in_the_offer_fails(self):
+        self.add_to_addon("fn_cavalry_publication_offer", "napi_call_threadsafe_function(tsfn, NULL, napi_tsfn_blocking);")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("node: fn_cavalry_publication_offer (", finding)
+        self.assertIn("`napi_*threadsafe_function*`", finding)
+
+    def test_a_throw_in_the_commit_fails(self):
+        self.add_to_addon("fn_cavalry_buffer_claim_commit", "napi_throw_error(env, NULL, \"no\");")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("node: fn_cavalry_buffer_claim_commit (", finding)
+        self.assertIn("throws, `napi_throw*`", finding)
+
+    def test_a_fatal_error_in_the_buffers_finalizer_fails(self):
+        self.add_to_addon("buffer_freed", "napi_fatal_error(\"here\", NAPI_AUTO_LENGTH, \"no\", NAPI_AUTO_LENGTH);")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("node: buffer_freed (", finding)
+        self.assertIn("calls `napi_fatal_*`", finding)
+
+    def test_an_argument_readers_throw_passes_and_the_same_throw_elsewhere_fails(self):
+        """The readers throw a TypeError for an argument of the wrong type, and the committed
+        addon passes with them; the same throw in report, which poll calls once the ABI has
+        returned and which reads no argument, is a raise on the path."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.add_to_addon("report", "napi_throw_type_error(env, NULL, \"no\");")
+        self.assert_addon_finding("fn_poll", "calls report")
+        self.assert_addon_finding("fn_poll", "report throws, `napi_throw*`")
+
+    def test_a_missing_addon_per_message_function_fails(self):
+        self.edit("static napi_value fn_view(", "static napi_value fn_view_renamed(", file=self.addon)
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("the addon's per-message function fn_view is not in" in f for f in found), found)
+
+    def test_a_missing_addon_says_to_generate(self):
+        os.remove(self.addon)
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("src/addon.c is missing", finding)
+        self.assertIn("python3 clients/generate.py node", finding)
+
+    def test_an_addon_without_the_per_message_functions_fails(self):
+        with open(self.addon, "w", encoding="utf-8") as f:
+            f.write("static int nothing(void) {\n  return 1;\n}\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("none of the addon's per-message functions", finding)
+        self.assertIn("trampoline", finding)
 
     def test_the_tokenizer_blanks_comments_and_strings_and_keeps_lines(self):
         source = "const a = \"th//row\"; // throw\nconst b = `aw${x}ait`; /* await\n */ const c = '\\''; throw a;\n"

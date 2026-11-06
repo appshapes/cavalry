@@ -27,8 +27,14 @@ needs and both CI runners and the ten-minute path's machines have.
 
 - Never run a message through anything but one ABI call: no lock, no `await`, no
   promise, no copy of a fragment into a new array for the handler. `clients/lint.py`
-  reads the per-message functions for JavaScript's forms of each (`async`, `await`,
-  `Promise`, `.then`, `throw`, `Atomics.wait`) and `just lint` fails on any of them.
+  reads the per-message functions of `index.js` for JavaScript's forms of each
+  (`async`, `await`, `Promise`, `.then`, `throw`, `Atomics.wait`), and those of
+  `src/addon.c`, the trampoline, the Buffers' finalizer, `poll`, `headerField`, `view`,
+  `detach` and the wrappers of the claim, the reserved value, the commit, the abort
+  and the offer, for C's (`pthread_mutex_*`, `pthread_rwlock_*`, `mtx_*`,
+  `uv_mutex_*`, `uv_rwlock_*`, `napi_*threadsafe_function*`, and `napi_throw*` and
+  `napi_fatal_*` outside the argument readers). `just lint` fails on any of them, in
+  the function's own body or in a function of the package it calls.
 - Never throw for an `Offer` code: `tryClaim` and `offer` return the position after
   the frame or the code below zero (`NOT_CONNECTED`, `BACK_PRESSURED`, `ADMIN_ACTION`,
   `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the caller branches.

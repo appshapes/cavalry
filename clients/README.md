@@ -50,8 +50,10 @@ writer module of their own.
   reserved value, the commit and abort, the offer, the poll and the header's values)
   and the trampoline that calls the user's handler: no lock, no `await`, no raise, in
   the language's forms, in the function's own body or in any function of the package
-  it calls. It fails on generated code in a language it has no rules for, on a package
-  in which it finds none of the per-message functions, and on one that is missing.
+  it calls. Generated code of the client in another language on the same path is read
+  in that language's forms, as the Node addon's C is. It fails on generated code in a
+  language it has no rules for, on a package in which it finds none of the
+  per-message functions, and on one that is missing.
 - The client's README answers the four questions every crate README answers, with the
   ten-minute path's program in its language as the example, and records the
   runtime's side of the boundary: how the runtime calls the fragment handler back,
