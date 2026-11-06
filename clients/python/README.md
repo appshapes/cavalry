@@ -180,9 +180,9 @@ No counter in Python's standard library sees an object made and freed within one
 message, so the runner reports net figures. Its allocation round sends 10,000 messages
 whose handler only counts and whose publisher writes one constant, with `tracemalloc`
 on for that round alone. On a Linux CI runner (Python 3.12.3): `sys.getallocatedblocks`,
-read before and after the round with nothing read between, +0.001 live blocks per
+read before and after the round with nothing read between, +0.000 live blocks per
 message; `tracemalloc`, its own snapshots left out, +0.001 traced blocks and +0.0 bytes
-per message, and a peak of 1,156 bytes traced above the round's start. So every object
+per message, and a peak of 1,084 bytes traced above the round's start. So every object
 a message makes is freed before the next, and no more than about 1 KB of them is alive
 at once. The objects listed above are the per-message churn behind those net figures.
 
@@ -191,8 +191,8 @@ at once. The objects listed above are the per-message churn behind those net fig
 The runner's latency round sends 100,000 messages over `cavalry:ipc`, one at a time on
 one thread, with `tracemalloc` off. The publisher writes `perf_counter_ns` into the
 claim before its commit, and the handler reads the clock first. On the same runner,
-unpinned: p50 981 ns, p99 1,522 ns, p99.99 7,515 ns (10 samples above it, nearest
-rank), max 62,257 ns. That is the whole path through Python, the claim, the commit, the
+unpinned: p50 1,022 ns, p99 1,503 ns, p99.99 6,342 ns (10 samples above it, nearest
+rank), max 23,364 ns. That is the whole path through Python, the claim, the commit, the
 poll and the call-back, the release of each view included ("What it must never do").
 The bench's `one_way_<body>_ffi` row measures the path through the C ABI alone, with
 the publisher and the subscriber pinned on threads of their own
