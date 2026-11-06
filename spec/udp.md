@@ -604,6 +604,7 @@ Aeron's, and the driver's in this version; a configuration key for one needs its
 | session records | 4096 per driver, twice the images registry; a datagram for a 4097th session is dropped and counted in `receiver.sessions_full` |
 | linger | 5 s, `spec/client-protocol.md`'s publication linger |
 | datagrams per burst, per poll | 16; a burst goes to every destination of a control channel, so a cycle sends at most 16 × the destinations |
+| sender requests per cycle | 16; the sender takes its requests, an add or a remove of a publication, an endpoint or a destination, in the order they were queued, at most this many at the start of each duty cycle and none while its replies wait for room, so a destination change takes effect at the start of the cycle that takes it (`spec/client-protocol.md`, "Commands") |
 | send endpoints, receive endpoints | 64 each; a 65th is error code 10 |
 | destinations per send endpoint | 64; a 65th is error code 10 |
 | receivers per `min` publication | 64; a 65th's status messages are accepted and not tracked, counted in `sender.flow_control_receivers_full` |

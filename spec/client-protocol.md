@@ -188,10 +188,12 @@ What the driver does with each, after the checks of "What the driver rejects":
   family, IPv4 or IPv6, that the resolver returns, and adds it to the publication's
   send endpoint, whose every publication then sends to it (`spec/udp.md`, "The
   sender"); it answers `operation success` once it has queued the change for the
-  sender, which takes it at the start of its next duty cycle, so that the burst the
-  sender gathers in the cycle under way when the answer arrives may not yet go to the
-  destination and every later cycle's burst does; the answer does not wait for the
-  sender, as Aeron's destination commands do not (ADR 0057). A destination is its endpoint as the add
+  sender, which takes its requests in the order they were queued, at most the sender
+  requests per cycle of `spec/udp.md`, "Values", at the start of each duty cycle, and
+  none while its replies wait for room, so that the change takes effect at the start
+  of the cycle that takes it, the next cycle only when nothing waits ahead of it, and
+  until then nothing the endpoint sends reaches the destination; the answer does not
+  wait for the sender, as Aeron's destination commands do not (ADR 0057). A destination is its endpoint as the add
   writes it, the host compared byte for byte and the port by value: one the endpoint
   already has is added again by nothing and answered the same, so that a client that
   retries after a response timeout is not refused, and two writings of one address
@@ -213,11 +215,11 @@ What the driver does with each, after the checks of "What the driver rejects":
   send endpoint the destination whose endpoint, as its add wrote it, is the one this
   command writes, and resolves nothing, so that a name whose address changed after the
   add removes the address the add resolved; it answers `operation success` once it
-  has queued the change for the sender, as an add does, so that the burst the sender
-  gathers in the cycle under way when the answer arrives, one burst at most, may still
-  reach the removed destination, and a message the publication commits after a
-  remaining destination has received one committed after the answer reaches it no
-  more (ADR 0057). A
+  has queued the change for the sender, as an add does, so that the change takes
+  effect at the start of the cycle that takes it, the next cycle only when nothing
+  waits ahead of it in the sender's queue, and until then everything the endpoint
+  sends, data, retransmissions, setup frames and heartbeats, still reaches the
+  removed destination (ADR 0057). A
   destination the endpoint does not have is removed by nothing and answered the same,
   as `stop recording` of a stopped recording is. The codes are `add destination`'s,
   but code 9, the refusal of an endpoint the control address cannot send to and a
