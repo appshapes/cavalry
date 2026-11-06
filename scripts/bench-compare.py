@@ -26,7 +26,10 @@ process of the same tree that reads a row above it is the host's own band and jo
 baseline with `--join`: on kip a row's median moves by a tenth, and by half on the
 exclusive claim row, between two processes of one tree, and a baseline from one process
 at the bottom of that band failed master's own next run with no change behind it (ADR
-0033). Only
+0033). A row added to an entry by hand holds its percentiles, its slowest run as its
+p99.99 and no runs list (docs/how-to/run-the-bench.md, step 4); a join carries it
+through as such, each percentile the larger of the row's and the new process's and the
+p99.99 the slowest run of both, still with no list (card 221). Only
 the rows a message passes through, claim_commit_*, one_way_* and udp_round_trip_*, can
 fail the gate; the timer and slot_padding_* rows hold no Cavalry code, they probe the host
 and the clock at 30 to 60 ns, where one 10 ns step of the clock is 15 to 33 percent, and
@@ -214,7 +217,11 @@ def update(results: list[dict], baseline: dict, join: bool = False) -> int:
     and clock step, with the same rows; `git` is the one commit, or the list when the
     processes ran at several, and `date` is the newest process's. With `join`, the
     results are added to the entry the profile already has, which must be of the same
-    harness setting and rows: the entry's processes come first, as they were written."""
+    harness setting and rows: the entry's processes come first, as they were written. A
+    row that an earlier process holds with `p99_99_ns_runs` of None, which `joined` gives a
+    row the entry holds with no runs list, a row added by hand, is written with no list
+    again: each percentile the largest over the processes, and `p99_99_ns` the slowest run
+    over them, the row's own value standing for the runs it does not list."""
     if join:
         results = joined(results, baseline)
     results = sorted(results, key=lambda r: r.get("date_unix") or 0)
@@ -248,15 +255,7 @@ def update(results: list[dict], baseline: dict, join: bool = False) -> int:
         "repeat": newest.get("repeat"),
         "processes": len(results),
         **({STEP_FIELD: clock_step(newest)} if clock_step(newest) else {}),
-        "benchmarks": {
-            name: {
-                **{k: max(r["benchmarks"][name][k] for r in results)
-                   for k in SHOWN if all(k in r["benchmarks"][name] for r in results)},
-                "p99_99_ns_runs": [run for r in results
-                                   for run in (r["benchmarks"][name].get("p99_99_ns_runs") or [r["benchmarks"][name][GATED]])],
-            }
-            for name in sorted(newest["benchmarks"])
-        },
+        "benchmarks": {name: written_row(name, results) for name in sorted(newest["benchmarks"])},
     }
     baseline.setdefault("profiles", {})[profile] = entry
     BASELINE.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -267,13 +266,31 @@ def update(results: list[dict], baseline: dict, join: bool = False) -> int:
     return 0
 
 
+def written_row(name: str, results: list[dict]) -> dict:
+    """The entry's row for `name` over the processes: each percentile the largest, and every
+    process's runs in order, a process without a list standing as its p99.99 once. When a
+    process carries the row with `p99_99_ns_runs` of None, a row added by hand that
+    `joined` read back from the entry, the row is written with no list and its p99.99 the
+    slowest run over the processes, the gate's number for a row without a list."""
+    rows = [r["benchmarks"][name] for r in results]
+    written = {k: max(row[k] for row in rows) for k in SHOWN if all(k in row for row in rows)}
+    if any("p99_99_ns_runs" in row and row["p99_99_ns_runs"] is None for row in rows):
+        written[GATED] = max(max(row["p99_99_ns_runs"]) if row.get("p99_99_ns_runs") else row[GATED] for row in rows)
+        return written
+    written["p99_99_ns_runs"] = [run for row in rows for run in (row.get("p99_99_ns_runs") or [row[GATED]])]
+    return written
+
+
 def joined(results: list[dict], baseline: dict) -> list[dict]:
     """The processes already in the results' profile's entry, as result-shaped dicts in the
     order they were written, followed by the new results, for `--join`. The entry holds
     every process's runs in order, each `repeat` long, and each percentile from the slowest
     process; a process read back from it carries the entry's percentiles, which the
-    maximum over processes leaves unchanged, and its own runs. A process has no date of
-    its own in the entry, so the earlier processes sort before every new result."""
+    maximum over processes leaves unchanged, and its own runs. A row the entry holds with
+    no runs list, one added by hand (docs/how-to/run-the-bench.md, step 4), is read back
+    with `p99_99_ns_runs` of None on every earlier process, which `written_row` writes with
+    no list again (card 221). A process has no date of its own in the entry, so the
+    earlier processes sort before every new result."""
     profile = results[0]["profile"]
     entry = baseline.get("profiles", {}).get(profile)
     if entry is None:
@@ -296,7 +313,8 @@ def joined(results: list[dict], baseline: dict) -> list[dict]:
             **({STEP_FIELD: entry[STEP_FIELD]} if STEP_FIELD in entry else {}),
             "benchmarks": {
                 name: {**{k: row[k] for k in SHOWN if k in row},
-                       "p99_99_ns_runs": (row.get("p99_99_ns_runs") or [row[GATED]] * repeat)[i * repeat:(i + 1) * repeat]}
+                       "p99_99_ns_runs": (row["p99_99_ns_runs"][i * repeat:(i + 1) * repeat]
+                                          if row.get("p99_99_ns_runs") else None)}
                 for name, row in entry["benchmarks"].items()
             },
         })

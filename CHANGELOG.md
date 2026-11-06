@@ -1429,6 +1429,12 @@ user-visible change, added in the same commit as the change. The format follows
   ten-minute path's shape through the client and the README's example, with a report
   of its one-way latency over 100,000 messages and its allocations per message
   ([clients/python/README.md](clients/python/README.md); ADR 0046, card 205).
+- `scripts/bench-compare.py --join` adds a process to an entry that holds a row added
+  by hand, one with no `p99_99_ns_runs` list (`docs/how-to/run-the-bench.md`, step 4):
+  the row keeps no list, each percentile the larger of the row's and the process's and
+  `p99_99_ns` the slowest run of both. Before, the join padded the row with its p99.99,
+  sliced it per process and exited with "has 0 runs where the harness setting is 21"
+  for every process after the first (card 221).
 - The Node client, `clients/node`, generated from the committed C header by
   `clients/generate.py node` (`just generate-clients`): a native addon in C over N-API,
   built by `npm install` against the header and linked with `libcavalry_ffi.a`, so the
