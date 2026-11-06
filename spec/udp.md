@@ -155,8 +155,8 @@ publication on the channel goes to every destination, which is multi-destination
 ("The sender"). `control` and `control-mode` come together, `manual` is the one
 control mode of this version, and a control channel names no `endpoint` and no
 `interface`: the control address is the local address, and the destinations are the
-remote ones. A destination channel is `cavalry:udp?endpoint=<host>:<port>`, of which
-only `endpoint` is read, resolved to an address the control address can send to ("The
+remote ones. A destination channel is `cavalry:udp?endpoint=<host>:<port>` and names nothing
+else, its endpoint resolved to an address the control address can send to ("The
 sender").
 
 A publication's channel, with an endpoint or a control address, may name
@@ -633,8 +633,9 @@ code 9. A string wrong in two ways reports the earlier check, as the vectors pin
 socket that cannot be opened, bound or connected is error code 4 with the operating
 system's reason. The driver's own checks on a channel that parses, a control channel
 or `fc` on an `add subscription`, a join under a different `fc`, a destination
-channel that is `cavalry:ipc` or a control channel, and a destination with no address
-the control address can send to ("The sender"), are error code 1 too
+channel that is `cavalry:ipc` or a control channel or names more than its endpoint,
+and a destination with no address the control address can send to ("The sender"), are
+error code 1 too
 (`spec/client-protocol.md`, "What the driver rejects").
 
 ## Vectors
