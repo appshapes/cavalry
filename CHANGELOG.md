@@ -1435,3 +1435,29 @@ user-visible change, added in the same commit as the change. The format follows
   `p99_99_ns` the slowest run of both. Before, the join padded the row with its p99.99,
   sliced it per process and exited with "has 0 runs where the harness setting is 21"
   for every process after the first (card 221).
+- The Node client, `clients/node`, generated from the committed C header by
+  `clients/generate.py node` (`just generate-clients`): a native addon in C over N-API,
+  built by `npm install` against the header and linked with `libcavalry_ffi.a`, so the
+  package has no runtime dependency, that refuses a library of another ABI version when
+  the package loads, before any other function; and the client's own code, typed by
+  `index.d.ts`, a `Client`, a `Publication` whose `tryClaim` and `offer` return the
+  position or the result code and whose `claim` is a `Buffer` over the log, a
+  `Subscription` polled with a fragment handler that every delivered fragment reaches,
+  the body a `Buffer` into the log for the call and the header's `reservedValue` a
+  `BigInt`, exact for any int64 a publisher sets, whose `poll` throws `HandlerError`
+  with the counts when a handler threw or the runtime kept a fragment from the
+  handler, a `Recording` and a `Replay`; `buffersHeld()`, the `Buffer`s, received
+  bodies and claims' views, whose native objects Node frees only when its event loop
+  turns, which a program that runs for long lets turn between batches; a call
+  the ABI refuses during a claim or a poll leaves the client's state as it was; `just
+  lint` regenerates the package and reads its per-message functions, and the package's
+  functions they call, for JavaScript's `async`, `await`, `Promise`, `.then`, `throw`
+  and `Atomics.wait`, and the addon's per-message C, the trampoline, the `Buffer`s'
+  finalizer, `poll`, `headerField`, `view`, `detach` and the wrappers of the claim, the
+  reserved value, the commit, the abort and the offer, for C's locks
+  (`pthread_mutex_*`, `pthread_rwlock_*`, `mtx_*`, `uv_mutex_*`, `uv_rwlock_*`,
+  `napi_*threadsafe_function*`) and raises (`napi_throw*` and `napi_fatal_*` outside
+  the argument readers); `just conformance` runs `conformance/node/`, the ten-minute
+  path's shape through the client and the README's example, with a report of its
+  one-way latency over 100,000 messages and its allocations per message
+  ([clients/node/README.md](clients/node/README.md); ADR 0046, card 206).

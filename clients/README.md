@@ -18,8 +18,10 @@ hold invariant 2's per-message rules between the user's code and the ABI. The
 generator writes every file of the package; nothing in a package is edited by hand.
 `just generate-clients` writes every package; commit what it writes. `just lint`
 regenerates each package in memory and fails when a committed file differs, naming the
-command that fixes it. Today the generator writes Python (`python/`); the Node, Go,
-JVM and .NET clients (cards 206 to 209) add a language each.
+command that fixes it. The generator writes Python (`python/`, by `write_python` in
+`generate.py`) and Node (`node/`, by `generate_node.py` beside it, which `generate.py`
+imports); the Go, JVM and .NET clients (cards 207 to 209) add a language each as a
+writer module of their own.
 
 ## What every client must pass
 
@@ -36,7 +38,10 @@ JVM and .NET clients (cards 206 to 209) add a language each.
   client's side of the boundary, the client's code and the runtime's together,
   counted with what the runtime counts, switched on for that round alone and read
   with nothing else between the two reads; the README says which objects a message
-  makes and frees that such a net count cannot see.
+  makes and frees that such a net count cannot see. Where the runtime frees what a
+  message makes natively later than a collection, as Node does when its event loop
+  turns, the runner counts what is held, shows that the loop the client's README
+  gives keeps it bounded, and fails when it does not (invariant 3).
 - `conformance/<language>/run.sh` runs the client README's example as written against
   the runner's driver, and fails unless it prints the line the README says the reader
   will see (`conformance/python/readme.py` is the shape).
@@ -45,12 +50,15 @@ JVM and .NET clients (cards 206 to 209) add a language each.
   reserved value, the commit and abort, the offer, the poll and the header's values)
   and the trampoline that calls the user's handler: no lock, no `await`, no raise, in
   the language's forms, in the function's own body or in any function of the package
-  it calls. It fails on generated code in a language it has no rules for, on a package
-  in which it finds none of the per-message functions, and on one that is missing.
+  it calls. Generated code of the client in another language on the same path is read
+  in that language's forms, as the Node addon's C is. It fails on generated code in a
+  language it has no rules for, on a package in which it finds none of the
+  per-message functions, and on one that is missing.
 - The client's README answers the four questions every crate README answers, with the
   ten-minute path's program in its language as the example, and records the
   runtime's side of the boundary: how the runtime calls the fragment handler back,
-  what that costs in locks and allocations per message, whether the view over a
+  what that costs in locks, allocations and system calls per message and when the
+  runtime frees what it allocated, whether the view over a
   claimed slice is one object per publication or a new one per claim, and where an
   exception the user's handler raises goes.
 
@@ -68,3 +76,4 @@ built from the same checkout, or regenerate the package from the library's heade
 | Client | Package | Runner | Decided in |
 | --- | --- | --- | --- |
 | `python/` | `cavalry`, `ctypes` over the shared library | `conformance/python/` | ADR 0046 (card 205) |
+| `node/` | `@cavalry/client`, an N-API addon in C over the header, linked with the static library | `conformance/node/` | ADR 0046 (card 206) |
