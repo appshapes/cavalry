@@ -1135,10 +1135,12 @@ class DotnetPackage(unittest.TestCase):
         self.assertLess(body.index("claim = default;"), body.index("Abi.cavalry_publication_close(closing)"))
 
     def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
-        code = gen_dotnet.write_dotnet(self.header)["HandlerException.cs"]
+        files = gen_dotnet.write_dotnet(self.header)
+        code = files["HandlerException.cs"]
         body = code.split("public HandlerException(int fragments, int raised, Exception cause)", 1)[1].split("\n    {\n", 1)[0]
         self.assertIn("fragment(s) this poll delivered", body)
-        self.assertIn("before it stopped on a fault, which Subscription.Fault() reads", body)
+        self.assertIn("before it stopped on a fault, which Subscription.GetFault() reads", body)
+        self.assertIn("    public Fault GetFault()\n", files["Subscription.cs"])
         self.assertIn("Fix the handler: its first exception, ", body)
         self.assertIn("See clients/dotnet/README.md#the-exception", body)
         with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:

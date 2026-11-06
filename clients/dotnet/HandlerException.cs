@@ -18,7 +18,7 @@ public sealed class HandlerException : Exception
     public HandlerException(int fragments, int raised, Exception cause)
         : base("the fragment handler threw on " + raised + " of " + (fragments >= 0
             ? "the " + fragments + " fragment(s) this poll delivered"
-            : "the fragments this poll delivered before it stopped on a fault, which Subscription.Fault() reads")
+            : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads")
             + "; every fragment reached the handler once, in order. Fix the handler: its first exception, " + cause.GetType().Name
             + ", is this exception's InnerException; polling again does not deliver these fragments again."
             + " See clients/dotnet/README.md#the-exception", cause)
