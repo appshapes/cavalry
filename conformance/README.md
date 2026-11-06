@@ -16,6 +16,15 @@ bounded at 10 s, and one that runs out says how far it got.
 | Runner | Language | Runs with | Decided in |
 | --- | --- | --- | --- |
 | `c/` | C11, `quickstart.c` through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204) |
+| `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205) |
 
-The runners for Python, Node, Go, the JVM and .NET follow with their clients (ADR
-0046, cards 205 to 209), each the shape card 205 builds, its report included.
+The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046, cards
+206 to 209): a package of another ABI version refused when it loads the library; the C
+runner's checks through the client; the client's own edges, where a handler's exception
+goes, what `offer` refuses, how long a view lives, and the calls `spec/c-abi.md` refuses
+during a claim or a poll, which leave the client's state as they found it; then a report,
+printed and never gated, from two rounds that check nothing else: the one-way p50, p99,
+p99.99 and max over 100,000 messages, with the runtime's allocation counters off, and the
+allocations per message on the client's side of the boundary over 10,000 more, counted
+with what the runtime counts, switched on for that round alone (clients/README.md, "What
+every client must pass").

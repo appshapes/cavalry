@@ -31,6 +31,8 @@ test-scripts:
     python3 scripts/release-notes-test.py
     python3 scripts/bench-compare-test.py
     python3 scripts/wait-for-partner-job-test.py
+    python3 clients/generate-test.py
+    python3 clients/lint-test.py
 
 # Latency and throughput harness (CLAUDE.md, gate 2; ADR 0015): HdrHistogram p50, p99,
 # p99.99 and max of claim and commit, of publish to delivery, and of the slot-padding
@@ -60,7 +62,8 @@ bench-compare:
 # vectors, spec/c-abi.md); every vector test also runs in `just test`. Then each
 # client's runner under conformance/ (conformance/README.md): today
 # conformance/c/run.sh, a C program over the header against a driver of its own
-# (ADR 0051). A client in clients/ joins here with its own runner.
+# (ADR 0051), then conformance/python/run.sh, the Python client's runner over the shared
+# library (ADR 0046, card 205). A client in clients/ joins here with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance
@@ -72,6 +75,7 @@ conformance:
     cargo test -p cavalry-log --test conformance
     cargo test -p cavalry-ffi --test conformance
     conformance/c/run.sh
+    conformance/python/run.sh
 
 # Deterministic replay test (CLAUDE.md, gate 1; ADR 0030): a driver on a directory of
 # its own records 100,000 hash-chained messages while a live subscriber prints them,
@@ -91,7 +95,7 @@ quickstart:
 
 # clippy with workspace lints, fmt, the workspace lint, the counters lint and the
 # configuration lint below.
-lint: fmt-check clippy lint-workspace lint-counters lint-config lint-header
+lint: fmt-check clippy lint-workspace lint-counters lint-config lint-header lint-clients
 
 # The committed C header is what cbindgen 0.29.4 writes from crates/cavalry-ffi, and
 # nothing else (spec/c-abi.md; ADR 0051): regenerate it to a temporary file and diff.
@@ -111,6 +115,20 @@ lint-header:
         exit 1
     fi
     echo "lint-header: crates/cavalry-ffi/include/cavalry.h is what cbindgen 0.29.4 writes"
+
+# The generated clients are what the committed header gives, and their per-message
+# functions hold no lock, no await and no raise (clients/README.md; ADR 0046): the
+# generator regenerates each package in memory and compares it with the committed files,
+# then clients/lint.py reads the generated code for the language's forms of each, in the
+# per-message functions and in the package's functions they call.
+lint-clients:
+    python3 clients/generate.py python --check
+    python3 clients/lint.py
+
+# Regenerate every client's package from the committed header (clients/README.md): what
+# to run after a change to the header or to clients/generate.py, then commit the result.
+generate-clients:
+    python3 clients/generate.py python
 
 # The CLAUDE.md rules rustc and clippy cannot see: data-plane flags, the dependency
 # allowlist, no async on the data plane, unsafe only in two crates, the lock ban's
