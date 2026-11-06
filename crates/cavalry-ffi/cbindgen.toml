@@ -9,26 +9,24 @@ include_version = false
 no_includes = true
 sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
 cpp_compat = true
-# A string constant cbindgen does not write from Rust: the environment variable a
-# context's default directory reads (spec/c-abi.md, "Constants").
+# What cbindgen does not write from Rust, inside the include guard: a string constant,
+# the environment variable a context's default directory reads (spec/c-abi.md,
+# "Constants"), and the header's one macro, its own version passed by default
+# (spec/c-abi.md, "Versions and what a reader rejects").
 after_includes = """
 
 /* The environment variable a context's default directory reads. */
 #define CAVALRY_DIR_ENV "CAVALRY_DIR"
-"""
-documentation = true
-documentation_style = "c"
-style = "type"
-usize_is_size_t = true
-# The header's one macro: its own version, passed by default (spec/c-abi.md, "Versions
-# and what a reader rejects"), which cbindgen cannot write from Rust.
-trailer = """
+
 /* The header's own version, passed to the library by default, so that a program built
    against another version is refused at its first call (spec/c-abi.md, "Versions and
    what a reader rejects"). */
 #define cavalry_context_init(context) cavalry_context_init_v((context), CAVALRY_ABI_VERSION)
 """
-
+documentation = true
+documentation_style = "c"
+style = "type"
+usize_is_size_t = true
 [parse]
 parse_deps = false
 

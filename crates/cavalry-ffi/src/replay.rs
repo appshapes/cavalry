@@ -91,7 +91,9 @@ pub unsafe extern "C" fn cavalry_replay_position(replay: *const cavalry_replay_t
 }
 
 /// Whether the replay has ended; when it has, the end position and the reason,
-/// `CAVALRY_REPLAY_STOP_*` or −1 for none, are written through the non-null pointers.
+/// `CAVALRY_REPLAY_STOP_*` or −1 for none, are written through the pointers. A null
+/// `position` or `reason` is refused as any null required pointer is, with
+/// `CAVALRY_ERR_NULL` and `false`.
 ///
 /// # Safety
 ///
@@ -107,6 +109,14 @@ pub unsafe extern "C" fn cavalry_replay_ended(
         error::null("cavalry_replay_ended", "replay");
         return false;
     }
+    if position.is_null() {
+        error::null("cavalry_replay_ended", "position");
+        return false;
+    }
+    if reason.is_null() {
+        error::null("cavalry_replay_ended", "reason");
+        return false;
+    }
     // SAFETY: a live handle, by the caller's convention.
     let Some((at, why)) = (unsafe { (*replay).replay.ended() }) else {
         return false;
@@ -118,14 +128,11 @@ pub unsafe extern "C" fn cavalry_replay_ended(
         Some(ReplayStopReason::Failed) => CAVALRY_REPLAY_STOP_FAILED,
         None => -1,
     };
-    // SAFETY: each pointer is null or writable, by the caller's convention.
+    // SAFETY: each pointer is non-null, checked above, and writable, by the caller's
+    // convention.
     unsafe {
-        if !position.is_null() {
-            *position = at;
-        }
-        if !reason.is_null() {
-            *reason = code;
-        }
+        *position = at;
+        *reason = code;
     }
     true
 }

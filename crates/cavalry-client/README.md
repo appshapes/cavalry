@@ -16,7 +16,8 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
 - Returns back-pressure as a result code when the receiver window or the log buffer is
   full. The caller decides what to do; the driver never buffers more.
 - Says when its client is gone. Once the client is closed, by `close` or because the
-  driver went, a publication's next refusal is `Offer::Closed` and every poll of a
+  driver went, every claim and offer on a publication is `Offer::Closed` before
+  anything is reserved, so no frame lands past the stream's end, and every poll of a
   subscription is `Fault::Closed`. A subscription the client cannot hold is refused with
   `subscriptions-full`; it is never left open without its images.
 - Records a stream to the durable log: `Cavalry::start_recording(channel, stream_id)`

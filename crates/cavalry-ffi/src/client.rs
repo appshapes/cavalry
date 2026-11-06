@@ -186,10 +186,11 @@ unsafe fn add_arguments<'a, T>(
         error::null(function, "channel");
         return None;
     }
-    // SAFETY: `channel` is NUL-terminated by the caller's convention; `client` is a
-    // live handle used from one thread at a time ("Threads"), so the exclusive
-    // reference is the only one for this call.
+    // SAFETY: `channel` is NUL-terminated by the caller's convention.
     let channel = unsafe { strings::channel(function, channel) }?;
+    // SAFETY: `client` is non-null, checked above, and a live handle used from one
+    // thread at a time ("Threads"), so the exclusive reference is the only one for
+    // this call.
     let client = unsafe { &mut (*client).client };
     Some((client, channel))
 }

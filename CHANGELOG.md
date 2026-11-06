@@ -1330,6 +1330,30 @@ user-visible change, added in the same commit as the change. The format follows
   `subscription.add_deferred_timed_out`, which `cavalry doctor` reports
   ([ADR 0049](docs/decisions/0049-hold-an-add-until-the-closing-endpoint-has-closed.md);
   card 194).
+- `conformance/c/`, the first runner of the directory gate 1 names: `quickstart.c`, a
+  C11 program over the committed header that checks the ABI version both ways,
+  publishes 1,000 messages by claim and commit over `cavalry:ipc` and reads them back
+  once and in order with the header's fields checked, records the stream, does the
+  same over `cavalry:udp` on the loopback, and replays the recording to another
+  stream at the positions the recording holds each frame, computed from the image's
+  constants; `run.sh` builds the driver and the library, compiles and links the
+  program with the runner's C compiler, and runs it against a driver on a directory
+  of its own; `just conformance` runs it after the Rust vector suites, with
+  `cavalry-ffi`'s header test among them
+  ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
+  card 204).
+- `cavalry-ffi` takes its reviews' notes: `cavalry_replay_ended` refuses a null
+  `position` or `reason` as it refuses any null required pointer; the
+  `cavalry_context_init` macro sits inside the header's include guard; `just
+  lint-header` shows cbindgen's own output when it fails and says what to do next;
+  every handle type is asserted `Send` at compile time, which the subscription
+  handle's self-pointing views need an `unsafe impl` for (card 204).
+- A claim or an offer on a publication whose client has closed is now
+  `Offer::Closed`, `CAVALRY_PUBLICATION_CLOSED` in C, before anything is reserved,
+  where one that still fit the publisher limit used to read a position: the driver
+  ends the stream at the producer position it loads on `client close`, so such a
+  frame could land past the stream's end with no subscriber told of it
+  ([log buffer, "Closing"](spec/log-buffer.md); card 204).
 - The udp pair's wait reads the workflow's runs listed as queued as well as in progress
   when it looks for a crossed pair: GitHub lists a run whose jobs are part queued and
   part in progress under queued, so the wait never saw the other run's end holding the
