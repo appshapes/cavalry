@@ -528,9 +528,13 @@ begins first where two do, and the leader tells the two requests apart by the
 position: one below the leader's term base log position is a replication (state 9),
 whose replays end at the first term base log position in the leader's log above the
 position asked, the leader starting the next recording's replay from the position
-the last `replay stopped` carried once the follower's reported append position has
-reached it, so that the follower's image of each replay joins at its append position,
-counted in `cluster.log_replications`, the `replay-end` vectors pinning both; one at
+the last `replay stopped` carried, once that event came with reason 0 and the
+follower's reported append position has reached the position, so that the follower's
+image of each replay joins at its append position, a `replay stopped` with any other
+reason starting nothing, which the follower's progress timer counts; each replay
+started is counted in `cluster.log_replications`, once per replay where a
+replication spans several recordings, and the `replay-end` vectors pin where a
+replay begins and ends; one at
 or above it is a catch-up within the leader's term (state 11), whose replay follows
 the live recording, counted in `cluster.catchups`; a position the leader's recordings
 do not hold, purged by retention (`spec/client-protocol.md`, "Commands", purge
@@ -540,8 +544,10 @@ it is on its `catchup` endpoint alone; and sends stop catch-up, stopping the rep
 follower whose position was appended from the replay reports an append position at or
 past the leader's log position. A leader that reads canvass position for a term at or
 below its own first stops any replay it has running to that follower with `stop
-replay`, so that a follower that failed and canvasses again never joins a stale
-replay, then answers with new leadership term for the reported term, its next fields
+replay` and drops any next replay it was waiting to start for it, as a new catch-up
+position from the follower does too, so that a follower that failed and canvasses
+again never joins a stale replay or finds two started for one request, then answers
+with new leadership term for the reported term, its next fields
 as the table gives them, the three −1 when the reported term is its own, so that a
 restarted member finds the leader and truncates no more than it must; a follower that reads stop catch-up for its term
 removes its catch-up subscription. Any member that reads request vote or commit
@@ -662,8 +668,8 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.sessions_refused` | a session connect refused, with the version, the response channel or the limit as the detail |
 | `cluster.connects_dropped` | a session connect dropped unanswered: the member's pending answers at their bound, the response channel refused by the driver, or the answer unsent at the session connect timeout |
 | `cluster.ingress_ignored` | a session message, keepalive or close the leader ignored, for a term not its own or a session not open |
-| `cluster.log_replications` | a replication begun: on the follower, a catch-up position sent from state 9; on the leader, a replay started with a stop position |
-| `cluster.log_replications_unavailable` | a replication that made no progress for the leader heartbeat timeout, the leader's recordings not holding the position asked, so the member failed its election |
+| `cluster.log_replications` | on the follower, a catch-up position sent from state 9; on the leader, a replay started for a replication, once per replay where a replication spans several recordings |
+| `cluster.log_replications_unavailable` | a replication whose append position did not move for the leader heartbeat timeout while below the stop position, so the member failed its election: the leader's recordings not holding the position asked, purged by retention; a replay that stopped for a fault; or a leader lost mid-replication |
 | `cluster.join_position_mismatches` | an image of a replay or of the live log that joined at a position other than the member's append position, so the member failed its election (states 9, 12 and 15) |
 | `cluster.sessions_timed_out` | a session closed for the session timeout |
 | `cluster.catchups` | a catch-up begun: on the follower, a catch-up position sent; on the leader, a replay started |
