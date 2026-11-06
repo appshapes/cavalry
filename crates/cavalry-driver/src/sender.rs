@@ -27,8 +27,9 @@ use cavalry_proto::channel::FlowControl;
 use cavalry_proto::frame::Flags;
 use cavalry_proto::udp::{
     CONNECTION_TIMEOUT, ControlFrame, DATAGRAMS_PER_BURST, FLOW_CONTROL_RECEIVER_TIMEOUT,
-    HEARTBEAT_INTERVAL, Heartbeat, LINGER, MAX_TERM_LENGTH, Nak, RETRANSMIT_LINGER, RttMeasurement,
-    SETUP_INTERVAL, SetupFrame, StatusMessage, parse, retransmit_window, sender_limit,
+    HEARTBEAT_INTERVAL, Heartbeat, LINGER, MAX_DESTINATIONS, MAX_FLOW_CONTROL_RECEIVERS,
+    MAX_TERM_LENGTH, Nak, RETRANSMIT_LINGER, RttMeasurement, SETUP_INTERVAL, SetupFrame,
+    StatusMessage, parse, retransmit_window, sender_limit,
 };
 use cavalry_shm::counters::generated::{
     LOG_BUFFER_REJECTED_FRAME, PUBLICATION_CONNECTED, PUBLICATION_DISCONNECTED,
@@ -758,8 +759,9 @@ impl Sender {
             }
             // The conductor checked the bound and the endpoints held, as written: two
             // writings of one address are two destinations (`spec/client-protocol.md`,
-            // "Commands", add destination); the table never grows past the room it came
-            // with, so the push allocates nothing.
+            // "Commands", add destination). The table holds the spec's bound and never
+            // grows past the room it came with, at least that bound, so the push
+            // allocates nothing.
             Request::AddDestination {
                 registration_id,
                 address,
@@ -769,7 +771,7 @@ impl Sender {
                     .iter_mut()
                     .find(|endpoint| endpoint.registration_id == registration_id)
                     && let Some(destinations) = &mut endpoint.destinations
-                    && destinations.len() < destinations.capacity()
+                    && destinations.len() < MAX_DESTINATIONS.min(destinations.capacity())
                 {
                     destinations.push(SockaddrStorage::from(address));
                 }
@@ -977,7 +979,11 @@ impl Sender {
                         receiver.end_of_stream = message.is_end_of_stream();
                     }
                     None if message.is_end_of_stream() => {}
-                    None if live.receivers.len() < live.receivers.capacity() => {
+                    // The spec's bound, within the room the conductor gave, which is at
+                    // least that bound, so the push allocates nothing.
+                    None if live.receivers.len()
+                        < MAX_FLOW_CONTROL_RECEIVERS.min(live.receivers.capacity()) =>
+                    {
                         live.receivers.push(Receiver {
                             receiver_id: message.receiver_id,
                             limit: plus_window,
