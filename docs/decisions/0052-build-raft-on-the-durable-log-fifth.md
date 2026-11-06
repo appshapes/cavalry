@@ -175,11 +175,21 @@ status message's receiver id is the field that tells a sender's destinations apa
 card, `kip` keeps its stock Ubuntu, gains a self-hosted runner with a label of its own,
 and the three hosts run the cluster's cross-host job over the lab's network, not the
 cable: the job is a correctness and availability gate, a leader lost and a member
-partitioned with nothing committed lost, not a latency row, so it runs on housekeeping
-cores and asks nothing of the isolated ones ADR 0044 gave the UDP rows. That is a card
-of its own (feature 8), the only card of the slice that needs a hand on a host, and
-the hand it needs, a runner's registration and the network between three hosts, goes
-to Rjae as a `brigade decision` on that card and on no other.
+partitioned with nothing committed lost, not a latency row, so it asks for none of the
+isolated cores ADR 0044 gave the UDP rows. A GitHub job runs on one runner, so the
+cross-host job is three jobs, one on each host's one runner under its label,
+`bench-linux`, `grip-linux` and `kip`'s own. No host gains a second runner: each label
+names one runner (`docs/how-to/set-up-a-bench-host.md`, step 2), and
+`scripts/wait-for-partner-job.py` rests on that. A runner runs one job at a time and
+each job's driver ends with its job, so a cluster member on `bench` or `grip` never
+runs while a bench job measures there. It therefore never loads, during a
+measurement, the housekeeping CPU that carries the UDP rows' conductor, recorder,
+replayer and client conductor (ADR 0044, Decision 1), where added load would make a
+UDP row's number one its baseline cannot be compared with. In a run the three jobs
+come after the udp pair, as the pair comes after the single-host bench jobs. That is
+a card of its own (feature 8), the only card of the slice that needs a hand on a
+host, and the hand it needs, a runner's registration and the network between three
+hosts, goes to Rjae as a `brigade decision` on that card and on no other.
 
 Eight features make the slice, one Trello card each, in this order:
 
@@ -290,7 +300,9 @@ Eight features make the slice, one Trello card each, in this order:
    versions (ADR 0003's Revisit).
 8. **The cross-host gate (card 232).** `kip` as the third host: a self-hosted runner
    with a label of its own, the three hosts' addresses on the lab's network, and a job
-   `cluster (hosts)` on every push to `master` and every pull request that runs the
+   `cluster (hosts)` on `kip`, with a member job on each of `bench` and `grip` under
+   their labels and after the udp pair, as the third host's paragraph above places
+   them, on every push to `master` and every pull request, that runs the
    three-member cluster across `bench`, `grip` and `kip` through features 4 and 6's
    scenarios, a required check of `master` as `bench (grip)` is (ADR 0044's pattern),
    and the set-up page for it beside `docs/how-to/set-up-a-bench-host.md`. The card
@@ -333,8 +345,13 @@ control address and how a destination's status messages reach the right publicat
 channel of its own (card 227); the leader's own append position and whether the leader
 counts toward the quorum before its recorder has synced (card 227); where the cluster's
 timestamp comes from and how a service reads it (card 226, card 229); the snapshot's
-shape in the recording log and the cadence (card 230); and how `conformance/upgrade/`
-names N (card 231).
+shape in the recording log and the cadence (card 230); how `conformance/upgrade/`
+names N (card 231); and how the cross-host job's three jobs meet (card 232), each
+holding its host while it waits for the other two, within three constraints: one
+runner per label, no job on `bench` or `grip` beside a bench job, and no hold-and-wait
+cycle with another run's udp pair or another run's cluster jobs, which
+`scripts/wait-for-partner-job.py`'s crossing rule settles for a pair and not yet for
+three.
 
 The open cards, placed. Ten are open on the Cavalry list beside this ADR's own, and
 none joins the slice.
@@ -438,8 +455,12 @@ twice before the first release, for the destinations and for the cluster session
 and every client regenerates each time; the fault-injection tests run three drivers
 on one runner and the gates grow by them; `conformance/upgrade/` builds the checkout
 twice; the cross-host job occupies three self-hosted runners per push, so a push
-waits on the slowest; `kip` changes role when card 159 ends, and the hand on it is
-Rjae's; the slice is larger than any before it, eight cards where the fourth had six,
+waits on the slowest; its member jobs take the `bench` and `grip` runners after the
+udp pair, so the latency gate's two hosts carry the cluster's minutes on every push
+and a run's bench jobs queue behind another run's member jobs; three jobs that each
+hold a host while they wait for the other two are the hold-and-wait the udp pair's
+script settles for two, and card 232 settles it for three; `kip` changes role when
+card 159 ends, and the hand on it is Rjae's; the slice is larger than any before it, eight cards where the fourth had six,
 and the order above is what keeps a stranger reading one page.
 
 Revisit: when card 232's job is green with feature 7's upgrade in it and the README
