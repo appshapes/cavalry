@@ -196,10 +196,18 @@ cycle sends at most that many times the destinations. The control frames a
 destination's receiver sends for its image go to the source address of the setup
 frame that created it ("The receiver", step 1), which is the control address, so they
 arrive on this socket, and each finds its publication by session id and stream id as on
-any endpoint; the source address is not read for that. With no destination, nothing
-is sent and the publication stays not connected. `channel.destinations`, keyed as
-`channel.status` is, counts the endpoint's destinations. Per publication, on every
-duty cycle, with p the sender position and L the sender limit:
+any endpoint; the source address is not read for that. With no destination nothing
+goes on the wire: a burst, a setup frame or a heartbeat that is due is dropped, and the
+sender position advances past the burst as it advances past a padding frame, so that a
+destination added later joins the stream at the sender position, as a subscription
+joins at the producer's; no status message arrives, so the publication stays not
+connected, or disconnects at the connection timeout once its last destination is
+removed. The counters of a send, `sender.bytes_sent`, `sender.frames_sent`,
+`sender.setups_sent`, `sender.heartbeats_sent` and `sender.retransmitted_bytes`,
+count each destination's send, so a frame to three destinations counts three times
+and a burst to none counts nothing. `channel.destinations`, keyed as `channel.status`
+is, counts the endpoint's destinations. Per publication, on every duty cycle, with p
+the sender position and L the sender limit:
 
 1. **Setup.** Until the first status message without the send-setup flag arrives, a
    setup frame every setup interval, carrying the sender position's active term id and
@@ -237,7 +245,9 @@ duty cycle, with p the sender position and L the sender limit:
    below says, is dropped and counted in `sender.naks_ignored`. A
    retransmit never moves the sender position.
 5. **RTT.** An RTT measurement with the reply flag is answered: the same frame without
-   the flag, the echo timestamp and receiver id unchanged, a reception delta of 0.
+   the flag, the echo timestamp and receiver id unchanged, a reception delta of 0, sent
+   to the address the measurement came from, which on a channel with an endpoint is
+   the endpoint.
 
 The sender limit is 0 when the publication is created and moves on every status
 message without the send-setup flag whose position, consumption term id and offset as
@@ -491,9 +501,9 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 
 | Counter | Moves when |
 | --- | --- |
-| `sender.bytes_sent`, `sender.frames_sent` | a data or padding frame is sent: the bytes put on the wire, 32 for a padding frame, and one frame each |
-| `sender.setups_sent`, `sender.heartbeats_sent` | a setup frame or a heartbeat is sent |
-| `sender.retransmits_sent`, `sender.retransmitted_bytes` | a NAK is answered |
+| `sender.bytes_sent`, `sender.frames_sent` | a data or padding frame is sent: the bytes put on the wire, 32 for a padding frame, and one frame each; once per destination on a control channel |
+| `sender.setups_sent`, `sender.heartbeats_sent` | a setup frame or a heartbeat is sent; once per destination on a control channel |
+| `sender.retransmits_sent`, `sender.retransmitted_bytes` | a NAK is answered; the bytes once per destination on a control channel |
 | `sender.retransmit_overflow` | a NAK for another range arrives while a retransmit is outstanding |
 | `sender.short_sends`, `sender.send_failed` | the socket took part of a datagram, or refused one |
 | `sender.flow_control_limited` | a publication enters the state of having a frame to send and no window |
