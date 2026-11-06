@@ -13,9 +13,9 @@ file of a package comes from here, and `just generate-clients` runs it for every
 language; `--check` writes nothing, compares the package it would write in memory with
 the committed files and exits 1 when one differs, which is how `just lint` holds the
 packages to the header (clients/README.md). The languages are `python`, written here by
-`write_python`, `node`, written by `generate_node.py` beside this file (card 206), and `jvm`,
-written by `generate_jvm.py` (card 208); cards 207 and 209 add theirs as a writer module of
-their own, registered in `WRITERS`.
+`write_python`, `node`, written by `generate_node.py` beside this file (card 206), `go`,
+written by `generate_go.py` (card 207), and `jvm`, written by `generate_jvm.py` (card 208);
+card 209 adds its own as a writer module of its own, registered in `WRITERS`.
 
 The header is parsed, not the vectors, so that a change to the header that the vectors
 do not yet hold shows up here first; `generate-test.py` holds the parse to
@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HEADER = os.path.join(ROOT, "crates", "cavalry-ffi", "include", "cavalry.h")
-LANGUAGES = {"python": "python", "node": "node", "jvm": "jvm"}
+LANGUAGES = {"python": "python", "node": "node", "go": "go", "jvm": "jvm"}
 
 # The ABI's per-message functions, as crates/cavalry-ffi/README.md and
 # crates/cavalry-ffi/tests/allocations.rs name them; `generate-test.py` holds this list
@@ -868,10 +868,11 @@ def version():
     return library().cavalry_version_full().decode()
 '''
 
+from generate_go import write_go  # noqa: E402
 from generate_jvm import write_jvm  # noqa: E402
 from generate_node import write_node  # noqa: E402
 
-WRITERS = {"python": write_python, "node": write_node, "jvm": write_jvm}
+WRITERS = {"python": write_python, "node": write_node, "go": write_go, "jvm": write_jvm}
 
 
 def main(argv: list[str]) -> int:
