@@ -24,8 +24,11 @@ git pull --no-edit
 git push
 ```
 
-Merges only. Never `rebase`, never `--force`. On a merge conflict, stop and hand it
-back: no `git merge --abort`, no rebase, no force-push.
+Merges only. Never `rebase`, never `--force`, never `git merge --abort` to escape a
+conflict. A merge conflict is yours to resolve in place: in the files everyone appends
+to keep both sides with `master`'s lines first, anywhere else keep what both changes
+meant, run the gates again, and name the files and the resolution in the commit
+message (CLAUDE.md, Working rules for agents; card 218).
 
 The optional Trello card number is: $ARGUMENTS
 
@@ -132,5 +135,5 @@ before `git push`. If either fails, stop and report; do not push.
 ## 7. Report the result
 
 - On success, give the commit hash, the subject and the body, and say it was pushed.
-- On failure (a gate, a merge conflict, a rejected push), report the error output
-  clearly. Do not retry automatically. On a merge conflict, hand it back as it is.
+- On failure (a gate or a rejected push), report the error output clearly. Do not
+  retry automatically. A merge conflict is not a failure: resolve it as above.
