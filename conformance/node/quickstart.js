@@ -528,6 +528,19 @@ function edges(client) {
   publication.close();
   if (publication.claim !== null) fail(`${name}: the publication's close left claim ${publication.claim}`);
   if (outstanding.length !== 0) fail(`${name}: a claim's Buffer still has ${outstanding.length} bytes after its publication's close`);
+  // The close zeroed the claim struct: the claim's calls after it hand the ABI a struct
+  // that names no publication, each -1 with CAVALRY_ERR_NO_CLAIM, and no read of the
+  // handle the close freed (spec/c-abi.md, "Which claim a struct names").
+  const afterClose = [];
+  afterClose.push(["commit", publication.commit(), addon.cavalry_errcode()]);
+  afterClose.push(["abort", publication.abort(), addon.cavalry_errcode()]);
+  afterClose.push(["setReservedValue", publication.setReservedValue(1n), addon.cavalry_errcode()]);
+  for (const [call, result, code] of afterClose) {
+    if (result !== -1 || code !== constants.CAVALRY_ERR_NO_CLAIM) {
+      fail(`${name}: ${call} after the publication's close returned ${result} with error ${code}; expected -1 with ` +
+           `CAVALRY_ERR_NO_CLAIM (${constants.CAVALRY_ERR_NO_CLAIM}), since the close zeroed the claim struct`);
+    }
+  }
   pollOrFail(name, subscription, unexpected, 21, 21); // the close aborted the claim: padding, never a fragment
   subscription.close();
   if (subscription.handle !== null) fail(`${name}: the close after the poll left the handle ${subscription.handle}`);

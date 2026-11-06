@@ -63,7 +63,9 @@ before it returns.
   publication or a subscription answers as closed from the client's close until then
   (`spec/c-abi.md`, "Lifetimes"). An unclosed `Subscription` also keeps its slot in
   the table ("Threads"), so a program that closes only its clients fills the table
-  and `AddSubscription` returns `ErrSubscriptionsFull`.
+  and `AddSubscription` returns `ErrSubscriptionsFull`. The close zeroes the claim struct too, so `Commit`, `Abort` and `SetReservedValue` after it answer -1 with
+  `ErrNoClaim` in `Err` and the ABI reads no freed handle through the struct's
+  `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never edit a generated file by hand: `just lint` regenerates the module and fails
   when the committed files differ. `example/main.go` is the one file written by hand,
   and it is this README's program.

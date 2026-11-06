@@ -510,6 +510,24 @@ func edges(client *cavalry.Client) {
 	if err := publication.Close(); err != nil || publication.Claim != nil {
 		fail("%s: the publication's close with a claim outstanding returned %v and left Claim %v", name, err, publication.Claim)
 	}
+	// The close zeroed the claim struct: the claim's calls after it hand the ABI a struct
+	// that names no publication, each -1 with ErrNoClaim in Err, and no read of the handle
+	// the close freed (spec/c-abi.md, "Which claim a struct names").
+	for _, call := range []string{"cavalry_buffer_claim_commit", "cavalry_buffer_claim_abort", "cavalry_buffer_claim_set_reserved_value"} {
+		var result int64
+		switch call {
+		case "cavalry_buffer_claim_commit":
+			result = publication.Commit()
+		case "cavalry_buffer_claim_abort":
+			result = publication.Abort()
+		default:
+			result = int64(publication.SetReservedValue(1))
+		}
+		if result != -1 || !errors.As(publication.Err(), &abi) || abi.Fn != call || abi.Code != cavalry.ErrNoClaim {
+			fail("%s: %s after the publication's close returned %d with Err %v; expected -1 with ErrNoClaim, since the close zeroed the claim struct",
+				name, call, result, publication.Err())
+		}
+	}
 	pollOrFail(name, subscription, unexpected, 17, 17) // the close aborted the claim: padding, never a fragment
 
 	// A close from inside the handler: refused with ErrPolling, the handle kept, the

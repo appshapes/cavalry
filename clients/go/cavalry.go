@@ -572,7 +572,10 @@ func (p *Publication) IsClosed() bool {
 }
 
 // Close closes the publication, aborting an outstanding claim. Idempotent; the handle is
-// forgotten whatever the ABI returns.
+// forgotten whatever the ABI returns. The claim struct is zeroed before the ABI's close,
+// so that Commit, Abort and SetReservedValue after it hand the ABI a struct that names no
+// publication, which it answers with -1 and ErrNoClaim in Err without reading the handle
+// the close freed (spec/c-abi.md, "Which claim a struct names").
 func (p *Publication) Close() error {
 	if p.handle == nil {
 		return nil
@@ -580,6 +583,7 @@ func (p *Publication) Close() error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	p.Claim = nil
+	p.claim = C.cavalry_buffer_claim_t{}
 	err := check("cavalry_publication_close", C.cavalry_publication_close(p.handle))
 	p.handle = nil
 	return err

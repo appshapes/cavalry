@@ -53,7 +53,10 @@ library's header (`spec/c-abi.md`, "Versions and what a reader rejects").
   outlive the call: copy with `bytes(body)`. A handler that still holds an export of
   `body` when it returns makes `poll` raise `HandlerError` with a `BufferError`; an
   export of the claim held across `commit` is left to the caller to drop before the
-  next claim.
+  next claim. The close zeroes the claim struct too, so `commit`, `abort` and
+  `set_reserved_value` after it answer -1 with `CAVALRY_ERR_NO_CLAIM` and the ABI reads
+  no freed handle through the struct's `publication` (`spec/c-abi.md`, "Which claim a
+  struct names").
 - Never let a call the ABI refuses change a claim or a poll (`spec/c-abi.md`, "Calls
   during a claim or a poll"). A `try_claim` while a claim is outstanding returns
   `cavalry.ERROR` with `CAVALRY_ERR_CLAIM_OUTSTANDING`, and `publication.claim` stays

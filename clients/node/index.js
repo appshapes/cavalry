@@ -510,10 +510,14 @@ class Publication {
   get isConnected() { return addon.cavalry_publication_is_connected(this.handle); }
   get isClosed() { return addon.cavalry_publication_is_closed(this.handle); }
   /** Close the publication; the ABI's close aborts a claim still outstanding, and the claim's
-   * Buffer is released first. */
+   * Buffer is released first. The claim struct is zeroed before the ABI's close, so that
+   * `commit`, `abort` and `setReservedValue` after it hand the ABI a struct that names no
+   * publication, which it answers with -1 and CAVALRY_ERR_NO_CLAIM without reading the handle
+   * the close freed (spec/c-abi.md, "Which claim a struct names"). */
   close() {
     if (this.handle !== null) {
       this._release();
+      new Uint8Array(this._claim.buffer).fill(0);
       closeHandle(this, "cavalry_publication_close");
     }
   }

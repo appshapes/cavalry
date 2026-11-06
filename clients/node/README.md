@@ -49,7 +49,9 @@ needs and both CI runners and the ten-minute path's machines have.
   ABI refuses with `CAVALRY_ERR_POLLING`, leaving the subscription open
   (`spec/c-abi.md`, "Calls during a claim or a poll"). `close()` then throws
   `CavalryError` and keeps the handle, so the subscription can be polled and closed
-  after the poll.
+  after the poll. The close zeroes the claim struct too, so `commit`, `abort` and `setReservedValue` after it answer -1 with
+  `CAVALRY_ERR_NO_CLAIM` and the ABI reads no freed handle through the struct's
+  `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never edit a generated file by hand: `just lint` regenerates the package and fails
   when the committed files differ.
 
