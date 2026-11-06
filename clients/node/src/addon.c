@@ -657,6 +657,32 @@ static napi_value fn_cavalry_stop_recording(napi_env env, napi_callback_info inf
   return make_int32(env, (int32_t) result);
 }
 
+static napi_value fn_cavalry_add_destination(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value argv[3];
+  if (!read_args(env, info, 3, &argc, argv, "cavalry_add_destination")) return NULL;
+  cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
+  if (arg_failed) return NULL;
+  cavalry_publication_t *publication = (cavalry_publication_t *) external_arg(env, argv[1], "publication");
+  if (arg_failed) return NULL;
+  char channel_buf[4096]; const char *channel = string_arg(env, argv[2], channel_buf, sizeof channel_buf, "channel");
+  if (string_failed) return NULL;
+  int result = cavalry_add_destination(client, publication, channel);
+  return make_int32(env, (int32_t) result);
+}
+
+static napi_value fn_cavalry_remove_destination(napi_env env, napi_callback_info info) {
+  size_t argc = 3; napi_value argv[3];
+  if (!read_args(env, info, 3, &argc, argv, "cavalry_remove_destination")) return NULL;
+  cavalry_t *client = (cavalry_t *) external_arg(env, argv[0], "client");
+  if (arg_failed) return NULL;
+  cavalry_publication_t *publication = (cavalry_publication_t *) external_arg(env, argv[1], "publication");
+  if (arg_failed) return NULL;
+  char channel_buf[4096]; const char *channel = string_arg(env, argv[2], channel_buf, sizeof channel_buf, "channel");
+  if (string_failed) return NULL;
+  int result = cavalry_remove_destination(client, publication, channel);
+  return make_int32(env, (int32_t) result);
+}
+
 static napi_value fn_cavalry_truncate_recording(napi_env env, napi_callback_info info) {
   size_t argc = 3; napi_value argv[3];
   if (!read_args(env, info, 3, &argc, argv, "cavalry_truncate_recording")) return NULL;
@@ -1132,6 +1158,8 @@ static napi_value init(napi_env env, napi_value exports) {
     { "cavalry_add_subscription", NULL, fn_cavalry_add_subscription, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_start_recording", NULL, fn_cavalry_start_recording, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_stop_recording", NULL, fn_cavalry_stop_recording, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_add_destination", NULL, fn_cavalry_add_destination, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_remove_destination", NULL, fn_cavalry_remove_destination, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_truncate_recording", NULL, fn_cavalry_truncate_recording, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_purge_segments", NULL, fn_cavalry_purge_segments, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_purge_recording", NULL, fn_cavalry_purge_recording, NULL, NULL, NULL, napi_default, NULL },

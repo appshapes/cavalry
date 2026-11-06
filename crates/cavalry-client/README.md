@@ -20,6 +20,13 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   anything is reserved, so no frame lands past the stream's end, and every poll of a
   subscription is `Fault::Closed`. A subscription the client cannot hold is refused with
   `subscriptions-full`; it is never left open without its images.
+- Gives a publication on a control channel,
+  `cavalry:udp?control=<host>:<port>|control-mode=manual`, its destinations:
+  `Cavalry::add_destination(publication.registration_id(), "cavalry:udp?endpoint=<host>:<port>")`
+  and `remove_destination` with the same string, each answered by the driver, so that
+  the sender sends every datagram to each destination, multi-destination cast (ADR
+  0053); `|fc=min` on the control channel lets the slowest destination's receiver pace
+  the sender.
 - Records a stream to the durable log: `Cavalry::start_recording(channel, stream_id)`
   asks the driver to record the stream's live publication and returns a `Recording`
   whose `position()` and `synced_position()` read the recorder's two counters;

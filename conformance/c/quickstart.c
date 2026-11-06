@@ -193,16 +193,21 @@ static const char *result_name(int64_t code) {
     }
 }
 
-/* Publishes MESSAGES messages by claim and commit on `publication`, polling `r` as it
- * goes, drains `r` to the end and polls it once more for nothing. */
-static void publish_and_receive(cavalry_publication_t *publication, receiver_t *r) {
+/* Publishes MESSAGES by claim and commit on the publication while polling every
+ * receiver, polls until each has every message, then polls each once more for nothing
+ * and computes each one's frame positions: one receiver for a stream to one endpoint,
+ * two for a control channel's stream to two destinations (ADR 0053). */
+static void publish_and_receive_all(cavalry_publication_t *publication, receiver_t **rs, int n) {
     cavalry_buffer_claim_t claim;
     struct timespec publish_until = deadline();
+    receiver_t *r = rs[0];
     for (uint64_t i = 0; i < MESSAGES;) {
         /* The image joins on a poll; take its constants once a frame from it is read. */
-        if (cavalry_subscription_poll(r->subscription, on_fragment, r, 16) < 0)
-            fail("cavalry_subscription_poll");
-        take_constants(r);
+        for (int k = 0; k < n; k++) {
+            if (cavalry_subscription_poll(rs[k]->subscription, on_fragment, rs[k], 16) < 0)
+                fail("cavalry_subscription_poll");
+            take_constants(rs[k]);
+        }
         int64_t position = cavalry_publication_try_claim(publication, BODY, &claim);
         if (position == CAVALRY_PUBLICATION_ERROR) fail("cavalry_publication_try_claim");
         /* CLOSED and MAX_POSITION_EXCEEDED never clear, and a result code sets no error,
@@ -231,18 +236,27 @@ static void publish_and_receive(cavalry_publication_t *publication, receiver_t *
         i++;
     }
     struct timespec until = deadline();
-    while (r->next < MESSAGES) {
-        if (cavalry_subscription_poll(r->subscription, on_fragment, r, 16) < 0)
-            fail("cavalry_subscription_poll");
-        take_constants(r);
-        if (passed(&until)) {
-            fprintf(stderr, "conformance/c: %s: received %" PRIu64 " of %d in %d s\n", r->name,
-                    r->next, MESSAGES, WAIT_SECONDS);
-            exit(1);
+    for (int k = 0; k < n; k++) {
+        while (rs[k]->next < MESSAGES) {
+            if (cavalry_subscription_poll(rs[k]->subscription, on_fragment, rs[k], 16) < 0)
+                fail("cavalry_subscription_poll");
+            take_constants(rs[k]);
+            if (passed(&until)) {
+                fprintf(stderr, "conformance/c: %s: received %" PRIu64 " of %d in %d s\n",
+                        rs[k]->name, rs[k]->next, MESSAGES, WAIT_SECONDS);
+                exit(1);
+            }
         }
     }
-    expect_no_more(r);
-    compute_positions(r);
+    for (int k = 0; k < n; k++) {
+        expect_no_more(rs[k]);
+        compute_positions(rs[k]);
+    }
+}
+
+static void publish_and_receive(cavalry_publication_t *publication, receiver_t *r) {
+    receiver_t *rs[1] = {r};
+    publish_and_receive_all(publication, rs, 1);
 }
 
 static int free_udp_port(void) {
@@ -338,6 +352,44 @@ int main(void) {
            udp.source_identity);
     CHECK(cavalry_publication_close(udp_pub));
     CHECK(cavalry_subscription_close(udp_sub));
+
+    /* 2b. The same 1,000 over a control channel to two destinations, each a subscription
+     * on a loopback port of its own, under fc=min: multi-destination cast (ADR 0053),
+     * through cavalry_add_destination and cavalry_remove_destination (ADR 0057). */
+    char control_channel[96], destination_a[64], destination_b[64];
+    snprintf(control_channel, sizeof control_channel,
+             "cavalry:udp?control=127.0.0.1:%d|control-mode=manual|fc=min", free_udp_port());
+    snprintf(destination_a, sizeof destination_a, "cavalry:udp?endpoint=127.0.0.1:%d", free_udp_port());
+    snprintf(destination_b, sizeof destination_b, "cavalry:udp?endpoint=127.0.0.1:%d", free_udp_port());
+    cavalry_subscription_t *sub_a = NULL, *sub_b = NULL;
+    cavalry_publication_t *mdc_pub = NULL;
+    CHECK(cavalry_add_subscription(&sub_a, client, destination_a, STREAM));
+    CHECK(cavalry_add_subscription(&sub_b, client, destination_b, STREAM));
+    CHECK(cavalry_add_publication(&mdc_pub, client, control_channel, STREAM));
+    CHECK(cavalry_add_destination(client, mdc_pub, destination_a));
+    CHECK(cavalry_add_destination(client, mdc_pub, destination_b));
+    /* A duplicate add and a remove of one never added are success and change nothing;
+     * a destination the control address cannot send to is refused when added, code 1
+     * (spec/client-protocol.md, "Commands"). */
+    CHECK(cavalry_add_destination(client, mdc_pub, destination_a));
+    CHECK(cavalry_remove_destination(client, mdc_pub, "cavalry:udp?endpoint=127.0.0.1:1"));
+    if (cavalry_add_destination(client, mdc_pub, "cavalry:udp?endpoint=[::1]:40123") != -1 ||
+        cavalry_errcode() != 1) {
+        fprintf(stderr, "conformance/c: a destination of the other family was not refused with code 1: %s\n",
+                cavalry_errmsg());
+        return 1;
+    }
+    static receiver_t mdc_a = {.name = "destination a"}, mdc_b = {.name = "destination b"};
+    mdc_a.subscription = sub_a;
+    mdc_b.subscription = sub_b;
+    receiver_t *both[2] = {&mdc_a, &mdc_b};
+    publish_and_receive_all(mdc_pub, both, 2);
+    printf("conformance/c: %d messages over %s to two destinations by session %" PRId32
+           " received once, in order, at each\n", MESSAGES, control_channel, mdc_a.session_id);
+    CHECK(cavalry_remove_destination(client, mdc_pub, destination_b));
+    CHECK(cavalry_publication_close(mdc_pub));
+    CHECK(cavalry_subscription_close(sub_a));
+    CHECK(cavalry_subscription_close(sub_b));
 
     /* 3. Replay the recording onto stream 2001: the same checks, each frame at the
      * position the recording holds it at (ADR 0030), and the end reported. */

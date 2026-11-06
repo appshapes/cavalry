@@ -112,7 +112,7 @@ class Parse(unittest.TestCase):
         expected = {fn["name"]: (flat(fn["returns"]), [(flat(t), n) for t, n in fn["params"]])
                     for fn in self.vectors["functions"]}
         self.assertEqual(parsed, expected)
-        self.assertEqual(len(self.header.functions), 58)
+        self.assertEqual(len(self.header.functions), 60)
 
     def test_the_defines_are_the_vectors(self):
         parsed = {name: gen.python_value(value) for name, value in self.header.defines if name != "CAVALRY_H"}
@@ -835,7 +835,8 @@ class GoPackage(unittest.TestCase):
         self.assertEqual(sorted(methods), sorted(
             ["Client.IsClosed", "Client.Closed", "Client.Close", "Client.AddPublication", "Client.AddExclusivePublication",
              "Client.AddSubscription", "Client.StartRecording", "Client.StopRecording", "Client.TruncateRecording",
-             "Client.PurgeSegments", "Client.PurgeRecording", "Client.StartReplay", "Client.StopReplay"]))
+             "Client.PurgeSegments", "Client.PurgeRecording", "Client.StartReplay", "Client.StopReplay",
+             "Client.AddDestination", "Client.RemoveDestination"]))
         for label in methods:
             body = module.functions[label][2]
             self.assertTrue(body.startswith("{\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n"), label)

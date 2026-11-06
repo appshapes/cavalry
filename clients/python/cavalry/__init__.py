@@ -21,7 +21,7 @@ import threading
 from . import _abi
 from ._abi import *  # noqa: F401,F403  the header's constants, as the ABI names them
 
-ABI_VERSION = 0
+ABI_VERSION = 1
 
 # The result codes a message path returns instead of raising (spec/c-abi.md, "Result
 # codes"), under the names Aeron's C client uses without the prefix.
@@ -191,6 +191,17 @@ class Client:
 
     def stop_recording(self, recording_id):
         self._command("cavalry_stop_recording", recording_id)
+
+    def add_destination(self, publication, channel):
+        """Add the destination `channel`, `cavalry:udp?endpoint=<host>:<port>`, to the
+        control channel of `publication`, a Publication of this client; answered by the
+        driver (spec/client-protocol.md, "Commands"; ADR 0053)."""
+        self._command("cavalry_add_destination", publication._handle, channel.encode())
+
+    def remove_destination(self, publication, channel):
+        """Remove the destination `channel`, as it was added; one not there is removed
+        by nothing."""
+        self._command("cavalry_remove_destination", publication._handle, channel.encode())
 
     def truncate_recording(self, recording_id, position):
         self._command("cavalry_truncate_recording", recording_id, position)

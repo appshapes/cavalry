@@ -1602,3 +1602,12 @@ user-visible change, added in the same commit as the change. The format follows
   receiver is still dropped on the next cycle
   ([ADR 0056](docs/decisions/0056-keep-an-ended-receiver-in-a-closed-publications-table.md);
   card 225).
+- The C ABI moves to version 1 with `cavalry_add_destination` and
+  `cavalry_remove_destination`, each taking the client, the publication and the
+  destination channel, and the Rust client gains `Cavalry::add_destination` and
+  `remove_destination` by the publication's registration id; the five generated
+  clients gain the method on their client object, a package of version 0 refusing the
+  library until it is regenerated, as the clients README says; the C runner sends one
+  stream to two destinations and checks a duplicate add, an absent remove and a
+  destination of the other family ([ADR 0057](docs/decisions/0057-take-the-c-abi-to-version-1-with-destinations.md);
+  card 225).

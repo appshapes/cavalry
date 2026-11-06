@@ -1,7 +1,8 @@
 //! The ABI's rules over a driver in the process (`spec/c-abi.md`; ADR 0051): the
 //! version check, the strings, a claim and a poll through the C handler with the
 //! header's values and the frame's position from the image's constants, the calls a
-//! live claim or a running poll refuses, which claim a struct names, a refused
+//! live claim or a running poll refuses, the destination commands a live claim allows
+//! and the nulls they refuse, which claim a struct names, a refused
 //! claim's struct, the closed codes and the long message's anchor.
 
 use std::ffi::{CStr, CString, c_void};
@@ -338,6 +339,62 @@ fn a_live_claim_refuses_the_calls_the_rust_borrow_would() {
         assert_eq!(constants.max_message_length, idle.max_message_length);
         assert!(constants.max_payload_length > 0 && constants.max_message_length > 0);
         assert_eq!(constants.is_exclusive, idle.is_exclusive);
+        // The destination commands read the handle's copied registration id and run on
+        // the client, so the claim refuses neither: each reaches the driver, which
+        // answers this `cavalry:ipc` publication with its `control` refusal, code 1,
+        // and not CLAIM_OUTSTANDING (ADR 0057).
+        let destination = c"cavalry:udp?endpoint=127.0.0.1:40123";
+        for (function, call) in [
+            (
+                "cavalry_add_destination",
+                cavalry_add_destination as unsafe extern "C" fn(_, _, _) -> _,
+            ),
+            ("cavalry_remove_destination", cavalry_remove_destination),
+        ] {
+            assert_eq!(
+                call(setup.client, setup.publication, destination.as_ptr()),
+                -1,
+                "{function}"
+            );
+            assert_eq!(
+                cavalry_errcode(),
+                CAVALRY_ERR_INVALID_CHANNEL,
+                "{function}: {}",
+                errmsg()
+            );
+            assert!(errmsg().contains("(control)"), "{function}: {}", errmsg());
+            // A null handle or string is refused before the client is reached.
+            assert_eq!(call(setup.client, ptr::null(), destination.as_ptr()), -1);
+            assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+            assert!(
+                errmsg().contains(&format!("{function} refused (null): publication")),
+                "{}",
+                errmsg()
+            );
+            assert_eq!(call(setup.client, setup.publication, ptr::null()), -1);
+            assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+            assert!(
+                errmsg().contains(&format!("{function} refused (null): channel")),
+                "{}",
+                errmsg()
+            );
+            assert_eq!(
+                call(ptr::null_mut(), setup.publication, destination.as_ptr()),
+                -1
+            );
+            assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+            assert!(
+                errmsg().contains(&format!("{function} refused (null): client")),
+                "{}",
+                errmsg()
+            );
+        }
+        // The claim the calls ran beside is still the one outstanding.
+        assert_eq!(
+            cavalry_publication_offer(setup.publication, b"x".as_ptr(), 1),
+            CAVALRY_PUBLICATION_ERROR
+        );
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_CLAIM_OUTSTANDING);
         ptr::copy_nonoverlapping(b"live".as_ptr(), claim.data, 4);
         assert_eq!(cavalry_buffer_claim_commit(&mut claim), after);
         assert!(cavalry_publication_is_connected(setup.publication));
@@ -616,7 +673,11 @@ fn the_version_check_and_the_strings_refuse_what_the_page_says() {
         );
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_ABI_VERSION);
         assert!(
-            errmsg().contains("version 1 and this library is version 0"),
+            errmsg().contains(&format!(
+                "version {} and this library is version {}",
+                CAVALRY_ABI_VERSION + 1,
+                CAVALRY_ABI_VERSION
+            )),
             "{}",
             errmsg()
         );

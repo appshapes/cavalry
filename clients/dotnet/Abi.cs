@@ -23,7 +23,7 @@ public static unsafe partial class Abi
     internal const string Library = "cavalry_ffi";
 
     public const string DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public const int ABI_VERSION = 0; // CAVALRY_ABI_VERSION
+    public const int ABI_VERSION = 1; // CAVALRY_ABI_VERSION
     public const int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public const int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
     public const int NULL_LENGTH = -1; // CAVALRY_NULL_LENGTH
@@ -223,6 +223,12 @@ public static unsafe partial class Abi
 
     [LibraryImport(Library)]
     internal static partial int cavalry_stop_recording(nint client, long recording_id);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int cavalry_add_destination(nint client, nint publication, string channel);
+
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int cavalry_remove_destination(nint client, nint publication, string channel);
 
     [LibraryImport(Library)]
     internal static partial int cavalry_truncate_recording(nint client, long recording_id, long position);

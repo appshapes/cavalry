@@ -1,4 +1,4 @@
-# C ABI, version 0
+# C ABI, version 1
 
 The C ABI is how a program in any language but Rust reaches the client API: the
 `extern "C"` functions, the opaque handles, the structs a caller owns, the codes, the
@@ -91,12 +91,12 @@ handle writes nothing through that pointer; it promises nothing about threads
 | --- | --- |
 | context | `int cavalry_context_init_v(cavalry_context_t **context, int abi_version)`, which the header's macro `cavalry_context_init(context)` calls with `CAVALRY_ABI_VERSION` ("Versions and what a reader rejects"); `int cavalry_context_set_dir(cavalry_context_t *context, const char *dir)`; `const char *cavalry_context_get_dir(const cavalry_context_t *context)`; `int cavalry_context_close(cavalry_context_t *context)`. A context resolves its directory when it is made, as the Rust client's default does: `CAVALRY_DIR` when it is set and not empty, else the driver's default directory (`spec/client-protocol.md`, "The driver directory"). `set_dir` replaces it with the caller's bytes and refuses an empty string ("Strings"); `get_dir` returns the directory `cavalry_init` will use, never null for a context, valid until the next `set_dir` or the context's close. |
 | client | `int cavalry_init(cavalry_t **client, cavalry_context_t *context)`: attaches to the driver at the context's directory and starts the client conductor, in one call, and copies the directory, so the client keeps no pointer to its context; `int cavalry_close(cavalry_t *client)`; `bool cavalry_is_closed(const cavalry_t *client)`; `int32_t cavalry_closed(const cavalry_t *client)`: 0 while open, else why, `CAVALRY_CLOSED_*` ("Constants"); `int64_t cavalry_client_id(const cavalry_t *client)`; `const char *cavalry_dir(const cavalry_t *client)`. |
-| adds and commands | `int cavalry_add_publication(cavalry_publication_t **publication, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_add_exclusive_publication(cavalry_publication_t **publication, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_add_subscription(cavalry_subscription_t **subscription, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_start_recording(cavalry_recording_t **recording, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_stop_recording(cavalry_t *client, int64_t recording_id)`; `int cavalry_truncate_recording(cavalry_t *client, int64_t recording_id, int64_t position)`; `int cavalry_purge_segments(cavalry_t *client, int64_t recording_id, int64_t new_start_position)`; `int cavalry_purge_recording(cavalry_t *client, int64_t recording_id)`; `int cavalry_start_replay(cavalry_replay_t **replay, cavalry_t *client, int64_t recording_id, int64_t position, int64_t length, int32_t replay_stream_id, const char *channel)`; `int cavalry_stop_replay(cavalry_t *client, int64_t replay_session_id)`. Each is synchronous: it returns when the driver has answered or the response timeout, 10 s, has passed, with one operation in flight per client, as the client protocol has it. The driver's refusal is the error, with the driver's code and message. |
+| adds and commands | `int cavalry_add_publication(cavalry_publication_t **publication, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_add_exclusive_publication(cavalry_publication_t **publication, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_add_subscription(cavalry_subscription_t **subscription, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_start_recording(cavalry_recording_t **recording, cavalry_t *client, const char *channel, int32_t stream_id)`; `int cavalry_stop_recording(cavalry_t *client, int64_t recording_id)`; `int cavalry_truncate_recording(cavalry_t *client, int64_t recording_id, int64_t position)`; `int cavalry_purge_segments(cavalry_t *client, int64_t recording_id, int64_t new_start_position)`; `int cavalry_purge_recording(cavalry_t *client, int64_t recording_id)`; `int cavalry_start_replay(cavalry_replay_t **replay, cavalry_t *client, int64_t recording_id, int64_t position, int64_t length, int32_t replay_stream_id, const char *channel)`; `int cavalry_stop_replay(cavalry_t *client, int64_t replay_session_id)`; `int cavalry_add_destination(cavalry_t *client, const cavalry_publication_t *publication, const char *channel)` and `int cavalry_remove_destination(cavalry_t *client, const cavalry_publication_t *publication, const char *channel)`: the client protocol's `add destination` and `remove destination` for the publication, whose registration id the function reads from the handle's copied constants, so that the call is allowed during a claim; 0 on `operation success`, −1 with the driver's code on its refusal (`spec/client-protocol.md`, "Commands"; ADR 0057). Each is synchronous: it returns when the driver has answered or the response timeout, 10 s, has passed, with one operation in flight per client, as the client protocol has it. The driver answers once it has queued the change for its sender, which takes its requests in order, at most the sender requests per cycle at the start of each duty cycle and none while its replies wait for room, so the change takes effect at the start of the cycle that takes it, the next cycle only when nothing waits ahead of it, and until then everything the endpoint sends still reaches a removed destination and nothing reaches an added one (`spec/client-protocol.md`, "Commands"; `spec/udp.md`, "Values"). The driver's refusal is the error, with the driver's code and message. |
 | publication | `int64_t cavalry_publication_try_claim(cavalry_publication_t *publication, size_t length, cavalry_buffer_claim_t *claim)`: the position after the frame, with the struct filled, or a result code; `int cavalry_buffer_claim_set_reserved_value(cavalry_buffer_claim_t *claim, int64_t value)`; `int64_t cavalry_buffer_claim_commit(cavalry_buffer_claim_t *claim)` and `int64_t cavalry_buffer_claim_abort(cavalry_buffer_claim_t *claim)`: the position after the frame, or −1; `int64_t cavalry_publication_offer(cavalry_publication_t *publication, const uint8_t *buffer, size_t length)`: the position after the message, or a result code; `int64_t cavalry_publication_position(const cavalry_publication_t *publication)`: the producer position, where the next frame goes, as the Rust `Publication::position` gives it (`spec/log-buffer.md`, "Tail counters"); in a concurrent publication it counts frames that other handles on the log have claimed and not yet committed; or −1 with the thread's error set, `CAVALRY_ERR_LOG` when the log's active tail is not its active term's, the one check of `spec/log-buffer.md` this read runs; `int64_t cavalry_publication_position_limit(const cavalry_publication_t *publication)`; `bool cavalry_publication_is_connected(const cavalry_publication_t *publication)`; `bool cavalry_publication_is_closed(const cavalry_publication_t *publication)`; `int cavalry_publication_constants(const cavalry_publication_t *publication, cavalry_publication_constants_t *constants)`; `int cavalry_publication_close(cavalry_publication_t *publication)`. |
 | subscription | `int cavalry_subscription_poll(cavalry_subscription_t *subscription, cavalry_fragment_handler_t handler, void *clientd, size_t fragment_limit)`: the fragments delivered, or −1 with the fault as the error; a `fragment_limit` above `INT_MAX` is read as `INT_MAX`, so that the count fits the `int`; `int cavalry_subscription_fault(const cavalry_subscription_t *subscription, cavalry_fault_t *fault)`; `int cavalry_subscription_image_count(const cavalry_subscription_t *subscription)`; `cavalry_image_t *cavalry_subscription_image_at_index(cavalry_subscription_t *subscription, size_t index)`: null past the count, with no error set; `bool cavalry_subscription_is_connected(const cavalry_subscription_t *subscription)`; `bool cavalry_subscription_is_closed(const cavalry_subscription_t *subscription)`; `int cavalry_subscription_constants(const cavalry_subscription_t *subscription, cavalry_subscription_constants_t *constants)`; `int cavalry_subscription_close(cavalry_subscription_t *subscription)`. |
 | image and header | `int cavalry_image_constants(const cavalry_image_t *image, cavalry_image_constants_t *constants)`; `int64_t cavalry_image_position(const cavalry_image_t *image)`; `bool cavalry_image_is_end_of_stream(const cavalry_image_t *image)`; `int cavalry_header_values(const cavalry_header_t *header, cavalry_header_values_t *values)`. This version has no `cavalry_header_position`: a frame's position is computed from its image's constants ("A frame's position"). |
 | recording and replay | `int cavalry_recording_constants(const cavalry_recording_t *recording, cavalry_recording_constants_t *constants)`; `int64_t cavalry_recording_position(const cavalry_recording_t *recording)`; `int64_t cavalry_recording_synced_position(const cavalry_recording_t *recording)`; `int cavalry_recording_close(cavalry_recording_t *recording)`, which frees the handle and stops nothing; `int cavalry_replay_constants(const cavalry_replay_t *replay, cavalry_replay_constants_t *constants)`; `int64_t cavalry_replay_position(const cavalry_replay_t *replay)`; `bool cavalry_replay_ended(const cavalry_replay_t *replay, int64_t *position, int32_t *reason)`: `true` once the replay has ended, with the end position and the reason, `CAVALRY_REPLAY_STOP_*` or −1 for none, written through the pointers; `int cavalry_replay_close(cavalry_replay_t *replay)`, which frees the handle. |
-| errors and version | `int cavalry_errcode(void)` and `const char *cavalry_errmsg(void)`: the calling thread's last error ("Error codes", "The message"); `int cavalry_version_major(void)`, `int cavalry_version_minor(void)`, `int cavalry_version_patch(void)` and `const char *cavalry_version_full(void)`: the crate's version; `int cavalry_abi_version(void)`: this page's version, 0, beside the header's `CAVALRY_ABI_VERSION`. |
+| errors and version | `int cavalry_errcode(void)` and `const char *cavalry_errmsg(void)`: the calling thread's last error ("Error codes", "The message"); `int cavalry_version_major(void)`, `int cavalry_version_minor(void)`, `int cavalry_version_patch(void)` and `const char *cavalry_version_full(void)`: the crate's version; `int cavalry_abi_version(void)`: this page's version, 1, beside the header's `CAVALRY_ABI_VERSION`. |
 
 The fragment handler is `typedef void (*cavalry_fragment_handler_t)(void *clientd,
 const uint8_t *buffer, size_t length, const cavalry_header_t *header)`: the body as a
@@ -158,7 +158,7 @@ across the boundary:
 
 | Define | Value | Meaning |
 | --- | --- | --- |
-| `CAVALRY_ABI_VERSION` | 0 | this page's version |
+| `CAVALRY_ABI_VERSION` | 1 | this page's version |
 | `CAVALRY_DIR_ENV` | `"CAVALRY_DIR"` | the environment variable a context's default directory reads |
 | `CAVALRY_MAX_IMAGES` | 256 | the images a subscription holds at most |
 | `CAVALRY_NULL_POSITION` | −1 | no position: a replay from the recording's start, a fault without one |
@@ -234,6 +234,7 @@ the poll as it was.
 | `cavalry_publication_position`, `_position_limit` | −1 with `CAVALRY_ERR_CLAIM_OUTSTANDING` |
 | `cavalry_publication_is_connected`, `_is_closed` | `false` with `CAVALRY_ERR_CLAIM_OUTSTANDING` |
 | `cavalry_publication_close` | aborts the claim, then closes |
+| `cavalry_add_destination`, `cavalry_remove_destination` with this publication | allowed: each reads the handle's copied registration id, which the claim does not borrow, and runs on the client (ADR 0057) |
 
 | Call from inside the handler | While the subscription's poll runs |
 | --- | --- |
@@ -311,6 +312,12 @@ a `&mut self` one:
   the new client.
 - An image is part of its subscription, so a call on an image counts as a call on its
   subscription.
+- `cavalry_add_destination` and `cavalry_remove_destination` count as calls on the
+  client and not on the publication they name: each reads only the registration id
+  the publication handle copied when it was made, which no function of the
+  publication writes. So either may run in one thread beside any call on the
+  publication in another, an offer or a claim among them, but not beside the
+  publication's close, which frees the handle ("Lifetimes"; ADR 0057).
 - Two handles may be used from two threads at once, a client and its publications,
   subscriptions, recordings and replays among them.
 
@@ -353,6 +360,12 @@ with the version its bindings were generated from, and calls `cavalry_abi_versio
 when it loads the library, before any other function, so that a mismatch fails at load
 time.
 
+Version 1 adds `cavalry_add_destination` and `cavalry_remove_destination` to "adds and
+commands" and moves `CAVALRY_ABI_VERSION` to 1 (ADR 0057); every declaration of
+version 0 is unchanged. Nothing is released (ADR 0003), so no built program meets the
+refusal below; a generated client's package of version 0 refuses a version 1 library
+when it loads, as its message says, until it is regenerated.
+
 A reader of the header, `cavalry-ffi`'s conformance test, checks it against
 `spec/vectors/c-abi.json`, written by `spec/vectors/c-abi.py` from this page's tables:
 every opaque type, every struct with its fields in order, the handler typedef, the
@@ -368,7 +381,8 @@ library answers an older program's `cavalry_context_init_v` with
 Image handlers and the invoker mode; counters and `add counter`, and the Rust
 `Cavalry::counters()`; the channel status as a function, which the counters file
 holds; a vectored offer, the controlled and block polls and the fragment assemblers;
-destinations; `revoke` and `append_padding`; `local_sockaddrs`; `print_counters` and
+the destinations of a subscription, Aeron's multi-destination subscription; `revoke`
+and `append_padding`; `local_sockaddrs`; `print_counters` and
 the `cnc` family, which `cavalry doctor` serves; `cavalry_header_position` and the
 position context in the header's values; the Rust `Flags::NONE` and `Flags::RESERVED`,
 which a C caller writes as 0 and reads from the flags byte; and the Rust `reason()` names of `Offer`,

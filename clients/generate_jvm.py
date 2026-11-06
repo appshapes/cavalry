@@ -566,6 +566,25 @@ public final class Client implements AutoCloseable {
         return new Recording(add("cavalry_start_recording", Abi.cavalry_start_recording, channel, streamId));
     }
 
+    /** Adds the destination channel, {@code cavalry:udp?endpoint=<host>:<port>}, to the
+     *  publication's control channel, answered by the driver (ADR 0053). */
+    public synchronized void addDestination(Publication publication, String channel) {
+        destination("cavalry_add_destination", Abi.cavalry_add_destination, publication, channel);
+    }
+
+    /** Removes the destination channel, as it was added; one not there is removed by nothing. */
+    public synchronized void removeDestination(Publication publication, String channel) {
+        destination("cavalry_remove_destination", Abi.cavalry_remove_destination, publication, channel);
+    }
+
+    private void destination(String fn, java.lang.invoke.MethodHandle function, Publication publication, String channel) {
+        try (Arena arena = Arena.ofConfined()) {
+            Abi.check(fn, (int) function.invokeExact(handle, publication.handle(), arena.allocateFrom(channel)));
+        } catch (Throwable t) {
+            throw Abi.failed(fn, t);
+        }
+    }
+
     /** Stops the recording. */
     public synchronized void stopRecording(long recordingId) {
         try {
@@ -652,6 +671,11 @@ public final class Publication implements AutoCloseable {
     private static final MemorySegment EVERYTHING = MemorySegment.NULL.reinterpret(Long.MAX_VALUE);
 
     private MemorySegment handle;
+
+    /** The handle, for the client's own commands that name this publication. */
+    MemorySegment handle() {
+        return handle;
+    }
     private final MemorySegment claimStruct = Arena.ofAuto().allocate(Abi.cavalry_buffer_claim_t);
     private MemorySegment claim;
     private final String channel;
