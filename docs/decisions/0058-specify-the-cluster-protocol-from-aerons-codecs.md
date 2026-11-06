@@ -69,7 +69,7 @@ most 8 members. The stream ids are Aeron's defaults: the log 100, ingress 101, e
 102, consensus 108. The leadership term id counts from 0 and only rises; a term's base
 position is the log position at which its new leadership term event begins; an entry's
 position is the position after its frame, `spec/log-buffer.md`'s arithmetic, so that
-every member's recording holds every entry at one position. The commit position is the
+every member's log holds every entry at one position. The commit position is the
 highest position a quorum of active members, the leader among them, has appended,
 bounded by the leader's own; the quorum is half the members plus one; a member is
 active while its last append position is younger than the leader heartbeat timeout. The
@@ -174,9 +174,9 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   log carries, stays a wall clock's milliseconds for the service.
 - **Catch-up from any position in place of follower log replication, one replay
   across the terms a member missed.** Lost. One replay across terms has no stop
-  position a follower can check term by term, and the member's log is one recording
-  per term, so the replication is Aeron's, one term at a time to the next term's base,
-  over the catch-up messages the page has.
+  position a follower can check term by term, and each span a member receives from a
+  replay is a recording of its own, so the replication is Aeron's, one term at a time
+  to the next term's base, over the catch-up messages the page has.
 - **Follower log replication out of version 0, a member below the leader's term base
   log position failing its election until card 230.** Lost: a follower that is behind
   within the previous term is the ordinary case at failover, and a cluster whose
