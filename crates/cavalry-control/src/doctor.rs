@@ -1237,6 +1237,8 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             });
         }
     }
+    // The counter counts a receiver dropped for the timeout alone; one whose stream
+    // ended, as every receiver's does after a clean close, is not in it (ADR 0054).
     if let Some(timed_out) = read_static(
         reader,
         "sender.flow_control_receivers_timed_out",
@@ -1249,11 +1251,12 @@ fn udp_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding
             level: Level::Warn,
             message: format!(
                 "sender.flow_control_receivers_timed_out is {timed_out}: that many times a \
-                 receiver of a publication under fc=min sent no status message for 5 s, or \
-                 ended its stream, and was dropped from the publication's table, each time \
-                 after holding the stream back for the timeout; a destination whose driver \
-                 stopped, lost its subscription or lost its route: find it by the \
-                 publication whose sender.flow_control_receivers is below its endpoint's \
+                 receiver of a publication under fc=min sent no status message for 5 s and \
+                 was dropped from the publication's table, each time after holding the \
+                 stream back for the timeout; a receiver whose stream ended is not counted, \
+                 so this is a destination whose driver stopped, lost its subscription or \
+                 lost its route: find it by the publication whose \
+                 sender.flow_control_receivers is below its endpoint's \
                  channel.destinations, check its driver, or remove the destination"
             ),
             doc: DOC_UDP_SENDER,
@@ -2499,6 +2502,49 @@ mod tests {
             found[0].message.contains("publication 8 on stream"),
             "{}",
             found[0].message
+        );
+    }
+
+    /// A clean close of a `min` publication on a control channel (ADR 0054): its
+    /// receiver ended its stream, so the sender dropped it from the table uncounted,
+    /// and the close freed the publication's counters. What the close leaves, the
+    /// endpoint open for a `max` publication beside it to its one destination and both
+    /// static counters at 0, gives `doctor` no warning.
+    #[test]
+    fn a_clean_close_of_a_min_publication_leaves_doctor_with_no_warning() {
+        let dir = TestDir::new("udp-mdc-min-close");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        control_endpoint(&mut counters, 9, 1);
+        sender_gauges(&mut counters, 8, 9, "fc=max", (131_072, 0));
+        // The udp checks: the test's directory may be on a disk, which another warns of.
+        let report = examine(&dir.0);
+        let warnings: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.level == Level::Warn && f.check.starts_with("udp-"))
+            .collect();
+        assert!(warnings.is_empty(), "{report}");
+        // The counter the sweep used to raise on that close: now it means a timeout,
+        // and the finding says so.
+        counters
+            .counter(SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT.record())
+            .expect("static")
+            .increment();
+        let report = examine(&dir.0);
+        let found = finding(&report, "udp-flow-control-receiver-timed-out");
+        assert!(
+            found
+                .message
+                .contains("a receiver whose stream ended is not counted"),
+            "{}",
+            found.message
+        );
+        assert!(
+            !found.message.contains("or ended its stream"),
+            "{}",
+            found.message
         );
     }
 
