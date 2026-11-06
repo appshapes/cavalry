@@ -194,8 +194,17 @@ Eight features make the slice, one Trello card each, in this order:
    64 distinct endpoints); flow control `fc=max|min` with `min` the slowest
    destination's pace and a destination that times out dropped from the accounting
    and counted; `tagged` and the group tag left to the Revisit; the dynamic control
-   mode left out (Alternatives). Vectors for the new frames' fields and the commands;
-   the client API's `add_destination` and `remove_destination` on a publication and
+   mode left out (Alternatives). No frame is new and no frame's field changes:
+   `spec/udp.md` moves to version 1 for its channel grammar, the `control`,
+   `control-mode` and `fc` keys that version 0 refuses as unknown, and for the
+   sender's per-destination state, and `spec/client-protocol.md` to version 5 for the
+   two commands. Every frame's version byte stays 0, since a receiver of version 0
+   drops a frame whose version is not 0 (`spec/udp.md`, "The datagram"), and a byte
+   that moved would have a member at N drop every datagram of a member at N+1, the
+   opposite of feature 7's cluster of both. Vectors for the `add destination` and
+   `remove destination` layouts in `spec/vectors/client-protocol.json`, and for the
+   `control`, `control-mode` and `fc` parameters, parsed and refused, as `channel`
+   vectors in `spec/vectors/udp.json`; the client API's `add_destination` and `remove_destination` on a publication and
    their ABI functions, a version bump of the ABI before the first release under the
    ADR's rule ("Nothing is released, so a client that later finds the ABI wanting sends
    it to a new version under a new ADR"); the UDP conformance suite and the C runner
