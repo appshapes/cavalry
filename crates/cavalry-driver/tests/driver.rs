@@ -614,7 +614,7 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
 
     // A reserved type id is `type`, code 6, however long the record.
     let reserved = client.correlation_id();
-    client.send_raw(7, &over_long(reserved));
+    client.send_raw(9, &over_long(reserved));
     let (code, text) = client.wait_error(reserved);
     assert_eq!(code, 6);
     assert!(text.contains("(type)"), "{text}");
