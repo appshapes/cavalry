@@ -61,7 +61,17 @@ nothing depends on it.
   then; a tenth
   of `--messages` per run, at ten microseconds a message, after a warm-up of 10,000
   messages, since the driver pre-touches both logs. The driver's threads
-  busy-spin under `--pin` and back off otherwise. With `--link-here <host>:<port>` and
+  busy-spin under `--pin` and back off otherwise. Measures the same two rows over a
+  control channel to two destinations, `claim_commit_32_udp_mdc` and
+  `one_way_32_udp_mdc`: a publication on
+  `cavalry:udp?control=127.0.0.1:<port>|control-mode=manual|fc=min` whose sender
+  sends every datagram to two subscriptions of the driver on two loopback ports, the
+  first measured and the second drained on a thread of its own, one message in flight,
+  reported and never gated since every isolated core of both bench hosts is taken
+  (ADR 0052, feature 1; ADR 0053); under `--link-here` and `--link-peer` the same two
+  rows run after the link rows with the peer's endpoint as the second destination,
+  over the cable and this host at once, the peer echoing them onto the held link
+  subscription. With `--link-here <host>:<port>` and
   `--link-peer <host>:<port>` it runs the link rows alone instead, `udp_round_trip_32`
   and `udp_one_way_32`, across the direct cable between the two bench hosts to a peer
   running `--echo`, the harness on the other host, which claims every message it

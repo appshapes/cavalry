@@ -233,6 +233,11 @@ enum Benchmark {
     /// The client path over `cavalry:udp` on the loopback, through the driver's sender
     /// and receiver, one message in flight (ADR 0044): the same two rows under `udp`.
     Udp,
+    /// The client path over a control channel to two destinations, each a subscription
+    /// of this driver on a loopback port, under `fc=min`, one message in flight,
+    /// measured at the first (ADR 0053): the same two rows under `udp_mdc`, reported
+    /// and never gated (ADR 0052, feature 1).
+    UdpMdc,
     /// The client path through the C ABI (ADR 0051): `cavalry-ffi`'s `extern "C"`
     /// functions in this binary, so the rows need no C compiler and the allocation gate
     /// counts the ABI's path as it counts the client's; the same two rows under `ffi`.
@@ -249,7 +254,7 @@ impl Benchmark {
     /// types, the client path with and without a recording on, the client path over
     /// UDP on the loopback, the client path through the C ABI, the three slot
     /// spacings, and last the recorder's block path, so its writes reach no other row.
-    const ALL: [Benchmark; 11] = [
+    const ALL: [Benchmark; 12] = [
         Benchmark::Timer,
         Benchmark::Log {
             log_type: LogType::Exclusive,
@@ -268,6 +273,7 @@ impl Benchmark {
             name: "recorded",
         },
         Benchmark::Udp,
+        Benchmark::UdpMdc,
         Benchmark::Ffi,
         Benchmark::Slot { spacing: 0 },
         Benchmark::Slot { spacing: 64 },
@@ -288,6 +294,10 @@ impl Benchmark {
             Benchmark::Udp => vec![
                 format!("claim_commit_{body}_udp"),
                 format!("one_way_{body}_udp"),
+            ],
+            Benchmark::UdpMdc => vec![
+                format!("claim_commit_{body}_udp_mdc"),
+                format!("one_way_{body}_udp_mdc"),
             ],
             Benchmark::Ffi => vec![
                 format!("claim_commit_{body}_ffi"),
@@ -492,7 +502,11 @@ fn parse(args: &[String]) -> Result<Options, String> {
         options.profile.push_str("-only");
     }
     if let Some(pin) = options.pin {
-        let udp = options.link.is_some() || options.benchmarks().contains(&Benchmark::Udp);
+        let udp = options.link.is_some()
+            || options
+                .benchmarks()
+                .iter()
+                .any(|benchmark| matches!(benchmark, Benchmark::Udp | Benchmark::UdpMdc));
         check_pins(pin, udp)?;
     }
     // Read here, before `main` pins this thread to the publisher's CPU, since the
@@ -607,6 +621,14 @@ struct Link {
 impl Link {
     fn here_channel(&self) -> String {
         format!("cavalry:udp?endpoint={}", self.here)
+    }
+
+    /// This host's address on the link, without its port: where the multi-destination
+    /// cast rows' control channel and local destination are.
+    fn here_host(&self) -> String {
+        self.here
+            .rsplit_once(':')
+            .map_or_else(|| self.here.clone(), |(host, _)| host.to_string())
     }
 
     fn peer_channel(&self) -> String {
@@ -1977,6 +1999,200 @@ fn bench_udp(options: &Options) -> Result<LogRun, String> {
     with_bench_dir("udp", |dir| run_udp(options, dir))
 }
 
+/// The multi-destination cast rows, `claim_commit_<body>_udp_mdc` and
+/// `one_way_<body>_udp_mdc` (ADR 0052, feature 1; ADR 0053): the UDP rows' path over
+/// a control channel, `cavalry:udp?control=<host>:<port>|control-mode=manual|fc=min`,
+/// whose sender sends every datagram to two destinations, one message in flight,
+/// measured at the first destination, a subscription of this driver on a port of this
+/// host. In the loopback pass the second destination is a subscription of this driver
+/// too, drained on a thread of its own so that `fc=min` paces the sender by the slower
+/// of two readers that both keep up; in the link pass it is the peer's endpoint across
+/// the cable, where the peer's echo claims every message back onto the link
+/// subscription, held and not polled, as it echoes the link rows'. Reported and never
+/// gated: every isolated core of both bench hosts is taken (ADR 0044), and the row
+/// joins the gate with the host change that gives it cores (ADR 0052's Revisit).
+fn bench_udp_mdc(options: &Options) -> Result<LogRun, String> {
+    with_bench_dir("udp-mdc", |dir| {
+        let pins = Arc::new(DriverPins::new());
+        let on_thread_start = udp_thread_start(options, &pins);
+        pin_to(options.housekeeping)?;
+        let driver =
+            Driver::start_with_threads(dir, dir.join("log"), driver_idle(options), on_thread_start)
+                .map_err(|e| e.to_string())?;
+        let mut client = Cavalry::connect_to(dir).map_err(|e| e.to_string())?;
+        let second = format!("cavalry:udp?endpoint=127.0.0.1:{}", free_port()?);
+        let run = mdc_rows(
+            options,
+            &mut client,
+            &pins,
+            "127.0.0.1",
+            &second,
+            CONNECT_TIMEOUT,
+        )?;
+        client.close().map_err(|e| e.to_string())?;
+        driver.close().map_err(|e| e.to_string())?;
+        for thread in [
+            DriverThread::Conductor,
+            DriverThread::Recorder,
+            DriverThread::Replayer,
+            DriverThread::Sender,
+            DriverThread::Receiver,
+        ] {
+            pins.check(thread)?;
+        }
+        Ok(run)
+    })
+}
+
+/// One run of the multi-destination cast rows on `client`, whose driver already runs:
+/// a subscription on a free port of `host`, the measured destination, a second
+/// subscription on `second` when it is this host's, drained on its own thread, a
+/// publication on a control channel of `host` with both as its destinations, connected
+/// within `timeout`, the measured run, and the handles closed in the order
+/// `close_stream` keeps, the publication first so that the stream's end goes out.
+fn mdc_rows(
+    options: &Options,
+    client: &mut Cavalry,
+    pins: &DriverPins,
+    host: &str,
+    second: &str,
+    timeout: Duration,
+) -> Result<LogRun, String> {
+    let control = format!(
+        "cavalry:udp?control={host}:{}|control-mode=manual|fc=min",
+        free_port()?
+    );
+    let first = format!("cavalry:udp?endpoint={host}:{}", free_port()?);
+    let mut subscription = client
+        .add_subscription(&first, STREAM_ID)
+        .map_err(|e| e.to_string())?;
+    let local_second = second.contains(&format!("endpoint={host}:"));
+    let mut drained = if local_second {
+        Some(
+            client
+                .add_subscription(second, STREAM_ID)
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    pins.check(DriverThread::Conductor)?;
+    let mut publication = client
+        .add_publication(&control, STREAM_ID)
+        .map_err(|e| e.to_string())?;
+    let id = publication.registration_id();
+    client
+        .add_destination(id, &first)
+        .map_err(|e| e.to_string())?;
+    client
+        .add_destination(id, second)
+        .map_err(|e| e.to_string())?;
+    pin_to(options.pin.map(|pin| pin.publisher))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        subscription.poll(|_, _| {}, 0).map_err(|e| e.to_string())?;
+        if let Some(drained) = drained.as_mut() {
+            drained.poll(|_, _| {}, 0).map_err(|e| e.to_string())?;
+        }
+        if publication.is_connected()
+            && subscription.is_connected()
+            && drained.as_ref().is_none_or(Subscription::is_connected)
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "the control channel's stream did not connect in {} s: the publication on \
+                 {control} is {}, the subscription on {first} {}, the second destination \
+                 {second}; a setup frame goes to each destination every 100 ms, so a \
+                 receiver on it whose subscription wants the stream answers within one \
+                 (docs/how-to/run-the-bench.md#when-it-does-not-work)",
+                timeout.as_secs(),
+                if publication.is_connected() {
+                    "connected"
+                } else {
+                    "not connected"
+                },
+                if subscription.is_connected() {
+                    "has its image"
+                } else {
+                    "has no image"
+                }
+            ));
+        }
+        std::thread::sleep(Duration::from_micros(100));
+    }
+    pins.check(DriverThread::Sender)?;
+    pins.check(DriverThread::Receiver)?;
+    let warmup = options.udp_warmup();
+    let run = Run {
+        warmup,
+        total: warmup + options.udp_messages(),
+        body: options.body,
+        epoch: tick(),
+        link: false,
+    };
+    let received = Arc::new(AtomicU64::new(0));
+    let subscriber = spawn_subscriber(
+        "udp-mdc-subscriber",
+        options.pin.map(|pin| pin.subscriber),
+        subscription,
+        Arc::clone(&received),
+        run,
+    )?;
+    let drain = drained.map(|drained| spawn_drain("udp-mdc-drain", drained, run.total));
+    let published = publish_one_in_flight(&mut publication, &received, &subscriber, run)?;
+    let (subscription, one_way, _, _) = match subscriber.join() {
+        Ok(Ok(received)) => received,
+        failed => return Err(subscriber_failure(failed)),
+    };
+    let drained = match drain {
+        Some(drain) => Some(match drain.join() {
+            Ok(Ok(drained)) => drained,
+            Ok(Err(message)) => return Err(message),
+            Err(_) => return Err("the drain thread panicked".to_string()),
+        }),
+        None => None,
+    };
+    publication.close().map_err(|e| e.to_string())?;
+    subscription.close().map_err(|e| e.to_string())?;
+    if let Some(drained) = drained {
+        drained.close().map_err(|e| e.to_string())?;
+    }
+    Ok(LogRun {
+        claim_commit: summarize(&published.claim_commit, published.elapsed),
+        one_way: summarize(&one_way, published.elapsed),
+        retries: published.retries,
+        allocations: published.allocations,
+        producer_position_loads: None,
+    })
+}
+
+/// A thread that polls `subscription` until `total` messages have come, the second
+/// destination's reader in the loopback pass, counting and keeping nothing, and
+/// returns the subscription.
+fn spawn_drain(
+    name: &'static str,
+    mut subscription: Subscription,
+    total: u64,
+) -> JoinHandle<Result<Subscription, String>> {
+    thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let mut count: u64 = 0;
+            while count < total {
+                let delivered = subscription
+                    .poll(|_, _| count += 1, 1024)
+                    .map_err(|e| e.to_string())?;
+                if delivered == 0 {
+                    std::hint::spin_loop();
+                }
+            }
+            Ok(subscription)
+        })
+        .expect("the drain thread starts")
+}
+
 fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
     let channel = format!("cavalry:udp?endpoint=127.0.0.1:{}", free_port()?);
     let UdpStream {
@@ -2035,14 +2251,18 @@ struct LinkRun {
 /// it is reported beside the offset chrony gives on the peer and never gated (ADR 0039,
 /// ADR 0044). The stream, the driver and the peer's image live across every run, so a
 /// run after the first starts connected; `--messages` is the count per run, as given.
-fn bench_link(options: &Options, link: &Link) -> Result<Vec<LinkRun>, String> {
+fn bench_link(options: &Options, link: &Link) -> Result<(Vec<LinkRun>, LogRun), String> {
     with_bench_dir("link", |dir| run_link(options, dir, link))
 }
 
-fn run_link(options: &Options, dir: &std::path::Path, link: &Link) -> Result<Vec<LinkRun>, String> {
+fn run_link(
+    options: &Options,
+    dir: &std::path::Path,
+    link: &Link,
+) -> Result<(Vec<LinkRun>, LogRun), String> {
     let UdpStream {
         driver,
-        client,
+        mut client,
         mut publication,
         subscription,
         pins,
@@ -2092,11 +2312,24 @@ fn run_link(options: &Options, dir: &std::path::Path, link: &Link) -> Result<Vec
             below_zero,
         });
     }
+    // The multi-destination cast rows over the cable and this host at once (ADR 0052,
+    // feature 1): a control channel on this host's link address with the peer's
+    // endpoint and a subscription of this driver as its destinations, measured here;
+    // the peer echoes the stream onto the link subscription as it echoes the link
+    // rows', which is held unpolled until the close.
+    let mdc = mdc_rows(
+        options,
+        &mut client,
+        &pins,
+        &link.here_host(),
+        &link.peer_channel(),
+        LINK_TIMEOUT,
+    )?;
     let subscription = subscription
         .take()
         .ok_or_else(|| "the subscription is held after the runs".to_string())?;
     close_stream(dir, publication, subscription, client, driver, &pins, true)?;
-    Ok(runs)
+    Ok((runs, mdc))
 }
 
 /// The echo peer, `--echo`: the other end of the link rows, on the other bench host. A
@@ -2600,6 +2833,17 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
                     options.udp_messages(),
                 );
             }
+            Benchmark::UdpMdc => {
+                let run = bench_udp_mdc(options)
+                    .map_err(|message| format!("the udp_mdc benchmark failed: {message}"))?;
+                pass.insert_message_run(
+                    benchmark,
+                    "udp_mdc",
+                    options.body,
+                    run,
+                    options.udp_messages(),
+                );
+            }
             Benchmark::Ffi => {
                 let run = bench_ffi(options)
                     .map_err(|message| format!("the ffi benchmark failed: {message}"))?;
@@ -2718,13 +2962,25 @@ fn main() -> ExitCode {
     let mut below_zero: u64 = 0;
     if let Some(link) = &options.link {
         // The link rows alone, every run over one stream, so the runs are the pass.
-        let runs = match bench_link(&options, link) {
+        let (runs, mdc) = match bench_link(&options, link) {
             Ok(runs) => runs,
             Err(message) => {
                 eprintln!("cavalry-bench: the link rows failed: {message}");
                 return ExitCode::FAILURE;
             }
         };
+        for (row, summary) in Benchmark::UdpMdc
+            .rows(options.body)
+            .into_iter()
+            .zip([mdc.claim_commit, mdc.one_way])
+        {
+            passes.entry(row).or_default().push(summary);
+        }
+        retries.insert("udp_mdc".to_string(), mdc.retries);
+        *allocations_by_benchmark
+            .entry("udp_mdc".to_string())
+            .or_insert(0) += mdc.allocations;
+        messages_measured += options.udp_messages();
         let round_trip = format!("udp_round_trip_{}", options.body);
         let one_way = format!("udp_one_way_{}", options.body);
         for run in runs {
@@ -3092,7 +3348,12 @@ mod tests {
         }
         assert_eq!(
             options(&["--only", "one_way_32_udp"]).benchmarks(),
-            vec![Benchmark::Udp]
+            vec![Benchmark::Udp, Benchmark::UdpMdc],
+            "a name one row contains is in the mdc row too"
+        );
+        assert_eq!(
+            options(&["--only", "one_way_32_udp_mdc"]).benchmarks(),
+            vec![Benchmark::UdpMdc]
         );
         assert_eq!(
             options(&["--only", "slot_padding"]).benchmarks(),

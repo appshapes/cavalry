@@ -76,6 +76,10 @@ SHOWN = ("p50_ns", "p99_ns", "p99_99_ns", "max_ns")
 # the round trip (ADR 0039, ADR 0044). Named in full here, so that which row gates is
 # this list and not the order of the words in a name.
 REPORTED_ROWS = ("udp_one_way_",)
+# The rows that are reported and never gated by their suffix: the multi-destination cast
+# rows run beside the UDP rows on hosts whose isolated cores the gated rows take, and join
+# the gate with the host change that gives them cores (ADR 0052, feature 1; ADR 0053).
+REPORTED_SUFFIXES = ("_udp_mdc",)
 # The rows a message passes through; every other row is a probe of the host (ADR 0017).
 GATED_ROWS = ("claim_commit_", "one_way_", "udp_round_trip_")
 
@@ -141,7 +145,7 @@ def compare(result: dict, baseline: dict) -> int:
             slowest = max(then.get("p99_99_ns_runs") or [then[GATED]])
             ratio = now[GATED] / slowest - 1
             verdict = f"{ratio:+.1%}"
-            if name.startswith(REPORTED_ROWS) or not name.startswith(GATED_ROWS):
+            if name.startswith(REPORTED_ROWS) or name.endswith(REPORTED_SUFFIXES) or not name.startswith(GATED_ROWS):
                 verdict += " reported"
             elif ratio > TOLERANCE and now[GATED] - slowest > floor:
                 verdict += " REGRESSION"
