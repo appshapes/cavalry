@@ -3379,10 +3379,10 @@ mod tests {
             panic!("--only slot_padding_96 parsed, and no row's name contains it");
         };
         assert!(error.starts_with("--only slot_padding_96:"), "{error}");
-        // The timer, two rows each of the six message benchmarks and the three slot
+        // The timer, two rows each of the seven message benchmarks and the three slot
         // pairs, and the record row.
         let rows = options(&[]).rows();
-        assert_eq!(rows.len(), 20);
+        assert_eq!(rows.len(), 22);
         for row in rows {
             assert!(error.contains(&row), "{error} does not list {row}");
         }
