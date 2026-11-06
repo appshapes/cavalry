@@ -27,3 +27,12 @@ __pycache__/
 /clients/node/build/
 /clients/node/node_modules/
 /clients/node/package-lock.json
+
+# The .NET client's, its example's and its runners' build output, written by
+# `dotnet build` (clients/dotnet/README.md); the generated sources are committed.
+/clients/dotnet/bin/
+/clients/dotnet/obj/
+/clients/dotnet/example/bin/
+/clients/dotnet/example/obj/
+/conformance/dotnet/*/bin/
+/conformance/dotnet/*/obj/

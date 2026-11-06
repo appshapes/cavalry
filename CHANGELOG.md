@@ -1461,3 +1461,23 @@ user-visible change, added in the same commit as the change. The format follows
   path's shape through the client and the README's example, with a report of its
   one-way latency over 100,000 messages and its allocations per message
   ([clients/node/README.md](clients/node/README.md); ADR 0046, card 206).
+- The .NET client, `clients/dotnet`, generated from the committed C header by
+  `clients/generate.py dotnet` (`just generate-clients`): the namespace `Cavalry`
+  over the shared library through P/Invoke with the source-generated marshalling,
+  .NET 10 and nothing else, no package reference and no native shim, whose `Abi`
+  refuses a library of another ABI version when it loads, before any other function;
+  a `Client` whose methods hold its lock, so threads may share it, a `Publication`
+  whose `TryClaim` and `Offer` return the position or the result code and whose
+  `Claim` is a `Span<byte>` over the log, a `Subscription` polled with a
+  `FragmentHandler` that every delivered fragment reaches, the body a
+  `ReadOnlySpan<byte>` into the log for the call and the `Header`'s `ReservedValue` a
+  `long`, whose `Poll` throws `HandlerException` with the counts and the first
+  exception once the ABI has returned, a `Recording` and a `Replay`; a call the ABI
+  refuses during a claim or a poll leaves the client's state as it was; `just lint`
+  regenerates the package and reads its per-message members, and the package's
+  members they call, for C#'s `lock`, the locks and waits of `System.Threading`,
+  `async`, `await`, `Task`, `.Wait(`, `.Result`, a thread started, `throw`, `new` and
+  an interpolated string; `just conformance` runs `conformance/dotnet/`, the
+  ten-minute path's shape through the client and the README's example, with a report
+  of its one-way latency over 100,000 messages and its allocations per message
+  ([clients/dotnet/README.md](clients/dotnet/README.md); ADR 0046, card 209).

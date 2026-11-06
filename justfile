@@ -64,7 +64,8 @@ bench-compare:
 # conformance/c/run.sh, a C program over the header against a driver of its own
 # (ADR 0051), then conformance/python/run.sh, the Python client's runner over the shared
 # library (ADR 0046, card 205), then conformance/node/run.sh, the Node client's runner
-# over its addon (card 206). A client in clients/ joins here with its own runner.
+# over its addon (card 206), then conformance/dotnet/run.sh, the .NET client's runner
+# through P/Invoke (card 209). A client in clients/ joins here with its own runner.
 conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance
@@ -78,6 +79,7 @@ conformance:
     conformance/c/run.sh
     conformance/python/run.sh
     conformance/node/run.sh
+    conformance/dotnet/run.sh
 
 # Deterministic replay test (CLAUDE.md, gate 1; ADR 0030): a driver on a directory of
 # its own records 100,000 hash-chained messages while a live subscriber prints them,
@@ -126,6 +128,7 @@ lint-header:
 lint-clients:
     python3 clients/generate.py python --check
     python3 clients/generate.py node --check
+    python3 clients/generate.py dotnet --check
     python3 clients/lint.py
 
 # Regenerate every client's package from the committed header (clients/README.md): what
@@ -133,6 +136,7 @@ lint-clients:
 generate-clients:
     python3 clients/generate.py python
     python3 clients/generate.py node
+    python3 clients/generate.py dotnet
 
 # The CLAUDE.md rules rustc and clippy cannot see: data-plane flags, the dependency
 # allowlist, no async on the data plane, unsafe only in two crates, the lock ban's

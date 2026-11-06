@@ -25,7 +25,14 @@ The one raise allowed is in `poll`, after the last line that calls the ABI, wher
 user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
 such as the refused poll from inside a handler and the poll's own call, is not after the
-poll.
+poll. For C#, read from the files of `clients/dotnet` by the same tokenizer, the forms are
+`lock`, `Monitor`, `Mutex`, `Semaphore`, `SpinLock` and the other waits of
+`System.Threading`, `async`, `await`, `Task`, `ValueTask`, `.Wait(`, `.Result`,
+`Thread.Sleep`, a thread started, `throw`, building an exception, `new`, C#'s allocation,
+except a `Span` or `ReadOnlySpan` made over bytes the ABI handed over, which is a struct on
+the stack, and an interpolated string; the one exception built on the per-message path is
+the `HandlerException` that `Poll` throws after its ABI call, and `Header.Ensure` is the
+guard that throws for a header read outside its handler call, before the ABI is reached.
 
 It fails on generated code under `clients/` in a language it has no rules for, and on a
 package in which it finds none of the per-message functions, so that a client cannot slip
@@ -119,6 +126,40 @@ RULES = {
                         "string_arg", "int64_arg", "int32_arg", "size_arg", "bool_arg"],
         },
     },
+    # The .NET client calls the ABI through LibraryImport stubs (clients/dotnet/README.md):
+    # the per-message members are in Publication.cs, Subscription.cs and Header.cs, the
+    # trampoline the ABI reaches is Subscription.OnFragment, which calls Deliver, and Abi.cs
+    # holds the helpers they call, so every file of the package is read. `Poll` builds the
+    # HandlerException after its ABI call, the one exception built on the path, and
+    # `Header.Ensure` is the guard that throws for a header read outside its handler call,
+    # before the ABI is reached.
+    "dotnet": {
+        "file": "Publication.cs",
+        "files": ["Abi.cs", "CavalryException.cs", "Client.cs", "FragmentHandler.cs", "HandlerException.cs", "Header.cs",
+                  "Image.cs", "Publication.cs", "Recording.cs", "Replay.cs", "Subscription.cs"],
+        "functions": [
+            "Publication.TryClaim",
+            "Publication.SetReservedValue",
+            "Publication.Commit",
+            "Publication.Abort",
+            "Publication.Offer",
+            "Publication.Claim",
+            "Subscription.Poll",
+            "Subscription.OnFragment",
+            "Subscription.Deliver",
+            "Header.FrameLength",
+            "Header.Version",
+            "Header.Flags",
+            "Header.Type",
+            "Header.TermOffset",
+            "Header.SessionId",
+            "Header.StreamId",
+            "Header.TermId",
+            "Header.ReservedValue",
+        ],
+        "raise_after": ("Subscription.Poll", "Abi.cavalry_subscription_poll"),
+        "guards": ["Header.Ensure"],
+    },
 }
 HELP = "see clients/README.md, \"What every client must pass\""
 WHY = {
@@ -128,6 +169,8 @@ WHY = {
              "returns, nothing else on the per-message path raises",
     "promise": "no promise on the per-message path: the call returns when the ABI returns",
     "wait": "no blocking wait on the per-message path",
+    "thread": "no thread started on the per-message path: the call returns when the ABI returns",
+    "alloc": "no allocation on the per-message path",
 }
 
 
@@ -597,7 +640,268 @@ def node_findings(language: str, path: str, rules: dict) -> list[str]:
     return findings
 
 
-CHECKERS = {"python": python_findings, "node": node_findings}
+# ------------------------------------------------------------------ C#, the .NET client
+
+CS_FORMS = (
+    # (kind, pattern over the code with comments and strings blanked, what the finding says)
+    ("threading", re.compile(r"(?<![\w.])lock\s*\("), "uses `lock`"),
+    ("threading", re.compile(r"(?<![\w.])(?:Monitor|Mutex|Semaphore|SemaphoreSlim|SpinLock|SpinWait|ReaderWriterLock"
+                             r"|ReaderWriterLockSlim|Barrier|CountdownEvent|ManualResetEvent|ManualResetEventSlim"
+                             r"|AutoResetEvent|EventWaitHandle|WaitHandle)(?![\w])"), "uses a lock or a wait of `System.Threading`"),
+    ("threading", re.compile(r"(?<![\w.])System\s*\.\s*Threading\s*\.\s*Lock(?![\w])|(?<![\w.])Lock\s+\w+\s*=\s*new"),
+     "uses `System.Threading.Lock`"),
+    ("await", re.compile(r"(?<![\w.])await(?![\w])"), "awaits"),
+    ("promise", re.compile(r"(?<![\w])(?:Task|ValueTask|TaskCompletionSource)(?![\w])"), "uses a task"),
+    ("wait", re.compile(r"\.\s*(?:Wait|WaitOne|WaitAll|WaitAny|Join|GetAwaiter|GetResult)\s*\(|\.\s*Result(?![\w])"
+                        r"|(?<![\w.])Thread\s*\.\s*(?:Sleep|SpinWait|Yield)\s*\("), "blocks, with `.Wait(`, `.Result`, `.Join(` or `Thread.Sleep`"),
+    ("thread", re.compile(r"(?<![\w.])new\s+Thread\s*\(|(?<![\w.])ThreadPool\s*\.|\.\s*Start\s*\(\s*\)"), "starts a thread"),
+    ("raise", re.compile(r"(?<![\w.])throw(?![\w])"), "throws"),
+    ("alloc", re.compile(r"\$\""), "allocates an interpolated string"),
+)
+CS_WORDS = {"if", "for", "foreach", "while", "switch", "catch", "lock", "using", "fixed", "return", "new", "else", "do",
+            "throw", "base", "this", "is", "as", "typeof", "sizeof", "nameof", "default", "checked", "unchecked", "when"}
+CS_FOREIGN = {"System", "Math", "Marshal", "GC", "Console", "Environment", "Path", "File", "Directory", "NativeLibrary",
+              "GCHandle", "MemoryMarshal", "Unsafe", "Thread", "Interlocked", "Volatile", "BinaryPrimitives", "List",
+              "string", "Exception"}
+CS_VIEWS = {"Span", "ReadOnlySpan"}
+
+
+def paren_end(code: str, start: int) -> int:
+    """The index of the `)` that closes the `(` at `start`, or -1."""
+    depth = 0
+    for i in range(start, len(code)):
+        if code[i] == "(":
+            depth += 1
+        elif code[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+class CsModule:
+    """The package's own members across its files, as `Class.Member` for a method, a
+    constructor or a property, each with its file, line, head (the modifiers before its
+    name), body and where the body starts, found inside a class body at member level: a
+    method as a name before `(`, its parameters and `{` or `=>`; a property as a name before
+    `{ get` or `=>`; the package's own exception classes, those whose base reaches an
+    Exception; and what each member reaches, as `Module.reach` does for JavaScript. A guard
+    throws for a call made outside the handler call, before the ABI is reached, so its
+    raise is not one."""
+
+    CLASS = re.compile(r"(?<![\w.])(?:class|struct|record(?:\s+struct)?|interface)\s+(\w+)(?:\s*\([^)]*\))?"
+                       r"(?:\s*:\s*([\w.]+)(?:\s*,\s*[\w.]+)*)?(?:\s+where[^{;]*)?\s*\{")
+    MEMBER = re.compile(r"(?<![\w.])(\w+)\s*(\(|=>|\{\s*get)")
+
+    def __init__(self, files: list, guards=()):
+        self.files = [(path, blank(text)) for path, text in files]
+        self.functions: dict[str, tuple[str, int, str, str, int, str]] = {}  # label: (file, line, head, body, start, code)
+        self.classes: dict[str, set[str]] = {}
+        self.guards = set(guards)
+        extends: dict[str, str] = {}
+        for path, code in self.files:
+            for m in self.CLASS.finditer(code):
+                name, base = m.group(1), m.group(2)
+                body_start = m.end() - 1
+                body_end = block_end(code, body_start)
+                self.classes.setdefault(name, set())
+                if base:
+                    extends[name] = base.split(".")[-1]
+                i = body_start + 1
+                while i < body_end:
+                    mm = self.MEMBER.search(code, i, body_end)
+                    if mm is None:
+                        break
+                    member, opener = mm.group(1), mm.group(2)
+                    if member in CS_WORDS or opener != "(" and member[0].islower():
+                        i = mm.end()
+                        continue
+                    if opener == "(":
+                        params_end = paren_end(code, mm.end() - 1)
+                        rest = code[params_end + 1:params_end + 200].lstrip() if params_end >= 0 else ""
+                        if params_end < 0 or not (rest.startswith("{") or rest.startswith("=>")):
+                            i = mm.end()
+                            continue
+                        at = params_end + 1 + (len(code[params_end + 1:params_end + 200]) - len(rest))
+                    else:
+                        at = mm.start() + len(member) + (len(mm.group(0)) - len(member) - len(mm.group(2).lstrip()))
+                        at = code.index(mm.group(2).strip()[0], mm.start() + len(member))
+                    if code[at] == "{":
+                        end = block_end(code, at)
+                    else:  # an expression body: to the `;` that ends it
+                        end = self._statement_end(code, at)
+                    if end > body_end:
+                        i = mm.end()
+                        continue
+                    self.classes[name].add(member)
+                    head = code[max(code.rfind(c, 0, mm.start()) for c in ";{}") + 1:mm.start()]
+                    self.functions[f"{name}.{member}"] = (path, line_of(code, mm.start()), head, code[at:end], at, code)
+                    i = end
+        self.exceptions: set[str] = set()
+        while True:
+            more = {name for name, base in extends.items() if name not in self.exceptions
+                    and (base.endswith("Exception") or base in self.exceptions)}
+            if not more:
+                break
+            self.exceptions |= more
+        self.reached: dict[str, dict[str, str]] = {}
+
+    @staticmethod
+    def _statement_end(code: str, start: int) -> int:
+        """The index after the `;` that ends the expression starting at `start`, braces and
+        parentheses matched."""
+        depth = 0
+        for i in range(start, len(code)):
+            c = code[i]
+            if c in "({[":
+                depth += 1
+            elif c in ")}]":
+                depth -= 1
+            elif c == ";" and depth == 0:
+                return i + 1
+        return len(code)
+
+    def callees(self, cls: str, text: str) -> list:
+        """(offset, label) for each call in `text` that reaches one of the package's own
+        members: `Name(` a member of the same class, `new Name(` a class's constructor,
+        `this.Name(` the same class's member, `Class.Name(` that class's member, `x.Name(`
+        or `(...).Name(` any class's member of that name, and a property read `x.Name` of
+        a property any class has by that name."""
+        out = []
+        properties = {c: {m for m in members if f"{c}.{m}" in self.functions and not self._is_method(c, m)}
+                      for c, members in self.classes.items()}
+        for m in re.finditer(r"(?<![\w.])(?:(new)\s+)?(?:([\w.]+|\))\s*\.\s*)?(\w+)(\s*\()?", text):
+            is_new, owner, name, call = m.group(1), m.group(2), m.group(3), m.group(4)
+            if owner == ")":  # a call on a cast or a parenthesised expression: a member of that name in any class
+                owner = "(expression)"
+            if is_new:
+                if call and name in self.classes and name in self.classes[name]:
+                    out.append((m.start(), f"{name}.{name}"))
+                continue
+            if name in CS_WORDS:
+                continue
+            if owner is None:
+                if call and name in self.classes.get(cls, ()) or name in properties.get(cls, ()):
+                    if name != cls:
+                        out.append((m.start(), f"{cls}.{name}"))
+                continue
+            last = owner.split(".")[-1]
+            if last in ("this", "base"):
+                if name in self.classes.get(cls, ()):
+                    out.append((m.start(), f"{cls}.{name}"))
+            elif last in self.classes:
+                if name in self.classes[last]:
+                    out.append((m.start(), f"{last}.{name}"))
+            elif last not in CS_FOREIGN:
+                for c, members in self.classes.items():
+                    if name in members and (call or name in properties.get(c, ())):
+                        out.append((m.start(), f"{c}.{name}"))
+        return out
+
+    def _is_method(self, cls: str, member: str) -> bool:
+        _, _, head, body, start, code = self.functions[f"{cls}.{member}"]
+        return code[code.rfind(member, 0, start) + len(member):start].lstrip().startswith("(")
+
+    def forms(self, label: str, raise_after):
+        """Each form in the member's own body as (kind, line, text), and each call to the
+        package's own members as ("call" or "call-allowed", line, callee); a throw or an
+        exception built in a guard or on a line after `raise_after` is allowed and not
+        yielded, and a call from there is allowed to raise."""
+        path, line, head, body, start, code = self.functions[label]
+        cls = label.split(".", 1)[0]
+        base = line_of(code, start) - 1
+
+        def place(offset):
+            at = base + body.count("\n", 0, offset) + 1
+            return at, raise_after is not None and at > raise_after
+
+        if re.search(r"(?<![\w.])async(?![\w])", head):
+            yield "async", line, "is `async`"
+        for kind, pattern, what in CS_FORMS:
+            for m in pattern.finditer(body):
+                at, allowed = place(m.start())
+                if kind == "raise" and (allowed or label in self.guards):
+                    continue
+                yield kind, at, f"{what} at line {at}"
+        for m in re.finditer(r"(?<![\w.])new\s+([\w.]+)\s*(?:<[^>]*>)?\s*[(\[]", body):
+            name = m.group(1).split(".")[-1]
+            at, allowed = place(m.start())
+            if name in self.exceptions or name.endswith("Exception"):
+                if not (allowed or label in self.guards):
+                    yield "raise", at, f"builds {name} at line {at}"
+            elif name not in CS_VIEWS:
+                yield "alloc", at, f"allocates {name} with `new` at line {at}"
+        for offset, callee in self.callees(cls, body):
+            if callee == label:
+                continue
+            at, allowed = place(offset)
+            yield ("call-allowed" if allowed else "call"), at, callee
+
+    def reach(self, label: str) -> dict[str, str]:
+        """{kind: how `label` reaches it}, for the first form of each kind in its body or in
+        the package's members it calls; memoized, as `Package.reach`. A guard's raise does not
+        reach its callers."""
+        if label in self.reached:
+            return self.reached[label]
+        found: dict[str, str] = {}
+        self.reached[label] = found
+        for kind, line, what in self.forms(label, None):
+            if kind in WHY:
+                found.setdefault(kind, f"{label} {what}")
+            elif kind != "async":
+                for k, how in self.reach(what).items():
+                    if kind == "call-allowed" and k == "raise":
+                        continue
+                    found.setdefault(k, f"{label} calls {what} at line {line}, and {how}")
+        if label in self.guards:
+            found.pop("raise", None)
+        return found
+
+
+def dotnet_findings(language: str, path: str, rules: dict) -> list[str]:
+    findings = []
+    package = os.path.dirname(path)
+    files = []
+    for name in rules["files"]:
+        file = os.path.join(package, name)
+        if not os.path.exists(file):
+            findings.append(f"{language}: {os.path.relpath(file, ROOT)} is missing; run `python3 clients/generate.py {language}`")
+            continue
+        with open(file, encoding="utf-8") as f:
+            files.append((file, f.read()))
+    module = CsModule(files, rules.get("guards", ()))
+    present = [name for name in rules["functions"] if name in module.functions]
+    if not present:
+        return findings + [f"{language}: none of the per-message functions {', '.join(rules['functions'])} is in "
+                           f"{os.path.relpath(package, ROOT)}; the generator renamed them or the rules are stale; {HELP}"]
+    for name in rules["functions"]:
+        if name not in module.functions:
+            findings.append(f"{language}: the per-message function {name} is not in {os.path.relpath(package, ROOT)}; {HELP}")
+    allowed_in, abi_call = rules["raise_after"]
+    for name in present:
+        file, line, head, body, start, code = module.functions[name]
+        where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
+        abi_line = None
+        if name == allowed_in:  # the last line that calls the ABI's poll
+            base = line_of(code, start) - 1
+            for m in re.finditer(re.escape(abi_call) + r"\s*\(", body):
+                at = base + body.count("\n", 0, m.start()) + 1
+                abi_line = at if abi_line is None else max(abi_line, at)
+        for kind, at, what in module.forms(name, abi_line):
+            if kind == "async":
+                findings.append(f"{where} {what}: a per-message function runs on the caller's thread and returns when "
+                                f"the ABI returns, with no task around it; {HELP}")
+            elif kind in WHY:
+                findings.append(f"{where} {what}: {WHY[kind]}; {HELP}")
+            else:
+                for k, how in module.reach(what).items():
+                    if kind == "call-allowed" and k == "raise":
+                        continue
+                    findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
+    return findings
+
+
+CHECKERS = {"python": python_findings, "node": node_findings, "dotnet": dotnet_findings}
 
 
 def findings(clients: str = CLIENTS) -> list[str]:
@@ -628,7 +932,7 @@ def main(argv: list[str]) -> int:
         return 1
     languages = [e for e in sorted(os.listdir(CLIENTS)) if e in RULES]
     print(f"lint-clients: {', '.join(languages)}: the per-message functions, and the package's functions they call, "
-          f"hold no lock, no await, no promise and no raise")
+          f"hold no lock, no await, no promise, no thread, no allocation and no raise")
     return 0
 
 

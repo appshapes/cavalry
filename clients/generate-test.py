@@ -13,7 +13,15 @@ binding, the trampoline, compiled with `cc` against a stand-in for N-API, counts
 reports every fragment the handler did not see, `HandlerError`'s message and the addon's
 Error for such a fragment say what to do and name a heading of the README, and `--check`
 fails on a package that differs. `just test` runs this through `test-scripts`. Python 3.9
-standard library only.
+standard library only. The same for the .NET package (`DotnetPackage`): the committed
+twelve files are what the parse gives, a header change changes the constants, every define
+is a constant under its name with the ABI's name beside it, the binding resolves the library
+and reads `cavalry_abi_version` before any other function and refuses a header without the
+check's names, every function is a `LibraryImport` with blittable parameters and the one
+trampoline is `UnmanagedCallersOnly` whose address the poll passes, `HandlerException`'s
+message says what to do and names a heading of the README, the generated project builds
+with every warning an error when a .NET 10 SDK is on the path, and `--check` fails on a
+package that differs.
 """
 
 import ctypes
@@ -29,6 +37,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate as gen  # noqa: E402
+import generate_dotnet as gen_dotnet  # noqa: E402
 import generate_node as gen_node  # noqa: E402
 import lint  # noqa: E402
 
@@ -654,6 +663,136 @@ class NodePackage(unittest.TestCase):
                     self.assertEqual(gen.main(["generate.py", "node", "--check"]), 1)
                 self.assertIn("differs from what the header gives in src/addon.c", err.getvalue())
                 self.assertIn("python3 clients/generate.py node", err.getvalue())
+            finally:
+                gen.ROOT, gen.HEADER = root, header
+
+
+class DotnetPackage(unittest.TestCase):
+    """The .NET package, `clients/dotnet` (clients/dotnet/README.md; ADR 0046, card 209)."""
+
+    FILES = sorted(["Cavalry.csproj", "Abi.cs", "CavalryException.cs", "Client.cs", "FragmentHandler.cs", "HandlerException.cs",
+                    "Header.cs", "Image.cs", "Publication.cs", "Recording.cs", "Replay.cs", "Subscription.cs"])
+
+    @classmethod
+    def setUpClass(cls):
+        with open(gen.HEADER, encoding="utf-8") as f:
+            cls.text = f.read()
+        cls.header = gen.parse(cls.text)
+
+    def committed(self, name):
+        with open(os.path.join(gen.ROOT, "clients", "dotnet", name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_the_committed_package_is_what_the_header_gives(self):
+        files = gen_dotnet.write_dotnet(self.header)
+        self.assertEqual(sorted(files), self.FILES)
+        for name, content in files.items():
+            self.assertEqual(self.committed(name), content, name)
+        self.assertIs(gen.WRITERS["dotnet"], gen_dotnet.write_dotnet)
+        self.assertEqual(gen.LANGUAGES["dotnet"], "dotnet")
+
+    def test_a_header_change_changes_the_constants(self):
+        changed = gen.parse(self.text.replace("#define CAVALRY_MAX_IMAGES 256", "#define CAVALRY_MAX_IMAGES 512"))
+        code = gen_dotnet.write_dotnet(changed)["Abi.cs"]
+        self.assertIn("    public const int MAX_IMAGES = 512; // CAVALRY_MAX_IMAGES\n", code)
+        self.assertNotEqual(code, self.committed("Abi.cs"))
+
+    def test_every_define_is_a_constant_under_its_name(self):
+        code = gen_dotnet.write_dotnet(self.header)["Abi.cs"]
+        for name, _ in self.header.defines:
+            if name != "CAVALRY_H":
+                self.assertRegex(code, r"    public const \w+ " + gen_dotnet.cs_name(name) + r" = \S.*; // " + name + r"\n")
+        self.assertEqual(gen_dotnet.cs_name("CAVALRY_ERR_POLLING"), "ERR_POLLING")
+        self.assertEqual(gen_dotnet.cs_constant("INT64_MAX"), ("long", "long.MaxValue"))
+        self.assertEqual(gen_dotnet.cs_constant("(-1)"), ("int", "-1"))
+
+    def test_the_binding_reads_the_abi_version_before_any_other_function(self):
+        """The static constructor resolves the library's path, installs the resolver and checks
+        the version, in that order, before any other function can run (spec/c-abi.md,
+        "Versions and what a reader rejects"); a header without the check's names cannot be
+        generated."""
+        code = gen_dotnet.write_dotnet(self.header)["Abi.cs"]
+        block = code.split("    static Abi()\n    {\n", 1)[1].split("\n    }\n", 1)[0]
+        found = block.index("LibraryPath = FindLibrary();")
+        resolver = block.index("NativeLibrary.SetDllImportResolver(")
+        check = block.index("CheckAbiVersion(ABI_VERSION);")
+        self.assertLess(found, resolver)
+        self.assertLess(resolver, check)
+        self.assertIn("ERR_ABI_VERSION", code)
+        self.assertIn("docs/reference/c-abi.md#versions-and-what-a-reader-rejects", code)
+        without = gen.parse(self.text.replace("#define CAVALRY_ABI_VERSION ", "#define CAVALRY_ABI_VERSION_GONE "))
+        with self.assertRaises(SystemExit) as refused:
+            gen_dotnet.write_dotnet(without)
+        self.assertIn("CAVALRY_ABI_VERSION", str(refused.exception))
+
+    def test_every_function_is_a_library_import_with_blittable_parameters(self):
+        files = gen_dotnet.write_dotnet(self.header)
+        abi, subscription = files["Abi.cs"], files["Subscription.cs"]
+        self.assertEqual(abi.count("[LibraryImport("), len(self.header.functions))
+        for fn in self.header.functions:
+            self.assertIn(f" {fn.name}(", abi)
+        self.assertIn("internal static partial long cavalry_publication_try_claim(nint publication, nuint length, ref cavalry_buffer_claim_t claim);", abi)
+        self.assertIn("internal static partial int cavalry_subscription_poll(nint subscription, " + gen_dotnet.CALLBACK
+                      + " handler, nint clientd, nuint fragment_limit);", abi)
+        self.assertIn("internal static partial long cavalry_publication_offer(nint publication, byte* buffer, nuint length);", abi)
+        self.assertRegex(abi, r"\[LibraryImport\(Library, StringMarshalling = StringMarshalling\.Utf8\)\]\n"
+                              r"    internal static partial int cavalry_add_publication\(out nint publication, nint client, string channel, int stream_id\);")
+        self.assertIn("[return: MarshalAs(UnmanagedType.U1)]\n    internal static partial bool cavalry_is_closed(nint client);", abi)
+        self.assertNotIn("MarshalAs", abi.split("public struct", 1)[1].split("[LibraryImport", 1)[0])  # the structs are blittable
+        self.assertEqual(subscription.count("[UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]"), 1)
+        self.assertEqual(subscription.count("Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit)"), 2)
+
+    def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
+        code = gen_dotnet.write_dotnet(self.header)["HandlerException.cs"]
+        body = code.split("public HandlerException(int fragments, int raised, Exception cause)", 1)[1].split("\n    {\n", 1)[0]
+        self.assertIn("fragment(s) this poll delivered", body)
+        self.assertIn("before it stopped on a fault, which Subscription.Fault() reads", body)
+        self.assertIn("Fix the handler: its first exception, ", body)
+        self.assertIn("See clients/dotnet/README.md#the-exception", body)
+        with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("the-exception", slugs)
+
+    def test_the_generated_project_builds_with_every_warning_an_error_when_dotnet_10_is_on_the_path(self):
+        """The README builds the client with `dotnet build`, whose project makes every warning
+        an error; without a .NET SDK of release 10 or later on the path, as on a machine that
+        builds no client, the check is CI's (`just conformance`)."""
+        dotnet = shutil.which("dotnet")
+        version = subprocess.run([dotnet, "--version"], capture_output=True, text=True) if dotnet else None
+        found = re.match(r"(\d+)\.", version.stdout.strip()) if version and version.returncode == 0 else None
+        if found is None or int(found.group(1)) < 10:
+            print("generate-test: no .NET SDK of release 10 or later on the path; the build is checked in CI")
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, content in gen_dotnet.write_dotnet(self.header).items():
+                with open(os.path.join(tmp, name), "w", encoding="utf-8") as f:
+                    f.write(content)
+            env = dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT="1", DOTNET_NOLOGO="1", DOTNET_SKIP_FIRST_TIME_EXPERIENCE="1")
+            built = subprocess.run([dotnet, "build", "-c", "Release", os.path.join(tmp, "Cavalry.csproj")],
+                                   capture_output=True, text=True, env=env)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+
+    def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(gen.ROOT, "clients", "dotnet"), os.path.join(tmp, "clients", "dotnet"),
+                            ignore=shutil.ignore_patterns("bin", "obj"))
+            os.makedirs(os.path.join(tmp, "crates", "cavalry-ffi", "include"))
+            shutil.copy(gen.HEADER, os.path.join(tmp, "crates", "cavalry-ffi", "include", "cavalry.h"))
+            root, header = gen.ROOT, gen.HEADER
+            gen.ROOT = tmp
+            gen.HEADER = os.path.join(tmp, "crates", "cavalry-ffi", "include", "cavalry.h")
+            try:
+                self.assertEqual(gen.main(["generate.py", "dotnet", "--check"]), 0)
+                with open(os.path.join(tmp, "clients", "dotnet", "Header.cs"), "a", encoding="utf-8") as f:
+                    f.write("// edited by hand\n")
+                import io
+                import contextlib
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(gen.main(["generate.py", "dotnet", "--check"]), 1)
+                self.assertIn("differs from what the header gives in Header.cs", err.getvalue())
+                self.assertIn("python3 clients/generate.py dotnet", err.getvalue())
             finally:
                 gen.ROOT, gen.HEADER = root, header
 

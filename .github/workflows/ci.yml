@@ -76,6 +76,13 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+      # .NET for the .NET client, which `just conformance` builds with the runner's SDK and
+      # runs through P/Invoke over the shared library, and for conformance/dotnet (ADR
+      # 0046, card 209): .NET 10, the long-term release the client needs; no package
+      # reference, nothing from a package registry.
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: 10.0.x
       # mdBook for `just docs`, as a prebuilt binary checked against the action's own
       # manifest, pinned to the version the justfile names; bump both together (ADR 0006).
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
