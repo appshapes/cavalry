@@ -1163,9 +1163,10 @@ impl Conductor {
     /// not there is removed by nothing. Each is answered with `operation success`. A
     /// registration the driver does not know or another client's is code 3; a
     /// publication whose channel names no control address is code 1 with the reason
-    /// `control`; a destination channel that is `cavalry:ipc` or a control channel, or
-    /// whose endpoint has no address the control address can send to, is code 1 with
-    /// the reason `destination`; a host that resolves to no address at all is code 9.
+    /// `control`; a destination channel that is `cavalry:ipc` or a control channel, one
+    /// that names `interface` or `fc`, or one whose endpoint has no address the control
+    /// address can send to, is code 1 with the reason `destination`; a host that
+    /// resolves to no address at all is code 9.
     fn change_destination(
         &mut self,
         client_id: i64,
@@ -1222,8 +1223,15 @@ impl Conductor {
         else {
             return;
         };
+        // A destination names its endpoint and nothing else: `interface` or `fc` on it
+        // is refused, as a subscription's channel refuses a publication's keys, since a
+        // key that does nothing is a key the reader cannot check (ADR 0053).
         let destination = match parsed {
-            Channel::Udp(udp) if !udp.is_control() => udp.endpoint(),
+            Channel::Udp(udp)
+                if !udp.is_control() && udp.interface().is_none() && !udp.names_flow_control() =>
+            {
+                udp.endpoint()
+            }
             _ => None,
         };
         let Some(destination) = destination else {
@@ -1232,9 +1240,9 @@ impl Conductor {
                 correlation_id,
                 ErrorCode::InvalidChannel,
                 &format!(
-                    "the destination channel: channel refused (destination): it names no \
-                     endpoint; a destination is cavalry:udp?endpoint=<host>:<port>; see \
-                     {ERRORS_DOC}"
+                    "the destination channel: channel refused (destination): a destination is \
+                     cavalry:udp?endpoint=<host>:<port> and names nothing else; remove any \
+                     other parameter, or name an endpoint; see {ERRORS_DOC}"
                 ),
             );
             return;
@@ -7100,9 +7108,10 @@ mod recording {
     /// (`spec/client-protocol.md`, "Commands" and "What the driver rejects"; ADR 0053):
     /// add destination on a publication with no control address is code 1 with the
     /// reason `control`; an unknown or another client's registration is code 3; a
-    /// destination that is `cavalry:ipc` or a control channel, one with no address of
-    /// the control address's family, or one beyond the loopback a loopback control
-    /// address is on, is code 1 with the reason `destination`, one that fails the
+    /// destination that is `cavalry:ipc` or a control channel, one naming `interface`
+    /// or `fc`, one with no address of the control address's family, or one beyond the
+    /// loopback a loopback control address is on, is code 1 with the reason
+    /// `destination`, one that fails the
     /// grammar code 1 with the reader's reason; a name with no address is code 9; a 65th
     /// destination is code 10, counted; a subscription's channel that names a
     /// publication's keys is code 1 with the reason `subscription`; a join under
@@ -7139,6 +7148,16 @@ mod recording {
         h.conductor
             .change_destination(1, 8, 6, control.as_bytes(), true);
         assert_eq!(h.last_error(8).expect("an error").0, 1);
+        h.conductor.change_destination(
+            1,
+            17,
+            6,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|fc=min",
+            true,
+        );
+        let (code, message) = h.last_error(17).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("names nothing else"), "{message}");
         // An address of the other family, and a host beyond the loopback the control
         // address is on: code 1, reason destination; a name with no address: code 9.
         h.conductor
@@ -7211,7 +7230,7 @@ mod recording {
             "14 joined 2"
         );
         assert_eq!(h.conductor.publications.len(), 2);
-        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 9);
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 10);
     }
 
     /// An RTT measurement that reaches a control channel's socket is answered to the
