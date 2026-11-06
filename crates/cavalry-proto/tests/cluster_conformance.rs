@@ -6,9 +6,10 @@
 //! alone; `just test` runs it with the rest.
 
 use cavalry_proto::cluster::{
-    Ballot, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition, EMPTY_MEMBER,
-    EventCode, MAX_MEMBERS, Member, MemberPosition, Message, SnapshotMark, Stream, TimeUnit,
-    VERSION, ballot, commit_position, entry_position, log_at_least, parse_members, quorum,
+    Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
+    EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
+    SnapshotMark, Stream, TimeUnit, VERSION, ballot, candidate, commit_position, entry_position,
+    log_at_least, parse_members, quorum,
 };
 use serde_json::{Map, Value, json};
 
@@ -391,6 +392,32 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 inputs["timeout_passed"].as_bool().expect("timeout_passed"),
             );
             json!({"leader": leader, "unanimous": unanimous})
+        }
+        "candidate" => {
+            let members = usize::try_from(int(inputs, "members")).expect("members");
+            let reports: Vec<Option<LogReport>> = inputs["reports"]
+                .as_array()
+                .expect("reports")
+                .iter()
+                .map(|r| {
+                    r.as_array().map(|pair| LogReport {
+                        term: pair[0].as_i64().expect("term"),
+                        position: pair[1].as_i64().expect("position"),
+                    })
+                })
+                .collect();
+            let own = inputs["own"].as_array().expect("own");
+            let own = LogReport {
+                term: own[0].as_i64().expect("term"),
+                position: own[1].as_i64().expect("position"),
+            };
+            let Candidate { nominate, unanimous } = candidate(
+                members,
+                &reports,
+                own,
+                inputs["deadline_passed"].as_bool().expect("deadline_passed"),
+            );
+            json!({"nominate": nominate, "unanimous": unanimous})
         }
         "entry-position" => {
             let after = entry_position(

@@ -106,6 +106,14 @@ pub const INVALID_CLIENT_VERSION: &[u8] = b"invalid client version";
 /// The reason detail of an error session event when the sessions are at their bound.
 pub const CONCURRENT_SESSION_LIMIT: &[u8] = b"concurrent session limit";
 
+/// The reason detail of an error session event for a connect whose response stream id
+/// is not the egress stream's or whose response channel is not
+/// `cavalry:udp?endpoint=<host:port>`.
+pub const INVALID_RESPONSE_CHANNEL: &[u8] = b"invalid response channel";
+
+/// How many redirects or refusals a member holds unsent at a time.
+pub const MAX_PENDING_ANSWERS: usize = 10;
+
 /// The docs anchor every error message names.
 const DOC: &str = "docs/reference/cluster.md#what-a-reader-rejects";
 
@@ -1095,8 +1103,9 @@ impl<'a> Message<'a> {
     /// Decodes one message of `stream`, running the spec's checks in the spec's order
     /// (`spec/cluster.md`, "What a reader rejects"): the header's length, schema id,
     /// version and template; the stream; the block length; every variable field's
-    /// length and the bytes left over; a protocol version field's major; the
-    /// enumerations; the ASCII fields; the member ids; the positions; the term ids.
+    /// length and the bytes left over; a consensus message's protocol version field's
+    /// major, a session connect's read whatever it is; the enumerations; the ASCII
+    /// fields; the member ids; the positions; the term ids.
     pub fn parse(stream: Stream, bytes: &'a [u8]) -> Result<Self, ClusterError> {
         if bytes.len() < HEADER_LENGTH {
             return Err(ClusterError::TooShort {
@@ -1190,7 +1199,8 @@ impl<'a> Message<'a> {
                 let encoded_credentials = reader.variable()?;
                 let client_info = reader.variable()?;
                 reader.done()?;
-                protocol_version(version)?;
+                // Any major is read here: the leader refuses one not its own with
+                // `invalid client version` (spec/cluster.md, "Sessions").
                 ascii("response channel", response_channel)?;
                 ascii("client info", client_info)?;
                 Message::SessionConnect {
@@ -2007,6 +2017,7 @@ fn parse_endpoint(text: &[u8]) -> Option<Endpoint<'_>> {
     let port = u16::try_from(value).ok().filter(|&port| port != 0)?;
     let host = match (host.first(), host.last()) {
         (Some(b'['), Some(b']')) if host.len() > 2 => host.get(1..host.len() - 1)?,
+        _ if host.contains(&b':') => return None, // an IPv6 literal is written in brackets
         _ => host,
     };
     Some(Endpoint { host, port })
@@ -2202,6 +2213,53 @@ pub fn ballot(members: usize, votes: &[Option<bool>], timeout_passed: bool) -> B
     }
     Ballot {
         leader: timeout_passed && against == 0 && for_ >= quorum(members),
+        unanimous: false,
+    }
+}
+
+/// One member's canvass report: its log leadership term id and append position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LogReport {
+    /// The term of the last entry in its recording, −1 for none.
+    pub term: i64,
+    /// Its append position.
+    pub position: i64,
+}
+
+/// Whether a canvassing member nominates itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Candidate {
+    /// Whether it goes to nominate.
+    pub nominate: bool,
+    /// Whether every member reported and none is ahead, which decides at once.
+    pub unanimous: bool,
+}
+
+/// A canvassing member's nomination among `members` members, `reports[i]` member `i`'s
+/// canvass report or `None` while it has not reported, `own` the member's own log
+/// (`spec/cluster.md`, "canvass"): a unanimous candidate at once when every member has
+/// reported and none has a log ahead of `own`; a quorum candidate once the deadline has
+/// passed when those that reported with a log not ahead make a quorum. The member
+/// counts itself through its own entry in `reports`.
+pub fn candidate(
+    members: usize,
+    reports: &[Option<LogReport>],
+    own: LogReport,
+    deadline_passed: bool,
+) -> Candidate {
+    let reported = reports.iter().take(members).flatten();
+    let reported_count = reported.clone().count();
+    let not_ahead = reported
+        .filter(|r| log_at_least(own.term, own.position, r.term, r.position))
+        .count();
+    if reported_count == members && not_ahead == members && members >= 1 {
+        return Candidate {
+            nominate: true,
+            unanimous: true,
+        };
+    }
+    Candidate {
+        nominate: deadline_passed && not_ahead >= quorum(members),
         unanimous: false,
     }
 }
