@@ -612,9 +612,14 @@ class Publication:
     def close(self):
         """Close the publication. The ABI's close aborts a claim still outstanding, and the
         claim's view is released first, so a view kept past the close raises ValueError on
-        use instead of writing into a log the close gives back."""
+        use instead of writing into a log the close gives back. The claim struct is zeroed
+        before the ABI's close, so that `commit`, `abort` and `set_reserved_value` after it
+        hand the ABI a struct that names no publication, which it answers with -1 and
+        `CAVALRY_ERR_NO_CLAIM` without reading the handle the close freed (spec/c-abi.md,
+        "Which claim a struct names")."""
         if self._handle is not None:
             self._release()
+            ctypes.memset(ctypes.addressof(self._claim), 0, ctypes.sizeof(self._claim))
             _check(self._abi, "cavalry_publication_close", self._abi.cavalry_publication_close(self._handle))
             self._handle = None
 

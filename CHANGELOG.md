@@ -1531,3 +1531,11 @@ user-visible change, added in the same commit as the change. The format follows
   ten-minute path's shape through the client and the README's example, with a report
   of its one-way latency over 100,000 messages and its allocations per message
   ([clients/dotnet/README.md](clients/dotnet/README.md); ADR 0046, card 209).
+- The Python, Go and Node clients zero a publication's claim struct when they close
+  it, so a `commit`, `abort` or `set_reserved_value` after the close hands the ABI a
+  struct that names no publication, answered with -1 and `CAVALRY_ERR_NO_CLAIM`, and
+  the ABI reads no handle the close freed (`spec/c-abi.md`, "Which claim a struct
+  names"); each runner checks the three calls after a close, and the generator's tests
+  hold each close to the zeroing. Found by pull request 146's review in the JVM client,
+  which card 208 fixed, and fixed in the .NET client before card 209's pull request
+  (issue 147; card 222).

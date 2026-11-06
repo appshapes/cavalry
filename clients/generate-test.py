@@ -165,6 +165,20 @@ class Package(unittest.TestCase):
         for name in gen.PER_MESSAGE:
             self.assertIn(f'    "{name}",\n', abi.split("PER_MESSAGE = (", 1)[1].split(")", 1)[0])
 
+    def test_a_publications_close_zeroes_the_claim_struct_before_the_abis_close(self):
+        """The claim struct's `publication` field names the handle the close frees, and the
+        ABI reads it on a commit, an abort or a reserved value, so `close` zeroes the struct
+        before the ABI's close (spec/c-abi.md, "Which claim a struct names"); the runner's
+        refusals round makes the three calls after a close, and this check fails without the
+        zeroing every time, where a read of the freed handle may answer NO_CLAIM by luck."""
+        code = gen.write_python(self.header)["cavalry/__init__.py"]
+        publication = code.split("class Publication:", 1)[1].split("\nclass ", 1)[0]
+        close = publication.split("    def close(self):\n", 1)[1]
+        zeroed = close.index("ctypes.memset(ctypes.addressof(self._claim), 0, ctypes.sizeof(self._claim))")
+        freed = close.index("self._abi.cavalry_publication_close(self._handle)")
+        self.assertLess(zeroed, freed)
+        self.assertLess(close.index("self._release()"), zeroed)
+
     def test_offer_takes_bytes_and_refuses_a_str(self):
         """`c_void_p` took a `str` as its `wchar_t` buffer, so `offer("hello")` published
         `h\\0\\0\\0e`; the binding's `c_char_p` refuses it, and every other non-bytes form,
@@ -522,6 +536,15 @@ class NodePackage(unittest.TestCase):
         self.assertNotIn("fn_cavalry_version_patch", addon)
         self.assertIn("fn_cavalry_version_minor", addon)
 
+    def test_a_publications_close_zeroes_the_claim_struct_before_the_abis_close(self):
+        """As the Python package's close does: the struct zeroed after the Buffer's release
+        and before the ABI's close, so a commit, abort or reserved value after the close hands
+        the ABI no freed handle (spec/c-abi.md, "Which claim a struct names")."""
+        code = gen_node.write_node(self.header)["index.js"]
+        close = code.split('closeHandle(this, "cavalry_publication_close")', 1)[0]
+        close = close[close.rindex("  close() {"):]
+        self.assertLess(close.index("this._release();"), close.index("new Uint8Array(this._claim.buffer).fill(0);"))
+
     def test_the_addon_wraps_every_function_and_the_poll_is_its_own(self):
         """One N-API function per ABI function, registered under the ABI's name, except the
         poll: the addon's `poll` makes the one `cavalry_subscription_poll` call with its
@@ -715,6 +738,16 @@ class GoPackage(unittest.TestCase):
         code = gen_go.write_go(changed)["cavalry.go"]
         self.assertRegex(code, r"MaxImages\s+= 512\s+// CAVALRY_MAX_IMAGES")
         self.assertNotEqual(code, self.committed("cavalry.go"))
+
+    def test_a_publications_close_zeroes_the_claim_struct_before_the_abis_close(self):
+        """As the Python package's close does: `p.claim` zeroed beside `p.Claim = nil` and
+        before the ABI's close, so Commit, Abort or SetReservedValue after the close hands
+        the ABI no freed handle (spec/c-abi.md, "Which claim a struct names")."""
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        close = code.split("func (p *Publication) Close() error {\n", 1)[1].split("\n}\n", 1)[0]
+        zeroed = close.index("p.claim = C.cavalry_buffer_claim_t{}")
+        self.assertLess(close.index("p.Claim = nil"), zeroed)
+        self.assertLess(zeroed, close.index("C.cavalry_publication_close(p.handle)"))
 
     def test_every_define_is_a_constant_under_its_go_name(self):
         code = gen_go.write_go(self.header)["cavalry.go"]
