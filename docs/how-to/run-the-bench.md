@@ -386,7 +386,13 @@ shared runner is
    A new row joins a baseline that already exists by adding its entry from the tree's
    processes that have it and leaving the other rows as they were recorded, in a
    commit that names the row and the runs; `--update` rewrites the whole profile,
-   which is for a host whose numbers moved, never for one new row.
+   which is for a host whose numbers moved, never for one new row. Such a row holds
+   each percentile as the largest over those processes and `p99_99_ns` as the slowest
+   of their runs, with no `p99_99_ns_runs` list: the entry's other rows list their
+   runs per process, and a list this row cannot line up with them would be read as
+   theirs. A later `--join` carries the row through as it is: each percentile the
+   larger of the row's and the new process's, `p99_99_ns` the slowest run of both,
+   still with no list, so the gate goes on comparing with `p99_99_ns`.
 
 5. Measure the link between the two bench hosts, which the `bench (udp)` job does on
    every push with its peer job `bench (udp peer)`
