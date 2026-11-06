@@ -204,13 +204,16 @@ Eight features make the slice, one Trello card each, in this order:
    opposite of feature 7's cluster of both. Vectors for the `add destination` and
    `remove destination` layouts in `spec/vectors/client-protocol.json`, and for the
    `control`, `control-mode` and `fc` parameters, parsed and refused, as `channel`
-   vectors in `spec/vectors/udp.json`; the client API's `add_destination` and `remove_destination` on a publication and
-   their ABI functions, a version bump of the ABI before the first release under the
-   ADR's rule ("Nothing is released, so a client that later finds the ABI wanting sends
-   it to a new version under a new ADR"); the UDP conformance suite and the C runner
+   vectors in `spec/vectors/udp.json`; the client API's `add_destination` and
+   `remove_destination` on a publication and their ABI functions, a version bump of
+   the ABI before the first release under the ADR's rule ("Nothing is released, so a
+   client that later finds the ABI wanting sends it to a new version under a new
+   ADR"); the UDP conformance suite and the C runner
    send one stream to two destinations on the loopback; a bench row, `one_way_32_udp_mdc`,
-   over the cable to `grip` and the loopback at once, reported and not gated until the
-   host question of feature 8 gives it cores (ADR 0044). Builds nothing new among the
+   over the cable to `grip` and the loopback at once, reported and not gated, since
+   every isolated core of both bench hosts is taken (ADR 0044) and feature 8's job asks
+   for none; it joins the gate when the Revisit clause for a cluster's row in the
+   latency gate fires and a host change gives it cores. Builds nothing new among the
    gates; extends `conformance/` and the UDP vectors.
 2. **The cluster protocol, specified (card 226).** `spec/cluster.md` version 0, with
    its ADR Accepted on the evidence of Aeron's schema read and dated, under Aeron's
@@ -445,11 +448,12 @@ says the fifth slice works, with a new ADR for the sixth slice, the first releas
 freezes at, `conformance/upgrade/` over released versions) or `cavalry-control`'s
 export, discovery and `console`; when a user needs a member added to or removed from
 a running cluster, for dynamic membership and the messages Aeron deprecated; when a
-cluster's client needs the challenge, for authentication; when a cluster's row is
-wanted in the latency gate, for the cores it needs on a third host (ADR 0044); when a
-cluster needs the `tagged` strategy, the group tag or the dynamic control mode; when
-the consensus thread needs a lock, for the split ADR 0003 names; when `doctor` shows a
-host that needs a timeout of its own, for the key and its `why_not_default`.
+cluster's client needs the challenge, for authentication; when a cluster's row,
+feature 1's `one_way_32_udp_mdc` among them, is wanted in the latency gate, for the
+host change that gives it cores, on `bench` and `grip` or on a third host (ADR 0044);
+when a cluster needs the `tagged` strategy, the group tag or the dynamic control mode;
+when the consensus thread needs a lock, for the split ADR 0003 names; when `doctor`
+shows a host that needs a timeout of its own, for the key and its `why_not_default`.
 
 ## References
 
