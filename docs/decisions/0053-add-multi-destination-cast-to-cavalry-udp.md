@@ -164,12 +164,16 @@ doctor` explains it from the three counters and `sender.send_failed`.
 **The commands are Aeron's, under its numbers.** `add destination` and `remove
 destination` carry client id, correlation id, the client's registration of the
 publication and the destination channel, and are answered with `operation success`.
-A destination channel names its `endpoint` and nothing else: `interface`, `fc`,
-`control` and `control-mode` on it are refused with code 1 and the reason
-`destination`, as a subscription's channel refuses a publication's keys, since a key
-that does nothing is a key the reader cannot check; the endpoint is resolved once as
-every channel's host is, to an address of the control address's family (above); `cavalry:ipc` or a
-control channel as a destination is code 1. An unknown or
+A destination channel names its `endpoint` and nothing else: `interface` and `fc`
+beside the endpoint are refused with code 1 and the reason `destination`, as a
+subscription's channel refuses a publication's keys, since a key that does nothing is
+a key the reader cannot check. `control` or `control-mode` beside the endpoint never
+reaches that refusal: the reader's `control` check, which runs before any of the
+driver's, refuses a control address beside an endpoint and a mode without a control
+address, so it is code 1 with the reason `control` (`spec/udp.md`, "What a reader
+rejects"). The endpoint is resolved once as every channel's host is, to an address of
+the control address's family (above); `cavalry:ipc` or a control channel as a
+destination is code 1 with the reason `destination`. An unknown or
 another client's registration is code 3; a publication whose channel has no control
 address is code 1, Aeron's `INVALID_CHANNEL`, with a message that says what to add to
 the channel; a 65th destination on an endpoint is code 10 and counts
