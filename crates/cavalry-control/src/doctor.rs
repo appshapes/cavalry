@@ -2505,11 +2505,55 @@ mod tests {
         );
     }
 
-    /// A clean close of a `min` publication on a control channel (ADR 0054): its
-    /// receiver ended its stream, so the sender dropped it from the table uncounted,
-    /// and the close freed the publication's counters. What the close leaves, the
-    /// endpoint open for a `max` publication beside it to its one destination and both
-    /// static counters at 0, gives `doctor` no warning.
+    /// A `min` publication on a control channel during the linger after a clean close
+    /// (ADR 0056), its counters as the driver's
+    /// `a_clean_close_of_a_min_publication_counts_no_receiver_timed_out` reads them
+    /// before the linger ends: both destinations' receivers ended their streams and
+    /// stay in the table, so the gauge reads the endpoint's 2 destinations, the limit
+    /// is above 0 and nothing timed out, and `doctor` gives no `udp-` warning. A live
+    /// `min` publication beside it with one of the two answering still warns, and the
+    /// warning names it alone.
+    #[test]
+    fn a_min_publication_lingering_after_a_clean_close_leaves_doctor_with_no_warning() {
+        let dir = TestDir::new("udp-mdc-min-linger");
+        let mut counters = CountersFile::create(&dir.0, 128).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        control_endpoint(&mut counters, 9, 2);
+        sender_gauges(&mut counters, 8, 9, "fc=min", (131_072, 2));
+        // The udp checks: the test's directory may be on a disk, which another warns of.
+        let report = examine(&dir.0);
+        let warnings: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.level == Level::Warn && f.check.starts_with("udp-"))
+            .collect();
+        assert!(warnings.is_empty(), "{report}");
+        sender_gauges(&mut counters, 10, 9, "fc=min", (131_072, 1));
+        let report = examine(&dir.0);
+        let found: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|f| f.check == "udp-flow-control-receivers")
+            .collect();
+        assert_eq!(found.len(), 1, "{report}");
+        assert!(
+            found[0].message.contains("publication 10 on stream"),
+            "{}",
+            found[0].message
+        );
+        assert!(
+            found[0].message.contains("1 answer"),
+            "{}",
+            found[0].message
+        );
+    }
+
+    /// A clean close of a `min` publication on a control channel (ADR 0054, ADR 0056):
+    /// its receiver ended its stream, so the sender kept it in the table uncounted
+    /// until the linger ended, and the close then freed the publication's counters.
+    /// What the close leaves, the endpoint open for a `max` publication beside it to
+    /// its one destination and both static counters at 0, gives `doctor` no warning.
     #[test]
     fn a_clean_close_of_a_min_publication_leaves_doctor_with_no_warning() {
         let dir = TestDir::new("udp-mdc-min-close");
