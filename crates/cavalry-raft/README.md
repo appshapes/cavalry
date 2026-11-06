@@ -39,8 +39,17 @@ first public item.
 
 ## What to read next
 
-Not yet: the pages this crate will point at, its section of `spec/` and its reference
-page, do not exist. Until they do, read [`CLAUDE.md`](../../CLAUDE.md) for the
-invariants and the gates, and
-[ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md) for how the workspace is
-laid out.
+- [`spec/cluster.md`](../../spec/cluster.md), the cluster protocol this crate implements:
+  the members string and the streams, the log's entries and their positions, the
+  consensus messages, the session protocol, the election's states, the timeouts and
+  what a reader rejects; its vectors are `spec/vectors/cluster.json`.
+- [ADR 0058](../../docs/decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md),
+  why the protocol is Aeron Cluster's field for field under a header of Cavalry's own,
+  and [ADR 0052](../../docs/decisions/0052-build-raft-on-the-durable-log-fifth.md), the
+  slice's eight features in order, of which this crate's are the third to the seventh.
+- [`spec/udp.md`](../../spec/udp.md), "The sender", for the multi-destination cast the
+  log travels over, and [`spec/durable-log.md`](../../spec/durable-log.md) for the
+  recording every member keeps of it.
+- [`CLAUDE.md`](../../CLAUDE.md) for the invariants and the gates, and
+  [ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md) for how the workspace
+  is laid out.

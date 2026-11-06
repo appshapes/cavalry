@@ -37,6 +37,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Durable log](reference/durable-log.md)
 - [UDP transport](reference/udp.md)
 - [C ABI](reference/c-abi.md)
+- [Cluster protocol](reference/cluster.md)
 - [Configuration](reference/config.md)
 - [Glossary](glossary.md)
 
@@ -100,3 +101,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0055. Answer an add publication on a closing send endpoint with code 4 and a retry](decisions/0055-answer-an-add-publication-on-a-closing-send-endpoint-with-a-retry.md)
 - [0056. Keep an ended receiver in a closed publication's `min` table until the linger ends](decisions/0056-keep-an-ended-receiver-in-a-closed-publications-table.md)
 - [0057. Take the C ABI to version 1 with add and remove destination](decisions/0057-take-the-c-abi-to-version-1-with-destinations.md)
+- [0058. Specify the cluster protocol, version 0, from Aeron Cluster's codecs](decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md)

@@ -130,3 +130,23 @@ pages elsewhere mention Aeron at most once.
 | control channel / control address | A publication channel `cavalry:udp?control=<host>:<port>\|control-mode=manual`: the control address is the local address its sender binds, where its destinations' status messages and NAKs arrive, in place of an endpoint. | `control`, `control-mode=manual` | `docs/reference/udp.md` |
 | destination | An endpoint a send endpoint on a control channel sends every datagram to, added with `add destination` and removed with `remove destination`; at most 64 per endpoint, counted in `channel.destinations`. | destination | `docs/reference/udp.md` |
 | flow control receiver | A receiver, by its receiver id, in a `min` publication's accounting: its last position plus window sets the sender limit with the others', and it is dropped after the flow control receiver timeout, 5 s, without a status message, counted in `sender.flow_control_receivers_timed_out`. | receiver (`MinMulticastFlowControl`) | `docs/reference/udp.md` |
+| member | One driver of a cluster, in the members string by its member id with its five endpoints; a follower, a candidate or the leader. | cluster member | `docs/reference/cluster.md` |
+| members string | The one string every member and client of a cluster holds: `id,ingress,consensus,log,catchup,archive` per member, members separated by `\|`, at most 8. | cluster members | `docs/reference/cluster.md` |
+| leader | The member that writes the cluster's log and commits it; one per leadership term. | leader | `docs/reference/cluster.md` |
+| follower | A member that records the leader's log and reports its append position. | follower | `docs/reference/cluster.md` |
+| candidate | A follower asking the members for votes to lead the next term. | candidate | `docs/reference/cluster.md` |
+| leadership term | The span of the log one leader writes, numbered from 0 by its leadership term id, which only rises. | leadership term | `docs/reference/cluster.md` |
+| term base log position | The log position at which a leadership term's first entry, its new leadership term event, begins. | term base log position | `docs/reference/cluster.md` |
+| append position | How far a member's recording of the cluster's log has been written, reported to the leader. | append position | `docs/reference/cluster.md` |
+| commit position | The highest log position a quorum of active members has appended, bounded by the leader's own; the service reads nothing above it. | commit position | `docs/reference/cluster.md` |
+| quorum | Half the members plus one: the members whose recordings make an entry committed, and the votes that make a leader. | quorum | `docs/reference/cluster.md` |
+| election | The state machine a member runs to find or become the leader, eighteen states from init to closed. | election | `docs/reference/cluster.md` |
+| canvass | The election state in which a member reports its log to every other and waits for a quorum of members its log is at least equal to. | canvass | `docs/reference/cluster.md` |
+| catch-up | The leader's replay of its recording of the log to a member whose append position is behind, sent to that member's catchup endpoint. | catchup | `docs/reference/cluster.md` |
+| cluster session | A client's session with the leader, opened by session connect and carried by session messages on the ingress and egress streams. | cluster session | `docs/reference/cluster.md` |
+| session message | A message of a cluster session: the session message header, with the term, the session id and the cluster's time, and the payload. | session message | `docs/reference/cluster.md` |
+| cluster time | The timestamp of every log entry, the leader's wall clock in milliseconds since the Unix epoch, read by every member and service from the log. | cluster clock | `docs/reference/cluster.md` |
+| service | The subscriber, in any language through the C ABI, that reads the committed log and replies through the leader. | clustered service | `docs/reference/cluster.md` |
+| snapshot marker | The message that begins, sections and ends a snapshot of a member's state at a commit position. | snapshot marker | `docs/reference/cluster.md` |
+| ingress | The stream, id 101, a client sends its session's messages on, to a member's ingress endpoint. | ingress | `docs/reference/cluster.md` |
+| egress | The stream, id 102, the leader sends a session's events and replies on, to the client's response channel. | egress | `docs/reference/cluster.md` |
