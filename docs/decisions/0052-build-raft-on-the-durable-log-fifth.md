@@ -167,8 +167,9 @@ a position in the stream, the replay check holds across members as it holds for 
 and a follower catches up from any peer's recording; and it is Aeron's shape, so
 Aeron's names and its documentation explain Cavalry's. Multi-destination cast is a
 transport feature with its own ADR and its own card, the slice's first, and it needs no
-wire change: the setup frame's TTL, group tag and receiver id fields are already on the
-wire for it (ADR 0040).
+wire change: the setup frame's TTL and the status message's receiver id and group tag
+are already on the wire for it (`spec/udp.md`, "Frames"; ADR 0040), and under `min` the
+status message's receiver id is the field that tells a sender's destinations apart.
 
 **The third host is `kip`.** When card 159's week ends and its close-out is on the
 card, `kip` keeps its stock Ubuntu, gains a self-hosted runner with a label of its own,
