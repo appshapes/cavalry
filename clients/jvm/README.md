@@ -201,11 +201,27 @@ reinterprets the body's segment to its length, one more object, points the
 subscription's one `Header` at the frame and calls the handler inside a
 `try`/`catch (Throwable)` ("The exception"). So four objects per received message,
 each a few dozen bytes, each dead when the handler returns, counted by the allocation
-round below. The body is never copied. There is no one view per subscription reused
-across messages, as the card asked and as the Rust API's slice is: a `MemorySegment`
-cannot be pointed somewhere else once made, and the one alternative, a segment over
-the whole address space with the body as an offset into it, would hand the handler
-every byte of the process; the objects cost what "The count" says.
+round below. The body is never copied.
+
+There is no one view per subscription reused across messages, as the card asked and
+as the Rust API's slice is, because a `MemorySegment` cannot be pointed somewhere else
+once made. Three other forms lost:
+
+- One segment over the whole address space, handed to the handler with the body as an
+  offset into it, would make no object of the client's own per message. It would also
+  hand the handler every byte of the process.
+- The body as a slice of a private segment over the address space, the form the claim's
+  view takes ("The view over a claimed slice"), is one object, the same as the
+  `reinterpret` it would replace. It saves nothing here, because the runtime has
+  already made the body's segment of length zero before `onFragment` runs.
+- The stub's descriptor could declare its three pointer parameters `JAVA_LONG`. The
+  runtime would then pass three numbers and make no segment, and the body would be one
+  slice: one object per message instead of four. But `cavalry_fragment_handler_t` takes
+  three pointers, and the API leaves unspecified what a stub does whose descriptor does
+  not match the C signature. So the stub keeps `ADDRESS`, and the runtime makes its
+  three objects.
+
+The objects cost what "The count" says.
 
 The `Header`'s getters read `cavalry_header_values` once per fragment, on the first
 getter, into the one native struct the subscription keeps, and return the field as a
@@ -213,27 +229,42 @@ primitive, no object. Outside the handler call every getter throws
 `IllegalStateException`, since the header is valid for the call alone. The body's
 segment is valid for the call alone too: it points into the log, which the publisher
 writes over once the subscription's position has moved past it. A segment kept past
-the call reads whatever the log holds later; copy what must outlive the handler.
+the call reads whatever the log holds later; copy what must outlive the handler. The
+body's segment is writable in Java's view, but a subscriber maps the log read-only
+(`Map::Reader`, `crates/cavalry-shm/src/log/file.rs`), so a write through it faults
+on a read-only page; copy the body to change it.
 
 ### The view over a claimed slice, by construction
 
-`publication.claim()` is a `MemorySegment` over the bytes the ABI reserved, made from
-the address the ABI filled into the one `cavalry_buffer_claim_t` the publication
-keeps: `get` reads the address as a segment of length zero, one object, and
-`reinterpret` makes the segment over the claimed length, a second; so two objects per
-claim. `commit`, `abort` and `close` set it to `null`. A segment kept past the commit
-points into the log, as a body does.
+`publication.claim()` is a `MemorySegment` over the bytes the ABI reserved and over
+nothing else. `Publication` keeps one private segment over the whole address space,
+`EVERYTHING`, made once when the class loads and never handed out. `tryClaim` reads
+the address the ABI filled into the one `cavalry_buffer_claim_t` the publication keeps
+as a `long`, and takes the slice of `EVERYTHING` at that address and of the claimed
+length: one `asSlice`, so one object per claim. The address is read as a `long`
+because every layout of this package is generated with 8-byte pointers. `commit`,
+`abort` and `close` set the segment to `null`. A segment kept past the commit points
+into the log, as a body does.
+
+The form that lost reads the address as a segment, `get(ADDRESS, …)`, which makes a
+segment of length zero, and calls `reinterpret` on it for the claimed length, which
+makes a second segment: two objects per claim. The count below was measured with that
+form.
 
 ### The count, measured
 
 The runner's allocation round sends 10,000 messages whose handler only counts and whose
 publisher copies one constant, with the thread's allocated bytes read from
 `com.sun.management.ThreadMXBean` before and after the round with nothing between,
-which counts every object the thread allocated, freed or not. On the laptop: 206.5
-bytes per message, about five objects' worth where the construction above makes six,
-the claim's two and the call-back's four, since the compiler removes an object it can
-prove dies inside the call and the count is what it left; and 0 collections during the
-round.
+which counts every object the thread allocated, freed or not. With the claim's
+two-object form: 206.5 bytes per message on the laptop, and 206.5 on CI's Linux runner
+(Temurin 25.0.4, run 42205547531), with 0 collections during the round. That is about
+five objects' worth where that construction made six, the claim's two and the
+call-back's four, since the compiler removes an object it can prove dies inside the
+call and the count is what it left. The construction now makes five, the claim's one
+and the call-back's four. This page has no measured count for it yet, because the
+change was made on a machine without Java 25. Every CI run prints it, in the line
+`conformance/jvm: report: allocations per message` of the gates job.
 
 ### The latency, measured
 

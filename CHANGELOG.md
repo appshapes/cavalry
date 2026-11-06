@@ -1495,7 +1495,8 @@ user-visible change, added in the same commit as the change. The format follows
   refuses a library of another ABI version when it loads, before it binds any other
   function; a `Client` whose methods are `synchronized`, so threads may share it, a
   `Publication` whose `tryClaim` and `offer` return the position or the result code and
-  whose `claim()` is a `MemorySegment` over the log, a `Subscription` polled with a
+  whose `claim()` is a `MemorySegment` over the claimed bytes of the log, one object per
+  claim, a slice of a private segment over the address space, a `Subscription` polled with a
   `FragmentHandler` that every delivered fragment reaches, the body a `MemorySegment`
   into the log for the call and the `Header`'s `reservedValue` a `long`, whose `poll`
   throws `HandlerException` with the counts and the first throwable once the ABI has

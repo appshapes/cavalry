@@ -27,7 +27,8 @@ constant under its Java name with the ABI's name beside it, the binding reads
 `cavalry_abi_version` before it binds any other function and refuses a header without the
 check's names, the offer's handle alone is critical and each subscription makes one upcall
 stub bound to its own `onFragment`, a publication's close zeroes the claim struct before
-the ABI frees the handle the struct names, `HandlerException`'s message says what to do and names
+the ABI frees the handle the struct names, a claim's segment is one slice of a private
+segment over the address space, `HandlerException`'s message says what to do and names
 a heading of the README, the generated files compile under Java 25 with every lint an error
 when a `javac` of that release is on the path, and `--check` fails on a package that
 differs.
@@ -960,6 +961,24 @@ class JvmPackage(unittest.TestCase):
         self.assertLess(zeroed, freed)
         for call in ("cavalry_buffer_claim_commit", "cavalry_buffer_claim_abort", "cavalry_buffer_claim_set_reserved_value"):
             self.assertIn("Abi." + call + ".invokeExact(claimStruct", code)
+
+    def test_a_claims_segment_is_one_slice_of_a_private_segment_over_the_address_space(self):
+        """`tryClaim` makes the claim's segment with one `asSlice` of the publication's
+        private `EVERYTHING`, at the address the ABI filled in read as a `long`, so one
+        object per claim. Reading the address as an `ADDRESS` would make a segment of length
+        zero first, and the `reinterpret` over it a second (clients/jvm/README.md, "The view
+        over a claimed slice"). The segment over the address space is never handed out, so
+        the caller sees the claimed bytes alone."""
+        code = gen_jvm.write_jvm(self.header)[self.BASE + "Publication.java"]
+        self.assertIn("    private static final MemorySegment EVERYTHING = MemorySegment.NULL.reinterpret(Long.MAX_VALUE);\n", code)
+        self.assertEqual(code.count("EVERYTHING"), 3)  # the field, the Javadoc of tryClaim, and its one slice
+        body = code.split("    public long tryClaim(int length) {\n", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("claim = EVERYTHING.asSlice(claimStruct.get(JAVA_LONG, Abi.cavalry_buffer_claim_t_data),\n"
+                      "                    claimStruct.get(JAVA_LONG, Abi.cavalry_buffer_claim_t_length));", body)
+        self.assertNotIn("ADDRESS", body)
+        self.assertNotIn("reinterpret", body)
+        self.assertRegex(gen_jvm.write_jvm(self.header)[self.BASE + "Abi.java"],
+                         r"static final long cavalry_buffer_claim_t_length = 8;")  # the 8-byte pointer before it
 
     def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
         code = gen_jvm.write_jvm(self.header)[self.BASE + "HandlerException.java"]

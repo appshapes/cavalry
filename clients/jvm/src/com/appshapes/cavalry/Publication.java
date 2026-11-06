@@ -18,6 +18,12 @@ import static java.lang.foreign.ValueLayout.JAVA_LONG;
  */
 @SuppressWarnings("restricted")
 public final class Publication implements AutoCloseable {
+    /** The address space as one segment, made once and never handed out: a claim's segment is
+     * the slice of it at the address the ABI filled in, one {@code asSlice} and so one object
+     * per claim, and the caller sees the claimed bytes alone (clients/jvm/README.md, "The view
+     * over a claimed slice"). */
+    private static final MemorySegment EVERYTHING = MemorySegment.NULL.reinterpret(Long.MAX_VALUE);
+
     private MemorySegment handle;
     private final MemorySegment claimStruct = Arena.ofAuto().allocate(Abi.cavalry_buffer_claim_t);
     private MemorySegment claim;
@@ -76,13 +82,16 @@ public final class Publication implements AutoCloseable {
 
     /** Claims {@code length} bytes: the position after the frame, with {@link #claim()} the
      * writable segment over them, or a result code below zero, which leaves the claim as it
-     * was. One ABI call; the segment is the client's one object per sent message. */
+     * was. One ABI call; the segment is the client's one object per sent message, a slice of
+     * {@code EVERYTHING} at the claim's address read as a {@code long}, since reading it as
+     * an {@code ADDRESS} would make a segment of length zero first (a pointer field is 8
+     * bytes in every layout of this package). */
     public long tryClaim(int length) {
         try {
             long position = (long) Abi.cavalry_publication_try_claim.invokeExact(handle, (long) length, claimStruct);
             if (position >= 0) {
-                claim = claimStruct.get(ADDRESS, Abi.cavalry_buffer_claim_t_data)
-                    .reinterpret(claimStruct.get(JAVA_LONG, Abi.cavalry_buffer_claim_t_length));
+                claim = EVERYTHING.asSlice(claimStruct.get(JAVA_LONG, Abi.cavalry_buffer_claim_t_data),
+                    claimStruct.get(JAVA_LONG, Abi.cavalry_buffer_claim_t_length));
             }
             return position;
         } catch (Throwable t) {
