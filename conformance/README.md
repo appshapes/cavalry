@@ -16,7 +16,7 @@ bounded at 10 s, and one that runs out says how far it got.
 | Runner | Language | Runs with | Decided in |
 | --- | --- | --- | --- |
 | `c/` | C11, `quickstart.c` through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204) |
-| `python/` | Python 3, `quickstart.py` through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205) |
+| `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205) |
 
 The Python runner is the shape the Node, Go, JVM and .NET runners copy (ADR 0046, cards
 206 to 209): the C runner's checks through the client, then a report, printed and never

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the driver and cavalry-ffi's shared library in release, starts a driver on a
 # directory of its own, runs conformance/python/quickstart.py through clients/python with
-# the runner's Python 3 and cleans up. `just conformance` runs this after conformance/c
+# the runner's Python 3, then clients/python/README.md's example through
+# conformance/python/readme.py, and cleans up. `just conformance` runs this after conformance/c
 # (clients/README.md; ADR 0046, card 205). Nothing is installed: ctypes is in the standard
 # library.
 set -euo pipefail
@@ -38,3 +39,8 @@ grep -q 'is running' <<<"$running" || {
 
 echo "conformance/python: run quickstart.py with $(python3 --version)"
 PYTHONPATH=clients/python python3 conformance/python/quickstart.py
+
+# The README's example against the same driver: it fails unless the program prints the
+# line the README says the reader will see (conformance/python/readme.py).
+echo "conformance/python: run clients/python/README.md's example"
+python3 conformance/python/readme.py

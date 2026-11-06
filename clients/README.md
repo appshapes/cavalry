@@ -34,6 +34,9 @@ JVM and .NET clients (cards 206 to 209) add a language each.
   counted with what the runtime counts, switched on for that round alone and read
   with nothing else between the two reads; the README says which objects a message
   makes and frees that such a net count cannot see.
+- `conformance/<language>/run.sh` runs the client README's example as written against
+  the runner's driver, and fails unless it prints the line the README says the reader
+  will see (`conformance/python/readme.py` is the shape).
 - `just lint` runs `clients/lint.py` over the generated per-message functions, the
   wrapper of each of the ABI's seven (`crates/cavalry-ffi/README.md`: the claim, the
   reserved value, the commit and abort, the offer, the poll and the header's values)

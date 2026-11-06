@@ -81,6 +81,10 @@ kill -TERM %1
 
 You will see `1000 messages over cavalry:ipc, position 64000`.
 
+`just conformance` runs this program as written, through
+`conformance/python/readme.py`, against the runner's driver, and fails unless it prints
+that line within 10 s: change the program or the line, and the run says which.
+
 ## The runtime's side of the boundary
 
 What `ctypes` does per message, and what `conformance/python/quickstart.py`'s report
