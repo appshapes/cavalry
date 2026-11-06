@@ -292,7 +292,12 @@ duty cycle an entry whose status message is older than the flow control receiver
 timeout is dropped from the table and counted in
 `sender.flow_control_receivers_timed_out`, an entry whose last status message carried
 the end-of-stream flag is dropped and not counted, its image ended as every image ends
-after a close, which the receiving driver counts in `image.ended` (ADR 0054), and when
+after a close, which the receiving driver counts in `image.ended` (ADR 0054), except
+that once the publication is closed such an entry stays in the table until the linger
+ends, dropped neither for the flag nor for the timeout and never counted, so that the
+gauge below counts every receiver that took the stream to its end; it holds nothing
+back, since a receiver ends its stream only after the heartbeat with EOS, which goes
+once the sender position has reached the end of stream position (ADR 0056); and when
 entries remain the limit becomes max(L, the least of them), so that a receiver that
 went away holds the stream back for the timeout and no longer; a status message from a
 receiver the full table does not hold is accepted for the connection below and not
@@ -548,7 +553,7 @@ lands: the sender's and the endpoint's rows, the publication's connection and
 | `sender.rtt_replies_sent` | an RTT measurement is answered |
 | `sender.flow_control_receivers_timed_out` | a receiver is dropped from a `min` publication's table for no status message within the flow control receiver timeout; one dropped because its last status message carried end of stream is not counted (ADR 0054) |
 | `sender.flow_control_receivers_full` | a status message from a receiver a `min` publication's full table does not hold: accepted, not tracked |
-| `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, 0 under `max` |
+| `sender.position`, `sender.limit`, `sender.flow_control_receivers` | keyed as `publication.position` is: the sender position and the sender limit of one publication, and the receivers in its `min` table now, a closed publication's ended receivers among them until the linger ends (ADR 0056), 0 under `max` |
 | `receiver.bytes_received`, `receiver.frames_received` | a data or padding frame is accepted: the bytes as they came off the wire, 32 for a padding frame, and one frame each |
 | `receiver.setups_received`, `receiver.setups_unwanted`, `receiver.setups_elicited` | a setup frame arrives; one names a stream nobody wants; a status message asked a sender for one |
 | `receiver.heartbeats_received` | a heartbeat is accepted |
