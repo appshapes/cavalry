@@ -179,11 +179,15 @@ fn a_control_channel_reaches_every_destination_once_and_in_order() {
         );
     }
     // The second removed. The driver answers the remove once it has queued it for the
-    // sender, which takes its requests at the start of a duty cycle and sends a burst
-    // at the end, so a cycle that took them before the removal may gather the next
-    // message, 500, after its commit and send it to both. 501 reaches the first alone:
-    // it is committed once the first has 500, after the burst that sent it, and every
-    // cycle after that one takes the removal before it gathers a burst.
+    // sender, which takes its requests in queue order, at most 16 at the start of a
+    // duty cycle and none while its replies wait for room, and sends a burst at the
+    // end. The argument below holds because nothing else is queued for this driver's
+    // sender, which serves one client's one publication and holds no reply waiting for
+    // room, so the cycle after the one under way takes the removal. A cycle that took
+    // its requests before the removal may gather the next message, 500, after its
+    // commit and send it to both. 501 reaches the first alone: it is committed once the
+    // first has 500, after the burst that sent it, and every cycle after that one takes
+    // the removal before it gathers a burst.
     client
         .remove_destination(id, &endpoints[1])
         .expect("removed");
