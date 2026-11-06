@@ -41,7 +41,16 @@ calls the package's throwing `Abi.check` or `Abi.lastError`, fails naming the me
 the form; a throw in the trampoline's catch, which holds no `invokeExact`, fails; building
 the `HandlerException` in `poll` before its ABI call fails; a header getter that throws
 fails while `Header.ensure`'s own throw, the guard, passes; a package with none of the
-per-message methods fails, one method renamed fails, and a missing file says to generate.
+per-message methods fails, one method renamed fails, and a missing file says to generate. The same for
+the .NET client's package: a per-message member that uses `lock`, `Monitor` or
+`System.Threading.Lock`, is `async`, awaits, uses a task, blocks, starts a thread, throws,
+allocates with `new` or an interpolated string, or calls the package's throwing `Abi.Check`
+or `Abi.LastError`, fails naming the member and the form; the `Span` the claim's getter
+makes over the ABI's bytes passes while a throw in that getter fails; a throw in the
+trampoline's catch fails; building the `HandlerException` in `Poll` before its ABI call
+fails; a header getter that throws fails while `Header.Ensure`'s own throw, the guard,
+passes; a package with none of the per-message members fails, one member renamed fails,
+and a missing file says to generate.
 """
 
 import os
@@ -73,6 +82,9 @@ class Clients(unittest.TestCase):
         shutil.copytree(os.path.join(lint.CLIENTS, "jvm"), os.path.join(self.tmp, "jvm"),
                         ignore=shutil.ignore_patterns("build"))
         self.jvm = os.path.join(self.tmp, "jvm", "src", "com", "appshapes", "cavalry")
+        shutil.copytree(os.path.join(lint.CLIENTS, "dotnet"), os.path.join(self.tmp, "dotnet"),
+                        ignore=shutil.ignore_patterns("bin", "obj"))
+        self.dotnet = os.path.join(self.tmp, "dotnet")
 
     def edit(self, old, new, count=1, file=None):
         file = file or self.file
@@ -89,6 +101,9 @@ class Clients(unittest.TestCase):
         self.edit(old, new, count, file=file or self.go)
     def edit_jvm(self, old, new, count=1, file="Publication.java"):
         self.edit(old, new, count, file=os.path.join(self.jvm, file))
+
+    def edit_dotnet(self, old, new, count=1, file="Publication.cs"):
+        self.edit(old, new, count, file=os.path.join(self.dotnet, file))
 
     def add_to_addon(self, function, line):
         """`line` as the first statement of the addon's C function `function`."""
@@ -712,6 +727,149 @@ class Clients(unittest.TestCase):
         os.remove(os.path.join(self.jvm, "Header.java"))
         found = lint.findings(self.tmp)
         self.assertTrue(any("Header.java is missing" in f and "python3 clients/generate.py jvm" in f for f in found), found)
+
+
+    # The .NET client's package, read by the tokenizer (clients/dotnet/README.md).
+
+    def test_a_lock_in_a_dotnet_per_message_method_fails(self):
+        self.edit_dotnet("    public long TryClaim(int length)\n    {\n",
+                         "    public long TryClaim(int length)\n    {\n        lock (this)\n        {\n        }\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.TryClaim", finding)
+        self.assertIn("uses `lock`", finding)
+
+    def test_a_monitor_in_dotnet_fails(self):
+        self.edit_dotnet("    public long Commit()\n    {\n        data = null;\n",
+                         "    public long Commit()\n    {\n        Monitor.Enter(this);\n        data = null;\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Commit", finding)
+        self.assertIn("uses a lock or a wait of `System.Threading`", finding)
+
+    def test_a_system_threading_lock_in_dotnet_fails(self):
+        self.edit_dotnet("    public long Commit()\n    {\n        data = null;\n",
+                         "    public long Commit()\n    {\n        Lock gate = new();\n        data = null;\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Commit", finding)
+        self.assertIn("uses `System.Threading.Lock`", finding)
+
+    def test_an_async_dotnet_per_message_method_fails(self):
+        self.edit_dotnet("    public long Abort()\n", "    public async long Abort()\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Abort", finding)
+        self.assertIn("is `async`", finding)
+
+    def test_an_await_in_dotnet_fails(self):
+        self.edit_dotnet("    public long Abort()\n    {\n        data = null;\n",
+                         "    public long Abort()\n    {\n        await System.Threading.Tasks.Task.Yield();\n        data = null;\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("Publication.Abort" in f and "awaits" in f for f in found), found)
+        self.assertTrue(any("Publication.Abort" in f and "uses a task" in f for f in found), found)
+
+    def test_a_blocking_wait_in_dotnet_fails(self):
+        self.edit_dotnet("    public int SetReservedValue(long value)\n    {\n",
+                         "    public int SetReservedValue(long value)\n    {\n        Thread.Sleep(1);\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.SetReservedValue", finding)
+        self.assertIn("blocks", finding)
+
+    def test_a_thread_started_in_dotnet_fails(self):
+        self.edit_dotnet("    public long Offer(ReadOnlySpan<byte> message)\n    {\n",
+                         "    public long Offer(ReadOnlySpan<byte> message)\n    {\n        new Thread(() => { }).Start();\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("Publication.Offer" in f and "starts a thread" in f for f in found), found)
+
+    def test_a_throw_in_dotnet_fails(self):
+        self.edit_dotnet("    public long TryClaim(int length)\n    {\n",
+                         "    public long TryClaim(int length)\n    {\n        if (length < 0) throw new ArgumentException(\"no\");\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("Publication.TryClaim" in f and "throws" in f for f in found), found)
+        self.assertTrue(any("Publication.TryClaim" in f and "builds ArgumentException" in f for f in found), found)
+
+    def test_an_allocation_in_dotnet_fails(self):
+        self.edit_dotnet("    public long Commit()\n    {\n        data = null;\n",
+                         "    public long Commit()\n    {\n        byte[] copy = new byte[8];\n        data = null;\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Commit", finding)
+        self.assertIn("allocates byte with `new`", finding)
+
+    def test_an_interpolated_string_in_dotnet_fails(self):
+        self.edit_dotnet("    public long Abort()\n    {\n        data = null;\n",
+                         "    public long Abort()\n    {\n        string s = $\"{length}\";\n        data = null;\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Abort", finding)
+        self.assertIn("allocates an interpolated string", finding)
+
+    def test_the_claims_span_passes_and_a_throw_in_its_getter_fails(self):
+        """The getter makes a Span over the bytes the ABI handed over, a struct on the stack,
+        and the committed package passes with it; a throw there is a raise on the path."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_dotnet("    public Span<byte> Claim => data == null ? default : new Span<byte>(data, length);\n",
+                         "    public Span<byte> Claim => throw new InvalidOperationException(\"no\");\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any(f.startswith("dotnet: Publication.Claim ") and "throws" in f for f in found), found)
+
+    def test_building_handler_exception_before_the_polls_call_in_dotnet_fails(self):
+        self.edit_dotnet("        int count = Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);\n",
+                         "        HandlerException early = new HandlerException(0, 0, first!);\n"
+                         "        int count = Abi.cavalry_subscription_poll(handle, &OnFragment, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);\n",
+                         file="Subscription.cs")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Subscription.Poll", finding)
+        self.assertIn("builds HandlerException", finding)
+
+    def test_a_throw_in_the_trampolines_catch_fails(self):
+        self.edit_dotnet("        catch (Exception e)\n        {\n            raised++;\n",
+                         "        catch (Exception e)\n        {\n            raised++;\n            throw;\n", file="Subscription.cs")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any(f.startswith("dotnet: Subscription.Deliver ") and "throws" in f for f in found), found)
+        self.assertTrue(any(f.startswith("dotnet: Subscription.OnFragment ") and "calls Subscription.Deliver" in f for f in found), found)
+
+    def test_a_throw_in_a_dotnet_header_getter_fails(self):
+        self.edit_dotnet("    public int SessionId\n    {\n        get\n        {\n            Ensure();\n",
+                         "    public int SessionId\n    {\n        get\n        {\n            throw new InvalidOperationException(\"no\");\n",
+                         file="Header.cs")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any(f.startswith("dotnet: Header.SessionId ") and "throws" in f for f in found), found)
+
+    def test_a_call_to_check_in_dotnet_fails(self):
+        self.edit_dotnet("    public long TryClaim(int length)\n    {\n",
+                         "    public long TryClaim(int length)\n    {\n        Abi.Check(\"cavalry_publication_try_claim\", 1);\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.TryClaim", finding)
+        self.assertIn("calls Abi.Check", finding)
+        self.assertIn("Abi.Check throws", finding)
+
+    def test_the_dotnet_guards_throw_passes_and_a_raising_helper_a_getter_calls_fails(self):
+        """Header.Ensure throws for a read outside the handler call, and the committed
+        package passes with it; a getter that calls Abi.LastError, which builds the
+        exception, is a raise on the path."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_dotnet("    public int SessionId\n    {\n        get\n        {\n            Ensure();\n",
+                         "    public int SessionId\n    {\n        get\n        {\n            Ensure();\n"
+                         "            Abi.LastError(\"cavalry_header_values\");\n", file="Header.cs")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Header.SessionId", finding)
+        self.assertIn("calls Abi.LastError", finding)
+        self.assertIn("builds CavalryException", finding)
+
+    def test_a_dotnet_package_without_the_per_message_members_fails(self):
+        for name in ("Publication", "Subscription", "Header"):
+            with open(os.path.join(self.dotnet, name + ".cs"), "w", encoding="utf-8") as f:
+                f.write(f"namespace Cavalry;\n\npublic sealed class {name}\n{{\n    internal int Here()\n    {{\n"
+                        f"        return 1;\n    }}\n}}\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("none of the per-message functions", finding)
+        self.assertIn("Publication.TryClaim", finding)
+
+    def test_one_missing_dotnet_per_message_method_fails(self):
+        self.edit_dotnet("    public long Offer(ReadOnlySpan<byte> message)\n", "    public long Send(ReadOnlySpan<byte> message)\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.Offer is not in", finding)
+
+    def test_a_missing_dotnet_file_says_to_generate(self):
+        os.remove(os.path.join(self.dotnet, "Header.cs"))
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("Header.cs is missing" in f and "python3 clients/generate.py dotnet" in f for f in found), found)
 
 
 if __name__ == "__main__":

@@ -32,3 +32,11 @@ __pycache__/
 # runner's (conformance/jvm/run.sh); the generated sources beside them are committed.
 /clients/jvm/build/
 /conformance/jvm/build/
+# The .NET client's, its example's and its runners' build output, written by
+# `dotnet build` (clients/dotnet/README.md); the generated sources are committed.
+/clients/dotnet/bin/
+/clients/dotnet/obj/
+/clients/dotnet/example/bin/
+/clients/dotnet/example/obj/
+/conformance/dotnet/*/bin/
+/conformance/dotnet/*/obj/
