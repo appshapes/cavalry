@@ -597,7 +597,7 @@ order, reporting the first that fails by name; a rejected message is counted in
 | --- | --- |
 | `too-short` | fewer than 8 bytes, or fewer than 8 + the header's block length |
 | `schema` | the schema id is not 1 |
-| `version` | the version is not 0, or a `protocol version` or `version` field's major, its value ÷ 65536, is not 0 |
+| `version` | the version is not 0; and, once the fields are read, after `length`, a `protocol version` or `version` field's major, its value ÷ 65536, is not 0 |
 | `template` | the template id is not one this version names: 1 to 6, 20 to 25, 50 to 57 or 100; 7 and 8 among those it does not |
 | `stream` | the template is not one the stream carries: the log stream carries 1 and 20 to 25, the consensus stream 50 to 57, the ingress stream 1, 3, 4 and 5, the egress stream 1, 2 and 6, a snapshot 100 |
 | `block-length` | the block length is not the template's |
