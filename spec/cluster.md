@@ -532,7 +532,9 @@ is sent; a member holds at most the pending answers of "Values" at a time, and a
 connect that arrives with no room is dropped unanswered and counted in
 `cluster.connects_dropped`, the client's connect timeout reporting it. A client that
 has no session event within the session connect timeout reports the connect lost to
-its caller and may send it again with a new correlation id.
+its caller and may send it again with a new correlation id; one that reads a session
+event whose version has a major other than its own reports the cluster's version to
+its caller and sends nothing more.
 
 An open session carries session messages from the client, each a session message header
 with the client's term and session id and the payload; the leader appends each as an

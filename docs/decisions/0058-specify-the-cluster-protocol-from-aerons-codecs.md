@@ -73,16 +73,33 @@ member and service, never from a clock of their own. The timeouts are Aeron's de
 as constants with no configuration key: leader heartbeat interval 200 ms and timeout
 10 s, election timeout 1 s, election status interval 100 ms, startup canvass timeout
 60 s, session timeout 10 s, session connect timeout 5 s, keepalive interval 500 ms,
-`spec/client-protocol.md`'s; a cluster holds at most 10 open sessions, Aeron's default.
-A reader rejects, in order, a message too short for its header or block, a schema id
-not 1, a version not 0, a template id this version does not name, a block length not
-the template's, a variable field that runs past the message or bytes left after the
-last, a value outside an enumeration, a non-ASCII byte in an ASCII field, a member id
-below 0 where none is allowed, a position below 0 where none is allowed and a term id
-below −1. Out of this version: the challenge and challenge response, Aeron's
-authentication, with their template ids reserved; dynamic membership and its
-deprecated messages; the service control protocol of a service in a process of its
-own; the admin request; the backup, heartbeat and standby snapshot queries; the
+`spec/client-protocol.md`'s, each measured on a monotonic clock of the member's own,
+Aeron's nano clock, never a wall clock or the cluster's time, so that a step of a
+host's clock moves no election. A cluster holds at most 10 open sessions, Aeron's
+default, and a member at most 10 pending answers, the redirects and refusals it has
+yet to send, a connect beyond them dropped unanswered and counted; the leader stops
+reading its ingress images while its claim on the log is back-pressured, buffering no
+message and dropping none; a session message the leader ignores is counted, and a
+client treats a message with no reply as possibly lost, the new leader event its
+report of a truncated term. A reader rejects, in order, a message too short for its
+header or block, a schema id not 1, a header version not 0, a template id this
+version does not name, a template its stream does not carry, a block length not the
+template's, a variable field that runs past the message or bytes left after the last,
+a consensus message's protocol version of a major other than 0, a value outside an
+enumeration, a non-ASCII byte in an ASCII field, a member id below 0 where none is
+allowed, a position below 0 where none is allowed and a term id below −1; a session
+connect's version is read whatever its major, so that the leader answers it with an
+error, as Aeron's `SessionManager` does, and a client that reads a session event of
+another major reports it. Follower log replication, Aeron's replication of a whole
+earlier term from a peer's archive, is out of this version: no message of it asks for
+one, and a member whose append position is below the leader's term base log position
+catches up instead through the catch-up states from its own append position, the
+leader's replay of its recording of the log starting there across the terms between,
+which asks of the replicated log (card 227) that a member's recording of the log span
+its terms at the log's positions. Out of this version: the challenge and challenge
+response, Aeron's authentication, with their template ids reserved; dynamic membership
+and its deprecated messages; the service control protocol of a service in a process of
+its own; the admin request; the backup, heartbeat and standby snapshot queries; the
 snapshot's contents between its markers, which ADR 0052 leaves to card 230; the
 members string's seventh and eighth fields, Aeron's response endpoints.
 
@@ -170,7 +187,12 @@ of them runs, so the implementing features must keep it true and amend it by a n
 version when they find it is not; every field Aeron made optional is mandatory here,
 so a value Aeron leaves null is written as its null value and the page says which
 fields allow one; the consensus messages cross the wire as message payloads inside
-data frames, so a reader walks `spec/frame.md` first and this page second.
+data frames, so a reader walks `spec/frame.md` first and this page second. A member
+at version N+1 must speak this page's header version 0 to a member at version N, since
+a reader rejects any other, and card 231 decides how it does (ADR 0052, feature 7).
+A member that was down across the end of a term rejoins only by the catch-up replay
+from its own append position, so the replicated log's recording must span terms
+(card 227), and a replay across a term boundary is the first thing card 230 proves.
 
 Revisit: when card 229's client needs the challenge, for Aeron's authentication
 protocol and the two reserved template ids; when a member must be added to or removed
@@ -178,9 +200,12 @@ from a running cluster, for the membership change event's use and the messages A
 deprecated; when a service runs in a process of its own, for the service control
 protocol, the schedule and cancel timer, the close session and the service ack; when
 card 230 writes the snapshot, for its contents between the markers and the standby
-snapshot message; when a cluster of more than eight members is wanted; when `doctor`
-shows a host that needs a timeout of its own, for the first configuration key of the
-slice with its `why_not_default`.
+snapshot message; when card 230 needs Aeron's follower log replication, a whole term
+from a peer's recording through the `archive` endpoint with its request and its stop
+position, which version 0 leaves out for the catch-up replay from any position; when
+a cluster of more than eight members is wanted; when `doctor` shows a host that needs
+a timeout of its own, for the first configuration key of the slice with its
+`why_not_default`.
 
 ## References
 
