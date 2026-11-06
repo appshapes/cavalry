@@ -1539,3 +1539,13 @@ user-visible change, added in the same commit as the change. The format follows
   hold each close to the zeroing. Found by pull request 146's review in the JVM client,
   which card 208 fixed, and fixed in the .NET client before card 209's pull request
   (issue 147; card 222).
+- ADR 0052, Accepted: the fifth slice is Raft on the durable log, in eight features,
+  one card each: multi-destination cast on `cavalry:udp` as the fan-out, decided over
+  one publication per follower; the cluster protocol page under Aeron Cluster's names;
+  the replicated log with a commit at a quorum and the service a subscriber in any
+  language; the election with gate 3's fault injection; the cluster client through the
+  ABI and the five clients; catch-up, snapshots and standby in the open core; a rolling
+  upgrade that builds `conformance/upgrade/`; and the cross-host gate with `kip` as the
+  third host after card 159's week, the one card that needs a hand on a host
+  ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md); cards 224
+  to 232).

@@ -94,3 +94,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0051. Expose the client API as a C ABI with Aeron's C client's names, version 0](decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md)
 - [0049. Hold an add subscription until its channel's closing endpoint has closed](decisions/0049-hold-an-add-until-the-closing-endpoint-has-closed.md)
 - [0050. Re-record a bench baseline at a tree where pull requests read red while master passes](decisions/0050-re-record-at-a-tree-where-pull-requests-read-red.md)
+- [0052. Build Raft on the durable log fifth, in eight features](decisions/0052-build-raft-on-the-durable-log-fifth.md)
