@@ -141,7 +141,7 @@ pages elsewhere mention Aeron at most once.
 | commit position | The highest log position a quorum of active members has appended, bounded by the leader's own; the service reads nothing above it. | commit position | `docs/reference/cluster.md` |
 | quorum | Half the members plus one: the members whose recordings make an entry committed, and the votes that make a leader. | quorum | `docs/reference/cluster.md` |
 | election | The state machine a member runs to find or become the leader, eighteen states from init to closed. | election | `docs/reference/cluster.md` |
-| canvass | The election state in which a member reports its log to every other and waits for a quorum of members its log is at least equal to. | canvass | `docs/reference/cluster.md` |
+| canvass | The election state in which a member reports its log to every other and nominates itself once every member has reported with no log ahead of its own, or a quorum has at the deadline. | canvass | `docs/reference/cluster.md` |
 | catch-up | The leader's replay of its recording of the log to a member whose append position is behind, sent to that member's catchup endpoint. | catchup | `docs/reference/cluster.md` |
 | cluster session | A client's session with the leader, opened by session connect and carried by session messages on the ingress and egress streams. | cluster session | `docs/reference/cluster.md` |
 | session message | A message of a cluster session: the session message header, with the term, the session id and the cluster's time, and the payload. | session message | `docs/reference/cluster.md` |
