@@ -145,6 +145,7 @@ pages elsewhere mention Aeron at most once.
 | catch-up | The leader's replay of its recordings of the log to a member whose append position is behind, sent to that member's catchup endpoint, within the leader's term; the same replay to a term's end is a log replication. | catchup | `docs/reference/cluster.md` |
 | cluster session | A client's session with the leader, opened by session connect and carried by session messages on the ingress and egress streams. | cluster session | `docs/reference/cluster.md` |
 | session message | A message of a cluster session: the session message header, with the term, the session id and the cluster's time, and the payload. | session message | `docs/reference/cluster.md` |
+| join position | The position an image's subscriber starts at when `available image` arrives, the first frame the image holds; a member checks that a replay's or the live log's image joins at its append position. | join position | `docs/reference/cluster.md` |
 | cluster time | The timestamp of every log entry, the leader's wall clock in milliseconds since the Unix epoch, read by every member and service from the log. | cluster clock | `docs/reference/cluster.md` |
 | service | The subscriber, in any language through the C ABI, that reads the committed log and replies through the leader. | clustered service | `docs/reference/cluster.md` |
 | snapshot marker | The message that begins, sections and ends a snapshot of a member's state at a commit position. | snapshot marker | `docs/reference/cluster.md` |
