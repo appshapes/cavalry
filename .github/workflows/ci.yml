@@ -83,6 +83,14 @@ jobs:
         with:
           go-version-file: clients/go/go.mod
           cache: false
+      # Java for the JVM client, which `just conformance` compiles with the runner's
+      # javac and runs through java.lang.foreign over the shared library, and for
+      # conformance/jvm (ADR 0046, card 208): Temurin's Java 25, the long-term release
+      # the client needs; no build tool and nothing from a package registry.
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: 25
       # .NET for the .NET client, which `just conformance` builds with the runner's SDK and
       # runs through P/Invoke over the shared library, and for conformance/dotnet (ADR
       # 0046, card 209): .NET 10, the long-term release the client needs; no package

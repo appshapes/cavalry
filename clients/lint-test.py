@@ -33,6 +33,15 @@ fails each shim call that keeps one; a function that reads the thread's error th
 its first ABI call fails, whether it lost the lock, takes it after the call, has no
 deferred unlock or is new; a module with none of the per-message functions fails, and a
 missing `cavalry.go` says to generate. The same for
+the JVM client's package under `src/com/appshapes/cavalry`: a per-message method that is
+`synchronized` or holds a `synchronized` block, takes a lock on any receiver, uses a lock
+class of `java.util.concurrent`, a future or a blocking wait, starts a thread, throws
+outside the compiler's `catch (Throwable)`, builds an exception, allocates with `new`, or
+calls the package's throwing `Abi.check` or `Abi.lastError`, fails naming the method and
+the form; a throw in the trampoline's catch, which holds no `invokeExact`, fails; building
+the `HandlerException` in `poll` before its ABI call fails; a header getter that throws
+fails while `Header.ensure`'s own throw, the guard, passes; a package with none of the
+per-message methods fails, one method renamed fails, and a missing file says to generate. The same for
 the .NET client's package: a per-message member that uses `lock`, `Monitor` or
 `System.Threading.Lock`, is `async`, awaits, uses a task, blocks, starts a thread, throws,
 allocates with `new` or an interpolated string, or calls the package's throwing `Abi.Check`
@@ -70,6 +79,9 @@ class Clients(unittest.TestCase):
         self.go_trampoline = os.path.join(self.tmp, "go", "trampoline.go")
         self.go_shim = os.path.join(self.tmp, "go", "shim.c")
         self.addon = os.path.join(self.tmp, "node", "src", "addon.c")
+        shutil.copytree(os.path.join(lint.CLIENTS, "jvm"), os.path.join(self.tmp, "jvm"),
+                        ignore=shutil.ignore_patterns("build"))
+        self.jvm = os.path.join(self.tmp, "jvm", "src", "com", "appshapes", "cavalry")
         shutil.copytree(os.path.join(lint.CLIENTS, "dotnet"), os.path.join(self.tmp, "dotnet"),
                         ignore=shutil.ignore_patterns("bin", "obj"))
         self.dotnet = os.path.join(self.tmp, "dotnet")
@@ -85,11 +97,13 @@ class Clients(unittest.TestCase):
     def edit_node(self, old, new, count=1):
         self.edit(old, new, count, file=self.node)
 
-    def edit_dotnet(self, old, new, count=1, file="Publication.cs"):
-        self.edit(old, new, count, file=os.path.join(self.dotnet, file))
-
     def edit_go(self, old, new, count=1, file=None):
         self.edit(old, new, count, file=file or self.go)
+    def edit_jvm(self, old, new, count=1, file="Publication.java"):
+        self.edit(old, new, count, file=os.path.join(self.jvm, file))
+
+    def edit_dotnet(self, old, new, count=1, file="Publication.cs"):
+        self.edit(old, new, count, file=os.path.join(self.dotnet, file))
 
     def add_to_addon(self, function, line):
         """`line` as the first statement of the addon's C function `function`."""
@@ -584,6 +598,135 @@ class Clients(unittest.TestCase):
         os.remove(self.file)
         [finding] = lint.findings(self.tmp)
         self.assertIn("python3 clients/generate.py python", finding)
+
+    # The JVM client's package, read by the tokenizer (clients/jvm/README.md).
+
+    def test_a_synchronized_jvm_per_message_method_fails(self):
+        self.edit_jvm("    public long tryClaim(int length) {\n", "    public synchronized long tryClaim(int length) {\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.tryClaim", finding)
+        self.assertIn("is `synchronized`", finding)
+
+    def test_a_synchronized_block_in_jvm_fails(self):
+        self.edit_jvm("    public long commit() {\n        claim = null;\n",
+                      "    public long commit() {\n        synchronized (this) {\n            claim = null;\n        }\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.commit", finding)
+        self.assertIn("uses `synchronized`", finding)
+
+    def test_a_lock_taken_on_any_receiver_in_jvm_fails(self):
+        self.edit_jvm("    public long offer(MemorySegment message) {\n        try {\n",
+                      "    public long offer(MemorySegment message) {\n        guard.lock();\n        try {\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.offer", finding)
+        self.assertIn("takes a lock", finding)
+
+    def test_a_lock_class_and_a_park_in_jvm_fail(self):
+        self.edit_jvm("    public long abort() {\n        claim = null;\n",
+                      "    public long abort() {\n        LockSupport.parkNanos(1);\n        claim = null;\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("Publication.abort" in f and "uses a lock class" in f for f in found), found)
+        self.assertTrue(any("Publication.abort" in f and "blocks" in f for f in found), found)
+
+    def test_a_future_in_jvm_fails(self):
+        self.edit_jvm("    public int setReservedValue(long value) {\n        try {\n",
+                      "    public int setReservedValue(long value) {\n        CompletableFuture.completedFuture(0);\n        try {\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.setReservedValue", finding)
+        self.assertIn("uses a future", finding)
+
+    def test_a_blocking_wait_in_jvm_fails(self):
+        self.edit_jvm("    public long commit() {\n        claim = null;\n",
+                      "    public long commit() {\n        Thread.sleep(1);\n        claim = null;\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.commit", finding)
+        self.assertIn("blocks", finding)
+
+    def test_a_thread_started_in_jvm_fails(self):
+        self.edit_jvm("    public long offer(MemorySegment message) {\n        try {\n",
+                      "    public long offer(MemorySegment message) {\n        Thread.ofPlatform().start(() -> {});\n        try {\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.offer", finding)
+        self.assertIn("starts a thread", finding)
+
+    def test_a_throw_outside_the_compilers_catch_in_jvm_fails(self):
+        self.edit_jvm("    public long tryClaim(int length) {\n        try {\n",
+                      "    public long tryClaim(int length) {\n        if (length < 0) throw new IllegalArgumentException(\"no\");\n"
+                      "        try {\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("Publication.tryClaim" in f and "throws" in f for f in found), found)
+        self.assertTrue(any("Publication.tryClaim" in f and "builds IllegalArgumentException" in f for f in found), found)
+
+    def test_a_throw_in_a_catch_without_invoke_exact_in_jvm_fails(self):
+        """The compiler's catch is the one after a try holding invokeExact; the trampoline's
+        catch around the handler's call holds none, so a throw there is a raise."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_jvm("        } catch (Throwable t) {\n            raised++;\n",
+                      "        } catch (Throwable t) {\n            raised++;\n            throw t;\n", file="Subscription.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Subscription.onFragment", finding)
+        self.assertIn("throws", finding)
+
+    def test_an_allocation_in_jvm_fails(self):
+        self.edit_jvm("    public long commit() {\n        claim = null;\n",
+                      "    public long commit() {\n        byte[] copy = new byte[8];\n        claim = null;\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.commit", finding)
+        self.assertIn("allocates byte with `new`", finding)
+
+    def test_building_handler_exception_before_the_polls_call_fails(self):
+        self.edit_jvm("        int count;\n        try {\n            count = (int) Abi.cavalry_subscription_poll.invokeExact(",
+                      "        HandlerException early = new HandlerException(0, 0, null);\n        int count;\n        try {\n"
+                      "            count = (int) Abi.cavalry_subscription_poll.invokeExact(", file="Subscription.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Subscription.poll", finding)
+        self.assertIn("builds HandlerException", finding)
+
+    def test_a_throw_in_a_jvm_header_getter_fails(self):
+        self.edit_jvm("    public int sessionId() {\n        ensure();\n",
+                      "    public int sessionId() {\n        throw new IllegalStateException(\"no\");\n", file="Header.java")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any(f.startswith("jvm: Header.sessionId ") and "throws" in f for f in found), found)
+
+    def test_a_call_to_check_outside_the_compilers_catch_in_jvm_fails(self):
+        self.edit_jvm("    public long tryClaim(int length) {\n        try {\n",
+                      "    public long tryClaim(int length) {\n        Abi.check(\"cavalry_publication_try_claim\", 1);\n        try {\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.tryClaim", finding)
+        self.assertIn("calls Abi.check", finding)
+        self.assertIn("Abi.check throws", finding)
+
+    def test_the_guards_throw_passes_and_a_raising_helper_a_getter_calls_fails(self):
+        """Header.ensure throws for a read outside the handler call, and the committed
+        package passes with it; a getter that calls Abi.lastError, which builds the
+        exception, is a raise on the path."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_jvm("    public int sessionId() {\n        ensure();\n",
+                      "    public int sessionId() {\n        ensure();\n        Abi.lastError(\"cavalry_header_values\");\n",
+                      file="Header.java")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Header.sessionId", finding)
+        self.assertIn("calls Abi.lastError", finding)
+        self.assertIn("builds CavalryException", finding)
+
+    def test_a_jvm_package_without_the_per_message_methods_fails(self):
+        for name in ("Publication", "Subscription", "Header"):
+            with open(os.path.join(self.jvm, name + ".java"), "w", encoding="utf-8") as f:
+                f.write(f"package com.appshapes.cavalry;\n\npublic final class {name} {{\n    int here() {{\n"
+                        f"        return 1;\n    }}\n}}\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("none of the per-message functions", finding)
+        self.assertIn("Publication.tryClaim", finding)
+
+    def test_one_missing_jvm_per_message_method_fails(self):
+        self.edit_jvm("    public long offer(MemorySegment message) {\n", "    public long send(MemorySegment message) {\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.offer is not in", finding)
+
+    def test_a_missing_jvm_file_says_to_generate(self):
+        os.remove(os.path.join(self.jvm, "Header.java"))
+        found = lint.findings(self.tmp)
+        self.assertTrue(any("Header.java is missing" in f and "python3 clients/generate.py jvm" in f for f in found), found)
 
 
     # The .NET client's package, read by the tokenizer (clients/dotnet/README.md).

@@ -28,6 +28,10 @@ __pycache__/
 /clients/node/node_modules/
 /clients/node/package-lock.json
 
+# The JVM client's classes, compiled by `javac` as clients/jvm/README.md says, and the
+# runner's (conformance/jvm/run.sh); the generated sources beside them are committed.
+/clients/jvm/build/
+/conformance/jvm/build/
 # The .NET client's, its example's and its runners' build output, written by
 # `dotnet build` (clients/dotnet/README.md); the generated sources are committed.
 /clients/dotnet/bin/
