@@ -38,7 +38,10 @@ writer module of their own.
   client's side of the boundary, the client's code and the runtime's together,
   counted with what the runtime counts, switched on for that round alone and read
   with nothing else between the two reads; the README says which objects a message
-  makes and frees that such a net count cannot see.
+  makes and frees that such a net count cannot see. Where the runtime frees what a
+  message makes natively later than a collection, as Node does when its event loop
+  turns, the runner counts what is held, shows that the loop the client's README
+  gives keeps it bounded, and fails when it does not (invariant 3).
 - `conformance/<language>/run.sh` runs the client README's example as written against
   the runner's driver, and fails unless it prints the line the README says the reader
   will see (`conformance/python/readme.py` is the shape).
@@ -52,7 +55,8 @@ writer module of their own.
 - The client's README answers the four questions every crate README answers, with the
   ten-minute path's program in its language as the example, and records the
   runtime's side of the boundary: how the runtime calls the fragment handler back,
-  what that costs in locks and allocations per message, whether the view over a
+  what that costs in locks, allocations and system calls per message and when the
+  runtime frees what it allocated, whether the view over a
   claimed slice is one object per publication or a new one per claim, and where an
   exception the user's handler raises goes.
 

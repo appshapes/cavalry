@@ -505,7 +505,7 @@ class NodePackage(unittest.TestCase):
             self.assertIn(f"static napi_value fn_{fn.name}(napi_env env, napi_callback_info info)", addon)
             self.assertIn(f'{{ "{fn.name}", NULL, fn_{fn.name}, NULL, NULL, NULL, napi_default, NULL }},', addon)
         self.assertEqual(addon.count("cavalry_subscription_poll("), 2)  # the nested refusal and the poll itself
-        for own in ("registerSubscription", "poll", "headerField", "view", "detach", "stringAt"):
+        for own in ("registerSubscription", "poll", "headerField", "view", "detach", "stringAt", "buffersHeld"):
             self.assertIn(f'{{ "{own}", NULL, fn_{own}, NULL, NULL, NULL, napi_default, NULL }},', addon)
         self.assertIn("cavalry_header_values(s->current, &s->values)", addon)
 

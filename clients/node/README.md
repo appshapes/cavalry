@@ -88,8 +88,9 @@ You will see `1000 messages over cavalry:ipc, position 64000`.
 ## The runtime's side of the boundary
 
 What N-API does per message, and what `conformance/node/quickstart.js`'s report
-measures of it. The figures below are the laptop's (Node v24.16.0, macOS 26.6 on
-arm64); every CI run prints its runners'.
+measures of it. The figures below are one run's, on the Linux runner that applied the
+review of card 206 (Node v22.23.4, npm 10.9.8, Ubuntu 24.04 on four vCPUs of an AMD
+EPYC, unpinned); every CI run prints its runners'.
 
 ### The call
 
@@ -113,13 +114,42 @@ per-subscription state belongs to the subscription.
 ### The call-back, by construction
 
 The ABI calls the addon's trampoline with the body's address and length and the
-frame's header. The trampoline opens a handle scope, makes a `Buffer` over the body's
-bytes with `napi_create_external_buffer`, no copy, takes the subscription's one
-`Header` object from the reference it keeps, calls the handler through
-`napi_call_function`, detaches the `Buffer`'s `ArrayBuffer` so that a kept body
-reads as empty, and closes the scope. That is two objects per received message, the
-`Buffer` and the `ArrayBuffer` under it, both the runtime's, freed by the next
-collection. The `Header`'s getters each call the addon's `headerField`, which reads
+frame's header. The trampoline makes eight N-API calls per fragment, which
+`clients/generate-test.py` pins. It opens a handle scope, makes a `Buffer` over the
+body's bytes with `napi_create_external_buffer`, no copy, takes the subscription's one
+`Header` object from the reference it keeps, reads `undefined` for the handler's
+`this`, and calls the handler through `napi_call_function`. Then it detaches the
+`Buffer`'s `ArrayBuffer` (`napi_get_typedarray_info`, `napi_detach_arraybuffer`), so
+that a kept body reads as empty, and closes the scope.
+
+What Node does for those calls, per received message, as Node v24.x's source has it
+(`src/js_native_api_v8.cc`, `src/node_api.cc`, `src/node_buffer.cc`, `src/env-inl.h`):
+
+- On V8's heap: the `Buffer` and the `ArrayBuffer` under it, freed by a collection.
+- On the native heap: N-API's wrapper of the handle scope, freed when the scope
+  closes; a `BufferFinalizer`; a `CallbackInfo`, which holds a mutex of its own and is
+  linked onto the environment's list of objects to clean up at exit; V8's
+  `BackingStore` over the log's bytes, with V8's own bookkeeping for the
+  `ArrayBuffer`; and a weak global handle to the `ArrayBuffer`.
+- At the detach: V8 frees the `BackingStore` at once. Its deleter,
+  `CallbackInfo::OnBackingStoreFree`, locks the `CallbackInfo`'s mutex and calls
+  `Environment::SetImmediateThreadsafe`. That allocates a native callback, locks the
+  environment's `native_immediates_threadsafe_mutex_`, queues the callback, and calls
+  libuv's `uv_async_send`. `uv_async_send` writes to the event loop's wake-up file
+  descriptor the first time after each turn of the loop; until the loop turns again,
+  it only finds the flag that write set.
+- When the event loop next turns, Node runs the queued callback. The callback calls
+  the addon's finalizer, `buffer_freed`, and frees the `CallbackInfo`, the
+  `BufferFinalizer` and itself ("The runtime's queue").
+
+So a received message costs, on the runtime's side, at least five native
+allocations, two mutex lock and unlock pairs, and a share of one `write` system call
+per turn of the event loop. The mutexes are contended only when another thread queues
+work for the same environment at the same moment. None of this is code Cavalry
+writes; ADR 0046 leaves it outside the per-message rules, and this README records it.
+The addon's own share is one counter increment per `Buffer`, for `buffersHeld`.
+
+The `Header`'s getters each call the addon's `headerField`, which reads
 `cavalry_header_values` once per fragment, on the first getter, into the one
 `cavalry_header_values_t` the addon keeps per subscription, and returns the field as a
 number, which V8 keeps on the stack for a small integer; outside the handler call every
@@ -135,27 +165,65 @@ detached by `commit`, `abort` and `close`: V8 has no view that can be moved to a
 address, so the one object per publication is the claim struct, a 32-byte
 `ArrayBuffer` the addon fills, and the view is the client's own code's allocation per
 sent message, two objects, the `Buffer` and its `ArrayBuffer`, recorded here with that
-reason.
+reason. The runtime's side of the view is the call-back's without the handle scope,
+which the addon's `view` does not open, since it returns to JavaScript at once. That is
+a `BufferFinalizer`, a `CallbackInfo` with its mutex, a `BackingStore` and a weak
+global handle at the claim. At the `commit` or `abort` that detaches the view, it is
+the queued callback, the same two locks, and a share of the same wake-up `write`.
+
+### The runtime's queue
+
+Node frees the native objects of an external `Buffer` when its event loop turns, not
+at the detach and not at a collection: the queued callback runs on the next turn.
+Every message holds two `Buffer`s until then, the view of its claim and the body its
+handler received. A program that publishes or polls in one synchronous loop holds
+every one of them until it returns to the event loop, however many messages that is.
+`cavalry.buffersHeld()` counts them on the calling thread: the addon counts each
+`Buffer` it makes, and its finalizer counts each one Node frees.
+
+So a program that runs for longer than a burst lets the event loop turn. It publishes
+and polls in batches and returns to the loop between them, for example by scheduling
+its next batch with `setImmediate`, as `dutyCycle` in
+`conformance/node/quickstart.js` does. A program that must spin without returning
+runs the client on a `worker_threads` worker that returns to its own loop between
+batches.
+
+The runner shows both cases. Its allocation round sends 10,000 messages without a
+turn. On this Linux runner it held 20,000 `Buffer`s after the round, still 20,000
+after a full collection, and 0 after one turn of the event loop. Its duty cycle then
+runs ten turns of 1,000 messages each, returning to the loop with `setImmediate`
+after each. It held 0 `Buffer`s at the start of every turn and 2,000 at the end of
+each, and it fails if they ever pass two turns' worth, 4,000. In bytes,
+`process.memoryUsage().external` and `arrayBuffers` do not count these objects on
+Node v22.23.4. `rss` grew by 275 bytes per message over the allocation round. That
+figure also counts the log's own pages and V8's heap, and it does not fall after the
+turn, since malloc keeps freed memory for its next allocations rather than giving it
+back. The runner prints all three readings before the round, after it, after a full
+collection and after the turn.
 
 ### The count, measured
 
 The runner's allocation round sends 10,000 messages whose handler only counts and whose
 publisher copies one constant, with V8's sampling heap profiler on for that round
 alone, the objects a collection freed included, and a full collection before and after
-(`node --expose-gc`). On the laptop: 490 bytes allocated per message, an unbiased
-estimate from samples every 64 bytes, which is the four objects above and what V8 makes
-around a call; and -0.7 bytes kept per message after the collection
-(`process.memoryUsage().heapUsed`, nothing read between), so everything a message
-makes is freed by the next collection.
+(`node --expose-gc`). On this Linux runner: 456 bytes of V8's heap allocated per
+message, an unbiased estimate from samples every 64 bytes, which is the four objects
+above and what V8 makes around a call; and 2.6 bytes kept per message after the
+collection (`process.memoryUsage().heapUsed`, nothing read between), so what a message
+makes on V8's heap is freed by the next collection. Neither figure sees the native
+heap: what a message holds there is counted in `Buffer`s and freed by the next turn
+of the event loop ("The runtime's queue").
 
 ### The latency, measured
 
 The runner's latency round sends 100,000 messages over `cavalry:ipc`, one at a time on
 one thread, with the profiler off. The publisher writes `process.hrtime.bigint()` into
-the claim before its commit, and the handler reads the clock first. On the laptop,
-unpinned: p50 375 ns, p99 834 ns, p99.99 15,292 ns (10 samples above it, nearest
-rank), max 73,042 ns. The `BigInt` each side makes for the clock is the round's own
-cost, not the client's.
+the claim before its commit, and the handler reads the clock first. On this Linux
+runner: p50 682 ns, p99 1,432 ns, p99.99 86,222 ns (10 samples above it, nearest
+rank), max 155,272 ns. The `BigInt` each side makes for the clock is the round's own
+cost, not the client's. The round does not return to the event loop for its 100,000
+messages, so it holds 200,000 `Buffer`s by its end ("The runtime's queue"); the
+allocation round after it starts on a turn of its own.
 
 ### The exception
 

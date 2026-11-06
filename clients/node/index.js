@@ -640,10 +640,14 @@ class Replay {
 function abiVersion() { return addon.cavalry_abi_version(); }
 /** The library's own version, as `cavalry_version_full` gives it. */
 function version() { return addon.cavalry_version_full(); }
+/** The Buffers this thread was handed, received bodies and claims' views, whose native
+ * objects Node has not freed yet. Node frees them when its event loop turns, so a program
+ * that never returns to the event loop holds every one (README, "The runtime's queue"). */
+function buffersHeld() { return addon.buffersHeld(); }
 
 module.exports = {
   ABI_VERSION, constants, LAYOUT, HEADER_FIELDS,
   NOT_CONNECTED, BACK_PRESSURED, ADMIN_ACTION, CLOSED, MAX_POSITION_EXCEEDED, ERROR, NULL_POSITION,
   CavalryError, HandlerError, Client, Publication, Subscription, Header, Image, Recording, Replay,
-  abiVersion, version, addon,
+  abiVersion, version, buffersHeld, addon,
 };

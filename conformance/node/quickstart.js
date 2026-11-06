@@ -17,19 +17,24 @@
  * how far it got. It exits 1 with the function, the code and `cavalry_errmsg` when a call
  * failed, or with the code's name when a result code did.
  *
- * Then the report, printed and never gated, from two rounds that check nothing else. The
- * latency round (`latency`): 100,000 messages over `cavalry:ipc` on stream 1004, one at a
- * time on this thread, each carrying the publisher's `process.hrtime.bigint()` from before
- * its commit, which the handler subtracts from the clock it reads first; the one-way p50,
- * p99, p99.99 and max, nearest rank, so ten samples lie above the p99.99. The allocation
- * round (`allocations`): 10,000 messages on stream 1002 whose handler only counts and whose
- * publisher copies one constant, with V8's sampling heap profiler on for this round alone
- * (`inspector`'s `HeapProfiler`, the objects a collection freed included): the bytes
- * allocated per message on this side of the boundary, the client's code and the runtime's
- * together, an unbiased estimate from the samples; and, when `--expose-gc` is on, the bytes
- * the heap kept per message after a full collection, read from `process.memoryUsage()` with
- * nothing else between. clients/node/README.md lists what a message makes by construction.
- * Node's standard library only (ADR 0003).
+ * Then the report, printed and not gated, from two rounds that check one thing between
+ * them. The latency round (`latency`): 100,000 messages over `cavalry:ipc` on stream 1004,
+ * one at a time on this thread, each carrying the publisher's `process.hrtime.bigint()` from
+ * before its commit, which the handler subtracts from the clock it reads first; the one-way
+ * p50, p99, p99.99 and max, nearest rank, so ten samples lie above the p99.99. The
+ * allocation round (`allocations`), last, on a turn of the event loop of its own: 10,000
+ * messages on stream 1002 whose handler only counts and whose publisher copies one
+ * constant, with V8's sampling heap profiler on for this round alone (`inspector`'s
+ * `HeapProfiler`, the objects a collection freed included): the bytes allocated per message
+ * on this side of the boundary, the client's code and the runtime's together, an unbiased
+ * estimate from the samples; when `--expose-gc` is on, the bytes V8's heap kept per message
+ * after a full collection; and the runtime's native side, `cavalry.buffersHeld()` and
+ * `process.memoryUsage()`'s `external`, `arrayBuffers` and `rss`, before the round, after
+ * it, after the collection and after one more turn of the event loop. Then, on the same
+ * stream, a duty cycle of ten turns of 1,000 messages each, which fails if the Buffers Node
+ * holds ever exceed two turns' worth: the rule clients/node/README.md, "The runtime's
+ * queue", gives a program, that a loop lets the event loop turn. That README lists what a
+ * message makes by construction. Node's standard library only (ADR 0003).
  */
 
 const dgram = require("dgram");
@@ -46,6 +51,8 @@ const { addon, constants } = cavalry;
 const MESSAGES = 1000;
 const LATENCY_MESSAGES = 100000;
 const ALLOCATION_MESSAGES = 10000;
+const DUTY_TURNS = 10;
+const DUTY_BATCH = 1000;
 const BODY = 64;
 const STREAM = 1001;
 const REPLAY_STREAM = 2001;
@@ -515,11 +522,13 @@ function edges(client) {
 /** The latency round, for the report: 100,000 messages over cavalry:ipc on stream 1004, one
  * at a time on this thread. The publisher writes `process.hrtime.bigint()` into the claim
  * just before its commit; the handler reads the clock first and keeps the difference. The
- * profiler is off. The latencies, in order. */
+ * profiler is off, and the round does not return to the event loop. {latencies, held}: the
+ * latencies, in arrival order, and the Buffers the round left Node holding at its end. */
 function latency(client) {
   const name = "the latency round";
   const subscription = client.addSubscription("cavalry:ipc", STREAM + 3);
   const publication = client.addPublication("cavalry:ipc", STREAM + 3);
+  const heldBefore = cavalry.buffersHeld();
   const latencies = new Float64Array(LATENCY_MESSAGES);
   let received = 0;
   const onFragment = (body) => {
@@ -546,20 +555,30 @@ function latency(client) {
     until = deadline(); // 10 s for each message, outside the interval it measures
   }
   if (subscription.poll(onFragment, 16) !== 0) fail(`${name}: a fragment after all ${LATENCY_MESSAGES} messages`);
+  const held = cavalry.buffersHeld() - heldBefore;
   publication.close();
   subscription.close();
-  return latencies;
+  return { latencies, held };
 }
 
 /** The allocation round, for the report: 10,000 messages over cavalry:ipc on stream 1002
  * whose handler only counts and whose publisher copies one constant, so that the checks'
  * objects are not in the count, with V8's sampling heap profiler on for this round alone,
  * the objects a collection freed included, and a full collection before and after when
- * `--expose-gc` is on. The counts are read in this order, so that the profile, the large
- * object the profiler returns, is not in the kept count: the collection, the heap used,
- * the profiler on; the round; the heap used, the collection, the heap used, the profiler
- * off. {measured, sampledBytes, keptBytes (null without --expose-gc), heapBefore, heapAfter}. */
-function allocations(client) {
+ * `--expose-gc` is on. main runs it last, on a turn of the event loop of its own, so that
+ * the runtime's queue of native frees the earlier rounds filled has drained. The counts
+ * are read in this order, so that the profile, the large object the profiler returns, is
+ * not in the kept count: the collection, `process.memoryUsage()` (`before`), the profiler
+ * on; the round; `process.memoryUsage()` (`after`), the collection, `process.memoryUsage()`
+ * (`collected`), the profiler off; then one turn of the event loop (`setImmediate`), the
+ * collection, and `process.memoryUsage()` (`turned`). Each reading carries
+ * `cavalry.buffersHeld()` too. V8's profiler and `heapUsed` count V8's heap; Node frees
+ * what it allocates natively for each external Buffer only when its event loop turns
+ * (clients/node/README.md, "The runtime's queue"), which `buffersHeld` counts exactly and
+ * `external`, `arrayBuffers` and `rss` show as far as each can. Then dutyCycle on the same
+ * stream. Calls `done` with {measured, sampledBytes, before, after, collected, turned,
+ * duty}, `collected` null and the collections skipped without --expose-gc. */
+function allocations(client, done) {
   const name = "the allocation round";
   const subscription = client.addSubscription("cavalry:ipc", STREAM + 1);
   const publication = client.addPublication("cavalry:ipc", STREAM + 1);
@@ -591,7 +610,7 @@ function allocations(client) {
   };
   const collect = typeof global.gc === "function" ? global.gc : null;
   if (collect) collect();
-  const heapBefore = process.memoryUsage().heapUsed;
+  const before = reading();
   post("HeapProfiler.startSampling", { samplingInterval: 64, includeObjectsCollectedByMajorGC: true,
                                        includeObjectsCollectedByMinorGC: true });
   const receivedBefore = received;
@@ -611,11 +630,11 @@ function allocations(client) {
     pollOrFail(name, subscription, count, received, ALLOCATION_MESSAGES);
     if (Date.now() > until) fail(`${name}: received ${received} of ${ALLOCATION_MESSAGES} in ${WAIT_MS / 1000} s`);
   }
-  const heapAfter = process.memoryUsage().heapUsed;
-  let keptBytes = null;
+  const after = reading();
+  let collected = null;
   if (collect) {
     collect();
-    keptBytes = process.memoryUsage().heapUsed - heapBefore;
+    collected = reading();
   }
   const { profile } = post("HeapProfiler.stopSampling"); // last: the profile it returns is a large object
   session.disconnect();
@@ -628,9 +647,72 @@ function allocations(client) {
   };
   walk(profile.head);
   if (subscription.poll(count, 16) !== 0) fail(`${name}: a fragment after all ${ALLOCATION_MESSAGES} messages`);
-  publication.close();
-  subscription.close();
-  return { measured, sampledBytes, keptBytes, heapBefore, heapAfter };
+  setImmediate(guarded(() => {
+    if (collect) collect();
+    const turned = reading();
+    dutyCycle(subscription, publication, (duty) => {
+      publication.close();
+      subscription.close();
+      done({ measured, sampledBytes, before, after, collected, turned, duty });
+    });
+  }));
+}
+
+/** `process.memoryUsage()` and, as `held`, `cavalry.buffersHeld()`: the Buffers, received
+ * bodies and claims' views, whose native objects Node has not freed yet. */
+function reading() {
+  return { ...process.memoryUsage(), held: cavalry.buffersHeld() };
+}
+
+/** The rule of clients/node/README.md, "The runtime's queue", shown on the allocation
+ * round's stream: DUTY_TURNS turns of the event loop, each sending and receiving
+ * DUTY_BATCH messages and then returning to the loop with `setImmediate`, as a program's
+ * duty cycle would. The Buffers Node holds are read at the start and at the end of each
+ * turn. The round fails if they ever exceed two turns' worth, 4 × DUTY_BATCH, which a loop
+ * whose turns freed nothing would pass by its third turn. Calls `done` with {turns, batch,
+ * atStart, atEnd}. */
+function dutyCycle(subscription, publication, done) {
+  const name = "the runtime's queue";
+  const total = DUTY_TURNS * DUTY_BATCH;
+  const atStart = [];
+  const atEnd = [];
+  let sent = 0;
+  let received = 0;
+  const count = () => { received += 1; };
+  const turn = guarded(() => {
+    atStart.push(cavalry.buffersHeld());
+    const until = deadline();
+    const target = sent + DUTY_BATCH;
+    while (sent < target) {
+      const position = publication.tryClaim(BODY);
+      if (position >= 0) {
+        publication.claim.fill(7);
+        publication.commit();
+        sent += 1;
+      } else {
+        refused(name, position, sent, until, total);
+      }
+      pollOrFail(name, subscription, count, received, total);
+    }
+    while (received < sent) {
+      pollOrFail(name, subscription, count, received, total);
+      if (Date.now() > until) fail(`${name}: received ${received} of ${sent} in ${WAIT_MS / 1000} s`);
+    }
+    atEnd.push(cavalry.buffersHeld());
+    if (atStart.length < DUTY_TURNS) {
+      setImmediate(turn);
+      return;
+    }
+    const most = Math.max(...atStart, ...atEnd);
+    if (most > 4 * DUTY_BATCH) {
+      fail(`${name}: a loop that returned to the event loop after each ${withCommas(DUTY_BATCH)} messages held ` +
+           `${withCommas(most)} Buffers, more than two turns' worth (${withCommas(4 * DUTY_BATCH)}): at the start of ` +
+           `its ${DUTY_TURNS} turns ${atStart.join(", ")}, at their end ${atEnd.join(", ")}; Node did not free them ` +
+           `when its event loop turned (clients/node/README.md, "The runtime's queue")`);
+    }
+    done({ turns: DUTY_TURNS, batch: DUTY_BATCH, atStart, atEnd });
+  });
+  setImmediate(turn);
 }
 
 /** The nearest-rank percentile `parts / whole` of sorted values: the smallest value with at
@@ -706,7 +788,6 @@ function main(udpPort) {
 
   const client = new cavalry.Client();
   let latencies;
-  let allocation;
   try {
     say(`client ${client.clientId} on ${client.dir}, library ${cavalry.version()}, ABI version ${cavalry.abiVersion()}`);
 
@@ -730,9 +811,9 @@ function main(udpPort) {
 
     edges(client);
 
-    // The report's two rounds, which check nothing else.
-    latencies = latency(client).sort();
-    allocation = allocations(client);
+    // The report's latency round, which checks nothing else; its allocation round runs last.
+    const round = latency(client);
+    latencies = { sorted: round.latencies.sort(), held: round.held };
 
     // 2. The same 1,000 over cavalry:udp on the loopback.
     const udpChannel = `cavalry:udp?endpoint=127.0.0.1:${udpPort}`;
@@ -782,35 +863,71 @@ function main(udpPort) {
     replay.close();
     replaySub.close();
     ipcSub.close();
-  } finally {
+  } catch (thrown) {
     client.close();
+    throw thrown;
   }
 
-  // The report, never gated: the laptop's or the runner's cost of this side of the
-  // boundary (clients/node/README.md, "The runtime's side").
-  const [p50] = percentile(latencies, 50, 100);
-  const [p99] = percentile(latencies, 99, 100);
-  const [p9999, above] = percentile(latencies, 9999, 10000);
-  say(`report: one-way latency over ${withCommas(latencies.length)} cavalry:ipc messages, one at a time on one thread, ` +
+  // The allocation round, on a turn of the event loop of its own: the earlier rounds'
+  // messages left the native frees of their external Buffers queued for the turn.
+  setImmediate(guarded(() => allocations(client, (allocation) => {
+    client.close();
+    report(latencies, allocation);
+    say("ok");
+  })));
+}
+
+/** The report, which nothing gates but the duty cycle's bound: the laptop's or the
+ * runner's cost of this side of the boundary (clients/node/README.md, "The runtime's side
+ * of the boundary"). `latencies` is {sorted, held}, `allocation` what allocations gives. */
+function report(latencies, allocation) {
+  const { sorted, held } = latencies;
+  const [p50] = percentile(sorted, 50, 100);
+  const [p99] = percentile(sorted, 99, 100);
+  const [p9999, above] = percentile(sorted, 9999, 10000);
+  say(`report: one-way latency over ${withCommas(sorted.length)} cavalry:ipc messages, one at a time on one thread, ` +
       `the profiler off, nearest rank: p50 ${withCommas(p50)} ns, p99 ${withCommas(p99)} ns, p99.99 ${withCommas(p9999)} ns ` +
-      `(${above} samples above it), max ${withCommas(latencies[latencies.length - 1])} ns`);
-  const { measured, sampledBytes, keptBytes, heapBefore, heapAfter } = allocation;
-  const kept = keptBytes === null ? "the bytes kept after a collection not read, run with --expose-gc" :
-    `${(keptBytes / measured).toFixed(1)} bytes kept per message after a full collection (process.memoryUsage().heapUsed, ` +
-    `${withCommas(heapBefore)} before, ${withCommas(heapAfter)} after the round, nothing read between)`;
+      `(${above} samples above it), max ${withCommas(sorted[sorted.length - 1])} ns; the round, which did not return to ` +
+      `the event loop, left ${withCommas(held)} Buffers held at its end`);
+  const { measured, sampledBytes, before, after, collected, turned, duty } = allocation;
+  const perMessage = (key, at) => {
+    const bytes = (at[key] - before[key]) / measured;
+    return `${bytes >= 0 ? "+" : ""}${bytes.toFixed(1)}`;
+  };
+  const kept = collected === null ? "the bytes kept after a collection not read, run with --expose-gc" :
+    `${((collected.heapUsed - before.heapUsed) / measured).toFixed(1)} bytes of V8's heap kept per message after a full collection ` +
+    `(process.memoryUsage().heapUsed ${withCommas(before.heapUsed)} before, ${withCommas(after.heapUsed)} after the ` +
+    `round, ${withCommas(collected.heapUsed)} after the collection, nothing read between)`;
   say(`report: allocations per message, this side of the boundary, over ${withCommas(measured)} messages whose handler ` +
       `counts and whose publisher copies a constant: ${(sampledBytes / measured).toFixed(1)} bytes allocated (V8's ` +
       `sampling heap profiler at 64 bytes, an unbiased estimate, the objects a collection freed included); ${kept}`);
-  say("ok");
-  return 0;
+  const readings = [["after the round", after], ["after a full collection", collected],
+                    ["after one turn of the event loop and a collection", turned]].filter(([, at]) => at !== null);
+  const native = ["external", "arrayBuffers", "rss"].map((key) =>
+    `${key} ${withCommas(before[key])} bytes before, then ` +
+    readings.map(([when, at]) => `${withCommas(at[key])} ${when} (${perMessage(key, at)} per message)`).join(", "));
+  say(`report: the runtime's native side over the same ${withCommas(measured)} messages, which V8's profiler does not ` +
+      `see: the Buffers Node had not freed (cavalry.buffersHeld()) ${withCommas(before.held)} before, then ` +
+      `${readings.map(([when, at]) => `${withCommas(at.held)} ${when}`).join(", ")}; process.memoryUsage() ` +
+      `${native.join("; ")}`);
+  say(`report: the runtime's queue: a loop that returned to the event loop after each ${withCommas(duty.batch)} ` +
+      `messages held ${duty.atStart.join(", ")} Buffers at the start of its ${duty.turns} turns and ` +
+      `${duty.atEnd.join(", ")} at their end, at most ${withCommas(Math.max(...duty.atStart, ...duty.atEnd))}; the ` +
+      `round above, which did not return to the loop for ${withCommas(measured)} messages, held ${withCommas(after.held)}`);
 }
 
-freeUdpPort((udpPort) => {
-  try {
-    process.exitCode = main(udpPort);
-  } catch (thrown) {
-    if (thrown instanceof cavalry.CavalryError) fail(`${thrown.fn} failed with error ${thrown.code}: ${thrown.abiMessage}`);
-    if (thrown instanceof cavalry.HandlerError) fail(`a poll threw HandlerError: ${thrown.message}`);
-    throw thrown;
-  }
-});
+/** `fn`, with the runner's report of what it throws: the function, the code and the ABI's
+ * message for CavalryError, the message for HandlerError, anything else as Node reports it. */
+function guarded(fn) {
+  return (...args) => {
+    try {
+      fn(...args);
+    } catch (thrown) {
+      if (thrown instanceof cavalry.CavalryError) fail(`${thrown.fn} failed with error ${thrown.code}: ${thrown.abiMessage}`);
+      if (thrown instanceof cavalry.HandlerError) fail(`a poll threw HandlerError: ${thrown.message}`);
+      throw thrown;
+    }
+  };
+}
+
+freeUdpPort(guarded(main));

@@ -208,3 +208,6 @@ export class Replay {
 
 export function abiVersion(): number;
 export function version(): string;
+/** The Buffers this thread was handed, received bodies and claims' views, that Node frees
+ * when its event loop next turns. */
+export function buffersHeld(): number;

@@ -229,7 +229,7 @@ def write_addon(header) -> str:
     out.append("  napi_property_descriptor properties[] = {")
     for fn in functions:
         out.append(f'    {{ "{fn.name}", NULL, fn_{fn.name}, NULL, NULL, NULL, napi_default, NULL }},')
-    for own in ("registerSubscription", "poll", "headerField", "view", "detach", "stringAt"):
+    for own in ("registerSubscription", "poll", "headerField", "view", "detach", "stringAt", "buffersHeld"):
         out.append(f'    {{ "{own}", NULL, fn_{own}, NULL, NULL, NULL, napi_default, NULL }},')
     out.append("  };")
     out.append("  napi_define_properties(env, exports, sizeof properties / sizeof properties[0], properties);")
@@ -393,6 +393,18 @@ static const char *const status_names[] = {
 };
 #define NO_EXTERNAL_BUFFERS 22 /* napi_no_external_buffers_allowed: a runtime built with V8's sandbox */
 
+/* External Buffers made on this thread, received bodies and claims' views, whose native
+ * objects Node has not freed yet. Node frees them when its event loop turns, not at the
+ * detach, and then calls buffer_freed, each Buffer's finalizer, which counts them back
+ * (clients/node/README.md, "The runtime's queue"). Per thread, as each worker thread's
+ * Buffers are freed on its own loop. */
+static _Thread_local int64_t buffers_held;
+
+static void buffer_freed(napi_env env, void *data, void *hint) {
+  (void) env; (void) data; (void) hint;
+  buffers_held--;
+}
+
 /* What a poll reports as the cause: the first fragment of the poll that did not reach the
  * handler cleanly, by the handler's exception or by an N-API call that failed. */
 typedef enum { FIRST_NONE, FIRST_EXCEPTION, FIRST_FAILURE } first_t;
@@ -479,7 +491,9 @@ static void trampoline(void *clientd, const uint8_t *buffer, size_t length, cons
     return;
   }
   napi_value body = NULL, hdr = NULL, undefined = NULL, result = NULL;
-  if ((status = napi_create_external_buffer(env, length, (void *) buffer, NULL, NULL, &body)) != napi_ok) {
+  status = napi_create_external_buffer(env, length, (void *) buffer, buffer_freed, NULL, &body);
+  if (status == napi_ok) buffers_held++;
+  if (status != napi_ok) {
     body = NULL;
     undelivered(s, header, "make the body's Buffer (napi_create_external_buffer)", status);
   } else if ((status = napi_get_reference_value(env, s->header_ref, &hdr)) != napi_ok || hdr == NULL) {
@@ -676,8 +690,15 @@ static napi_value fn_view(napi_env env, napi_callback_info info) {
   if (arg_failed) return NULL;
   if (claim == NULL || n < sizeof *claim || claim->data == NULL) return make_null(env);
   napi_value body;
-  if (napi_create_external_buffer(env, claim->length, claim->data, NULL, NULL, &body) != napi_ok) return make_null(env);
+  if (napi_create_external_buffer(env, claim->length, claim->data, buffer_freed, NULL, &body) != napi_ok) return make_null(env);
+  buffers_held++;
   return body;
+}
+
+/* buffersHeld(): buffers_held, the external Buffers of this thread Node has not freed yet. */
+static napi_value fn_buffersHeld(napi_env env, napi_callback_info info) {
+  (void) info;
+  return make_int64(env, buffers_held);
 }
 
 /* detach(view): releases a view returned by view or handed to a handler; a kept view then
@@ -1127,12 +1148,16 @@ class Replay {
 function abiVersion() { return addon.cavalry_abi_version(); }
 /** The library's own version, as `cavalry_version_full` gives it. */
 function version() { return addon.cavalry_version_full(); }
+/** The Buffers this thread was handed, received bodies and claims' views, whose native
+ * objects Node has not freed yet. Node frees them when its event loop turns, so a program
+ * that never returns to the event loop holds every one (README, "The runtime's queue"). */
+function buffersHeld() { return addon.buffersHeld(); }
 
 module.exports = {
   ABI_VERSION, constants, LAYOUT, HEADER_FIELDS,
   NOT_CONNECTED, BACK_PRESSURED, ADMIN_ACTION, CLOSED, MAX_POSITION_EXCEEDED, ERROR, NULL_POSITION,
   CavalryError, HandlerError, Client, Publication, Subscription, Header, Image, Recording, Replay,
-  abiVersion, version, addon,
+  abiVersion, version, buffersHeld, addon,
 };
 '''
 
@@ -1276,4 +1301,7 @@ export class Replay {
 
 export function abiVersion(): number;
 export function version(): string;
+/** The Buffers this thread was handed, received bodies and claims' views, that Node frees
+ * when its event loop next turns. */
+export function buffersHeld(): number;
 '''
