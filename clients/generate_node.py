@@ -413,7 +413,7 @@ typedef enum { FIRST_NONE, FIRST_EXCEPTION, FIRST_FAILURE } first_t;
  * with the external that holds it. */
 typedef struct {
   napi_env env;                      /* valid during a poll */
-  napi_ref header_ref;               /* the JS Header object the handler receives */
+  napi_ref header_ref;               /* the JS Header object the handler receives; weak, see registerSubscription */
   napi_value handler;                /* the handler of the poll in progress, else NULL; see fn_poll */
   napi_ref holder_ref;               /* an object whose element 0 holds the poll's first exception */
   uint32_t raised;                   /* handler calls that threw in this poll */
@@ -542,13 +542,18 @@ static void free_state(napi_env env, void *data, void *hint) {
 
 /* registerSubscription(header): the subscription's state, holding a reference to its Header
  * and the holder object a poll keeps its first exception in, made here once per subscription
- * so that a throwing poll makes nothing new to keep it. */
+ * so that a throwing poll makes nothing new to keep it. The reference to the Header is weak,
+ * a count of 0: the Header holds the external that holds the state, so a strong one would
+ * root the Header, and with it the state, for the life of the process. The Subscription
+ * holds its Header for every poll, so the weak reference reads it whenever a poll runs; once
+ * the program drops the Subscription, a collection frees the Header and the external, whose
+ * finalizer, free_state, frees the state. */
 static napi_value fn_registerSubscription(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value argv[1];
   if (!read_args(env, info, 1, &argc, argv, "registerSubscription")) return NULL;
   subscription_state_t *s = calloc(1, sizeof *s);
   if (s == NULL) { napi_throw_error(env, NULL, "registerSubscription: out of memory"); return NULL; }
-  if (napi_create_reference(env, argv[0], 1, &s->header_ref) != napi_ok) {
+  if (napi_create_reference(env, argv[0], 0, &s->header_ref) != napi_ok) {
     free(s); type_error(env, "header", "the subscription's Header object"); return NULL;
   }
   napi_value holder, v;

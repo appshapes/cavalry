@@ -871,10 +871,45 @@ function main(udpPort) {
   // The allocation round, on a turn of the event loop of its own: the earlier rounds'
   // messages left the native frees of their external Buffers queued for the turn.
   setImmediate(guarded(() => allocations(client, (allocation) => {
-    client.close();
-    report(latencies, allocation);
-    say("ok");
+    stateFreed(client, () => {
+      client.close();
+      report(latencies, allocation);
+      say("ok");
+    });
   })));
+}
+
+/** A closed subscription's state goes with it: the addon's state holds the subscription's
+ * Header by a weak reference, so once the program drops a closed Subscription, a collection
+ * frees the Header and the external that holds the state, whose finalizer frees the state
+ * (clients/node/README.md, "The call-back, by construction"). A subscription on stream 1006
+ * is added, closed and dropped, with a WeakRef to its Header and to its state. After a turn
+ * of the event loop, which ends a WeakRef's hold on its target, and a full collection, both
+ * must be gone. Needs --expose-gc, which run.sh passes. */
+function stateFreed(client, done) {
+  const name = "a subscription's state";
+  const collect = typeof global.gc === "function" ? global.gc : null;
+  if (collect === null) {
+    say(`${name}: not checked; run with --expose-gc`);
+    done();
+    return;
+  }
+  let subscription = client.addSubscription("cavalry:ipc", STREAM + 5);
+  const header = new WeakRef(subscription._header);
+  const state = new WeakRef(subscription._state);
+  subscription.close();
+  subscription = null;
+  setImmediate(guarded(() => {
+    collect();
+    const held = [["Header", header], ["state", state]].filter(([, ref]) => ref.deref() !== undefined);
+    if (held.length > 0) {
+      fail(`${name}: a subscription closed and dropped still had its ${held.map(([what]) => what).join(" and ")} ` +
+           `after a turn of the event loop and a full collection; something the addon keeps roots the Header, and ` +
+           `with it the state`);
+    }
+    say(`${name}: a subscription closed and dropped had its Header and its state freed by a full collection`);
+    done();
+  }));
 }
 
 /** The report, which nothing gates but the duty cycle's bound: the laptop's or the

@@ -156,7 +156,12 @@ number, which V8 keeps on the stack for a small integer; outside the handler cal
 getter is `undefined`, since the header is valid for the call alone. The handler is the
 poll's own argument: the addon's `poll` keeps its value in the subscription's state for
 the call, and N-API keeps that value valid until the call returns, so a poll makes no
-reference of its own.
+reference of its own. The subscription's state, the struct the trampoline works from,
+holds the `Header` by a weak reference. The `Header` holds the state through the
+external N-API wraps it in, so a strong reference would keep both for the life of the
+process. Once the program drops a `Subscription`, a collection frees its `Header` and
+the external, and the external's finalizer frees the state. The runner checks this
+with a `WeakRef` to each of a closed subscription's `Header` and state.
 
 ### The view over a claimed slice, by construction
 
