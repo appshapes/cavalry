@@ -873,11 +873,6 @@ from generate_go import write_go  # noqa: E402
 from generate_jvm import write_jvm  # noqa: E402
 from generate_node import write_node  # noqa: E402
 
-from generate_dotnet import write_dotnet  # noqa: E402
-from generate_go import write_go  # noqa: E402
-from generate_jvm import write_jvm  # noqa: E402
-from generate_node import write_node  # noqa: E402
-
 WRITERS = {"python": write_python, "node": write_node, "go": write_go, "jvm": write_jvm, "dotnet": write_dotnet}
 
 
