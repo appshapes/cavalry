@@ -7,9 +7,9 @@
 
 use cavalry_proto::cluster::{
     Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
-    EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
-    SnapshotMark, Stream, TimeUnit, VERSION, ballot, candidate, commit_position, entry_position,
-    log_at_least, parse_members, quorum,
+    EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message, SnapshotMark,
+    Stream, TimeUnit, VERSION, ballot, candidate, commit_position, entry_position, log_at_least,
+    parse_members, quorum,
 };
 use serde_json::{Map, Value, json};
 
@@ -411,11 +411,16 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 term: own[0].as_i64().expect("term"),
                 position: own[1].as_i64().expect("position"),
             };
-            let Candidate { nominate, unanimous } = candidate(
+            let Candidate {
+                nominate,
+                unanimous,
+            } = candidate(
                 members,
                 &reports,
                 own,
-                inputs["deadline_passed"].as_bool().expect("deadline_passed"),
+                inputs["deadline_passed"]
+                    .as_bool()
+                    .expect("deadline_passed"),
             );
             json!({"nominate": nominate, "unanimous": unanimous})
         }
