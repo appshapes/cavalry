@@ -1,6 +1,6 @@
 {
   "spec": "spec/c-abi.md",
-  "version": 0,
+  "version": 1,
   "generated_by": "spec/vectors/c-abi.py; do not edit by hand",
   "opaque_types": [
     "cavalry_context_t",
@@ -525,6 +525,42 @@
       ]
     },
     {
+      "name": "cavalry_add_destination",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "const cavalry_publication_t *",
+          "publication"
+        ],
+        [
+          "const char *",
+          "channel"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_remove_destination",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "const cavalry_publication_t *",
+          "publication"
+        ],
+        [
+          "const char *",
+          "channel"
+        ]
+      ]
+    },
+    {
       "name": "cavalry_publication_try_claim",
       "returns": "int64_t",
       "params": [
@@ -943,7 +979,7 @@
     }
   ],
   "defines": {
-    "CAVALRY_ABI_VERSION": 0,
+    "CAVALRY_ABI_VERSION": 1,
     "CAVALRY_DIR_ENV": "CAVALRY_DIR",
     "CAVALRY_MAX_IMAGES": 256,
     "CAVALRY_NULL_POSITION": -1,

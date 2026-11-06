@@ -408,6 +408,77 @@ impl Cavalry {
         }
     }
 
+    /// Adds the destination `channel`, `cavalry:udp?endpoint=<host>:<port>`, to the
+    /// control channel of the publication this client registered as `registration_id`,
+    /// [`Publication::registration_id`](crate::Publication::registration_id): the
+    /// driver resolves the endpoint once, to the first address of the control address's
+    /// family, and the sender sends every datagram of the channel's publications to it
+    /// from then on (`spec/client-protocol.md`, "Commands"; `spec/udp.md`, "The
+    /// sender"; ADR 0053). A destination already added, as written, is added again by
+    /// nothing and is success. Refused with [`ClientError::Refused`]: code 3 for a
+    /// registration this client does not hold; code 1 for a publication whose channel
+    /// names no control address, for a destination that is `cavalry:ipc` or a control
+    /// channel, or for one with no address the control address can send to, an address
+    /// of the other family or one beyond the loopback among them; code 9 for a name with
+    /// no address; code 10 for a 65th destination.
+    pub fn add_destination(
+        &mut self,
+        registration_id: i64,
+        channel: &str,
+    ) -> Result<(), ClientError> {
+        self.destination(registration_id, channel, true)
+    }
+
+    /// Removes the destination `channel`, as it was added, from the control channel of
+    /// the publication `registration_id`: the driver matches the endpoint as the add
+    /// wrote it and resolves nothing, so a name whose address changed since removes the
+    /// address the add resolved (`spec/client-protocol.md`, "Commands"; ADR 0053). One
+    /// not there is removed by nothing and is success. The codes are
+    /// [`add_destination`](Self::add_destination)'s, less 9 and 10.
+    pub fn remove_destination(
+        &mut self,
+        registration_id: i64,
+        channel: &str,
+    ) -> Result<(), ClientError> {
+        self.destination(registration_id, channel, false)
+    }
+
+    fn destination(
+        &mut self,
+        registration_id: i64,
+        channel: &str,
+        add: bool,
+    ) -> Result<(), ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let (command, name) = if add {
+            (
+                Command::AddDestination {
+                    client_id: self.client_id,
+                    correlation_id,
+                    registration_id,
+                    channel: channel.as_bytes(),
+                },
+                "add destination",
+            )
+        } else {
+            (
+                Command::RemoveDestination {
+                    client_id: self.client_id,
+                    correlation_id,
+                    registration_id,
+                    channel: channel.as_bytes(),
+                },
+                "remove destination",
+            )
+        };
+        match self.request(&command, correlation_id, name)? {
+            Response::Success { .. } => Ok(()),
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to {name}"),
+            }),
+        }
+    }
+
     /// Stops recording `recording_id`, whichever client started it: the driver writes the
     /// catalog's stop at the position written and answers once it is synced
     /// (`spec/client-protocol.md`, "Commands"). A recording already stopped is success

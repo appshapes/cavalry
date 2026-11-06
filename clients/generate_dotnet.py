@@ -542,6 +542,25 @@ public sealed class Client : IDisposable
         }
     }
 
+    /// <summary>Adds the destination channel, cavalry:udp?endpoint=&lt;host&gt;:&lt;port&gt;, to
+    /// the publication's control channel, answered by the driver (ADR 0053).</summary>
+    public void AddDestination(Publication publication, string channel)
+    {
+        lock (gate)
+        {
+            Abi.Check("cavalry_add_destination", Abi.cavalry_add_destination(handle, publication.Handle, channel));
+        }
+    }
+
+    /// <summary>Removes the destination channel, as it was added; one not there is removed by nothing.</summary>
+    public void RemoveDestination(Publication publication, string channel)
+    {
+        lock (gate)
+        {
+            Abi.Check("cavalry_remove_destination", Abi.cavalry_remove_destination(handle, publication.Handle, channel));
+        }
+    }
+
     /// <summary>Stops the recording.</summary>
     public void StopRecording(long recordingId)
     {
@@ -617,6 +636,8 @@ namespace Cavalry;
 public sealed unsafe class Publication : IDisposable
 {
     private nint handle;
+    /// <summary>The handle, for the client's own commands that name this publication.</summary>
+    internal nint Handle => handle;
     private Abi.cavalry_buffer_claim_t claim;
     private byte* data;
     private int length;

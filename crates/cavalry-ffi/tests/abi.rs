@@ -616,7 +616,11 @@ fn the_version_check_and_the_strings_refuse_what_the_page_says() {
         );
         assert_eq!(cavalry_errcode(), CAVALRY_ERR_ABI_VERSION);
         assert!(
-            errmsg().contains("version 1 and this library is version 0"),
+            errmsg().contains(&format!(
+                "version {} and this library is version {}",
+                CAVALRY_ABI_VERSION + 1,
+                CAVALRY_ABI_VERSION
+            )),
             "{}",
             errmsg()
         );

@@ -370,6 +370,91 @@ pub unsafe extern "C" fn cavalry_stop_recording(
     }
 }
 
+/// Adds the destination `channel` to `publication`'s control channel, waiting for the
+/// driver's answer or the 10 s response timeout (`spec/client-protocol.md`,
+/// "Commands", add destination; ADR 0053, ADR 0054). The publication's registration
+/// id is read from the handle's copy, so the call is allowed during a claim.
+///
+/// # Safety
+///
+/// `client` is null or a live client handle not in use by another call;
+/// `publication` is null or a live publication handle; `channel` is null or
+/// NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_add_destination(
+    client: *mut cavalry_t,
+    publication: *const cavalry_publication_t,
+    channel: *const c_char,
+) -> c_int {
+    // SAFETY: the caller's conventions above.
+    unsafe { destination("cavalry_add_destination", client, publication, channel, true) }
+}
+
+/// Removes the destination `channel`, as it was added, from `publication`'s control
+/// channel; one not there is removed by nothing and answered the same.
+///
+/// # Safety
+///
+/// As for `cavalry_add_destination`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_remove_destination(
+    client: *mut cavalry_t,
+    publication: *const cavalry_publication_t,
+    channel: *const c_char,
+) -> c_int {
+    // SAFETY: the caller's conventions above.
+    unsafe {
+        destination(
+            "cavalry_remove_destination",
+            client,
+            publication,
+            channel,
+            false,
+        )
+    }
+}
+
+/// The two destination commands: the handles and the string checked as the adds check
+/// theirs, the publication's registration id read from the handle's copied constants,
+/// which a claim does not borrow, then the client's command.
+///
+/// # Safety
+///
+/// As for `cavalry_add_destination`.
+unsafe fn destination(
+    function: &str,
+    client: *mut cavalry_t,
+    publication: *const cavalry_publication_t,
+    channel: *const c_char,
+    add: bool,
+) -> c_int {
+    if publication.is_null() {
+        error::null(function, "publication");
+        return -1;
+    }
+    // SAFETY: a live publication handle, per the caller's convention; its constants
+    // are the handle's own copy, read by `cavalry_publication_constants` the same way.
+    let registration_id = unsafe { crate::publication::registration_id_of(publication) };
+    if channel.is_null() {
+        error::null(function, "channel");
+        return -1;
+    }
+    // SAFETY: non-null, checked above, and NUL-terminated by the caller's convention.
+    let Some(channel) = (unsafe { strings::channel(function, channel) }) else {
+        return -1;
+    };
+    // SAFETY: the caller's convention on `client`.
+    unsafe {
+        command(function, client, |c| {
+            if add {
+                c.add_destination(registration_id, channel)
+            } else {
+                c.remove_destination(registration_id, channel)
+            }
+        })
+    }
+}
+
 /// Truncates the recording `recording_id` to `position`.
 ///
 /// # Safety

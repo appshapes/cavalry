@@ -38,7 +38,7 @@ public final class Abi {
     }
 
     public static final String DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public static final int ABI_VERSION = 0; // CAVALRY_ABI_VERSION
+    public static final int ABI_VERSION = 1; // CAVALRY_ABI_VERSION
     public static final int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public static final int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
     public static final int NULL_LENGTH = -1; // CAVALRY_NULL_LENGTH
@@ -222,6 +222,8 @@ public final class Abi {
     static final MethodHandle cavalry_add_subscription;
     static final MethodHandle cavalry_start_recording;
     static final MethodHandle cavalry_stop_recording;
+    static final MethodHandle cavalry_add_destination;
+    static final MethodHandle cavalry_remove_destination;
     static final MethodHandle cavalry_truncate_recording;
     static final MethodHandle cavalry_purge_segments;
     static final MethodHandle cavalry_purge_recording;
@@ -296,6 +298,8 @@ public final class Abi {
         cavalry_add_subscription = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_add_subscription"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_INT));
         cavalry_start_recording = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_start_recording"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_INT));
         cavalry_stop_recording = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_stop_recording"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+        cavalry_add_destination = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_add_destination"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
+        cavalry_remove_destination = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_remove_destination"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
         cavalry_truncate_recording = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_truncate_recording"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG));
         cavalry_purge_segments = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_purge_segments"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG, JAVA_LONG));
         cavalry_purge_recording = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_purge_recording"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));

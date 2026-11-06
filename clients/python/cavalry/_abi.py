@@ -14,7 +14,7 @@ from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_int, c_in
 # The defines, the header's constants (spec/c-abi.md, "Constants", "Result codes",
 # "Error codes").
 CAVALRY_DIR_ENV = "CAVALRY_DIR"
-CAVALRY_ABI_VERSION = 0
+CAVALRY_ABI_VERSION = 1
 CAVALRY_MAX_IMAGES = 256
 CAVALRY_NULL_POSITION = -1
 CAVALRY_NULL_LENGTH = -1
@@ -217,6 +217,8 @@ FUNCTIONS = {
     "cavalry_add_subscription": (c_int, [POINTER(c_void_p), c_void_p, c_char_p, c_int32]),
     "cavalry_start_recording": (c_int, [POINTER(c_void_p), c_void_p, c_char_p, c_int32]),
     "cavalry_stop_recording": (c_int, [c_void_p, c_int64]),
+    "cavalry_add_destination": (c_int, [c_void_p, c_void_p, c_char_p]),
+    "cavalry_remove_destination": (c_int, [c_void_p, c_void_p, c_char_p]),
     "cavalry_truncate_recording": (c_int, [c_void_p, c_int64, c_int64]),
     "cavalry_purge_segments": (c_int, [c_void_p, c_int64, c_int64]),
     "cavalry_purge_recording": (c_int, [c_void_p, c_int64]),

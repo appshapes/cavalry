@@ -118,6 +118,8 @@ export class Client {
   addSubscription(channel: string, streamId: number): Subscription;
   startRecording(channel: string, streamId: number): Recording;
   stopRecording(recordingId: number): void;
+  addDestination(publication: Publication, channel: string): void;
+  removeDestination(publication: Publication, channel: string): void;
   truncateRecording(recordingId: number, position: number): void;
   purgeSegments(recordingId: number, newStartPosition: number): void;
   purgeRecording(recordingId: number): void;

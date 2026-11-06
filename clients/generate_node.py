@@ -999,6 +999,10 @@ class Client {
   addSubscription(channel, streamId) { return new Subscription(this._add("cavalry_add_subscription", channel, streamId)); }
   startRecording(channel, streamId) { return new Recording(this._add("cavalry_start_recording", channel, streamId)); }
   stopRecording(recordingId) { check("cavalry_stop_recording", addon.cavalry_stop_recording(this.handle, recordingId)); }
+  /** Adds the destination `channel` to `publication`'s control channel (ADR 0053). */
+  addDestination(publication, channel) { check("cavalry_add_destination", addon.cavalry_add_destination(this.handle, publication.handle, channel)); }
+  /** Removes the destination `channel`, as it was added. */
+  removeDestination(publication, channel) { check("cavalry_remove_destination", addon.cavalry_remove_destination(this.handle, publication.handle, channel)); }
   truncateRecording(recordingId, position) { check("cavalry_truncate_recording", addon.cavalry_truncate_recording(this.handle, recordingId, position)); }
   purgeSegments(recordingId, newStartPosition) { check("cavalry_purge_segments", addon.cavalry_purge_segments(this.handle, recordingId, newStartPosition)); }
   purgeRecording(recordingId) { check("cavalry_purge_recording", addon.cavalry_purge_recording(this.handle, recordingId)); }
@@ -1260,6 +1264,8 @@ export class Client {
   addSubscription(channel: string, streamId: number): Subscription;
   startRecording(channel: string, streamId: number): Recording;
   stopRecording(recordingId: number): void;
+  addDestination(publication: Publication, channel: string): void;
+  removeDestination(publication: Publication, channel: string): void;
   truncateRecording(recordingId: number, position: number): void;
   purgeSegments(recordingId: number, newStartPosition: number): void;
   purgeRecording(recordingId: number): void;

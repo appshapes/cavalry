@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 0.
+"""Write spec/vectors/c-abi.json: the vectors for spec/c-abi.md, version 1.
 
 This script is the page's reference, independent of the Rust code and of the committed
 header: it lists, from the page's own tables, every opaque type, every struct with its
@@ -17,7 +17,7 @@ and a reader checks a header against them (spec/README.md, "Conventions").
 import json
 from pathlib import Path
 
-ABI_VERSION = 0
+ABI_VERSION = 1
 
 OPAQUE_TYPES = [
     "cavalry_context_t", "cavalry_t", "cavalry_publication_t", "cavalry_subscription_t",
@@ -121,6 +121,9 @@ FUNCTIONS = [
        ("int64_t", "recording_id"), ("int64_t", "position"), ("int64_t", "length"),
        ("int32_t", "replay_stream_id"), ("const char *", "channel")),
     fn("int", "cavalry_stop_replay", CLIENT, ("int64_t", "replay_session_id")),
+    # Version 1: the destination commands (ADR 0054).
+    fn("int", "cavalry_add_destination", CLIENT, CPUB, ("const char *", "channel")),
+    fn("int", "cavalry_remove_destination", CLIENT, CPUB, ("const char *", "channel")),
     # publication
     fn("int64_t", "cavalry_publication_try_claim", PUB, ("size_t", "length"), CLAIM),
     fn("int", "cavalry_buffer_claim_set_reserved_value", CLAIM, ("int64_t", "value")),

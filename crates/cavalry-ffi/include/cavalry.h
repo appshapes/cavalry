@@ -21,7 +21,7 @@
  `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
  with its own.
  */
-#define CAVALRY_ABI_VERSION 0
+#define CAVALRY_ABI_VERSION 1
 
 /*
  The images a subscription holds at most.
@@ -776,6 +776,34 @@ int cavalry_start_recording(cavalry_recording_t **recording,
  */
 int cavalry_stop_recording(cavalry_t *client,
                            int64_t recording_id);
+
+/*
+ Adds the destination `channel` to `publication`'s control channel, waiting for the
+ driver's answer or the 10 s response timeout (`spec/client-protocol.md`,
+ "Commands", add destination; ADR 0053, ADR 0054). The publication's registration
+ id is read from the handle's copy, so the call is allowed during a claim.
+
+ # Safety
+
+ `client` is null or a live client handle not in use by another call;
+ `publication` is null or a live publication handle; `channel` is null or
+ NUL-terminated.
+ */
+int cavalry_add_destination(cavalry_t *client,
+                            const cavalry_publication_t *publication,
+                            const char *channel);
+
+/*
+ Removes the destination `channel`, as it was added, from `publication`'s control
+ channel; one not there is removed by nothing and answered the same.
+
+ # Safety
+
+ As for `cavalry_add_destination`.
+ */
+int cavalry_remove_destination(cavalry_t *client,
+                               const cavalry_publication_t *publication,
+                               const char *channel);
 
 /*
  Truncates the recording `recording_id` to `position`.

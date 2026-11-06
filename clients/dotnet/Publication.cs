@@ -15,6 +15,8 @@ namespace Cavalry;
 public sealed unsafe class Publication : IDisposable
 {
     private nint handle;
+    /// <summary>The handle, for the client's own commands that name this publication.</summary>
+    internal nint Handle => handle;
     private Abi.cavalry_buffer_claim_t claim;
     private byte* data;
     private int length;

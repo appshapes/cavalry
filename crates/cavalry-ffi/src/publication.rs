@@ -80,6 +80,18 @@ pub struct cavalry_publication_constants_t {
     pub is_exclusive: bool,
 }
 
+/// The registration id the handle copied when it was made: what the destination
+/// commands name the publication by, read without reaching the publication a claim
+/// may be borrowing (ADR 0054).
+///
+/// # Safety
+///
+/// `publication` is a live publication handle.
+pub(crate) unsafe fn registration_id_of(publication: *const cavalry_publication_t) -> i64 {
+    // SAFETY: a live handle, per the caller; the constants are plain copies.
+    unsafe { (*publication).constants.registration_id }
+}
+
 pub(crate) fn publication_handle(publication: Publication) -> *mut cavalry_publication_t {
     handle::give(cavalry_publication_t {
         state: State::Idle,

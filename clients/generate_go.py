@@ -710,6 +710,30 @@ func (c *Client) StartRecording(channel string, streamID int32) (*Recording, err
 	return newRecording(handle)
 }
 
+// AddDestination adds the destination channel, cavalry:udp?endpoint=<host>:<port>,
+// to the publication's control channel, answered by the driver (ADR 0053).
+func (c *Client) AddDestination(p *Publication, channel string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	cchannel := cString(channel)
+	defer freeCString(cchannel)
+	return check("cavalry_add_destination", C.cavalry_add_destination(c.handle, p.handle, cchannel))
+}
+
+// RemoveDestination removes the destination channel, as it was added; one not there
+// is removed by nothing.
+func (c *Client) RemoveDestination(p *Publication, channel string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	cchannel := cString(channel)
+	defer freeCString(cchannel)
+	return check("cavalry_remove_destination", C.cavalry_remove_destination(c.handle, p.handle, cchannel))
+}
+
 // StopRecording stops the recording.
 func (c *Client) StopRecording(recordingID int64) error {
 	c.mu.Lock()

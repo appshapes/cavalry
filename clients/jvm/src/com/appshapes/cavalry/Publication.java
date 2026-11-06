@@ -25,6 +25,11 @@ public final class Publication implements AutoCloseable {
     private static final MemorySegment EVERYTHING = MemorySegment.NULL.reinterpret(Long.MAX_VALUE);
 
     private MemorySegment handle;
+
+    /** The handle, for the client's own commands that name this publication. */
+    MemorySegment handle() {
+        return handle;
+    }
     private final MemorySegment claimStruct = Arena.ofAuto().allocate(Abi.cavalry_buffer_claim_t);
     private MemorySegment claim;
     private final String channel;
