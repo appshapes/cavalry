@@ -485,7 +485,8 @@ pub enum Command<'a> {
         /// The client's registration of the publication: the correlation id of its add
         /// command.
         registration_id: i64,
-        /// The destination: a `cavalry:udp` channel of which only `endpoint` is read.
+        /// The destination: `cavalry:udp?endpoint=<host>:<port>` and nothing else
+        /// (`spec/client-protocol.md`, "Commands").
         channel: &'a [u8],
     },
     /// Type 8.
