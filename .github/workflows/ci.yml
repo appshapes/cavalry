@@ -76,6 +76,14 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+      # Java for the JVM client, which `just conformance` compiles with the runner's
+      # javac and runs through java.lang.foreign over the shared library, and for
+      # conformance/jvm (ADR 0046, card 208): Temurin's Java 25, the long-term release
+      # the client needs; no build tool and nothing from a package registry.
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: 25
       # mdBook for `just docs`, as a prebuilt binary checked against the action's own
       # manifest, pinned to the version the justfile names; bump both together (ADR 0006).
       - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0

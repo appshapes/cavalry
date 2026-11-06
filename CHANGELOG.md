@@ -1461,3 +1461,23 @@ user-visible change, added in the same commit as the change. The format follows
   path's shape through the client and the README's example, with a report of its
   one-way latency over 100,000 messages and its allocations per message
   ([clients/node/README.md](clients/node/README.md); ADR 0046, card 206).
+- The JVM client, `clients/jvm`, generated from the committed C header by
+  `clients/generate.py jvm` (`just generate-clients`): the package
+  `com.appshapes.cavalry` over the shared library through Java's foreign function and
+  memory API, Java 25 and nothing else, no build tool and no dependency, whose `Abi`
+  refuses a library of another ABI version when it loads, before it binds any other
+  function; a `Client` whose methods are `synchronized`, so threads may share it, a
+  `Publication` whose `tryClaim` and `offer` return the position or the result code and
+  whose `claim()` is a `MemorySegment` over the log, a `Subscription` polled with a
+  `FragmentHandler` that every delivered fragment reaches, the body a `MemorySegment`
+  into the log for the call and the `Header`'s `reservedValue` a `long`, whose `poll`
+  throws `HandlerException` with the counts and the first throwable once the ABI has
+  returned, a `Recording` and a `Replay`; a call the ABI refuses during a claim or a
+  poll leaves the client's state as it was; `just lint` regenerates the package and
+  reads its per-message methods, and the package's methods they call, for Java's
+  `synchronized`, the locks of `java.util.concurrent`, a lock taken on any receiver, a
+  blocking wait, a future, a thread started, `throw` and `new`; `just conformance` runs
+  `conformance/jvm/`, the ten-minute path's shape through the client and the README's
+  example, with a report of its one-way latency over 100,000 messages and its
+  allocations per message ([clients/jvm/README.md](clients/jvm/README.md); ADR 0046,
+  card 208).

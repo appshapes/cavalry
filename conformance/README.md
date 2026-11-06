@@ -18,9 +18,10 @@ bounded at 10 s, and one that runs out says how far it got.
 | `c/` | C11, `quickstart.c` through `run.sh` | the runner's `cc`, the static library | ADR 0051 (card 204) |
 | `python/` | Python 3, `quickstart.py` and then `readme.py`, the example of `clients/python/README.md`, through `run.sh` over `clients/python` | the runner's `python3`, the shared library | ADR 0046 (card 205) |
 | `node/` | Node, `quickstart.js` and then `readme.js`, the example of `clients/node/README.md`, through `run.sh` over `clients/node` | the runner's `node` and `npm`, whose own `node-gyp` builds the addon against the static library | ADR 0046 (card 206) |
+| `jvm/` | Java 25, `Quickstart.java` and then `Readme.java`, the example of `clients/jvm/README.md`, through `run.sh` over `clients/jvm` | the runner's `javac` and `java`, whose `java.lang.foreign` binds the shared library when the client loads | ADR 0046 (card 208) |
 
-The Python runner is the shape the Node runner copies and the Go, JVM and .NET runners
-will (ADR 0046, cards 206 to 209): a package of another ABI version refused when it loads the library; the C
+The Python runner is the shape the Node and JVM runners copy and the Go and .NET
+runners will (ADR 0046, cards 206 to 209): a package of another ABI version refused when it loads the library; the C
 runner's checks through the client; the client's own edges, where a handler's exception
 goes, what `offer` refuses, how long a view lives, and the calls `spec/c-abi.md` refuses
 during a claim or a poll, which leave the client's state as they found it; then a report,

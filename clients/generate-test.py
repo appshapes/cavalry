@@ -13,7 +13,15 @@ binding, the trampoline, compiled with `cc` against a stand-in for N-API, counts
 reports every fragment the handler did not see, `HandlerError`'s message and the addon's
 Error for such a fragment say what to do and name a heading of the README, and `--check`
 fails on a package that differs. `just test` runs this through `test-scripts`. Python 3.9
-standard library only.
+standard library only. The same for the JVM package (`JvmPackage`): the committed eleven
+files are what the parse gives, a header change changes the constants, every define is a
+constant under its Java name with the ABI's name beside it, the binding reads
+`cavalry_abi_version` before it binds any other function and refuses a header without the
+check's names, the offer's handle alone is critical and each subscription makes one upcall
+stub bound to its own `onFragment`, `HandlerException`'s message says what to do and names
+a heading of the README, the generated files compile under Java 25 with every lint an error
+when a `javac` of that release is on the path, and `--check` fails on a package that
+differs.
 """
 
 import ctypes
@@ -29,6 +37,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate as gen  # noqa: E402
+import generate_jvm as gen_jvm  # noqa: E402
 import generate_node as gen_node  # noqa: E402
 import lint  # noqa: E402
 
@@ -654,6 +663,142 @@ class NodePackage(unittest.TestCase):
                     self.assertEqual(gen.main(["generate.py", "node", "--check"]), 1)
                 self.assertIn("differs from what the header gives in src/addon.c", err.getvalue())
                 self.assertIn("python3 clients/generate.py node", err.getvalue())
+            finally:
+                gen.ROOT, gen.HEADER = root, header
+
+
+JVM_BASE = "src/com/appshapes/cavalry/"
+
+
+class JvmPackage(unittest.TestCase):
+    """The JVM package, `clients/jvm` (clients/jvm/README.md; ADR 0046, card 208)."""
+
+    BASE = JVM_BASE
+    FILES = sorted(JVM_BASE + name for name in (
+        "Abi.java", "CavalryException.java", "Client.java", "FragmentHandler.java", "HandlerException.java",
+        "Header.java", "Image.java", "Publication.java", "Recording.java", "Replay.java", "Subscription.java"))
+
+    @classmethod
+    def setUpClass(cls):
+        with open(gen.HEADER, encoding="utf-8") as f:
+            cls.text = f.read()
+        cls.header = gen.parse(cls.text)
+
+    def committed(self, name):
+        with open(os.path.join(gen.ROOT, "clients", "jvm", name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_the_committed_package_is_what_the_header_gives(self):
+        files = gen_jvm.write_jvm(self.header)
+        self.assertEqual(sorted(files), self.FILES)
+        for name, content in files.items():
+            self.assertEqual(self.committed(name), content, name)
+        self.assertIs(gen.WRITERS["jvm"], gen_jvm.write_jvm)
+        self.assertEqual(gen.LANGUAGES["jvm"], "jvm")
+
+    def test_a_header_change_changes_the_constants(self):
+        changed = gen.parse(self.text.replace("#define CAVALRY_MAX_IMAGES 256", "#define CAVALRY_MAX_IMAGES 512"))
+        code = gen_jvm.write_jvm(changed)[self.BASE + "Abi.java"]
+        self.assertIn("    public static final int MAX_IMAGES = 512; // CAVALRY_MAX_IMAGES\n", code)
+        self.assertNotEqual(code, self.committed(self.BASE + "Abi.java"))
+
+    def test_every_define_is_a_constant_under_its_java_name(self):
+        code = gen_jvm.write_jvm(self.header)[self.BASE + "Abi.java"]
+        for name, _ in self.header.defines:
+            if name != "CAVALRY_H":
+                self.assertRegex(code, r"    public static final \w+ " + gen_jvm.java_name(name) + r" = \S.*; // " + name + r"\n")
+        self.assertEqual(gen_jvm.java_name("CAVALRY_ERR_POLLING"), "ERR_POLLING")
+        self.assertEqual(gen_jvm.java_name("CAVALRY_ABI_VERSION"), "ABI_VERSION")
+        self.assertEqual(gen_jvm.java_constant("INT64_MAX"), ("long", "Long.MAX_VALUE"))
+        self.assertEqual(gen_jvm.java_constant("(-1)"), ("int", "-1"))
+
+    def test_the_binding_reads_the_abi_version_before_it_binds_any_other_function(self):
+        """The static initializer binds `cavalry_abi_version`, calls it and compares, and
+        binds every other function after the comparison (spec/c-abi.md, "Versions and what
+        a reader rejects"); a header without the check's names cannot be generated."""
+        code = gen_jvm.write_jvm(self.header)[self.BASE + "Abi.java"]
+        block = code.split("    static {\n", 1)[1].split("\n    }\n", 1)[0]
+        first = block.index("cavalry_abi_version = LINKER.downcallHandle(")
+        read = block.index("found = (int) cavalry_abi_version.invokeExact();")
+        check = block.index("if (found != ABI_VERSION) {")
+        self.assertLess(first, read)
+        self.assertLess(read, check)
+        others = [m.start() for m in re.finditer(r"\n        cavalry_\w+ = LINKER\.downcallHandle\(", block)]
+        self.assertEqual(len(others), len(self.header.functions) - 1)
+        self.assertTrue(all(check < at for at in others), "a function bound before the version check")
+        self.assertIn("ERR_ABI_VERSION", block)
+        self.assertIn("docs/reference/c-abi.md#versions-and-what-a-reader-rejects", block)
+        without = gen.parse(self.text.replace("#define CAVALRY_ABI_VERSION ", "#define CAVALRY_ABI_VERSION_GONE "))
+        with self.assertRaises(SystemExit) as refused:
+            gen_jvm.write_jvm(without)
+        self.assertIn("CAVALRY_ABI_VERSION", str(refused.exception))
+
+    def test_the_offer_alone_is_critical_and_each_subscription_makes_one_upcall_stub(self):
+        files = gen_jvm.write_jvm(self.header)
+        abi, subscription = files[self.BASE + "Abi.java"], files[self.BASE + "Subscription.java"]
+        self.assertRegex(abi, r'cavalry_publication_offer = LINKER\.downcallHandle\(LOOKUP\.findOrThrow\("cavalry_publication_offer"\), '
+                              r'FunctionDescriptor\.of\(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG\), Linker\.Option\.critical\(true\)\);')
+        self.assertEqual(abi.count("Linker.Option.critical("), 1)
+        self.assertEqual(subscription.count("Abi.LINKER.upcallStub("), 1)
+        self.assertIn('findVirtual(Subscription.class, "onFragment"', subscription)
+        self.assertIn(".bindTo(this)", subscription)
+        self.assertEqual(subscription.count("Abi.cavalry_subscription_poll.invokeExact("), 2)  # the refused nested poll and the poll
+
+    def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
+        code = gen_jvm.write_jvm(self.header)[self.BASE + "HandlerException.java"]
+        body = code.split("public HandlerException(int fragments, int raised, Throwable cause) {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("fragment(s) this poll delivered", body)
+        self.assertIn("before it stopped on a fault, which Subscription.fault() reads", body)
+        self.assertIn("Fix the handler: its first throwable, ", body)
+        self.assertIn("See clients/jvm/README.md#the-exception", body)
+        with open(os.path.join(gen.ROOT, "clients", "jvm", "README.md"), encoding="utf-8") as f:
+            slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                     for line in f if line.startswith("#")}
+        self.assertIn("the-exception", slugs)
+
+    def test_the_generated_java_compiles_with_every_lint_an_error_when_javac_25_is_on_the_path(self):
+        """The README builds the client with `javac --release 25` and run.sh adds
+        `-Xlint:all -Werror`, so the generated files carry no warning; without a javac of
+        Java 25 or later on the path, as on a machine that builds no client, the check is
+        CI's (`just conformance`)."""
+        javac = shutil.which("javac")
+        version = subprocess.run([javac, "-version"], capture_output=True, text=True) if javac else None
+        found = re.search(r"javac (\d+)", (version.stdout + version.stderr) if version else "")
+        if version is None or version.returncode != 0 or found is None or int(found.group(1)) < 25:
+            print("generate-test: no javac of Java 25 or later on the path; the compile is checked in CI")
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for name, content in gen_jvm.write_jvm(self.header).items():
+                path = os.path.join(tmp, name)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                paths.append(path)
+            compiled = subprocess.run([javac, "--release", "25", "-Xlint:all", "-Werror", "-d", os.path.join(tmp, "classes")]
+                                      + paths, capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+
+    def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(os.path.join(gen.ROOT, "clients", "jvm"), os.path.join(tmp, "clients", "jvm"),
+                            ignore=shutil.ignore_patterns("build"))
+            os.makedirs(os.path.join(tmp, "crates", "cavalry-ffi", "include"))
+            shutil.copy(gen.HEADER, os.path.join(tmp, "crates", "cavalry-ffi", "include", "cavalry.h"))
+            root, header = gen.ROOT, gen.HEADER
+            gen.ROOT = tmp
+            gen.HEADER = os.path.join(tmp, "crates", "cavalry-ffi", "include", "cavalry.h")
+            try:
+                self.assertEqual(gen.main(["generate.py", "jvm", "--check"]), 0)
+                with open(os.path.join(tmp, "clients", "jvm", self.BASE + "Header.java"), "a", encoding="utf-8") as f:
+                    f.write("// edited by hand\n")
+                import io
+                import contextlib
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(gen.main(["generate.py", "jvm", "--check"]), 1)
+                self.assertIn("differs from what the header gives in " + self.BASE + "Header.java", err.getvalue())
+                self.assertIn("python3 clients/generate.py jvm", err.getvalue())
             finally:
                 gen.ROOT, gen.HEADER = root, header
 

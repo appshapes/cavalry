@@ -27,3 +27,8 @@ __pycache__/
 /clients/node/build/
 /clients/node/node_modules/
 /clients/node/package-lock.json
+
+# The JVM client's classes, compiled by `javac` as clients/jvm/README.md says, and the
+# runner's (conformance/jvm/run.sh); the generated sources beside them are committed.
+/clients/jvm/build/
+/conformance/jvm/build/
