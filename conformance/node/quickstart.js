@@ -251,8 +251,9 @@ function indexOf(body) {
  * Buffer kept past its commit, and a body and a header kept past their handler call, read
  * as empty. Then the refusals of spec/c-abi.md, "Calls during a claim or a poll", which
  * leave the wrapper as they found it: a poll from inside a handler of its own subscription,
- * a second claim with one outstanding, and a close with a claim outstanding, which releases
- * its Buffer. */
+ * a second claim with one outstanding, a close from inside a handler of its own
+ * subscription, which leaves the subscription open to poll and to close after the poll, and
+ * a close with a claim outstanding, which releases its Buffer. */
 function edges(client) {
   let name = "handler exceptions";
   const subscription = client.addSubscription("cavalry:ipc", STREAM + 2);
@@ -425,22 +426,65 @@ function edges(client) {
   }
   if (!same(received, [16])) fail(`${name}: received ${received} for the claim committed past a refused one; expected message 16`);
 
+  // A close from inside a handler of the subscription's own poll: the ABI refuses it with -1
+  // and CAVALRY_ERR_POLLING and the subscription stays open, so the wrapper throws
+  // CavalryError in the handler and keeps its handle. poll throws HandlerError with that
+  // error as its cause, the next message still arrives, and a close after the poll closes it.
+  offerOrFail(name, publication, message(17), 17);
+  offerOrFail(name, publication, message(18), 18);
+  const closing = [];
+  const closesInside = (fragment) => {
+    closing.push(indexOf(fragment));
+    if (closing.length === 1) subscription.close();
+  };
+  let refusedClose = null;
+  until = deadline();
+  while (closing.length === 0) {
+    try {
+      pollOrFail(name, subscription, closesInside, 17, 19);
+    } catch (thrown) {
+      refusedClose = thrown;
+    }
+    if (Date.now() > until) fail(`${name}: message 17 did not arrive in ${WAIT_MS / 1000} s`);
+  }
+  const closeCause = refusedClose === null ? null : refusedClose.cause;
+  if (!(refusedClose instanceof cavalry.HandlerError) || refusedClose.raised !== 1 || refusedClose.undelivered !== 0
+      || !(closeCause instanceof cavalry.CavalryError) || closeCause.fn !== "cavalry_subscription_close"
+      || closeCause.code !== constants.CAVALRY_ERR_POLLING) {
+    fail(`${name}: a close from inside the handler made poll throw ${refusedClose} with cause ${closeCause}; expected ` +
+         `HandlerError with raised 1 and, as its cause, CavalryError of cavalry_subscription_close with ` +
+         `CAVALRY_ERR_POLLING (${constants.CAVALRY_ERR_POLLING})`);
+  }
+  if (subscription.handle === null || subscription.isClosed) {
+    fail(`${name}: a close the ABI refused from inside the handler left the handle ${subscription.handle} and isClosed ` +
+         `${subscription.isClosed}; expected the subscription open, as the ABI leaves it`);
+  }
+  until = deadline();
+  while (closing.length < 2) {
+    pollOrFail(name, subscription, closesInside, 17 + closing.length, 19);
+    if (Date.now() > until) fail(`${name}: message 18 did not arrive after the refused close in ${WAIT_MS / 1000} s`);
+  }
+  if (!same(closing, [17, 18])) fail(`${name}: received ${closing} around the refused close; expected messages 17 and 18`);
+
   until = deadline();
   for (;;) {
     position = publication.tryClaim(BODY);
     if (position >= 0) break;
-    refused(name, position, 17, until);
+    refused(name, position, 19, until);
   }
   const outstanding = publication.claim;
   publication.close();
   if (publication.claim !== null) fail(`${name}: the publication's close left claim ${publication.claim}`);
   if (outstanding.length !== 0) fail(`${name}: a claim's Buffer still has ${outstanding.length} bytes after its publication's close`);
-  pollOrFail(name, subscription, unexpected, 17, 17); // the close aborted the claim: padding, never a fragment
+  pollOrFail(name, subscription, unexpected, 19, 19); // the close aborted the claim: padding, never a fragment
   subscription.close();
+  if (subscription.handle !== null) fail(`${name}: the close after the poll left the handle ${subscription.handle}`);
   say(`${name}: a poll from inside a handler of its own subscription returned -1 with CAVALRY_ERR_POLLING and the ` +
       `outer handler saw messages 13 to 15; a tryClaim with a claim outstanding returned ERROR with ` +
-      `CAVALRY_ERR_CLAIM_OUTSTANDING, claim stayed the first Buffer and its commit released it; a close with a claim ` +
-      `outstanding released its Buffer`);
+      `CAVALRY_ERR_CLAIM_OUTSTANDING, claim stayed the first Buffer and its commit released it; a close from inside a ` +
+      `handler of its own subscription was refused with CAVALRY_ERR_POLLING, poll threw HandlerError with that ` +
+      `CavalryError as its cause, the subscription stayed open, message 18 still arrived and the close after the poll ` +
+      `closed it; a close with a claim outstanding released its Buffer`);
 }
 
 /** The latency round, for the report: 100,000 messages over cavalry:ipc on stream 1004, one

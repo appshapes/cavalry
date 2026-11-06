@@ -37,6 +37,13 @@ needs and both CI runners and the ten-minute path's machines have.
   keeps from the handler is counted, and `poll` throws a `HandlerError` once the ABI
   has returned, with the first exception or failure as its `cause` and the counts, the
   one throw the per-message path allows.
+- Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
+  returns, so `close()` forgets the handle once the ABI's close has returned. The one
+  exception is a subscription's close from inside a handler of its own poll, which the
+  ABI refuses with `CAVALRY_ERR_POLLING`, leaving the subscription open
+  (`spec/c-abi.md`, "Calls during a claim or a poll"). `close()` then throws
+  `CavalryError` and keeps the handle, so the subscription can be polled and closed
+  after the poll.
 - Never edit a generated file by hand: `just lint` regenerates the package and fails
   when the committed files differ.
 

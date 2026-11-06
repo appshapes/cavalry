@@ -864,6 +864,18 @@ function check(fn, result) {
   if (result !== 0) throw error(fn);
 }
 
+/** Close `owner.handle` with the ABI's close `fn`, then forget the handle. Every close frees
+ * its handle, whatever it returns (spec/c-abi.md, "Lifetimes"), except one the ABI refuses:
+ * a subscription's close from inside a handler of its own poll is -1 with
+ * CAVALRY_ERR_POLLING and leaves the subscription open ("Calls during a claim or a poll"),
+ * so the wrapper keeps the handle, to poll it and close it later. */
+function closeHandle(owner, fn) {
+  const result = addon[fn](owner.handle);
+  if (result !== 0 && addon.cavalry_errcode() === constants.CAVALRY_ERR_POLLING) throw error(fn);
+  owner.handle = null;
+  check(fn, result);
+}
+
 /** A caller-owned struct: its ArrayBuffer, a DataView over it, and typed reads by the layout. */
 class Struct {
   constructor(name) {
@@ -897,11 +909,7 @@ class Client {
     this.clientId = addon.cavalry_client_id(this.handle);
   }
   close() {
-    if (this.handle !== null) {
-      const handle = this.handle;
-      this.handle = null;
-      check("cavalry_close", addon.cavalry_close(handle));
-    }
+    if (this.handle !== null) closeHandle(this, "cavalry_close");
   }
   get isClosed() { return this.handle === null || addon.cavalry_is_closed(this.handle); }
   /** 0 while open, else why the client closed, `CAVALRY_CLOSED_*`. */
@@ -972,12 +980,12 @@ class Publication {
   positionLimit() { return addon.cavalry_publication_position_limit(this.handle); }
   get isConnected() { return addon.cavalry_publication_is_connected(this.handle); }
   get isClosed() { return addon.cavalry_publication_is_closed(this.handle); }
+  /** Close the publication; the ABI's close aborts a claim still outstanding, and the claim's
+   * Buffer is released first. */
   close() {
     if (this.handle !== null) {
       this._release();
-      const handle = this.handle;
-      this.handle = null;
-      check("cavalry_publication_close", addon.cavalry_publication_close(handle));
+      closeHandle(this, "cavalry_publication_close");
     }
   }
 }
@@ -1055,12 +1063,10 @@ class Subscription {
   }
   get isConnected() { return addon.cavalry_subscription_is_connected(this.handle); }
   get isClosed() { return addon.cavalry_subscription_is_closed(this.handle); }
+  /** Close the subscription. From inside a handler of its own poll the ABI refuses the close,
+   * which throws CavalryError with CAVALRY_ERR_POLLING and leaves the subscription open. */
   close() {
-    if (this.handle !== null) {
-      const handle = this.handle;
-      this.handle = null;
-      check("cavalry_subscription_close", addon.cavalry_subscription_close(handle));
-    }
+    if (this.handle !== null) closeHandle(this, "cavalry_subscription_close");
   }
 }
 
@@ -1078,11 +1084,7 @@ class Recording {
   position() { return addon.cavalry_recording_position(this.handle); }
   syncedPosition() { return addon.cavalry_recording_synced_position(this.handle); }
   close() {
-    if (this.handle !== null) {
-      const handle = this.handle;
-      this.handle = null;
-      check("cavalry_recording_close", addon.cavalry_recording_close(handle));
-    }
+    if (this.handle !== null) closeHandle(this, "cavalry_recording_close");
   }
 }
 
@@ -1105,11 +1107,7 @@ class Replay {
     return { ended, position, reason };
   }
   close() {
-    if (this.handle !== null) {
-      const handle = this.handle;
-      this.handle = null;
-      check("cavalry_replay_close", addon.cavalry_replay_close(handle));
-    }
+    if (this.handle !== null) closeHandle(this, "cavalry_replay_close");
   }
 }
 
