@@ -47,9 +47,9 @@ nothing depends on it.
 - Measures the same two rows through the C ABI, `claim_commit_32_ffi` and
   `one_way_32_ffi`: the client path of `claim_commit_32_client` reached through
   `cavalry-ffi`'s `extern "C"` functions in this binary, behind its `harness` module's
-  one safe call per function, so the rows need no C compiler and the allocation gate
-  counts the ABI's path as it counts the client's (ADR 0051). The two sets of rows
-  differ by the boundary alone. The rows are gated as the other message rows once a
+  safe methods, so the rows need no C compiler and the allocation gate counts the
+  ABI's path as it counts the client's (ADR 0051). The two sets of rows differ by the
+  boundary alone. The rows are gated as the other message rows once a
   host's baseline holds them and `no baseline` until then; they join each host's
   baseline from the tree's processes that have them, in a commit that names the rows
   and the runs, as ADR 0033's rule for a new row has it.

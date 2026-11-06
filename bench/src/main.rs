@@ -247,8 +247,8 @@ enum Benchmark {
 impl Benchmark {
     /// Every benchmark of a full pass, in the order they run: the timer, both log
     /// types, the client path with and without a recording on, the client path over
-    /// UDP on the loopback, the three slot spacings, and last the recorder's block
-    /// path, so its writes reach no other row.
+    /// UDP on the loopback, the client path through the C ABI, the three slot
+    /// spacings, and last the recorder's block path, so its writes reach no other row.
     const ALL: [Benchmark; 11] = [
         Benchmark::Timer,
         Benchmark::Log {
@@ -1374,9 +1374,9 @@ fn bench_ffi(options: &Options) -> Result<LogRun, String> {
 
 /// The client rows through the C ABI (ADR 0051): the same driver, client, subscription
 /// and publication as `run_client`'s, reached through `cavalry-ffi`'s `extern "C"`
-/// functions in this binary, behind its `harness` module's safe calls, one per
-/// function, since this crate may hold no `unsafe`. The stamp crosses the ABI in the
-/// claimed body, and the subscriber's C fragment handler hands it back. The driver's
+/// functions in this binary, behind its `harness` module's safe methods, since this
+/// crate may hold no `unsafe`. The stamp crosses the ABI in the claimed body, and the
+/// subscriber's C fragment handler hands it back. The driver's
 /// threads, the pins, the warm-up, the counting window and the stall bound are the
 /// client rows', so the two sets of rows differ by the boundary alone.
 fn run_ffi(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
@@ -2570,7 +2570,8 @@ impl Pass {
 
 /// Every benchmark `--only` admits once, in [`Benchmark::ALL`]'s order: the timer, both
 /// log types, the client path with and without a recording on, the client path over
-/// UDP on the loopback, the three slot spacings, and last the recorder's block path.
+/// UDP on the loopback, the client path through the C ABI, the three slot spacings,
+/// and last the recorder's block path.
 fn run_pass(options: &Options) -> Result<Pass, String> {
     let mut pass = Pass::default();
     for benchmark in options.benchmarks() {

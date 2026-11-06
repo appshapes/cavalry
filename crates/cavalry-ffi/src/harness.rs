@@ -1,11 +1,13 @@
 //! The client path through the ABI for `just bench`'s `ffi` rows (ADR 0051): the calls
-//! a C program makes, in the order it makes them, each one `extern "C"` function of
-//! this crate behind a safe method, because `bench/` inherits the workspace's ban on
-//! `unsafe` (CLAUDE.md, Unsafe) and may not call the functions itself. Nothing here is
-//! part of the ABI: the header declares none of it, and a client in another language
-//! calls the functions, not this. The per-message path is one method, one `extern "C"`
-//! call and the Rust core behind it, so the rows measure the ABI and the allocation
-//! gate counts its path as it counts the client's (ADR 0047).
+//! a C program makes, in the order it makes them, this crate's `extern "C"` functions
+//! behind safe methods, because `bench/` inherits the workspace's ban on `unsafe`
+//! (CLAUDE.md, Unsafe) and may not call the functions itself. Nothing here is part of
+//! the ABI: the header declares none of it, and a client in another language calls the
+//! functions, not this. The per-message path is one method on each side and the Rust
+//! core behind it: `claim_commit`'s two calls, `cavalry_publication_try_claim` and
+//! `cavalry_buffer_claim_commit`, and `poll`'s one, `cavalry_subscription_poll`, so the
+//! rows measure the ABI and the allocation gate counts its path as it counts the
+//! client's (ADR 0047).
 
 use std::ffi::{CStr, CString, c_void};
 use std::path::Path;
@@ -25,7 +27,7 @@ use crate::context::{
 use crate::error::{DOC, cavalry_errcode, cavalry_errmsg};
 use crate::publication::{
     cavalry_buffer_claim_commit, cavalry_buffer_claim_t, cavalry_publication_close,
-    cavalry_publication_position, cavalry_publication_t, cavalry_publication_try_claim,
+    cavalry_publication_t, cavalry_publication_try_claim,
 };
 use crate::subscription::{
     cavalry_header_t, cavalry_subscription_close, cavalry_subscription_is_connected,
@@ -200,7 +202,10 @@ impl Drop for Client {
 impl Publication {
     /// One message of `body` bytes with `stamp` in its first eight, by
     /// `cavalry_publication_try_claim` and `cavalry_buffer_claim_commit`: the position
-    /// after the frame, or the claim's result code, `CAVALRY_PUBLICATION_*`.
+    /// after the frame, or the claim's result code, `CAVALRY_PUBLICATION_*`. A commit
+    /// that fails returns -1 with the thread's error set, which as a claim's result
+    /// would read as `CAVALRY_PUBLICATION_NOT_CONNECTED` and be tried again, so it is
+    /// `CAVALRY_PUBLICATION_ERROR` here, whose [`refusal`] carries that error.
     #[inline]
     pub fn claim_commit(&mut self, body: usize, stamp: u64) -> i64 {
         let mut claim = cavalry_buffer_claim_t {
@@ -219,18 +224,12 @@ impl Publication {
             if claim.length >= 8 {
                 ptr::copy_nonoverlapping(stamp.to_le_bytes().as_ptr(), claim.data, 8);
             }
-            cavalry_buffer_claim_commit(&mut claim)
+            let committed = cavalry_buffer_claim_commit(&mut claim);
+            if committed < 0 {
+                return CAVALRY_PUBLICATION_ERROR;
+            }
+            committed
         }
-    }
-
-    /// `cavalry_publication_position`.
-    pub fn position(&self) -> Result<i64, String> {
-        // SAFETY: a live handle used from this thread.
-        let position = unsafe { cavalry_publication_position(self.0) };
-        if position < 0 {
-            return Err(last_error("cavalry_publication_position"));
-        }
-        Ok(position)
     }
 
     /// `cavalry_publication_close`.
