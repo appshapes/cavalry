@@ -66,7 +66,11 @@ nothing depends on it.
   `one_way_32_udp_mdc`: a publication on
   `cavalry:udp?control=127.0.0.1:<port>|control-mode=manual|fc=min` whose sender
   sends every datagram to two subscriptions of the driver on two loopback ports, the
-  first measured and the second drained on a thread of its own, one message in flight,
+  first measured and the second drained on a thread of its own, one message in flight;
+  under `--pin` the drain runs on the housekeeping CPU with the driver's conductor, so
+  that no pinned CPU holds a second thread, and sleeps 100 µs after a poll that found
+  nothing, well inside the 20 ms its image's receiver window of 128 KiB lasts at the
+  row's pace, so that it does not pace the sender. The rows are
   reported and never gated since every isolated core of both bench hosts is taken
   (ADR 0052, feature 1; ADR 0053); under `--link-here` and `--link-peer` the same two
   rows run after the link rows with the peer's endpoint as the second destination,

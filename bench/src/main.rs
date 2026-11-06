@@ -2005,8 +2005,9 @@ fn bench_udp(options: &Options) -> Result<LogRun, String> {
 /// whose sender sends every datagram to two destinations, one message in flight,
 /// measured at the first destination, a subscription of this driver on a port of this
 /// host. In the loopback pass the second destination is a subscription of this driver
-/// too, drained on a thread of its own so that `fc=min` paces the sender by the slower
-/// of two readers that both keep up; in the link pass it is the peer's endpoint across
+/// too, drained on a thread of its own, on the housekeeping CPU under `--pin`, so that
+/// `fc=min` paces the sender by the slower of two readers that both keep up; in the link
+/// pass it is the peer's endpoint across
 /// the cable, where the peer's echo claims every message back onto the link
 /// subscription, held and not polled, as it echoes the link rows'. Reported and never
 /// gated: every isolated core of both bench hosts is taken (ADR 0044), and the row
@@ -2046,9 +2047,10 @@ fn bench_udp_mdc(options: &Options) -> Result<LogRun, String> {
 
 /// One run of the multi-destination cast rows on `client`, whose driver already runs:
 /// a subscription on a free port of `host`, the measured destination, a second
-/// subscription on `second` when it is this host's, drained on its own thread, a
-/// publication on a control channel of `host` with both as its destinations, connected
-/// within `timeout`, the measured run, and the handles closed in the order
+/// subscription on `second` when it is this host's, drained on its own thread
+/// ([`spawn_drain`]), a publication on a control channel of `host` with both as its
+/// destinations, connected within `timeout`, the measured run, the drain stopped and
+/// joined whatever the run's outcome, and the handles closed in the order
 /// `close_stream` keeps, the publication first so that the stream's end goes out.
 fn mdc_rows(
     options: &Options,
@@ -2140,20 +2142,27 @@ fn mdc_rows(
         Arc::clone(&received),
         run,
     )?;
-    let drain = drained.map(|drained| spawn_drain("udp-mdc-drain", drained, run.total));
-    let published = publish_one_in_flight(&mut publication, &received, &subscriber, run)?;
-    let (subscription, one_way, _, _) = match subscriber.join() {
-        Ok(Ok(received)) => received,
-        failed => return Err(subscriber_failure(failed)),
-    };
-    let drained = match drain {
-        Some(drain) => Some(match drain.join() {
-            Ok(Ok(drained)) => drained,
-            Ok(Err(message)) => return Err(message),
-            Err(_) => return Err("the drain thread panicked".to_string()),
-        }),
-        None => None,
-    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let drain = drained
+        .map(|drained| {
+            spawn_drain(
+                "udp-mdc-drain",
+                options.housekeeping,
+                drained,
+                Arc::clone(&stop),
+            )
+        })
+        .transpose()?;
+    let measured = publish_one_in_flight(&mut publication, &received, &subscriber, run).and_then(
+        |published| match subscriber.join() {
+            Ok(Ok((subscription, one_way, _, _))) => Ok((published, subscription, one_way)),
+            failed => Err(subscriber_failure(failed)),
+        },
+    );
+    // The drain stops whatever the run's outcome, so that its join is bounded; a drain
+    // that failed is reported first, since under `fc=min` it is why the stream stalled.
+    let drained = drain.map(|drain| join_drain(drain, &stop)).transpose()?;
+    let (published, subscription, one_way) = measured?;
     publication.close().map_err(|e| e.to_string())?;
     subscription.close().map_err(|e| e.to_string())?;
     if let Some(drained) = drained {
@@ -2168,29 +2177,59 @@ fn mdc_rows(
     })
 }
 
-/// A thread that polls `subscription` until `total` messages have come, the second
-/// destination's reader in the loopback pass, counting and keeping nothing, and
-/// returns the subscription.
+/// How long the second destination's drain sleeps after a poll that delivered nothing:
+/// short beside the time its image's receiver window of 128 KiB (`spec/udp.md`,
+/// "Values") takes to fill with one message in flight, about 20 ms of 64-byte frames at
+/// the loopback's 10 µs a message and about 1 ms of the MTU's frames, so that under
+/// `fc=min` the drain does not pace the sender; long enough that the drain does not load
+/// the housekeeping CPU it shares with the driver's conductor under `--pin`.
+const DRAIN_IDLE: Duration = Duration::from_micros(100);
+
+/// A thread that polls `subscription`, the second destination's reader in the loopback
+/// pass, keeping nothing, until `stop` is set, and returns the subscription. It pins
+/// itself to `cpu` first, the housekeeping CPU under `--pin`, as the subscriber pins
+/// itself, since a thread spawned from the publisher's thread inherits the publisher's
+/// CPU and a pinned CPU holds one measured thread alone (card 136); after a poll that
+/// delivered nothing it sleeps [`DRAIN_IDLE`]. [`join_drain`] waits one poll and one
+/// sleep past `stop` at most.
 fn spawn_drain(
     name: &'static str,
+    cpu: Option<usize>,
     mut subscription: Subscription,
-    total: u64,
-) -> JoinHandle<Result<Subscription, String>> {
+    stop: Arc<AtomicBool>,
+) -> Result<JoinHandle<Result<Subscription, String>>, String> {
     thread::Builder::new()
         .name(name.into())
         .spawn(move || {
-            let mut count: u64 = 0;
-            while count < total {
+            pin_to(cpu)?;
+            while !stop.load(Ordering::Acquire) {
                 let delivered = subscription
-                    .poll(|_, _| count += 1, 1024)
+                    .poll(|_, _| {}, 1024)
                     .map_err(|e| e.to_string())?;
                 if delivered == 0 {
-                    std::hint::spin_loop();
+                    thread::sleep(DRAIN_IDLE);
                 }
             }
             Ok(subscription)
         })
-        .expect("the drain thread starts")
+        .map_err(|e| format!("the second destination's drain thread did not start: {e}"))
+}
+
+/// Sets `stop` and joins the drain, with its subscription, or what failed in it.
+fn join_drain(
+    drain: JoinHandle<Result<Subscription, String>>,
+    stop: &AtomicBool,
+) -> Result<Subscription, String> {
+    stop.store(true, Ordering::Release);
+    match drain.join() {
+        Ok(Ok(subscription)) => Ok(subscription),
+        Ok(Err(message)) => Err(format!("the second destination's drain failed: {message}")),
+        Err(_) => Err(
+            "the second destination's drain thread panicked: the panic's message, printed \
+             above, names the line to look at"
+                .to_string(),
+        ),
+    }
 }
 
 fn run_udp(options: &Options, dir: &std::path::Path) -> Result<LogRun, String> {
