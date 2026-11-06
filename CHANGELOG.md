@@ -1354,3 +1354,22 @@ user-visible change, added in the same commit as the change. The format follows
   ends the stream at the producer position it loads on `client close`, so such a
   frame could land past the stream's end with no subscriber told of it
   ([log buffer, "Closing"](spec/log-buffer.md); card 204).
+- `bench`'s two bench profiles, `bench-linux` and `bench-linux-unchecked`, are
+  re-recorded at the tree of 3fe13b4 from its twenty processes, pull request 128's
+  four runs, master's five with both attempts of a re-run, pull requests 129's four,
+  130's two, 132's one and 134's four, with every gated row's slowest run before and
+  after in the commit and the process behind each row that loosened. The checked
+  `claim_commit_32_recorded` row had turned `bench (linux)` red four times at that
+  tree, master's own run among them, at 330 ns against a slowest run of 310 ns
+  recorded on 2026-10-31. Card 216 measured card 177's commit against its parent on
+  the idle host, three 21-run processes of each interleaved, and found them not
+  separated, the parent reading 320 with runs to 330 as the commit does, so any shift
+  at the code is under the gate's one clock step of 10 ns, where CI's own processes at
+  the two trees sat about one step apart, and the band rose with the host. Seven rows
+  loosen by more than 5 percent: the recorded row to 360 ns; the checked
+  `claim_commit_32_client` row to 170 ns, by 25 runs in eight of the twenty processes
+  with every process's median at 159 or 160 ns; the unchecked `claim_commit_32_udp`
+  and `one_way_32_client` rows, each by one run of one process; and three rows by the
+  two whole processes that card 219 holds, where one run of a third process also
+  reaches the checked `one_way_32_concurrent` row's new 250 ns. The commit is the
+  owner's under ADR 0032 (card 216).
