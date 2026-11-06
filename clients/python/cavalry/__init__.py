@@ -189,8 +189,9 @@ class Client:
 
 class Publication:
     """A publication: `try_claim` and `offer` return the position after the frame or a code
-    below zero, never raising; `claim` is the view over the slice the last `try_claim`
-    reserved, a `memoryview` built from the one `cavalry_buffer_claim_t` this object keeps."""
+    below zero, never raising for a code (`offer` refuses a message that is not `bytes`
+    before the call); `claim` is the view over the slice the last `try_claim` reserved, a
+    `memoryview` built from the one `cavalry_buffer_claim_t` this object keeps."""
 
     def __init__(self, abi, handle):
         self._abi = abi
@@ -233,7 +234,11 @@ class Publication:
         return self._abi.cavalry_buffer_claim_set_reserved_value(self._claim_ref, value)
 
     def offer(self, message):
-        """Offer `message`, bytes-like: the position after it, or a result code below zero."""
+        """Offer `message`, `bytes` or a `ctypes` `c_char` array such as
+        `ctypes.create_string_buffer(n)`, which a caller may reuse across offers: the
+        position after it, or a result code below zero. A `str`, `bytearray`,
+        `memoryview` or anything else is refused by `ctypes` with `ctypes.ArgumentError`
+        before the ABI is called, so nothing is published."""
         return self._abi.cavalry_publication_offer(self._handle, message, len(message))
 
     def position(self):

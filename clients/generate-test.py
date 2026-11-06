@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """The generator's tests (ADR 0026): its parse of the committed header equals
 `spec/vectors/c-abi.json` each way, the committed Python package is what the parse gives,
-a change to the header changes the package, and `--check` fails on a package that differs.
+a change to the header changes the package, `offer` takes bytes and refuses a `str`, and
+`--check` fails on a package that differs.
 `just test` runs this through `test-scripts`. Python 3.9 standard library only.
 """
 
+import ctypes
 import json
 import os
 import re
@@ -95,6 +97,25 @@ class Package(unittest.TestCase):
             self.assertIn(f'"{fn.name}": (', abi)
         self.assertIn("cavalry_fragment_handler_t = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t, c_void_p)", abi)
         self.assertIn("ctypes.PyDLL(path)", abi)
+
+    def test_offer_takes_bytes_and_refuses_a_str(self):
+        """`c_void_p` took a `str` as its `wchar_t` buffer, so `offer("hello")` published
+        `h\\0\\0\\0e`; the binding's `c_char_p` refuses it, and every other non-bytes form,
+        before the ABI is called. The fragment handler's buffer stays an address."""
+        abi = gen.write_python(self.header)["cavalry/_abi.py"]
+        self.assertIn('"cavalry_publication_offer": (c_int64, [c_void_p, c_char_p, c_size_t]),', abi)
+        sys.path.insert(0, os.path.join(gen.ROOT, "clients", "python"))
+        try:
+            from cavalry import _abi
+        finally:
+            sys.path.pop(0)
+        buffer = _abi.FUNCTIONS["cavalry_publication_offer"][1][1]
+        self.assertIs(buffer, ctypes.c_char_p)
+        for refused in ("hello", bytearray(b"hello"), memoryview(b"hello"), 5):
+            with self.assertRaises(TypeError, msg=type(refused).__name__):
+                buffer.from_param(refused)
+        buffer.from_param(b"hello")
+        buffer.from_param(ctypes.create_string_buffer(5))
 
     def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
         with tempfile.TemporaryDirectory() as tmp:

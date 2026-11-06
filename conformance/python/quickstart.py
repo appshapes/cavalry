@@ -6,8 +6,9 @@ records stream 1001 on `cavalry:ipc`, publishes 1,000 messages of 64 bytes by cl
 commit, each carrying its index and the publisher's clock, and reads them back through the
 fragment handler once and in order, with the header's type, flags, version, frame length,
 term offset and session id checked against spec/frame.md; waits for the recording to sync
-to the stream's end and stops it; checks where a handler's exception goes, on stream 1003
-(`handler_exceptions`); does the same 1,000 over `cavalry:udp` on the loopback;
+to the stream's end and stops it; checks where a handler's exception goes and that `offer`
+refuses what is not bytes, on stream 1003 (`edges`); does the same 1,000 over
+`cavalry:udp` on the loopback;
 and replays the recording onto stream 2001, each frame at the position the recording holds
 it at, with the end reported. Every wait is bounded at 10 s, and a wait that runs out says
 how far it got. It exits 1 with the function, the code and `cavalry_errmsg` when a call
@@ -23,6 +24,7 @@ checks' own objects are not in the count.
 Python 3.9 standard library only (ADR 0003).
 """
 
+import ctypes
 import os
 import socket
 import sys
@@ -171,13 +173,15 @@ def offer_or_fail(name, publication, message, sent):
             fail(f"{name}: offer returned {CODE_NAMES.get(position, position)} ({position}) after {sent} messages")
 
 
-def handler_exceptions(client):
-    """Where a handler's exception goes (clients/python/README.md, "The exception"): ten
-    messages offered on stream 1003, then one poll of ten whose handler raises on message
-    3. The ABI's poll consumes all ten, so every one must reach the handler, once and in
-    order, and poll must raise HandlerError with `fragments` 10, `raised` 1 and the
-    ValueError as its cause. Then a poll whose handler raises a ValueError on one message
-    and SystemExit(2) on the next: poll raises the SystemExit as itself."""
+def edges(client):
+    """The client's edges, on stream 1003. Where a handler's exception goes
+    (clients/python/README.md, "The exception"): ten messages offered, then one poll of
+    ten whose handler raises on message 3. The ABI's poll consumes all ten, so every one
+    must reach the handler, once and in order, and poll must raise HandlerError with
+    `fragments` 10, `raised` 1 and the ValueError as its cause. Then a poll whose handler
+    raises a ValueError on one message and SystemExit(2) on the next: poll raises the
+    SystemExit as itself. Then what `offer` refuses: a `str`, a `bytearray` and a
+    `memoryview` are refused with `ctypes.ArgumentError` and nothing is published."""
     name = "handler exceptions"
     subscription = client.add_subscription("cavalry:ipc", STREAM + 2)
     publication = client.add_publication("cavalry:ipc", STREAM + 2)
@@ -238,11 +242,25 @@ def handler_exceptions(client):
         fail(f"{name}: poll raised {exited!r} and the handler saw {seen}; expected SystemExit(2) and messages 0 to 11")
     if subscription.poll(unexpected, 10) != 0:
         fail(f"{name}: a fragment after all 12 messages")
-    publication.close()
-    subscription.close()
     print(f"conformance/python: {name}: a handler that raised on message 3 of a poll of 10 saw all 10 once, in order, "
           f"and poll raised HandlerError (fragments 10, raised 1, the ValueError as its cause); a SystemExit after a "
           f"ValueError in one poll was raised as itself")
+
+    # What offer refuses: a str, whose wchar_t bytes a `c_void_p` buffer published, and
+    # the other forms that are not bytes.
+    name = "offer"
+    for refused in ("hello", bytearray(b"hello"), memoryview(b"hello")):
+        try:
+            position = publication.offer(refused)
+        except ctypes.ArgumentError:
+            continue
+        fail(f"{name}: took a {type(refused).__name__} and returned {position}; it takes bytes only")
+    if subscription.poll(unexpected, 10) != 0:
+        fail(f"{name}: a refused offer published a fragment")
+    publication.close()
+    subscription.close()
+    print(f"conformance/python: {name}: a str, a bytearray and a memoryview were refused with ctypes.ArgumentError and "
+          f"nothing was published")
 
 
 def free_udp_port():
@@ -259,7 +277,6 @@ def main():
     abi = cavalry.library()
     # What a reader rejects, both ways: another version is refused with the code, and the
     # package's own version is not.
-    import ctypes
     context = ctypes.c_void_p()
     if (abi.cavalry_context_init_v(ctypes.byref(context), cavalry.ABI_VERSION + 1) == 0
             or abi.cavalry_errcode() != _abi.CAVALRY_ERR_ABI_VERSION):
@@ -291,7 +308,7 @@ def main():
         recording.close()
         ipc_pub.close()
 
-        handler_exceptions(client)
+        edges(client)
 
         # The measured round, for the report: 1,000 more messages on stream 1002 with a
         # handler that does nothing and a publisher that writes one constant, so that the

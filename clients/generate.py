@@ -131,15 +131,21 @@ CTYPES = {
 }
 
 
-def ctype(c: str, header: Header, struct_pointer_as_pointer: bool = True) -> str:
+def ctype(c: str, header: Header, struct_pointer_as_pointer: bool = True, function_param: bool = False) -> str:
     """The ctypes type for a C type of the header. Opaque handles, byte buffers and `void *`
     are `c_void_p`, an integer address, so a handle costs one `int` and a body's view is
     built from its address; a pointer to a caller-owned struct is `POINTER(struct)`; an
-    out parameter for a handle is `POINTER(c_void_p)`."""
+    out parameter for a handle is `POINTER(c_void_p)`. A function's `const uint8_t *`
+    parameter, bytes the caller hands in, is `c_char_p`, which takes `bytes` or a `c_char`
+    array and refuses anything else: `c_void_p` would take a `str` as its `wchar_t`
+    buffer and publish bytes the caller never offered. The fragment handler's `buffer`
+    stays an address."""
     c = " ".join(c.split())
     const = c.startswith("const ")
     base = c[6:] if const else c
     if base == "char *":
+        return "c_char_p"
+    if base == "uint8_t *" and const and function_param:
         return "c_char_p"
     if base in ("void *", "uint8_t *"):
         return "c_void_p"
@@ -223,7 +229,7 @@ def write_python(header: Header) -> dict[str, str]:
     out.append("# Every function: name -> (restype, argtypes), in the header's order.")
     out.append("FUNCTIONS = {")
     for fn in header.functions:
-        argtypes = ", ".join(ctype(p.type, header) for p in fn.params)
+        argtypes = ", ".join(ctype(p.type, header, function_param=True) for p in fn.params)
         out.append(f'    "{fn.name}": ({ctype(fn.ret, header)}, [{argtypes}]),')
     out.append("}")
     out.append("")
@@ -435,8 +441,9 @@ class Client:
 
 class Publication:
     """A publication: `try_claim` and `offer` return the position after the frame or a code
-    below zero, never raising; `claim` is the view over the slice the last `try_claim`
-    reserved, a `memoryview` built from the one `cavalry_buffer_claim_t` this object keeps."""
+    below zero, never raising for a code (`offer` refuses a message that is not `bytes`
+    before the call); `claim` is the view over the slice the last `try_claim` reserved, a
+    `memoryview` built from the one `cavalry_buffer_claim_t` this object keeps."""
 
     def __init__(self, abi, handle):
         self._abi = abi
@@ -479,7 +486,11 @@ class Publication:
         return self._abi.cavalry_buffer_claim_set_reserved_value(self._claim_ref, value)
 
     def offer(self, message):
-        """Offer `message`, bytes-like: the position after it, or a result code below zero."""
+        """Offer `message`, `bytes` or a `ctypes` `c_char` array such as
+        `ctypes.create_string_buffer(n)`, which a caller may reuse across offers: the
+        position after it, or a result code below zero. A `str`, `bytearray`,
+        `memoryview` or anything else is refused by `ctypes` with `ctypes.ArgumentError`
+        before the ABI is called, so nothing is published."""
         return self._abi.cavalry_publication_offer(self._handle, message, len(message))
 
     def position(self):

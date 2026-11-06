@@ -29,6 +29,11 @@ the ABI's page promises (ADR 0046's boundary; ADR 0051). The package has no depe
   the frame or the code below zero (`cavalry.BACK_PRESSURED`, `NOT_CONNECTED`,
   `ADMIN_ACTION`, `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the
   caller branches, as a Rust caller matches `Offer`.
+- Never publish bytes the caller did not offer: `offer` takes `bytes`, or a `ctypes`
+  `c_char` array such as `ctypes.create_string_buffer(n)`, which a caller may reuse
+  across offers. A `str`, a `bytearray`, a `memoryview` or anything else is refused
+  by `ctypes` with `ctypes.ArgumentError` before the ABI is called, so nothing is
+  published; pass `bytes(view)`, or claim and write into `publication.claim`.
 - Never drop a fragment and never swallow the user's exception: the ABI's poll
   consumes every fragment it delivers, so every one reaches the handler, once and in
   order, even after a call raised; `poll` raises once the ABI has returned, the one

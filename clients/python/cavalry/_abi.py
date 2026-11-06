@@ -231,7 +231,7 @@ FUNCTIONS = {
     "cavalry_buffer_claim_set_reserved_value": (c_int, [POINTER(cavalry_buffer_claim_t), c_int64]),
     "cavalry_buffer_claim_commit": (c_int64, [POINTER(cavalry_buffer_claim_t)]),
     "cavalry_buffer_claim_abort": (c_int64, [POINTER(cavalry_buffer_claim_t)]),
-    "cavalry_publication_offer": (c_int64, [c_void_p, c_void_p, c_size_t]),
+    "cavalry_publication_offer": (c_int64, [c_void_p, c_char_p, c_size_t]),
     "cavalry_publication_position": (c_int64, [c_void_p]),
     "cavalry_publication_position_limit": (c_int64, [c_void_p]),
     "cavalry_publication_is_connected": (c_bool, [c_void_p]),
