@@ -2132,6 +2132,176 @@
     },
     {
       "kind": "arithmetic",
+      "name": "replay-end-mid-term",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 960
+      },
+      "fields": {
+        "term": 4,
+        "end_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-at-term-boundary",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 200
+      },
+      "fields": {
+        "term": 3,
+        "end_position": 500
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-at-leaders-base",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 1000
+      },
+      "fields": {
+        "term": 5,
+        "end_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-in-leaders-term",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 3000
+      },
+      "fields": {
+        "term": 5,
+        "end_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-at-log-start",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 0
+      },
+      "fields": {
+        "term": 2,
+        "end_position": 200
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "entry-position-one-frame",
       "rule": "entry-position",
       "inputs": {

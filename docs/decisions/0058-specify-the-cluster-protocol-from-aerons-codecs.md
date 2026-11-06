@@ -17,8 +17,8 @@ under Aeron's names where the concept matches (`CLAUDE.md`, Protocol: spec first
 of the transport under it is done: `spec/udp.md` version 1 carries one publication to
 every destination of a control channel under `min` flow control (ADR 0053), the
 durable log records a stream at the positions the stream has (`spec/durable-log.md`),
-and the C ABI at version 1 reaches both from five languages (ADR 0057). Two things it
-lacks the page names as dependencies: no command of `spec/client-protocol.md` version
+and the C ABI at version 1 reaches both from five languages (ADR 0057). Three things
+it lacks the page names as dependencies: no command of `spec/client-protocol.md` version
 5 and no key of `spec/udp.md` version 1 creates a publication at a position, which
 every term after the first needs for its log publication; `start recording` records
 an image from its rebuild position when the command is handled, not from the
@@ -102,11 +102,19 @@ another major reports it; a version field's major is the value shifted right by 
 bits, arithmetic, so a negative value is rejected. Follower log replication, Aeron's
 replication of what a follower lacks up to the next term's base, runs in this version
 over the messages the page has: the follower sends catch-up position from its append
-position, and the leader answers with a `start replay` of its recording of the term
-that holds the position, with the length that ends at Aeron's stop position, the next
-term base log position when the append position is below it, else the next log
-position; within the leader's term the catch-up is the same replay following the
-live recording. One departure the client protocol forces: a replay's publication has
+position, and the leader answers with replays of its recordings, beginning in the
+recording that begins at or below the position and ends above it and ending at the
+first term base log position in its log above the position, one `start replay` after
+another where the span crosses a recording's end, which is Aeron's stop position on
+the follower's side, the next term base log position when the append position is
+below it, else the next log position; within the leader's term the catch-up is the
+same replay following the live recording. A leader that reads a follower's canvass
+position first stops any replay it has running to it, a replay counting as running
+from `replay ready` to `replay stopped`, so that a follower that failed and
+canvasses again never joins a stale replay; and a follower checks that an image of
+a replay or of the live log joins at its append position, failing its election,
+counted, when it does not, as Aeron's `verifyLogJoinPosition` does, so that a hole
+never lies below its append position. One departure the client protocol forces: a replay's publication has
 a session id of its own, so the follower finds either replay as the one image of
 stream 100 on its `catchup` endpoint, and the span it records from it carries the
 replay's session id in its frame headers. A member's log is therefore its recordings
