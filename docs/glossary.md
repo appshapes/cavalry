@@ -137,7 +137,7 @@ pages elsewhere mention Aeron at most once.
 | candidate | A follower asking the members for votes to lead the next term. | candidate | `docs/reference/cluster.md` |
 | leadership term | The span of the log one leader writes, numbered from 0 by its leadership term id, which only rises. | leadership term | `docs/reference/cluster.md` |
 | term base log position | The log position at which a leadership term's first entry, its new leadership term event, begins. | term base log position | `docs/reference/cluster.md` |
-| append position | How far a member's recording of the cluster's log has been written, reported to the leader. | append position | `docs/reference/cluster.md` |
+| append position | The end of the contiguous span a member's recordings of the cluster's log hold from its start, reported to the leader. | append position | `docs/reference/cluster.md` |
 | commit position | The highest log position a quorum of active members has appended, bounded by the leader's own; the service reads nothing above it. | commit position | `docs/reference/cluster.md` |
 | quorum | Half the members plus one: the members whose recordings make an entry committed, and the votes that make a leader. | quorum | `docs/reference/cluster.md` |
 | election | The state machine a member runs to find or become the leader, eighteen states from init to closed. | election | `docs/reference/cluster.md` |
