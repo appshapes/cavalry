@@ -55,8 +55,12 @@ JVM and .NET clients (cards 206 to 209) add a language each.
 
 The clients version with `cavalry-ffi` and are released with it, at the version the
 ABI freezes at (ADR 0046's Revisit; the release's ADR). A client's package carries
-the header's `CAVALRY_ABI_VERSION` and passes it to `cavalry_context_init_v`, so a
-package built against another version is refused at its first call.
+the header's `CAVALRY_ABI_VERSION`. When it loads the library it calls
+`cavalry_abi_version()` before any other function and refuses a library of another
+version with an error that names both numbers and says what to do: load the library
+built from the same checkout, or regenerate the package from the library's header
+(`spec/c-abi.md`, "Versions and what a reader rejects"). It also passes its version to
+`cavalry_context_init_v`, which refuses a mismatch again at each client it makes.
 
 | Client | Package | Runner | Decided in |
 | --- | --- | --- | --- |

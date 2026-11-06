@@ -279,7 +279,12 @@ PER_MESSAGE = (
 
 
 def load(path):
-    """Load libcavalry_ffi from `path` and declare every function's types. The per-message
+    """Load libcavalry_ffi from `path` and declare every function's types. First it calls
+    `cavalry_abi_version()`, before any other function is bound or called, and refuses a
+    library whose ABI version is not this binding's `CAVALRY_ABI_VERSION` with
+    `cavalry.CavalryError`, code `CAVALRY_ERR_ABI_VERSION`, naming both numbers, so that a
+    mismatch fails here and not at a function the other version lacks or reads differently
+    (spec/c-abi.md, "Versions and what a reader rejects"). The per-message
     functions come through `ctypes.PyDLL`, which keeps the GIL held across the call and so
     around each call-back: no release and re-acquire pair per message. Every other function
     comes through `ctypes.CDLL`, which releases the GIL for the call, so that an add, a command
@@ -287,6 +292,18 @@ def load(path):
     Python threads. Both open the one library the loader maps (clients/python/README.md,
     "The runtime's side")."""
     library = ctypes.CDLL(path)
+    abi_version = library.cavalry_abi_version
+    abi_version.restype, abi_version.argtypes = FUNCTIONS["cavalry_abi_version"]
+    found = abi_version()
+    if found != CAVALRY_ABI_VERSION:
+        from . import CavalryError  # the package's error; the package has loaded by the time load runs
+        raise CavalryError("cavalry_abi_version", CAVALRY_ERR_ABI_VERSION,
+                           f"the library at {path} is ABI version {found} and this package was generated "
+                           f"from a header of ABI version {CAVALRY_ABI_VERSION}; load the library built from "
+                           f"the same checkout as the package, at CAVALRY_FFI_LIBRARY or the checkout's "
+                           f"target/release, or regenerate the package from the library's header with "
+                           f"`python3 clients/generate.py python`; see "
+                           f"docs/reference/c-abi.md#versions-and-what-a-reader-rejects")
     held = ctypes.PyDLL(path)
     for name, (restype, argtypes) in FUNCTIONS.items():
         function = getattr(held if name in PER_MESSAGE else library, name)

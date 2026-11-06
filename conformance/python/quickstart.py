@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The Python client's conformance runner (clients/README.md; ADR 0046, card 205): the
 ten-minute path's shape through `clients/python`, as `conformance/c/quickstart.c` runs it
-through the header. Against a driver at `CAVALRY_DIR` it checks the ABI version both ways,
+through the header. It checks that a package of another ABI version fails when it loads
+the library. Against a driver at `CAVALRY_DIR` it checks the ABI version both ways,
 records stream 1001 on `cavalry:ipc`, publishes 1,000 messages of 64 bytes by claim and
 commit, each carrying its index and a pattern, and reads them back through the fragment
 handler once and in order, with the header's type, flags, version, frame length, term
@@ -442,6 +443,26 @@ def free_udp_port():
 
 
 def main():
+    # The load-time check (spec/c-abi.md, "Versions and what a reader rejects"): a package
+    # whose CAVALRY_ABI_VERSION is not the library's fails in `load`, before any other
+    # function, with CavalryError naming both numbers.
+    package = _abi.CAVALRY_ABI_VERSION
+    _abi.CAVALRY_ABI_VERSION = package + 1
+    try:
+        _abi.load(cavalry.find_library())
+        refusal = None
+    except cavalry.CavalryError as error:
+        refusal = error
+    finally:
+        _abi.CAVALRY_ABI_VERSION = package
+    if refusal is None:
+        fail(f"a package of ABI version {package + 1} loaded a library of version {package}")
+    if (refusal.code != _abi.CAVALRY_ERR_ABI_VERSION or f"is ABI version {package} and" not in refusal.message
+            or f"from a header of ABI version {package + 1};" not in refusal.message):
+        fail(f"a package of ABI version {package + 1} was refused with {refusal}; expected CAVALRY_ERR_ABI_VERSION "
+             f"naming both versions")
+    print(f"conformance/python: ABI version: a package of version {package + 1} was refused in load: {refusal}")
+
     abi = cavalry.library()
     # What a reader rejects, both ways: another version is refused with the code, and the
     # package's own version is not.

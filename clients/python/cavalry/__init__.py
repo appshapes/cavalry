@@ -88,7 +88,9 @@ _library = None
 
 
 def library(path=None):
-    """The loaded ABI, loaded once per process."""
+    """The loaded ABI, loaded once per process. A library whose ABI version is not this
+    package's is refused here, before any other function, with `CavalryError`, code
+    `CAVALRY_ERR_ABI_VERSION` (`_abi.load`)."""
     global _library
     if _library is None:
         _library = _abi.load(path or find_library())

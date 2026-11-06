@@ -253,6 +253,13 @@ def write_python(header: Header) -> dict[str, str]:
     if missing:
         raise SystemExit(f"generate: the per-message function(s) {', '.join(missing)} are not in the header; update "
                          f"PER_MESSAGE in clients/generate.py with crates/cavalry-ffi/tests/allocations.rs")
+    defines = dict(header.defines)
+    version_check = [name for name in ("CAVALRY_ABI_VERSION", "CAVALRY_ERR_ABI_VERSION") if name not in defines]
+    version_check += [name for name in ("cavalry_abi_version",) if name not in names]
+    if version_check:
+        raise SystemExit(f"generate: {', '.join(version_check)} is not in the header, and `load` checks the library's "
+                         f"ABI version with it (spec/c-abi.md, \"Versions and what a reader rejects\"); teach "
+                         f"clients/generate.py the header's new check")
     out.append("# The per-message functions (crates/cavalry-ffi/README.md), loaded through `ctypes.PyDLL`.")
     out.append("PER_MESSAGE = (")
     for name in PER_MESSAGE:
@@ -261,7 +268,12 @@ def write_python(header: Header) -> dict[str, str]:
     out.append("")
     out.append("")
     out.append("def load(path):")
-    out.append('    """Load libcavalry_ffi from `path` and declare every function\'s types. The per-message')
+    out.append('    """Load libcavalry_ffi from `path` and declare every function\'s types. First it calls')
+    out.append("    `cavalry_abi_version()`, before any other function is bound or called, and refuses a")
+    out.append("    library whose ABI version is not this binding's `CAVALRY_ABI_VERSION` with")
+    out.append("    `cavalry.CavalryError`, code `CAVALRY_ERR_ABI_VERSION`, naming both numbers, so that a")
+    out.append("    mismatch fails here and not at a function the other version lacks or reads differently")
+    out.append('    (spec/c-abi.md, "Versions and what a reader rejects"). The per-message')
     out.append("    functions come through `ctypes.PyDLL`, which keeps the GIL held across the call and so")
     out.append("    around each call-back: no release and re-acquire pair per message. Every other function")
     out.append("    comes through `ctypes.CDLL`, which releases the GIL for the call, so that an add, a command")
@@ -269,6 +281,18 @@ def write_python(header: Header) -> dict[str, str]:
     out.append("    Python threads. Both open the one library the loader maps (clients/python/README.md,")
     out.append('    "The runtime\'s side")."""')
     out.append("    library = ctypes.CDLL(path)")
+    out.append("    abi_version = library.cavalry_abi_version")
+    out.append('    abi_version.restype, abi_version.argtypes = FUNCTIONS["cavalry_abi_version"]')
+    out.append("    found = abi_version()")
+    out.append("    if found != CAVALRY_ABI_VERSION:")
+    out.append("        from . import CavalryError  # the package's error; the package has loaded by the time load runs")
+    out.append('        raise CavalryError("cavalry_abi_version", CAVALRY_ERR_ABI_VERSION,')
+    out.append('                           f"the library at {path} is ABI version {found} and this package was generated "')
+    out.append('                           f"from a header of ABI version {CAVALRY_ABI_VERSION}; load the library built from "')
+    out.append('                           f"the same checkout as the package, at CAVALRY_FFI_LIBRARY or the checkout\'s "')
+    out.append('                           f"target/release, or regenerate the package from the library\'s header with "')
+    out.append('                           f"`python3 clients/generate.py python`; see "')
+    out.append('                           f"docs/reference/c-abi.md#versions-and-what-a-reader-rejects")')
     out.append("    held = ctypes.PyDLL(path)")
     out.append("    for name, (restype, argtypes) in FUNCTIONS.items():")
     out.append("        function = getattr(held if name in PER_MESSAGE else library, name)")
@@ -277,8 +301,7 @@ def write_python(header: Header) -> dict[str, str]:
     out.append("        setattr(library, name, function)")
     out.append("    return library")
     abi = "\n".join(out) + "\n"
-    version = dict(header.defines).get("CAVALRY_ABI_VERSION", "0")
-    client = PYTHON_CLIENT.replace("@ABI_VERSION@", version)
+    client = PYTHON_CLIENT.replace("@ABI_VERSION@", defines["CAVALRY_ABI_VERSION"])
     return {"cavalry/_abi.py": abi, "cavalry/__init__.py": client}
 
 
@@ -372,7 +395,9 @@ _library = None
 
 
 def library(path=None):
-    """The loaded ABI, loaded once per process."""
+    """The loaded ABI, loaded once per process. A library whose ABI version is not this
+    package's is refused here, before any other function, with `CavalryError`, code
+    `CAVALRY_ERR_ABI_VERSION` (`_abi.load`)."""
     global _library
     if _library is None:
         _library = _abi.load(path or find_library())

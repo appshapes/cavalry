@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The generator's tests (ADR 0026): its parse of the committed header equals
 `spec/vectors/c-abi.json` each way, the committed Python package is what the parse gives,
-a change to the header changes the package, `offer` takes bytes and refuses a `str`, and
+a change to the header changes the package, `offer` takes bytes and refuses a `str`,
+`load` refuses a library of another ABI version before it touches any other function, and
 `--check` fails on a package that differs.
 `just test` runs this through `test-scripts`. Python 3.9 standard library only.
 """
@@ -14,11 +15,23 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate as gen  # noqa: E402
 
 VECTORS = os.path.join(gen.ROOT, "spec", "vectors", "c-abi.json")
+
+
+def load_package():
+    """The committed package, imported as `cavalry` from clients/python; nothing loads the
+    library until a test asks."""
+    sys.path.insert(0, os.path.join(gen.ROOT, "clients", "python"))
+    try:
+        import cavalry
+    finally:
+        sys.path.pop(0)
+    return cavalry
 
 
 def flat(c: str) -> str:
@@ -105,7 +118,8 @@ class Package(unittest.TestCase):
             doc = "".join(line for line in f if line.startswith("//!"))
         self.assertEqual(sorted(gen.PER_MESSAGE), sorted(set(re.findall(r"`(cavalry_\w+)`", doc))))
         abi = gen.write_python(self.header)["cavalry/_abi.py"]
-        self.assertIn("    library = ctypes.CDLL(path)\n    held = ctypes.PyDLL(path)\n", abi)
+        self.assertIn("    library = ctypes.CDLL(path)\n", abi)
+        self.assertIn("    held = ctypes.PyDLL(path)\n", abi)
         self.assertIn("function = getattr(held if name in PER_MESSAGE else library, name)", abi)
         for name in gen.PER_MESSAGE:
             self.assertIn(f'    "{name}",\n', abi.split("PER_MESSAGE = (", 1)[1].split(")", 1)[0])
@@ -116,11 +130,7 @@ class Package(unittest.TestCase):
         before the ABI is called. The fragment handler's buffer stays an address."""
         abi = gen.write_python(self.header)["cavalry/_abi.py"]
         self.assertIn('"cavalry_publication_offer": (c_int64, [c_void_p, c_char_p, c_size_t]),', abi)
-        sys.path.insert(0, os.path.join(gen.ROOT, "clients", "python"))
-        try:
-            from cavalry import _abi
-        finally:
-            sys.path.pop(0)
+        _abi = load_package()._abi
         buffer = _abi.FUNCTIONS["cavalry_publication_offer"][1][1]
         self.assertIs(buffer, ctypes.c_char_p)
         for refused in ("hello", bytearray(b"hello"), memoryview(b"hello"), 5):
@@ -128,6 +138,54 @@ class Package(unittest.TestCase):
                 buffer.from_param(refused)
         buffer.from_param(b"hello")
         buffer.from_param(ctypes.create_string_buffer(5))
+
+    def test_a_header_without_what_the_version_check_reads_fails_to_generate(self):
+        for removed, name in (("#define CAVALRY_ERR_ABI_VERSION 135\n", "CAVALRY_ERR_ABI_VERSION"),
+                              ("int cavalry_abi_version(void);\n", "cavalry_abi_version")):
+            self.assertIn(removed, self.text)
+            with self.assertRaises(SystemExit) as raised:
+                gen.write_python(gen.parse(self.text.replace(removed, "")))
+            self.assertIn(f"{name} is not in the header", str(raised.exception))
+
+    def test_load_checks_the_abi_version_before_any_other_function(self):
+        """spec/c-abi.md, "Versions and what a reader rejects": a generated client calls
+        `cavalry_abi_version()` when it loads the library, before any other function. A
+        library of another version is refused with CavalryError naming both numbers, and
+        nothing else of it is touched; a library of the package's version is bound whole,
+        `cavalry_abi_version` first."""
+        _abi = load_package()._abi
+
+        class Library:
+            def __init__(self, version):
+                self.touched = []
+                self.version = version
+
+            def __getattr__(self, name):
+                self.touched.append(name)
+                function = (lambda: self.version) if name == "cavalry_abi_version" else (lambda *args: 0)
+                setattr(self, name, function)
+                return function
+
+        package = _abi.CAVALRY_ABI_VERSION
+        for found in (package + 1, package - 1):
+            library = Library(found)
+            with mock.patch.object(ctypes, "CDLL", lambda path: library), \
+                    mock.patch.object(ctypes, "PyDLL", lambda path: self.fail("PyDLL opened before the check")):
+                with self.assertRaises(sys.modules["cavalry"].CavalryError) as raised:
+                    _abi.load("libcavalry_ffi.so")
+            self.assertEqual(library.touched, ["cavalry_abi_version"])
+            self.assertEqual(raised.exception.code, _abi.CAVALRY_ERR_ABI_VERSION)
+            self.assertEqual(raised.exception.function, "cavalry_abi_version")
+            self.assertIn(f"is ABI version {found} and", raised.exception.message)
+            self.assertIn(f"from a header of ABI version {package};", raised.exception.message)
+            self.assertIn("python3 clients/generate.py python", raised.exception.message)
+            self.assertIn("docs/reference/c-abi.md#versions-and-what-a-reader-rejects", raised.exception.message)
+        library, held = Library(package), Library(package)
+        with mock.patch.object(ctypes, "CDLL", lambda path: library), mock.patch.object(ctypes, "PyDLL", lambda path: held):
+            self.assertIs(_abi.load("libcavalry_ffi.so"), library)
+        self.assertEqual(library.touched[0], "cavalry_abi_version")
+        self.assertEqual(sorted(library.touched + held.touched), sorted(_abi.FUNCTIONS))
+        self.assertEqual(sorted(held.touched), sorted(_abi.PER_MESSAGE))
 
     def test_check_fails_on_a_package_that_differs_and_says_what_to_do(self):
         with tempfile.TemporaryDirectory() as tmp:

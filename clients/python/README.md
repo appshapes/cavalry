@@ -14,6 +14,13 @@ client sends or receives goes through one `extern "C"` call on the caller's thre
 the ABI's page promises (ADR 0046's boundary; ADR 0051). The package has no dependency:
 `ctypes` is in Python's standard library, and both CI runners carry Python 3 already.
 
+The package loads the library at its first use, `cavalry.Client()` or
+`cavalry.version()`, and calls `cavalry_abi_version()` before any other function. A
+library of another ABI version than the header the package was generated from raises
+`cavalry.CavalryError` with code `CAVALRY_ERR_ABI_VERSION` and both numbers: load the
+library built from the same checkout, or run `just generate-clients` against the
+library's header (`spec/c-abi.md`, "Versions and what a reader rejects").
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no `await`, no
