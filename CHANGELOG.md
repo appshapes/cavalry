@@ -1583,5 +1583,5 @@ user-visible change, added in the same commit as the change. The format follows
   clients gain the method on their client object, a package of version 0 refusing the
   library until it is regenerated, as the clients README says; the C runner sends one
   stream to two destinations and checks a duplicate add, an absent remove and a
-  destination of the other family ([ADR 0054](docs/decisions/0054-take-the-c-abi-to-version-1-with-destinations.md);
+  destination of the other family ([ADR 0056](docs/decisions/0056-take-the-c-abi-to-version-1-with-destinations.md);
   card 225).
