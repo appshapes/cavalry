@@ -6,6 +6,7 @@ mod codes;
 mod context;
 mod error;
 mod handle;
+pub mod harness;
 mod publication;
 mod recording;
 mod replay;

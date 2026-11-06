@@ -1342,6 +1342,13 @@ user-visible change, added in the same commit as the change. The format follows
   `cavalry-ffi`'s header test among them
   ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
   card 204).
+- `just bench` measures the client path through the C ABI, `claim_commit_32_ffi` and
+  `one_way_32_ffi`: `cavalry-ffi`'s `extern "C"` functions in the bench's own binary,
+  behind the crate's `harness` module, with the client rows' driver, pins, warm-up and
+  allocation window, so the two sets of rows differ by the boundary alone; the rows
+  join each host's baseline as ADR 0033's rule for a new row has it
+  ([ADR 0051](docs/decisions/0051-expose-the-client-api-as-a-c-abi-with-aerons-names.md);
+  card 204).
 - `cavalry-ffi` takes its reviews' notes: `cavalry_replay_ended` refuses a null
   `position` or `reason` as it refuses any null required pointer; the
   `cavalry_context_init` macro sits inside the header's include guard; `just
