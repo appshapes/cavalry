@@ -1048,7 +1048,9 @@ fn term(field: &'static str, found: i64) -> Result<(), ClusterError> {
 }
 
 fn protocol_version(found: i32) -> Result<(), ClusterError> {
-    if found / 65_536 != 0 {
+    // The major is the value shifted right by 16 bits, arithmetic, so a negative value
+    // has a negative major and is rejected (spec/cluster.md, "Encoding").
+    if found >> 16 != 0 {
         Err(ClusterError::Version { found })
     } else {
         Ok(())
@@ -2261,6 +2263,47 @@ pub fn candidate(
     Candidate {
         nominate: deadline_passed && not_ahead >= quorum(members),
         unanimous: false,
+    }
+}
+
+/// Where a follower's log replication stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReplicationStop {
+    /// Whether the follower replicates at all: false when the new leadership term gives
+    /// it no stop position.
+    pub replicate: bool,
+    /// The stop position, or −1 for none.
+    pub stop_position: i64,
+}
+
+/// The stop position of a follower whose append position is below the leader's term
+/// base log position, from the new leadership term's next term base log position and
+/// next log position, each −1 for none (`spec/cluster.md`, "follower log replication"):
+/// the next term base log position when the append position is below it, else the
+/// next log position when the message carries one.
+pub const fn replication_stop(
+    append_position: i64,
+    next_term_base_log_position: i64,
+    next_log_position: i64,
+) -> ReplicationStop {
+    if next_term_base_log_position != NULL_VALUE && append_position < next_term_base_log_position {
+        ReplicationStop {
+            replicate: true,
+            stop_position: next_term_base_log_position,
+        }
+    } else if next_term_base_log_position != NULL_VALUE
+        && append_position == next_term_base_log_position
+        && next_log_position != NULL_VALUE
+    {
+        ReplicationStop {
+            replicate: true,
+            stop_position: next_log_position,
+        }
+    } else {
+        ReplicationStop {
+            replicate: false,
+            stop_position: NULL_VALUE,
+        }
     }
 }
 
