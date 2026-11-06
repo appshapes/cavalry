@@ -1626,3 +1626,9 @@ user-visible change, added in the same commit as the change. The format follows
   from `spec/vectors/cluster.py` and a glossary row per term
   ([ADR 0058](docs/decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md);
   `docs/reference/cluster.md`; card 226).
+- `cavalry-proto` reads and writes every message of `spec/cluster.md` in `cluster`, the
+  members string and the protocol's arithmetic, allocating nothing, and `just
+  conformance` runs its 111 vectors through `tests/cluster_conformance.rs`, with a
+  no-panic test on every commit and a `cluster` fuzz target under `just fuzz`
+  ([ADR 0058](docs/decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md);
+  card 226).

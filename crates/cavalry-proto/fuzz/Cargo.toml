@@ -41,4 +41,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "cluster"
+path = "fuzz_targets/cluster.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

@@ -4,5 +4,6 @@
 
 pub mod channel;
 pub mod client_protocol;
+pub mod cluster;
 pub mod frame;
 pub mod udp;
