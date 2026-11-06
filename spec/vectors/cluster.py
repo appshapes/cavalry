@@ -451,6 +451,22 @@ def nlt(log_leadership_term_id, next_leadership_term_id, next_term_base_log_posi
             "log_position": log_position}
 
 
+def replay_end(terms, position):
+    """spec/cluster.md, "Messages outside an election": the leader's replay for a position begins in
+    the recording of the term that begins at or below the position and ends above it (an open
+    term, end −1, ends above every position), and a replication's replays end at the first term
+    base log position above the position; −1 when the position lies in the leader's open term,
+    a catch-up that follows the live recording. `terms` is the leader's log as [term, base, end]."""
+    holder = next((t for t in terms if t[1] <= position and (t[2] == NULL or position < t[2])), None)
+    if holder is None:
+        return {"term": NULL, "end_position": NULL}
+    above = [t[1] for t in terms if t[1] > position]
+    return {"term": holder[0], "end_position": min(above) if above else NULL}
+
+
+LEADER_TERMS = [[2, 0, 200], [3, 200, 500], [4, 500, 1000], [5, 1000, NULL]]
+
+
 def entry_position(position, length, mtu):
     """spec/cluster.md, "The log": the position after an entry of `length` bytes that begins at
     `position`, fragments of mtu − 32 and a last of the remainder, each frame aligned to 32."""
@@ -582,6 +598,16 @@ VECTORS += [
     arithmetic("new-leadership-term-at-next-base-no-end-waits", "new-leadership-term",
                {"log_leadership_term_id": 3, "append_position": 500, "message": nlt(3, 4, 500, NULL, 5, 1000, 5000)},
                new_leadership_term_action(3, 500, nlt(3, 4, 500, NULL, 5, 1000, 5000))),
+    arithmetic("replay-end-mid-term", "replay-end", {"terms": LEADER_TERMS, "position": 960},
+               replay_end(LEADER_TERMS, 960)),
+    arithmetic("replay-end-at-term-boundary", "replay-end", {"terms": LEADER_TERMS, "position": 200},
+               replay_end(LEADER_TERMS, 200)),
+    arithmetic("replay-end-at-leaders-base", "replay-end", {"terms": LEADER_TERMS, "position": 1000},
+               replay_end(LEADER_TERMS, 1000)),
+    arithmetic("replay-end-in-leaders-term", "replay-end", {"terms": LEADER_TERMS, "position": 3000},
+               replay_end(LEADER_TERMS, 3000)),
+    arithmetic("replay-end-at-log-start", "replay-end", {"terms": LEADER_TERMS, "position": 0},
+               replay_end(LEADER_TERMS, 0)),
     arithmetic("entry-position-one-frame", "entry-position",
                {"position": 65536, "length": 56, "mtu": 1408}, entry_position(65536, 56, 1408)),
     arithmetic("entry-position-aligned", "entry-position",

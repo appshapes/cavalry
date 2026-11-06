@@ -469,13 +469,13 @@ counter ("Counters").
 | 6 | leader replay | replays its own log, its recordings in position order, from its log position to its append position into its service, then goes to leader init; a leader with nothing to replay goes at once |
 | 7 | leader init | joins its log as leader for the term at its append position and goes to leader ready |
 | 8 | leader ready | sends new leadership term every leader heartbeat interval until a quorum of members has reported an append position at its log position within the leader heartbeat timeout, then appends the new leadership term event and closes the election |
-| 9 | follower log replication | replicates what it lacks of the term its append position lies in, one term at a time: it subscribes to stream 100 on its `catchup` endpoint, as state 11 does, and sends catch-up position with its append position and that endpoint, counted in `cluster.log_replications`; the leader answers with replays of the recordings of its own that cover the span from that position to the stop position, the next term base log position when the append position is below it, else the next log position ("Messages outside an election"; the `replication-stop` vectors), one `start replay` after another in position order where the span crosses a recording's end; the follower records each replay, an image of stream 100 on its `catchup` endpoint with the replay's session id, reporting append position as it goes, and goes back to canvass, removing the subscription, once the replay has reached the stop position and the commit position it was told is at or past its append position, a later new leadership term carrying it on to the next term. A commit position or a new leadership term from its leader extends its deadline by the leader heartbeat timeout; a replication whose deadline passes fails the election, counted in `cluster.log_replications_unavailable`, the leader's recordings not holding the span, purged by retention, being the one cause of this version, and the member begins again at init |
+| 9 | follower log replication | replicates what it lacks of the term its append position lies in, one term at a time: it subscribes to stream 100 on its `catchup` endpoint, as state 11 does, and sends catch-up position with its append position and that endpoint, counted in `cluster.log_replications`; the leader answers with replays of the recordings of its own that cover the span from that position to the stop position, the next term base log position when the append position is below it, else the next log position ("Messages outside an election"; the `replication-stop` vectors), one `start replay` after another in position order where the span crosses a recording's end; the follower records each replay, an image of stream 100 on its `catchup` endpoint with the replay's session id, whose join position must be its append position, an image that joins elsewhere failing the election, counted in `cluster.join_position_mismatches`, reporting append position as it goes, and goes back to canvass, removing the subscription, once the replay has reached the stop position and the commit position it was told is at or past its append position, a later new leadership term carrying it on to the next term. A commit position or a new leadership term from its leader extends its deadline by the leader heartbeat timeout; a replication whose deadline passes fails the election, counted in `cluster.log_replications_unavailable`, the leader's recordings not holding the span, purged by retention, being the one cause of this version, and the member begins again at init |
 | 10 | follower replay | replays its own log, its recordings in position order, from its log position to the lesser of its append position and the commit position it was told into its service, then goes to follower catch-up init when its append position is behind the leader's log position, else to follower log init; a replay that ends short of its append position goes back to canvass |
 | 11 | follower catch-up init | subscribes to the log stream on its `catchup` endpoint and sends catch-up position with that endpoint; goes to follower catch-up await once sent, and fails the election when it cannot send within the leader heartbeat timeout |
-| 12 | follower catch-up await | waits for the image of the leader's catch-up replay, the one image of stream 100 on its `catchup` endpoint, whatever its session id, since a replay's publication has a session id of its own (`spec/client-protocol.md`, "Commands", start replay), and goes to follower catch-up when it has joined it; fails the election when none comes within the leader heartbeat timeout |
+| 12 | follower catch-up await | waits for the image of the leader's catch-up replay, the one image of stream 100 on its `catchup` endpoint, whatever its session id, since a replay's publication has a session id of its own (`spec/client-protocol.md`, "Commands", start replay), checks that the image's join position, the position its first frame has, is its append position, and goes to follower catch-up when it has joined it; an image that joins elsewhere, a stale replay's among them, fails the election, counted in `cluster.join_position_mismatches`, and so does no image within the leader heartbeat timeout |
 | 13 | follower catch-up | records the catch-up replay, reporting its append position, the contiguous end, with the catch-up flag, and adds its `log` endpoint's live subscription once its append position is within the live-add window of the leader's, the lesser of term length ÷ 4 and 1,048,576 bytes; the live image's recording begins at the live recording's start, the position the follower joined the live log at, which lies at or past its append position, so that the two recordings overlap from there and the append position follows the replay until it reaches the live recording's start and the live recording from then; goes to follower log init once its append position has reached the live recording's start and the commit position it was told, and the leader has sent stop catch-up, which it sends when the follower's append position reaches its log position; fails the election when the catch-up makes no progress for the leader heartbeat timeout |
 | 14 | follower log init | subscribes to the log stream on its `log` endpoint when it has not, and goes to follower log await; one already subscribed goes to follower ready |
-| 15 | follower log await | waits for the live image by the log session id, joins it at its append position, and goes to follower ready; fails the election when none comes within the leader heartbeat timeout |
+| 15 | follower log await | waits for the live image by the log session id, checks that its join position is its append position, joins it there and goes to follower ready; an image that joins elsewhere, the leader having appended past the follower's position while it subscribed, fails the election, counted in `cluster.join_position_mismatches`, so that the member canvasses again and catches up, and so does no image within the leader heartbeat timeout |
 | 16 | follower ready | sends append position to the leader and closes the election; fails it when it cannot send within the leader heartbeat timeout |
 | 17 | closed | the election is over: the leader leads the term, a follower follows it |
 
@@ -493,11 +493,15 @@ at least the reader's is answered for, in canvass, nominate, candidate ballot or
 follower ballot, and the reader goes to follower ballot. Vote is read by a candidate in
 candidate ballot for its own candidate term and recorded against the voter. New
 leadership term for the reader's candidate term, in follower ballot or candidate
-ballot, or in canvass for any term, makes the sender the reader's leader and the term
-its term: when the reader's log leadership term id is the message's, a reader whose
-append position is above a next term base log position the message carries, one not
-−1, truncates its log to that position first, the uncommitted tail of an older term,
-and a message whose next term base log position is −1 truncates nothing; a reader
+ballot, or in canvass for any term, is read against the reader's log leadership term
+id: when the two differ the reader goes back to canvass and takes neither the sender
+as its leader nor the term; when they are the same the sender becomes the reader's
+leader and the term its term, and a reader whose append position is above a next
+term base log position the message carries, one not −1, truncates its log to that
+position first, the uncommitted tail of an older term, `truncate recording` on the
+recording that begins at or below the position and ends above it and `purge
+recording` on every recording that begins above it, and a message whose next term
+base log position is −1 truncates nothing; a reader
 whose append position is then below the leader's term base log position goes to
 follower log replication with the stop position the message gives, the next term
 base log position when its append position is below it, else the next log position
@@ -506,19 +510,21 @@ base log position with no next log position carried waits for a later new leader
 term; one whose message carries no next leadership term id, −1, fails its election,
 counted in `cluster.elections_failed`, since the leader's log does not reach its
 position; and a reader whose append position is at or above the term base log
-position goes to follower replay; when the log leadership term ids differ the reader
-goes back to canvass. The `new-leadership-term` vectors pin each case. Append position is recorded by a candidate or leader against the follower.
+position goes to follower replay. The `new-leadership-term` vectors pin each case. Append position is recorded by a candidate or leader against the follower.
 Commit position from the reader's leader raises the commit position it was told.
 
 **Messages outside an election, and the leader's in states 5 to 8.** A leader reads
 append position and records it; catch-up position and starts a replay, a `start
-replay` of the recording of its own that holds the position asked, from that position,
-on stream 100 to `cavalry:udp?endpoint=<the follower's catchup endpoint>`, when the
-follower has none running, and tells the two requests apart by the position: one
-below the leader's term base log position is a replication (state 9), whose replays
-end at the stop position of the term that holds the position, the next term's base,
-the leader starting the next covering recording's replay from where the last ended
-when the span crosses a recording's end, counted in `cluster.log_replications`; one at
+replay` of a recording of its own on stream 100 to `cavalry:udp?endpoint=<the
+follower's catchup endpoint>`, when the follower has none running, a replay counting
+as running from its `replay ready` until its `replay stopped`
+(`spec/client-protocol.md`, "Events"). The replay begins at the position asked in the
+recording that begins at or below that position and ends above it, and the leader
+tells the two requests apart by the position: one below the leader's term base log
+position is a replication (state 9), whose replays end at the first term base log
+position in the leader's log above the position asked, the leader starting the next
+recording's replay from where the last ended when the span crosses a recording's end,
+counted in `cluster.log_replications`, the `replay-end` vectors pinning both; one at
 or above it is a catch-up within the leader's term (state 11), whose replay follows
 the live recording, counted in `cluster.catchups`; a position the leader's recordings
 do not hold, purged by retention (`spec/client-protocol.md`, "Commands", purge
@@ -527,7 +533,9 @@ publication has a session id of its own in this version, so the follower's image
 it is on its `catchup` endpoint alone; and sends stop catch-up, stopping the replay with `stop replay`, when a
 follower whose position was appended from the replay reports an append position at or
 past the leader's log position. A leader that reads canvass position for a term at or
-below its own answers with new leadership term for the reported term, its next fields
+below its own first stops any replay it has running to that follower with `stop
+replay`, so that a follower that failed and canvasses again never joins a stale
+replay, then answers with new leadership term for the reported term, its next fields
 as the table gives them, the three −1 when the reported term is its own, so that a
 restarted member finds the leader and truncates no more than it must; a follower that reads stop catch-up for its term
 removes its catch-up subscription. Any member that reads request vote or commit
@@ -650,6 +658,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.ingress_ignored` | a session message, keepalive or close the leader ignored, for a term not its own or a session not open |
 | `cluster.log_replications` | a replication begun: on the follower, a catch-up position sent from state 9; on the leader, a replay started with a stop position |
 | `cluster.log_replications_unavailable` | a replication that made no progress for the leader heartbeat timeout, the leader's recordings not holding the position asked, so the member failed its election |
+| `cluster.join_position_mismatches` | an image of a replay or of the live log that joined at a position other than the member's append position, so the member failed its election (states 9, 12 and 15) |
 | `cluster.sessions_timed_out` | a session closed for the session timeout |
 | `cluster.catchups` | a catch-up begun: on the follower, a catch-up position sent; on the leader, a replay started |
 | `cluster.messages_rejected` | a message of this page a reader rejected, for any reason of "What a reader rejects" |
@@ -731,8 +740,10 @@ encoder. Each vector has a `kind`:
   quorum candidate from the members' reports; the stop position of a follower's log
   replication from its append position and the next term's base and end positions;
   what a reader of new leadership term does with its log, truncate, replicate, replay,
-  wait or fail, from the message's fields and its own; the position after an entry
-  from the position it begins at, its length and the MTU length.
+  wait or fail, from the message's fields and its own; which of the leader's
+  recordings a replay begins in and where it ends, from the leader's terms and the
+  position asked; the position after an entry from the position it begins at, its
+  length and the MTU length.
 
 A conforming implementation decodes every valid vector to its fields, encodes those
 fields to the same bytes, parses every members string, computes every arithmetic
