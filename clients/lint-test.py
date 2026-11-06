@@ -27,7 +27,11 @@ and `.Lock()`, `.RLock()`, `.TryLock()` and `.TryRLock()` on a field), waits wit
 fails naming the function and the form;
 building the `*HandlerError` in `Poll` after the shim's poll call passes and before it
 fails; a panic in the exported trampoline fails naming `trampoline.go`; a lock in
-`shim.c`'s trampoline fails; a module with none of the per-message functions fails, and a
+`shim.c`'s trampoline fails, and one in the helper that keeps a per-message call's error
+fails each shim call that keeps one; a function that reads the thread's error through
+`check` or `lastError` without `runtime.LockOSThread()` and its deferred unlock before
+its first ABI call fails, whether it lost the lock, takes it after the call, has no
+deferred unlock or is new; a module with none of the per-message functions fails, and a
 missing `cavalry.go` says to generate.
 """
 
@@ -471,10 +475,50 @@ class Clients(unittest.TestCase):
     def test_a_call_to_last_error_in_go_fails(self):
         self.edit_go("func (p *Publication) TryClaim(length int) int64 {\n",
                      "func (p *Publication) TryClaim(length int) int64 {\n\t_ = lastError(\"x\")\n")
+        builds, thread = lint.findings(self.tmp)
+        self.assertIn("Publication.TryClaim", builds)
+        self.assertIn("calls lastError", builds)
+        self.assertIn("builds Error", builds)
+        # It reads the thread's error too, without the lock a per-message call never takes.
+        self.assertIn("Publication.TryClaim", thread)
+        self.assertIn("reads the thread's error through lastError", thread)
+
+    # The thread's error (clients/go/README.md, "The thread's error"): a function that reads
+    # it through check or lastError holds the goroutine to its OS thread first.
+
+    def test_a_go_add_without_the_thread_lock_fails(self):
+        self.edit_go("func (c *Client) AddPublication(channel string, streamID int32) (*Publication, error) {\n"
+                     "\truntime.LockOSThread()\n\tdefer runtime.UnlockOSThread()\n",
+                     "func (c *Client) AddPublication(channel string, streamID int32) (*Publication, error) {\n")
         [finding] = lint.findings(self.tmp)
-        self.assertIn("Publication.TryClaim", finding)
-        self.assertIn("calls lastError", finding)
-        self.assertIn("builds Error", finding)
+        self.assertIn("Client.AddPublication", finding)
+        self.assertIn("reads the thread's error through check", finding)
+        self.assertIn("runtime.LockOSThread()", finding)
+        self.assertIn("clients/go/README.md#the-threads-error", finding)
+
+    def test_a_go_close_that_locks_after_its_abi_call_fails(self):
+        self.edit_go("\truntime.LockOSThread()\n\tdefer runtime.UnlockOSThread()\n"
+                     "\tif result := C.cavalry_subscription_close(s.handle); result != 0 {\n",
+                     "\tresult := C.cavalry_subscription_close(s.handle)\n"
+                     "\truntime.LockOSThread()\n\tdefer runtime.UnlockOSThread()\n\tif result != 0 {\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Subscription.Close", finding)
+        self.assertIn("reads the thread's error through lastError", finding)
+
+    def test_a_new_go_function_that_reads_the_error_without_the_lock_fails(self):
+        with open(self.go, "a", encoding="utf-8") as f:
+            f.write("\nfunc (c *Client) Probe() error {\n"
+                    "\treturn check(\"cavalry_probe\", C.cavalry_probe(c.handle))\n}\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Client.Probe", finding)
+        self.assertIn("through check", finding)
+
+    def test_the_go_thread_lock_needs_its_deferred_unlock(self):
+        self.edit_go("\truntime.LockOSThread()\n\tdefer runtime.UnlockOSThread()\n"
+                     "\tvar k C.cavalry_replay_constants_t\n",
+                     "\truntime.LockOSThread()\n\tvar k C.cavalry_replay_constants_t\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("newReplay", finding)
 
     def test_a_panic_in_the_go_trampoline_fails(self):
         self.edit_go("\ts.deliver(body)\n", "\tpanic(\"x\")\n\ts.deliver(body)\n", file=self.go_trampoline)
@@ -490,6 +534,15 @@ class Clients(unittest.TestCase):
         [finding] = lint.findings(self.tmp)
         self.assertIn("cavalry_go_trampoline", finding)
         self.assertIn("pthread_mutex_*", finding)
+
+    def test_a_lock_where_the_go_shim_keeps_an_error_fails_every_call_that_keeps_one(self):
+        self.edit_go("  error->code = (int32_t) cavalry_errcode();\n",
+                     "  pthread_mutex_lock(&lock);\n  error->code = (int32_t) cavalry_errcode();\n", file=self.go_shim)
+        found = lint.findings(self.tmp)
+        for name in ("cavalry_go_try_claim", "cavalry_go_set_reserved_value", "cavalry_go_commit", "cavalry_go_abort",
+                     "cavalry_go_offer", "cavalry_go_poll"):
+            self.assertTrue(any(f"go: {name} " in f and "calls cavalry_go_keep" in f and "pthread_mutex_*" in f
+                                for f in found), (name, found))
 
     def test_a_go_module_without_the_per_message_functions_fails(self):
         with open(self.go, "w", encoding="utf-8") as f:

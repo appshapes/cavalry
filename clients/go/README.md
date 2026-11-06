@@ -47,6 +47,11 @@ before it returns.
   `*HandlerError` once the ABI has returned, with the first panic's value as its
   `Cause` and the counts. A panic must not unwind through the ABI's frames, so the
   trampoline recovers every one.
+- Never read the ABI's error on another thread than the failing call's. The error is
+  the calling OS thread's and Go moves goroutines between threads, so a call that is
+  not a message holds its goroutine's thread from the call to the read, and a
+  per-message call's error is copied in the C call that failed ("The thread's
+  error"). `just lint` fails a function that reads the error without the lock.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `Close` forgets the handle once the ABI's close has returned. The one
   exception is a subscription's close from inside a handler of its own poll, which the
@@ -132,16 +137,19 @@ unpinned); every CI run prints its runners'.
 
 ### The call
 
-Each per-message function is one cgo call into the ABI, with its arguments as they
-are: the handle as the C pointer the ABI returned, the claim struct as the address of
-the one `cavalry_buffer_claim_t` the publication keeps, the offered bytes as the
-address of the slice's first element. A cgo call switches the goroutine to the
-system stack and back, which Go's runtime does in 14 ns on this laptop for a call
-that returns at once (`cavalry_abi_version`, 5,000,000 calls), and cgo's pointer
-check, on by default, reads each pointer argument once. The ABI's reply
-comes back as the Go integer of the C type. An add, a command or a close waits on the
-driver for up to 10 s (`spec/c-abi.md`, "Threads"); the goroutine blocks in the call
-and the scheduler runs the program's other goroutines meanwhile.
+Each per-message function is one cgo call, to a function of `shim.c` that makes the
+one ABI call with the arguments as they are: the handle as the C pointer the ABI
+returned, the claim struct as the address of the one `cavalry_buffer_claim_t` the
+publication keeps, the offered bytes as the address of the slice's first element. The
+shim's last argument is the address of the one `cavalry_go_error_t` the handle keeps,
+which the shim writes only when the call failed ("The thread's error"); a call that
+succeeds costs one C function call and one comparison more than the ABI's own. A cgo
+call switches the goroutine to the system stack and back, which Go's runtime does in
+14 ns on this laptop for a call that returns at once (`cavalry_abi_version`, 5,000,000
+calls), and cgo's pointer check, on by default, reads each pointer argument once. The
+ABI's reply comes back as the Go integer of the C type. An add, a command or a close
+waits on the driver for up to 10 s (`spec/c-abi.md`, "Threads"); the goroutine blocks
+in the call and the scheduler runs the program's other goroutines meanwhile.
 
 ### Threads
 
@@ -152,6 +160,37 @@ shared, since each of its calls is one ABI call that the ABI serialises. The tab
 trampoline reads subscriptions from is written under a lock when a subscription is
 added or closed, never on a message's path, and read with one atomic load per
 fragment.
+
+### The thread's error
+
+The ABI keeps one error per OS thread: `cavalry_errcode` and `cavalry_errmsg` describe
+the last call that failed on the calling thread, and a success clears nothing
+(`spec/c-abi.md`, "Error codes"). Go runs a goroutine on whichever OS thread its
+scheduler picks, and may run the goroutine's next cgo call on another thread than its
+last. A read of the error in a second cgo call, after the call that failed, could then
+read another thread's failure, or none. The client never reads the error that way:
+
+- A call that is not a message (`NewClient`, an add, a command, a close, `Fault`,
+  `ImageAt`) holds the goroutine to its OS thread with `runtime.LockOSThread` from
+  before its first ABI call until it returns. The `*Error` it returns is read on the
+  thread of the call that failed. The lock nests, so it holds inside a fragment
+  handler too. `clients/lint.py` fails a function of `cavalry.go` that reads the
+  error through `check` or `lastError` without `runtime.LockOSThread()` and a
+  deferred `runtime.UnlockOSThread()` before its first ABI call.
+- A per-message call goes through a function of `shim.c`. When the ABI call failed,
+  the shim copies the code, the message and the ABI function's name into the one
+  `cavalry_go_error_t` the handle keeps, in the same C call, so on the same thread.
+  `Publication.Err` and `Subscription.Err` return that copy as an `*Error`, kept until
+  the handle's next failure, as the ABI keeps a thread's; they return `nil` before
+  the first failure. The copy is bounded by the struct, 48 bytes of function name and
+  512 bytes of message, the size of the ABI's own buffer; it allocates nothing, and a
+  call that succeeds copies nothing. `Err` builds the `*Error` when it is called.
+- `Errcode` and `Errmsg` are the ABI's two functions as they are: they read the
+  calling thread's error. They describe the goroutine's own failure in two places
+  only. One is inside a fragment handler, where cgo holds the goroutine to the poll's
+  thread for the call, as after a `Header.Values` that returned `false`. The other is
+  between `runtime.LockOSThread` and `runtime.UnlockOSThread` around both the failing
+  call and the read.
 
 ### The call-back, by construction
 

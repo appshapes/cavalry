@@ -710,8 +710,52 @@ class GoPackage(unittest.TestCase):
                       files["shim.c"])
         self.assertEqual(files["shim.c"].count("cavalry_subscription_poll("), 1)
         self.assertIn("//export cavalryGoFragment\n", files["trampoline.go"])
-        self.assertIn("C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit))", files["cavalry.go"])
+        self.assertIn("C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)", files["cavalry.go"])
         self.assertNotIn("C.cavalry_subscription_poll(", files["cavalry.go"])
+
+    def test_each_per_message_call_keeps_its_error_in_the_c_call_that_failed(self):
+        """The ABI's error is the calling thread's and Go may run a goroutine's next cgo
+        call on another thread (clients/go/README.md, "The thread's error"), so the Go code
+        reaches each per-message function through a function of shim.c that copies the
+        thread's error into the handle when the call failed, and reads no error itself."""
+        files = gen_go.write_go(self.header)
+        shim, code = files["shim.c"], files["cavalry.go"]
+        calls = {"cavalry_go_try_claim": ("cavalry_publication_try_claim", "position == CAVALRY_PUBLICATION_ERROR"),
+                 "cavalry_go_offer": ("cavalry_publication_offer", "position == CAVALRY_PUBLICATION_ERROR"),
+                 "cavalry_go_commit": ("cavalry_buffer_claim_commit", "position < 0"),
+                 "cavalry_go_abort": ("cavalry_buffer_claim_abort", "position < 0"),
+                 "cavalry_go_set_reserved_value": ("cavalry_buffer_claim_set_reserved_value", "result != 0"),
+                 "cavalry_go_poll": ("cavalry_subscription_poll", "count < 0")}
+        for shim_call, (abi, failed) in calls.items():
+            body = shim.split(f" {shim_call}(", 1)[1].split("\n}\n", 1)[0]
+            self.assertEqual(body.count(f"{abi}("), 1, shim_call)
+            self.assertIn(f"if ({failed}) {{\n    cavalry_go_keep(error, \"{abi}\");\n  }}", body)
+            self.assertIn(f"C.{shim_call}(", code)
+            self.assertNotIn(f"C.{abi}(", code)
+            self.assertIn(f"{shim_call}(", files["shim.h"])
+        self.assertIn("error->code = (int32_t) cavalry_errcode();", shim)
+        self.assertIn("cavalry_go_copy(error->message, sizeof error->message, cavalry_errmsg());", shim)
+        self.assertIn("char message[512];", files["shim.h"])
+        for method in ("Publication.TryClaim", "Publication.Offer", "Publication.Commit", "Publication.Abort",
+                       "Publication.SetReservedValue", "Subscription.Poll"):
+            receiver, name = method.split(".")
+            body = code.split(f") {name}(", 1)[1].split("\n}\n", 1)[0]
+            self.assertNotIn("cavalry_errcode", body, method)
+            self.assertNotIn("Errcode", body, method)
+            self.assertIn(f"&{receiver[0].lower()}.err)", body, method)
+
+    def test_every_call_that_reads_the_threads_error_holds_its_os_thread(self):
+        """The committed module passes lint.py's thread rule, and each function that reads
+        the error through check or lastError begins its ABI work under the lock."""
+        code = gen_go.write_go(self.header)["cavalry.go"]
+        module = lint.GoModule([("cavalry.go", code)])
+        self.assertEqual(lint.go_thread_findings("go", module, ["check", "lastError"]), [])
+        readers = [label for label, (_, _, body, _, _) in module.functions.items()
+                   if label not in ("check", "lastError") and re.search(r"(?<![\w.])(check|lastError)\(", body)]
+        self.assertGreaterEqual(len(readers), 20, readers)
+        for name in ("NewClient", "Client.Close", "Client.AddSubscription", "Subscription.Close", "Subscription.Fault",
+                     "newPublication", "Replay.Close"):
+            self.assertIn(name, readers)
 
     def test_handler_errors_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
         code = gen_go.write_go(self.header)["cavalry.go"]

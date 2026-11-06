@@ -1470,12 +1470,17 @@ user-visible change, added in the same commit as the change. The format follows
   result code and whose `Claim` is a `[]byte` over the log, a `Subscription` polled
   with a fragment handler that every delivered fragment reaches, the body a `[]byte`
   into the log for the call and a panic recovered and returned by `Poll` as a
-  `*HandlerError`, a `Recording` and a `Replay`; a call the ABI refuses during a claim
+  `*HandlerError`, a `Recording` and a `Replay`; a per-message call that fails keeps
+  the ABI's code and message in its handle's `Err`, copied in the C call that failed,
+  and every other call returns an `*Error` read on the OS thread of the call that
+  failed, held with `runtime.LockOSThread`, since the ABI's error is the thread's and Go
+  moves goroutines between threads; a call the ABI refuses during a claim
   or a poll leaves the client's state as it was; `just lint` regenerates the module and
   reads its per-message functions, and the functions they call, for Go's `sync`, a lock
   or a wait through a variable or a field (`.Lock()`, `.RLock()`, `.TryLock()`,
   `.TryRLock()`, `.Wait()`), `go`, channels, `select`, `panic` and `make`, `new` and
-  `append`, and the C shim's locks;
+  `append`, and the C shim's locks, and fails a function that reads the thread's error
+  without holding its thread;
   `just conformance` runs `conformance/go/`, the ten-minute path's shape through the
   client and the README's example, with a report of its one-way latency over 100,000
   messages and its allocations per message, counted exactly by `runtime.ReadMemStats`

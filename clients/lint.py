@@ -32,7 +32,12 @@ the forms are `sync`, a lock or a wait through a variable or a field on any rece
 package's own error types, and `make`, `new` and `append`, Go's allocations; the one
 error built on the per-message path is the `*HandlerError` that
 `Poll` returns after its ABI call, and `recover` in the trampoline is what keeps a panic
-from unwinding through the ABI. The C of `shim.c` is read as the Node addon's is.
+from unwinding through the ABI. The C of `shim.c` is read as the Node addon's is. Go may
+run a goroutine's next cgo call on another OS thread and the ABI's error is the calling
+thread's, so for Go it also fails any function of the package that reads that error,
+through `check` or `lastError`, without `runtime.LockOSThread()` and then
+`defer runtime.UnlockOSThread()` before its first ABI call (clients/go/README.md, "The
+thread's error").
 
 It fails on generated code under `clients/` in a language it has no rules for, and on a
 package in which it finds none of the per-message functions, so that a client cannot slip
@@ -145,12 +150,20 @@ RULES = {
             "cavalryGoFragment",
         ],
         "raise_after": ("Subscription.Poll", "C.cavalry_go_poll"),
-        # The C of shim.c: the trampoline the ABI calls and the poll that installs it.
+        # The C of shim.c: the trampoline the ABI calls, the poll that installs it, and the
+        # per-message calls that copy the thread's error into the handle when they fail.
         "shim": {
             "file": "shim.c",
-            "functions": ["cavalry_go_trampoline", "cavalry_go_poll"],
+            "functions": ["cavalry_go_trampoline", "cavalry_go_poll", "cavalry_go_try_claim",
+                          "cavalry_go_set_reserved_value", "cavalry_go_commit", "cavalry_go_abort",
+                          "cavalry_go_offer"],
             "readers": [],
         },
+        # The functions that read the calling OS thread's error (spec/c-abi.md, "Error
+        # codes"): every other function of the package that calls one holds the goroutine to
+        # its thread, `runtime.LockOSThread()` then `defer runtime.UnlockOSThread()`, before
+        # its first ABI call (clients/go/README.md, "The thread's error").
+        "thread_readers": ["check", "lastError"],
     },
 }
 HELP = "see clients/README.md, \"What every client must pass\""
@@ -651,6 +664,9 @@ GO_FORMS = (
     ("raise", re.compile(r"(?<![\w.])panic\s*\("), "panics"),
     ("alloc", re.compile(r"(?<![\w.])(?:make|new|append)\s*\("), "allocates with `make`, `new` or `append`"),
 )
+GO_THREAD_LOCK = re.compile(r"(?<![\w.])runtime\s*\.\s*LockOSThread\s*\(\s*\)\s*\n\s*"
+                            r"defer\s+runtime\s*\.\s*UnlockOSThread\s*\(\s*\)")
+GO_ABI_CALL = re.compile(r"(?<![\w.])C\s*\.\s*\w+\s*\(")
 GO_WORDS = {"if", "for", "switch", "return", "func", "defer", "go", "range", "select", "case", "len", "cap",
             "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "bool",
             "string", "byte", "rune", "any", "error", "recover", "copy", "delete", "close", "print", "println",
@@ -790,6 +806,35 @@ def go_findings(language: str, path: str, rules: dict) -> list[str]:
                     if kind == "call-allowed" and k == "raise":
                         continue
                     findings.append(f"{where} calls {what} at line {at}, and {how}: {WHY[k]}; {HELP}")
+    return findings + go_thread_findings(language, module, rules.get("thread_readers", []))
+
+
+def go_thread_findings(language: str, module: GoModule, readers) -> list[str]:
+    """Every function of the module that reads the calling thread's error through one of
+    `readers`, the readers themselves aside, takes `runtime.LockOSThread()` and then
+    defers `runtime.UnlockOSThread()` before its first ABI call and before the read: the
+    ABI's error is the calling thread's, and Go may run a goroutine's next cgo call on
+    another OS thread, so a read without the lock may describe another thread's failure
+    or none (spec/c-abi.md, "Error codes"; clients/go/README.md, "The thread's error")."""
+    if not readers:
+        return []
+    reads = re.compile(r"(?<![\w.])(" + "|".join(map(re.escape, readers)) + r")\s*\(")
+    findings = []
+    for label, (file, line, body, start, code) in module.functions.items():
+        read = reads.search(body)
+        if label in readers or read is None:
+            continue
+        abi = GO_ABI_CALL.search(body)
+        first = min(read.start(), abi.start()) if abi else read.start()
+        lock = GO_THREAD_LOCK.search(body)
+        if lock is not None and lock.start() < first:
+            continue
+        at = line_of(code, start) + body.count("\n", 0, read.start())
+        findings.append(f"{language}: {label} ({os.path.relpath(file, ROOT)}:{line}) reads the thread's error through "
+                        f"{read.group(1)} at line {at} without holding its OS thread from before its first ABI call: "
+                        f"the ABI's error is the calling thread's, and Go may run the goroutine's next cgo call on "
+                        f"another thread; begin the function with `runtime.LockOSThread()` and `defer "
+                        f"runtime.UnlockOSThread()`; see clients/go/README.md#the-threads-error")
     return findings
 
 

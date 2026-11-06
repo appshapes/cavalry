@@ -10,7 +10,8 @@
 // checks where a handler's panic goes, in both orders of an error and a string, that a
 // header kept past its call reads as invalid and a committed claim's slice is nil, and the
 // refusals of spec/c-abi.md, "Calls during a claim or a poll", a close from inside the
-// handler included, on stream 1003 (edges); checks that a reserved value beyond 2^53 reaches
+// handler included, with each per-message refusal's error in its handle's Err and a refused
+// add's in its *Error, on stream 1003 (edges); checks that a reserved value beyond 2^53 reaches
 // the handler exactly on stream 1005 (reservedValues); checks that a closed subscription's
 // slot in the table is freed (stateFreed); does the same 1,000 over cavalry:udp on the
 // loopback; and replays the recording onto stream 2001, each frame at the position the
@@ -186,12 +187,21 @@ func (r *receiver) expectNoMore() {
 	}
 }
 
+// codeOf is the ABI's code of err, an *Error, or 0.
+func codeOf(err error) int32 {
+	var abi *cavalry.Error
+	if errors.As(err, &abi) {
+		return abi.Code
+	}
+	return 0
+}
+
 // refused handles a claim refused with position, below zero: fail at once on a code that
-// does not pass, ERROR with the ABI's error, CLOSED or MAX_POSITION_EXCEEDED, or once the
-// round's 10 s have passed, saying how far the round got; else return, to claim again.
-func refused(name string, position int64, sent int, until time.Time, total int) {
+// does not pass, ERROR with the publication's Err, CLOSED or MAX_POSITION_EXCEEDED, or once
+// the round's 10 s have passed, saying how far the round got; else return, to claim again.
+func refused(name string, publication *cavalry.Publication, position int64, sent int, until time.Time, total int) {
 	if position == cavalry.PublicationError {
-		fail("%s: cavalry_publication_try_claim failed with error %d: %s", name, cavalry.Errcode(), cavalry.Errmsg())
+		fail("%s: TryClaim returned ERROR: %v", name, publication.Err())
 	}
 	if position == cavalry.PublicationClosed || position == cavalry.PublicationMaxPositionExceeded {
 		fail("%s: TryClaim returned %s (%d) after %d of %d messages", name, codeName(position), position, sent, total)
@@ -210,8 +220,8 @@ func pollOrFail(name string, subscription *cavalry.Subscription, handler cavalry
 	}
 	if count < 0 {
 		code, sessionID, position := must3(subscription.Fault())
-		fail("%s: poll stopped on fault %d of session %d at position %d after %d of %d messages; %s",
-			name, code, sessionID, position, received, total, cavalry.Errmsg())
+		fail("%s: poll stopped on fault %d of session %d at position %d after %d of %d messages: %v",
+			name, code, sessionID, position, received, total, subscription.Err())
 	}
 	return count
 }
@@ -238,7 +248,7 @@ func publishAndReceive(publication *cavalry.Publication, r *receiver) {
 		r.takeConstants()
 		position := publication.TryClaim(bodyLength)
 		if position < 0 {
-			refused(r.name, position, i, until, messages)
+			refused(r.name, publication, position, i, until, messages)
 			continue
 		}
 		writeMessage(publication.Claim, i)
@@ -292,7 +302,7 @@ func claimOrFail(name string, publication *cavalry.Publication, sent int) int64 
 		if position >= 0 {
 			return position
 		}
-		refused(name, position, sent, until, sent+1)
+		refused(name, publication, position, sent, until, sent+1)
 	}
 }
 
@@ -314,6 +324,10 @@ func edges(client *cavalry.Client) {
 	var seen []int
 	unexpected := func(body []byte, header *cavalry.Header) {
 		fail("%s: a fragment the test did not expect, after %v", name, seen)
+	}
+	if publication.Err() != nil || subscription.Err() != nil {
+		fail("%s: a new publication's Err is %v and a new subscription's %v; expected nil before any failure", name,
+			publication.Err(), subscription.Err())
 	}
 
 	until := deadline()
@@ -421,9 +435,12 @@ func edges(client *cavalry.Client) {
 		offerOrFail(name, publication, message(i), i)
 	}
 	var outer []int
+	// The refused poll's error twice: kept in the subscription by the shim, and read as
+	// the thread's, which a handler may, since cgo holds it to the poll's thread.
 	type nestedResult struct {
-		count int
-		code  int32
+		count  int
+		kept   int32
+		thread int32
 	}
 	var nested []nestedResult
 	nestedHandler := func(body []byte, header *cavalry.Header) {
@@ -432,7 +449,7 @@ func edges(client *cavalry.Client) {
 	outerHandler := func(body []byte, header *cavalry.Header) {
 		outer = append(outer, indexOf(body))
 		count := must(subscription.Poll(nestedHandler, 10))
-		nested = append(nested, nestedResult{count, cavalry.Errcode()})
+		nested = append(nested, nestedResult{count, codeOf(subscription.Err()), cavalry.Errcode()})
 	}
 	until = deadline()
 	for len(outer) < 3 {
@@ -441,23 +458,38 @@ func edges(client *cavalry.Client) {
 			fail("%s: received messages %v of 13 to 15 in %v", name, outer, wait)
 		}
 	}
-	if !slices.Equal(outer, []int{13, 14, 15}) || !slices.Equal(nested, []nestedResult{{-1, cavalry.ErrPolling}, {-1, cavalry.ErrPolling}, {-1, cavalry.ErrPolling}}) {
-		fail("%s: the outer handler saw %v and the polls from inside it returned %v; expected messages 13 to 15, and -1 "+
-			"with ErrPolling (%d) each time", name, outer, nested, cavalry.ErrPolling)
+	refusedPoll := nestedResult{-1, cavalry.ErrPolling, cavalry.ErrPolling}
+	if !slices.Equal(outer, []int{13, 14, 15}) || !slices.Equal(nested, []nestedResult{refusedPoll, refusedPoll, refusedPoll}) {
+		fail("%s: the outer handler saw %v and the polls from inside it returned %v (the count, Err's code, Errcode); "+
+			"expected messages 13 to 15, and -1 with ErrPolling (%d) each time", name, outer, nested, cavalry.ErrPolling)
+	}
+	var abi *cavalry.Error
+	if !errors.As(subscription.Err(), &abi) || abi.Fn != "cavalry_subscription_poll" || !strings.Contains(abi.Message, "(polling)") {
+		fail("%s: after the refused polls the subscription's Err is %v; expected the refusal of cavalry_subscription_poll, "+
+			"kept until the next failure", name, subscription.Err())
 	}
 
 	position = claimOrFail(name, publication, 16)
 	firstClaim := publication.Claim
 	binary.LittleEndian.PutUint64(firstClaim, 16)
 	second := publication.TryClaim(bodyLength)
-	code := cavalry.Errcode()
-	if second != cavalry.PublicationError || code != cavalry.ErrClaimOutstanding || len(publication.Claim) != len(firstClaim) ||
-		&publication.Claim[0] != &firstClaim[0] {
-		fail("%s: a TryClaim with a claim outstanding returned %s with error %d, and Claim is %v; expected ERROR with "+
-			"ErrClaimOutstanding and the outstanding claim's slice", name, codeName(second), code, publication.Claim)
+	secondErr := publication.Err()
+	if second != cavalry.PublicationError || !errors.As(secondErr, &abi) || abi.Fn != "cavalry_publication_try_claim" ||
+		abi.Code != cavalry.ErrClaimOutstanding || !strings.Contains(abi.Message, "(claim-outstanding)") ||
+		len(publication.Claim) != len(firstClaim) || &publication.Claim[0] != &firstClaim[0] {
+		fail("%s: a TryClaim with a claim outstanding returned %s with Err %v, and Claim is %v; expected ERROR with "+
+			"cavalry_publication_try_claim's ErrClaimOutstanding and the outstanding claim's slice", name, codeName(second),
+			secondErr, publication.Claim)
 	}
-	if publication.Commit() != position || publication.Claim != nil {
-		fail("%s: the outstanding claim's commit did not return its position %d and set Claim to nil", name, position)
+	if publication.Commit() != position || publication.Claim != nil || publication.Err().Error() != secondErr.Error() {
+		fail("%s: the outstanding claim's commit did not return its position %d, set Claim to nil and keep Err, %v", name,
+			position, publication.Err())
+	}
+	// The struct's claim is committed: a second commit is the ABI's NO_CLAIM, in Err.
+	if publication.Commit() != -1 || !errors.As(publication.Err(), &abi) || abi.Fn != "cavalry_buffer_claim_commit" ||
+		abi.Code != cavalry.ErrNoClaim {
+		fail("%s: a second commit of a committed claim left Err %v; expected cavalry_buffer_claim_commit's ErrNoClaim", name,
+			publication.Err())
 	}
 	var received []int
 	index := func(body []byte, header *cavalry.Header) { received = append(received, indexOf(body)) }
@@ -494,7 +526,7 @@ func edges(client *cavalry.Client) {
 			fail("%s: message 17 did not arrive in %v", name, wait)
 		}
 	}
-	var abi *cavalry.Error
+	abi = nil
 	if !errors.As(closeErr, &abi) || abi.Code != cavalry.ErrPolling || subscription.IsClosed() {
 		fail("%s: a close from inside the handler returned %v and IsClosed is %v; expected *Error with ErrPolling and the "+
 			"subscription open", name, closeErr, subscription.IsClosed())
@@ -516,11 +548,22 @@ func edges(client *cavalry.Client) {
 			subscription.IsClosed(), cavalry.Registered(), registered)
 	}
 	mustOK(publication.Close())
-	say("%s: a poll from inside a handler of its own subscription returned -1 with ErrPolling and the outer handler saw "+
-		"messages 13 to 15; a TryClaim with a claim outstanding returned ERROR with ErrClaimOutstanding, Claim stayed the "+
-		"first slice and its commit set it to nil; a close with a claim outstanding set Claim to nil; a close from inside "+
-		"the handler returned *Error with ErrPolling, kept the subscription open for message 18, and the close after the "+
-		"poll freed its slot", name)
+
+	// A call that is not a message reads its error on the thread of the call that failed:
+	// an add whose channel is not UTF-8, which the ABI refuses before the driver
+	// (spec/c-abi.md, "Strings").
+	abi = nil
+	if _, err := client.AddPublication("cavalry:ipc\xff", stream+2); !errors.As(err, &abi) ||
+		abi.Fn != "cavalry_add_publication" || abi.Code != cavalry.ErrNotUTF8 || abi.Message == "" {
+		fail("%s: an add whose channel is not UTF-8 returned %v; expected *Error with cavalry_add_publication's "+
+			"ErrNotUTF8 and its message", name, err)
+	}
+	say("%s: a poll from inside a handler of its own subscription returned -1 with ErrPolling, in the subscription's "+
+		"Err and the handler's Errcode, and the outer handler saw messages 13 to 15; a TryClaim with a claim outstanding "+
+		"returned ERROR with ErrClaimOutstanding in Err, Claim stayed the first slice and its commit set it to nil; a "+
+		"second commit left ErrNoClaim in Err; a close with a claim outstanding set Claim to nil; a close from inside the "+
+		"handler returned *Error with ErrPolling, kept the subscription open for message 18, and the close after the poll "+
+		"freed its slot; an add whose channel is not UTF-8 returned *Error with ErrNotUTF8", name)
 }
 
 func rangeOf(from, to int) []int {
@@ -554,11 +597,11 @@ func reservedValues(client *cavalry.Client) {
 			if position >= 0 {
 				break
 			}
-			refused(name, position, i, until, len(values))
+			refused(name, publication, position, i, until, len(values))
 		}
 		binary.LittleEndian.PutUint64(publication.Claim, uint64(i))
 		if publication.SetReservedValue(value) != 0 {
-			fail("%s: SetReservedValue(%d) failed with error %d: %s", name, value, cavalry.Errcode(), cavalry.Errmsg())
+			fail("%s: SetReservedValue(%d) failed: %v", name, value, publication.Err())
 		}
 		publication.Commit()
 	}
@@ -600,7 +643,7 @@ func latency(client *cavalry.Client) []int64 {
 			if position >= 0 {
 				break
 			}
-			refused(name, position, i, until, latencyMessages)
+			refused(name, publication, position, i, until, latencyMessages)
 			pollOrFail(name, subscription, onFragment, received, latencyMessages) // the image joins on a poll
 		}
 		binary.LittleEndian.PutUint64(publication.Claim, uint64(time.Since(start)))
@@ -650,7 +693,7 @@ func allocations(client *cavalry.Client) allocation {
 		if position >= 0 {
 			break
 		}
-		refused(name, position, 0, until, allocationMessages)
+		refused(name, publication, position, 0, until, allocationMessages)
 	}
 	copy(publication.Claim, constant)
 	publication.Commit()
@@ -669,7 +712,7 @@ func allocations(client *cavalry.Client) allocation {
 			publication.Commit()
 			sent++
 		} else {
-			refused(name, position, sent, until, allocationMessages)
+			refused(name, publication, position, sent, until, allocationMessages)
 		}
 		pollOrFail(name, subscription, count, received, allocationMessages)
 	}

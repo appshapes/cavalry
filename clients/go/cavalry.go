@@ -6,8 +6,11 @@
 // on the caller's goroutine: TryClaim, Offer, Commit, Abort, SetReservedValue, Poll and
 // Values hold invariant 2's rules, no lock, no goroutine, no channel, no allocation, no
 // panic (a handler's own panic is recovered and returned by Poll once the ABI has
-// returned), and clients/lint.py reads them for Go's forms of each. Anything that is not
-// a message, an add, a command, a close, returns an *Error with the ABI's code and message.
+// returned), and clients/lint.py reads them for Go's forms of each; a per-message call
+// that fails leaves its error in the handle's Err, copied by shim.c in the call that
+// failed. Anything that is not a message, an add, a command, a close, holds the
+// goroutine's OS thread for the call and returns an *Error with the ABI's code and
+// message, read on the thread of the call that failed.
 package cavalry
 
 /*
@@ -26,6 +29,7 @@ import "C"
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -146,10 +150,16 @@ func (e *HandlerError) Unwrap() error {
 	return nil
 }
 
+// lastError is the calling OS thread's error as an *Error. The ABI keeps an error per
+// thread (spec/c-abi.md, "Error codes") and Go may run a goroutine's next cgo call on
+// another thread, so every function that calls lastError or check holds the goroutine to
+// its thread with runtime.LockOSThread from before its first ABI call until it returns,
+// which clients/lint.py checks (README, "The thread's error").
 func lastError(fn string) *Error {
 	return &Error{Fn: fn, Code: int32(C.cavalry_errcode()), Message: C.GoString(C.cavalry_errmsg())}
 }
 
+// check is nil for a result of 0, else lastError, under lastError's rule.
 func check(fn string, result C.int) error {
 	if result != 0 {
 		return lastError(fn)
@@ -157,11 +167,27 @@ func check(fn string, result C.int) error {
 	return nil
 }
 
-// Errcode is the ABI's error code of this thread's last failed call (cavalry_errcode):
-// what a result code below zero, such as PublicationError, or a poll's -1 stands for.
+// keptError is the failure a function of shim.c copied into kept in the C call that
+// failed, as an *Error, or nil before the first failure.
+func keptError(kept *C.cavalry_go_error_t) error {
+	if kept.code == 0 {
+		return nil
+	}
+	return &Error{Fn: C.GoString(&kept.function[0]), Code: int32(kept.code), Message: C.GoString(&kept.message[0])}
+}
+
+// Errcode is the ABI's error code of the calling OS thread's last failed call
+// (cavalry_errcode). Go may run a goroutine's next cgo call on another thread, so it is
+// the code of the goroutine's own failed call only where the failing call and this read
+// run on one thread: inside a fragment handler, which cgo holds to the poll's thread, as
+// for a Header.Values that returned false, or between runtime.LockOSThread and
+// runtime.UnlockOSThread around both. A per-message call's failure is Publication.Err's
+// and Subscription.Err's, and every other call returns its *Error (README, "The
+// thread's error").
 func Errcode() int32 { return int32(C.cavalry_errcode()) }
 
-// Errmsg is the message of this thread's last failed call (cavalry_errmsg).
+// Errmsg is the message of the calling OS thread's last failed call (cavalry_errmsg),
+// under Errcode's rule.
 func Errmsg() string { return C.GoString(C.cavalry_errmsg()) }
 
 // LibraryABIVersion is the ABI version of the library this package links
@@ -250,6 +276,8 @@ type Client struct {
 // directory when dir is "": CheckABIVersion first, then cavalry_context_init_v with this
 // package's ABI version, then cavalry_init.
 func NewClient(dir string) (*Client, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := CheckABIVersion(ABIVersion); err != nil {
 		return nil, err
 	}
@@ -295,6 +323,8 @@ func (c *Client) Close() error {
 	if c.handle == nil {
 		return nil
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	err := check("cavalry_close", C.cavalry_close(c.handle))
 	c.handle = nil
 	return err
@@ -303,6 +333,8 @@ func (c *Client) Close() error {
 // AddPublication adds a publication on channel and streamID, waiting on the driver for
 // up to 10 s.
 func (c *Client) AddPublication(channel string, streamID int32) (*Publication, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
 	defer freeCString(cchannel)
 	var handle *C.cavalry_publication_t
@@ -314,6 +346,8 @@ func (c *Client) AddPublication(channel string, streamID int32) (*Publication, e
 
 // AddExclusivePublication adds a publication of its own session on channel and streamID.
 func (c *Client) AddExclusivePublication(channel string, streamID int32) (*Publication, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
 	defer freeCString(cchannel)
 	var handle *C.cavalry_publication_t
@@ -326,6 +360,8 @@ func (c *Client) AddExclusivePublication(channel string, streamID int32) (*Publi
 // AddSubscription adds a subscription on channel and streamID and registers it in the
 // table the trampoline reads.
 func (c *Client) AddSubscription(channel string, streamID int32) (*Subscription, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
 	defer freeCString(cchannel)
 	var handle *C.cavalry_subscription_t
@@ -337,6 +373,8 @@ func (c *Client) AddSubscription(channel string, streamID int32) (*Subscription,
 
 // StartRecording starts recording the live publication on channel and streamID.
 func (c *Client) StartRecording(channel string, streamID int32) (*Recording, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
 	defer freeCString(cchannel)
 	var handle *C.cavalry_recording_t
@@ -348,27 +386,37 @@ func (c *Client) StartRecording(channel string, streamID int32) (*Recording, err
 
 // StopRecording stops the recording.
 func (c *Client) StopRecording(recordingID int64) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	return check("cavalry_stop_recording", C.cavalry_stop_recording(c.handle, C.int64_t(recordingID)))
 }
 
 // TruncateRecording truncates the recording to position.
 func (c *Client) TruncateRecording(recordingID int64, position int64) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	return check("cavalry_truncate_recording", C.cavalry_truncate_recording(c.handle, C.int64_t(recordingID), C.int64_t(position)))
 }
 
 // PurgeSegments purges the recording's segments before newStartPosition.
 func (c *Client) PurgeSegments(recordingID int64, newStartPosition int64) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	return check("cavalry_purge_segments", C.cavalry_purge_segments(c.handle, C.int64_t(recordingID), C.int64_t(newStartPosition)))
 }
 
 // PurgeRecording purges the recording.
 func (c *Client) PurgeRecording(recordingID int64) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	return check("cavalry_purge_recording", C.cavalry_purge_recording(c.handle, C.int64_t(recordingID)))
 }
 
 // StartReplay replays length bytes of the recording from position onto replayStreamID
 // of channel; NullPosition and NullLength replay all of it.
 func (c *Client) StartReplay(recordingID int64, position int64, length int64, replayStreamID int32, channel string) (*Replay, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	cchannel := cString(channel)
 	defer freeCString(cchannel)
 	var handle *C.cavalry_replay_t
@@ -381,16 +429,19 @@ func (c *Client) StartReplay(recordingID int64, position int64, length int64, re
 
 // StopReplay stops the replay session.
 func (c *Client) StopReplay(replaySessionID int64) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	return check("cavalry_stop_replay", C.cavalry_stop_replay(c.handle, C.int64_t(replaySessionID)))
 }
 
 // Publication is a publication: TryClaim and Offer return the position after the frame
 // or a code below zero, never an error; Claim is the slice over the bytes the last
 // TryClaim reserved, from the one cavalry_buffer_claim_t this publication keeps, set to
-// nil by Commit, Abort and Close.
+// nil by Commit, Abort and Close. Err is the last per-message call that failed.
 type Publication struct {
 	handle *C.cavalry_publication_t
 	claim  C.cavalry_buffer_claim_t
+	err    C.cavalry_go_error_t
 
 	// Claim is the writable slice over the claimed bytes, valid until the commit or abort.
 	Claim []byte
@@ -405,6 +456,8 @@ type Publication struct {
 }
 
 func newPublication(handle *C.cavalry_publication_t) (*Publication, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	var k C.cavalry_publication_constants_t
 	if err := check("cavalry_publication_constants", C.cavalry_publication_constants(handle, &k)); err != nil {
 		C.cavalry_publication_close(handle)
@@ -416,42 +469,53 @@ func newPublication(handle *C.cavalry_publication_t) (*Publication, error) {
 }
 
 // TryClaim claims length bytes: the position after the frame, with Claim the writable
-// slice over them, or a result code below zero, which leaves Claim as it was. One ABI
-// call; the slice is made with unsafe.Slice and allocates nothing.
+// slice over them, or a result code below zero, which leaves Claim as it was; Err says
+// why a PublicationError. One cgo call, to shim.c's one ABI call; the slice is made with
+// unsafe.Slice and allocates nothing.
 func (p *Publication) TryClaim(length int) int64 {
-	position := int64(C.cavalry_publication_try_claim(p.handle, C.size_t(length), &p.claim))
+	position := int64(C.cavalry_go_try_claim(p.handle, C.size_t(length), &p.claim, &p.err))
 	if position >= 0 {
 		p.Claim = unsafe.Slice((*byte)(unsafe.Pointer(p.claim.data)), int(p.claim.length))
 	}
 	return position
 }
 
-// Commit commits the claim: the position after the frame, or -1.
+// Commit commits the claim: the position after the frame, or -1, with Err saying why.
 func (p *Publication) Commit() int64 {
 	p.Claim = nil
-	return int64(C.cavalry_buffer_claim_commit(&p.claim))
+	return int64(C.cavalry_go_commit(&p.claim, &p.err))
 }
 
-// Abort aborts the claim, leaving padding: the position after the frame, or -1.
+// Abort aborts the claim, leaving padding: the position after the frame, or -1, with Err
+// saying why.
 func (p *Publication) Abort() int64 {
 	p.Claim = nil
-	return int64(C.cavalry_buffer_claim_abort(&p.claim))
+	return int64(C.cavalry_go_abort(&p.claim, &p.err))
 }
 
-// SetReservedValue sets the claimed frame's reserved value, any int64: 0, or -1.
+// SetReservedValue sets the claimed frame's reserved value, any int64: 0, or -1, with
+// Err saying why.
 func (p *Publication) SetReservedValue(value int64) int32 {
-	return int32(C.cavalry_buffer_claim_set_reserved_value(&p.claim, C.int64_t(value)))
+	return int32(C.cavalry_go_set_reserved_value(&p.claim, C.int64_t(value), &p.err))
 }
 
-// Offer publishes message: the position after it, or a code below zero. The ABI copies
-// the bytes before it returns, so the slice is the caller's again at once.
+// Offer publishes message: the position after it, or a code below zero; Err says why a
+// PublicationError. The ABI copies the bytes before it returns, so the slice is the
+// caller's again at once.
 func (p *Publication) Offer(message []byte) int64 {
 	var buffer *C.uint8_t
 	if len(message) > 0 {
 		buffer = (*C.uint8_t)(unsafe.Pointer(&message[0]))
 	}
-	return int64(C.cavalry_publication_offer(p.handle, buffer, C.size_t(len(message))))
+	return int64(C.cavalry_go_offer(p.handle, buffer, C.size_t(len(message)), &p.err))
 }
+
+// Err is the failure of this publication's last per-message call that failed, a
+// PublicationError of TryClaim or Offer, or a -1 of Commit, Abort or SetReservedValue:
+// an *Error with the ABI function, code and message, which shim.c copied from the
+// thread's error in the C call that failed, kept until the next failure; nil before the
+// first (README, "The thread's error").
+func (p *Publication) Err() error { return keptError(&p.err) }
 
 // Position is the publication's position, or NullPosition.
 func (p *Publication) Position() int64 { return int64(C.cavalry_publication_position(p.handle)) }
@@ -475,6 +539,8 @@ func (p *Publication) Close() error {
 	if p.handle == nil {
 		return nil
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	p.Claim = nil
 	err := check("cavalry_publication_close", C.cavalry_publication_close(p.handle))
 	p.handle = nil
@@ -509,7 +575,8 @@ type Header struct {
 }
 
 // Values is the frame's header, and whether the header is valid now: false outside the
-// handler call, or when the ABI refused the read.
+// handler call, or when the ABI refused the read, which Errcode and Errmsg then describe,
+// since the handler runs on the poll's thread.
 func (h *Header) Values() (Frame, bool) {
 	if h.ptr == nil {
 		return Frame{}, false
@@ -546,7 +613,8 @@ func (i *Image) IsEndOfStream() bool { return bool(C.cavalry_image_is_end_of_str
 
 // Subscription is a subscription: Poll calls the handler for each fragment and returns
 // the count, with a *HandlerError when a handler call panicked, once the ABI has
-// returned, every later fragment still having reached the handler.
+// returned, every later fragment still having reached the handler. Err is the last poll
+// that failed.
 type Subscription struct {
 	handle  *C.cavalry_subscription_t
 	slot    uintptr
@@ -555,6 +623,7 @@ type Subscription struct {
 	polling bool
 	raised  int
 	first   any
+	err     C.cavalry_go_error_t
 
 	Channel        string
 	RegistrationID int64
@@ -562,6 +631,8 @@ type Subscription struct {
 }
 
 func newSubscription(handle *C.cavalry_subscription_t) (*Subscription, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	var k C.cavalry_subscription_constants_t
 	if err := check("cavalry_subscription_constants", C.cavalry_subscription_constants(handle, &k)); err != nil {
 		C.cavalry_subscription_close(handle)
@@ -577,18 +648,18 @@ func newSubscription(handle *C.cavalry_subscription_t) (*Subscription, error) {
 }
 
 // Poll delivers up to fragmentLimit fragments to handler: one ABI call, the count it
-// returned (or -1, with Errcode saying why: ErrPolling for a poll from inside a handler
-// of this subscription, which the ABI refuses and which touches nothing here), and a
-// *HandlerError when a handler call panicked.
+// returned (or -1, with Err saying why: a fault, which Fault reads, or ErrPolling for a
+// poll from inside a handler of this subscription, which the ABI refuses and which
+// touches nothing here), and a *HandlerError when a handler call panicked.
 func (s *Subscription) Poll(handler FragmentHandler, fragmentLimit int) (int, error) {
 	if s.polling {
-		return int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit))), nil
+		return int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err)), nil
 	}
 	s.handler = handler
 	s.polling = true
 	s.raised = 0
 	s.first = nil
-	count := int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit)))
+	count := int(C.cavalry_go_poll(s.handle, C.uintptr_t(s.slot), C.size_t(fragmentLimit), &s.err))
 	s.polling = false
 	s.handler = nil
 	if s.raised == 0 {
@@ -613,9 +684,17 @@ func (s *Subscription) deliver(body []byte) {
 	s.handler(body, &s.header)
 }
 
+// Err is the failure of this subscription's last poll that returned -1: an *Error with
+// the ABI function, code and message, which shim.c copied from the thread's error in the
+// C call that failed, kept until the next failure; nil before the first (README, "The
+// thread's error").
+func (s *Subscription) Err() error { return keptError(&s.err) }
+
 // Fault is what the last poll stopped on: the code (0 for none), the session and the
 // position.
 func (s *Subscription) Fault() (code int32, sessionID int32, position int64, err error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	var f C.cavalry_fault_t
 	if err := check("cavalry_subscription_fault", C.cavalry_subscription_fault(s.handle, &f)); err != nil {
 		return 0, 0, 0, err
@@ -628,6 +707,8 @@ func (s *Subscription) ImageCount() int { return int(C.cavalry_subscription_imag
 
 // ImageAt is the image at index, with its constants copied now, or nil.
 func (s *Subscription) ImageAt(index int) (*Image, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	ptr := C.cavalry_subscription_image_at_index(s.handle, C.size_t(index))
 	if ptr == nil {
 		return nil, nil
@@ -673,6 +754,8 @@ func (s *Subscription) Close() error {
 	if s.handle == nil {
 		return nil
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if result := C.cavalry_subscription_close(s.handle); result != 0 {
 		err := lastError("cavalry_subscription_close")
 		if err.Code == ErrPolling {
@@ -698,6 +781,8 @@ type Recording struct {
 }
 
 func newRecording(handle *C.cavalry_recording_t) (*Recording, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	var k C.cavalry_recording_constants_t
 	if err := check("cavalry_recording_constants", C.cavalry_recording_constants(handle, &k)); err != nil {
 		C.cavalry_recording_close(handle)
@@ -720,6 +805,8 @@ func (r *Recording) Close() error {
 	if r.handle == nil {
 		return nil
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	err := check("cavalry_recording_close", C.cavalry_recording_close(r.handle))
 	r.handle = nil
 	return err
@@ -738,6 +825,8 @@ type Replay struct {
 }
 
 func newReplay(handle *C.cavalry_replay_t) (*Replay, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	var k C.cavalry_replay_constants_t
 	if err := check("cavalry_replay_constants", C.cavalry_replay_constants(handle, &k)); err != nil {
 		C.cavalry_replay_close(handle)
@@ -764,6 +853,8 @@ func (r *Replay) Close() error {
 	if r.handle == nil {
 		return nil
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	err := check("cavalry_replay_close", C.cavalry_replay_close(r.handle))
 	r.handle = nil
 	return err
