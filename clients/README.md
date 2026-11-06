@@ -15,9 +15,10 @@ functions with their return and parameter types and the 71 defines, and writes t
 client's package: the binding, which declares every function and struct to the
 language's foreign-function layer, and the client's own code, the wrapper types that
 hold invariant 2's per-message rules between the user's code and the ABI. The
-generator writes every file of the package; nothing in a package is edited by hand,
-and `just lint` regenerates each package to a temporary directory and fails when the
-committed files differ. Today the generator writes Python (`python/`); the Node, Go,
+generator writes every file of the package; nothing in a package is edited by hand.
+`just generate-clients` writes every package; commit what it writes. `just lint`
+regenerates each package in memory and fails when a committed file differs, naming the
+command that fixes it. Today the generator writes Python (`python/`); the Node, Go,
 JVM and .NET clients (cards 206 to 209) add a language each.
 
 ## What every client must pass
@@ -30,9 +31,12 @@ JVM and .NET clients (cards 206 to 209) add a language each.
   message on the client's side of the boundary, the client's code and the runtime's
   together, counted with what the runtime counts.
 - `just lint` runs `clients/lint.py` over the generated per-message functions, the
-  offer, the claim, the commit and abort, and the poll: no lock, no `await`, no raise,
-  in the language's forms, and fails on generated code in a language it has no rules
-  for, or on a package in which it finds none of the per-message functions.
+  wrapper of each of the ABI's seven (`crates/cavalry-ffi/README.md`: the claim, the
+  reserved value, the commit and abort, the offer, the poll and the header's values)
+  and the trampoline that calls the user's handler: no lock, no `await`, no raise, in
+  the language's forms, in the function's own body or in any function of the package
+  it calls. It fails on generated code in a language it has no rules for, on a package
+  in which it finds none of the per-message functions, and on one that is missing.
 - The client's README answers the four questions every crate README answers, with the
   ten-minute path's program in its language as the example, and records the
   runtime's side of the boundary: how the runtime calls the fragment handler back,

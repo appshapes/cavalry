@@ -263,7 +263,10 @@ class Header:
         self._values_ref = ctypes.byref(self._values)
 
     def values(self):
-        _check(self._abi, "cavalry_header_values", self._abi.cavalry_header_values(self._pointer, self._values_ref))
+        """The frame's fields, `cavalry_header_values_frame_t`; None when the ABI refuses
+        the pointer, which on the handler's own header it cannot, so this never raises."""
+        if self._abi.cavalry_header_values(self._pointer, self._values_ref) != 0:
+            return None
         return self._values.frame
 
     @property

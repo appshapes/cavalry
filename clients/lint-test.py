@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """The tests of clients/lint.py (ADR 0026): the committed Python package passes; a generated
 per-message function carrying each forbidden form, a `threading` lock, `async def`, `await`
-or `raise`, fails naming the function and the form; a raise in `poll` after the ABI's call
-passes and one before it fails; a package with none of the per-message functions fails; a
-language with no rules fails. `just test` runs this through `test-scripts`.
+or `raise`, fails naming the function and the form; so does one that calls the package's
+own raising function, `_check`, `_error` or a raising method, and the wrappers of the
+reserved value and the header's values with its properties are read as the others are; a
+raise in `poll` after the ABI's call passes and one before it fails; a package with none of
+the per-message functions fails; a language with no rules fails. `just test` runs this
+through `test-scripts`.
 """
 
 import os
@@ -69,8 +72,49 @@ class Clients(unittest.TestCase):
         [finding] = lint.findings(self.tmp)
         self.assertIn("Subscription._on_fragment", finding)
 
+    def test_a_raise_in_set_reserved_value_fails(self):
+        self.edit("    def set_reserved_value(self, value):\n",
+                  "    def set_reserved_value(self, value):\n        raise RuntimeError('no')\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.set_reserved_value", finding)
+        self.assertIn("raises", finding)
+
+    def test_a_call_to_check_fails(self):
+        self.edit("    def offer(self, message):\n",
+                  "    def offer(self, message):\n        _check(self._abi, 'cavalry_publication_offer', -1)\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.offer", finding)
+        self.assertIn("calls _check", finding)
+        self.assertIn("_check raises at line", finding)
+
+    def test_a_call_to_error_fails(self):
+        self.edit("    def abort(self):\n", "    def abort(self):\n        _error(self._abi, 'cavalry_buffer_claim_abort')\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.abort", finding)
+        self.assertIn("calls _error", finding)
+        self.assertIn("_error builds CavalryError", finding)
+
+    def test_a_call_to_a_raising_method_fails(self):
+        self.edit("    def commit(self):\n", "    def commit(self):\n        self.position()\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Publication.commit", finding)
+        self.assertIn("calls Publication.position", finding)
+
+    def test_header_values_raising_through_check_fails_and_so_do_its_properties(self):
+        self.edit("        if self._abi.cavalry_header_values(self._pointer, self._values_ref) != 0:\n"
+                  "            return None\n",
+                  "        _check(self._abi, 'cavalry_header_values',"
+                  " self._abi.cavalry_header_values(self._pointer, self._values_ref))\n")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any(f.startswith("python: Header.values ") and "calls _check" in f for f in found), found)
+        self.assertTrue(any(f.startswith("python: Header.session_id ") and "calls Header.values" in f for f in found),
+                        found)
+        self.assertEqual(len(found), 10, found)  # values and its nine properties
+
     def test_a_package_without_the_per_message_functions_fails(self):
-        for name in ("try_claim", "offer", "commit", "abort", "poll", "_on_fragment"):
+        for name in ("try_claim", "set_reserved_value", "offer", "commit", "abort", "poll", "_on_fragment", "values",
+                     "session_id", "stream_id", "term_id", "term_offset", "frame_length", "flags", "type", "version",
+                     "reserved_value"):
             self.edit(f"    def {name}(self", f"    def renamed_{name}(self")
         [finding] = lint.findings(self.tmp)
         self.assertIn("none of the per-message functions", finding)
@@ -79,6 +123,11 @@ class Clients(unittest.TestCase):
         self.edit("    def offer(self, message):", "    def send(self, message):")
         [finding] = lint.findings(self.tmp)
         self.assertIn("Publication.offer is not in", finding)
+
+    def test_a_missing_header_values_fails(self):
+        self.edit("    def values(self):", "    def read(self):")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("Header.values is not in", finding)
 
     def test_a_language_without_rules_fails(self):
         os.makedirs(os.path.join(self.tmp, "ruby", "cavalry"))

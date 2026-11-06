@@ -18,8 +18,13 @@ the ABI's page promises (ADR 0046's boundary; ADR 0051). The package has no depe
 
 - Never run a message through anything but one ABI call: no lock, no `await`, no
   thread, no copy of a fragment into a new array for the handler. `clients/lint.py`
-  reads the per-message functions for Python's forms of each (`threading`'s locks,
-  `async def`, `await`, `raise`) and `just lint` fails on any of them.
+  reads the per-message functions, `try_claim`, `set_reserved_value`, `commit`,
+  `abort`, `offer`, `poll`, the trampoline and `Header.values` with the `Header`
+  properties that call it, for Python's forms of each (`threading`'s locks,
+  `async def`, `await`, `raise`, and building `CavalryError`), in their own bodies and
+  in every function of the package they call, such as `_check`; `just lint` fails on
+  any of them. `Header.values()` is None when the ABI refuses the header's pointer,
+  which inside the handler's call it cannot.
 - Never raise for an `Offer` code: `try_claim` and `offer` return the position after
   the frame or the code below zero (`cavalry.BACK_PRESSURED`, `NOT_CONNECTED`,
   `ADMIN_ACTION`, `CLOSED`, `MAX_POSITION_EXCEEDED`, `ERROR`), as the ABI does; the

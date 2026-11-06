@@ -9,10 +9,11 @@ Reads `crates/cavalry-ffi/include/cavalry.h`, the header cbindgen writes from
 struct, the fragment handler's type and every function to the language's foreign-function
 layer, and the client's own code, the wrapper types between the user's code and the ABI
 that hold invariant 2's per-message rules (ADR 0046, the boundary's second part). Every
-file of a package comes from here; `--check` writes to a temporary directory and exits 1
-when a committed file differs, which is how `just lint` holds the packages to the header
-(clients/README.md). Today the one language is `python`; cards 206 to 209 add theirs by
-adding a writer beside `write_python`.
+file of a package comes from here, and `just generate-clients` runs it for every
+language; `--check` writes nothing, compares the package it would write in memory with
+the committed files and exits 1 when one differs, which is how `just lint` holds the
+packages to the header (clients/README.md). Today the one language is `python`; cards
+206 to 209 add theirs by adding a writer beside `write_python`.
 
 The header is parsed, not the vectors, so that a change to the header that the vectors
 do not yet hold shows up here first; `generate-test.py` holds the parse to
@@ -24,7 +25,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import tempfile
 from dataclasses import dataclass, field
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -509,7 +509,10 @@ class Header:
         self._values_ref = ctypes.byref(self._values)
 
     def values(self):
-        _check(self._abi, "cavalry_header_values", self._abi.cavalry_header_values(self._pointer, self._values_ref))
+        """The frame's fields, `cavalry_header_values_frame_t`; None when the ABI refuses
+        the pointer, which on the handler's own header it cannot, so this never raises."""
+        if self._abi.cavalry_header_values(self._pointer, self._values_ref) != 0:
+            return None
         return self._values.frame
 
     @property

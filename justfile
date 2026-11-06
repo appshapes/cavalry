@@ -118,11 +118,17 @@ lint-header:
 
 # The generated clients are what the committed header gives, and their per-message
 # functions hold no lock, no await and no raise (clients/README.md; ADR 0046): the
-# generator regenerates each package to a temporary directory and compares, then
-# clients/lint.py reads the generated code for the language's forms of each.
+# generator regenerates each package in memory and compares it with the committed files,
+# then clients/lint.py reads the generated code for the language's forms of each, in the
+# per-message functions and in the package's functions they call.
 lint-clients:
     python3 clients/generate.py python --check
     python3 clients/lint.py
+
+# Regenerate every client's package from the committed header (clients/README.md): what
+# to run after a change to the header or to clients/generate.py, then commit the result.
+generate-clients:
+    python3 clients/generate.py python
 
 # The CLAUDE.md rules rustc and clippy cannot see: data-plane flags, the dependency
 # allowlist, no async on the data plane, unsafe only in two crates, the lock ban's

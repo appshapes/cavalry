@@ -81,6 +81,8 @@ class Receiver:
             if body[b] != (index + b) & 0xFF:
                 fail(f"{self.name}: message {index} byte {b} is {body[b]}, not {(index + b) & 0xFF}")
         frame = header.values()
+        if frame is None:
+            fail(f"{self.name}: cavalry_header_values refused message {index}'s header inside the handler")
         # The header against spec/frame.md: a data frame, unfragmented, version 0, the
         # body plus the 32-byte header, aligned to 32 in its term.
         if (frame.type != _abi.CAVALRY_FRAME_TYPE_DATA or frame.flags != _abi.CAVALRY_FLAGS_UNFRAGMENTED
