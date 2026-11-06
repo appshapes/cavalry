@@ -216,15 +216,14 @@ Eight features make the slice, one Trello card each, in this order:
    `control`, `control-mode` and `fc` parameters, parsed and refused, as `channel`
    vectors in `spec/vectors/udp.json`; the client API's `add_destination` and
    `remove_destination` on a publication and their ABI functions, a version bump of
-   the ABI before the first release under the ADR's rule ("Nothing is released, so a
-   client that later finds the ABI wanting sends it to a new version under a new
-   ADR"); the UDP conformance suite and the C runner
-   send one stream to two destinations on the loopback; a bench row, `one_way_32_udp_mdc`,
-   over the cable to `grip` and the loopback at once, reported and not gated, since
-   every isolated core of both bench hosts is taken (ADR 0044) and feature 8's job asks
-   for none; it joins the gate when the Revisit clause for a cluster's row in the
-   latency gate fires and a host change gives it cores. Builds nothing new among the
-   gates; extends `conformance/` and the UDP vectors.
+   the ABI before the first release, which ADR 0051 leaves open: nothing is released
+   (ADR 0003), and "the first release is what freezes it"; the UDP conformance suite
+   and the C runner send one stream to two destinations on the loopback; a bench row,
+   `one_way_32_udp_mdc`, over the cable to `grip` and the loopback at once, reported
+   and not gated, since every isolated core of both bench hosts is taken (ADR 0044)
+   and feature 8's job asks for none; it joins the gate when the Revisit clause for a
+   cluster's row in the latency gate fires and a host change gives it cores. Builds
+   nothing new among the gates; extends `conformance/` and the UDP vectors.
 2. **The cluster protocol, specified (card 226).** `spec/cluster.md` version 0, with
    its ADR Accepted on the evidence of Aeron's schema read and dated, under Aeron's
    names where the concept matches: the log's entries, a session message header with
@@ -422,7 +421,7 @@ events.
 - **The first release in the slice.** Lost again: ADR 0003's Revisit and an ADR of its
   own, and this slice adds to the ABI before it freezes.
 - **Deciding the slice in chat.** Lost: a decision that is not an ADR does not exist
-  (ADR 0001), and this one orders eight cards and places eleven.
+  (ADR 0001), and this one orders eight cards and places ten.
 
 ## Evidence
 
