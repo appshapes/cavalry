@@ -33,7 +33,9 @@ publication's channel (ADR 0053); every version 4 encoding is unchanged, so a ve
 commands with code 6. Version 6 arms a recording: a `start recording` on a
 `cavalry:udp` channel and stream with a live subscription and no live publication or
 image is answered with `operation success` and starts the recording when the stream's
-first image arrives, at the image's join position; and it reads the position keys of
+next image arrives, at the image's join position, answering the command a second time
+with `recording ready`, or with `error` when that start fails or the armed recording
+is dropped with its stream's last subscription; and it reads the position keys of
 `spec/udp.md`, version 2, on a publication's channel (ADR 0059); every version 5
 encoding is unchanged, so a version 5 client's commands are version 6 commands, and a
 version 5 driver answers the arming case with code 20.
@@ -132,7 +134,7 @@ Then, by command:
 | add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | `cavalry:ipc`, or a `cavalry:udp` channel as `spec/udp.md`, "The channel URI", says; any other string is answered with error code 1, a host that does not resolve with code 9 |
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
 | add destination, remove destination | 16 | 8 | registration id | i64 | 0 or more: the client's registration of the publication, the correlation id of its add publication or add exclusive publication command |
-| add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: `cavalry:udp?endpoint=<host>:<port>` and nothing else (`spec/udp.md`, "The channel URI"); `cavalry:ipc`, a control channel, one naming `interface` or `fc`, an endpoint the control address cannot send to (add destination) or any other string is answered with error code 1, a host that does not resolve with code 9 |
+| add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: `cavalry:udp?endpoint=<host>:<port>` and nothing else (`spec/udp.md`, "The channel URI"); `cavalry:ipc`, a control channel, one naming `interface`, `fc` or a position key, an endpoint the control address cannot send to (add destination) or any other string is answered with error code 1, a host that does not resolve with code 9 |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 | start replay | 24 | 8 | position | i64 | −1 for the recording's retained position, its start position until a purge moves it; else a multiple of 32 from the retained position to the extent |
@@ -720,14 +722,14 @@ with error code 10 and registers nothing:
 | destinations | 64 per send endpoint | every destination added to a control channel's send endpoint and not removed (`spec/udp.md`, "The sender") |
 
 The counters file is sized so that the registries fill before it does: the static
-counters of `counters.toml`, 84 once the sender and the receiver land their 46 (`spec/udp.md`,
-"Counters"), five per publication (5120: its position, its limit, the sender position,
+counters of `counters.toml`, 91 with the armed recording's four (ADR 0059) after the
+sender's and the receiver's 46 (`spec/udp.md`, "Counters"), five per publication (5120: its position, its limit, the sender position,
 the sender limit and the sender's flow control receivers), three per image (6144: the
 subscriber's position, the rebuild position and the high-water mark), three per
 recording (3072), one per replay (64), five per replay publication (640: its position
 and its limit, and over `cavalry:udp` the sender position, the sender limit and the
 flow control receivers beside them; ADR 0043, ADR 0053) and six per endpoint (768)
-come to 15,892, fewer than 16384.
+come to 15,899, fewer than 16384.
 
 ## What the driver rejects
 
@@ -756,7 +758,7 @@ destination command on a publication whose channel names no control address, or 
 destination channel that is `cavalry:ipc` or a control channel, names `interface` or
 `fc`, or whose endpoint has no address the control address can send to, is code 1
 with the reason
-`subscription`, `fc`, `control` or `destination` and adds one to
+`subscription`, `fc`, `position`, `control` or `destination` and adds one to
 `client_protocol.rejected_command` too; a `cavalry:udp` host that does not resolve is
 code 9; a `cavalry:udp` endpoint whose socket fails is code 4;
 an unknown or another client's registration is code 2 or 3; a registry or the counters
@@ -764,7 +766,10 @@ file at capacity is code 10 and adds one to `driver.registry_full`; a log that c
 be created or sized is code 12 and adds one to `driver.log_create_failed`; a stream id and
 channel no live publication, image or subscription has is code 20; a stream whose live
 publications and images are all being recorded, or on which a recording is armed, is
-code 22; a recording id the catalog does not hold is code 21; the catalog's
+code 22; an armed recording's start that fails when its image arrives answers the
+arming command a second time with code 10 or 12 and adds one to
+`recording.armed_failed`, and one dropped with its stream's last subscription answers
+it with code 20 and adds one to `recording.armed_dropped`; a recording id the catalog does not hold is code 21; the catalog's
 slots used up is code 10 and adds one to `recording.catalog_full`; a recording's files
 that could not be created is code 12 and adds one to `recording.start_failed`; a replay
 length below −1 is code 7 and adds one to `client_protocol.rejected_command`; a replay

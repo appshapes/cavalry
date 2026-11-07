@@ -552,9 +552,12 @@ reads −1 from the indicator in this version.
 records one log per command: of the live publications sending on the resolved channel
 and the images received on it whose stream id matches, the one with the lowest
 registration id that is not yet being recorded, as the command's rule is over
-`cavalry:ipc`, so that a second command records the next; none is error code 20, every
-one being recorded is code 22 with the message naming the recording id, and `recording
-ready` names the log's session id. A recording of a publication starts at its producer
+`cavalry:ipc`, so that a second command records the next; none, with no subscription on
+the endpoint and stream, is error code 20, while a subscription with no image yet arms
+the recording for the stream's next image (`spec/client-protocol.md`, "Commands", start
+recording; ADR 0059); every one being recorded, or a recording armed on the stream, is
+code 22 with the message naming the recording id or saying armed, and `recording ready`
+names the log's session id. A recording of a publication starts at its producer
 position, as over `cavalry:ipc`. A recording of an image starts at the image's rebuild
 position when the command is handled, loaded from `image.rebuild_position`; from then
 on its position is one of the image's readers (step 4); the recorder reads the image's
