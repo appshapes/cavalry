@@ -106,6 +106,17 @@ pub enum TermsError {
     },
     /// An append past the bound: `terms full`.
     Full,
+    /// A write the file's rules refuse: nothing was written and the record of terms is
+    /// as it was. The consensus module asked for the write, so the fault is Cavalry's,
+    /// not the file's.
+    Refused {
+        /// The check the write fails, as "What a reader rejects" names it.
+        check: &'static str,
+        /// The value refused.
+        found: i64,
+        /// The rule the value breaks.
+        rule: &'static str,
+    },
 }
 
 impl TermsError {
@@ -125,6 +136,30 @@ impl TermsError {
             TermsError::Position { .. } => "position",
             TermsError::Recording { .. } => "recording",
             TermsError::Full => "terms-full",
+            TermsError::Refused { check, .. } => check,
+        }
+    }
+
+    /// The reader's refusal of an entry, as the refusal of the write that would have
+    /// stored it: the same check, and a message that says the file is unchanged.
+    fn refused(self) -> Self {
+        match self {
+            TermsError::Term { found } => TermsError::Refused {
+                check: "term",
+                found,
+                rule: "is below 0 or not above the last term recorded",
+            },
+            TermsError::Position { found } => TermsError::Refused {
+                check: "position",
+                found,
+                rule: "is below 0, not a multiple of 32 or below the last term's base",
+            },
+            TermsError::Recording { found } => TermsError::Refused {
+                check: "recording",
+                found,
+                rule: "is below -1",
+            },
+            other => other,
         }
     }
 }
@@ -206,6 +241,13 @@ impl std::fmt::Display for TermsError {
                 f,
                 "terms full: the file holds {MAX_ENTRIES} entries, its bound; start a new log \
                  directory for this member; see {DOC}"
+            ),
+            TermsError::Refused { check, found, rule } => write!(
+                f,
+                "terms file refused a write ({check}): {found} {rule}; nothing was written, so \
+                 the member's record of terms and its vote are as they were: keep this log \
+                 directory, and report this as a bug in the consensus module with the output \
+                 of `cavalry doctor`; see {DOC}"
             ),
         }
     }
@@ -496,7 +538,7 @@ impl TermsFile {
             recording_id,
         };
         let last = self.terms().last().copied();
-        TermsEntry::parse(&entry.encode(), last.as_ref())?;
+        TermsEntry::parse(&entry.encode(), last.as_ref()).map_err(TermsError::refused)?;
         let bytes = entry.encode();
         let at = (HEADER_LENGTH + self.entries.len() * ENTRY_LENGTH) as u64;
         // The fields and the checksum first, the state last, so that a crash between
@@ -678,6 +720,18 @@ mod tests {
         assert_eq!(file.append(4, 0, 2).unwrap_err().reason(), "position");
         assert_eq!(file.append(4, 100, 2).unwrap_err().reason(), "position");
         assert_eq!(file.append(4, 4096, -2).unwrap_err().reason(), "recording");
+        // A refusal is the caller's fault and the file is whole: the message says so, and
+        // never tells the operator to give up the directory that holds the member's vote.
+        let message = file.append(3, 4096, 2).unwrap_err().to_string();
+        assert!(message.contains("nothing was written"), "{message}");
+        assert!(!message.contains("new log directory"), "{message}");
+        drop(file);
+        let mut file = TermsFile::open(&dir).expect("opened");
+        assert_eq!(
+            file.terms().count(),
+            1,
+            "a refused write left the file alone"
+        );
         file.entries.resize(MAX_ENTRIES as usize, file.entries[0]);
         assert_eq!(file.append(5, 4096, 2).unwrap_err().reason(), "terms-full");
         let _ = std::fs::remove_dir_all(&dir);
