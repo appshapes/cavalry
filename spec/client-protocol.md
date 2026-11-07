@@ -36,7 +36,9 @@ image is answered with `operation success` and starts the recording when the str
 next image arrives, at the image's join position, answering the command a second time
 with `recording ready`, or with `error` when that start fails or the armed recording
 is dropped with its stream's last subscription; and it reads the position keys of
-`spec/udp.md`, version 2, on a publication's channel (ADR 0059); every version 5
+`spec/udp.md`, version 2, on a publication's channel, refusing them on a subscription's,
+a destination's and a replay's and reading past them on a recording's (ADR 0059); every
+version 5
 encoding is unchanged, so a version 5 client's commands are version 6 commands, and a
 version 5 driver answers the arming case with code 20.
 
