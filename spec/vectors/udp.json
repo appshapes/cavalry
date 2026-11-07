@@ -1,6 +1,6 @@
 {
   "spec": "spec/udp.md",
-  "version": 1,
+  "version": 2,
   "generated_by": "spec/vectors/udp.py; do not edit by hand",
   "vectors": [
     {
@@ -628,7 +628,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -643,7 +647,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -658,7 +666,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -673,7 +685,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -688,7 +704,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -703,7 +723,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -851,7 +875,11 @@
         "control_host": "10.0.0.1",
         "control_port": 40456,
         "control_mode": "manual",
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -866,7 +894,11 @@
         "control_host": "bench-link",
         "control_port": 40456,
         "control_mode": "manual",
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -881,7 +913,11 @@
         "control_host": "fd00::1",
         "control_port": 40456,
         "control_mode": "manual",
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -896,7 +932,11 @@
         "control_host": "10.0.0.1",
         "control_port": 40456,
         "control_mode": "manual",
-        "fc": "min"
+        "fc": "min",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -911,7 +951,11 @@
         "control_host": "10.0.0.1",
         "control_port": 40456,
         "control_mode": "manual",
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -926,7 +970,11 @@
         "control_host": "10.0.0.1",
         "control_port": 1,
         "control_mode": "manual",
-        "fc": "min"
+        "fc": "min",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -941,7 +989,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "min"
+        "fc": "min",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -956,7 +1008,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "max"
+        "fc": "max",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -971,7 +1027,11 @@
         "control_host": null,
         "control_port": null,
         "control_mode": null,
-        "fc": "min"
+        "fc": "min",
+        "initial_term_id": null,
+        "term_id": null,
+        "term_offset": null,
+        "position": null
       }
     },
     {
@@ -1126,6 +1186,159 @@
       "kind": "channel",
       "string": "cavalry:udp?control=224.0.1.1:40456",
       "error": "control",
+      "code": 1
+    },
+    {
+      "name": "channel-position-keys",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=9|term-offset=4096",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max",
+        "initial_term_id": 7,
+        "term_id": 9,
+        "term_offset": 4096,
+        "position": 33558528
+      }
+    },
+    {
+      "name": "channel-position-keys-at-start",
+      "kind": "channel",
+      "string": "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|fc=min|init-term-id=7|term-id=7|term-offset=0",
+      "fields": {
+        "endpoint_host": null,
+        "endpoint_port": null,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": "10.0.0.1",
+        "control_port": 40456,
+        "control_mode": "manual",
+        "fc": "min",
+        "initial_term_id": 7,
+        "term_id": 7,
+        "term_offset": 0,
+        "position": 0
+      }
+    },
+    {
+      "name": "channel-position-keys-term-id-wraps",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=2147483647|term-id=-2147483648|term-offset=32",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max",
+        "initial_term_id": 2147483647,
+        "term_id": -2147483648,
+        "term_offset": 32,
+        "position": 16777248
+      }
+    },
+    {
+      "name": "channel-position-keys-negative-term-ids",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|term-offset=64|term-id=-3|init-term-id=-5",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max",
+        "initial_term_id": -5,
+        "term_id": -3,
+        "term_offset": 64,
+        "position": 33554496
+      }
+    },
+    {
+      "name": "channel-position-one-key",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7",
+      "error": "position",
+      "code": 1
+    },
+    {
+      "name": "channel-position-two-keys",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|term-id=9|term-offset=0",
+      "error": "position",
+      "code": 1
+    },
+    {
+      "name": "channel-position-not-an-integer",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=nine|term-offset=0",
+      "error": "position",
+      "code": 1
+    },
+    {
+      "name": "channel-position-past-i32",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=2147483648|term-id=0|term-offset=0",
+      "error": "position",
+      "code": 1
+    },
+    {
+      "name": "channel-position-term-id-below-initial",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=9|term-id=7|term-offset=0",
+      "error": "position",
+      "code": 1
+    },
+    {
+      "name": "channel-position-offset-negative",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=7|term-offset=-32",
+      "error": "position",
+      "code": 1
+    },
+    {
+      "name": "channel-position-offset-not-a-multiple-of-32",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=7|term-offset=100",
+      "error": "position",
+      "code": 1
+    },
+    {
+      "name": "channel-position-offset-at-term-length",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=7|term-offset=16777216",
+      "error": "position",
+      "code": 1
+    },
+    {
+      "name": "channel-key-before-position",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-length=65536",
+      "error": "key",
+      "code": 1
+    },
+    {
+      "name": "channel-fc-before-position",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|fc=tagged|init-term-id=7",
+      "error": "fc",
+      "code": 1
+    },
+    {
+      "name": "channel-position-before-multicast",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=224.0.1.1:40123|init-term-id=7|term-id=7|term-offset=-32",
+      "error": "position",
       "code": 1
     },
     {

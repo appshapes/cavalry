@@ -1,9 +1,10 @@
 //! The channel URI: `cavalry:ipc`; `cavalry:udp?endpoint=<host>:<port>` with its option
 //! `interface`; and, from version 1 of `spec/udp.md`, the control channel
 //! `cavalry:udp?control=<host>:<port>|control-mode=manual` of multi-destination cast,
-//! and `fc=max|min`, the flow control strategy, on a publication's channel
-//! (`spec/udp.md`, "The channel URI"; `spec/client-protocol.md`, version 5; ADR 0040,
-//! ADR 0053).
+//! and `fc=max|min`, the flow control strategy, on a publication's channel, and, from
+//! version 2, the position keys `init-term-id`, `term-id` and `term-offset`, which
+//! create a publication at a position (`spec/udp.md`, "The channel URI";
+//! `spec/client-protocol.md`, version 6; ADR 0040, ADR 0053, ADR 0059).
 //!
 //! [`Channel::parse`] reads a channel string, borrowing from it, and runs the spec's
 //! checks in the spec's order: `grammar`, `key`, `control`, `endpoint`, `fc`,
@@ -34,7 +35,7 @@ pub enum ChannelError {
         what: &'static str,
     },
     /// A key this version does not name: not `endpoint`, `interface`, `control`,
-    /// `control-mode` or `fc`.
+    /// `control-mode`, `fc`, `init-term-id`, `term-id` or `term-offset`.
     Key {
         /// The byte offset of the key within the channel string.
         at: usize,
@@ -62,6 +63,15 @@ pub enum ChannelError {
         /// What was wrong, in words.
         what: &'static str,
     },
+    /// One or two of the position keys `init-term-id`, `term-id` and `term-offset`
+    /// without the rest; a value that is not a 32-bit integer in decimal; a `term-id`
+    /// below `init-term-id` by the 32-bit two's complement count; or a `term-offset`
+    /// that is negative, not a multiple of 32 or not below the UDP term length
+    /// (version 2, ADR 0059).
+    Position {
+        /// What was wrong, in words.
+        what: &'static str,
+    },
     /// The endpoint or the control address is a multicast address, which this version
     /// refuses.
     Multicast,
@@ -77,6 +87,7 @@ impl ChannelError {
             ChannelError::Control { .. } => "control",
             ChannelError::Endpoint { .. } => "endpoint",
             ChannelError::FlowControl { .. } => "fc",
+            ChannelError::Position { .. } => "position",
             ChannelError::Multicast => "multicast",
         }
     }
@@ -109,8 +120,9 @@ impl fmt::Display for ChannelError {
             ChannelError::Key { at, len } => write!(
                 f,
                 "channel refused (key): the {len}-byte parameter at byte {at} is not one this \
-                 version names, endpoint, interface, control, control-mode or fc; remove it, or \
-                 upgrade the driver to a version that names it; see {DOC}"
+                 version names, endpoint, interface, control, control-mode, fc, init-term-id, \
+                 term-id or term-offset; remove it, or upgrade the driver to a version that \
+                 names it; see {DOC}"
             ),
             ChannelError::Control { what } => write!(
                 f,
@@ -128,6 +140,12 @@ impl fmt::Display for ChannelError {
                 f,
                 "channel refused (fc): {what}; the flow control strategy is fc=max or fc=min, \
                  max when the channel names none; see {DOC}"
+            ),
+            ChannelError::Position { what } => write!(
+                f,
+                "channel refused (position): {what}; a publication's channel names \
+                 init-term-id=<i32>|term-id=<i32>|term-offset=<multiple of 32 below the term \
+                 length>, all three or none, to be created at that position; see {DOC}"
             ),
             ChannelError::Multicast => write!(
                 f,
@@ -224,6 +242,34 @@ pub struct UdpChannel<'a> {
     control: Option<Address<'a>>,
     control_mode: Option<ControlMode>,
     flow_control: Option<FlowControl>,
+    position: Option<PublicationPosition>,
+}
+
+/// The position keys of a publication's channel, `init-term-id`, `term-id` and
+/// `term-offset`, which create its log at a position (`spec/udp.md`, version 2, "The
+/// channel URI"; ADR 0059).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PublicationPosition {
+    /// `init-term-id`: the log's initial term id.
+    pub initial_term_id: i32,
+    /// `term-id`: the term id of the position, `initial_term_id` plus the term count.
+    pub term_id: i32,
+    /// `term-offset`: a multiple of 32 below the UDP term length.
+    pub term_offset: i32,
+}
+
+impl PublicationPosition {
+    /// The term count: `term_id` − `initial_term_id` in 32-bit two's complement, 0 or
+    /// more once the channel has parsed.
+    pub const fn term_count(self) -> i32 {
+        self.term_id.wrapping_sub(self.initial_term_id)
+    }
+
+    /// The position the keys name under the UDP term length of `spec/udp.md`, "Values":
+    /// the term count × the term length + the term offset.
+    pub const fn position(self) -> i64 {
+        self.term_count() as i64 * crate::udp::UDP_TERM_LENGTH as i64 + self.term_offset as i64
+    }
 }
 
 impl<'a> UdpChannel<'a> {
@@ -268,6 +314,18 @@ impl<'a> UdpChannel<'a> {
     /// Whether the channel names `fc` at all, which an `add subscription` refuses.
     pub const fn names_flow_control(&self) -> bool {
         self.flow_control.is_some()
+    }
+
+    /// The position keys, when the channel names them: a publication's log is created
+    /// at [`PublicationPosition::position`] with their initial term id (version 2).
+    pub const fn position_keys(&self) -> Option<PublicationPosition> {
+        self.position
+    }
+
+    /// Whether the channel names the position keys, which an `add subscription` and a
+    /// destination channel refuse.
+    pub const fn names_position(&self) -> bool {
+        self.position.is_some()
     }
 }
 
@@ -347,7 +405,14 @@ impl<'a> Channel<'a> {
             let key = key_of(param);
             if !matches!(
                 key,
-                "endpoint" | "interface" | "control" | "control-mode" | "fc"
+                "endpoint"
+                    | "interface"
+                    | "control"
+                    | "control-mode"
+                    | "fc"
+                    | "init-term-id"
+                    | "term-id"
+                    | "term-offset"
             ) {
                 return Err(ChannelError::Key { at, len: key.len() });
             }
@@ -361,6 +426,9 @@ impl<'a> Channel<'a> {
         let mut endpoint_value = None;
         let mut interface_value = None;
         let mut fc_value = None;
+        let mut initial_term_id_value = None;
+        let mut term_id_value = None;
+        let mut term_offset_value = None;
         for param in params.split('|') {
             let (key, value) = param.split_once('=').unwrap_or((param, ""));
             match key {
@@ -369,6 +437,9 @@ impl<'a> Channel<'a> {
                 "endpoint" => endpoint_value = Some(value),
                 "interface" => interface_value = Some(value),
                 "fc" => fc_value = Some(value),
+                "init-term-id" => initial_term_id_value = Some(value),
+                "term-id" => term_id_value = Some(value),
+                "term-offset" => term_offset_value = Some(value),
                 _ => {}
             }
         }
@@ -436,6 +507,47 @@ impl<'a> Channel<'a> {
                 });
             }
         };
+        // `position` (version 2): the three keys together, each a 32-bit integer, the
+        // term id at or past the initial one and the offset within the UDP term.
+        let position = match (initial_term_id_value, term_id_value, term_offset_value) {
+            (None, None, None) => None,
+            (Some(initial), Some(term), Some(offset)) => {
+                let parse = |value: &str| value.parse::<i32>().ok();
+                let (Some(initial_term_id), Some(term_id), Some(term_offset)) =
+                    (parse(initial), parse(term), parse(offset))
+                else {
+                    return Err(ChannelError::Position {
+                        what: "init-term-id, term-id and term-offset are each a 32-bit integer in \
+                               decimal",
+                    });
+                };
+                let keys = PublicationPosition {
+                    initial_term_id,
+                    term_id,
+                    term_offset,
+                };
+                if keys.term_count() < 0 {
+                    return Err(ChannelError::Position {
+                        what: "term-id is below init-term-id by the 32-bit two's complement count",
+                    });
+                }
+                if term_offset < 0
+                    || term_offset % 32 != 0
+                    || term_offset >= crate::udp::UDP_TERM_LENGTH as i32
+                {
+                    return Err(ChannelError::Position {
+                        what: "term-offset is not a multiple of 32 from 0 to below the UDP term \
+                               length",
+                    });
+                }
+                Some(keys)
+            }
+            _ => {
+                return Err(ChannelError::Position {
+                    what: "init-term-id, term-id and term-offset come together, all three or none",
+                });
+            }
+        };
         // `multicast`.
         if endpoint.is_some_and(|address| address.is_multicast())
             || control.is_some_and(|address| address.is_multicast())
@@ -448,6 +560,7 @@ impl<'a> Channel<'a> {
             control,
             control_mode,
             flow_control,
+            position,
         }))
     }
 }

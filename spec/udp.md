@@ -1,4 +1,4 @@
-# UDP transport, version 1
+# UDP transport, version 2
 
 The UDP transport carries one publication's stream from the driver on one host to the
 driver on another: the sender puts the frames of the publication's log buffer into
@@ -15,7 +15,12 @@ datagram to, and the `fc` parameter that names the flow control strategy, `max` 
 `min` (ADR 0053); every frame of version 0 is unchanged and its version byte stays 0,
 so a receiver of version 0 reads a sender of version 1, and a channel of version 1 is
 refused by a reader of version 0 as "What a reader rejects" says a key it does not
-name is.
+name is. Version 2 adds the position keys, `init-term-id`, `term-id` and
+`term-offset`, which create a publication at a position (ADR 0059); every frame of
+version 1 is unchanged and its version byte stays 0, so a receiver of version 1 reads a
+sender of version 2, whose setup frame carries a position every version's receiver
+reads, and a channel of version 2 is refused by a reader of version 1 as a key it does
+not name.
 
 ## The datagram
 
@@ -165,6 +170,19 @@ lets the fastest receiver set the pace, and `min` the slowest. `control`,
 `control-mode` and `fc` are a publication's: an `add subscription` whose channel names
 one is refused, since this version receives on no control address.
 
+A publication's channel may name `init-term-id`, `term-id` and `term-offset`, all three
+or none, each a 32-bit integer in decimal: the *position keys*, which create the
+publication's log at a position instead of 0, (`term-id` − `init-term-id`, a 32-bit
+two's complement count of 0 or more) × the UDP term length of "Values" + `term-offset`,
+with `init-term-id` as the initial term id, as `spec/log-buffer.md`, "The driver",
+creates a replay's log at a position, so that the first frame the publication sends is
+at that position and its setup frames carry its term id and term offset ("The sender").
+`term-offset` is a multiple of 32 below the term length. The keys are a publication's,
+as `control`, `control-mode` and `fc` are: an `add subscription` or a destination
+channel that names one is refused. In Aeron, these are the `init-term-id`, `term-id`
+and `term-offset` parameters of a publication's channel, without `term-length`, which
+this version's one term length would make a key that does nothing (ADR 0059).
+
 Two channels are the same channel when their resolved endpoint and interface are the
 same, or their resolved control addresses are the same: a second `add publication` on
 the same channel and stream joins the first (`spec/client-protocol.md`, "Commands"),
@@ -172,10 +190,15 @@ subscriptions on the same channel share one receive endpoint, and publications o
 same control address share one send endpoint and its destinations. `fc` is the
 publication's, read from the command that created it, and not part of the channel: an
 `add publication` that would join a live publication under a different `fc` is refused.
+The position keys are the publication's too, read from the command that created it: an
+`add publication` that would join a live publication whose position keys differ from
+its own, or that names them where the live one named none or the reverse, is refused,
+since a shared log has one position.
 A channel is refused as "What a reader rejects" says: the grammar, an unknown key, a
 port of 0 or above 65535, a control address without its mode or beside an endpoint, an
-`fc` this version does not name, and a multicast address are error code 1 with a
-message naming what; a host that does not resolve is code 9.
+`fc` this version does not name, position keys that are incomplete or out of range,
+and a multicast address are error code 1 with a message naming what; a host that does
+not resolve is code 9.
 
 ## The sender
 
@@ -183,7 +206,11 @@ The driver's sender is one dedicated thread per driver with the driver's idle st
 A `cavalry:udp` publication has a log buffer of type 0 or 1 (`spec/log-buffer.md`) with
 the UDP term length and MTU of "Values", or, for a replay's publication, its recording's
 term length and MTU, which its setup frame carries (`spec/client-protocol.md`,
-"Commands", start replay; ADR 0043), and a send endpoint per resolved channel: one
+"Commands", start replay; ADR 0043), created at position 0 with an initial term id of
+the driver's choosing, or at the position its channel's position keys name, with
+`init-term-id` as its initial term id ("The channel URI"; ADR 0059), so that its first
+setup frame carries that term id and term offset and the receiver creates the image
+there ("The receiver"), and a send endpoint per resolved channel: one
 socket, shared by the publications on that channel, with the operating system's send
 buffer. On a channel with an endpoint the socket is connected to the endpoint and
 bound to the interface when one is named, and every datagram goes to the endpoint. On
@@ -635,18 +662,24 @@ and nothing from a rejected datagram is delivered.
 A channel is checked in this order, each check over the whole string before the next:
 `grammar` (the scheme, the `?`, the `key=value` form of every parameter, a key outside
 `[a-z0-9-]+`, an empty value, a repeated key), `key` (a key this version does not name:
-not `endpoint`, `interface`, `control`, `control-mode` or `fc`), `control` (a control
+not `endpoint`, `interface`, `control`, `control-mode`, `fc`, `init-term-id`,
+`term-id` or `term-offset`), `control` (a control
 address without `control-mode` or `control-mode` without a control address; a control
 mode other than `manual`; a control address beside an endpoint or an interface; a
 control address with no port, a port of 0 or above 65535, or malformed), `endpoint`
 (neither an endpoint nor a control address; an endpoint or interface with a port of 0
 or above 65535 or a malformed address), `fc` (a value other than `max` or `min`),
-`multicast` (an endpoint or control address that is a multicast address), each error
+`position` (one or two of `init-term-id`, `term-id` and `term-offset` without the rest;
+a value that is not a 32-bit integer in decimal; a `term-id` below `init-term-id` by
+the 32-bit two's complement count; a `term-offset` that is negative, not a multiple of
+32 or not below the term length), `multicast` (an endpoint or control address that is a
+multicast address), each error
 code 1 with the reason in the message; then `host` (the name does not resolve), error
 code 9. A string wrong in two ways reports the earlier check, as the vectors pin. The
 socket that cannot be opened, bound or connected is error code 4 with the operating
-system's reason. The driver's own checks on a channel that parses, a control channel
-or `fc` on an `add subscription`, a join under a different `fc`, a destination
+system's reason. The driver's own checks on a channel that parses, a control channel,
+`fc` or a position key on an `add subscription`, a join under a different `fc` or
+under different position keys, a destination
 channel that is `cavalry:ipc` or a control channel or names more than its endpoint,
 and a destination with no address the control address can send to ("The sender"), are
 error code 1 too
@@ -665,9 +698,10 @@ vector has a `kind`:
   reader walks (term offset and frame length of each) or the `error`; a padding frame
   among them is its header alone, as "The datagram" carries it.
 - `channel`: a channel `string` and the `fields` it parses to (endpoint host and port,
-  interface host and port, control host and port, control mode, and `fc`, `max` when
-  the string names none; a field the string does not name is null) or the `error` and
-  its `code`.
+  interface host and port, control host and port, control mode, `fc`, `max` when the
+  string names none, and the position keys `initial_term_id`, `term_id` and
+  `term_offset` with the `position` they make under the UDP term length of "Values"; a
+  field the string does not name is null) or the `error` and its `code`.
 - `arithmetic`: `inputs` and the `fields` that follow: the sender limit from a status
   message against a sender position, the retransmit window, the receiver's under-run and
   over-run bounds, the status message threshold, and an image's start position.

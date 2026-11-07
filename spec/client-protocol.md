@@ -1,4 +1,4 @@
-# Client protocol, version 5
+# Client protocol, version 6
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -30,7 +30,13 @@ destination`, Aeron's type ids 7 and 8, for a publication on a control channel o
 `spec/udp.md`, version 1, and reads `control`, `control-mode` and `fc` on a
 publication's channel (ADR 0053); every version 4 encoding is unchanged, so a version
 4 client's commands are version 5 commands, and a version 4 driver answers the two
-commands with code 6.
+commands with code 6. Version 6 arms a recording: a `start recording` on a
+`cavalry:udp` channel and stream with a live subscription and no live publication or
+image is answered with `operation success` and starts the recording when the stream's
+first image arrives, at the image's join position; and it reads the position keys of
+`spec/udp.md`, version 2, on a publication's channel (ADR 0059); every version 5
+encoding is unchanged, so a version 5 client's commands are version 6 commands, and a
+version 5 driver answers the arming case with code 20.
 
 ## The driver directory
 
@@ -168,7 +174,13 @@ What the driver does with each, after the checks of "What the driver rejects":
   destinations, none until a client adds one with `add destination`; the publication's
   flow control strategy is its channel's `fc`, `max` when it names none, and an add
   that would join a live publication under a different `fc` is error code 1 with the
-  reason `fc`. A registry at capacity, a counters file
+  reason `fc`. A channel that names the position keys of `spec/udp.md`, version 2,
+  `init-term-id`, `term-id` and `term-offset`, has its log created at the position they
+  name with `init-term-id` as its initial term id, as a replay's log is created at a
+  position (`spec/log-buffer.md`, "The driver"; ADR 0059), and an add that would join a
+  live publication whose position keys differ from its own, or that names them where
+  the live one named none or the reverse, is error code 1 with the reason `position`.
+  A registry at capacity, a counters file
   with no free record, or the sender's request queue with no room for the endpoint and
   the publication, or with a remove still waiting for room (ADR 0041), is error code
   10; a log that cannot be created or sized is error code 12; a socket that cannot be
@@ -292,10 +304,22 @@ What the driver does with each, after the checks of "What the driver rejects":
   On a `cavalry:udp` channel the logs that match are the live publications sending on
   the resolved channel and the images received on it with the stream id, and the rule
   and the codes are the same across both: one recording per command, the lowest
-  registration id not yet being recorded, code 20 when there is neither a publication
-  nor an image, code 22 when every one is being recorded; a recording of an image starts
-  at the image's rebuild position when the command is handled and stops when the image
-  is retired (`spec/udp.md`, "The receiver", step 5; ADR 0042).
+  registration id not yet being recorded, code 20 when there is neither a publication,
+  an image nor a subscription, code 22 when every one is being recorded; a recording of
+  an image starts at the image's rebuild position when the command is handled and stops
+  when the image is retired (`spec/udp.md`, "The receiver", step 5; ADR 0042). When the
+  stream has no live publication and no image but a live subscription on the resolved
+  channel and stream, the command *arms* the recording: the driver answers `operation
+  success` at once, counted in `recording.armed`, holds one armed recording per receive
+  endpoint and stream, and when the first image of that stream arrives on the endpoint
+  it starts the recording at the image's initial position, its join position, before
+  `available image` is sent, so that every frame the image holds is in the recording,
+  with the steps and the codes a start on a live image has, and sends `recording ready`
+  to the arming client with the arming command's correlation id, counted in
+  `recording.armed_started`; a second `start recording` on the stream while one is
+  armed is code 22 with a message saying the recording is armed; an armed recording
+  whose endpoint closes before an image arrives is dropped, counted in
+  `recording.armed_dropped` (ADR 0059).
 - **stop recording.** The driver stops the recording at the position the recorder has
   written and answers `operation success` once the catalog's stop fields are written and
   synced (`spec/durable-log.md`, "The driver"); then every client gets `recording
@@ -620,9 +644,9 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
 | 11 | generic error | anything else; the message says what |
 | 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended |
-| 20 | no publication to record | start recording names a stream id and channel no live publication has, nor, over UDP, any image |
+| 20 | no publication to record | start recording names a stream id and channel no live publication has, nor, over UDP, any image or subscription |
 | 21 | unknown recording | stop recording, start replay or a retention command names a recording id the catalog does not hold as a valid recording |
-| 22 | already recording | start recording names a stream whose live publications, and over UDP images, are all being recorded; the message names the recording id |
+| 22 | already recording | start recording names a stream whose live publications, and over UDP images, are all being recorded, the message naming the recording id; or, over UDP, one on which a recording is armed, which the message says |
 | 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's retained position or above its extent; truncate recording names one that is not a multiple of 32 from the retained position to the stop position or at which no frame begins; purge segments names one that is not a segment base above the retained position and at most the stop position; the message names the bounds |
 | 24 | recording busy | truncate recording, purge segments, purge recording or start replay names a recording that is live or stopping, that a replay is reading, or that a retention command is working on; the message says which and what to do |
 
@@ -711,8 +735,9 @@ codes are the ones "Commands" and "Error codes" name: a channel that is neither
 `cavalry:ipc` nor a `cavalry:udp` channel this version accepts is code 1 with the reason
 `spec/udp.md` names, `grammar`, `key`, `control`, `endpoint`, `fc` or `multicast`, and
 adds one to `client_protocol.rejected_command`; a channel that parses where the
-command does not take it, `control`, `control-mode` or `fc` on an `add subscription`,
-an `add publication` that would join a live publication under a different `fc`, a
+command does not take it, `control`, `control-mode`, `fc` or a position key on an
+`add subscription`, an `add publication` that would join a live publication under a
+different `fc` or under different position keys, a
 destination command on a publication whose channel names no control address, or a
 destination channel that is `cavalry:ipc` or a control channel, names `interface` or
 `fc`, or whose endpoint has no address the control address can send to, is code 1
@@ -723,8 +748,9 @@ code 9; a `cavalry:udp` endpoint whose socket fails is code 4;
 an unknown or another client's registration is code 2 or 3; a registry or the counters
 file at capacity is code 10 and adds one to `driver.registry_full`; a log that could not
 be created or sized is code 12 and adds one to `driver.log_create_failed`; a stream id and
-channel no live publication or image has is code 20; a stream whose live publications and
-images are all being recorded is code 22; a recording id the catalog does not hold is code 21; the catalog's
+channel no live publication, image or subscription has is code 20; a stream whose live
+publications and images are all being recorded, or on which a recording is armed, is
+code 22; a recording id the catalog does not hold is code 21; the catalog's
 slots used up is code 10 and adds one to `recording.catalog_full`; a recording's files
 that could not be created is code 12 and adds one to `recording.start_failed`; a replay
 length below −1 is code 7 and adds one to `client_protocol.rejected_command`; a replay
@@ -749,7 +775,9 @@ Static counters in `counters.toml` (`spec/counters-file.md`), written by the dri
 `client.timed_out`, `client_protocol.rejected_command`, `client_protocol.errors`,
 `driver.registry_full`, `driver.log_create_failed`, `recording.started`,
 `recording.stopped`, `recording.write_failed`, `recording.start_failed`,
-`recording.catalog_full`, and the recovery pass's `recording.recovered`,
+`recording.catalog_full`, the armed recording's `recording.armed`,
+`recording.armed_started` and `recording.armed_dropped` (ADR 0059), and the recovery
+pass's `recording.recovered`,
 `recording.invalidated`, `recording.index_rewritten`, `recording.catalog_truncated`,
 `recording.slot_dropped` and `recording.files_removed` (`spec/durable-log.md`, "The
 driver"); the replay's `replay.started`, `replay.stopped`, `replay.ended`,

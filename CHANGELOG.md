@@ -1632,3 +1632,12 @@ user-visible change, added in the same commit as the change. The format follows
   no-panic test on every commit and a `cluster` fuzz target under `just fuzz`
   ([ADR 0058](docs/decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md);
   card 226).
+- `spec/udp.md` version 2 adds the position keys `init-term-id`, `term-id` and
+  `term-offset`, which create a publication at a position, and `spec/client-protocol.md`
+  version 6 arms a recording: `start recording` on a `cavalry:udp` stream with a live
+  subscription and no image answers `operation success` and starts the recording at the
+  first image's join position, counted in `recording.armed`, `recording.armed_started`
+  and `recording.armed_dropped`; `cavalry-proto` parses the keys with 15 new channel
+  vectors, and the driver answers both with code 11 until card 227's driver change
+  ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
+  card 227).

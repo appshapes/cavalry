@@ -273,6 +273,39 @@ fn channel_vector(name: &str, vector: &Value) {
         string.contains("fc="),
         "{name}: names_flow_control"
     );
+    // Version 2: the position keys and the position they make (ADR 0059).
+    match fields["initial_term_id"].as_i64() {
+        None => {
+            assert!(udp.position_keys().is_none(), "{name}: position keys");
+            assert!(!udp.names_position(), "{name}: names_position");
+        }
+        Some(initial_term_id) => {
+            let keys = udp
+                .position_keys()
+                .unwrap_or_else(|| panic!("{name}: no position keys"));
+            assert!(udp.names_position(), "{name}: names_position");
+            assert_eq!(
+                i64::from(keys.initial_term_id),
+                initial_term_id,
+                "{name}: init-term-id"
+            );
+            assert_eq!(
+                Some(i64::from(keys.term_id)),
+                fields["term_id"].as_i64(),
+                "{name}: term-id"
+            );
+            assert_eq!(
+                Some(i64::from(keys.term_offset)),
+                fields["term_offset"].as_i64(),
+                "{name}: term-offset"
+            );
+            assert_eq!(
+                Some(keys.position()),
+                fields["position"].as_i64(),
+                "{name}: position"
+            );
+        }
+    }
     match fields["interface_host"].as_str() {
         None => assert!(udp.interface().is_none(), "{name}: interface"),
         Some(host) => {
@@ -389,7 +422,7 @@ fn arithmetic_vector(name: &str, vector: &Value) {
 #[test]
 fn every_vector_in_spec_vectors_udp_json() {
     let doc: Value = serde_json::from_str(VECTORS).expect("udp.json parses");
-    assert_eq!(doc["version"], 1, "the vectors are for version 1");
+    assert_eq!(doc["version"], 2, "the vectors are for version 2");
     let vectors = doc["vectors"].as_array().expect("vectors is an array");
     assert!(vectors.len() >= 96, "udp.py writes at least 96 vectors");
     for vector in vectors {
