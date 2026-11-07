@@ -1,4 +1,4 @@
-# Client protocol, version 5
+# Client protocol, version 6
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -30,7 +30,17 @@ destination`, Aeron's type ids 7 and 8, for a publication on a control channel o
 `spec/udp.md`, version 1, and reads `control`, `control-mode` and `fc` on a
 publication's channel (ADR 0053); every version 4 encoding is unchanged, so a version
 4 client's commands are version 5 commands, and a version 4 driver answers the two
-commands with code 6.
+commands with code 6. Version 6 arms a recording: a `start recording` on a
+`cavalry:udp` channel and stream with a live subscription and no live publication or
+image is answered with `operation success` and starts the recording when the stream's
+next image arrives, at the image's join position, answering the command a second time
+with `recording ready`, or with `error` when that start fails or the armed recording
+is dropped with its stream's last subscription; and it reads the position keys of
+`spec/udp.md`, version 2, on a publication's channel, refusing them on a subscription's,
+a destination's and a replay's and reading past them on a recording's (ADR 0059); every
+version 5
+encoding is unchanged, so a version 5 client's commands are version 6 commands, and a
+version 5 driver answers the arming case with code 20.
 
 ## The driver directory
 
@@ -116,7 +126,7 @@ begins with the same 16 bytes:
 | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- |
 | 0 | 8 | client id | i64 | 0 or more: the id the client took from the correlation id counter |
-| 8 | 8 | correlation id | i64 | 0 or more: the id the client took from the correlation id counter for this command; the event that answers it names it |
+| 8 | 8 | correlation id | i64 | 0 or more: the id the client took from the correlation id counter for this command; the event that answers it names it, and an armed `start recording` alone is answered twice ("Commands") |
 
 Then, by command:
 
@@ -126,7 +136,7 @@ Then, by command:
 | add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | `cavalry:ipc`, or a `cavalry:udp` channel as `spec/udp.md`, "The channel URI", says; any other string is answered with error code 1, a host that does not resolve with code 9 |
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
 | add destination, remove destination | 16 | 8 | registration id | i64 | 0 or more: the client's registration of the publication, the correlation id of its add publication or add exclusive publication command |
-| add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: `cavalry:udp?endpoint=<host>:<port>` and nothing else (`spec/udp.md`, "The channel URI"); `cavalry:ipc`, a control channel, one naming `interface` or `fc`, an endpoint the control address cannot send to (add destination) or any other string is answered with error code 1, a host that does not resolve with code 9 |
+| add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: `cavalry:udp?endpoint=<host>:<port>` and nothing else (`spec/udp.md`, "The channel URI"); `cavalry:ipc`, a control channel, one naming `interface`, `fc` or a position key, an endpoint the control address cannot send to (add destination) or any other string is answered with error code 1, a host that does not resolve with code 9 |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 | start replay | 24 | 8 | position | i64 | −1 for the recording's retained position, its start position until a purge moves it; else a multiple of 32 from the retained position to the extent |
@@ -168,7 +178,13 @@ What the driver does with each, after the checks of "What the driver rejects":
   destinations, none until a client adds one with `add destination`; the publication's
   flow control strategy is its channel's `fc`, `max` when it names none, and an add
   that would join a live publication under a different `fc` is error code 1 with the
-  reason `fc`. A registry at capacity, a counters file
+  reason `fc`. A channel that names the position keys of `spec/udp.md`, version 2,
+  `init-term-id`, `term-id` and `term-offset`, has its log created at the position they
+  name with `init-term-id` as its initial term id, as a replay's log is created at a
+  position (`spec/log-buffer.md`, "The driver"; ADR 0059), and an add that would join a
+  live publication whose position keys differ from its own, or that names them where
+  the live one named none or the reverse, is error code 1 with the reason `position`.
+  A registry at capacity, a counters file
   with no free record, or the sender's request queue with no room for the endpoint and
   the publication, or with a remove still waiting for room (ADR 0041), is error code
   10; a log that cannot be created or sized is error code 12; a socket that cannot be
@@ -201,7 +217,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   another client, is error code 3; a publication whose channel names no control
   address, a `cavalry:ipc` publication among them, is code 1 with the reason
   `control` and a message saying what to add to the channel; a destination channel
-  that is `cavalry:ipc` or a control channel, one that names `interface` or `fc`, or
+  that is `cavalry:ipc` or a control channel, one that names `interface`, `fc` or a
+  position key, or
   whose endpoint has no address of the
   control address's family, an address of the other family written in the channel
   among them, or is not a loopback address beside a loopback control address, is code
@@ -235,8 +252,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   event names; an image is created when a setup frame for the stream arrives, with a
   registration id of its own, and `available image` then carries that id, the image's
   log under `images/` and the sender's address as the source identity (`spec/udp.md`,
-  "The receiver"). A channel that names `control`, `control-mode` or `fc` is error
-  code 1 with the reason `subscription`: this version receives on no control address
+  "The receiver"). A channel that names `control`, `control-mode`, `fc` or a position
+  key is error code 1 with the reason `subscription`: this version receives on no control address
   and reads no `fc` on a subscription (`spec/udp.md`, "The channel URI"). A registry
   at capacity, a counters file with no free record, or the
   receiver's request queue with no room for the endpoint and the subscription, or with
@@ -262,7 +279,9 @@ What the driver does with each, after the checks of "What the driver rejects":
 - **client keepalive.** The driver refreshes the client's liveness. No answer.
 - **client close.** The driver removes the client's publications and subscriptions as if
   each had been removed, and forgets the client. No answer.
-- **start recording.** The driver finds the live publications whose stream id and channel
+- **start recording.** A position key on the channel takes no part, as its `fc` takes
+  none: the command matches a stream by its resolved channel, so a client records the
+  publication it created at a position under the channel it holds (ADR 0059). The driver finds the live publications whose stream id and channel
   match, those whose end of stream position is not stored, and takes the one with the
   lowest registration id that is not yet being recorded, so that a second command records
   the next one. None live: error code 20. Every one being recorded, or its recording
@@ -292,10 +311,36 @@ What the driver does with each, after the checks of "What the driver rejects":
   On a `cavalry:udp` channel the logs that match are the live publications sending on
   the resolved channel and the images received on it with the stream id, and the rule
   and the codes are the same across both: one recording per command, the lowest
-  registration id not yet being recorded, code 20 when there is neither a publication
-  nor an image, code 22 when every one is being recorded; a recording of an image starts
-  at the image's rebuild position when the command is handled and stops when the image
-  is retired (`spec/udp.md`, "The receiver", step 5; ADR 0042).
+  registration id not yet being recorded, code 20 when there is neither a publication,
+  an image nor a subscription, code 22 when every one is being recorded; a recording of
+  an image starts at the image's rebuild position when the command is handled and stops
+  when the image is retired (`spec/udp.md`, "The receiver", step 5; ADR 0042). When the
+  stream has no live publication and no image but a live subscription on the resolved
+  channel and stream, the command *arms* the recording: the driver answers `operation
+  success` at once, counted in `recording.armed`, and holds one armed recording per
+  receive endpoint and stream, at most one for each endpoint and stream a live
+  subscription holds, so that the subscriptions registry bounds them; when the next
+  image of that stream arrives on the endpoint it starts the recording at the image's
+  initial position, its join position, before `available image` is sent, so that every
+  frame the image holds is in the recording, with the steps a start on a live image
+  has, and sends `recording ready` to the arming client with the arming command's
+  correlation id, counted in `recording.armed_started`. A start that fails then, the
+  recordings registry, the recorder's queue, the catalog or the counters file at
+  capacity, code 10, or files that cannot be created, code 12, each counted as a live
+  start's failure is, sends `error` with the arming command's correlation id and that
+  code, announces the image all the same and frees its limit from the recording,
+  counted in `recording.armed_failed`. A second `start recording` on the stream while
+  one is armed is code 22 with a message saying the recording is armed. An armed
+  recording is dropped, counted in `recording.armed_dropped` and answered with `error`
+  code 20 under the arming command's correlation id, when the last subscription on its
+  stream and endpoint goes, by `remove subscription`, `client close` or `client
+  timeout`, the endpoint's close among those cases, since no image is created for a
+  stream no subscription on the endpoint wants (`spec/udp.md`, "The receiver"). An
+  armed `start recording` is so the one command answered twice, its second answer
+  exactly one event, `recording ready` or `error`, so that the arming client learns
+  every outcome, and `recording.armed` is `recording.armed_started`,
+  `recording.armed_dropped` and `recording.armed_failed` together with the recordings
+  still armed or starting (ADR 0059).
 - **stop recording.** The driver stops the recording at the position the recorder has
   written and answers `operation success` once the catalog's stop fields are written and
   synced (`spec/durable-log.md`, "The driver"); then every client gets `recording
@@ -303,7 +348,11 @@ What the driver does with each, after the checks of "What the driver rejects":
   slots the catalog holds, is error code 21; one below the next id that no live recording
   holds is already stopped, and the answer is `operation success` with nothing written,
   since a recording id is never reused.
-- **start replay.** A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
+- **start replay.** A replay channel that names a position key is error code 1 with
+  the reason `position`, before its host is resolved and the replay is registered, so
+  that one with a key and a host that does not resolve is code 1 and not 9, since the
+  replay's publication is created at the replay's position under its recording's
+  initial term id (ADR 0059). A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
   channel this version accepts is error code 1; a `cavalry:udp` replay channel's host is
   resolved once as the command is handled, as every command's is (`spec/udp.md`, "The
   channel URI"; ADR 0043), code 9 when it does not resolve; a length below
@@ -610,19 +659,19 @@ whose correlation id, registration id or client id is its own and ignores the re
 
 | Code | Name | When |
 | --- | --- | --- |
-| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its control address, its endpoint, its `fc`, or a multicast address (`spec/udp.md`, "What a reader rejects"); or a channel that parses where the command does not take it: `control`, `control-mode` or `fc` on an `add subscription`, an `add publication` that would join a live publication under a different `fc`, a destination command on a publication whose channel names no control address, or a destination channel that is `cavalry:ipc` or a control channel, names `interface` or `fc`, or whose endpoint has no address the control address can send to; the message names the reason and the parameter |
+| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its control address, its endpoint, its `fc`, its position keys incomplete or out of range, or a multicast address (`spec/udp.md`, "What a reader rejects"); or a channel that parses where the command does not take it: `control`, `control-mode`, `fc` or a position key on an `add subscription`, a position key on a `start replay` channel, an `add publication` that would join a live publication under a different `fc` or under different position keys, a destination command on a publication whose channel names no control address, or a destination channel that is `cavalry:ipc` or a control channel, names `interface`, `fc` or a position key, or whose endpoint has no address the control address can send to; the message names the reason and the parameter |
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
 | 3 | unknown publication | remove publication, add destination or remove destination names a registration id the driver does not know, or another client's |
 | 4 | channel endpoint error | a `cavalry:udp` endpoint's socket could not be opened, bound or connected, and the message carries the operating system's reason and the endpoint; or an `add subscription` waited the closing endpoint wait for its channel's previous receive endpoint to close, and the message names the endpoint and the wait |
 | 6 | unknown command type | the record's type is not a command of this version |
 | 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read, or start replay's length is below −1 |
 | 9 | unknown host | a `cavalry:udp` channel's host does not resolve; the message names it |
-| 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
+| 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record; for an armed recording whose start found one so, a second answer under the arming command's correlation id |
 | 11 | generic error | anything else; the message says what |
-| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended |
-| 20 | no publication to record | start recording names a stream id and channel no live publication has, nor, over UDP, any image |
+| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended; for an armed recording whose start found one so, a second answer under the arming command's correlation id |
+| 20 | no publication to record | start recording names a stream id and channel no live publication has, nor, over UDP, any image or subscription; or an armed recording was dropped, its stream's last subscription gone, answered under the arming command's correlation id |
 | 21 | unknown recording | stop recording, start replay or a retention command names a recording id the catalog does not hold as a valid recording |
-| 22 | already recording | start recording names a stream whose live publications, and over UDP images, are all being recorded; the message names the recording id |
+| 22 | already recording | start recording names a stream whose live publications, and over UDP images, are all being recorded, the message naming the recording id; or, over UDP, one on which a recording is armed, which the message says |
 | 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's retained position or above its extent; truncate recording names one that is not a multiple of 32 from the retained position to the stop position or at which no frame begins; purge segments names one that is not a segment base above the retained position and at most the stop position; the message names the bounds |
 | 24 | recording busy | truncate recording, purge segments, purge recording or start replay names a recording that is live or stopping, that a replay is reading, or that a retention command is working on; the message says which and what to do |
 
@@ -682,14 +731,14 @@ with error code 10 and registers nothing:
 | destinations | 64 per send endpoint | every destination added to a control channel's send endpoint and not removed (`spec/udp.md`, "The sender") |
 
 The counters file is sized so that the registries fill before it does: the static
-counters of `counters.toml`, 84 once the sender and the receiver land their 46 (`spec/udp.md`,
-"Counters"), five per publication (5120: its position, its limit, the sender position,
+counters of `counters.toml`, 91 with the armed recording's four (ADR 0059) after the
+sender's and the receiver's 46 (`spec/udp.md`, "Counters"), five per publication (5120: its position, its limit, the sender position,
 the sender limit and the sender's flow control receivers), three per image (6144: the
 subscriber's position, the rebuild position and the high-water mark), three per
 recording (3072), one per replay (64), five per replay publication (640: its position
 and its limit, and over `cavalry:udp` the sender position, the sender limit and the
 flow control receivers beside them; ADR 0043, ADR 0053) and six per endpoint (768)
-come to 15,892, fewer than 16384.
+come to 15,899, fewer than 16384.
 
 ## What the driver rejects
 
@@ -709,22 +758,28 @@ The vectors cover these: they are checks on bytes. A command that decodes is the
 checked by the driver against its state, which no vector holds; the checks and their
 codes are the ones "Commands" and "Error codes" name: a channel that is neither
 `cavalry:ipc` nor a `cavalry:udp` channel this version accepts is code 1 with the reason
-`spec/udp.md` names, `grammar`, `key`, `control`, `endpoint`, `fc` or `multicast`, and
-adds one to `client_protocol.rejected_command`; a channel that parses where the
-command does not take it, `control`, `control-mode` or `fc` on an `add subscription`,
-an `add publication` that would join a live publication under a different `fc`, a
-destination command on a publication whose channel names no control address, or a
-destination channel that is `cavalry:ipc` or a control channel, names `interface` or
-`fc`, or whose endpoint has no address the control address can send to, is code 1
+`spec/udp.md` names, `grammar`, `key`, `control`, `endpoint`, `fc`, `position` or
+`multicast`, and adds one to `client_protocol.rejected_command`; a channel that parses where the
+command does not take it, `control`, `control-mode`, `fc` or a position key on an
+`add subscription`, a position key on a `start replay` channel, an `add publication`
+that would join a live publication under a different `fc` or under
+different position keys, a destination command on a publication whose channel names
+no control address, or a destination channel that is `cavalry:ipc` or a control
+channel, names `interface`, `fc` or a position key, or whose endpoint has no address
+the control address can send to, is code 1
 with the reason
-`subscription`, `fc`, `control` or `destination` and adds one to
+`subscription`, `fc`, `position`, `control` or `destination` and adds one to
 `client_protocol.rejected_command` too; a `cavalry:udp` host that does not resolve is
 code 9; a `cavalry:udp` endpoint whose socket fails is code 4;
 an unknown or another client's registration is code 2 or 3; a registry or the counters
 file at capacity is code 10 and adds one to `driver.registry_full`; a log that could not
 be created or sized is code 12 and adds one to `driver.log_create_failed`; a stream id and
-channel no live publication or image has is code 20; a stream whose live publications and
-images are all being recorded is code 22; a recording id the catalog does not hold is code 21; the catalog's
+channel no live publication, image or subscription has is code 20; a stream whose live
+publications and images are all being recorded, or on which a recording is armed, is
+code 22; an armed recording's start that fails when its image arrives answers the
+arming command a second time with code 10 or 12 and adds one to
+`recording.armed_failed`, and one dropped with its stream's last subscription answers
+it with code 20 and adds one to `recording.armed_dropped`; a recording id the catalog does not hold is code 21; the catalog's
 slots used up is code 10 and adds one to `recording.catalog_full`; a recording's files
 that could not be created is code 12 and adds one to `recording.start_failed`; a replay
 length below −1 is code 7 and adds one to `client_protocol.rejected_command`; a replay
@@ -749,7 +804,10 @@ Static counters in `counters.toml` (`spec/counters-file.md`), written by the dri
 `client.timed_out`, `client_protocol.rejected_command`, `client_protocol.errors`,
 `driver.registry_full`, `driver.log_create_failed`, `recording.started`,
 `recording.stopped`, `recording.write_failed`, `recording.start_failed`,
-`recording.catalog_full`, and the recovery pass's `recording.recovered`,
+`recording.catalog_full`, the armed recording's `recording.armed`,
+`recording.armed_started`, `recording.armed_dropped` and `recording.armed_failed` (ADR
+0059), and the recovery
+pass's `recording.recovered`,
 `recording.invalidated`, `recording.index_rewritten`, `recording.catalog_truncated`,
 `recording.slot_dropped` and `recording.files_removed` (`spec/durable-log.md`, "The
 driver"); the replay's `replay.started`, `replay.stopped`, `replay.ended`,

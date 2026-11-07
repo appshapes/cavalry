@@ -41,8 +41,8 @@ Protocol).
 | `log-buffer.md`, the log buffer | 1 | ADR 0013, ADR 0040, ADR 0048 |
 | `command-ring.md`, the command ring | 1 | ADR 0014, ADR 0018 |
 | `broadcast-buffer.md`, the broadcast buffer | 0 | ADR 0014 |
-| `client-protocol.md`, the client protocol | 5 | ADR 0019, ADR 0025, ADR 0030, ADR 0031, ADR 0040, ADR 0049, ADR 0053 |
+| `client-protocol.md`, the client protocol | 6 | ADR 0019, ADR 0025, ADR 0030, ADR 0031, ADR 0040, ADR 0049, ADR 0053, ADR 0059 |
 | `durable-log.md`, the durable log | 1 | ADR 0024, ADR 0031 |
-| `udp.md`, the UDP transport | 1 | ADR 0040, ADR 0045, ADR 0053 |
+| `udp.md`, the UDP transport | 2 | ADR 0040, ADR 0045, ADR 0053, ADR 0059 |
 | `c-abi.md`, the C ABI | 1 | ADR 0051, ADR 0057 |
 | `cluster.md`, the cluster protocol | 0 | ADR 0058 |

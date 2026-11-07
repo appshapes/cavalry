@@ -1,6 +1,6 @@
 {
  "spec": "spec/client-protocol.md",
- "version": 5,
+ "version": 6,
  "generated_by": "spec/vectors/client-protocol.py",
  "vectors": [
   {

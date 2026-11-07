@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write spec/vectors/udp.json: the test vectors for spec/udp.md, version 1.
+"""Write spec/vectors/udp.json: the test vectors for spec/udp.md, version 2.
 The reference encoder, standard library only. Run from the repository root:
 
     python3 spec/vectors/udp.py
@@ -33,6 +33,7 @@ MIN_TERM, MAX_TERM, MIN_MTU, MAX_MTU = 65536, 1 << 30, 64, 65504
 MAX_MESSAGE_CAP = 16 * 1024 * 1024
 SESSION_ID, STREAM_ID, INITIAL_TERM_ID, RECEIVER_ID = 7, 1001, -5, 0x1122334455667788
 TERM_LENGTH = 65536
+UDP_TERM_LENGTH = 16 * 1024 * 1024  # the UDP term length of spec/udp.md, "Values", which the position keys count in
 
 
 def i32(value):
@@ -145,14 +146,23 @@ def datagram(name, frames, term_length=TERM_LENGTH, error=None):
 # ---- channels -----------------------------------------------------------------------
 
 def channel(name, string, endpoint_host, endpoint_port, interface_host=None, interface_port=None,
-            control_host=None, control_port=None, control_mode=None, fc="max"):
-    """A channel and its fields: an endpoint or a control address (version 1), and `fc`,
-    `max` when the string names none."""
+            control_host=None, control_port=None, control_mode=None, fc="max",
+            initial_term_id=None, term_id=None, term_offset=None):
+    """A channel and its fields: an endpoint or a control address (version 1), `fc`, `max`
+    when the string names none, and the position keys (version 2) with the position they
+    make under the UDP term length, null when the string names none."""
+    position = None
+    if initial_term_id is not None:
+        count = i32(term_id - initial_term_id)
+        assert count >= 0, name
+        position = count * UDP_TERM_LENGTH + term_offset
     return {"name": name, "kind": "channel", "string": string,
             "fields": {"endpoint_host": endpoint_host, "endpoint_port": endpoint_port,
                        "interface_host": interface_host, "interface_port": interface_port,
                        "control_host": control_host, "control_port": control_port,
-                       "control_mode": control_mode, "fc": fc}}
+                       "control_mode": control_mode, "fc": fc,
+                       "initial_term_id": initial_term_id, "term_id": term_id,
+                       "term_offset": term_offset, "position": position}}
 
 
 def control_channel(name, string, control_host, control_port, fc="max"):
@@ -374,6 +384,43 @@ VECTORS = [
     bad_channel("channel-fc-before-multicast",
                 "cavalry:udp?control=224.0.1.1:40456|control-mode=manual|fc=tagged", "fc"),
     bad_channel("channel-control-before-multicast", "cavalry:udp?control=224.0.1.1:40456", "control"),
+    # Version 2: the position keys, all three or none, and the position they make (ADR 0059).
+    channel("channel-position-keys",
+            "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=9|term-offset=4096",
+            "10.0.0.2", 40123, initial_term_id=7, term_id=9, term_offset=4096),
+    channel("channel-position-keys-at-start",
+            "cavalry:udp?control=10.0.0.1:40456|control-mode=manual|fc=min|init-term-id=7|term-id=7|term-offset=0",
+            None, None, control_host="10.0.0.1", control_port=40456, control_mode="manual", fc="min",
+            initial_term_id=7, term_id=7, term_offset=0),
+    channel("channel-position-keys-term-id-wraps",
+            "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=2147483647|term-id=-2147483648|term-offset=32",
+            "10.0.0.2", 40123, initial_term_id=2147483647, term_id=-2147483648, term_offset=32),
+    channel("channel-position-keys-signs-and-zeros",
+            "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=+007|term-id=0009|term-offset=00",
+            "10.0.0.2", 40123, initial_term_id=7, term_id=9, term_offset=0),
+    channel("channel-position-keys-negative-term-ids",
+            "cavalry:udp?endpoint=10.0.0.2:40123|term-offset=64|term-id=-3|init-term-id=-5",
+            "10.0.0.2", 40123, initial_term_id=-5, term_id=-3, term_offset=64),
+    bad_channel("channel-position-one-key", "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7", "position"),
+    bad_channel("channel-position-two-keys", "cavalry:udp?endpoint=10.0.0.2:40123|term-id=9|term-offset=0",
+                "position"),
+    bad_channel("channel-position-not-an-integer",
+                "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=nine|term-offset=0", "position"),
+    bad_channel("channel-position-past-i32",
+                "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=2147483648|term-id=0|term-offset=0", "position"),
+    bad_channel("channel-position-term-id-below-initial",
+                "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=9|term-id=7|term-offset=0", "position"),
+    bad_channel("channel-position-offset-negative",
+                "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=7|term-offset=-32", "position"),
+    bad_channel("channel-position-offset-not-a-multiple-of-32",
+                "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=7|term-offset=100", "position"),
+    bad_channel("channel-position-offset-at-term-length",
+                "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-id=7|term-offset=16777216", "position"),
+    bad_channel("channel-key-before-position", "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=7|term-length=65536",
+                "key"),
+    bad_channel("channel-fc-before-position", "cavalry:udp?endpoint=10.0.0.2:40123|fc=tagged|init-term-id=7", "fc"),
+    bad_channel("channel-position-before-multicast",
+                "cavalry:udp?endpoint=224.0.1.1:40123|init-term-id=7|term-id=7|term-offset=-32", "position"),
     # Arithmetic: the rules of "The sender" and "The receiver" on given inputs.
     sender_limit("sender-limit-first-status-message", 0, 0, INITIAL_TERM_ID, 0, 131072),
     sender_limit("sender-limit-rises", 8192, 131072, INITIAL_TERM_ID, 8192, 131072),
@@ -405,7 +452,7 @@ def main():
     assert len(names) == len(set(names)), "vector names must be unique"
     doc = {
         "spec": "spec/udp.md",
-        "version": 1,
+        "version": 2,
         "generated_by": "spec/vectors/udp.py; do not edit by hand",
         "vectors": VECTORS,
     }

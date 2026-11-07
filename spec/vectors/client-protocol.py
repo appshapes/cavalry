@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/client-protocol.json: the test vectors for spec/client-protocol.md,
-version 5.
+version 6.
 
 This script is the spec's reference encoder, independent of the Rust code: it packs
 each command's and event's fields with the standard library and nothing else, so an
@@ -35,6 +35,8 @@ ON_REPLAY_READY, ON_REPLAY_STOPPED = 0x1003, 0x1004
 # Version 3: the retention commands, answered with operation success or error (ADR 0031).
 TRUNCATE_RECORDING, PURGE_SEGMENTS, PURGE_RECORDING = 0x0105, 0x0106, 0x0107
 # Version 5: the destination commands, under Aeron's ids (ADR 0053).
+# Version 6: no new encoding; start recording arms a recording on a subscription, and a
+# publication's channel may name the position keys of spec/udp.md, version 2 (ADR 0059).
 ADD_DESTINATION, REMOVE_DESTINATION = 7, 8
 # The replay's conventions, Aeron's: NULL_POSITION, NULL_LENGTH and Long.MAX_VALUE.
 NULL_POSITION, NULL_LENGTH, FOLLOW_LENGTH = -1, -1, 2**63 - 1
@@ -407,7 +409,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 5,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 6,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")
