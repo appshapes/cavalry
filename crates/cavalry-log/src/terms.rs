@@ -503,7 +503,7 @@ impl TermsFile {
             let bytes = &mut chunk[..count * ENTRY_LENGTH];
             let at = HEADER_LENGTH as u64 + index * ENTRY_LENGTH as u64;
             file.read_exact_at(bytes, at).map_err(io("read"))?;
-            for entry_bytes in bytes.chunks_exact(ENTRY_LENGTH) {
+            for entry_bytes in bytes.as_chunks::<ENTRY_LENGTH>().0 {
                 let entry = match TermsEntry::parse(entry_bytes, previous.as_ref()) {
                     Ok(entry) => entry,
                     Err(TermsError::Checksum) => break 'read,
