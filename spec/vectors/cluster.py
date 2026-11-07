@@ -428,12 +428,17 @@ def replication_stop(append_position, next_term_base_log_position, next_log_posi
     return {"replicate": False, "stop_position": NULL}
 
 
-def new_leadership_term_action(log_term, append, msg):
+def new_leadership_term_action(log_term, append, msg, candidate_term, in_canvass):
     """spec/cluster.md, "Messages during an election", new leadership term: what a reader with log
-    leadership term id `log_term` and append position `append` does with the message's fields, and
-    the term it records, the leader's term at its base when the reader's append position, after
-    any truncation, is at the leader's term base log position."""
+    leadership term id `log_term`, append position `append` and candidate term `candidate_term`, in
+    canvass or in a ballot state, does with the message's fields, and the term it records, the
+    leader's term at its base when the reader's append position, after any truncation, is at the
+    leader's term base log position. A term below the candidate term is ignored, as is, in a ballot
+    state, any term but the candidate term; Aeron reads any term in canvass (ADR 0058)."""
     none = {"truncate_to": NULL, "stop_position": NULL, "records": None}
+    term = msg["leadership_term_id"]
+    if term < candidate_term or (not in_canvass and term != candidate_term):
+        return dict(none, action="ignore")
     if msg["log_leadership_term_id"] != log_term:
         return dict(none, action="canvass")
     truncate_to = NULL
@@ -450,6 +455,35 @@ def new_leadership_term_action(log_term, append, msg):
         return dict(none, action="wait", truncate_to=truncate_to)
     records = [msg["leadership_term_id"], base] if append == base else None
     return dict(none, action="replay", truncate_to=truncate_to, records=records)
+
+
+VOTING_STATES = (1, 2, 3, 4)  # canvass, nominate, candidate ballot, follower ballot
+
+
+def request_vote(candidate_term, log, state, request):
+    """spec/cluster.md, "Messages during an election", request vote: the vote a reader with
+    candidate term `candidate_term`, log `[term, position]` and election state `state` (the states
+    table's number) answers `request`, True for, False against, None for no answer, and its candidate
+    term after it: against, unchanged, for a term at or below its own; against, taking the term, for a
+    higher term from a log behind its own; for, taking the term, for a higher term from a log at least
+    its own in canvass, nominate, candidate ballot or follower ballot; nothing in init or in any other
+    state."""
+    term = request["candidate_term_id"]
+    if state == 0:
+        return {"vote": None, "candidate_term": candidate_term}
+    if term <= candidate_term:
+        return {"vote": False, "candidate_term": candidate_term}
+    if not at_least(request["log_leadership_term_id"], request["log_position"], log[0], log[1]):
+        return {"vote": False, "candidate_term": term}
+    if state in VOTING_STATES:
+        return {"vote": True, "candidate_term": term}
+    return {"vote": None, "candidate_term": candidate_term}
+
+
+def vote_vector(name, candidate_term, log, state, request):
+    request = {"candidate_term_id": request[0], "log_leadership_term_id": request[1], "log_position": request[2]}
+    inputs = {"candidate_term": candidate_term, "log": log, "state": state, "request": request}
+    return arithmetic(name, "request-vote", inputs, request_vote(candidate_term, log, state, request))
 
 
 def next_fields(terms, reported_term, leader_term, leader_base):
@@ -618,32 +652,62 @@ VECTORS += [
                {"append_position": 960, "next_term_base_log_position": NULL, "next_log_position": NULL},
                replication_stop(960, NULL, NULL)),
     arithmetic("new-leadership-term-returning-leader-truncates", "new-leadership-term",
-               {"log_leadership_term_id": 4, "append_position": 1100, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
-               new_leadership_term_action(4, 1100, nlt(4, 5, 1000, NULL, 5, 1000, 5000))),
+               {"log_leadership_term_id": 4, "append_position": 1100, "candidate_term": 5,
+                "in_canvass": True, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(4, 1100, nlt(4, 5, 1000, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-behind-replicates", "new-leadership-term",
-               {"log_leadership_term_id": 4, "append_position": 960, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
-               new_leadership_term_action(4, 960, nlt(4, 5, 1000, NULL, 5, 1000, 5000))),
+               {"log_leadership_term_id": 4, "append_position": 960, "candidate_term": 5,
+                "in_canvass": True, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(4, 960, nlt(4, 5, 1000, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-two-terms-behind", "new-leadership-term",
-               {"log_leadership_term_id": 2, "append_position": 200, "message": nlt(2, 3, 200, 500, 5, 1000, 5000)},
-               new_leadership_term_action(2, 200, nlt(2, 3, 200, 500, 5, 1000, 5000))),
+               {"log_leadership_term_id": 2, "append_position": 200, "candidate_term": 5,
+                "in_canvass": True, "message": nlt(2, 3, 200, 500, 5, 1000, 5000)},
+               new_leadership_term_action(2, 200, nlt(2, 3, 200, 500, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-own-term-replays", "new-leadership-term",
-               {"log_leadership_term_id": 5, "append_position": 3000, "message": nlt(5, NULL, NULL, NULL, 5, 1000, 5000)},
-               new_leadership_term_action(5, 3000, nlt(5, NULL, NULL, NULL, 5, 1000, 5000))),
+               {"log_leadership_term_id": 5, "append_position": 3000, "candidate_term": 5,
+                "in_canvass": True, "message": nlt(5, NULL, NULL, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(5, 3000, nlt(5, NULL, NULL, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-other-log-term-canvasses", "new-leadership-term",
-               {"log_leadership_term_id": 3, "append_position": 900, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
-               new_leadership_term_action(3, 900, nlt(4, 5, 1000, NULL, 5, 1000, 5000))),
+               {"log_leadership_term_id": 3, "append_position": 900, "candidate_term": 5,
+                "in_canvass": True, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(3, 900, nlt(4, 5, 1000, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-no-next-term-fails", "new-leadership-term",
-               {"log_leadership_term_id": 4, "append_position": 960, "message": nlt(4, NULL, NULL, NULL, 5, 1000, 5000)},
-               new_leadership_term_action(4, 960, nlt(4, NULL, NULL, NULL, 5, 1000, 5000))),
+               {"log_leadership_term_id": 4, "append_position": 960, "candidate_term": 5,
+                "in_canvass": True, "message": nlt(4, NULL, NULL, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(4, 960, nlt(4, NULL, NULL, NULL, 5, 1000, 5000), 5, True)),
     arithmetic("new-leadership-term-at-leaders-base-records", "new-leadership-term",
-               {"log_leadership_term_id": 1, "append_position": 1100, "message": nlt(1, 2, 1100, NULL, 2, 1100, 1100)},
-               new_leadership_term_action(1, 1100, nlt(1, 2, 1100, NULL, 2, 1100, 1100))),
+               {"log_leadership_term_id": 1, "append_position": 1100, "candidate_term": 2,
+                "in_canvass": True, "message": nlt(1, 2, 1100, NULL, 2, 1100, 1100)},
+               new_leadership_term_action(1, 1100, nlt(1, 2, 1100, NULL, 2, 1100, 1100), 2, True)),
     arithmetic("new-leadership-term-stale-tail-truncates", "new-leadership-term",
-               {"log_leadership_term_id": 2, "append_position": 300, "message": nlt(2, 4, 200, 1000, 5, 1000, 1000)},
-               new_leadership_term_action(2, 300, nlt(2, 4, 200, 1000, 5, 1000, 1000))),
+               {"log_leadership_term_id": 2, "append_position": 300, "candidate_term": 5,
+                "in_canvass": True, "message": nlt(2, 4, 200, 1000, 5, 1000, 1000)},
+               new_leadership_term_action(2, 300, nlt(2, 4, 200, 1000, 5, 1000, 1000), 5, True)),
     arithmetic("new-leadership-term-at-next-base-no-end-waits", "new-leadership-term",
-               {"log_leadership_term_id": 3, "append_position": 500, "message": nlt(3, 4, 500, NULL, 5, 1000, 5000)},
-               new_leadership_term_action(3, 500, nlt(3, 4, 500, NULL, 5, 1000, 5000))),
+               {"log_leadership_term_id": 3, "append_position": 500, "candidate_term": 5,
+                "in_canvass": True, "message": nlt(3, 4, 500, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(3, 500, nlt(3, 4, 500, NULL, 5, 1000, 5000), 5, True)),
+    arithmetic("new-leadership-term-below-candidate-term-ignored", "new-leadership-term",
+               {"log_leadership_term_id": 2, "append_position": 100, "candidate_term": 4,
+                "in_canvass": True, "message": nlt(2, 3, 200, NULL, 3, 200, 200)},
+               new_leadership_term_action(2, 100, nlt(2, 3, 200, NULL, 3, 200, 200), 4, True)),
+    arithmetic("new-leadership-term-above-candidate-term-in-canvass-replays", "new-leadership-term",
+               {"log_leadership_term_id": 5, "append_position": 3000, "candidate_term": 2,
+                "in_canvass": True, "message": nlt(5, NULL, NULL, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(5, 3000, nlt(5, NULL, NULL, NULL, 5, 1000, 5000), 2, True)),
+    arithmetic("new-leadership-term-other-term-in-ballot-ignored", "new-leadership-term",
+               {"log_leadership_term_id": 4, "append_position": 960, "candidate_term": 4,
+                "in_canvass": False, "message": nlt(4, 5, 1000, NULL, 5, 1000, 5000)},
+               new_leadership_term_action(4, 960, nlt(4, 5, 1000, NULL, 5, 1000, 5000), 4, False)),
+    vote_vector("request-vote-at-candidate-term-against", 3, [2, 200], 1, (3, 2, 200)),
+    vote_vector("request-vote-below-candidate-term-against", 4, [2, 200], 1, (3, 2, 300)),
+    vote_vector("request-vote-higher-term-log-behind-against-takes-term", 2, [2, 200], 1, (3, 2, 100)),
+    vote_vector("request-vote-higher-term-log-equal-for", 2, [2, 200], 1, (3, 2, 200)),
+    vote_vector("request-vote-higher-term-log-term-ahead-for", 2, [2, 500], 1, (3, 3, 100)),
+    vote_vector("request-vote-second-request-for-a-voted-term-against", 3, [2, 200], 4, (3, 2, 300)),
+    vote_vector("request-vote-in-follower-ballot-higher-term-for", 3, [2, 100], 4, (4, 2, 100)),
+    vote_vector("request-vote-outside-the-voting-states-nothing", 3, [2, 200], 10, (4, 2, 200)),
+    vote_vector("request-vote-in-init-nothing", 3, [2, 200], 0, (4, 2, 200)),
     arithmetic("next-fields-term-behind", "next-fields",
                {"terms": LEADER_TERMS, "reported_term": 2, "leader_term": 5, "leader_base": 1000},
                next_fields(LEADER_TERMS, 2, 5, 1000)),
