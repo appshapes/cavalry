@@ -3854,23 +3854,6 @@ impl Conductor {
         let Some(parsed) = self.check_channel(correlation_id, channel, "the channel") else {
             return;
         };
-        // A position key is a client's publication's: a recording is matched by its
-        // resolved channel alone (`spec/udp.md`, "The channel URI"; ADR 0059).
-        if let Channel::Udp(udp) = parsed
-            && udp.names_position()
-        {
-            self.statics.rejected_command.increment();
-            self.send_error(
-                correlation_id,
-                ErrorCode::InvalidChannel,
-                &format!(
-                    "the channel: channel refused (position): it names init-term-id, term-id or \
-                     term-offset, which create a publication at a position and mean nothing to \
-                     a recording, matched by its channel alone; remove them; see {ERRORS_DOC}"
-                ),
-            );
-            return;
-        }
         // Over UDP the logs that match are the publications sending on the resolved
         // channel and the images received on it (`spec/udp.md`, "The receiver"; ADR
         // 0042), the lowest registration id not yet recorded first, as over IPC.
@@ -7547,20 +7530,10 @@ mod recording {
             "14 joined 2"
         );
         assert_eq!(h.conductor.publications.len(), 2);
-        // A recording channel that names a position key is refused the same way.
-        h.conductor.start_recording(
-            19,
-            7,
-            b"cavalry:udp?endpoint=127.0.0.1:40123|init-term-id=7|term-id=9|term-offset=4096",
-            now,
-        );
-        let (code, message) = h.last_error(19).expect("an error");
-        assert_eq!(code, 1, "{message}");
-        assert!(message.contains("(position)"), "{message}");
         // Ten of version 5's refusals, and the position keys refused on a subscription,
-        // on a destination, on a replay channel and on a recording channel; the code 11
-        // answers count nothing.
-        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 14);
+        // on a destination and on a replay channel; the code 11 answers count nothing,
+        // and a recording channel's keys take no part (ADR 0059).
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 13);
     }
 
     /// An RTT measurement that reaches a control channel's socket is answered to the

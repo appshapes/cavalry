@@ -277,10 +277,9 @@ What the driver does with each, after the checks of "What the driver rejects":
 - **client keepalive.** The driver refreshes the client's liveness. No answer.
 - **client close.** The driver removes the client's publications and subscriptions as if
   each had been removed, and forgets the client. No answer.
-- **start recording.** A channel that names a position key is error code 1 with the
-  reason `position`, before its host is resolved, so that one with a key and a host
-  that does not resolve is code 1 and not 9, since the command matches a stream by its
-  resolved channel and creates nothing (ADR 0059). The driver finds the live publications whose stream id and channel
+- **start recording.** A position key on the channel takes no part, as its `fc` takes
+  none: the command matches a stream by its resolved channel, so a client records the
+  publication it created at a position under the channel it holds (ADR 0059). The driver finds the live publications whose stream id and channel
   match, those whose end of stream position is not stored, and takes the one with the
   lowest registration id that is not yet being recorded, so that a second command records
   the next one. None live: error code 20. Every one being recorded, or its recording
@@ -658,7 +657,7 @@ whose correlation id, registration id or client id is its own and ignores the re
 
 | Code | Name | When |
 | --- | --- | --- |
-| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its control address, its endpoint, its `fc`, its position keys incomplete or out of range, or a multicast address (`spec/udp.md`, "What a reader rejects"); or a channel that parses where the command does not take it: `control`, `control-mode`, `fc` or a position key on an `add subscription`, a position key on a `start recording` or `start replay` channel, an `add publication` that would join a live publication under a different `fc` or under different position keys, a destination command on a publication whose channel names no control address, or a destination channel that is `cavalry:ipc` or a control channel, names `interface`, `fc` or a position key, or whose endpoint has no address the control address can send to; the message names the reason and the parameter |
+| 1 | invalid channel | the channel is not `cavalry:ipc` or a `cavalry:udp` channel this version accepts: its grammar, a parameter this version does not name, its control address, its endpoint, its `fc`, its position keys incomplete or out of range, or a multicast address (`spec/udp.md`, "What a reader rejects"); or a channel that parses where the command does not take it: `control`, `control-mode`, `fc` or a position key on an `add subscription`, a position key on a `start replay` channel, an `add publication` that would join a live publication under a different `fc` or under different position keys, a destination command on a publication whose channel names no control address, or a destination channel that is `cavalry:ipc` or a control channel, names `interface`, `fc` or a position key, or whose endpoint has no address the control address can send to; the message names the reason and the parameter |
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
 | 3 | unknown publication | remove publication, add destination or remove destination names a registration id the driver does not know, or another client's |
 | 4 | channel endpoint error | a `cavalry:udp` endpoint's socket could not be opened, bound or connected, and the message carries the operating system's reason and the endpoint; or an `add subscription` waited the closing endpoint wait for its channel's previous receive endpoint to close, and the message names the endpoint and the wait |
@@ -760,8 +759,8 @@ codes are the ones "Commands" and "Error codes" name: a channel that is neither
 `spec/udp.md` names, `grammar`, `key`, `control`, `endpoint`, `fc`, `position` or
 `multicast`, and adds one to `client_protocol.rejected_command`; a channel that parses where the
 command does not take it, `control`, `control-mode`, `fc` or a position key on an
-`add subscription`, a position key on a `start recording` or `start replay` channel, an
-`add publication` that would join a live publication under a different `fc` or under
+`add subscription`, a position key on a `start replay` channel, an `add publication`
+that would join a live publication under a different `fc` or under
 different position keys, a destination command on a publication whose channel names
 no control address, or a destination channel that is `cavalry:ipc` or a control
 channel, names `interface`, `fc` or a position key, or whose endpoint has no address
