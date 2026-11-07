@@ -4121,6 +4121,23 @@ impl Conductor {
             })
             .map(|entry| entry.registration_id)
             .collect();
+        // A second start while a recording is armed on the stream is code 22, whatever
+        // else the stream has, a publication sending to the endpoint among them
+        // (`spec/client-protocol.md`, "Commands", start recording; ADR 0059).
+        if self.armed_recordings.iter().any(|armed| {
+            armed.stream_id == stream_id && receive_endpoints.contains(&armed.endpoint_id)
+        }) {
+            self.send_error(
+                correlation_id,
+                ErrorCode::AlreadyRecording,
+                &format!(
+                    "stream {stream_id} on {resolved} has a recording armed, which starts when \
+                     the stream's next image arrives; wait for its recording ready; see \
+                     {ERRORS_DOC}"
+                ),
+            );
+            return;
+        }
         // The candidates: (registration id, is an image), live and on the stream.
         let mut candidates: Vec<(i64, bool)> = self
             .publications
@@ -4147,23 +4164,9 @@ impl Conductor {
         );
         // Version 6: no publication and no image, but a live subscription on the
         // endpoint and stream, arms the recording for the stream's next image, one per
-        // endpoint and stream (`spec/client-protocol.md`, "Commands", start recording;
-        // ADR 0059); a second start while one is armed is code 22.
+        // endpoint and stream, a second start while one is armed being code 22 above
+        // (`spec/client-protocol.md`, "Commands", start recording; ADR 0059).
         if candidates.is_empty() {
-            if self.armed_recordings.iter().any(|armed| {
-                armed.stream_id == stream_id && receive_endpoints.contains(&armed.endpoint_id)
-            }) {
-                self.send_error(
-                    correlation_id,
-                    ErrorCode::AlreadyRecording,
-                    &format!(
-                        "stream {stream_id} on {resolved} has a recording armed, which starts \
-                         when the stream's next image arrives; wait for its recording ready; \
-                         see {ERRORS_DOC}"
-                    ),
-                );
-                return;
-            }
             let subscribed = self
                 .subscriptions
                 .iter()
@@ -4352,6 +4355,9 @@ impl Conductor {
             self.recorder_queue_full(correlation_id);
             return false;
         }
+        // Never taken, so never unanswered: both callers found the image in
+        // `udp_images` in the same call, `start_udp_recording` among the candidates and
+        // `on_setup` where it pushed the image, and nothing between removes one.
         let Some((session_id, stream_id, source_identity)) = self
             .udp_images
             .iter()
@@ -12693,6 +12699,31 @@ mod receiving {
             1,
             "the other stream keeps the endpoint"
         );
+    }
+
+    /// A second start while a recording is armed is code 22 even with a publication
+    /// sending to the endpoint on the stream, which is not recorded in the armed
+    /// recording's place (`spec/client-protocol.md`, "Commands", start recording; ADR
+    /// 0059).
+    #[test]
+    fn a_second_start_while_armed_is_code_22_beside_a_publication_on_the_stream() {
+        let mut h = Harness::new("armed-recording-publication");
+        let port = subscribe_and_arm(&mut h, 3);
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let now = h.now;
+        h.conductor
+            .add_publication(1, 4, STREAM, channel.as_bytes(), false, now);
+        assert_eq!(h.last_error(4), None);
+        h.conductor
+            .start_recording(5, STREAM, channel.as_bytes(), now);
+        let (code, message) = h.last_error(5).expect("an error");
+        assert_eq!(code, 22, "{message}");
+        assert!(message.contains("armed"), "{message}");
+        assert!(
+            h.conductor.recordings.is_empty(),
+            "the publication is not recorded"
+        );
+        assert_eq!(h.conductor.armed_recordings.len(), 1);
     }
 
     /// The armed recordings at capacity (invariant 3): the subscriptions registry full,
