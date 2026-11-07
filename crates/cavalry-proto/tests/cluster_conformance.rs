@@ -8,9 +8,10 @@
 use cavalry_proto::cluster::{
     Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
     EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
-    NewLeadershipTermAction, ReplayEnd, ReplicationStop, SnapshotMark, Stream, TermFields,
-    TermSpan, TimeUnit, VERSION, ballot, candidate, commit_position, entry_position, log_at_least,
-    new_leadership_term_action, parse_members, quorum, replay_end, replication_stop,
+    NewLeadershipTermAction, RecordedTerms, ReplayEnd, ReplicationStop, SnapshotMark, Stream,
+    TermFields, TermSpan, TimeUnit, VERSION, ballot, candidate, commit_position, entry_position,
+    log_at_least, new_leadership_term_action, parse_members, quorum, replay_end,
+    replication_record, replication_stop,
 };
 use serde_json::{Map, Value, json};
 
@@ -471,6 +472,24 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 .collect();
             let ReplayEnd { term, end_position } = replay_end(&terms, int(inputs, "position"));
             json!({"term": term, "end_position": end_position})
+        }
+        "replication-record" => {
+            let RecordedTerms {
+                replicated,
+                leader,
+                log_leadership_term_id,
+            } = replication_record(
+                int(inputs, "term_replicated"),
+                int(inputs, "term_base"),
+                int(inputs, "stop_position"),
+                int(inputs, "leader_term"),
+                int(inputs, "leader_base"),
+            );
+            let mut recorded = vec![json!([replicated.0, replicated.1])];
+            if let Some((term, base)) = leader {
+                recorded.push(json!([term, base]));
+            }
+            json!({"recorded": recorded, "log_leadership_term_id": log_leadership_term_id})
         }
         "entry-position" => {
             let after = entry_position(

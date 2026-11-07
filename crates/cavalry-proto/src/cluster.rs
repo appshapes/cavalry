@@ -2469,6 +2469,48 @@ pub fn replay_end(terms: &[TermSpan], position: i64) -> ReplayEnd {
     }
 }
 
+/// The terms a follower records when its replication reaches its stop position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RecordedTerms {
+    /// The term replicated and its base, always recorded.
+    pub replicated: (i64, i64),
+    /// The leader's term and its base, recorded after it when the stop position is
+    /// the leader's term base log position; `None` otherwise.
+    pub leader: Option<(i64, i64)>,
+    /// The member's log leadership term id afterwards, the highest term recorded.
+    pub log_leadership_term_id: i64,
+}
+
+/// What a follower records when its replication of `term_replicated`, based at
+/// `term_base`, reaches `stop_position` under a leader of `leader_term` based at
+/// `leader_base` (`spec/cluster.md`, "follower log replication"): the term replicated,
+/// and the leader's term at the leader's base after it when the stop is that base.
+pub const fn replication_record(
+    term_replicated: i64,
+    term_base: i64,
+    stop_position: i64,
+    leader_term: i64,
+    leader_base: i64,
+) -> RecordedTerms {
+    if stop_position == leader_base {
+        RecordedTerms {
+            replicated: (term_replicated, term_base),
+            leader: Some((leader_term, leader_base)),
+            log_leadership_term_id: if leader_term > term_replicated {
+                leader_term
+            } else {
+                term_replicated
+            },
+        }
+    } else {
+        RecordedTerms {
+            replicated: (term_replicated, term_base),
+            leader: None,
+            log_leadership_term_id: term_replicated,
+        }
+    }
+}
+
 /// The position after an entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EntryPosition {
