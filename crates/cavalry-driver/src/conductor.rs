@@ -12695,6 +12695,194 @@ mod receiving {
         );
     }
 
+    /// Subscribes on a fresh endpoint and arms a recording on [`STREAM`] under
+    /// `correlation_id`, answered with operation success; the endpoint's port.
+    fn subscribe_and_arm(h: &mut Harness, correlation_id: i64) -> u16 {
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 2, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor
+            .start_recording(correlation_id, STREAM, channel.as_bytes(), now);
+        assert!(
+            drained_events(h).iter().any(|(type_id, message)| matches!(
+                Event::parse(*type_id, message),
+                Ok(Event::OperationSuccess { correlation_id: id }) if id == correlation_id
+            )),
+            "operation success answers the arming"
+        );
+        assert_eq!(h.conductor.armed_recordings.len(), 1);
+        port
+    }
+
+    /// Sends the setup frame at 4096 to `port` and drives the receiver and the
+    /// conductor alone, the recorder never, until the image exists: the armed start
+    /// has been refused or handed to the recorder, and the recorder has not answered.
+    fn join_without_the_recorder(h: &mut Harness, port: u16) -> TestSender {
+        let mut sender = TestSender::bind(port);
+        sender.term = TERM;
+        sender.send_setup(SESSION, 4096);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while h.conductor.udp_images.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the setup frame created the image"
+            );
+            h.now += MS;
+            let now = h.now;
+            h.udp_receiver.duty_cycle(now);
+            h.conductor.duty_cycle(now);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(h.conductor.armed_recordings.is_empty());
+        sender
+    }
+
+    /// The arming command's second answer among `events`: (code, message) of an
+    /// `error` under `correlation_id`, and whether a `recording ready` named it too.
+    fn second_answer(
+        events: &[(i32, Vec<u8>)],
+        correlation_id: i64,
+    ) -> (Option<(i32, String)>, bool) {
+        let mut error = None;
+        let mut ready = false;
+        for (type_id, message) in events {
+            match Event::parse(*type_id, message) {
+                Ok(Event::Error {
+                    offending_correlation_id,
+                    error_code,
+                    error_message,
+                }) if offending_correlation_id == correlation_id => {
+                    error = Some((
+                        error_code,
+                        String::from_utf8_lossy(error_message).into_owned(),
+                    ));
+                }
+                Ok(Event::RecordingReady {
+                    correlation_id: id, ..
+                }) if id == correlation_id => ready = true,
+                _ => {}
+            }
+        }
+        (error, ready)
+    }
+
+    /// Whether `events` hold an `available image` for `image_id`.
+    fn announced(events: &[(i32, Vec<u8>)], image_id: i64) -> bool {
+        events.iter().any(|(type_id, message)| {
+            matches!(
+                Event::parse(*type_id, message),
+                Ok(Event::AvailableImage { correlation_id, .. }) if correlation_id == image_id
+            )
+        })
+    }
+
+    /// An armed recording whose start the recorder refuses, here a full catalog at the
+    /// seam, is answered a second time with code 10 under the arming command's id,
+    /// once, and counted in `recording.armed_failed` and `recording.catalog_full`,
+    /// never in `recording.armed_started`; the image is announced all the same, and
+    /// the recording's entry and its reader on the image go (`spec/client-protocol.md`,
+    /// "Commands", start recording; ADR 0059).
+    #[test]
+    fn an_armed_recording_the_recorder_refuses_is_answered_and_counted_as_failed() {
+        let mut h = Harness::new("armed-recording-refused");
+        let port = subscribe_and_arm(&mut h, 3);
+        let sender = join_without_the_recorder(&mut h, port);
+        let image_id = h.conductor.udp_images[0].registration_id;
+        assert_eq!(h.conductor.recordings.len(), 1);
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Starting);
+        assert!(h.conductor.recordings[0].armed);
+        // The receiver takes the image with the subscription's reader and the
+        // recording's.
+        h.now += MS;
+        let now = h.now;
+        h.udp_receiver.duty_cycle(now);
+        assert_eq!(h.udp_receiver.reader_count(), 2);
+
+        h.conductor
+            .on_start_failed(image_id, 3, StartFailure::CatalogFull);
+        let events = drained_events(&mut h);
+        let (error, ready) = second_answer(&events, 3);
+        let (code, message) = error.expect("an error under the arming id");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("catalog"), "{message}");
+        assert!(!ready, "the second answer is the error alone");
+        assert_eq!(h.counter(RECORDING_ARMED), 1);
+        assert_eq!(h.counter(RECORDING_ARMED_FAILED), 1);
+        assert_eq!(h.counter(RECORDING_ARMED_STARTED), 0);
+        assert_eq!(h.counter(RECORDING_CATALOG_FULL), 1);
+        assert!(
+            h.conductor.recordings.is_empty(),
+            "the entry failed and went"
+        );
+        assert!(
+            announced(&events, image_id),
+            "the image was announced all the same"
+        );
+        // The recording's reader leaves the image; the subscription's stays.
+        h.now += MS;
+        let now = h.now;
+        h.udp_receiver.duty_cycle(now);
+        assert_eq!(h.udp_receiver.reader_count(), 1);
+        drop(sender);
+    }
+
+    /// An armed recording refused when its image arrives, before the recorder sees
+    /// it, here behind a request still waiting for room in the recorder's queue, is
+    /// answered a second time with code 10 under the arming command's id and counted
+    /// in `recording.armed_failed` and `driver.registry_full`; nothing is registered
+    /// and no reader added, and the image is announced all the same (ADR 0059).
+    #[test]
+    fn an_armed_recording_refused_when_its_image_arrives_is_counted_as_failed() {
+        let mut h = Harness::new("armed-recording-queue-full");
+        let port = subscribe_and_arm(&mut h, 3);
+        // The recorder's request queue full of stops of ids no recording holds, and
+        // one more waiting behind them.
+        while h
+            .conductor
+            .recorder
+            .requests
+            .offer(Request::Stop {
+                recording_id: 1_000_000,
+                correlation_id: None,
+            })
+            .is_ok()
+        {}
+        h.conductor.deferred.push_back(Request::Stop {
+            recording_id: 1_000_001,
+            correlation_id: None,
+        });
+        let registry_full = h.counter(DRIVER_REGISTRY_FULL);
+        let sender = join_without_the_recorder(&mut h, port);
+        let image_id = h.conductor.udp_images[0].registration_id;
+        let events = drained_events(&mut h);
+        let (error, ready) = second_answer(&events, 3);
+        let (code, message) = error.expect("an error under the arming id");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("request queue"), "{message}");
+        assert!(!ready, "the second answer is the error alone");
+        assert_eq!(h.counter(RECORDING_ARMED_FAILED), 1);
+        assert_eq!(h.counter(RECORDING_ARMED_STARTED), 0);
+        assert_eq!(h.counter(DRIVER_REGISTRY_FULL), registry_full + 1);
+        assert!(h.conductor.recordings.is_empty(), "nothing registered");
+        assert!(
+            announced(&events, image_id),
+            "the image was announced all the same"
+        );
+        h.now += MS;
+        let now = h.now;
+        h.udp_receiver.duty_cycle(now);
+        assert_eq!(
+            h.udp_receiver.reader_count(),
+            1,
+            "the subscription's reader alone"
+        );
+        drop(sender);
+    }
+
     /// Frames land in the image at their term offsets; one lost on the wire leaves a
     /// gap the rebuild stops at, which a NAK names after the NAK delay and the
     /// retransmit fills, after which a reader has every frame once and in order; a
