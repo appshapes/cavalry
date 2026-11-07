@@ -1246,6 +1246,25 @@
       }
     },
     {
+      "name": "channel-position-keys-signs-and-zeros",
+      "kind": "channel",
+      "string": "cavalry:udp?endpoint=10.0.0.2:40123|init-term-id=+007|term-id=0009|term-offset=00",
+      "fields": {
+        "endpoint_host": "10.0.0.2",
+        "endpoint_port": 40123,
+        "interface_host": null,
+        "interface_port": null,
+        "control_host": null,
+        "control_port": null,
+        "control_mode": null,
+        "fc": "max",
+        "initial_term_id": 7,
+        "term_id": 9,
+        "term_offset": 0,
+        "position": 33554432
+      }
+    },
+    {
       "name": "channel-position-keys-negative-term-ids",
       "kind": "channel",
       "string": "cavalry:udp?endpoint=10.0.0.2:40123|term-offset=64|term-id=-3|init-term-id=-5",

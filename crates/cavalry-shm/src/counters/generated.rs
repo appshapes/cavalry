@@ -326,8 +326,11 @@ pub const RECORDING_ARMED: CounterId = CounterId(105);
 /// `recording.armed_started`, a static counter: Armed recordings that started when the stream's first image arrived, at the image's join position, before the image was announced, recording ready sent to the arming client with the arming command's correlation id (spec/client-protocol.md, Commands, start recording; ADR 0059).
 pub const RECORDING_ARMED_STARTED: CounterId = CounterId(106);
 
-/// `recording.armed_dropped`, a static counter: Armed recordings dropped because their receive endpoint closed before an image arrived: the last subscription on the channel was removed or its client timed out (spec/client-protocol.md, Commands, start recording; ADR 0059).
+/// `recording.armed_dropped`, a static counter: Armed recordings dropped because the last subscription on their stream and receive endpoint was removed or its client timed out before an image arrived, the endpoint's close among those cases, since no image is created for a stream no subscription wants (spec/client-protocol.md, Commands, start recording; ADR 0059).
 pub const RECORDING_ARMED_DROPPED: CounterId = CounterId(107);
+
+/// `recording.armed_failed`, a static counter: Armed recordings whose start failed when the image arrived, the recordings registry, the recorder's queue, the catalog or the counters file at capacity or files that could not be created, the arming command answered a second time with error and that code, the image announced all the same and its limit freed (spec/client-protocol.md, Commands, start recording; ADR 0059).
+pub const RECORDING_ARMED_FAILED: CounterId = CounterId(108);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -1177,7 +1180,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Start recording commands on a cavalry:udp stream with a live subscription and no live publication or image, answered with operation success and held as an armed recording, one per receive endpoint and stream, until the stream's first image arrives (spec/client-protocol.md, Commands, start recording; ADR 0059).",
-        doctor: "An armed recording above recording.armed_started plus recording.armed_dropped is waiting for an image that has not arrived: check the publisher and the channel, and that the subscription's endpoint is the one the publication sends to.",
+        doctor: "An armed recording above recording.armed_started, recording.armed_dropped and recording.armed_failed together is waiting for an image that has not arrived: check the publisher and the channel, and that the subscription's endpoint is the one the publication sends to.",
     },
     CounterDef {
         id: RECORDING_ARMED_STARTED,
@@ -1192,7 +1195,15 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "recording.armed_dropped",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Armed recordings dropped because their receive endpoint closed before an image arrived: the last subscription on the channel was removed or its client timed out (spec/client-protocol.md, Commands, start recording; ADR 0059).",
-        doctor: "A dropped armed recording recorded nothing: keep the subscription open until the image arrives, then the recording starts on its own.",
+        doc: "Armed recordings dropped because the last subscription on their stream and receive endpoint was removed or its client timed out before an image arrived, the endpoint's close among those cases, since no image is created for a stream no subscription wants (spec/client-protocol.md, Commands, start recording; ADR 0059).",
+        doctor: "A dropped armed recording recorded nothing: keep a subscription on the stream open until the image arrives, then the recording starts on its own.",
+    },
+    CounterDef {
+        id: RECORDING_ARMED_FAILED,
+        name: "recording.armed_failed",
+        kind: Kind::Counter,
+        scope: Scope::Static,
+        doc: "Armed recordings whose start failed when the image arrived, the recordings registry, the recorder's queue, the catalog or the counters file at capacity or files that could not be created, the arming command answered a second time with error and that code, the image announced all the same and its limit freed (spec/client-protocol.md, Commands, start recording; ADR 0059).",
+        doctor: "An armed recording that failed to start recorded nothing and its client was told so under the arming command's correlation id: the live start's own counter, recording.catalog_full, recording.start_failed or driver.registry_full, says which bound was hit; start recording again once there is room.",
     },
 ];

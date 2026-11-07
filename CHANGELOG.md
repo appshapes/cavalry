@@ -1636,8 +1636,9 @@ user-visible change, added in the same commit as the change. The format follows
   `term-offset`, which create a publication at a position, and `spec/client-protocol.md`
   version 6 arms a recording: `start recording` on a `cavalry:udp` stream with a live
   subscription and no image answers `operation success` and starts the recording at the
-  first image's join position, counted in `recording.armed`, `recording.armed_started`
-  and `recording.armed_dropped`; `cavalry-proto` parses the keys with 15 new channel
-  vectors, and the driver answers both with code 11 until card 227's driver change
+  next image's join position, counted in `recording.armed`, `recording.armed_started`,
+  `recording.armed_dropped` and `recording.armed_failed`; `cavalry-proto` parses the
+  keys with 16 new channel vectors, and the driver answers both with code 11 until
+  card 227's driver change
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).

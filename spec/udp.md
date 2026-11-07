@@ -171,7 +171,8 @@ lets the fastest receiver set the pace, and `min` the slowest. `control`,
 one is refused, since this version receives on no control address.
 
 A publication's channel may name `init-term-id`, `term-id` and `term-offset`, all three
-or none, each a 32-bit integer in decimal: the *position keys*, which create the
+or none, each a 32-bit integer in decimal, ASCII digits after an optional `+` or `-`,
+leading zeros allowed, as a port is read: the *position keys*, which create the
 publication's log at a position instead of 0, (`term-id` − `init-term-id`, a 32-bit
 two's complement count of 0 or more) × the UDP term length of "Values" + `term-offset`,
 with `init-term-id` as the initial term id, as `spec/log-buffer.md`, "The driver",
@@ -670,7 +671,8 @@ control address with no port, a port of 0 or above 65535, or malformed), `endpoi
 (neither an endpoint nor a control address; an endpoint or interface with a port of 0
 or above 65535 or a malformed address), `fc` (a value other than `max` or `min`),
 `position` (one or two of `init-term-id`, `term-id` and `term-offset` without the rest;
-a value that is not a 32-bit integer in decimal; a `term-id` below `init-term-id` by
+a value that is not a 32-bit integer in decimal, an optional sign and digits; a
+`term-id` below `init-term-id` by
 the 32-bit two's complement count; a `term-offset` that is negative, not a multiple of
 32 or not below the term length), `multicast` (an endpoint or control address that is a
 multicast address), each error

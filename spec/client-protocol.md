@@ -122,7 +122,7 @@ begins with the same 16 bytes:
 | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- |
 | 0 | 8 | client id | i64 | 0 or more: the id the client took from the correlation id counter |
-| 8 | 8 | correlation id | i64 | 0 or more: the id the client took from the correlation id counter for this command; the event that answers it names it |
+| 8 | 8 | correlation id | i64 | 0 or more: the id the client took from the correlation id counter for this command; the event that answers it names it, and an armed `start recording` alone may be answered twice ("Commands") |
 
 Then, by command:
 
@@ -310,16 +310,27 @@ What the driver does with each, after the checks of "What the driver rejects":
   when the image is retired (`spec/udp.md`, "The receiver", step 5; ADR 0042). When the
   stream has no live publication and no image but a live subscription on the resolved
   channel and stream, the command *arms* the recording: the driver answers `operation
-  success` at once, counted in `recording.armed`, holds one armed recording per receive
-  endpoint and stream, and when the first image of that stream arrives on the endpoint
-  it starts the recording at the image's initial position, its join position, before
-  `available image` is sent, so that every frame the image holds is in the recording,
-  with the steps and the codes a start on a live image has, and sends `recording ready`
-  to the arming client with the arming command's correlation id, counted in
-  `recording.armed_started`; a second `start recording` on the stream while one is
-  armed is code 22 with a message saying the recording is armed; an armed recording
-  whose endpoint closes before an image arrives is dropped, counted in
-  `recording.armed_dropped` (ADR 0059).
+  success` at once, counted in `recording.armed`, and holds one armed recording per
+  receive endpoint and stream, at most one for each endpoint and stream a live
+  subscription holds, so that the subscriptions registry bounds them; when the next
+  image of that stream arrives on the endpoint it starts the recording at the image's
+  initial position, its join position, before `available image` is sent, so that every
+  frame the image holds is in the recording, with the steps a start on a live image
+  has, and sends `recording ready` to the arming client with the arming command's
+  correlation id, counted in `recording.armed_started`. A start that fails then, the
+  recordings registry, the recorder's queue, the catalog or the counters file at
+  capacity, code 10, or files that cannot be created, code 12, each counted as a live
+  start's failure is, sends `error` with the arming command's correlation id and that
+  code, a second answer to the command after its `operation success`, the one command
+  answered twice, announces the image all the same and frees its limit from the
+  recording, counted in `recording.armed_failed`. A second `start recording` on the
+  stream while one is armed is code 22 with a message saying the recording is armed.
+  An armed recording is dropped, counted in `recording.armed_dropped`, when the last
+  subscription on its stream and endpoint is removed or its client times out, the
+  endpoint's close among those cases, since no image is created for a stream no
+  subscription on the endpoint wants (`spec/udp.md`, "The receiver"); so
+  `recording.armed` is `recording.armed_started`, `recording.armed_dropped` and
+  `recording.armed_failed` together with the recordings still armed (ADR 0059).
 - **stop recording.** The driver stops the recording at the position the recorder has
   written and answers `operation success` once the catalog's stop fields are written and
   synced (`spec/durable-log.md`, "The driver"); then every client gets `recording
@@ -641,9 +652,9 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 6 | unknown command type | the record's type is not a command of this version |
 | 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read, or start replay's length is below −1 |
 | 9 | unknown host | a `cavalry:udp` channel's host does not resolve; the message names it |
-| 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record |
+| 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record; for an armed recording whose start found one so, a second answer under the arming command's correlation id |
 | 11 | generic error | anything else; the message says what |
-| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended |
+| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended; for an armed recording whose start found one so, a second answer under the arming command's correlation id |
 | 20 | no publication to record | start recording names a stream id and channel no live publication has, nor, over UDP, any image or subscription |
 | 21 | unknown recording | stop recording, start replay or a retention command names a recording id the catalog does not hold as a valid recording |
 | 22 | already recording | start recording names a stream whose live publications, and over UDP images, are all being recorded, the message naming the recording id; or, over UDP, one on which a recording is armed, which the message says |
@@ -733,8 +744,8 @@ The vectors cover these: they are checks on bytes. A command that decodes is the
 checked by the driver against its state, which no vector holds; the checks and their
 codes are the ones "Commands" and "Error codes" name: a channel that is neither
 `cavalry:ipc` nor a `cavalry:udp` channel this version accepts is code 1 with the reason
-`spec/udp.md` names, `grammar`, `key`, `control`, `endpoint`, `fc` or `multicast`, and
-adds one to `client_protocol.rejected_command`; a channel that parses where the
+`spec/udp.md` names, `grammar`, `key`, `control`, `endpoint`, `fc`, `position` or
+`multicast`, and adds one to `client_protocol.rejected_command`; a channel that parses where the
 command does not take it, `control`, `control-mode`, `fc` or a position key on an
 `add subscription`, an `add publication` that would join a live publication under a
 different `fc` or under different position keys, a
@@ -776,7 +787,8 @@ Static counters in `counters.toml` (`spec/counters-file.md`), written by the dri
 `driver.registry_full`, `driver.log_create_failed`, `recording.started`,
 `recording.stopped`, `recording.write_failed`, `recording.start_failed`,
 `recording.catalog_full`, the armed recording's `recording.armed`,
-`recording.armed_started` and `recording.armed_dropped` (ADR 0059), and the recovery
+`recording.armed_started`, `recording.armed_dropped` and `recording.armed_failed` (ADR
+0059), and the recovery
 pass's `recording.recovered`,
 `recording.invalidated`, `recording.index_rewritten`, `recording.catalog_truncated`,
 `recording.slot_dropped` and `recording.files_removed` (`spec/durable-log.md`, "The

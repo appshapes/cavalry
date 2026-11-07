@@ -63,17 +63,25 @@ and the position they make, null when the string names none.
 `spec/client-protocol.md` version 6: `start recording` on a `cavalry:udp` channel and
 stream with no live publication and no image, but a live subscription on the resolved
 channel and stream, arms the recording: the driver answers `operation success` at
-once, holds one armed recording per receive endpoint and stream, counted in
-`recording.armed`, and when the first image of that stream arrives on the endpoint it
-starts the recording at the image's initial position, its join position, before the
-image is announced, so that every frame the image holds is in the recording, and sends
-`recording ready` to the arming client with the arming command's correlation id,
-counted in `recording.armed_started`. A second `start recording` while one is armed is
-code 22 with a message that says the recording is armed; an armed recording whose
-endpoint closes before an image arrives is dropped, counted in
-`recording.armed_dropped`; code 20 is now a stream and channel with no live
-publication, image or subscription. The three counters are static counters of
-`counters.toml`. Version 6 encodes every message as version 5 does, and a version 5
+once, counted in `recording.armed`, and holds one armed recording per receive endpoint
+and stream, at most one for each endpoint and stream a live subscription holds, so
+that the subscriptions registry bounds them; when the next image of that stream
+arrives on the endpoint it starts the recording at the image's initial position, its
+join position, before the image is announced, so that every frame the image holds is
+in the recording, and sends `recording ready` to the arming client with the arming
+command's correlation id, counted in `recording.armed_started`. A start that fails
+then, a registry, the recorder's queue, the catalog or the counters file at capacity
+or files that cannot be created, answers the arming command a second time with
+`error` and the code a live start gets, announces the image all the same and frees its
+limit, counted in `recording.armed_failed`, the one command the protocol answers
+twice, so that a client learns its recording is not running. A second `start
+recording` while one is armed is code 22 with a message that says the recording is
+armed; an armed recording is dropped, counted in `recording.armed_dropped`, when the
+last subscription on its stream and endpoint is removed or its client times out, the
+endpoint's close among those cases, since no image is created for a stream no
+subscription wants; `recording.armed` is the sum of the other three and the recordings
+still armed; code 20 is now a stream and channel with no live publication, image or
+subscription. The four counters are static counters of `counters.toml`. Version 6 encodes every message as version 5 does, and a version 5
 driver answers the arming case with code 20.
 
 This change carries the two pages, their vectors and `cavalry-proto`'s channel parser
@@ -130,9 +138,11 @@ the command they have.
 
 Harder: the sender's first setup frame carries a position that is not 0, which the
 receiver already reads; the driver keeps an armed-recording slot per receive endpoint
-and stream, bounded by the endpoint's streams, and starts a recording from the
-receiver's thread's announcement rather than a command; two commands of the client
-protocol answer differently from version 5, which this version's paragraph says.
+and stream, bounded by the subscriptions registry and dropped with the stream's last
+subscription, and starts a recording from the receiver's announcement of an image
+rather than from a command, answering the arming command a second time when that
+start fails; two commands of the client protocol answer differently from version 5,
+which this version's paragraph says.
 
 Revisit: when a client needs a term length of its own on a `cavalry:udp` publication,
 for Aeron's `term-length`; when a subscription needs every image recorded, for
