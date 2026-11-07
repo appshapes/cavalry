@@ -1622,13 +1622,13 @@ user-visible change, added in the same commit as the change. The format follows
   the members string and the four streams, the message header with schema 1 and
   version 0, the log's entries, the eight consensus messages, the session protocol, the
   snapshot marker, the election's eighteen states, the quorum and commit position rules,
-  the sessions, Aeron's timeouts as constants and what a reader rejects, with 156 vectors
+  the sessions, Aeron's timeouts as constants and what a reader rejects, with 157 vectors
   from `spec/vectors/cluster.py` and a glossary row per term
   ([ADR 0058](docs/decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md);
   `docs/reference/cluster.md`; card 226).
 - `cavalry-proto` reads and writes every message of `spec/cluster.md` in `cluster`, the
   members string and the protocol's arithmetic, allocating nothing, and `just
-  conformance` runs its 156 vectors through `tests/cluster_conformance.rs`, with a
+  conformance` runs its 157 vectors through `tests/cluster_conformance.rs`, with a
   no-panic test on every commit and a `cluster` fuzz target under `just fuzz`
   ([ADR 0058](docs/decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md);
   card 226).

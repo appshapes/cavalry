@@ -2451,9 +2451,10 @@ pub struct NextFields {
 /// The next fields a leader with `terms`, its record, of `leader_term` based at
 /// `leader_base` writes into new leadership term for `reported_term`
 /// (`spec/cluster.md`, "New leadership term, template 53"): −1 for all three when the
-/// reported term is the leader's own; else the term one above the reported one when
-/// the record holds it, with its base and end; else the leader's own term at its base
-/// with no end.
+/// reported term is the leader's own; else the lowest term in the record above the
+/// reported one, with its base and end, so that a reader holding an uncommitted tail
+/// of a term the record skips truncates it to the next recorded term's base; else, for
+/// a record without the leader's own term, that term at its base with no end.
 pub fn next_fields(
     terms: &[TermSpan],
     reported_term: i64,
@@ -2467,7 +2468,11 @@ pub fn next_fields(
             next_log_position: NULL_VALUE,
         };
     }
-    match terms.iter().find(|t| t.term == reported_term + 1) {
+    match terms
+        .iter()
+        .filter(|t| t.term > reported_term)
+        .min_by_key(|t| t.term)
+    {
         Some(entry) => NextFields {
             next_leadership_term_id: entry.term,
             next_term_base_log_position: entry.base,
