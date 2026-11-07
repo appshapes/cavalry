@@ -12695,6 +12695,94 @@ mod receiving {
         );
     }
 
+    /// The armed recordings at capacity (invariant 3): the subscriptions registry full,
+    /// one stream each on one endpoint, and every stream armed, the table holds
+    /// exactly the registry's capacity, not past its allocation, and
+    /// `recording.armed` reads the same; the next `add subscription` is code 10, so no
+    /// stream gets a subscription to arm on and a start on it is code 20; and one
+    /// subscription removed drops exactly its armed recording, with code 20 under its
+    /// arming id (ADR 0059).
+    #[test]
+    fn the_armed_recordings_fill_at_the_subscriptions_registry_capacity() {
+        let mut h = Harness::new("armed-recordings-capacity");
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let n = spec::MAX_SUBSCRIPTIONS as i32;
+        let allocated = h.conductor.armed_recordings.capacity();
+        for i in 0..n {
+            h.conductor
+                .add_subscription(1, 10_000 + i64::from(i), STREAM + i, channel.as_bytes());
+            // The receiver takes the interest, so its queue has room for the next add.
+            let now = h.now;
+            h.udp_receiver.duty_cycle(now);
+        }
+        assert_eq!(h.conductor.subscriptions.len(), spec::MAX_SUBSCRIPTIONS);
+        assert_eq!(h.conductor.receive_endpoints.len(), 1);
+        let now = h.now;
+        for i in 0..n {
+            h.conductor
+                .start_recording(20_000 + i64::from(i), STREAM + i, channel.as_bytes(), now);
+        }
+        let events = drained_events(&mut h);
+        let armed = events
+            .iter()
+            .filter(|(type_id, message)| {
+                matches!(
+                    Event::parse(*type_id, message),
+                    Ok(Event::OperationSuccess { correlation_id })
+                        if (20_000..20_000 + i64::from(n)).contains(&correlation_id)
+                )
+            })
+            .count();
+        assert_eq!(armed, spec::MAX_SUBSCRIPTIONS, "every start was armed");
+        assert_eq!(h.conductor.armed_recordings.len(), spec::MAX_SUBSCRIPTIONS);
+        assert_eq!(
+            h.conductor.armed_recordings.capacity(),
+            allocated,
+            "the table did not grow"
+        );
+        assert_eq!(h.counter(RECORDING_ARMED), i64::from(n));
+
+        // The next add is refused, so its stream has nothing to arm on.
+        h.conductor
+            .add_subscription(1, 30_000, STREAM + n, channel.as_bytes());
+        let (code, message) = h.last_error(30_000).expect("one more is refused");
+        assert_eq!(code, 10, "{message}");
+        assert!(message.contains("subscriptions"), "{message}");
+        h.conductor
+            .start_recording(30_001, STREAM + n, channel.as_bytes(), now);
+        let (code, message) = h.last_error(30_001).expect("nothing to arm on");
+        assert_eq!(code, 20, "{message}");
+        assert_eq!(h.conductor.armed_recordings.len(), spec::MAX_SUBSCRIPTIONS);
+        assert_eq!(h.counter(RECORDING_ARMED), i64::from(n));
+
+        // One subscription goes: exactly its stream's armed recording is dropped.
+        h.conductor.remove_subscription(1, 40_000, 10_005, now);
+        assert_eq!(
+            h.conductor.armed_recordings.len(),
+            spec::MAX_SUBSCRIPTIONS - 1
+        );
+        assert!(
+            !h.conductor
+                .armed_recordings
+                .iter()
+                .any(|armed| armed.stream_id == STREAM + 5)
+        );
+        let errors: Vec<(i64, i32)> = drained_events(&mut h)
+            .iter()
+            .filter_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::Error {
+                    offending_correlation_id,
+                    error_code,
+                    ..
+                }) => Some((offending_correlation_id, error_code)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors, vec![(20_005, 20)], "the one armed id, code 20");
+        assert_eq!(h.counter(RECORDING_ARMED_DROPPED), 1);
+    }
+
     /// Subscribes on a fresh endpoint and arms a recording on [`STREAM`] under
     /// `correlation_id`, answered with operation success; the endpoint's port.
     fn subscribe_and_arm(h: &mut Harness, correlation_id: i64) -> u16 {
