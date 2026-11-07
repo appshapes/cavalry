@@ -32,6 +32,23 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   client sends the driver through the command ring and the events the driver answers
   with through the broadcast buffer, in `client_protocol`, with the spec's decoding
   checks in the spec's order and strings borrowed from the message, never copied.
+- Encodes and decodes the cluster protocol, `spec/cluster.md`: the messages of the
+  log, consensus, ingress and egress streams and the snapshot marker under the 8-byte
+  message header of schema 1, version 0, in `cluster`, with the spec's checks in the
+  spec's order, each stream refusing a template it does not carry, the variable fields
+  and the payload borrowed from the message; the members string, parsed into a
+  caller's array of at most 8; and the rules of the election and the log as free
+  functions (ADR 0058): `quorum` and `commit_position`; `log_at_least`, the order of
+  two logs; `candidate`, a canvassing member's nomination; `request_vote`, a reader's
+  vote; `ballot`, a candidate's outcome; `canvass_position_action`, what a leader does
+  with a canvass position; `new_leadership_term_action` and `next_fields`, what a
+  reader does with new leadership term and what a leader writes into it;
+  `replication_stop` and `replication_record`, where a follower's log replication
+  stops and the terms it records there; `replay_end`, where a leader's replay begins
+  and ends; and `entry_position`, the position after an entry. A log leadership term
+  id given to any of them is the highest term in the member's record of recorded
+  terms, not the term of its last entry. What a member does with a message is
+  `cavalry-raft`'s.
 
 In Aeron, this is the transport protocol specification and its frame layouts
 ([glossary](../../docs/glossary.md)).
@@ -116,3 +133,9 @@ frame rejected (version): version 1, this reader knows 0; the writer runs anothe
   why they are Aeron's; [`spec/vectors/udp.json`](../../spec/vectors/udp.json), which
   `tests/udp_conformance.rs` runs; `tests/udp_no_panic.rs`, `tests/channel_no_panic.rs`
   and the `udp` and `channel` fuzz targets.
+- [`spec/cluster.md`](../../spec/cluster.md), the cluster protocol's messages, members
+  string, election and rules `cluster` implements, and [ADR 0058](../../docs/decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md),
+  why they are Aeron Cluster's under a header of Cavalry's own;
+  [`spec/vectors/cluster.json`](../../spec/vectors/cluster.json), which
+  `tests/cluster_conformance.rs` runs; `tests/cluster_no_panic.rs` and the `cluster`
+  fuzz target.

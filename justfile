@@ -72,6 +72,7 @@ conformance:
     cargo test -p cavalry-proto --test conformance
     cargo test -p cavalry-proto --test client_protocol_conformance
     cargo test -p cavalry-proto --test udp_conformance
+    cargo test -p cavalry-proto --test cluster_conformance
     cargo test -p cavalry-shm --test conformance
     cargo test -p cavalry-shm --test log_buffer_conformance
     cargo test -p cavalry-shm --test command_ring_conformance
@@ -238,6 +239,7 @@ fuzz:
     cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz client_protocol -- -max_total_time=60
     cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz udp -- -max_total_time=60
     cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz channel -- -max_total_time=60
+    cargo +nightly fuzz run --fuzz-dir crates/cavalry-proto/fuzz cluster -- -max_total_time=60
 
 # Retire branches whose work is on master, locally and on origin: every branch whose
 # pull request merged, or the one named. GitHub deletes a merged pull request's branch
