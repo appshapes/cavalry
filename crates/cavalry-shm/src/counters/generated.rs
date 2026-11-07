@@ -320,13 +320,13 @@ pub const SENDER_FLOW_CONTROL_RECEIVERS: CounterId = CounterId(103);
 /// `channel.destinations`, a instance gauge: How many destinations one send endpoint of a control channel sends to, added with add destination and removed with remove destination; 0 on any other endpoint; key and label as channel.status (spec/udp.md, The sender; ADR 0053).
 pub const CHANNEL_DESTINATIONS: CounterId = CounterId(104);
 
-/// `recording.armed`, a static counter: Start recording commands on a cavalry:udp stream with a live subscription and no live publication or image, answered with operation success and held as an armed recording, one per receive endpoint and stream, until the stream's first image arrives (spec/client-protocol.md, Commands, start recording; ADR 0059).
+/// `recording.armed`, a static counter: Start recording commands on a cavalry:udp stream with a live subscription and no live publication or image, answered with operation success and held as an armed recording, at most one per receive endpoint and stream with a live subscription, so the subscriptions registry bounds them, until the stream's first image arrives or its last subscription on the endpoint goes (spec/client-protocol.md, Commands, start recording; ADR 0059).
 pub const RECORDING_ARMED: CounterId = CounterId(105);
 
 /// `recording.armed_started`, a static counter: Armed recordings that started when the stream's first image arrived, at the image's join position, before the image was announced, recording ready sent to the arming client with the arming command's correlation id (spec/client-protocol.md, Commands, start recording; ADR 0059).
 pub const RECORDING_ARMED_STARTED: CounterId = CounterId(106);
 
-/// `recording.armed_dropped`, a static counter: Armed recordings dropped because their receive endpoint closed before an image arrived: the last subscription on the channel was removed or its client timed out (spec/client-protocol.md, Commands, start recording; ADR 0059).
+/// `recording.armed_dropped`, a static counter: Armed recordings dropped because the last subscription on their receive endpoint and stream went before an image arrived, by remove subscription, client close or client timeout, a receive endpoint that closes being one case of it, since the receiver creates no image for a stream no subscription wants (spec/client-protocol.md, Commands, start recording; ADR 0059).
 pub const RECORDING_ARMED_DROPPED: CounterId = CounterId(107);
 
 /// Every entry of `counters.toml`, in the file's order.
@@ -1176,7 +1176,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "recording.armed",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Start recording commands on a cavalry:udp stream with a live subscription and no live publication or image, answered with operation success and held as an armed recording, one per receive endpoint and stream, until the stream's first image arrives (spec/client-protocol.md, Commands, start recording; ADR 0059).",
+        doc: "Start recording commands on a cavalry:udp stream with a live subscription and no live publication or image, answered with operation success and held as an armed recording, at most one per receive endpoint and stream with a live subscription, so the subscriptions registry bounds them, until the stream's first image arrives or its last subscription on the endpoint goes (spec/client-protocol.md, Commands, start recording; ADR 0059).",
         doctor: "An armed recording above recording.armed_started plus recording.armed_dropped is waiting for an image that has not arrived: check the publisher and the channel, and that the subscription's endpoint is the one the publication sends to.",
     },
     CounterDef {
@@ -1192,7 +1192,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "recording.armed_dropped",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Armed recordings dropped because their receive endpoint closed before an image arrived: the last subscription on the channel was removed or its client timed out (spec/client-protocol.md, Commands, start recording; ADR 0059).",
-        doctor: "A dropped armed recording recorded nothing: keep the subscription open until the image arrives, then the recording starts on its own.",
+        doc: "Armed recordings dropped because the last subscription on their receive endpoint and stream went before an image arrived, by remove subscription, client close or client timeout, a receive endpoint that closes being one case of it, since the receiver creates no image for a stream no subscription wants (spec/client-protocol.md, Commands, start recording; ADR 0059).",
+        doctor: "A dropped armed recording recorded nothing: its stream's last subscription on the endpoint was removed, or its client closed or timed out, before the image arrived. Keep a subscription on the stream open until the image arrives, then the recording starts on its own; check client.timed_out if nobody removed it.",
     },
 ];

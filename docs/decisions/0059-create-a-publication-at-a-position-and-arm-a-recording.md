@@ -63,15 +63,23 @@ and the position they make, null when the string names none.
 `spec/client-protocol.md` version 6: `start recording` on a `cavalry:udp` channel and
 stream with no live publication and no image, but a live subscription on the resolved
 channel and stream, arms the recording: the driver answers `operation success` at
-once, holds one armed recording per receive endpoint and stream, counted in
-`recording.armed`, and when the first image of that stream arrives on the endpoint it
-starts the recording at the image's initial position, its join position, before the
-image is announced, so that every frame the image holds is in the recording, and sends
-`recording ready` to the arming client with the arming command's correlation id,
-counted in `recording.armed_started`. A second `start recording` while one is armed is
-code 22 with a message that says the recording is armed; an armed recording whose
-endpoint closes before an image arrives is dropped, counted in
-`recording.armed_dropped`; code 20 is now a stream and channel with no live
+once, counted in `recording.armed`, and holds the armed recording, at most one per
+receive endpoint and stream that has a live subscription, so that the subscriptions
+registry of `spec/client-protocol.md`, "Sizes", bounds the armed recordings and a table
+of its capacity is never full; when the first image of that stream arrives on the
+endpoint it starts the recording at the image's initial position, its join position,
+before the image is announced, so that every frame the image holds is in the
+recording, and sends `recording ready` to the arming client with the arming command's
+correlation id, counted in `recording.armed_started`. A second `start recording` while
+one is armed is code 22 with a message that says the recording is armed. An armed
+recording is dropped when the last subscription on its endpoint and stream goes
+before an image arrives, by `remove subscription`, `client close` or `client timeout`,
+a receive endpoint that closes being one case of it, counted in
+`recording.armed_dropped`: the receiver creates an image only for a stream a
+subscription on the endpoint wants (`spec/udp.md`, "The receiver", step 1), so an
+armed recording that outlived its stream's last subscription could never start, and
+while the endpoint stayed open for another stream it would never be dropped either.
+Code 20 is now a stream and channel with no live
 publication, image or subscription. The three counters are static counters of
 `counters.toml`. Version 6 encodes every message as version 5 does, and a version 5
 driver answers the arming case with code 20.
@@ -106,6 +114,13 @@ card, as ADR 0053's first change did for card 225.
 - **Recording every image that arrives, as Aeron's Archive does.** Lost for this
   version: bounded at one armed recording per endpoint and stream, since the cluster's
   follower subscribes to one leader's stream at a time; the Revisit names it.
+- **Dropping an armed recording only when its receive endpoint closes.** Lost:
+  invariant 3. An endpoint is shared by every stream on its channel and stays open
+  while any of them has a subscription, and the receiver creates no image for a stream
+  with none, so an armed recording whose stream's last subscription went could neither
+  start nor be dropped, and a client that armed and unsubscribed stream after stream
+  would grow the table with no bound. Tying the armed recording to its stream's
+  subscriptions bounds it by the subscriptions registry.
 
 ## Evidence
 
@@ -130,7 +145,9 @@ the command they have.
 
 Harder: the sender's first setup frame carries a position that is not 0, which the
 receiver already reads; the driver keeps an armed-recording slot per receive endpoint
-and stream, bounded by the endpoint's streams, and starts a recording from the
+and stream with a live subscription, at most the subscriptions registry's capacity,
+drops it when the stream's last subscription on the endpoint goes, and starts a
+recording from the
 receiver's thread's announcement rather than a command; two commands of the client
 protocol answer differently from version 5, which this version's paragraph says.
 
