@@ -593,8 +593,20 @@ impl TermsFile {
         Ok(())
     }
 
-    /// Stores the candidate term: the value, then its checksum, synced.
+    /// Raises the candidate term: the value, then its checksum, synced. A value below −1
+    /// or below the candidate term stored is refused, since the module only raises it
+    /// ("The driver"); the value stored already needs no write.
     pub fn set_candidate_term(&mut self, candidate_term: i64) -> Result<(), TermsError> {
+        if candidate_term < NO_CANDIDATE_TERM || candidate_term < self.candidate_term {
+            return Err(TermsError::Refused {
+                check: "candidate",
+                found: candidate_term,
+                rule: "is below -1 or below the candidate term stored",
+            });
+        }
+        if candidate_term == self.candidate_term {
+            return Ok(());
+        }
         let header = TermsHeader { candidate_term };
         let bytes = header.encode();
         self.write_at(16, &bytes[16..24], "store")?;
@@ -811,6 +823,27 @@ mod tests {
         );
         file.entries.resize(MAX_ENTRIES as usize, file.entries[0]);
         assert_eq!(file.append(5, 4096, 2).unwrap_err().reason(), "terms-full");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_candidate_term_is_only_raised() {
+        let dir = dir("candidate");
+        let mut file = TermsFile::create(&dir).expect("created");
+        let below = file.set_candidate_term(-2).expect_err("below -1");
+        assert_eq!(below.reason(), "candidate");
+        assert!(below.to_string().contains("nothing was written"), "{below}");
+        file.set_candidate_term(5).expect("raised");
+        assert_eq!(
+            file.set_candidate_term(4)
+                .expect_err("below the stored")
+                .reason(),
+            "candidate"
+        );
+        file.set_candidate_term(5).expect("the value stored");
+        drop(file);
+        let file = TermsFile::open(&dir).expect("opened");
+        assert_eq!(file.candidate_term(), 5, "the refusals wrote nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
