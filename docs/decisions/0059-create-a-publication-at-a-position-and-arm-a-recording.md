@@ -49,12 +49,20 @@ and the driver creates the publication's log at the position they name, (`term-i
 `init-term-id`, a 32-bit two's complement count of 0 or more) × the UDP term length +
 `term-offset`, with `init-term-id` as the initial term id, under `spec/log-buffer.md`'s
 "created at a position" rule, so that the first frame the publication sends is at that
-position and its setup frames carry it. The keys are a publication's, as `control`,
-`control-mode` and `fc` are: an `add subscription` or a destination channel that names
-one is refused with code 1, and an `add publication` that would join a live publication
-whose keys differ from its own, or that names them where the live one named none or the
-reverse, is refused with code 1 and the reason `position`, since a shared log has one
-position. A channel is checked for `position` after `fc` and before `multicast`: one or
+position and its setup frames carry it. The keys are a client's publication's, as
+`control`, `control-mode` and `fc` are: an `add subscription` or a destination channel
+that names one is refused with code 1; a `start replay` whose replay channel names one
+is refused with code 1 and the reason `position`, before the replay is registered,
+since a replay's publication is created at the replay's start position under its
+recording's initial term id (`spec/client-protocol.md`, "Commands", start replay; ADR
+0030), where the keys could only repeat that position or disagree with it; and an `add
+publication` that would join a live publication whose keys differ from its own, or that
+names them where the live one named none or the reverse, is refused with code 1 and the
+reason `position`, since a shared log has one position. A `start recording` matches its
+channel as two channels compare, by the resolved endpoint and interface or control
+address, so the keys on its channel take no part, as its `fc` takes none, and a client
+records a publication under the channel string it created the publication with. A
+channel is checked for `position` after `fc` and before `multicast`: one or
 two of the three keys without the rest, a value that is not a 32-bit integer, a
 `term-id` below `init-term-id` by that count, or a `term-offset` that is negative, not a
 multiple of 32 or not below the term length. The channel vectors carry the three fields
@@ -111,6 +119,18 @@ card, as ADR 0053's first change did for card 225.
 - **`term-length` as Aeron's fourth key.** Lost: the UDP term length is "Values"' and
   one for every publication, so the key could only repeat it or disagree, and a key
   that does nothing is a key the reader cannot check (ADR 0053).
+- **Reading the keys on a replay channel, or ignoring them there.** Lost: a replay's
+  publication starts at the command's position under its recording's initial term id,
+  so keys on its channel could only repeat that position or contradict it, and a key
+  that does nothing is a key the reader cannot check (ADR 0053). Aeron's Archive sets
+  these keys on a replay's publication from the recording and the replay's position,
+  whatever the client's replay channel named, so a client that named others is not
+  told; a refusal with the reason `position` tells it at once, and the follower log
+  replication of card 227, which runs on replays (ADR 0058), meets the case.
+- **Refusing the keys on a `start recording` channel too.** Lost: the command finds
+  its logs by the channel's identity, which `fc` is not part of, and refusing the keys
+  would make a client that records the publication it created at a position strip them
+  from the channel it already holds.
 - **Recording from the rebuild position, the follower replaying the gap afterwards.**
   Lost: invariant 1. A hole at the start of a recording is a span the member's append
   position never covers (`spec/cluster.md`, "The log"), and a replay of the gap from
@@ -181,7 +201,8 @@ Archive's rule; when the cluster's catch-up needs a replay with the log's sessio
 ## References
 
 - `spec/udp.md`, version 2, "The channel URI", "The sender" and "What a reader rejects".
-- `spec/client-protocol.md`, version 6, "Commands", start recording, and "Error codes".
+- `spec/client-protocol.md`, version 6, "Commands", start recording and start replay,
+  and "Error codes".
 - ADR 0058, Consequences, the four dependencies; ADR 0053, the keys a reader can check;
   ADR 0030, a log created at a position; ADR 0025, a recording is the driver's; ADR
   0042, an image's recording from the rebuild position.

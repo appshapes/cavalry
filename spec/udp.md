@@ -178,9 +178,14 @@ two's complement count of 0 or more) × the UDP term length of "Values" + `term-
 with `init-term-id` as the initial term id, as `spec/log-buffer.md`, "The driver",
 creates a replay's log at a position, so that the first frame the publication sends is
 at that position and its setup frames carry its term id and term offset ("The sender").
-`term-offset` is a multiple of 32 below the term length. The keys are a publication's,
-as `control`, `control-mode` and `fc` are: an `add subscription` or a destination
-channel that names one is refused. In Aeron, these are the `init-term-id`, `term-id`
+`term-offset` is a multiple of 32 below the term length. The keys are a client's
+publication's, as `control`, `control-mode` and `fc` are: an `add subscription`, a
+destination channel or a `start replay` channel that names one is refused, since a
+replay's publication is created at the replay's position under its recording's initial
+term id, and on a `start recording` channel they take no part, as its `fc` takes none,
+since the command matches a stream by its resolved channel and a client records the
+publication it created under the channel it holds (`spec/client-protocol.md`,
+"Commands"). In Aeron, these are the `init-term-id`, `term-id`
 and `term-offset` parameters of a publication's channel, without `term-length`, which
 this version's one term length would make a key that does nothing (ADR 0059).
 
@@ -207,11 +212,13 @@ The driver's sender is one dedicated thread per driver with the driver's idle st
 A `cavalry:udp` publication has a log buffer of type 0 or 1 (`spec/log-buffer.md`) with
 the UDP term length and MTU of "Values", or, for a replay's publication, its recording's
 term length and MTU, which its setup frame carries (`spec/client-protocol.md`,
-"Commands", start replay; ADR 0043), created at position 0 with an initial term id of
-the driver's choosing, or at the position its channel's position keys name, with
-`init-term-id` as its initial term id ("The channel URI"; ADR 0059), so that its first
-setup frame carries that term id and term offset and the receiver creates the image
-there ("The receiver"), and a send endpoint per resolved channel: one
+"Commands", start replay; ADR 0043); a client's publication is created at position 0
+with an initial term id of the driver's choosing, or at the position its channel's
+position keys name with `init-term-id` as its initial term id ("The channel URI"; ADR
+0059), and a replay's at the replay's position under its recording's initial term id,
+so that a publication's first setup frame carries its term id and term offset and the
+receiver creates the image there ("The receiver"); and a send endpoint per resolved
+channel: one
 socket, shared by the publications on that channel, with the operating system's send
 buffer. On a channel with an endpoint the socket is connected to the endpoint and
 bound to the interface when one is named, and every datagram goes to the endpoint. On
@@ -683,8 +690,8 @@ code 1 with the reason in the message; then `host` (the name does not resolve), 
 code 9. A string wrong in two ways reports the earlier check, as the vectors pin. The
 socket that cannot be opened, bound or connected is error code 4 with the operating
 system's reason. The driver's own checks on a channel that parses, a control channel,
-`fc` or a position key on an `add subscription`, a join under a different `fc` or
-under different position keys, a destination
+`fc` or a position key on an `add subscription`, a position key on a `start replay`
+channel, a join under a different `fc` or under different position keys, a destination
 channel that is `cavalry:ipc` or a control channel or names more than its endpoint,
 and a destination with no address the control address can send to ("The sender"), are
 error code 1 too
