@@ -2177,9 +2177,13 @@
         }
       },
       "fields": {
-        "action": "replay",
         "truncate_to": 1000,
-        "stop_position": -1
+        "stop_position": -1,
+        "records": [
+          5,
+          1000
+        ],
+        "action": "replay"
       }
     },
     {
@@ -2200,9 +2204,10 @@
         }
       },
       "fields": {
-        "action": "replicate",
         "truncate_to": -1,
-        "stop_position": 1000
+        "stop_position": 1000,
+        "records": null,
+        "action": "replicate"
       }
     },
     {
@@ -2223,9 +2228,10 @@
         }
       },
       "fields": {
-        "action": "replicate",
         "truncate_to": -1,
-        "stop_position": 500
+        "stop_position": 500,
+        "records": null,
+        "action": "replicate"
       }
     },
     {
@@ -2246,9 +2252,10 @@
         }
       },
       "fields": {
-        "action": "replay",
         "truncate_to": -1,
-        "stop_position": -1
+        "stop_position": -1,
+        "records": null,
+        "action": "replay"
       }
     },
     {
@@ -2269,9 +2276,10 @@
         }
       },
       "fields": {
-        "action": "canvass",
         "truncate_to": -1,
-        "stop_position": -1
+        "stop_position": -1,
+        "records": null,
+        "action": "canvass"
       }
     },
     {
@@ -2292,9 +2300,37 @@
         }
       },
       "fields": {
-        "action": "fail",
         "truncate_to": -1,
-        "stop_position": -1
+        "stop_position": -1,
+        "records": null,
+        "action": "fail"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-at-leaders-base-records",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 1,
+        "append_position": 1100,
+        "message": {
+          "log_leadership_term_id": 1,
+          "next_leadership_term_id": 2,
+          "next_term_base_log_position": 1100,
+          "next_log_position": -1,
+          "leadership_term_id": 2,
+          "term_base_log_position": 1100,
+          "log_position": 1100
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": [
+          2,
+          1100
+        ],
+        "action": "replay"
       }
     },
     {
@@ -2315,9 +2351,185 @@
         }
       },
       "fields": {
-        "action": "wait",
         "truncate_to": -1,
-        "stop_position": -1
+        "stop_position": -1,
+        "records": null,
+        "action": "wait"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-term-behind",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 2,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": 3,
+        "next_term_base_log_position": 200,
+        "next_log_position": 500
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-term-before-leaders",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 4,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": 5,
+        "next_term_base_log_position": 1000,
+        "next_log_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-leaders-own-term",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 5,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": -1,
+        "next_term_base_log_position": -1,
+        "next_log_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-term-the-leader-lacks",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            4,
+            200,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 3,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": 4,
+        "next_term_base_log_position": 200,
+        "next_log_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-gap-after-reported-term",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            4,
+            200,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 2,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": 5,
+        "next_term_base_log_position": 1000,
+        "next_log_position": -1
       }
     },
     {
