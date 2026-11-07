@@ -9,9 +9,9 @@ use cavalry_proto::cluster::{
     Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
     EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
     NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, SnapshotMark,
-    Stream, TermFields, TermSpan, TimeUnit, VERSION, ballot, candidate, commit_position,
-    entry_position, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
-    replay_end, replication_record, replication_stop,
+    Stream, TermFields, TermSpan, TimeUnit, VERSION, VoteAnswer, VoteRequest, ballot, candidate,
+    commit_position, entry_position, log_at_least, new_leadership_term_action, next_fields,
+    parse_members, quorum, replay_end, replication_record, replication_stop, request_vote,
 };
 use serde_json::{Map, Value, json};
 
@@ -450,6 +450,8 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             } = new_leadership_term_action(
                 int(inputs, "log_leadership_term_id"),
                 int(inputs, "append_position"),
+                int(inputs, "candidate_term"),
+                inputs["in_canvass"].as_bool().expect("in_canvass"),
                 TermFields {
                     leadership_term_id: int(m, "leadership_term_id"),
                     log_leadership_term_id: int(m, "log_leadership_term_id"),
@@ -461,6 +463,27 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             );
             let records = records.map(|(term, base)| json!([term, base]));
             json!({"action": action.name(), "truncate_to": truncate_to, "stop_position": stop_position, "records": records})
+        }
+        "request-vote" => {
+            let log = inputs["log"].as_array().expect("log");
+            let r = &inputs["request"];
+            let VoteAnswer {
+                vote,
+                candidate_term,
+            } = request_vote(
+                int(inputs, "candidate_term"),
+                LogReport {
+                    term: log[0].as_i64().expect("term"),
+                    position: log[1].as_i64().expect("position"),
+                },
+                u8::try_from(int(inputs, "state")).expect("state"),
+                VoteRequest {
+                    candidate_term_id: int(r, "candidate_term_id"),
+                    log_leadership_term_id: int(r, "log_leadership_term_id"),
+                    log_position: int(r, "log_position"),
+                },
+            );
+            json!({"vote": vote, "candidate_term": candidate_term})
         }
         "next-fields" => {
             let terms: Vec<TermSpan> = inputs["terms"]

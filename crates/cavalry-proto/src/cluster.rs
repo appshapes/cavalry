@@ -2273,6 +2273,79 @@ pub fn candidate(
     }
 }
 
+/// The fields of a request vote a reader answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VoteRequest {
+    /// The term the candidate proposes to lead.
+    pub candidate_term_id: i64,
+    /// The candidate's log leadership term id.
+    pub log_leadership_term_id: i64,
+    /// The candidate's append position.
+    pub log_position: i64,
+}
+
+/// A reader's answer to a request vote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VoteAnswer {
+    /// `Some(true)` for the candidate, `Some(false)` against, `None` for no answer.
+    pub vote: Option<bool>,
+    /// The reader's candidate term after the request, stored before the vote is sent
+    /// when it changed.
+    pub candidate_term: i64,
+}
+
+/// The election states, numbered as `spec/cluster.md`'s table, in which a member votes
+/// for a candidate: canvass, nominate, candidate ballot and follower ballot.
+pub const VOTING_STATES: [u8; 4] = [1, 2, 3, 4];
+
+/// What a reader with `candidate_term`, log `log` and election state `state`, numbered
+/// as `spec/cluster.md`'s table, answers `request` (`spec/cluster.md`, "Messages during
+/// an election", request vote): against with the term unchanged for a term at or below
+/// its own, so that it votes once in a term; against, taking the term, for a higher
+/// term from a log behind its own; for, taking the term, for a higher term from a log
+/// at least its own in one of [`VOTING_STATES`]; nothing in init or in any other state.
+pub const fn request_vote(
+    candidate_term: i64,
+    log: LogReport,
+    state: u8,
+    request: VoteRequest,
+) -> VoteAnswer {
+    let term = request.candidate_term_id;
+    if state == 0 {
+        return VoteAnswer {
+            vote: None,
+            candidate_term,
+        };
+    }
+    if term <= candidate_term {
+        return VoteAnswer {
+            vote: Some(false),
+            candidate_term,
+        };
+    }
+    if !log_at_least(
+        request.log_leadership_term_id,
+        request.log_position,
+        log.term,
+        log.position,
+    ) {
+        return VoteAnswer {
+            vote: Some(false),
+            candidate_term: term,
+        };
+    }
+    if matches!(state, 1..=4) {
+        return VoteAnswer {
+            vote: Some(true),
+            candidate_term: term,
+        };
+    }
+    VoteAnswer {
+        vote: None,
+        candidate_term,
+    }
+}
+
 /// Where a follower's log replication stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ReplicationStop {
@@ -2318,6 +2391,9 @@ pub const fn replication_stop(
 /// "Messages during an election").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TermAction {
+    /// A term below the reader's candidate term, or in a ballot state any term but the
+    /// candidate term: the message is ignored.
+    Ignore,
     /// The message's log leadership term id is not the reader's: back to canvass.
     Canvass,
     /// Below the leader's term base with a stop position: follower log replication.
@@ -2334,6 +2410,7 @@ impl TermAction {
     /// The action's name as the vectors spell it.
     pub const fn name(self) -> &'static str {
         match self {
+            TermAction::Ignore => "ignore",
             TermAction::Canvass => "canvass",
             TermAction::Replicate => "replicate",
             TermAction::Replay => "replay",
@@ -2375,17 +2452,30 @@ pub struct TermFields {
     pub term_base_log_position: i64,
 }
 
-/// What a reader with `log_leadership_term_id` and `append_position` does with a new
+/// What a reader with `log_leadership_term_id`, `append_position` and `candidate_term`,
+/// in canvass when `in_canvass` and in a ballot state otherwise, does with a new
 /// leadership term whose fields are `message` (`spec/cluster.md`, "Messages during an
-/// election"): canvass when the log terms differ; else truncate to a next term base
-/// log position the message carries when above it; then, below the leader's term
-/// base, fail with no next term, replicate to the stop position, or wait; at or above
-/// it, replay.
+/// election"): ignore a term below the candidate term, or in a ballot state any term but
+/// the candidate term, so that a member that voted in a term follows no leader of a
+/// lower one; canvass when the log terms differ; else truncate to a next term base log
+/// position the message carries when above it; then, below the leader's term base, fail
+/// with no next term, replicate to the stop position, or wait; at or above it, replay.
 pub const fn new_leadership_term_action(
     log_leadership_term_id: i64,
     append_position: i64,
+    candidate_term: i64,
+    in_canvass: bool,
     message: TermFields,
 ) -> NewLeadershipTermAction {
+    let term = message.leadership_term_id;
+    if term < candidate_term || (!in_canvass && term != candidate_term) {
+        return NewLeadershipTermAction {
+            action: TermAction::Ignore,
+            truncate_to: NULL_VALUE,
+            stop_position: NULL_VALUE,
+            records: None,
+        };
+    }
     if message.log_leadership_term_id != log_leadership_term_id {
         return NewLeadershipTermAction {
             action: TermAction::Canvass,
