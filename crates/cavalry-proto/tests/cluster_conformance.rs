@@ -668,3 +668,57 @@ fn a_session_event_of_another_major_is_read() {
         );
     }
 }
+
+/// The first member of `text` and how many it holds, or the reason it is refused.
+fn first_member(text: &str) -> Result<(usize, Member<'_>), &'static str> {
+    let mut members = [EMPTY_MEMBER; MAX_MEMBERS];
+    parse_members(text.as_bytes(), &mut members, None)
+        .map(|count| (count, members[0]))
+        .map_err(|error| error.reason())
+}
+
+/// A members string's id and port are the integer their ASCII digits make, leading
+/// zeros included, as `spec/vectors/cluster.py`'s `parse_members` reads them
+/// (`spec/cluster.md`, "What a reader rejects"), so that members and clients built on
+/// different implementations agree on one string; a run of digits above the field's
+/// range is refused however long it is, and two ids of one value are one id. No vector
+/// of `spec/vectors/cluster.json` pins it yet, for the reason above.
+#[test]
+fn a_members_string_reads_leading_zeros_and_refuses_values_out_of_range() {
+    assert_eq!(
+        first_member("00000000001,a:1,a:2,a:3,a:4,a:5").map(|(count, m)| (count, m.id)),
+        Ok((1, 1)),
+        "a leading-zero id"
+    );
+    assert_eq!(
+        first_member("0,a:000080,a:2,a:3,a:4,a:5").map(|(_, m)| m.ingress.port),
+        Ok(80),
+        "a leading-zero port"
+    );
+    assert_eq!(
+        first_member("0002147483647,[::1]:00000000000000000000065535,a:2,a:3,a:4,a:5")
+            .map(|(_, m)| (m.id, m.ingress.port)),
+        Ok((i32::MAX, u16::MAX)),
+        "the largest id and port, with leading zeros"
+    );
+    for refused in [
+        "2147483648,a:1,a:2,a:3,a:4,a:5",
+        "99999999999,a:1,a:2,a:3,a:4,a:5",
+        "4294967297,a:1,a:2,a:3,a:4,a:5",
+        "100000000000000000000000000000000,a:1,a:2,a:3,a:4,a:5",
+        "0,a:65536,a:2,a:3,a:4,a:5",
+        "0,a:00000,a:2,a:3,a:4,a:5",
+        "0,a:99999999999999999999999999,a:2,a:3,a:4,a:5",
+    ] {
+        assert_eq!(
+            first_member(refused).map(|(count, _)| count),
+            Err("members-grammar"),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        first_member("1,a:1,a:2,a:3,a:4,a:5|01,b:1,b:2,b:3,b:4,b:5").map(|(count, _)| count),
+        Err("members-duplicate"),
+        "1 and 01 are one id"
+    );
+}

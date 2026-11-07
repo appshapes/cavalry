@@ -2007,20 +2007,35 @@ pub struct Member<'a> {
     pub archive: Endpoint<'a>,
 }
 
-fn parse_endpoint(text: &[u8]) -> Option<Endpoint<'_>> {
-    let colon = text.iter().rposition(|&byte| byte == b':')?;
-    let (host, port) = (text.get(..colon)?, text.get(colon + 1..)?);
-    if host.is_empty() || port.is_empty() || port.len() > 5 {
+/// The integer that `text`'s ASCII digits make, any number of them, leading zeros
+/// included, as the members string's grammar reads an id or a port; `None` when `text`
+/// is empty or holds another byte. The value saturates at `u64::MAX`, so a run of
+/// digits too large for its field fails the caller's range check, never overflows.
+fn digits(text: &[u8]) -> Option<u64> {
+    if text.is_empty() {
         return None;
     }
-    let mut value: u32 = 0;
-    for &digit in port {
+    let mut value: u64 = 0;
+    for &digit in text {
         if !digit.is_ascii_digit() {
             return None;
         }
-        value = value * 10 + u32::from(digit - b'0');
+        value = value
+            .saturating_mul(10)
+            .saturating_add(u64::from(digit - b'0'));
     }
-    let port = u16::try_from(value).ok().filter(|&port| port != 0)?;
+    Some(value)
+}
+
+fn parse_endpoint(text: &[u8]) -> Option<Endpoint<'_>> {
+    let colon = text.iter().rposition(|&byte| byte == b':')?;
+    let (host, port) = (text.get(..colon)?, text.get(colon + 1..)?);
+    if host.is_empty() {
+        return None;
+    }
+    let port = u16::try_from(digits(port)?)
+        .ok()
+        .filter(|&port| port != 0)?;
     let host = match (host.first(), host.last()) {
         (Some(b'['), Some(b']')) if host.len() > 2 => host.get(1..host.len() - 1)?,
         _ if host.contains(&b':') => return None, // an IPv6 literal is written in brackets
@@ -2031,18 +2046,7 @@ fn parse_endpoint(text: &[u8]) -> Option<Endpoint<'_>> {
 
 fn parse_member(text: &[u8]) -> Option<Member<'_>> {
     let mut fields = text.split(|&byte| byte == b',');
-    let id = fields.next()?;
-    if id.is_empty() || id.len() > 10 {
-        return None;
-    }
-    let mut value: i64 = 0;
-    for &digit in id {
-        if !digit.is_ascii_digit() {
-            return None;
-        }
-        value = value * 10 + i64::from(digit - b'0');
-    }
-    let id = i32::try_from(value).ok()?;
+    let id = i32::try_from(digits(fields.next()?)?).ok()?;
     let ingress = parse_endpoint(fields.next()?)?;
     let consensus = parse_endpoint(fields.next()?)?;
     let log = parse_endpoint(fields.next()?)?;
