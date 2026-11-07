@@ -1643,6 +1643,7 @@ user-visible change, added in the same commit as the change. The format follows
   keys with 16 new channel
   vectors, the driver refuses the keys on a subscription, a destination and a replay
   channel with code 1, the replay's with the reason `position`, since a replay starts
-  at its own position, and it answers both with code 11 until card 227's driver change
+  at its own position, and it creates the log at the keys' position, joins under the
+  same keys alone, and arms, starts, fails or drops the recording as the page says
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).
