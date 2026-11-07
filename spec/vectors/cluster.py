@@ -391,15 +391,20 @@ def at_least(term, position, other_term, other_position):
     return (term, position) >= (other_term, other_position)
 
 
-def ballot(count, votes, timeout_passed):
-    """spec/cluster.md, "candidate ballot": leader at once when every member voted for, else at the
-    election timeout when a quorum voted for and none against."""
-    cast = {v["member"]: v["vote"] for v in votes}
+def ballot(count, candidate_term, votes, timeout_passed):
+    """spec/cluster.md, "candidate ballot": over the votes cast for the candidate's current
+    candidate term alone, its own among them, Aeron's isQuorumLeader: leader at once when every
+    member voted for, else at the election timeout when a quorum voted for and none against."""
+    cast = {v["member"]: v["vote"] for v in votes if v["term"] == candidate_term}
     if len(cast) == count and all(cast.values()):
         return {"leader": True, "unanimous": True}
     if timeout_passed and all(v for v in cast.values()) and sum(1 for v in cast.values() if v) >= quorum(count):
         return {"leader": True, "unanimous": False}
     return {"leader": False, "unanimous": False}
+
+
+OLDER_TERM_VOTES = [{"member": 2, "vote": True, "term": 4}, {"member": 0, "vote": True, "term": 4},
+                    {"member": 1, "vote": True, "term": 4}, {"member": 4, "vote": True, "term": 4}]
 
 
 def candidate(count, reports, own, deadline_passed):
@@ -466,10 +471,10 @@ def request_vote(candidate_term, log, state, request):
     table's number) answers `request`, True for, False against, None for no answer, and its candidate
     term after it: against, unchanged, for a term at or below its own; against, taking the term, for a
     higher term from a log behind its own; for, taking the term, for a higher term from a log at least
-    its own in canvass, nominate, candidate ballot or follower ballot; nothing in init or in any other
-    state."""
+    its own in canvass, nominate, candidate ballot or follower ballot; nothing in init, once the
+    election has closed (17), when the member holds an election instead, or in any other state."""
     term = request["candidate_term_id"]
-    if state == 0:
+    if state in (0, CLOSED):
         return {"vote": None, "candidate_term": candidate_term}
     if term <= candidate_term:
         return {"vote": False, "candidate_term": candidate_term}
@@ -620,24 +625,27 @@ VECTORS += [
     arithmetic("compare-log-empty", "compare-log",
                {"term": NULL, "position": 0, "other_term": 0, "other_position": 0}, {"at_least": False}),
     arithmetic("ballot-unanimous", "ballot",
-               {"members": 3, "votes": [{"member": 0, "vote": True}, {"member": 1, "vote": True},
-                                        {"member": 2, "vote": True}], "timeout_passed": False},
+               {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3},
+                                        {"member": 2, "vote": True, "term": 3}], "timeout_passed": False},
                {"leader": True, "unanimous": True}),
     arithmetic("ballot-quorum-before-timeout", "ballot",
-               {"members": 3, "votes": [{"member": 0, "vote": True}, {"member": 1, "vote": True}],
+               {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}],
                 "timeout_passed": False}, {"leader": False, "unanimous": False}),
     arithmetic("ballot-quorum-at-timeout", "ballot",
-               {"members": 3, "votes": [{"member": 0, "vote": True}, {"member": 1, "vote": True}],
+               {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}],
                 "timeout_passed": True}, {"leader": True, "unanimous": False}),
     arithmetic("ballot-one-against", "ballot",
-               {"members": 3, "votes": [{"member": 0, "vote": True}, {"member": 1, "vote": True},
-                                        {"member": 2, "vote": False}], "timeout_passed": True},
+               {"members": 3, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3},
+                                        {"member": 2, "vote": False, "term": 3}], "timeout_passed": True},
                {"leader": False, "unanimous": False}),
     arithmetic("ballot-short-of-quorum", "ballot",
-               {"members": 5, "votes": [{"member": 0, "vote": True}, {"member": 1, "vote": True}],
+               {"members": 5, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}],
                 "timeout_passed": True}, {"leader": False, "unanimous": False}),
+    arithmetic("ballot-votes-for-an-older-term-not-leader", "ballot",
+               {"members": 5, "candidate_term": 5, "votes": OLDER_TERM_VOTES, "timeout_passed": True},
+               ballot(5, 5, OLDER_TERM_VOTES, True)),
     arithmetic("ballot-single-member", "ballot",
-               {"members": 1, "votes": [{"member": 0, "vote": True}], "timeout_passed": False},
+               {"members": 1, "candidate_term": 3, "votes": [{"member": 0, "vote": True, "term": 3}], "timeout_passed": False},
                {"leader": True, "unanimous": True}),
     arithmetic("candidate-unanimous", "candidate",
                {"members": 3, "reports": [[3, 98304], [3, 98304], [2, 65536]], "own": [3, 98304],
@@ -732,8 +740,9 @@ VECTORS += [
     vote_vector("request-vote-in-follower-ballot-higher-term-for", 3, [2, 100], 4, (4, 2, 100)),
     vote_vector("request-vote-outside-the-voting-states-nothing", 3, [2, 200], 10, (4, 2, 200)),
     vote_vector("request-vote-in-init-nothing", 3, [2, 200], 0, (4, 2, 200)),
-    vote_vector("request-vote-in-leader-ready-log-behind-against-takes-term", 3, [2, 200], 8, (4, 2, 100)),
-    vote_vector("request-vote-in-leader-ready-log-at-least-nothing", 3, [2, 200], 8, (4, 2, 200)),
+    vote_vector("request-vote-in-leader-ready-log-behind-against-takes-term", 3, [3, 200], 8, (4, 3, 100)),
+    vote_vector("request-vote-in-leader-ready-log-at-least-nothing", 3, [3, 200], 8, (4, 3, 200)),
+    vote_vector("request-vote-closed-nothing", 3, [3, 200], CLOSED, (4, 3, 200)),
     canvass_vector("canvass-position-stale-candidate-term-holds-election", 3, CLOSED, 4, 2),
     canvass_vector("canvass-position-higher-term-in-leader-ready-fails-election", 3, 8, 4, 2),
     canvass_vector("canvass-position-higher-log-term-in-leader-log-replication-fails-election", 3, 5, 4, 4),
@@ -787,7 +796,8 @@ VECTORS += [
                {"position": 98304, "length": 100000, "mtu": 1408}, entry_position(98304, 100000, 1408)),
 ]
 
-assert ballot(3, [{"member": 0, "vote": True}, {"member": 1, "vote": True}], True) == {"leader": True, "unanimous": False}
+assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], True) == {"leader": True, "unanimous": False}
+assert ballot(3, 4, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], True) == {"leader": False, "unanimous": False}
 assert at_least(3, 0, 2, 98304) and not at_least(2, 98304, 3, 0)
 for v in VECTORS:
     if v["kind"] == "message" and "error" not in v:
