@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cavalry_log::dir::Recovery;
 
-use cavalry_proto::channel::{Channel, ChannelError, FlowControl, UdpChannel};
+use cavalry_proto::channel::{Channel, ChannelError, FlowControl, PublicationPosition, UdpChannel};
 use cavalry_proto::client_protocol::{
     Command, ErrorCode, Event, IPC_CHANNEL, MAX_STRING_LENGTH, NO_CHANNEL_STATUS, NULL_LENGTH,
     ProtocolError, ReplayStopReason,
@@ -48,7 +48,8 @@ use cavalry_shm::counters::generated::{
     COMMAND_RING_REJECTED_TAIL, COMMAND_RING_UNBLOCKED, CONDUCTOR_IDLE_STRATEGY,
     DRIVER_LOG_CREATE_FAILED, DRIVER_REGISTRY_FULL, IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION,
     IMAGE_REMOVED, LOG_BUFFER_REJECTED_POSITION, LOG_BUFFER_REJECTED_TAIL, PUBLICATION_LIMIT,
-    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
+    PUBLICATION_POSITION, PUBLICATION_UNBLOCKED, RECORDING_ARMED, RECORDING_ARMED_DROPPED,
+    RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES, RECORDING_CATALOG_FULL,
     RECORDING_CATALOG_TRUNCATED, RECORDING_DELETED, RECORDING_FILES_REMOVED,
     RECORDING_INDEX_REWRITTEN, RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_RECOVERED,
     RECORDING_RETENTION_FAILED, RECORDING_SLOT_DROPPED, RECORDING_START_FAILED, RECORDING_STARTED,
@@ -222,6 +223,9 @@ struct Publication {
 struct UdpPublication {
     /// The send endpoint's registration id.
     endpoint_id: i64,
+    /// The position keys the publication was created with, which a join must name
+    /// too (`spec/udp.md`, version 2, "The channel URI"; ADR 0059).
+    position: Option<PublicationPosition>,
     /// The sender's `sender.position` counter, loaded on the duty cycle; freed with the
     /// publication's own two when the close completes.
     sender_position: Counter,
@@ -503,6 +507,17 @@ struct ReplayEntry {
 
 /// One recording the conductor registers: its publication, the command that started
 /// it, its start position, and, once the recorder has given the id, the two counters.
+/// A recording armed by `start recording` on a `cavalry:udp` stream with a live
+/// subscription and no image yet, held until the stream's next image arrives on the
+/// endpoint or its last subscription goes (`spec/client-protocol.md`, "Commands",
+/// start recording; ADR 0059).
+struct ArmedRecording {
+    endpoint_id: i64,
+    stream_id: i32,
+    /// The arming command's correlation id, which the second answer names.
+    correlation_id: i64,
+}
+
 struct RecordingEntry {
     publication_id: i64,
     session_id: i32,
@@ -578,6 +593,10 @@ struct Statics {
     recording_retention_failed: Counter,
     recording_start_failed: Counter,
     recording_catalog_full: Counter,
+    recording_armed: Counter,
+    recording_armed_started: Counter,
+    recording_armed_failed: Counter,
+    recording_armed_dropped: Counter,
     replay_started: Counter,
     replay_stopped: Counter,
     replay_ended: Counter,
@@ -612,6 +631,10 @@ impl Statics {
             recording_truncated: get(RECORDING_TRUNCATED)?,
             recording_deleted: get(RECORDING_DELETED)?,
             recording_retention_failed: get(RECORDING_RETENTION_FAILED)?,
+            recording_armed: get(RECORDING_ARMED)?,
+            recording_armed_started: get(RECORDING_ARMED_STARTED)?,
+            recording_armed_failed: get(RECORDING_ARMED_FAILED)?,
+            recording_armed_dropped: get(RECORDING_ARMED_DROPPED)?,
             recording_start_failed: get(RECORDING_START_FAILED)?,
             recording_catalog_full: get(RECORDING_CATALOG_FULL)?,
             replay_started: get(REPLAY_STARTED)?,
@@ -672,6 +695,9 @@ pub(crate) struct Conductor {
     pending_subscriptions: Vec<PendingSubscription>,
     images: Vec<Image>,
     recordings: Vec<RecordingEntry>,
+    /// At most one per endpoint and stream a live subscription holds, so the
+    /// subscriptions registry bounds them (ADR 0059).
+    armed_recordings: Vec<ArmedRecording>,
     replays: Vec<ReplayEntry>,
     /// The retention commands in progress (`spec/client-protocol.md`, "Sizes").
     commands: Vec<CommandEntry>,
@@ -788,6 +814,7 @@ impl Conductor {
             pending_subscriptions: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             images: Vec::with_capacity(spec::MAX_IMAGES),
             recordings: Vec::with_capacity(spec::MAX_RECORDINGS),
+            armed_recordings: Vec::with_capacity(spec::MAX_SUBSCRIPTIONS),
             replays: Vec::with_capacity(spec::MAX_REPLAYS),
             commands: Vec::with_capacity(spec::MAX_COMMANDS_IN_PROGRESS),
             recorder,
@@ -1578,22 +1605,6 @@ impl Conductor {
             self.registry_full(correlation_id, "publications", spec::MAX_PUBLICATIONS);
             return;
         }
-        // Version 2's position keys create the publication at a position, which card
-        // 227's driver change builds (ADR 0059); until it lands the keys are answered
-        // with code 11, as a control channel was before card 225's sender (ADR 0053).
-        if channel.names_position() {
-            self.send_error(
-                correlation_id,
-                ErrorCode::GenericError,
-                &format!(
-                    "the channel names init-term-id, term-id and term-offset, which create a \
-                     publication at a position (spec/udp.md, version 2; ADR 0059): this driver \
-                     does not create one yet, card 227's driver change does; remove the keys \
-                     until it lands; see {ERRORS_DOC}"
-                ),
-            );
-            return;
-        }
         let Some(target) = self.resolve_target(correlation_id, &channel) else {
             return;
         };
@@ -1633,6 +1644,33 @@ impl Conductor {
                              {ERRORS_DOC}",
                             held.name(),
                             held.name()
+                        ),
+                    );
+                    return;
+                }
+                // A shared log has one position: a join names the live publication's
+                // position keys, or none where it named none (ADR 0059).
+                let held_position = self.publications[index]
+                    .udp
+                    .as_ref()
+                    .and_then(|udp| udp.position);
+                if held_position != channel.position_keys() {
+                    self.statics.rejected_command.increment();
+                    let created = match held_position {
+                        Some(keys) => format!(
+                            "with init-term-id={} term-id={} term-offset={}",
+                            keys.initial_term_id, keys.term_id, keys.term_offset
+                        ),
+                        None => "with no position keys".to_string(),
+                    };
+                    self.send_error(
+                        correlation_id,
+                        ErrorCode::InvalidChannel,
+                        &format!(
+                            "the channel: channel refused (position): the live publication on \
+                             stream {stream_id} and this channel was created {created}, and a \
+                             join keeps one position; name the same keys to join it, or another \
+                             stream; see {ERRORS_DOC}"
                         ),
                     );
                     return;
@@ -1692,6 +1730,15 @@ impl Conductor {
         // publication's own term, as it must for a replay's publication, whose log
         // keeps its recording's term (ADR 0043).
         let term_length = self.term_length.min(spec::UDP_TERM_LENGTH);
+        // Version 2's position keys create the log at a position with their initial
+        // term id, as a replay's log is created (`spec/udp.md`, "The channel URI"; ADR
+        // 0059), the position counted in the log's own term, the spec's unless a test
+        // shrank it, so that the term ids on the wire are the keys'.
+        let keys = channel.position_keys();
+        let initial_term_id = keys.map_or(initial_term_id, |keys| keys.initial_term_id);
+        let start_position = keys.map_or(0, |keys| {
+            i64::from(keys.term_count()) * i64::from(term_length) + i64::from(keys.term_offset)
+        });
         let fields = HeaderFields::new(
             log_type,
             correlation_id,
@@ -1702,7 +1749,9 @@ impl Conductor {
             session_id,
             stream_id,
         );
-        let log = match fields.and_then(|fields| LogBuffers::create(&self.dir, &fields)) {
+        let log = match fields
+            .and_then(|fields| LogBuffers::create_at(&self.dir, &fields, start_position))
+        {
             Ok(log) => log,
             Err(error) => {
                 self.statics.log_create_failed.increment();
@@ -1769,7 +1818,7 @@ impl Conductor {
         else {
             return;
         };
-        let reader = match log.reader(0) {
+        let reader = match log.reader(start_position) {
             Ok(reader) => reader,
             Err(error) => {
                 for counter in [
@@ -1789,8 +1838,9 @@ impl Conductor {
                 return;
             }
         };
-        position.store_release(0);
-        limit.store_release(0);
+        position.store_release(start_position);
+        limit.store_release(start_position);
+        sender_position.store_release(start_position);
         let log_file_name = log_layout::file_name(correlation_id)
             .to_string_lossy()
             .into_owned();
@@ -1804,11 +1854,11 @@ impl Conductor {
             position,
             limit,
             registrations: vec![registration],
-            consumer_position: 0,
-            clean_position: 0,
-            last_limit: 0,
+            consumer_position: start_position,
+            clean_position: start_position,
+            last_limit: start_position,
             connected_flag: false,
-            producer: 0,
+            producer: start_position,
             producer_loaded_at: now,
             stalled: None,
             closing: None,
@@ -1823,6 +1873,7 @@ impl Conductor {
                 sender_closed: false,
                 flow_control,
                 receivers_id: receivers.id(),
+                position: keys,
             }),
         };
         let add = sender::AddPublication {
@@ -2991,6 +3042,7 @@ impl Conductor {
                     {
                         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
                         let entry = self.receive_endpoints.swap_remove(index);
+                        self.drop_armed_recordings(|armed| armed.endpoint_id == registration_id);
                         let (closed_endpoint, closed_interface) = (entry.endpoint, entry.interface);
                         for counter in [
                             entry.status,
@@ -3148,6 +3200,7 @@ impl Conductor {
         let mut readers: Vec<(ReaderKey, Option<Counter>, i64)> =
             Vec::with_capacity(subscribers.len());
         let mut pairs: Vec<(i64, u32)> = Vec::with_capacity(subscribers.len());
+        let mut announced: Vec<(i64, i32)> = Vec::with_capacity(subscribers.len());
         for subscription_id in subscribers {
             let label = format!(
                 "subscription.position {registration_id} {} {}",
@@ -3161,17 +3214,8 @@ impl Conductor {
                 }
             };
             position.store_release(start.position);
-            let event = Event::AvailableImage {
-                correlation_id: registration_id,
-                session_id: setup.session_id,
-                stream_id: setup.stream_id,
-                subscriber_registration_id: subscription_id,
-                subscriber_position_counter_id: counter_id(&position),
-                log_file_name: log_file_name.as_bytes(),
-                source_identity: source_identity.as_bytes(),
-            };
-            self.send(&event);
             pairs.push((subscription_id, position.id()));
+            announced.push((subscription_id, counter_id(&position)));
             readers.push((
                 ReaderKey::Subscription(subscription_id),
                 Some(position),
@@ -3186,8 +3230,8 @@ impl Conductor {
             stream_id: setup.stream_id,
             hwm: hwm.clone(),
             rebuild: rebuild.clone(),
-            log_file_name,
-            source_identity,
+            log_file_name: log_file_name.clone(),
+            source_identity: source_identity.clone(),
             subscriptions: pairs,
             state: ImageState::Live,
         });
@@ -3209,6 +3253,37 @@ impl Conductor {
             start_position: start.position,
             readers,
         }));
+        // An armed recording starts at the image's join position before the image is
+        // announced, its start answered under the arming command's correlation id and
+        // counted as started or failed (ADR 0059).
+        if let Some(index) = self.armed_recordings.iter().position(|armed| {
+            armed.endpoint_id == endpoint_id && armed.stream_id == setup.stream_id
+        }) {
+            let armed = self.armed_recordings.swap_remove(index);
+            let channel = self.receive_endpoints[endpoint_index].channel.clone();
+            if self.start_image_recording(
+                armed.correlation_id,
+                registration_id,
+                start.position,
+                channel,
+                now,
+            ) {
+                self.statics.recording_armed_started.increment();
+            } else {
+                self.statics.recording_armed_failed.increment();
+            }
+        }
+        for (subscription_id, position_id) in announced {
+            self.send(&Event::AvailableImage {
+                correlation_id: registration_id,
+                session_id: setup.session_id,
+                stream_id: setup.stream_id,
+                subscriber_registration_id: subscription_id,
+                subscriber_position_counter_id: position_id,
+                log_file_name: log_file_name.as_bytes(),
+                source_identity: source_identity.as_bytes(),
+            });
+        }
     }
 
     /// The receiver retired an image (`spec/udp.md`, "The receiver", step 5):
@@ -3416,6 +3491,18 @@ impl Conductor {
                 entry.subscription_count = entry.subscription_count.saturating_sub(1);
             }
             self.release_receive_endpoint(endpoint_id);
+            // The stream's last subscription on the endpoint takes its armed recording
+            // with it (ADR 0059).
+            let stream_id = subscription.stream_id;
+            if !self
+                .subscriptions
+                .iter()
+                .any(|other| other.endpoint == Some(endpoint_id) && other.stream_id == stream_id)
+            {
+                self.drop_armed_recordings(|armed| {
+                    armed.endpoint_id == endpoint_id && armed.stream_id == stream_id
+                });
+            }
         }
         let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
         let mut kept = Vec::with_capacity(self.images.len());
@@ -4051,29 +4138,49 @@ impl Conductor {
                 })
                 .map(|image| (image.registration_id, true)),
         );
-        // Version 6 arms the recording on a live subscription with no image yet, which
-        // card 227's driver change builds (ADR 0059); until it lands the case is answered
-        // with code 11 rather than version 5's code 20.
-        if candidates.is_empty()
-            && self.subscriptions.iter().any(|subscription| {
-                subscription.stream_id == stream_id
-                    && subscription
-                        .endpoint
-                        .is_some_and(|endpoint| receive_endpoints.contains(&endpoint))
-            })
-        {
-            self.send_error(
-                correlation_id,
-                ErrorCode::GenericError,
-                &format!(
-                    "a subscription on stream {stream_id} and channel {resolved} has no image \
-                     yet: version 6 arms the recording until the image arrives \
-                     (spec/client-protocol.md, Commands, start recording; ADR 0059), which \
-                     card 227's driver change builds; this driver answers code 11 until it \
-                     lands, so wait for the image and start recording again; see {ERRORS_DOC}"
-                ),
-            );
-            return;
+        // Version 6: no publication and no image, but a live subscription on the
+        // endpoint and stream, arms the recording for the stream's next image, one per
+        // endpoint and stream (`spec/client-protocol.md`, "Commands", start recording;
+        // ADR 0059); a second start while one is armed is code 22.
+        if candidates.is_empty() {
+            if self.armed_recordings.iter().any(|armed| {
+                armed.stream_id == stream_id && receive_endpoints.contains(&armed.endpoint_id)
+            }) {
+                self.send_error(
+                    correlation_id,
+                    ErrorCode::AlreadyRecording,
+                    &format!(
+                        "stream {stream_id} on {resolved} has a recording armed, which starts \
+                         when the stream's next image arrives; wait for its recording ready; \
+                         see {ERRORS_DOC}"
+                    ),
+                );
+                return;
+            }
+            let subscribed = self
+                .subscriptions
+                .iter()
+                .find(|subscription| {
+                    subscription.stream_id == stream_id
+                        && subscription
+                            .endpoint
+                            .is_some_and(|endpoint| receive_endpoints.contains(&endpoint))
+                })
+                .and_then(|subscription| subscription.endpoint);
+            if let Some(endpoint_id) = subscribed {
+                if self.armed_recordings.len() >= spec::MAX_SUBSCRIPTIONS {
+                    self.registry_full(correlation_id, "armed recordings", spec::MAX_SUBSCRIPTIONS);
+                    return;
+                }
+                self.armed_recordings.push(ArmedRecording {
+                    endpoint_id,
+                    stream_id,
+                    correlation_id,
+                });
+                self.statics.recording_armed.increment();
+                self.send(&Event::OperationSuccess { correlation_id });
+                return;
+            }
         }
         if candidates.is_empty() {
             self.send_error(
@@ -4130,37 +4237,25 @@ impl Conductor {
             self.recorder_queue_full(correlation_id);
             return;
         }
-        let (start_position, reader, header, session_id, source_identity) = if image {
-            let Some(entry) = self
+        if image {
+            let Some(start_position) = self
                 .udp_images
                 .iter()
                 .find(|image| image.registration_id == registration_id)
+                .map(|entry| entry.rebuild.load_acquire())
             else {
                 return;
             };
-            let log = match LogBuffers::open_image(&self.dir, registration_id, false) {
-                Ok(log) => log,
-                Err(error) => {
-                    self.send_error(correlation_id, ErrorCode::GenericError, &format!("{error}"));
-                    return;
-                }
-            };
-            let start_position = entry.rebuild.load_acquire();
-            let reader = match log.reader(start_position) {
-                Ok(reader) => reader,
-                Err(error) => {
-                    self.send_error(correlation_id, ErrorCode::GenericError, &format!("{error}"));
-                    return;
-                }
-            };
-            (
+            self.start_image_recording(
+                correlation_id,
+                registration_id,
                 start_position,
-                reader,
-                log.header(),
-                entry.session_id,
-                entry.source_identity.clone(),
-            )
-        } else {
+                resolved,
+                now,
+            );
+            return;
+        }
+        let (start_position, reader, header, session_id, source_identity) = {
             let Some(publication) = self
                 .publications
                 .iter()
@@ -4221,13 +4316,121 @@ impl Conductor {
             bytes: None,
             stop_requested: false,
         });
-        if image {
-            self.receiver_request(receiver::Request::AddReader {
-                registration_id,
-                key: ReaderKey::Recording(registration_id),
-                counter: None,
-                floor: start_position,
-            });
+    }
+
+    /// Starts recording the image `registration_id` from `start_position`: for a
+    /// `start recording` on a live image, from its rebuild position, and for an armed
+    /// recording when the stream's next image arrives, from the image's join position
+    /// (ADR 0059). The recorder's start, the entry and the receiver's reader, every
+    /// refusal answered under `correlation_id` with the code a live start gets; whether
+    /// the start was handed to the recorder.
+    fn start_image_recording(
+        &mut self,
+        correlation_id: i64,
+        registration_id: i64,
+        start_position: i64,
+        channel: String,
+        now: i64,
+    ) -> bool {
+        if self.recordings.len() >= spec::MAX_RECORDINGS {
+            self.registry_full(correlation_id, "recordings", spec::MAX_RECORDINGS);
+            return false;
+        }
+        if !self.deferred.is_empty() {
+            self.recorder_queue_full(correlation_id);
+            return false;
+        }
+        let Some((session_id, stream_id, source_identity)) = self
+            .udp_images
+            .iter()
+            .find(|image| image.registration_id == registration_id)
+            .map(|entry| {
+                (
+                    entry.session_id,
+                    entry.stream_id,
+                    entry.source_identity.clone(),
+                )
+            })
+        else {
+            return false;
+        };
+        let log = match LogBuffers::open_image(&self.dir, registration_id, false) {
+            Ok(log) => log,
+            Err(error) => {
+                self.send_error(correlation_id, ErrorCode::GenericError, &format!("{error}"));
+                return false;
+            }
+        };
+        let reader = match log.reader(start_position) {
+            Ok(reader) => reader,
+            Err(error) => {
+                self.send_error(correlation_id, ErrorCode::GenericError, &format!("{error}"));
+                return false;
+            }
+        };
+        let header = log.header();
+        let start = Start {
+            publication_id: registration_id,
+            correlation_id,
+            start_timestamp: now,
+            start_position,
+            initial_term_id: header.initial_term_id(),
+            term_length: i32::try_from(header.term_length()).unwrap_or(i32::MAX),
+            mtu_length: i32::try_from(header.mtu_length()).unwrap_or(i32::MAX),
+            session_id,
+            stream_id,
+            source_identity,
+            channel,
+            reader,
+        };
+        if self.recorder.requests.offer(Request::Start(start)).is_err() {
+            self.recorder_queue_full(correlation_id);
+            return false;
+        }
+        self.recordings.push(RecordingEntry {
+            publication_id: registration_id,
+            session_id,
+            stream_id,
+            start_position,
+            state: RecordingState::Starting,
+            recording_id: None,
+            position: None,
+            synced: None,
+            bytes: None,
+            stop_requested: false,
+        });
+        self.receiver_request(receiver::Request::AddReader {
+            registration_id,
+            key: ReaderKey::Recording(registration_id),
+            counter: None,
+            floor: start_position,
+        });
+        true
+    }
+
+    /// Drops every armed recording `gone` names, each answered under its arming
+    /// command's correlation id with code 20 and counted in `recording.armed_dropped`:
+    /// its stream's last subscription on the endpoint went, so no image will come
+    /// (`spec/client-protocol.md`, "Commands", start recording; ADR 0059).
+    fn drop_armed_recordings(&mut self, gone: impl Fn(&ArmedRecording) -> bool) {
+        let mut index = 0;
+        while index < self.armed_recordings.len() {
+            if gone(&self.armed_recordings[index]) {
+                let armed = self.armed_recordings.swap_remove(index);
+                self.statics.recording_armed_dropped.increment();
+                self.send_error(
+                    armed.correlation_id,
+                    ErrorCode::NoPublicationToRecord,
+                    &format!(
+                        "the recording armed on stream {} was dropped: the stream's last \
+                         subscription on its endpoint went before an image arrived, so none \
+                         will; subscribe again and start recording again; see {ERRORS_DOC}",
+                        armed.stream_id
+                    ),
+                );
+            } else {
+                index += 1;
+            }
         }
     }
 
@@ -5163,6 +5366,7 @@ impl Conductor {
                 sender_closed: false,
                 flow_control,
                 receivers_id: receivers.id(),
+                position: None,
             });
             let add = sender::AddPublication {
                 registration_id: replay_session_id,
@@ -6264,8 +6468,9 @@ mod recording {
     use cavalry_proto::frame::{DataFrameHeader, FrameType, HEADER_LENGTH as FRAME_HEADER};
     use cavalry_shm::broadcast::{BroadcastBuffer, Receiver};
     use cavalry_shm::counters::generated::{
-        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, RECORDING_CATALOG_FULL,
-        RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_WRITE_FAILED,
+        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, RECORDING_ARMED, RECORDING_ARMED_DROPPED,
+        RECORDING_ARMED_STARTED, RECORDING_CATALOG_FULL, RECORDING_START_FAILED, RECORDING_STARTED,
+        RECORDING_STOPPED, RECORDING_WRITE_FAILED,
     };
     use cavalry_shm::log::ClaimError;
 
@@ -6756,6 +6961,74 @@ mod recording {
             i64::from(publication.log.header().publication_window_length()),
             "the publisher's limit: the sender position plus the publication window"
         );
+    }
+
+    /// A publication whose channel names the position keys is created at their
+    /// position with their initial term id, its position counters there, its first
+    /// setup frame carries that term id and term offset, and a join names the same keys
+    /// or is refused with the reason `position` (ADR 0059).
+    #[test]
+    fn a_udp_publication_created_at_a_position_sends_its_setup_there() {
+        let mut h = Harness::new("udp-publication-at-a-position");
+        let mut receiver = TestReceiver::bind();
+        let now = h.now;
+        let channel = String::from_utf8_lossy(&receiver.channel()).into_owned();
+        let keyed = format!("{channel}|init-term-id=7|term-id=9|term-offset=4096");
+        h.conductor
+            .add_publication(1, 2, 7, keyed.as_bytes(), false, now);
+        assert_eq!(h.last_error(2), None);
+        {
+            let publication = &h.conductor.publications[0];
+            let term_length = i64::from(publication.log.header().term_length());
+            let expected = 2 * term_length + 4096;
+            assert_eq!(publication.log.header().initial_term_id(), 7);
+            assert_eq!(
+                publication.log.producer_position().expect("a position"),
+                expected
+            );
+            assert_eq!(publication.position.get(), expected);
+            assert_eq!(publication.limit.get(), expected, "not connected: no room");
+            assert_eq!(
+                publication
+                    .udp
+                    .as_ref()
+                    .and_then(|udp| udp.position)
+                    .map(|keys| (keys.initial_term_id, keys.term_id, keys.term_offset)),
+                Some((7, 9, 4096))
+            );
+            assert_eq!(
+                publication
+                    .udp
+                    .as_ref()
+                    .map(|udp| udp.sender_position.get()),
+                Some(expected)
+            );
+        }
+        h.sender.duty_cycle(now);
+        let setup = expect_setup(&mut receiver);
+        assert_eq!(
+            (
+                setup.initial_term_id,
+                setup.active_term_id,
+                setup.term_offset
+            ),
+            (7, 9, 4096)
+        );
+        // A join under no keys or other keys is refused; the same keys join.
+        h.conductor
+            .add_publication(1, 3, 7, channel.as_bytes(), false, now);
+        let (code, message) = h.last_error(3).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(position)"), "{message}");
+        let other = format!("{channel}|init-term-id=7|term-id=9|term-offset=8192");
+        h.conductor
+            .add_publication(1, 4, 7, other.as_bytes(), false, now);
+        assert_eq!(h.last_error(4).expect("an error").0, 1);
+        h.conductor
+            .add_publication(1, 5, 7, keyed.as_bytes(), false, now);
+        assert_eq!(h.last_error(5), None);
+        assert_eq!(h.conductor.publications.len(), 1);
+        assert_eq!(h.conductor.publications[0].registrations.len(), 2);
     }
 
     /// The sender's disconnected reply stores the flag 0 where the conductor takes it,
@@ -7431,8 +7704,7 @@ mod recording {
         assert_eq!(h.last_error(12).expect("an error").0, 1);
         assert!(h.conductor.receive_endpoints.is_empty());
         // Version 2's position keys: a publication's, refused on a subscription and on a
-        // destination, and answered with code 11 on a publication until card 227's
-        // driver change creates the log at the position (ADR 0059).
+        // destination (ADR 0059).
         h.conductor.add_subscription(
             1,
             15,
@@ -7453,27 +7725,9 @@ mod recording {
         let (code, message) = h.last_error(202).expect("an error");
         assert_eq!(code, 1, "{message}");
         assert!(message.contains("(destination)"), "{message}");
-        h.conductor.add_publication(
-            1,
-            16,
-            7,
-            b"cavalry:udp?endpoint=127.0.0.1:40123|init-term-id=7|term-id=9|term-offset=4096",
-            false,
-            now,
-        );
-        let (code, message) = h.last_error(16).expect("an error");
-        assert_eq!(code, 11, "{message}");
-        assert!(message.contains("ADR 0059"), "{message}");
-        // Version 6 arms a recording on a subscription with no image yet; until the same
-        // driver change the case is code 11, not version 5's code 20.
-        h.conductor
-            .add_subscription(1, 17, 9, b"cavalry:udp?endpoint=127.0.0.1:40124");
-        assert_eq!(h.last_error(17), None);
-        h.conductor
-            .start_recording(18, 9, b"cavalry:udp?endpoint=127.0.0.1:40124", now);
-        let (code, message) = h.last_error(18).expect("an error");
-        assert_eq!(code, 11, "{message}");
-        assert!(message.contains("ADR 0059"), "{message}");
+        // A publication that names them is created at their position, and a start
+        // recording on a subscription with no image arms the recording: each its own
+        // test (ADR 0059).
         // A join under another fc, and under the same.
         let min = format!("{unicast}|fc=min");
         h.conductor
@@ -12250,6 +12504,123 @@ mod receiving {
         // Five for the endpoint, two for the image, one for the subscriber.
         assert_eq!(h.counter(COUNTERS_ALLOCATED), allocated + 8);
         drop(sender);
+    }
+
+    /// Every event the broadcast buffer holds, drained: (type id, message).
+    fn drained_events(h: &mut Harness) -> Vec<(i32, Vec<u8>)> {
+        let mut out = Vec::new();
+        while h
+            .receiver
+            .receive(|type_id, message| out.push((type_id, message.to_vec())))
+            .expect("the receiver reads")
+        {}
+        out
+    }
+
+    /// `start recording` on a subscription with no image arms the recording: operation
+    /// success at once, code 22 for a second start meanwhile, and when the setup frame
+    /// arrives the recording starts at the image's join position before the image is
+    /// announced, with recording ready under the arming command's correlation id (ADR
+    /// 0059).
+    #[test]
+    fn an_armed_recording_starts_at_the_images_join_position_and_answers_twice() {
+        let mut h = Harness::new("armed-recording");
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 2, STREAM, channel.as_bytes());
+        assert_eq!(h.last_error(2), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor
+            .start_recording(3, STREAM, channel.as_bytes(), now);
+        assert!(
+            drained_events(&mut h)
+                .iter()
+                .any(|(type_id, message)| matches!(
+                    Event::parse(*type_id, message),
+                    Ok(Event::OperationSuccess { correlation_id: 3 })
+                )),
+            "operation success answers the arming"
+        );
+        assert_eq!(h.counter(RECORDING_ARMED), 1);
+        assert_eq!(h.conductor.armed_recordings.len(), 1);
+        h.conductor
+            .start_recording(4, STREAM, channel.as_bytes(), now);
+        let (code, message) = h.last_error(4).expect("an error");
+        assert_eq!(code, 22, "{message}");
+        assert!(message.contains("armed"), "{message}");
+        let mut sender = TestSender::bind(port);
+        sender.term = TERM;
+        sender.send_setup(SESSION, 4096);
+        assert!(
+            h.cycle_until(|h| h.conductor.udp_images.len() == 1),
+            "the setup frame created the image"
+        );
+        assert!(h.conductor.armed_recordings.is_empty());
+        assert_eq!(h.conductor.recordings.len(), 1);
+        assert_eq!(h.conductor.recordings[0].start_position, 4096);
+        assert_eq!(h.counter(RECORDING_ARMED_STARTED), 1);
+        assert!(
+            h.cycle_until(|h| h.conductor.recordings[0].state == RecordingState::Live),
+            "the recorder took the start"
+        );
+        let all = drained_events(&mut h);
+        let ready =
+            all.iter()
+                .find_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                    Ok(Event::RecordingReady {
+                        correlation_id,
+                        recording_id,
+                        ..
+                    }) => Some((correlation_id, recording_id)),
+                    _ => None,
+                });
+        assert_eq!(ready, Some((3, 0)), "recording ready under the arming id");
+        let announced = all.iter().position(|(type_id, message)| {
+            matches!(
+                Event::parse(*type_id, message),
+                Ok(Event::AvailableImage { .. })
+            )
+        });
+        assert!(announced.is_some(), "the image was announced");
+        drop(sender);
+    }
+
+    /// An armed recording is dropped with its stream's last subscription on the
+    /// endpoint, answered with code 20 under the arming command's id, while another
+    /// stream's subscription keeps the endpoint open (ADR 0059).
+    #[test]
+    fn an_armed_recording_is_dropped_with_its_streams_last_subscription() {
+        let mut h = Harness::new("armed-recording-dropped");
+        let port = free_port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 2, STREAM, channel.as_bytes());
+        h.conductor
+            .add_subscription(1, 3, STREAM + 1, channel.as_bytes());
+        h.cycle();
+        let now = h.now;
+        h.conductor
+            .start_recording(4, STREAM, channel.as_bytes(), now);
+        assert_eq!(h.last_error(4), None);
+        assert_eq!(h.conductor.armed_recordings.len(), 1);
+        // A second subscription on the stream keeps it armed; the last one drops it.
+        h.conductor
+            .add_subscription(1, 5, STREAM, channel.as_bytes());
+        h.conductor.remove_subscription(1, 6, 2, now);
+        assert_eq!(h.conductor.armed_recordings.len(), 1);
+        h.conductor.remove_subscription(1, 7, 5, now);
+        assert!(h.conductor.armed_recordings.is_empty());
+        let (code, message) = h.last_error(4).expect("the second answer");
+        assert_eq!(code, 20, "{message}");
+        assert!(message.contains("dropped"), "{message}");
+        assert_eq!(h.counter(RECORDING_ARMED_DROPPED), 1);
+        assert_eq!(
+            h.conductor.receive_endpoints.len(),
+            1,
+            "the other stream keeps the endpoint"
+        );
     }
 
     /// Frames land in the image at their term offsets; one lost on the wire leaves a
