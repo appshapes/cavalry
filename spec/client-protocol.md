@@ -278,8 +278,9 @@ What the driver does with each, after the checks of "What the driver rejects":
 - **client close.** The driver removes the client's publications and subscriptions as if
   each had been removed, and forgets the client. No answer.
 - **start recording.** A channel that names a position key is error code 1 with the
-  reason `position`, since the command matches a stream by its resolved channel and
-  creates nothing (ADR 0059). The driver finds the live publications whose stream id and channel
+  reason `position`, before its host is resolved, so that one with a key and a host
+  that does not resolve is code 1 and not 9, since the command matches a stream by its
+  resolved channel and creates nothing (ADR 0059). The driver finds the live publications whose stream id and channel
   match, those whose end of stream position is not stored, and takes the one with the
   lowest registration id that is not yet being recorded, so that a second command records
   the next one. None live: error code 20. Every one being recorded, or its recording
@@ -347,8 +348,10 @@ What the driver does with each, after the checks of "What the driver rejects":
   holds is already stopped, and the answer is `operation success` with nothing written,
   since a recording id is never reused.
 - **start replay.** A replay channel that names a position key is error code 1 with
-  the reason `position`, since the replay's publication is created at the replay's
-  position under its recording's initial term id (ADR 0059). A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
+  the reason `position`, before its host is resolved and the replay is registered, so
+  that one with a key and a host that does not resolve is code 1 and not 9, since the
+  replay's publication is created at the replay's position under its recording's
+  initial term id (ADR 0059). A replay channel that is neither `cavalry:ipc` nor a `cavalry:udp`
   channel this version accepts is error code 1; a `cavalry:udp` replay channel's host is
   resolved once as the command is handled, as every command's is (`spec/udp.md`, "The
   channel URI"; ADR 0043), code 9 when it does not resolve; a length below
