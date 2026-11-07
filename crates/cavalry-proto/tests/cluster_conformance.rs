@@ -6,12 +6,13 @@
 //! alone; `just test` runs it with the rest.
 
 use cavalry_proto::cluster::{
-    Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
-    EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
-    NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, SnapshotMark,
-    Stream, TermFields, TermSpan, TimeUnit, VERSION, VoteAnswer, VoteRequest, ballot, candidate,
-    commit_position, entry_position, log_at_least, new_leadership_term_action, next_fields,
-    parse_members, quorum, replay_end, replication_record, replication_stop, request_vote,
+    Ballot, Candidate, CanvassAction, CanvassTerms, ChangeType, CloseReason, ClusterAction,
+    ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member,
+    MemberPosition, Message, NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd,
+    ReplicationStop, SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, VERSION, VoteAnswer,
+    VoteRequest, ballot, candidate, canvass_position_action, commit_position, entry_position,
+    log_at_least, new_leadership_term_action, next_fields, parse_members, quorum, replay_end,
+    replication_record, replication_stop, request_vote,
 };
 use serde_json::{Map, Value, json};
 
@@ -484,6 +485,18 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 },
             );
             json!({"vote": vote, "candidate_term": candidate_term})
+        }
+        "canvass-position" => {
+            let m = &inputs["message"];
+            let action: CanvassAction = canvass_position_action(
+                int(inputs, "leader_term"),
+                u8::try_from(int(inputs, "state")).expect("state"),
+                CanvassTerms {
+                    leadership_term_id: int(m, "leadership_term_id"),
+                    log_leadership_term_id: int(m, "log_leadership_term_id"),
+                },
+            );
+            json!({"action": action.name()})
         }
         "next-fields" => {
             let terms: Vec<TermSpan> = inputs["terms"]

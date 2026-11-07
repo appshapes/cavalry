@@ -2346,6 +2346,65 @@ pub const fn request_vote(
     }
 }
 
+/// The election state "closed", numbered as `spec/cluster.md`'s table: no election runs.
+pub const CLOSED_STATE: u8 = 17;
+
+/// The two terms of a canvass position a leader reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CanvassTerms {
+    /// The sender's candidate term.
+    pub leadership_term_id: i64,
+    /// The highest term in the sender's record.
+    pub log_leadership_term_id: i64,
+}
+
+/// What a leader does with a canvass position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CanvassAction {
+    /// Answer with new leadership term for the reported log leadership term id.
+    Answer,
+    /// Hold an election from init: Raft's step-down once closed, a failed election in
+    /// leader log replication or leader ready.
+    Election,
+    /// Update the sender's position in the table alone.
+    Table,
+}
+
+impl CanvassAction {
+    /// The action's name as the vectors spell it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            CanvassAction::Answer => "answer",
+            CanvassAction::Election => "election",
+            CanvassAction::Table => "table",
+        }
+    }
+}
+
+/// What a leader of `leader_term` in election state `state`, 5 to 8 or
+/// [`CLOSED_STATE`], does with a canvass position whose terms are `message`
+/// (`spec/cluster.md`, "Messages during an election" and "Messages outside an
+/// election"): an election when either term is above its own, in leader log
+/// replication, leader ready or closed, Raft's step-down; an answer when the log
+/// leadership term id is below its term, or at it once closed; else the table alone.
+pub const fn canvass_position_action(
+    leader_term: i64,
+    state: u8,
+    message: CanvassTerms,
+) -> CanvassAction {
+    if message.leadership_term_id > leader_term || message.log_leadership_term_id > leader_term {
+        return if matches!(state, 5 | 8 | CLOSED_STATE) {
+            CanvassAction::Election
+        } else {
+            CanvassAction::Table
+        };
+    }
+    if message.log_leadership_term_id < leader_term || state == CLOSED_STATE {
+        return CanvassAction::Answer;
+    }
+    CanvassAction::Table
+}
+
 /// Where a follower's log replication stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ReplicationStop {
