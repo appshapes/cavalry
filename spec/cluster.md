@@ -144,10 +144,12 @@ member has recorded, each with its term base log position, is kept in its durabl
 log directory and written before the member reports an append position for the
 term, so that it survives a restart; its format is the replicated log's (card 227),
 the fourth dependency this page names ("Members and streams"; ADR 0058). A member's
-candidate term, the highest term it has voted in or proposed, is kept beside that
-record and written before the vote or the request vote that raises it is sent, Aeron's
-node state file, so that a member votes once in a term across a restart ("Messages
-during an election"). A member's
+candidate term, the highest term it has voted in, proposed or followed, is kept beside
+that record and written before the vote or the request vote that raises it is sent,
+Aeron's node state file, so that a member votes once in a term across a restart; a
+raise on following a leader is kept in memory alone, since a member counts toward a
+term only once it has recorded that term, after which init takes the term from its
+record ("Messages during an election"). A member's
 append position is the end
 of the contiguous span its recordings hold, as "The log" defines it, never a
 recording's position beyond a hole; the commit position is the position the leader has
@@ -270,7 +272,7 @@ it has no leader.
 | --- | --- | --- | --- | --- |
 | 8 | 8 | log leadership term id | i64 | the highest term in the sender's record of recorded terms ("The log"), −1 for none |
 | 16 | 8 | log position | i64 | the sender's append position |
-| 24 | 8 | leadership term id | i64 | the sender's candidate term, the highest term it has voted in, proposed or followed ("Messages during an election"), at least its log leadership term id; −1 for none |
+| 24 | 8 | leadership term id | i64 | the sender's candidate term, the highest term it has voted in, proposed or followed ("The log"), at least its log leadership term id; −1 for none |
 | 32 | 4 | follower member id | i32 | the sender's |
 | 36 | 4 | protocol version | i32 | 0 |
 
@@ -552,7 +554,8 @@ them, a departure from Aeron, which reads any term in canvass (ADR 0058), so tha
 a lower one and never counts toward that leader's commits, Raft's rule: when the two
 differ the reader goes back to canvass and takes neither the sender
 as its leader nor the term; when they are the same the sender becomes the reader's
-leader and the term its term, its candidate term too when the term is higher, and a
+leader and the term its term, its candidate term too when the term is higher, in
+memory alone ("The log"), and a
 reader whose append position is above a next
 term base log position the message carries, one not −1, truncates its log to that
 position first, the uncommitted tail of an older term, `truncate recording` on the
@@ -604,22 +607,23 @@ segments), is answered by nothing, and the follower's timeout counts it. Each re
 publication has a session id of its own in this version, so the follower's image of
 it is on its `catchup` endpoint alone; and sends stop catch-up, stopping the replay with `stop replay`, when a
 follower whose position was appended from the replay reports an append position at or
-past the leader's log position. A leader that reads canvass position whose leadership term
-id, the sender's candidate term, is at or below its own term first stops any replay it
-has running to that follower with `stop
-replay` and drops any next replay it was waiting to start for it, as a new catch-up
-position from the follower does too, so that a follower that failed and canvasses
-again never joins a stale replay or finds two started for one request, then answers
-with new leadership term for the reported log leadership term id, its next fields
-as the table gives them, the three −1 when that term is its own, so that a
-restarted member finds the leader and truncates no more than it must; one whose
-leadership term id is above the leader's term has the leader hold an election,
-beginning at init, Raft's step-down, counted in `cluster.leader_step_downs`, a
-departure from Aeron, whose leader reads a canvass position's log leadership term id
-alone (ADR 0058), so that a member whose candidate term passed the leader's term, one
-that voted in a ballot the leader never saw, rejoins through the election it brings
-instead of canvassing for as long as the leader leads; the `canvass-position` vectors
-pin both. A follower that reads stop catch-up for its term
+past the leader's log position. A leader, its election closed or in states 5 to 8, that
+reads canvass position first stops any replay it has running to that follower with
+`stop replay` and drops any next replay it was waiting to start for it, as a new
+catch-up position from the follower does too, so that a follower that failed and
+canvasses again never joins a stale replay or finds two started for one request;
+during its election it then does with the message as "Messages during an election"
+says; its election closed, it answers one whose leadership term id, the sender's
+candidate term, and log leadership term id are both at or below its own term with new
+leadership term for the reported log leadership term id, its next fields as the table
+gives them, the three −1 when that term is its own, so that a restarted member finds
+the leader and truncates no more than it must, and holds an election, beginning at
+init, on one with either term above its own, Raft's step-down, counted in
+`cluster.leader_step_downs`, a departure from Aeron, whose leader reads a canvass
+position's log leadership term id alone (ADR 0058), so that a member whose candidate
+term passed the leader's term, one that voted in a ballot the leader never saw,
+rejoins through the election it brings instead of canvassing for as long as the
+leader leads; the `canvass-position` vectors pin both. A follower that reads stop catch-up for its term
 removes its catch-up subscription. Any member whose election has closed that reads
 request vote whose candidate term id, or commit position whose leadership term id, is
 above its own leadership term id holds an election, beginning at init, counted in
