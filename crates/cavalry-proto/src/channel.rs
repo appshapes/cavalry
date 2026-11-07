@@ -8,8 +8,8 @@
 //!
 //! [`Channel::parse`] reads a channel string, borrowing from it, and runs the spec's
 //! checks in the spec's order: `grammar`, `key`, `control`, `endpoint`, `fc`,
-//! `multicast`. Resolving a host name is the driver's, on its control plane, and its
-//! failure is error code 9; every refusal here is error code 1.
+//! `position`, `multicast`. Resolving a host name is the driver's, on its control
+//! plane, and its failure is error code 9; every refusal here is error code 1.
 
 use core::fmt;
 use core::net::{Ipv4Addr, Ipv6Addr};
