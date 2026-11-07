@@ -531,6 +531,10 @@ struct RecordingEntry {
     bytes: Option<Counter>,
     /// A stop is with the recorder; a second `stop recording` is answered at once.
     stop_requested: bool,
+    /// Started by an armed recording when its image arrived: its `recording ready` is
+    /// counted in `recording.armed_started`, and a failure the recorder or the counters
+    /// file reports in `recording.armed_failed` (ADR 0059).
+    armed: bool,
 }
 
 /// One retention command in progress: truncate recording, purge segments or purge
@@ -3255,22 +3259,23 @@ impl Conductor {
             readers,
         }));
         // An armed recording starts at the image's join position before the image is
-        // announced, its start answered under the arming command's correlation id and
-        // counted as started or failed (ADR 0059).
+        // announced, its start answered under the arming command's correlation id. A
+        // refusal here is counted as failed at once; a start handed to the recorder is
+        // counted where the recorder's answer is taken, as started with `recording
+        // ready` (`on_ready`) or as failed (`fail_start`, `on_start_failed`) (ADR 0059).
         if let Some(index) = self.armed_recordings.iter().position(|armed| {
             armed.endpoint_id == endpoint_id && armed.stream_id == setup.stream_id
         }) {
             let armed = self.armed_recordings.swap_remove(index);
             let channel = self.receive_endpoints[endpoint_index].channel.clone();
-            if self.start_image_recording(
+            if !self.start_image_recording(
                 armed.correlation_id,
                 registration_id,
                 start.position,
                 channel,
+                true,
                 now,
             ) {
-                self.statics.recording_armed_started.increment();
-            } else {
                 self.statics.recording_armed_failed.increment();
             }
         }
@@ -4080,6 +4085,7 @@ impl Conductor {
             synced: None,
             bytes: None,
             stop_requested: false,
+            armed: false,
         });
     }
 
@@ -4252,6 +4258,7 @@ impl Conductor {
                 registration_id,
                 start_position,
                 resolved,
+                false,
                 now,
             );
             return;
@@ -4316,21 +4323,25 @@ impl Conductor {
             synced: None,
             bytes: None,
             stop_requested: false,
+            armed: false,
         });
     }
 
     /// Starts recording the image `registration_id` from `start_position`: for a
     /// `start recording` on a live image, from its rebuild position, and for an armed
-    /// recording when the stream's next image arrives, from the image's join position
-    /// (ADR 0059). The recorder's start, the entry and the receiver's reader, every
-    /// refusal answered under `correlation_id` with the code a live start gets; whether
-    /// the start was handed to the recorder.
+    /// recording when the stream's next image arrives, from the image's join position,
+    /// `armed` then marking the entry so that the recorder's answer counts as the armed
+    /// recording's (ADR 0059). The recorder's start, the entry and the receiver's
+    /// reader, every refusal answered under `correlation_id` with the code a live start
+    /// gets; whether the start was handed to the recorder, which is not yet whether it
+    /// started: `on_ready`, `fail_start` and `on_start_failed` say that.
     fn start_image_recording(
         &mut self,
         correlation_id: i64,
         registration_id: i64,
         start_position: i64,
         channel: String,
+        armed: bool,
         now: i64,
     ) -> bool {
         if self.recordings.len() >= spec::MAX_RECORDINGS {
@@ -4399,6 +4410,7 @@ impl Conductor {
             synced: None,
             bytes: None,
             stop_requested: false,
+            armed,
         });
         self.receiver_request(receiver::Request::AddReader {
             registration_id,
@@ -4559,9 +4571,10 @@ impl Conductor {
 
     /// The recorder took the slot and created the files: the two counters are
     /// allocated, keyed by the recording id and set to the start position, the recorder
-    /// gets their handles, and the client gets `recording ready`. A counters file with
-    /// no free record fails the start with code 10 and asks the recorder to stop the
-    /// recording (`fail_start`).
+    /// gets their handles, and the client gets `recording ready`, an armed recording's
+    /// counted in `recording.armed_started`. A counters file with no free record fails
+    /// the start with code 10 and asks the recorder to stop the recording
+    /// (`fail_start`).
     fn on_ready(&mut self, publication_id: i64, correlation_id: i64, recording_id: i64, now: i64) {
         let Some(index) = self.recordings.iter().position(|recording| {
             recording.publication_id == publication_id
@@ -4569,9 +4582,14 @@ impl Conductor {
         }) else {
             return;
         };
-        let (session_id, stream_id, start_position) = {
+        let (session_id, stream_id, start_position, armed) = {
             let entry = &self.recordings[index];
-            (entry.session_id, entry.stream_id, entry.start_position)
+            (
+                entry.session_id,
+                entry.stream_id,
+                entry.start_position,
+                entry.armed,
+            )
         };
         let key = recording_id.to_le_bytes();
         let label = |name: &str| format!("{name} {recording_id} {session_id} {stream_id}");
@@ -4653,10 +4671,14 @@ impl Conductor {
             recording_position_counter_id: position_id,
             recording_synced_position_counter_id: synced_id,
         });
+        if armed {
+            self.statics.recording_armed_started.increment();
+        }
     }
 
     /// A start the counters file refused after the slot was taken: the client gets
-    /// code 10 and the entry fails, but the recorder is already reading the log and
+    /// code 10 and the entry fails, an armed recording's counted in
+    /// `recording.armed_failed`, but the recorder is already reading the log and
     /// writing the slot, and goes on until it handles the stop asked for here. So the
     /// entry stays registered, a floor at its start position for the limit, the
     /// cleaning and the closing, and leaves only with the recorder's `Stopped` reply
@@ -4670,6 +4692,9 @@ impl Conductor {
         error: &CountersError,
     ) {
         self.counters_full(correlation_id, error);
+        if self.recordings[index].armed {
+            self.statics.recording_armed_failed.increment();
+        }
         let entry = &mut self.recordings[index];
         entry.state = RecordingState::Failed;
         entry.recording_id = Some(recording_id);
@@ -4681,14 +4706,17 @@ impl Conductor {
     }
 
     /// The recorder could not take a slot or create the files: the entry fails and the
-    /// client gets code 10 (catalog full) or 12 (files), each with its counter.
+    /// client gets code 10 (catalog full) or 12 (files), each with its counter, and an
+    /// armed recording's failure in `recording.armed_failed` as well.
     fn on_start_failed(&mut self, publication_id: i64, correlation_id: i64, failure: StartFailure) {
         if let Some(index) = self.recordings.iter().position(|recording| {
             recording.publication_id == publication_id
                 && recording.state == RecordingState::Starting
         }) {
             self.recordings[index].state = RecordingState::Failed;
-            self.recordings.swap_remove(index);
+            if self.recordings.swap_remove(index).armed {
+                self.statics.recording_armed_failed.increment();
+            }
         }
         // As on a stop: not connected from here if the recording connected the
         // publication alone (ADR 0048).
@@ -9037,6 +9065,7 @@ mod recording {
                 synced: None,
                 bytes: None,
                 stop_requested: false,
+                armed: false,
             });
         }
         h.conductor.recorder.next_recording_id = n;
@@ -12599,11 +12628,15 @@ mod receiving {
         assert!(h.conductor.armed_recordings.is_empty());
         assert_eq!(h.conductor.recordings.len(), 1);
         assert_eq!(h.conductor.recordings[0].start_position, 4096);
-        assert_eq!(h.counter(RECORDING_ARMED_STARTED), 1);
+        // Handed to the recorder is not started: the count waits for recording ready.
+        assert_eq!(h.conductor.recordings[0].state, RecordingState::Starting);
+        assert_eq!(h.counter(RECORDING_ARMED_STARTED), 0);
         assert!(
             h.cycle_until(|h| h.conductor.recordings[0].state == RecordingState::Live),
             "the recorder took the start"
         );
+        assert_eq!(h.counter(RECORDING_ARMED_STARTED), 1);
+        assert_eq!(h.counter(RECORDING_ARMED_FAILED), 0);
         let all = drained_events(&mut h);
         let ready =
             all.iter()
