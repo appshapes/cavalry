@@ -454,15 +454,14 @@ def new_leadership_term_action(log_term, append, msg):
 
 def next_fields(terms, reported_term, leader_term, leader_base):
     """spec/cluster.md, new leadership term's next fields: for a reported term that is the leader's
-    own, −1 for all three; else the term one above the reported one when the leader's record holds
-    it, with its base and its end position, the base of the term after it or −1 for an open term;
-    else the leader's own term at its base with −1 (Aeron's rule). `terms` is [term, base, end]."""
+    own, −1 for all three; else the lowest term in the leader's record above the reported one, the
+    leader's own when none lies between, with its base and its end position, the base of the term
+    after it or −1 for an open term; a departure from Aeron's lookup of the term one above, whose
+    record has no gaps. `terms` is [term, base, end], the leader's own term among them."""
     if reported_term == leader_term:
         return {"next_leadership_term_id": NULL, "next_term_base_log_position": NULL, "next_log_position": NULL}
-    entry = next((t for t in terms if t[0] == reported_term + 1), None)
-    if entry is None:
-        return {"next_leadership_term_id": leader_term, "next_term_base_log_position": leader_base,
-                "next_log_position": NULL}
+    above = [t for t in terms if t[0] > reported_term]
+    entry = min(above, key=lambda t: t[0]) if above else [leader_term, leader_base, NULL]
     return {"next_leadership_term_id": entry[0], "next_term_base_log_position": entry[1],
             "next_log_position": entry[2]}
 
@@ -639,6 +638,9 @@ VECTORS += [
     arithmetic("new-leadership-term-at-leaders-base-records", "new-leadership-term",
                {"log_leadership_term_id": 1, "append_position": 1100, "message": nlt(1, 2, 1100, NULL, 2, 1100, 1100)},
                new_leadership_term_action(1, 1100, nlt(1, 2, 1100, NULL, 2, 1100, 1100))),
+    arithmetic("new-leadership-term-stale-tail-truncates", "new-leadership-term",
+               {"log_leadership_term_id": 2, "append_position": 300, "message": nlt(2, 4, 200, 1000, 5, 1000, 1000)},
+               new_leadership_term_action(2, 300, nlt(2, 4, 200, 1000, 5, 1000, 1000))),
     arithmetic("new-leadership-term-at-next-base-no-end-waits", "new-leadership-term",
                {"log_leadership_term_id": 3, "append_position": 500, "message": nlt(3, 4, 500, NULL, 5, 1000, 5000)},
                new_leadership_term_action(3, 500, nlt(3, 4, 500, NULL, 5, 1000, 5000))),
