@@ -80,7 +80,12 @@ quorum is half the members plus one; a member is active while its last append
 position is younger than the leader heartbeat timeout. The
 election is Aeron's state machine, its eighteen states and the transitions the page
 lists, with a member voting for a candidate whose log is at least its own by term then
-position. The cluster's timestamp is the leader's wall clock in milliseconds since the
+position, its candidate term, the highest term it has voted in or proposed, stored in
+its log directory before the vote or request vote that raises it is sent, Aeron's node
+state file, so that it votes once in a term across a restart, and a member in canvass
+following a leader of a term at least its candidate term alone, Raft's rule that a
+member that has voted in a term follows no leader of a lower one, which departs from
+Aeron's canvass (Alternatives). The cluster's timestamp is the leader's wall clock in milliseconds since the
 Unix epoch, written by the leader into each entry and read from the log by every
 member and service, never from a clock of their own. The timeouts are Aeron's defaults
 as constants with no configuration key: leader heartbeat interval 200 ms and timeout
@@ -251,7 +256,8 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   timestamp as an entry's field.
 - **Aeron's next fields, the term one above the reported one when the leader's record
   holds it, else the leader's own term at its base.** Lost: invariant 1. Aeron's
-  `Election.onCanvassPosition` looks up `logLeadershipTermId + 1` in a record that
+  `Election.publishNewLeadershipTerm`, which `onCanvassPosition` calls, looks up
+  `logLeadershipTermId + 1` in a record that
   `RecordingLog.ensureCoherent` has filled in, one entry per term from the first to the
   leader's own, so the lookup never skips a term; a member of Cavalry records only the
   terms it received, live or by replication, so a leader's record has gaps. With
@@ -263,6 +269,32 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   that example, has the follower truncate to 200 and replicate term 4, and a leader's
   own record always holds its own term, so the field is never without a term; the
   `next-fields` and `new-leadership-term` vectors pin both.
+- **A candidate term kept in memory alone, raised by a vote against and set by a vote
+  for.** Lost: invariant 1. The page's first text raised the candidate term on a vote
+  against alone and stored nothing, so a member that voted for one candidate of a term
+  could vote for a second, or vote, restart and vote again, and two leaders of one term
+  could each record it at a base of their own with different entries; Aeron's
+  `Election.onRequestVote` has `NodeStateFile.proposeMaxCandidateTermId` store the term
+  before `placeVote`, for a vote for and a vote against alike, the thirteenth review's
+  finding. The `request-vote` vectors pin the vote and the term after it.
+- **Aeron's canvass, which takes a new leadership term for any term.** Lost: invariant
+  1. `Election.onNewLeadershipTerm` reads the message in canvass whatever its term, so
+  a member that voted in a term follows a leader of a lower one and counts toward its
+  commits, the thirteenth review's example: five members, B leads term 2 to 200 with C
+  holding it, A, D and E at 100, the commit position 100; B is lost and C and D cannot
+  reach each other; C nominates term 3 and D, whose candidate term was 3 from an
+  earlier ballot, term 4; A and E vote for C in term 3 and then for D in term 4; each
+  wins at the election timeout, C recording 3 at 200 and D 4 at 100; D's new
+  leadership terms to A and E are lost, both time out of follower ballot into canvass
+  with candidate term 4; C's new leadership term for term 3 reaches them there, under
+  Aeron's rule they take C, replicate [100, 200) and record 3 at 200, C commits 200 and
+  applies term 2's entries; D's new leadership term then reaches them, they truncate to
+  100 and record 4 at 100, and D commits term 4 over the three: the committed entries
+  [100, 200) are gone from a quorum and C's service has applied them. In canvass a
+  member reads a new leadership term for a term at least its candidate term alone, so
+  A ignores C and C never reaches a quorum; the `new-leadership-term` vectors carry the
+  reader's candidate term and whether it is in canvass, an `ignore` action pinning
+  it.
 
 ## Evidence
 
@@ -278,8 +310,10 @@ informed it: Aeron's sources named in Context, read on 2026-11-06, with
 `ClusterMember.quorumThreshold`, `quorumPosition`, `compareLog`, `isActive`,
 `isUnanimousCandidate`, `isQuorumCandidate`, `isUnanimousLeader` and
 `isQuorumLeader`; `ConsensusModuleAgent.updateLeaderPosition` and
-`quorumPositionBoundedByLeaderLog`; `Election`'s per-state methods and `onCanvassPosition`;
-`RecordingLog.ensureCoherent` and `findTermEntry`; `SessionManager`'s
+`quorumPositionBoundedByLeaderLog`; `Election`'s per-state methods, `onRequestVote`,
+`onNewLeadershipTerm`, `onCanvassPosition` and `publishNewLeadershipTerm`;
+`NodeStateFile.proposeMaxCandidateTermId`; `RecordingLog.ensureCoherent` and
+`findTermEntry`; `SessionManager`'s
 connect, close and timeout checks; `ClusterMember.parse` and `ingressEndpoints`;
 `MillisecondClusterClock` as the default clock; ADR 0052's Decision and card 226's
 brief; issue 16. The change that accepts this ADR carries the page, its vectors from

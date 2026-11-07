@@ -144,6 +144,10 @@ member has recorded, each with its term base log position, is kept in its durabl
 log directory and written before the member reports an append position for the
 term, so that it survives a restart; its format is the replicated log's (card 227),
 the fourth dependency this page names ("Members and streams"; ADR 0058). A member's
+candidate term, the highest term it has voted in or proposed, is kept beside that
+record and written before the vote or the request vote that raises it is sent, Aeron's
+node state file, so that a member votes once in a term across a restart ("Messages
+during an election"). A member's
 append position is the end
 of the contiguous span its recordings hold, as "The log" defines it, never a
 recording's position beyond a hole; the commit position is the position the leader has
@@ -304,7 +308,7 @@ that reports a term behind the leader's.
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
 | 8 | 8 | log leadership term id | i64 | the term the receiver reported, which this message describes |
-| 16 | 8 | next leadership term id | i64 | the lowest term in the leader's record above the log leadership term id, the leader's own term when none lies between, so that a reader whose log holds an uncommitted tail of the reported term truncates it to that term's base, a departure from Aeron's lookup of the term one above, whose record has no gaps (ADR 0058), the `next-fields` vectors pinning it; −1 when the log leadership term id is the leader's own term |
+| 16 | 8 | next leadership term id | i64 | the lowest term in the leader's record above the log leadership term id, the leader's own term when none lies between, so that a reader whose log holds an uncommitted tail of the reported term truncates it to the next term's base, a departure from Aeron's lookup of the term one above, whose record has no gaps (ADR 0058), the `next-fields` vectors pinning it; −1 when the log leadership term id is the leader's own term |
 | 24 | 8 | next term base log position | i64 | that term's base position, which is the leader's term base log position when the next term is the leader's own; −1 when the next leadership term id is −1 |
 | 32 | 8 | next log position | i64 | that term's end position, the base position of the term after it in the leader's record; −1 when the next term is the leader's own, whose end is not known, or the next leadership term id is −1 |
 | 40 | 8 | leadership term id | i64 | the leader's term |
@@ -495,7 +499,7 @@ counter ("Counters").
 | --- | --- | --- |
 | 0 | init | consolidates its log: stops any replay or catch-up, takes the higher of its stored candidate term and its leadership term as its candidate term. A cluster of one member goes to leader log replication as leader of candidate term + 1; every other member goes to canvass |
 | 1 | canvass | as a follower, sends canvass position to every other member every election status interval; moves to nominate at once when every member has reported and no member's log is ahead of its own, a unanimous candidate, or when the canvass deadline has passed and the members that have reported with a log not ahead of its own, itself among them, make a quorum, a quorum candidate ("Logs compared"; the arithmetic vectors pin both). The deadline is the leader heartbeat timeout after the last word from a leader, or the startup canvass timeout after the state began when the member started with no term. A member that receives a request vote for a term above its own while canvassing votes and goes to follower ballot; one that receives new leadership term for a term at least its candidate term goes to follower replay or follower log replication as that message's rules say |
-| 2 | nominate | waits a random delay up to half the election timeout, sending canvass position every election status interval, then takes candidate term + 1 as its candidate term, records its vote for itself and goes to candidate ballot |
+| 2 | nominate | waits a random delay up to half the election timeout, sending canvass position every election status interval, then takes candidate term + 1 as its candidate term, stores it before it sends anything, records its vote for itself and goes to candidate ballot |
 | 3 | candidate ballot | as a candidate, sends request vote to every member it has not sent one to; becomes leader of the candidate term, going to leader log replication, when every member has voted for it, or when the election timeout has passed and a quorum has, no member having voted against; goes back to canvass when the election timeout has passed without a quorum. A request vote from another candidate for a higher term moves it to follower ballot with its vote |
 | 4 | follower ballot | waits for the candidate it voted for; goes to follower replay or follower log replication on its new leadership term, or back to canvass when the election timeout passes |
 | 5 | leader log replication | as the leader, records its term with its append position as its base, before its own position counts, then adds its log publication at that position, the term base log position, which needs a publication created at a position ("Members and streams"); sends new leadership term and commit position every leader heartbeat interval; serves the catch-up positions of followers replicating what they lack (state 9, "Messages outside an election"); and waits until the quorum position reaches its append position, then goes to leader replay. It fails the election when its active members, those whose last append position is younger than the leader heartbeat timeout, fall below a quorum, and begins again at init |
@@ -520,16 +524,29 @@ a term below its own and answers with new leadership term for that term, its nex
 fields as the table gives them, the leader's term base log position standing for the
 next term's base when that term is the leader's own. Request vote
 for a candidate term at or below the reader's candidate term is answered with a vote
-against; one from a candidate whose log is behind the reader's is answered against and
-raises the reader's candidate term; one for a higher term from a candidate whose log is
-at least the reader's is answered for, in canvass, nominate, candidate ballot or
-follower ballot, and the reader goes to follower ballot. Vote is read by a candidate in
+against, the candidate term unchanged, so that a member votes once in a term, a second
+request for a term it has voted in answered against whatever the candidate's log; one
+for a higher term from a candidate whose log is behind the reader's is answered
+against; one for a higher term from a candidate whose log is at least the reader's is
+answered for, in canvass, nominate, candidate ballot or follower ballot, and the reader
+goes to follower ballot; in each of the last two cases the reader takes the request's
+candidate term as its own and stores it before it sends the vote, so that a restart
+between the two loses the vote and never the term; in init, or in a state other than
+those four with a higher term and a log at least the reader's, the request is answered
+with nothing and the candidate term is unchanged. The `request-vote` vectors pin each
+case: the reader's candidate term, log and state and the request's fields give the
+vote, for, against or none, and the candidate term after it. Vote is read by a candidate in
 candidate ballot for its own candidate term and recorded against the voter. New
 leadership term for the reader's candidate term, in follower ballot or candidate
-ballot, or in canvass for any term, is read against the reader's log leadership term
-id: when the two differ the reader goes back to canvass and takes neither the sender
+ballot, or in canvass for a term at least its candidate term, is read against the
+reader's log leadership term id, and one for any other term is ignored, a term below
+the candidate term in canvass among them, a departure from Aeron, which reads any term
+in canvass (ADR 0058), so that a member that has voted in a term follows no leader of
+a lower one and never counts toward that leader's commits, Raft's rule: when the two
+differ the reader goes back to canvass and takes neither the sender
 as its leader nor the term; when they are the same the sender becomes the reader's
-leader and the term its term, and a reader whose append position is above a next
+leader and the term its term, its candidate term too when the term is higher, and a
+reader whose append position is above a next
 term base log position the message carries, one not −1, truncates its log to that
 position first, the uncommitted tail of an older term, `truncate recording` on the
 recording that begins at or below the position and ends above it and `purge
@@ -549,7 +566,8 @@ at or above the term base log position goes to follower replay, recording the
 leader's term at the term base log position first when its append position, after any
 truncation, is at that base, before it reports, so that it counts toward the leader's
 commits with the log it holds to the base, as a member joining in state 15 does. The
-`new-leadership-term` vectors pin each case, the term recorded among their fields. Append position is recorded by a candidate or leader against the follower.
+`new-leadership-term` vectors pin each case, the reader's candidate term and whether it
+is in canvass among their inputs, the term recorded among their fields. Append position is recorded by a candidate or leader against the follower.
 Commit position from the reader's leader raises the commit position it was told.
 
 **Messages outside an election, and the leader's in states 5 to 8.** A leader reads
@@ -795,8 +813,11 @@ encoder. Each vector has a `kind`:
   wins a ballot, unanimous or by quorum; whether a canvassing member is a unanimous or a
   quorum candidate from the members' reports; the stop position of a follower's log
   replication from its append position and the next term's base and end positions;
-  what a reader of new leadership term does with its log, truncate, replicate, replay,
-  wait or fail, and the term it records, from the message's fields and its own; the
+  what a reader of new leadership term does with its log, ignore, truncate, replicate,
+  replay, wait or fail, and the term it records, from the message's fields, its own,
+  its candidate term and whether it is in canvass; what a reader answers a request
+  vote, for, against or nothing, and its candidate term after it, from its candidate
+  term, log and state and the request's fields; the
   next fields a leader writes into new leadership term for a reported term, from its
   record of terms; which of the leader's
   recordings a replay begins in and where it ends, from the leader's terms and the
