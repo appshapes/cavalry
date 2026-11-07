@@ -562,7 +562,8 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 int(inputs, "position"),
                 usize::try_from(int(inputs, "length")).expect("length"),
                 usize::try_from(int(inputs, "mtu")).expect("mtu"),
-            );
+            )
+            .unwrap_or_else(|| panic!("{name}: no position after the entry"));
             json!({"fragments": after.fragments, "position_after": after.position_after})
         }
         other => panic!("{name}: unknown rule {other}"),

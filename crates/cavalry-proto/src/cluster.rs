@@ -2764,21 +2764,54 @@ pub struct EntryPosition {
 
 /// The position after an entry of `length` bytes that begins at `position` on a stream
 /// with `mtu` (`spec/cluster.md`, "The log"): fragments of `mtu − 32` and a last of the
-/// remainder, each frame's length rounded up to a multiple of 32. An `mtu` below 64
-/// is read as 64.
-pub const fn entry_position(position: i64, length: usize, mtu: usize) -> EntryPosition {
-    let payload = if mtu < 64 { 32 } else { mtu - 32 };
+/// remainder, each frame's length rounded up to a multiple of 32. `None` when `mtu` is
+/// 32 or less, which leaves a fragment no payload, or when a frame's length or the
+/// position after the entry overflows; every step is checked, so no input panics.
+pub const fn entry_position(position: i64, length: usize, mtu: usize) -> Option<EntryPosition> {
+    if mtu <= 32 {
+        return None;
+    }
+    let payload = mtu - 32;
     let fragments = if length == 0 {
         1
     } else {
         length.div_ceil(payload)
     };
-    let full = (32 + payload).div_ceil(32) * 32;
-    let last_payload = length - payload * (fragments - 1);
-    let last = (32 + last_payload).div_ceil(32) * 32;
-    let bytes = full * (fragments - 1) + last;
-    EntryPosition {
+    // The last fragment carries what the others leave: 0 bytes for an empty entry, else
+    // the remainder, or a whole payload when the length is a multiple of it.
+    let last_payload = match length % payload {
+        0 if length > 0 => payload,
+        remainder => remainder,
+    };
+    let (Some(full), Some(last)) = (aligned_frame(payload), aligned_frame(last_payload)) else {
+        return None;
+    };
+    // `fragments` is at least 1, so `fragments - 1` cannot underflow.
+    let Some(bytes) = full.checked_mul(fragments - 1) else {
+        return None;
+    };
+    let Some(bytes) = bytes.checked_add(last) else {
+        return None;
+    };
+    // A `usize` widens to a `u64` without loss; one above `i64::MAX` is no position.
+    let bytes = bytes as u64;
+    if bytes > i64::MAX as u64 {
+        return None;
+    }
+    let Some(position_after) = position.checked_add(bytes as i64) else {
+        return None;
+    };
+    Some(EntryPosition {
         fragments,
-        position_after: position + bytes as i64,
+        position_after,
+    })
+}
+
+/// A frame's length on the stream: the 32-byte header and `payload`, rounded up to a
+/// multiple of 32; `None` when that does not fit a `usize`.
+const fn aligned_frame(payload: usize) -> Option<usize> {
+    match payload.checked_add(32 + 31) {
+        Some(length) => Some(length / 32 * 32),
+        None => None,
     }
 }

@@ -1,10 +1,17 @@
 //! Every byte string, on every stream, either decodes to a message that encodes to the
 //! same bytes and decodes again to the same message, or is rejected with one of the
-//! spec's twelve reasons; and every members string either parses or is refused with
-//! one of its four. Never a panic (invariant 2; CLAUDE.md gate 1, "frame parsers are
-//! fuzzed"; ADR 0058). This runs on every `just test`.
+//! spec's twelve reasons; every members string either parses or is refused with one of
+//! its four; and every arithmetic function computes from extreme inputs, the
+//! position after an entry `None` where it does not fit. Never a panic (invariant 2;
+//! CLAUDE.md gate 1, "frame parsers are fuzzed"; ADR 0058). This runs on every
+//! `just test`, in a debug build, where an overflow would panic.
 
-use cavalry_proto::cluster::{EMPTY_MEMBER, MAX_MEMBERS, Message, Stream, parse_members};
+use cavalry_proto::cluster::{
+    CLOSED_STATE, CanvassTerms, EMPTY_MEMBER, LogReport, MAX_MEMBERS, MemberPosition, Message,
+    Stream, TermFields, TermSpan, Vote, VoteRequest, ballot, candidate, canvass_position_action,
+    commit_position, entry_position, log_at_least, new_leadership_term_action, next_fields,
+    parse_members, quorum, replay_end, replication_record, replication_stop, request_vote,
+};
 
 /// Deterministic, so a failure reproduces: xorshift64.
 struct XorShift(u64);
@@ -143,5 +150,177 @@ fn no_byte_string_panics_the_members_parser() {
         let bytes: Vec<u8> = (0..64).map(|_| random.next() as u8).collect();
         let mut members = [EMPTY_MEMBER; MAX_MEMBERS];
         let _ = parse_members(&bytes, &mut members, None);
+    }
+}
+
+/// Positions, terms and lengths at the edges of their types, where an unchecked
+/// arithmetic step would overflow.
+const EXTREMES: [i64; 9] = [
+    i64::MIN,
+    i64::MIN + 1,
+    -2,
+    -1,
+    0,
+    1,
+    2,
+    i64::MAX - 1,
+    i64::MAX,
+];
+const LENGTHS: [usize; 7] = [0, 1, 31, 32, 1408, usize::MAX - 1, usize::MAX];
+const MTUS: [usize; 9] = [0, 1, 32, 33, 64, 1408, 65504, usize::MAX - 1, usize::MAX];
+
+#[test]
+fn no_extreme_input_panics_the_entry_position() {
+    for position in EXTREMES {
+        for length in LENGTHS {
+            for mtu in MTUS {
+                let after = entry_position(position, length, mtu);
+                if mtu <= 32 {
+                    assert_eq!(after, None, "an mtu of {mtu} leaves a fragment no payload");
+                }
+                if let Some(after) = after {
+                    // Every entry is at least one 32-byte frame.
+                    assert!(after.fragments >= 1);
+                    assert!(
+                        after.position_after >= position.saturating_add(32),
+                        "{position} {length} {mtu}: {after:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(entry_position(i64::MAX, 1, 1408), None, "past i64::MAX");
+    assert_eq!(
+        entry_position(i64::MAX - 64, 1, 1408).map(|after| after.position_after),
+        Some(i64::MAX),
+        "one 64-byte frame that ends at i64::MAX"
+    );
+    assert_eq!(
+        entry_position(0, usize::MAX, 1408),
+        None,
+        "more bytes than an i64"
+    );
+}
+
+impl XorShift {
+    /// One of [`EXTREMES`].
+    fn extreme(&mut self) -> i64 {
+        EXTREMES[(self.next() % EXTREMES.len() as u64) as usize]
+    }
+
+    /// A count below `bound`.
+    fn below(&mut self, bound: u64) -> usize {
+        (self.next() % bound) as usize
+    }
+}
+
+#[test]
+fn no_extreme_input_panics_the_election_arithmetic() {
+    let mut random = XorShift(0xD1B5_4A32_D192_ED03);
+    for members in [0, 1, 2, 3, MAX_MEMBERS, MAX_MEMBERS + 1, usize::MAX] {
+        assert!(quorum(members) >= 1);
+    }
+    for _ in 0..20_000 {
+        let r = &mut random;
+        // Up to 10 reports, more than the 8 the ranking holds.
+        let positions: Vec<MemberPosition> = (0..r.below(11))
+            .map(|_| MemberPosition {
+                position: r.extreme(),
+                age_ns: r.extreme().unsigned_abs(),
+                term: r.extreme(),
+            })
+            .collect();
+        let leader_position = r.extreme();
+        let commit = commit_position(
+            &positions,
+            leader_position,
+            r.extreme(),
+            r.extreme(),
+            r.extreme().unsigned_abs(),
+        );
+        assert!(commit.commit_position <= leader_position);
+        assert!(
+            commit.quorum_position == 0
+                || positions
+                    .iter()
+                    .any(|p| p.position == commit.quorum_position)
+        );
+
+        let own = LogReport {
+            term: r.extreme(),
+            position: r.extreme(),
+        };
+        assert!(log_at_least(own.term, own.position, own.term, own.position));
+        let _ = log_at_least(own.term, own.position, r.extreme(), r.extreme());
+
+        let members = [0, 1, 3, MAX_MEMBERS, usize::MAX][r.below(5)];
+        let votes: Vec<Option<Vote>> = (0..members.min(MAX_MEMBERS + 1))
+            .map(|_| {
+                (r.below(3) != 0).then(|| Vote {
+                    vote: r.next().is_multiple_of(2),
+                    term: r.extreme(),
+                })
+            })
+            .collect();
+        let outcome = ballot(members, r.extreme(), &votes, r.next().is_multiple_of(2));
+        assert!(!outcome.unanimous || outcome.leader);
+
+        let reports: Vec<Option<LogReport>> = (0..members.min(MAX_MEMBERS + 1))
+            .map(|_| {
+                (r.below(3) != 0).then(|| LogReport {
+                    term: r.extreme(),
+                    position: r.extreme(),
+                })
+            })
+            .collect();
+        let nomination = candidate(members, &reports, own, r.next().is_multiple_of(2));
+        assert!(!nomination.unanimous || nomination.nominate);
+
+        let candidate_term = r.extreme();
+        let state = r.next() as u8;
+        let request = VoteRequest {
+            candidate_term_id: r.extreme(),
+            log_leadership_term_id: r.extreme(),
+            log_position: r.extreme(),
+        };
+        let answer = request_vote(candidate_term, own, state, request);
+        assert!(answer.candidate_term >= candidate_term);
+        if state == 0 || state == CLOSED_STATE {
+            assert_eq!(answer.vote, None);
+        }
+
+        let terms = CanvassTerms {
+            leadership_term_id: r.extreme(),
+            log_leadership_term_id: r.extreme(),
+        };
+        let _ = canvass_position_action(r.extreme(), state, terms);
+        let _ = replication_stop(r.extreme(), r.extreme(), r.extreme());
+        let fields = TermFields {
+            leadership_term_id: r.extreme(),
+            log_leadership_term_id: r.extreme(),
+            next_leadership_term_id: r.extreme(),
+            next_term_base_log_position: r.extreme(),
+            next_log_position: r.extreme(),
+            term_base_log_position: r.extreme(),
+        };
+        let in_canvass = r.next().is_multiple_of(2);
+        let _ =
+            new_leadership_term_action(r.extreme(), r.extreme(), r.extreme(), in_canvass, fields);
+        let spans: Vec<TermSpan> = (0..r.below(5))
+            .map(|_| TermSpan {
+                term: r.extreme(),
+                base: r.extreme(),
+                end: r.extreme(),
+            })
+            .collect();
+        let _ = next_fields(&spans, r.extreme(), r.extreme(), r.extreme());
+        let _ = replay_end(&spans, r.extreme());
+        let _ = replication_record(
+            r.extreme(),
+            r.extreme(),
+            r.extreme(),
+            r.extreme(),
+            r.extreme(),
+        );
     }
 }
