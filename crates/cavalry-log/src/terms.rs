@@ -743,6 +743,48 @@ mod tests {
     }
 
     #[test]
+    fn a_tail_torn_by_its_checksum_alone_ends_the_file_and_the_next_append_overwrites_it() {
+        let dir = dir("torn-checksum");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.append(2, 0, 0).expect("appended");
+        file.append(3, 4096, 1).expect("appended");
+        drop(file);
+        let path = TermsFile::path_in(&dir);
+        let mut bytes = std::fs::read(&path).expect("read");
+        // Entry 1's state is 1 and its fields whole: only its checksum fails.
+        bytes[HEADER_LENGTH + ENTRY_LENGTH + 4] ^= 0xFF;
+        std::fs::write(&path, &bytes).expect("written");
+        let mut file = TermsFile::open(&dir).expect("opened");
+        assert_eq!(
+            file.log_leadership_term_id(),
+            2,
+            "the torn entry is not read"
+        );
+        assert_eq!(file.entries.len(), 1);
+        // The next append takes the torn entry's place; reopened, the file holds the
+        // new term in it and nothing behind it.
+        file.append(4, 8192, 2)
+            .expect("appended over the torn tail");
+        drop(file);
+        let file = TermsFile::open(&dir).expect("opened");
+        let terms: Vec<_> = file
+            .terms()
+            .map(|entry| {
+                (
+                    entry.leadership_term_id,
+                    entry.term_base_log_position,
+                    entry.recording_id,
+                )
+            })
+            .collect();
+        assert_eq!(terms, vec![(2, 0, 0), (4, 8192, 2)]);
+        assert_eq!(file.entries.len(), 2);
+        let length = std::fs::metadata(&path).expect("stat").len();
+        assert_eq!(length, (HEADER_LENGTH + 2 * ENTRY_LENGTH) as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_file_over_the_bound_is_length_before_an_entry_is_read_and_after_a_torn_candidate() {
         let dir = dir("bound");
         let mut file = TermsFile::create(&dir).expect("created");
