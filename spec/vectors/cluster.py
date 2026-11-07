@@ -471,6 +471,16 @@ def replay_end(terms, position):
 LEADER_TERMS = [[2, 0, 200], [3, 200, 500], [4, 500, 1000], [5, 1000, NULL]]
 
 
+def replication_record(term_replicated, term_base, stop_position, leader_term, leader_base):
+    """spec/cluster.md, "follower log replication": the terms a follower records, each with its base,
+    when its replication reaches the stop position: the term replicated, and the leader's term at
+    the leader's base after it when the stop is the leader's term base log position."""
+    recorded = [[term_replicated, term_base]]
+    if stop_position == leader_base:
+        recorded.append([leader_term, leader_base])
+    return {"recorded": recorded, "log_leadership_term_id": max(t for t, _ in recorded)}
+
+
 def entry_position(position, length, mtu):
     """spec/cluster.md, "The log": the position after an entry of `length` bytes that begins at
     `position`, fragments of mtu − 32 and a last of the remainder, each frame aligned to 32."""
@@ -511,7 +521,7 @@ VECTORS += [
     commit_vector("commit-position-five-members",
                   [(0, 500, 0), (1, 400, 1), (2, 300, 1), (3, 200, 1), (4, 100, 1)], 500),
     commit_vector("commit-position-below-base-not-counted",
-                  [(0, 1000, 0), (1, 1100, 1000), (2, 960, 1000)], 1100, leader_term=3, term_base=1000),
+                  [(0, 1100, 0), (1, 1000, 1000), (2, 960, 1000)], 1100, leader_term=3, term_base=1000),
     commit_vector("commit-position-older-term-not-counted",
                   [(0, 1100, 0), (1, 1100, 1000, 1), (2, 1000, 1000, 1)], 1100, leader_term=3, term_base=1000),
     commit_vector("commit-position-at-base-counts",
@@ -619,6 +629,12 @@ VECTORS += [
                replay_end(LEADER_TERMS, 3000)),
     arithmetic("replay-end-at-log-start", "replay-end", {"terms": LEADER_TERMS, "position": 0},
                replay_end(LEADER_TERMS, 0)),
+    arithmetic("replication-record-stop-at-leaders-base", "replication-record",
+               {"term_replicated": 4, "term_base": 500, "stop_position": 1000, "leader_term": 5, "leader_base": 1000},
+               replication_record(4, 500, 1000, 5, 1000)),
+    arithmetic("replication-record-stop-below-base", "replication-record",
+               {"term_replicated": 3, "term_base": 200, "stop_position": 500, "leader_term": 5, "leader_base": 1000},
+               replication_record(3, 200, 500, 5, 1000)),
     arithmetic("entry-position-one-frame", "entry-position",
                {"position": 65536, "length": 56, "mtu": 1408}, entry_position(65536, 56, 1408)),
     arithmetic("entry-position-aligned", "entry-position",

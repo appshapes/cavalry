@@ -132,12 +132,15 @@ alone. New leadership term carries Aeron's next fields, −1 for all three when 
 reported term is the leader's own, so a returning leader truncates no more than its
 uncommitted tail and a member two terms behind replicates one term at a time; a
 reader whose message carries no next term for a position below the leader's term base
-fails its election. A member's log leadership term id, which decides its vote, is the last term it has
-recorded, not the term of its last entry, as Aeron's `logLeadershipTermId` is: a
-member records a term when it joins the term's log, when a replication of it ends
-and when it replays its new leadership term event, in a record of terms and their
-base positions kept in its durable log directory and written before it reports an
-append position for the term, so that a member that joined a term before its first
+fails its election. A member's log leadership term id, which decides its vote and which its append
+position carries, is the highest term in its record of recorded terms, not the term
+of its last entry, as Aeron's `logLeadershipTermId` is: a member records a term, with
+its base, as the leader on entering leader log replication, as a follower when it
+takes a new leadership term's sender as its leader with its log at the leader's term
+base, when a replication ends, the term replicated and, at the leader's base, the
+leader's term, when it replays a term's new leadership term event, and when it joins
+the live log, in a record of terms and their base positions kept in its durable log
+directory and written before it reports an append position for the term, so that a member that joined a term before its first
 entry reached it outranks a longer log of an older term; with the leader recording
 its term on entering leader log replication and a follower whose replication ends at
 the leader's term base recording the leader's term before it reports the base, so
@@ -203,6 +206,16 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   position order, one per term received live and one per replayed span, and leaves
   one recording across terms, and a replay that carries the log's session id, to the
   Revisit.
+- **Recording a term only on joining its live log, as Aeron's `followerLogAwait`
+  does.** Lost. A follower at the leader's term base goes to follower replay, replays
+  only to the commit position it was told, below the base, and canvasses again, so
+  under Aeron's rule it would record the leader's term only in follower log await,
+  which it never reaches before the leader's commit position rises, which cannot rise
+  until a quorum has recorded the term: an ordinary failover would never end. A
+  follower therefore records the leader's term at the base as soon as it takes the
+  leader from a new leadership term with its log at that base, the log a joiner in
+  follower log await holds at the same position, and a replication that stops at the
+  leader's base records the leader's term after the term replicated.
 - **Aeron's quorum position, every active member's last position whatever term it was
   reported for.** Lost: invariant 1. Aeron's `quorumPositionBoundedByLeaderLog` ranks
   every active member, `leaderInit` records the leader's term before a follower has

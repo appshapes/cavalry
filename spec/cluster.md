@@ -125,13 +125,21 @@ from there.
 A leadership term is the span of the log one leader writes. Its leadership term id is
 an `i64` from 0 upward, one more than the term before it, never reused; −1 is no term.
 The term base log position is the position at which the term's first entry, its new
-leadership term event, begins. The log leadership term id of a member is the last term
-it has recorded, −1 for none, which is not the term of its last entry: a member
-records a term when it joins the term's log, as its leader in state 7 or as a follower
-in state 15, when a replication of the term ends in state 9, and when it reads the
-term's new leadership term event in a replay in state 10 or 13, so that a member that
-joined a term before its first entry reached it votes as a member of that term, and
-an election begins with the term the member last recorded. The record of the terms a
+leadership term event, begins. The log leadership term id of a member is the highest
+term in its record of recorded terms, −1 for none, which is not the term of its last
+entry. A member records a term, with its term base log position, at these points and
+no other: as the leader, on entering leader log replication, state 5, with its append
+position as the base; as a follower, when it takes the sender of a new leadership
+term as its leader and its append position, after any truncation, is at the leader's
+term base log position, before it reports that position ("Messages during an
+election"); when a replication ends, state 9, the term replicated at its base and,
+when the stop position is the leader's term base log position, the leader's term at
+that base after it, both before it reports the stop; when it reads a term's new
+leadership term event in a replay, state 10 or 13; and when it joins the live log,
+state 15, the leader's term at its join position when the record lacks it. So a
+member that joined a term before its first entry reached it votes as a member of that
+term, an election begins with the term the member last recorded, and a member whose
+log reaches the leader's term base counts toward the leader's commits. The record of the terms a
 member has recorded, each with its term base log position, is kept in its durable
 log directory and written before the member reports an append position for the
 term, so that it survives a restart; its format is the replicated log's (card 227),
@@ -317,7 +325,7 @@ of its append position and at least every leader heartbeat interval.
 
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
-| 8 | 8 | leadership term id | i64 | the term the follower follows |
+| 8 | 8 | leadership term id | i64 | the sender's log leadership term id, the highest term in its record, as canvass position's |
 | 16 | 8 | log position | i64 | the follower's append position |
 | 24 | 4 | follower member id | i32 | the follower's |
 | 28 | 1 | flags | u8 | bit 0 (`0x01`) catch-up: the position was appended from the leader's catch-up replay; the other bits reserved, written 0, ignored |
@@ -494,13 +502,13 @@ counter ("Counters").
 | 6 | leader replay | replays its own log, its recordings in position order, from its log position to its append position into its service, then goes to leader init; a leader with nothing to replay goes at once |
 | 7 | leader init | joins its log as leader for the term at its append position, the term recorded on entering state 5 ("The log"), and goes to leader ready |
 | 8 | leader ready | sends new leadership term every leader heartbeat interval until a quorum of members counted as "The commit position" counts them, for the leader's term and at its log position, has reported within the leader heartbeat timeout, then appends the new leadership term event and closes the election |
-| 9 | follower log replication | replicates what it lacks of the term its append position lies in, one term at a time: it subscribes to stream 100 on its `catchup` endpoint, as state 11 does, and sends catch-up position with its append position and that endpoint, counted in `cluster.log_replications`; the leader answers with replays of the recordings of its own that cover the span from that position to the stop position, the next term base log position when the append position is below it, else the next log position ("Messages outside an election"; the `replication-stop` vectors), one `start replay` after another in position order where the span crosses a recording's end, the next begun only once the follower's reported append position has reached where the last stopped, so that one replay image is on the endpoint at a time; the follower records each replay, an image of stream 100 on its `catchup` endpoint with the replay's session id, whose join position must be its append position, an image that joins elsewhere failing the election, counted in `cluster.join_position_mismatches`, reporting append position as it goes. Two timers bound it, Aeron's: while its append position is below the stop position, an append position that has not moved for the leader heartbeat timeout fails the election, counted in `cluster.log_replications_unavailable`, the leader's recordings not holding the span, purged by retention, or a replay that stopped for a fault being the causes; once its append position has reached the stop position it waits for the commit position it was told to reach its append position, a commit position or a new leadership term from its leader extending that wait by the leader heartbeat timeout, and a wait that runs out fails the election, counted in `cluster.elections_failed`. It goes back to canvass, removing the subscription, once the stop position is reached and the commit position it was told is at or past its append position, recording the term it replicated with its base position, or, when the stop position is the leader's term base log position, the next term being the leader's own, recording the leader's term with that base before it reports the position, so that it counts toward the leader's commits as a member that joined the term does; a later new leadership term carries it on to the next term |
+| 9 | follower log replication | replicates what it lacks of the term its append position lies in, one term at a time: it subscribes to stream 100 on its `catchup` endpoint, as state 11 does, and sends catch-up position with its append position and that endpoint, counted in `cluster.log_replications`; the leader answers with replays of the recordings of its own that cover the span from that position to the stop position, the next term base log position when the append position is below it, else the next log position ("Messages outside an election"; the `replication-stop` vectors), one `start replay` after another in position order where the span crosses a recording's end, the next begun only once the follower's reported append position has reached where the last stopped, so that one replay image is on the endpoint at a time; the follower records each replay, an image of stream 100 on its `catchup` endpoint with the replay's session id, whose join position must be its append position, an image that joins elsewhere failing the election, counted in `cluster.join_position_mismatches`, reporting append position as it goes. Two timers bound it, Aeron's: while its append position is below the stop position, an append position that has not moved for the leader heartbeat timeout fails the election, counted in `cluster.log_replications_unavailable`, the leader's recordings not holding the span, purged by retention, or a replay that stopped for a fault being the causes; once its append position has reached a stop position that is the leader's term base log position it waits for the commit position it was told to reach its append position, a commit position or a new leadership term from its leader extending that wait by the leader heartbeat timeout, and a wait that runs out fails the election, counted in `cluster.elections_failed`; a stop below the base has no such wait, since the leader's commit position cannot rise until a quorum has recorded its term, which this follower cannot do before the next term. When the stop position is reached it records the term replicated with its base and, when the stop is the leader's term base log position however the stop was given, the next term base or the next log position, the leader's term at that base after it, both before it reports the stop, the `replication-record` vectors pinning both, so that it counts toward the leader's commits as a member that joined the term does; then it goes back to canvass, removing the subscription, a later new leadership term carrying it on to the next term |
 | 10 | follower replay | replays its own log, its recordings in position order, from its log position to the lesser of its append position and the commit position it was told into its service, recording each term whose new leadership term event it replays, then goes to follower catch-up init when its append position is behind the leader's log position, else to follower log init; a replay that ends short of its append position goes back to canvass |
 | 11 | follower catch-up init | subscribes to the log stream on its `catchup` endpoint and sends catch-up position with that endpoint; goes to follower catch-up await once sent, and fails the election when it cannot send within the leader heartbeat timeout |
 | 12 | follower catch-up await | waits for the image of the leader's catch-up replay, the one image of stream 100 on its `catchup` endpoint, whatever its session id, since a replay's publication has a session id of its own (`spec/client-protocol.md`, "Commands", start replay), checks that the image's join position ("The log") is its append position, and goes to follower catch-up when it has joined it; an image that joins elsewhere, a stale replay's among them, fails the election, counted in `cluster.join_position_mismatches`, and so does no image within the leader heartbeat timeout |
 | 13 | follower catch-up | records the catch-up replay, recording each term whose new leadership term event it reads, reporting its append position, the contiguous end, with the catch-up flag, and adds its `log` endpoint's live subscription once its append position is within the live-add window of the leader's, the lesser of term length ÷ 4 and 1,048,576 bytes; the live image's recording begins at the live recording's start, the position the follower joined the live log at, which lies at or past its append position, so that the two recordings overlap from there and the append position follows the replay until it reaches the live recording's start and the live recording from then; goes to follower log init once its append position has reached the live recording's start and the commit position it was told, and the leader has sent stop catch-up, which it sends when the follower's append position reaches its log position; fails the election when the catch-up makes no progress for the leader heartbeat timeout |
 | 14 | follower log init | subscribes to the log stream on its `log` endpoint when it has not, and goes to follower log await; one already subscribed goes to follower ready |
-| 15 | follower log await | waits for the live image by the log session id, checks that its join position is its append position, joins it there, records the term with its base position, and goes to follower ready; an image that joins elsewhere, the leader having appended past the follower's position while it subscribed, fails the election, counted in `cluster.join_position_mismatches`, so that the member canvasses again and catches up, and so does no image within the leader heartbeat timeout |
+| 15 | follower log await | waits for the live image by the log session id, checks that its join position is its append position, joins it there, records the leader's term at its join position when its record lacks the term, and goes to follower ready; an image that joins elsewhere, the leader having appended past the follower's position while it subscribed, fails the election, counted in `cluster.join_position_mismatches`, so that the member canvasses again and catches up, and so does no image within the leader heartbeat timeout |
 | 16 | follower ready | sends append position to the leader and closes the election; fails it when it cannot send within the leader heartbeat timeout |
 | 17 | closed | the election is over: the leader leads the term, a follower follows it |
 
@@ -537,7 +545,11 @@ base log position with no next log position carried waits for a later new leader
 term; one whose message carries no next leadership term id, −1, fails its election,
 counted in `cluster.elections_failed`, since the leader's log does not reach its
 position; and a reader whose append position is at or above the term base log
-position goes to follower replay. The `new-leadership-term` vectors pin each case. Append position is recorded by a candidate or leader against the follower.
+position goes to follower replay, recording the leader's term at the term base log
+position first when its append position, after any truncation, is at that base, before
+it reports, so that it counts toward the leader's commits with the log it holds to the
+base, as a member joining in state 15 does. The `new-leadership-term` vectors pin
+each case. Append position is recorded by a candidate or leader against the follower.
 Commit position from the reader's leader raises the commit position it was told.
 
 **Messages outside an election, and the leader's in states 5 to 8.** A leader reads
@@ -786,7 +798,9 @@ encoder. Each vector has a `kind`:
   what a reader of new leadership term does with its log, truncate, replicate, replay,
   wait or fail, from the message's fields and its own; which of the leader's
   recordings a replay begins in and where it ends, from the leader's terms and the
-  position asked; the position after an entry from the position it begins at, its
+  position asked; which terms a follower records when its replication reaches its
+  stop, from the term replicated and its base, the stop position and the leader's
+  term and base; the position after an entry from the position it begins at, its
   length and the MTU length.
 
 A conforming implementation decodes every valid vector to its fields, encodes those

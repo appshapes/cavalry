@@ -1517,13 +1517,13 @@
         "positions": [
           {
             "member": 0,
-            "position": 1000,
+            "position": 1100,
             "age_ns": 0,
             "term": 3
           },
           {
             "member": 1,
-            "position": 1100,
+            "position": 1000,
             "age_ns": 1000,
             "term": 3
           },
@@ -2488,6 +2488,52 @@
       "fields": {
         "term": 2,
         "end_position": 200
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replication-record-stop-at-leaders-base",
+      "rule": "replication-record",
+      "inputs": {
+        "term_replicated": 4,
+        "term_base": 500,
+        "stop_position": 1000,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "recorded": [
+          [
+            4,
+            500
+          ],
+          [
+            5,
+            1000
+          ]
+        ],
+        "log_leadership_term_id": 5
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replication-record-stop-below-base",
+      "rule": "replication-record",
+      "inputs": {
+        "term_replicated": 3,
+        "term_base": 200,
+        "stop_position": 500,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "recorded": [
+          [
+            3,
+            200
+          ]
+        ],
+        "log_leadership_term_id": 3
       }
     },
     {
