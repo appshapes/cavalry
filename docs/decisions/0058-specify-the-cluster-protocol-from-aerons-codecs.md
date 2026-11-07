@@ -85,7 +85,11 @@ its log directory before the vote or request vote that raises it is sent, Aeron'
 state file, so that it votes once in a term across a restart, and a member in canvass
 following a leader of a term at least its candidate term alone, Raft's rule that a
 member that has voted in a term follows no leader of a lower one, which departs from
-Aeron's canvass (Alternatives). The cluster's timestamp is the leader's wall clock in milliseconds since the
+Aeron's canvass (Alternatives); canvass position carries the sender's candidate term
+as its leadership term id, and a leader whose election has closed holds an election on
+a canvass position whose leadership term id is above its own term, Raft's step-down,
+which departs from Aeron's `ConsensusModuleAgent.onCanvassPosition`, which reads the
+log leadership term id alone (Alternatives). The cluster's timestamp is the leader's wall clock in milliseconds since the
 Unix epoch, written by the leader into each entry and read from the log by every
 member and service, never from a clock of their own. The timeouts are Aeron's defaults
 as constants with no configuration key: leader heartbeat interval 200 ms and timeout
@@ -295,6 +299,25 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   A ignores C and C never reaches a quorum; the `new-leadership-term` vectors carry the
   reader's candidate term and whether it is in canvass, an `ignore` action pinning
   it.
+- **The canvass rule without Raft's step-down, a leader that reads a canvass
+  position's log leadership term id alone, as Aeron's
+  `ConsensusModuleAgent.onCanvassPosition` does.** Lost: invariants 3 and 4. Aeron
+  never needs the step-down, since its canvass takes any leader; with the rule above
+  alone, the fourteenth review's example: five members A to E with logs (2, 200), D's
+  candidate term 3 from an earlier failed ballot, a partial partition between D and A,
+  B, C; A nominates term 3 and B, C and E vote for it; D nominates term 4 and its
+  request reaches E alone, which votes and takes 4; A leads term 3 with B and C
+  following; D goes back to canvass with candidate term 4 and E, ignoring A's new
+  leadership term in follower ballot, times out into canvass with 4; the partition
+  heals, D and E canvass, A answers each with new leadership term for term 3, which
+  both ignore, and B and C, following A, answer nothing, so D and E never hear from a
+  quorum, never nominate, and stay in canvass for as long as A leads: a cluster of five
+  running as three after a healed fault, with no counter saying why. A leader whose
+  election has closed holds an election on a canvass position whose leadership term
+  id, the sender's candidate term, is above its own term, counted in
+  `cluster.leader_step_downs`, so D's first canvass position after the fault brings an
+  election every member joins; the `canvass-position` vectors pin the leader's action,
+  and `cluster.leadership_terms_ignored` counts the message a member ignores.
 
 ## Evidence
 
@@ -312,6 +335,7 @@ informed it: Aeron's sources named in Context, read on 2026-11-06, with
 `isQuorumLeader`; `ConsensusModuleAgent.updateLeaderPosition` and
 `quorumPositionBoundedByLeaderLog`; `Election`'s per-state methods, `onRequestVote`,
 `onNewLeadershipTerm`, `onCanvassPosition` and `publishNewLeadershipTerm`;
+`ConsensusModuleAgent.onCanvassPosition` and `onRequestVote`;
 `NodeStateFile.proposeMaxCandidateTermId`; `RecordingLog.ensureCoherent` and
 `findTermEntry`; `SessionManager`'s
 connect, close and timeout checks; `ClusterMember.parse` and `ingressEndpoints`;
