@@ -1729,18 +1729,22 @@
       "rule": "ballot",
       "inputs": {
         "members": 3,
+        "candidate_term": 3,
         "votes": [
           {
             "member": 0,
-            "vote": true
+            "vote": true,
+            "term": 3
           },
           {
             "member": 1,
-            "vote": true
+            "vote": true,
+            "term": 3
           },
           {
             "member": 2,
-            "vote": true
+            "vote": true,
+            "term": 3
           }
         ],
         "timeout_passed": false
@@ -1756,14 +1760,17 @@
       "rule": "ballot",
       "inputs": {
         "members": 3,
+        "candidate_term": 3,
         "votes": [
           {
             "member": 0,
-            "vote": true
+            "vote": true,
+            "term": 3
           },
           {
             "member": 1,
-            "vote": true
+            "vote": true,
+            "term": 3
           }
         ],
         "timeout_passed": false
@@ -1779,14 +1786,17 @@
       "rule": "ballot",
       "inputs": {
         "members": 3,
+        "candidate_term": 3,
         "votes": [
           {
             "member": 0,
-            "vote": true
+            "vote": true,
+            "term": 3
           },
           {
             "member": 1,
-            "vote": true
+            "vote": true,
+            "term": 3
           }
         ],
         "timeout_passed": true
@@ -1802,18 +1812,22 @@
       "rule": "ballot",
       "inputs": {
         "members": 3,
+        "candidate_term": 3,
         "votes": [
           {
             "member": 0,
-            "vote": true
+            "vote": true,
+            "term": 3
           },
           {
             "member": 1,
-            "vote": true
+            "vote": true,
+            "term": 3
           },
           {
             "member": 2,
-            "vote": false
+            "vote": false,
+            "term": 3
           }
         ],
         "timeout_passed": true
@@ -1829,14 +1843,53 @@
       "rule": "ballot",
       "inputs": {
         "members": 5,
+        "candidate_term": 3,
         "votes": [
           {
             "member": 0,
-            "vote": true
+            "vote": true,
+            "term": 3
           },
           {
             "member": 1,
-            "vote": true
+            "vote": true,
+            "term": 3
+          }
+        ],
+        "timeout_passed": true
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-votes-for-an-older-term-not-leader",
+      "rule": "ballot",
+      "inputs": {
+        "members": 5,
+        "candidate_term": 5,
+        "votes": [
+          {
+            "member": 2,
+            "vote": true,
+            "term": 4
+          },
+          {
+            "member": 0,
+            "vote": true,
+            "term": 4
+          },
+          {
+            "member": 1,
+            "vote": true,
+            "term": 4
+          },
+          {
+            "member": 4,
+            "vote": true,
+            "term": 4
           }
         ],
         "timeout_passed": true
@@ -1852,10 +1905,12 @@
       "rule": "ballot",
       "inputs": {
         "members": 1,
+        "candidate_term": 3,
         "votes": [
           {
             "member": 0,
-            "vote": true
+            "vote": true,
+            "term": 3
           }
         ],
         "timeout_passed": false
@@ -2682,13 +2737,13 @@
       "inputs": {
         "candidate_term": 3,
         "log": [
-          2,
+          3,
           200
         ],
         "state": 8,
         "request": {
           "candidate_term_id": 4,
-          "log_leadership_term_id": 2,
+          "log_leadership_term_id": 3,
           "log_position": 100
         }
       },
@@ -2704,13 +2759,35 @@
       "inputs": {
         "candidate_term": 3,
         "log": [
-          2,
+          3,
           200
         ],
         "state": 8,
         "request": {
           "candidate_term_id": 4,
-          "log_leadership_term_id": 2,
+          "log_leadership_term_id": 3,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "vote": null,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-closed-nothing",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          3,
+          200
+        ],
+        "state": 17,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 3,
           "log_position": 200
         }
       },

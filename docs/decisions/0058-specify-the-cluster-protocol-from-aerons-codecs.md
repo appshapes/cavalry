@@ -83,7 +83,10 @@ lists, with a member voting for a candidate whose log is at least its own by ter
 position, its candidate term, the highest term it has voted in, proposed or followed,
 stored in its log directory before the vote or request vote that raises it is sent,
 Aeron's node state file, a raise on following kept in memory alone, so that it votes
-once in a term across a restart, and a member in canvass
+once in a term across a restart, a candidate counting toward its ballot the votes for
+its current candidate term alone, its own among them, Aeron's `isQuorumLeader`, so that
+a candidate whose term rose during its ballot leads no term with votes cast for
+another, and a member in canvass
 following a leader of a term at least its candidate term alone, Raft's rule that a
 member that has voted in a term follows no leader of a lower one, which departs from
 Aeron's canvass (Alternatives); canvass position carries the sender's candidate term
@@ -319,6 +322,20 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   `cluster.leader_step_downs`, so D's first canvass position after the fault brings an
   election every member joins; the `canvass-position` vectors pin the leader's action,
   and `cluster.leadership_terms_ignored` counts the message a member ignores.
+- **A ballot counted without the votes' terms.** Lost: invariant 1. The seventeenth
+  review's example: five members, C's log (3, 300), D's (3, 250), A's, B's and E's
+  (3, 200), D's candidate term 4 from a failed ballot, C's messages to D lost; C
+  nominates term 4 and A, B and E vote for it; D nominates term 5 and A, B and E vote
+  for it too; D's request reaches C, which votes against, its log ahead, and takes 5;
+  D leads term 5 at 250; C, counting its four votes cast for term 4, would lead term 5
+  at 300 as well, and after it failed and canvassed, D's new leadership term for its
+  own term, next fields −1, would truncate nothing, leaving C's uncommitted term-3
+  tail [250, 300) where D committed term 5's entries, two committed logs differing at
+  one position. Aeron's `ClusterMember.isQuorumLeader` and `isUnanimousLeader` count
+  only the members whose recorded candidate term is the candidate's current one, so C
+  holds no vote for term 5 and goes back to canvass at the timeout; the page says so,
+  and the `ballot` vectors carry the candidate's term and each vote's, the review's
+  case among them.
 
 ## Evidence
 
