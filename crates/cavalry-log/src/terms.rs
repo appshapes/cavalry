@@ -14,7 +14,8 @@
 //! Nothing here runs per message: the file is written once per term and once per vote.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use crate::layout::crc32;
@@ -31,6 +32,9 @@ pub const HEADER_LENGTH: usize = 64;
 pub const ENTRY_LENGTH: usize = 32;
 /// The most entries the file holds, the catalog's bound on recordings.
 pub const MAX_ENTRIES: u64 = 1_048_576;
+/// The entries [`TermsFile::open`] reads at a time, so that its buffer is fixed whatever
+/// the file's length.
+const READ_ENTRIES: usize = 128;
 /// The candidate term of a member that has voted in and proposed no term.
 pub const NO_CANDIDATE_TERM: i64 = -1;
 /// The recording id of a term that has no recording yet.
@@ -279,7 +283,9 @@ impl TermsHeader {
     /// The checks of "What a reader rejects" on the header, in order, with the file's
     /// length: the first failure by name. A candidate checksum that does not match is
     /// [`TermsError::Candidate`], after which a reader keeps the header with a candidate
-    /// term of −1, as [`TermsFile::open`] does.
+    /// term of −1, as [`TermsFile::open`] does. The reader goes on past `candidate`, so
+    /// the `length` check runs after it all the same, and a file over the bound is
+    /// [`TermsError::Length`] whatever its candidate checksum.
     pub fn parse(bytes: &[u8], file_length: u64) -> Result<Self, TermsError> {
         if file_length < HEADER_LENGTH as u64 || bytes.len() < HEADER_LENGTH {
             return Err(TermsError::TooShort {
@@ -301,12 +307,13 @@ impl TermsHeader {
         }
         let candidate_term = i64::from_le_bytes(bytes[16..24].try_into().unwrap_or([0; 8]));
         let checksum = u32::from_le_bytes(bytes[24..28].try_into().unwrap_or([0; 4]));
-        if checksum != crc32(&bytes[16..24]) {
-            return Err(TermsError::Candidate);
-        }
+        let candidate_torn = checksum != crc32(&bytes[16..24]);
         let entries = Self::entries(file_length);
         if entries > MAX_ENTRIES {
             return Err(TermsError::Length { found: entries });
+        }
+        if candidate_torn {
+            return Err(TermsError::Candidate);
         }
         Ok(Self { candidate_term })
     }
@@ -453,7 +460,10 @@ impl TermsFile {
 
     /// Opens the file in `dir`, reading its header and every entry up to the torn tail,
     /// which the next write overwrites; a candidate checksum that does not match reads
-    /// as −1. Creates the file when there is none.
+    /// as −1. Creates the file when there is none. The file's length is checked
+    /// against the bound before a byte is read, and the entries are read 128 at a time
+    /// into a fixed buffer, so that what the reader holds is bounded by [`MAX_ENTRIES`]
+    /// whatever is on disk.
     pub fn open(dir: &Path) -> Result<Self, TermsError> {
         let path = Self::path_in(dir);
         if !path.exists() {
@@ -463,36 +473,51 @@ impl TermsFile {
             let path = path.clone();
             move |source| TermsError::Io { what, path, source }
         };
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(&path)
             .map_err(io("open"))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io("read"))?;
-        let file_length = bytes.len() as u64;
-        let candidate_term = match TermsHeader::parse(&bytes, file_length) {
+        // The bound from the length alone, before a byte is read.
+        let file_length = file.metadata().map_err(io("stat"))?.len();
+        let whole = TermsHeader::entries(file_length);
+        if whole > MAX_ENTRIES {
+            return Err(TermsError::Length { found: whole });
+        }
+        let mut header = [0u8; HEADER_LENGTH];
+        if file_length >= HEADER_LENGTH as u64 {
+            file.read_exact_at(&mut header, 0)
+                .map_err(io("read the header of"))?;
+        }
+        let candidate_term = match TermsHeader::parse(&header, file_length) {
             Ok(header) => header.candidate_term,
             Err(TermsError::Candidate) => NO_CANDIDATE_TERM,
             Err(error) => return Err(error),
         };
         let mut entries = Vec::new();
         let mut previous: Option<TermsEntry> = None;
-        let whole = TermsHeader::entries(file_length);
-        for index in 0..whole {
-            let at = HEADER_LENGTH + index as usize * ENTRY_LENGTH;
-            let entry = match TermsEntry::parse(&bytes[at..at + ENTRY_LENGTH], previous.as_ref()) {
-                Ok(entry) => entry,
-                Err(TermsError::Checksum) => break,
-                Err(error) => return Err(error),
-            };
-            if entry.state == EMPTY {
-                break;
+        let mut chunk = [0u8; READ_ENTRIES * ENTRY_LENGTH];
+        let mut index = 0;
+        'read: while index < whole {
+            let count = (whole - index).min(READ_ENTRIES as u64) as usize;
+            let bytes = &mut chunk[..count * ENTRY_LENGTH];
+            let at = HEADER_LENGTH as u64 + index * ENTRY_LENGTH as u64;
+            file.read_exact_at(bytes, at).map_err(io("read"))?;
+            for entry_bytes in bytes.chunks_exact(ENTRY_LENGTH) {
+                let entry = match TermsEntry::parse(entry_bytes, previous.as_ref()) {
+                    Ok(entry) => entry,
+                    Err(TermsError::Checksum) => break 'read,
+                    Err(error) => return Err(error),
+                };
+                if entry.state == EMPTY {
+                    break 'read;
+                }
+                if entry.state == VALID {
+                    previous = Some(entry);
+                }
+                entries.push(entry);
             }
-            if entry.state == VALID {
-                previous = Some(entry);
-            }
-            entries.push(entry);
+            index += count as u64;
         }
         Ok(Self {
             path,
@@ -702,6 +727,64 @@ mod tests {
         let file = TermsFile::open(&dir).expect("opened");
         assert_eq!(file.terms().count(), 1);
         assert_eq!(file.candidate_term(), NO_CANDIDATE_TERM);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_over_the_bound_is_length_before_an_entry_is_read_and_after_a_torn_candidate() {
+        let dir = dir("bound");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.append(2, 0, 0).expect("appended");
+        file.set_candidate_term(7).expect("stored");
+        drop(file);
+        let path = TermsFile::path_in(&dir);
+        // One whole entry past the bound, sparse: no byte past the first entry is written,
+        // and the reader refuses from the length alone.
+        let over = HEADER_LENGTH as u64 + (MAX_ENTRIES + 1) * ENTRY_LENGTH as u64;
+        let grown = OpenOptions::new().write(true).open(&path).expect("opened");
+        grown.set_len(over).expect("grown");
+        let refused = TermsFile::open(&dir).expect_err("over the bound");
+        assert_eq!(refused.reason(), "length");
+        // The candidate checksum torn too: the reader goes on past `candidate`, so the
+        // file is still `length`, from the header's parse as from the open.
+        grown.write_all_at(&[0xFF], 24).expect("torn");
+        drop(grown);
+        assert_eq!(TermsFile::open(&dir).unwrap_err().reason(), "length");
+        let mut header = TermsHeader { candidate_term: 7 }.encode();
+        header[24] ^= 0xFF;
+        assert_eq!(
+            TermsHeader::parse(&header, over).unwrap_err().reason(),
+            "length"
+        );
+        assert_eq!(
+            TermsHeader::parse(&header, HEADER_LENGTH as u64)
+                .unwrap_err()
+                .reason(),
+            "candidate"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_reader_takes_entries_across_its_read_buffer_up_to_the_torn_tail() {
+        let dir = dir("chunks");
+        let mut bytes = TermsHeader { candidate_term: 3 }.encode().to_vec();
+        for term in 0..300 {
+            let entry = TermsEntry {
+                state: VALID,
+                leadership_term_id: term,
+                term_base_log_position: term * 4096,
+                recording_id: term,
+            };
+            bytes.extend_from_slice(&entry.encode());
+        }
+        // Entry 200, in the reader's second buffer, torn by its checksum alone.
+        bytes[HEADER_LENGTH + 200 * ENTRY_LENGTH + 4] ^= 0xFF;
+        std::fs::write(TermsFile::path_in(&dir), &bytes).expect("written");
+        let file = TermsFile::open(&dir).expect("opened");
+        assert_eq!(file.terms().count(), 200);
+        assert_eq!(file.log_leadership_term_id(), 199);
+        assert_eq!(file.candidate_term(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
