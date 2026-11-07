@@ -635,7 +635,9 @@ pub enum Message<'a> {
         leader_member_id: i32,
         /// The code.
         code: EventCode,
-        /// The cluster's protocol version, in semantic form.
+        /// The cluster's protocol version, in semantic form, read whatever its major: a
+        /// client that reads a major not its own reports it to its caller and sends
+        /// nothing more.
         version: i32,
         /// The leader heartbeat timeout in nanoseconds.
         leader_heartbeat_timeout_ns: i64,
@@ -1106,7 +1108,8 @@ impl<'a> Message<'a> {
     /// (`spec/cluster.md`, "What a reader rejects"): the header's length, schema id,
     /// version and template; the stream; the block length; every variable field's
     /// length and the bytes left over; a consensus message's protocol version field's
-    /// major, a session connect's read whatever it is; the enumerations; the ASCII
+    /// major, a session connect's or a session event's version read whatever it is;
+    /// the enumerations; the ASCII
     /// fields; the member ids; the positions; the term ids.
     pub fn parse(stream: Stream, bytes: &'a [u8]) -> Result<Self, ClusterError> {
         if bytes.len() < HEADER_LENGTH {
@@ -1177,7 +1180,8 @@ impl<'a> Message<'a> {
                 let leader_heartbeat_timeout_ns = reader.i64()?;
                 let detail = reader.variable()?;
                 reader.done()?;
-                protocol_version(version)?;
+                // Any major is read here: a client that reads one not its own reports the
+                // cluster's version to its caller (spec/cluster.md, "Sessions").
                 let code = enum_field!(EventCode, "code", code)?;
                 ascii("detail", detail)?;
                 member_id("leader member id", leader_member_id, true)?;

@@ -632,3 +632,39 @@ fn the_enumerations_round_trip_their_codes() {
     assert_eq!(TimeUnit::from_code(0), Some(TimeUnit::Millis));
     assert_eq!(TimeUnit::from_code(1), None);
 }
+
+/// A session event of another major is read, its version intact, so that a client can
+/// report the cluster's version to its caller (`spec/cluster.md`, "Sessions"): the
+/// field-major check is a consensus message's alone ("What a reader rejects",
+/// `version`). No vector of `spec/vectors/cluster.json` pins it yet, since a vector is
+/// a change to `spec/` and needs an ADR of its own.
+#[test]
+fn a_session_event_of_another_major_is_read() {
+    for version in [65536, -1, -65536, i32::MIN, i32::MAX] {
+        let event = Message::SessionEvent {
+            cluster_session_id: -1,
+            correlation_id: 41,
+            leadership_term_id: 3,
+            leader_member_id: 0,
+            code: EventCode::Error,
+            version,
+            leader_heartbeat_timeout_ns: 10_000_000_000,
+            detail: b"invalid client version",
+        };
+        let mut bytes = [0u8; 128];
+        let length = event.write(&mut bytes).expect("a session event encodes");
+        let decoded = Message::parse(Stream::Egress, &bytes[..length])
+            .unwrap_or_else(|error| panic!("version {version}: {error}"));
+        assert_eq!(
+            decoded, event,
+            "version {version}: decoded with the value intact"
+        );
+        let mut again = [0u8; 128];
+        assert_eq!(decoded.write(&mut again), Ok(length));
+        assert_eq!(
+            again[..length],
+            bytes[..length],
+            "version {version}: the same bytes"
+        );
+    }
+}
