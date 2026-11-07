@@ -1,0 +1,685 @@
+//! The terms file: a cluster member's record of the terms it has recorded and the
+//! candidate term it has stored (`spec/durable-log.md`, version 2, "Terms"; ADR 0060).
+//!
+//! The consensus module of `cavalry-raft` is the file's only writer, from its own
+//! thread: [`TermsFile::create`] or [`TermsFile::open`] at the member's start, then
+//! [`TermsFile::append`] before the member reports an append position for a term,
+//! [`TermsFile::truncate_above`] before it reports its log leadership term id again,
+//! and [`TermsFile::set_candidate_term`] before the vote or request vote that raises
+//! the candidate term is sent; each write syncs before it returns. A reader takes the
+//! entries in file order, skips a deleted one and stops at the torn tail of a crash:
+//! [`TermsHeader::parse`] and [`TermsEntry::parse`] are the checks of "What a reader
+//! rejects", in order, which the vectors of `spec/vectors/durable-log.json` pin.
+//!
+//! Nothing here runs per message: the file is written once per term and once per vote.
+
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+use crate::layout::crc32;
+
+/// The file's name in the log directory.
+pub const FILE_NAME: &str = "terms";
+/// The header's eight-byte magic, `CVLYTERM`.
+pub const MAGIC: [u8; 8] = *b"CVLYTERM";
+/// The one version this crate writes and reads.
+pub const VERSION: i32 = 0;
+/// The header's length in bytes.
+pub const HEADER_LENGTH: usize = 64;
+/// An entry's length in bytes.
+pub const ENTRY_LENGTH: usize = 32;
+/// The most entries the file holds, the catalog's bound on recordings.
+pub const MAX_ENTRIES: u64 = 1_048_576;
+/// The candidate term of a member that has voted in and proposed no term.
+pub const NO_CANDIDATE_TERM: i64 = -1;
+/// The recording id of a term that has no recording yet.
+pub const NO_RECORDING: i64 = -1;
+/// An entry's state: empty, the file ends here.
+pub const EMPTY: i32 = 0;
+/// An entry's state: valid.
+pub const VALID: i32 = 1;
+/// An entry's state: deleted by a truncation.
+pub const DELETED: i32 = 3;
+
+/// Why a terms file, or one of its entries, was refused: the checks of
+/// `spec/durable-log.md`, "What a reader rejects", by name, and the I/O errors around
+/// them.
+#[derive(Debug)]
+pub enum TermsError {
+    /// The file could not be opened, read, written or synced.
+    Io {
+        /// What was being done.
+        what: &'static str,
+        /// The file.
+        path: PathBuf,
+        /// The operating system's reason.
+        source: io::Error,
+    },
+    /// The file is shorter than the header.
+    TooShort {
+        /// The length found.
+        found: u64,
+    },
+    /// The magic is not `CVLYTERM`.
+    Magic,
+    /// The version is not 0.
+    Version {
+        /// The version found.
+        found: i32,
+    },
+    /// The entry length is not 32.
+    EntryLength {
+        /// The entry length found.
+        found: i32,
+    },
+    /// The candidate checksum does not match: the candidate term reads as −1 and the
+    /// reader goes on, so a reader reports this and keeps the header.
+    Candidate,
+    /// The file holds more whole entries than the bound.
+    Length {
+        /// The whole entries found.
+        found: u64,
+    },
+    /// An entry's state is not 0, 1 or 3.
+    State {
+        /// The state found.
+        found: i32,
+    },
+    /// A valid or deleted entry's checksum does not match: the file ends here.
+    Checksum,
+    /// An entry's term is below 0 or not above the valid entry before it.
+    Term {
+        /// The term found.
+        found: i64,
+    },
+    /// An entry's term base log position is below 0, not a multiple of 32 or below
+    /// the valid entry's before it.
+    Position {
+        /// The position found.
+        found: i64,
+    },
+    /// An entry's recording id is below −1.
+    Recording {
+        /// The recording id found.
+        found: i64,
+    },
+    /// An append past the bound: `terms full`.
+    Full,
+}
+
+impl TermsError {
+    /// The check's name as the spec and the vectors spell it.
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            TermsError::Io { .. } => "io",
+            TermsError::TooShort { .. } => "too-short",
+            TermsError::Magic => "magic",
+            TermsError::Version { .. } => "version",
+            TermsError::EntryLength { .. } => "entry-length",
+            TermsError::Candidate => "candidate",
+            TermsError::Length { .. } => "length",
+            TermsError::State { .. } => "state",
+            TermsError::Checksum => "checksum",
+            TermsError::Term { .. } => "term",
+            TermsError::Position { .. } => "position",
+            TermsError::Recording { .. } => "recording",
+            TermsError::Full => "terms-full",
+        }
+    }
+}
+
+impl std::fmt::Display for TermsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const DOC: &str = "docs/reference/durable-log.md#terms";
+        match self {
+            TermsError::Io { what, path, source } => {
+                write!(
+                    f,
+                    "terms file: cannot {what} {}: {source}; see {DOC}",
+                    path.display()
+                )
+            }
+            TermsError::TooShort { found } => write!(
+                f,
+                "terms file rejected (too-short): {found} bytes, under the 64 of the header; \
+                 the file was torn while it was created, so remove it and start the member \
+                 again; see {DOC}"
+            ),
+            TermsError::Magic => write!(
+                f,
+                "terms file rejected (magic): the first eight bytes are not CVLYTERM; the \
+                 file is not a terms file, so move it out of the log directory; see {DOC}"
+            ),
+            TermsError::Version { found } => write!(
+                f,
+                "terms file rejected (version): version {found}, this reader knows 0; the \
+                 file was written by another Cavalry version, upgrade this member; see {DOC}"
+            ),
+            TermsError::EntryLength { found } => write!(
+                f,
+                "terms file rejected (entry-length): entries of {found} bytes, this reader \
+                 reads 32; the file was written by another Cavalry version; see {DOC}"
+            ),
+            TermsError::Candidate => write!(
+                f,
+                "terms file: the candidate term's checksum does not match, so the candidate \
+                 term reads as -1, the write it was torn in being the last; nothing to do; \
+                 see {DOC}"
+            ),
+            TermsError::Length { found } => write!(
+                f,
+                "terms file rejected (length): {found} entries, over the {MAX_ENTRIES} the \
+                 file holds; start a new log directory for this member; see {DOC}"
+            ),
+            TermsError::State { found } => write!(
+                f,
+                "terms entry rejected (state): state {found} is not 0, 1 or 3; the file is \
+                 damaged past this entry, so restore it from the member's last good copy or \
+                 start a new log directory; see {DOC}"
+            ),
+            TermsError::Checksum => write!(
+                f,
+                "terms entry rejected (checksum): the entry's checksum does not match, the \
+                 torn tail of a crash, which the next write overwrites; nothing to do; see \
+                 {DOC}"
+            ),
+            TermsError::Term { found } => write!(
+                f,
+                "terms entry rejected (term): term {found} is below 0 or not above the term \
+                 before it; the file is damaged past this entry, so restore it or start a new \
+                 log directory; see {DOC}"
+            ),
+            TermsError::Position { found } => write!(
+                f,
+                "terms entry rejected (position): term base log position {found} is below 0, \
+                 not a multiple of 32 or below the position before it; the file is damaged past \
+                 this entry, so restore it or start a new log directory; see {DOC}"
+            ),
+            TermsError::Recording { found } => write!(
+                f,
+                "terms entry rejected (recording): recording id {found} is below -1; the file \
+                 is damaged past this entry, so restore it or start a new log directory; see \
+                 {DOC}"
+            ),
+            TermsError::Full => write!(
+                f,
+                "terms full: the file holds {MAX_ENTRIES} entries, its bound; start a new log \
+                 directory for this member; see {DOC}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TermsError {}
+
+/// The terms file's header, read or written: the candidate term with its checksum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TermsHeader {
+    /// The candidate term stored, −1 for none.
+    pub candidate_term: i64,
+}
+
+impl TermsHeader {
+    /// The header's bytes: the magic, version 0, entry length 32, the candidate term and
+    /// its checksum, the rest zero.
+    pub fn encode(&self) -> [u8; HEADER_LENGTH] {
+        let mut bytes = [0u8; HEADER_LENGTH];
+        bytes[..8].copy_from_slice(&MAGIC);
+        bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        bytes[12..16].copy_from_slice(&(ENTRY_LENGTH as i32).to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.candidate_term.to_le_bytes());
+        let checksum = crc32(&bytes[16..24]);
+        bytes[24..28].copy_from_slice(&checksum.to_le_bytes());
+        bytes
+    }
+
+    /// The checks of "What a reader rejects" on the header, in order, with the file's
+    /// length: the first failure by name. A candidate checksum that does not match is
+    /// [`TermsError::Candidate`], after which a reader keeps the header with a candidate
+    /// term of −1, as [`TermsFile::open`] does.
+    pub fn parse(bytes: &[u8], file_length: u64) -> Result<Self, TermsError> {
+        if file_length < HEADER_LENGTH as u64 || bytes.len() < HEADER_LENGTH {
+            return Err(TermsError::TooShort {
+                found: file_length.min(bytes.len() as u64),
+            });
+        }
+        if bytes[..8] != MAGIC {
+            return Err(TermsError::Magic);
+        }
+        let version = i32::from_le_bytes(bytes[8..12].try_into().unwrap_or([0; 4]));
+        if version != VERSION {
+            return Err(TermsError::Version { found: version });
+        }
+        let entry_length = i32::from_le_bytes(bytes[12..16].try_into().unwrap_or([0; 4]));
+        if entry_length != ENTRY_LENGTH as i32 {
+            return Err(TermsError::EntryLength {
+                found: entry_length,
+            });
+        }
+        let candidate_term = i64::from_le_bytes(bytes[16..24].try_into().unwrap_or([0; 8]));
+        let checksum = u32::from_le_bytes(bytes[24..28].try_into().unwrap_or([0; 4]));
+        if checksum != crc32(&bytes[16..24]) {
+            return Err(TermsError::Candidate);
+        }
+        let entries = Self::entries(file_length);
+        if entries > MAX_ENTRIES {
+            return Err(TermsError::Length { found: entries });
+        }
+        Ok(Self { candidate_term })
+    }
+
+    /// The whole entries a file of `file_length` bytes holds after the header.
+    pub const fn entries(file_length: u64) -> u64 {
+        file_length.saturating_sub(HEADER_LENGTH as u64) / ENTRY_LENGTH as u64
+    }
+}
+
+/// One entry of the terms file: a term the member recorded, with its base and its
+/// recording, in one of the three states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TermsEntry {
+    /// [`EMPTY`], [`VALID`] or [`DELETED`].
+    pub state: i32,
+    /// The leadership term id.
+    pub leadership_term_id: i64,
+    /// The term base log position.
+    pub term_base_log_position: i64,
+    /// The recording of the term in this directory, or [`NO_RECORDING`].
+    pub recording_id: i64,
+}
+
+impl TermsEntry {
+    /// The entry's bytes: the state, the checksum of the three fields, then the fields.
+    pub fn encode(&self) -> [u8; ENTRY_LENGTH] {
+        let mut bytes = [0u8; ENTRY_LENGTH];
+        bytes[..4].copy_from_slice(&self.state.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.leadership_term_id.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.term_base_log_position.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.recording_id.to_le_bytes());
+        let checksum = if self.state == EMPTY {
+            0
+        } else {
+            crc32(&bytes[8..32])
+        };
+        bytes[4..8].copy_from_slice(&checksum.to_le_bytes());
+        bytes
+    }
+
+    /// The checks of "What a reader rejects" on an entry, in order, against the valid
+    /// entry before it: the first failure by name. An empty entry parses as itself, the
+    /// file's end, its other fields unread.
+    pub fn parse(bytes: &[u8], previous: Option<&TermsEntry>) -> Result<Self, TermsError> {
+        if bytes.len() < ENTRY_LENGTH {
+            return Err(TermsError::TooShort {
+                found: bytes.len() as u64,
+            });
+        }
+        let state = i32::from_le_bytes(bytes[..4].try_into().unwrap_or([0; 4]));
+        if state == EMPTY {
+            return Ok(Self {
+                state,
+                leadership_term_id: 0,
+                term_base_log_position: 0,
+                recording_id: 0,
+            });
+        }
+        if state != VALID && state != DELETED {
+            return Err(TermsError::State { found: state });
+        }
+        let checksum = u32::from_le_bytes(bytes[4..8].try_into().unwrap_or([0; 4]));
+        if checksum != crc32(&bytes[8..32]) {
+            return Err(TermsError::Checksum);
+        }
+        let leadership_term_id = i64::from_le_bytes(bytes[8..16].try_into().unwrap_or([0; 8]));
+        let term_base_log_position = i64::from_le_bytes(bytes[16..24].try_into().unwrap_or([0; 8]));
+        let recording_id = i64::from_le_bytes(bytes[24..32].try_into().unwrap_or([0; 8]));
+        if leadership_term_id < 0
+            || previous.is_some_and(|before| leadership_term_id <= before.leadership_term_id)
+        {
+            return Err(TermsError::Term {
+                found: leadership_term_id,
+            });
+        }
+        if term_base_log_position < 0
+            || term_base_log_position % 32 != 0
+            || previous.is_some_and(|before| term_base_log_position < before.term_base_log_position)
+        {
+            return Err(TermsError::Position {
+                found: term_base_log_position,
+            });
+        }
+        if recording_id < NO_RECORDING {
+            return Err(TermsError::Recording {
+                found: recording_id,
+            });
+        }
+        Ok(Self {
+            state,
+            leadership_term_id,
+            term_base_log_position,
+            recording_id,
+        })
+    }
+}
+
+/// The terms file, open for writing by the consensus module: the valid entries it
+/// holds, the candidate term, and the writes of "The driver", each synced before it
+/// returns.
+#[derive(Debug)]
+pub struct TermsFile {
+    path: PathBuf,
+    file: File,
+    candidate_term: i64,
+    /// Every entry in file order, deleted ones included, so that an index is a file
+    /// offset; bounded by [`MAX_ENTRIES`].
+    entries: Vec<TermsEntry>,
+}
+
+impl TermsFile {
+    /// The file's path in `dir`.
+    pub fn path_in(dir: &Path) -> PathBuf {
+        dir.join(FILE_NAME)
+    }
+
+    /// Creates the file in `dir` with its header, the candidate term −1 and no entry,
+    /// synced; a file already there is [`TermsError::Io`].
+    pub fn create(dir: &Path) -> Result<Self, TermsError> {
+        let path = Self::path_in(dir);
+        let io = |what: &'static str| {
+            let path = path.clone();
+            move |source| TermsError::Io { what, path, source }
+        };
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(io("create"))?;
+        let header = TermsHeader {
+            candidate_term: NO_CANDIDATE_TERM,
+        };
+        file.write_all(&header.encode()).map_err(io("write"))?;
+        file.sync_all().map_err(io("sync"))?;
+        Ok(Self {
+            path,
+            file,
+            candidate_term: NO_CANDIDATE_TERM,
+            entries: Vec::new(),
+        })
+    }
+
+    /// Opens the file in `dir`, reading its header and every entry up to the torn tail,
+    /// which the next write overwrites; a candidate checksum that does not match reads
+    /// as −1. Creates the file when there is none.
+    pub fn open(dir: &Path) -> Result<Self, TermsError> {
+        let path = Self::path_in(dir);
+        if !path.exists() {
+            return Self::create(dir);
+        }
+        let io = |what: &'static str| {
+            let path = path.clone();
+            move |source| TermsError::Io { what, path, source }
+        };
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(io("open"))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(io("read"))?;
+        let file_length = bytes.len() as u64;
+        let candidate_term = match TermsHeader::parse(&bytes, file_length) {
+            Ok(header) => header.candidate_term,
+            Err(TermsError::Candidate) => NO_CANDIDATE_TERM,
+            Err(error) => return Err(error),
+        };
+        let mut entries = Vec::new();
+        let mut previous: Option<TermsEntry> = None;
+        let whole = TermsHeader::entries(file_length);
+        for index in 0..whole {
+            let at = HEADER_LENGTH + index as usize * ENTRY_LENGTH;
+            let entry = match TermsEntry::parse(&bytes[at..at + ENTRY_LENGTH], previous.as_ref()) {
+                Ok(entry) => entry,
+                Err(TermsError::Checksum) => break,
+                Err(error) => return Err(error),
+            };
+            if entry.state == EMPTY {
+                break;
+            }
+            if entry.state == VALID {
+                previous = Some(entry);
+            }
+            entries.push(entry);
+        }
+        Ok(Self {
+            path,
+            file,
+            candidate_term,
+            entries,
+        })
+    }
+
+    /// The candidate term stored, −1 for none.
+    pub const fn candidate_term(&self) -> i64 {
+        self.candidate_term
+    }
+
+    /// The valid entries in order: the member's record of recorded terms.
+    pub fn terms(&self) -> impl Iterator<Item = &TermsEntry> {
+        self.entries.iter().filter(|entry| entry.state == VALID)
+    }
+
+    /// The highest term recorded, the member's log leadership term id, or −1 for none.
+    pub fn log_leadership_term_id(&self) -> i64 {
+        self.terms()
+            .last()
+            .map_or(-1, |entry| entry.leadership_term_id)
+    }
+
+    /// Appends a term: its fields, then its checksum, then the state, synced. The term
+    /// must be above the last valid one and its base at least the last valid base;
+    /// past [`MAX_ENTRIES`] it is [`TermsError::Full`].
+    pub fn append(
+        &mut self,
+        leadership_term_id: i64,
+        term_base_log_position: i64,
+        recording_id: i64,
+    ) -> Result<(), TermsError> {
+        if self.entries.len() as u64 >= MAX_ENTRIES {
+            return Err(TermsError::Full);
+        }
+        let entry = TermsEntry {
+            state: VALID,
+            leadership_term_id,
+            term_base_log_position,
+            recording_id,
+        };
+        let last = self.terms().last().copied();
+        TermsEntry::parse(&entry.encode(), last.as_ref())?;
+        let bytes = entry.encode();
+        let at = (HEADER_LENGTH + self.entries.len() * ENTRY_LENGTH) as u64;
+        // The fields and the checksum first, the state last, so that a crash between
+        // the two leaves an empty entry.
+        self.write_at(at + 4, &bytes[4..], "append")?;
+        self.write_at(at, &bytes[..4], "append")?;
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    /// Sets the recording id of the valid term `leadership_term_id`, once the term's
+    /// recording exists; a term not recorded is left alone.
+    pub fn set_recording(
+        &mut self,
+        leadership_term_id: i64,
+        recording_id: i64,
+    ) -> Result<(), TermsError> {
+        let Some(index) = self.entries.iter().position(|entry| {
+            entry.state == VALID && entry.leadership_term_id == leadership_term_id
+        }) else {
+            return Ok(());
+        };
+        let mut entry = self.entries[index];
+        entry.recording_id = recording_id;
+        let bytes = entry.encode();
+        let at = (HEADER_LENGTH + index * ENTRY_LENGTH) as u64;
+        self.write_at(at + 8, &bytes[8..], "write")?;
+        self.write_at(at + 4, &bytes[4..8], "write")?;
+        self.entries[index] = entry;
+        Ok(())
+    }
+
+    /// Truncates: every valid term whose base is above `position` is deleted, from the
+    /// last backwards, each write synced, so that a truncation drops the recorded terms
+    /// above the position (`spec/cluster.md`, "The log").
+    pub fn truncate_above(&mut self, position: i64) -> Result<(), TermsError> {
+        for index in (0..self.entries.len()).rev() {
+            let entry = self.entries[index];
+            if entry.state != VALID || entry.term_base_log_position <= position {
+                continue;
+            }
+            let at = (HEADER_LENGTH + index * ENTRY_LENGTH) as u64;
+            self.write_at(at, &DELETED.to_le_bytes(), "truncate")?;
+            self.entries[index].state = DELETED;
+        }
+        Ok(())
+    }
+
+    /// Stores the candidate term: the value, then its checksum, synced.
+    pub fn set_candidate_term(&mut self, candidate_term: i64) -> Result<(), TermsError> {
+        let header = TermsHeader { candidate_term };
+        let bytes = header.encode();
+        self.write_at(16, &bytes[16..24], "store")?;
+        self.write_at(24, &bytes[24..28], "store")?;
+        self.candidate_term = candidate_term;
+        Ok(())
+    }
+
+    fn write_at(&mut self, at: u64, bytes: &[u8], what: &'static str) -> Result<(), TermsError> {
+        let io = |what: &'static str| {
+            let path = self.path.clone();
+            move |source| TermsError::Io { what, path, source }
+        };
+        self.file.seek(SeekFrom::Start(at)).map_err(io(what))?;
+        self.file.write_all(bytes).map_err(io(what))?;
+        self.file.sync_all().map_err(io("sync"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cavalry-terms-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        dir
+    }
+
+    #[test]
+    fn a_created_file_reads_back_empty_and_an_appended_term_reads_back() {
+        let dir = dir("round-trip");
+        let mut file = TermsFile::create(&dir).expect("created");
+        assert_eq!(file.candidate_term(), NO_CANDIDATE_TERM);
+        assert_eq!(file.log_leadership_term_id(), -1);
+        file.append(2, 0, NO_RECORDING).expect("appended");
+        file.append(3, 4096, 1).expect("appended");
+        file.set_recording(2, 0).expect("set");
+        file.set_candidate_term(4).expect("stored");
+        drop(file);
+        let file = TermsFile::open(&dir).expect("opened");
+        let terms: Vec<_> = file.terms().copied().collect();
+        assert_eq!(terms.len(), 2);
+        assert_eq!(
+            (
+                terms[0].leadership_term_id,
+                terms[0].term_base_log_position,
+                terms[0].recording_id
+            ),
+            (2, 0, 0)
+        );
+        assert_eq!(
+            (
+                terms[1].leadership_term_id,
+                terms[1].term_base_log_position,
+                terms[1].recording_id
+            ),
+            (3, 4096, 1)
+        );
+        assert_eq!(file.candidate_term(), 4);
+        assert_eq!(file.log_leadership_term_id(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_truncation_deletes_the_terms_above_the_position_and_the_next_append_follows_them() {
+        let dir = dir("truncate");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.append(2, 0, 0).expect("appended");
+        file.append(3, 4096, 1).expect("appended");
+        file.append(4, 8192, 2).expect("appended");
+        file.truncate_above(4096).expect("truncated");
+        assert_eq!(file.log_leadership_term_id(), 3);
+        file.append(5, 4096, 3)
+            .expect("a term after the deleted one");
+        drop(file);
+        let file = TermsFile::open(&dir).expect("opened");
+        let terms: Vec<i64> = file.terms().map(|entry| entry.leadership_term_id).collect();
+        assert_eq!(terms, vec![2, 3, 5]);
+        assert_eq!(file.entries.len(), 4, "the deleted entry keeps its place");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_torn_tail_ends_the_file_and_a_torn_candidate_reads_as_none() {
+        let dir = dir("torn");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.append(2, 0, 0).expect("appended");
+        file.set_candidate_term(7).expect("stored");
+        drop(file);
+        let path = TermsFile::path_in(&dir);
+        let mut bytes = std::fs::read(&path).expect("read");
+        // A second entry with its fields written and its state not yet: empty.
+        let mut torn = TermsEntry {
+            state: VALID,
+            leadership_term_id: 3,
+            term_base_log_position: 4096,
+            recording_id: 1,
+        }
+        .encode();
+        torn[..4].copy_from_slice(&EMPTY.to_le_bytes());
+        bytes.extend_from_slice(&torn);
+        // A third entry whose checksum is wrong, as a crash mid-write leaves it.
+        let mut bad = TermsEntry {
+            state: VALID,
+            leadership_term_id: 4,
+            term_base_log_position: 8192,
+            recording_id: 2,
+        }
+        .encode();
+        bad[4] ^= 0xFF;
+        bytes.extend_from_slice(&bad);
+        // The candidate term's checksum torn.
+        bytes[24] ^= 0xFF;
+        std::fs::write(&path, &bytes).expect("written");
+        let file = TermsFile::open(&dir).expect("opened");
+        assert_eq!(file.terms().count(), 1);
+        assert_eq!(file.candidate_term(), NO_CANDIDATE_TERM);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_append_out_of_order_is_refused_and_the_bound_is_terms_full() {
+        let dir = dir("refused");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.append(3, 4096, 1).expect("appended");
+        assert_eq!(file.append(3, 4096, 2).unwrap_err().reason(), "term");
+        assert_eq!(file.append(4, 0, 2).unwrap_err().reason(), "position");
+        assert_eq!(file.append(4, 100, 2).unwrap_err().reason(), "position");
+        assert_eq!(file.append(4, 4096, -2).unwrap_err().reason(), "recording");
+        file.entries.resize(MAX_ENTRIES as usize, file.entries[0]);
+        assert_eq!(file.append(5, 4096, 2).unwrap_err().reason(), "terms-full");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

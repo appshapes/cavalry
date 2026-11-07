@@ -1,4 +1,4 @@
-# The durable log, version 0
+# The durable log, version 2
 
 The on-disk record of a stream: what the driver writes when it records a publication,
 and what `cavalry replay` and `just replay-check` read back. A directory, the driver's
@@ -7,7 +7,13 @@ time index per recording. The catalog and the time index each start with a heade
 carries a magic and a version, and a reader rejects a version it does not know; a
 segment file has no header, and the catalog's version governs it. In Aeron, this is
 Archive's catalog and recording segments
-([glossary](../docs/glossary.md)). Decided in ADR 0024; the slice is ADR 0023.
+([glossary](../docs/glossary.md)). Decided in ADR 0024; the slice is ADR 0023. Version
+1 added the retained group a slot may hold (ADR 0031). Version 2 adds the terms file,
+a cluster member's record of the terms it has recorded and the candidate term it has
+stored, which `spec/cluster.md`, "The log", names and which the consensus module of
+`cavalry-raft` writes and reads (ADR 0060); a directory with no cluster member has no
+terms file, and a reader of version 1 ignores one, as it ignores every file it does
+not name.
 
 Integers are little-endian; offsets and lengths are in bytes; signed fields are two's
 complement; a timestamp is nanoseconds since the Unix epoch as an i64. A position is
@@ -21,6 +27,7 @@ from the start of the stream, a multiple of 32.
 | `catalog` | The header and one 1024-byte slot per recording; a recording's id is its slot's index. |
 | `<recording id>-<segment base position>.rec` | A segment of the recording: the log buffer's raw term bytes from the segment base position, frame headers and padding included. |
 | `<recording id>.idx` | The time index: one (timestamp, position) entry at the start of the recording and then at most once per millisecond while the position moves. |
+| `terms` | A cluster member's record of recorded terms and its candidate term ("Terms"); absent on a driver that is no member. |
 
 A recording id and a segment base position are written in decimal with no sign and no
 leading zeros. Nothing else lives in the directory; a reader ignores files it does not
@@ -172,6 +179,47 @@ the replay's rule, not the format's. The granularity of an instant is the record
 cadence, one millisecond. The index and the segments grow with the recording until
 retention removes them.
 
+## Terms
+
+A cluster member's record of the terms it has recorded, each with its term base log
+position and the recording of the term in this directory, and the candidate term it
+has stored, the highest term it has voted in or proposed (`spec/cluster.md`, "The
+log"). In Aeron, this is the recording log and the node state file, one file here
+(ADR 0060). The file is `terms` in the log directory: a 64-byte header, then 32-byte
+entries in the order they were written.
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | magic | bytes | the bytes `43 56 4C 59 54 45 52 4D` (`CVLYTERM`) |
+| 8 | 4 | version | i32 | 0 |
+| 12 | 4 | entry length | i32 | 32 |
+| 16 | 8 | candidate term | i64 | −1 for none, else 0 or more |
+| 24 | 4 | candidate checksum | u32 | the zlib CRC32 of bytes 16 to 24 |
+| 28 | 36 | reserved | bytes | written as 0, never read |
+
+Entry i is at 64 + i × 32.
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 4 | state | i32 | 0, empty, the entry's other bytes are not read and the file ends here; 1, valid; 3, deleted, a term truncation dropped |
+| 4 | 4 | checksum | u32 | the zlib CRC32 of bytes 8 to 32 |
+| 8 | 8 | leadership term id | i64 | 0 or more, above every valid entry before it |
+| 16 | 8 | term base log position | i64 | 0 or more, a multiple of 32, at least every valid entry's before it |
+| 24 | 8 | recording id | i64 | the recording of this term in the catalog, or −1 while the term has none |
+
+The file holds at most 1048576 entries, the catalog's bound on recordings; a member
+that would record a term past it refuses with `terms full`, and the operator starts a
+new directory, as for a full catalog; `cavalry doctor` warns from 90 percent of it. A
+valid entry's term is above every valid entry's before it and its base at least
+theirs, so the entries a reader takes are the member's terms in order; the term base
+log position of the first term a member records is the position of its log at the
+time, 0 for a cluster's first term. The reader takes entries in file order, skips an
+entry whose state is 3, and stops at the first entry whose state is 0 or whose
+checksum fails, the torn tail of a crash, which the next write overwrites; a torn
+candidate checksum reads as a candidate term of −1, and the member's candidate term
+is then the higher of that and its log leadership term id, as "Roles and the
+election" of `spec/cluster.md` has init take it.
+
 ## The driver
 
 The driver is the directory's only writer; how it keeps a second driver out is its own
@@ -285,6 +333,18 @@ this version cannot tell a frame whose header survived but whose body did not fr
 whole one. A `start recording` whose channel is longer than 256 bytes or whose source
 identity is longer than 128 is refused with a named error before any slot is written.
 
+The consensus module is the terms file's only writer, from its own thread (ADR
+0060). It creates the file with its header, the candidate term −1, and syncs, before
+the member's first message; appends an entry by writing bytes 8 to 32, then the
+checksum, then the state, 1, and syncing, before the member reports an append position
+for the term; truncates by writing state 3 over each valid entry whose term base log
+position is above the truncation position, from the last entry backwards, and syncing,
+before the member reports its log leadership term id again; and raises the candidate
+term by writing the value, then its checksum, and syncing, before the vote or request
+vote that raises it is sent. A crash leaves at most one write torn, which the reader
+reads as the state before it. The recovery pass of this section leaves the file alone:
+it names files by recording id, and `terms` is none.
+
 ## What a reader rejects
 
 A reader checks each file in the order its table gives and reports the first failure by
@@ -342,12 +402,35 @@ A segment file has no header and one check, `frame`: the frame header at a posit
 does not carry the position's term id and term offset and the descriptor's session id
 and stream id, or the position is past the end of its segment file.
 
+The terms file, with the file's length:
+
+| Check | Reported when |
+| --- | --- |
+| `too-short` | The file is shorter than 64 bytes. |
+| `magic` | The magic is any other value than `CVLYTERM`. |
+| `version` | The version is not 0. |
+| `entry-length` | The entry length is not 32. |
+| `candidate` | The candidate checksum does not match bytes 16 to 24: the candidate term reads as −1, and the reader goes on. |
+| `length` | The file holds more than 1048576 whole entries. |
+
+An entry, with its index and the entry before it:
+
+| Check | Reported when |
+| --- | --- |
+| `state` | The state is not 0, 1 or 3. |
+| `checksum` | The state is 1 or 3 and the checksum does not match bytes 8 to 32: the file ends here. |
+| `term` | The term is below 0, or not above the valid entry before it. |
+| `position` | The term base log position is below 0, not a multiple of 32, or below the valid entry's before it. |
+| `recording` | The recording id is below −1. |
+
 ## Vectors
 
 `spec/vectors/durable-log.json`, written by `spec/vectors/durable-log.py`: catalog header
 vectors with the file length the reader sees and the whole slots it holds, under version
 0 and version 1; descriptor vectors with the slot index, in both forms, a valid vector's
 `fields` naming its `form`, 0 or 1, and its retained position;
-index header and entry vectors, an entry vector with the entry before it; and position
+index header and entry vectors, an entry vector with the entry before it; terms
+header vectors with the file length, and terms entry vectors with the entry's index and
+the valid entry before it, under version 2; and position
 vectors, arithmetic, from a descriptor's fields and a position to the segment file name,
 the segment base position, the offset in the segment, the term id and the term offset.

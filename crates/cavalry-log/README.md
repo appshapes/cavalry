@@ -5,6 +5,10 @@ The durable log: recording and replay. Data plane.
 ## What this does
 
 - Records a stream to disk as an ordered, replayable log, written by the driver.
+- Keeps a cluster member's terms file, `terms::TermsFile`, the record of the terms it
+  has recorded and its candidate term, one synced write per term and per vote, read
+  back at the member's start up to the torn tail of a crash (`spec/durable-log.md`,
+  "Terms"; ADR 0060).
 - Holds the log directory for the driver: `dir::LogDir` opens it under an exclusive
   advisory lock on the catalog, so two drivers never write one directory, and runs the
   recovery pass of the spec before any recording is added, reporting every action for
