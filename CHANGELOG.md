@@ -1618,3 +1618,11 @@ user-visible change, added in the same commit as the change. The format follows
   echoing it; both are reported and never gated until a host change
   gives them cores ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md),
   feature 1; `docs/how-to/run-the-bench.md`; card 225).
+- `spec/cluster.md` version 0 specifies the cluster protocol before any of it is built:
+  the members string and the four streams, the message header with schema 1 and
+  version 0, the log's entries, the eight consensus messages, the session protocol, the
+  snapshot marker, the election's eighteen states, the quorum and commit position rules,
+  the sessions, Aeron's timeouts as constants and what a reader rejects, with 181 vectors
+  from `spec/vectors/cluster.py` and a glossary row per term
+  ([ADR 0058](docs/decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md);
+  `docs/reference/cluster.md`; card 226).

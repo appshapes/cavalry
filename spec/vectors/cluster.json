@@ -1,0 +1,3389 @@
+{
+  "spec": "spec/cluster.md",
+  "version": 0,
+  "generated_by": "spec/vectors/cluster.py; do not edit by hand",
+  "vectors": [
+    {
+      "kind": "message",
+      "name": "session-message-log",
+      "stream": "log",
+      "bytes": "1800010001000000030000000000000007000000000000000010e49aa101000068656c6c6f",
+      "template": "session-message",
+      "fields": {
+        "leadership_term_id": 3,
+        "cluster_session_id": 7,
+        "timestamp": 1793600000000,
+        "payload": "68656c6c6f"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-message-ingress",
+      "stream": "ingress",
+      "bytes": "180001000100000003000000000000000700000000000000000000000000000068656c6c6f",
+      "template": "session-message",
+      "fields": {
+        "leadership_term_id": 3,
+        "cluster_session_id": 7,
+        "timestamp": 0,
+        "payload": "68656c6c6f"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-message-egress-empty",
+      "stream": "egress",
+      "bytes": "1800010001000000030000000000000007000000000000000010e49aa1010000",
+      "template": "session-message",
+      "fields": {
+        "leadership_term_id": 3,
+        "cluster_session_id": 7,
+        "timestamp": 1793600000000,
+        "payload": ""
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-event-ok",
+      "stream": "egress",
+      "bytes": "2c0002000100000007000000000000002900000000000000030000000000000000000000000000000000000000e40b540200000000000000",
+      "template": "session-event",
+      "fields": {
+        "cluster_session_id": 7,
+        "correlation_id": 41,
+        "leadership_term_id": 3,
+        "leader_member_id": 0,
+        "code": 0,
+        "version": 0,
+        "leader_heartbeat_timeout_ns": 10000000000,
+        "detail": ""
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-event-redirect",
+      "stream": "egress",
+      "bytes": "2c00020001000000ffffffffffffffff2900000000000000030000000000000001000000020000000000000000e40b540200000032000000303d31302e302e302e313a32303030302c313d31302e302e302e323a32303030302c323d31302e302e302e333a3230303030",
+      "template": "session-event",
+      "fields": {
+        "cluster_session_id": -1,
+        "correlation_id": 41,
+        "leadership_term_id": 3,
+        "leader_member_id": 1,
+        "code": 2,
+        "version": 0,
+        "leader_heartbeat_timeout_ns": 10000000000,
+        "detail": "0=10.0.0.1:20000,1=10.0.0.2:20000,2=10.0.0.3:20000"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-event-redirect-no-leader",
+      "stream": "egress",
+      "bytes": "2c00020001000000ffffffffffffffff29000000000000000300000000000000ffffffff020000000000000000e40b540200000032000000303d31302e302e302e313a32303030302c313d31302e302e302e323a32303030302c323d31302e302e302e333a3230303030",
+      "template": "session-event",
+      "fields": {
+        "cluster_session_id": -1,
+        "correlation_id": 41,
+        "leadership_term_id": 3,
+        "leader_member_id": -1,
+        "code": 2,
+        "version": 0,
+        "leader_heartbeat_timeout_ns": 10000000000,
+        "detail": "0=10.0.0.1:20000,1=10.0.0.2:20000,2=10.0.0.3:20000"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-event-error-version",
+      "stream": "egress",
+      "bytes": "2c00020001000000ffffffffffffffff2900000000000000030000000000000000000000010000000000000000e40b540200000016000000696e76616c696420636c69656e742076657273696f6e",
+      "template": "session-event",
+      "fields": {
+        "cluster_session_id": -1,
+        "correlation_id": 41,
+        "leadership_term_id": 3,
+        "leader_member_id": 0,
+        "code": 1,
+        "version": 0,
+        "leader_heartbeat_timeout_ns": 10000000000,
+        "detail": "invalid client version"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-event-error-limit",
+      "stream": "egress",
+      "bytes": "2c00020001000000ffffffffffffffff2900000000000000030000000000000000000000010000000000000000e40b540200000018000000636f6e63757272656e742073657373696f6e206c696d6974",
+      "template": "session-event",
+      "fields": {
+        "cluster_session_id": -1,
+        "correlation_id": 41,
+        "leadership_term_id": 3,
+        "leader_member_id": 0,
+        "code": 1,
+        "version": 0,
+        "leader_heartbeat_timeout_ns": 10000000000,
+        "detail": "concurrent session limit"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-event-error-channel",
+      "stream": "egress",
+      "bytes": "2c00020001000000ffffffffffffffff2900000000000000030000000000000000000000010000000000000000e40b540200000018000000696e76616c696420726573706f6e7365206368616e6e656c",
+      "template": "session-event",
+      "fields": {
+        "cluster_session_id": -1,
+        "correlation_id": 41,
+        "leadership_term_id": 3,
+        "leader_member_id": 0,
+        "code": 1,
+        "version": 0,
+        "leader_heartbeat_timeout_ns": 10000000000,
+        "detail": "invalid response channel"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-event-closed-timeout",
+      "stream": "egress",
+      "bytes": "2c000200010000000700000000000000ffffffffffffffff030000000000000000000000040000000000000000e40b54020000000700000054494d454f5554",
+      "template": "session-event",
+      "fields": {
+        "cluster_session_id": 7,
+        "correlation_id": -1,
+        "leadership_term_id": 3,
+        "leader_member_id": 0,
+        "code": 4,
+        "version": 0,
+        "leader_heartbeat_timeout_ns": 10000000000,
+        "detail": "TIMEOUT"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-connect",
+      "stream": "ingress",
+      "bytes": "10000300010000002900000000000000660000000000000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a3331303030000000000e000000717569636b737461727420302e31",
+      "template": "session-connect",
+      "fields": {
+        "correlation_id": 41,
+        "response_stream_id": 102,
+        "version": 0,
+        "response_channel": "cavalry:udp?endpoint=10.0.0.9:31000",
+        "encoded_credentials": "",
+        "client_info": "quickstart 0.1"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-connect-empty-info",
+      "stream": "ingress",
+      "bytes": "10000300010000002900000000000000660000000000000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a33313030300000000000000000",
+      "template": "session-connect",
+      "fields": {
+        "correlation_id": 41,
+        "response_stream_id": 102,
+        "version": 0,
+        "response_channel": "cavalry:udp?endpoint=10.0.0.9:31000",
+        "encoded_credentials": "",
+        "client_info": ""
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-connect-other-major",
+      "stream": "ingress",
+      "bytes": "10000300010000002900000000000000660000000000010023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a33313030300000000000000000",
+      "template": "session-connect",
+      "fields": {
+        "correlation_id": 41,
+        "response_stream_id": 102,
+        "version": 65536,
+        "response_channel": "cavalry:udp?endpoint=10.0.0.9:31000",
+        "encoded_credentials": "",
+        "client_info": ""
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-close",
+      "stream": "ingress",
+      "bytes": "100004000100000003000000000000000700000000000000",
+      "template": "session-close",
+      "fields": {
+        "leadership_term_id": 3,
+        "cluster_session_id": 7
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-keepalive",
+      "stream": "ingress",
+      "bytes": "100005000100000003000000000000000700000000000000",
+      "template": "session-keepalive",
+      "fields": {
+        "leadership_term_id": 3,
+        "cluster_session_id": 7
+      }
+    },
+    {
+      "kind": "message",
+      "name": "new-leader-event",
+      "stream": "egress",
+      "bytes": "1400060001000000040000000000000007000000000000000100000032000000303d31302e302e302e313a32303030302c313d31302e302e302e323a32303030302c323d31302e302e302e333a3230303030",
+      "template": "new-leader-event",
+      "fields": {
+        "leadership_term_id": 4,
+        "cluster_session_id": 7,
+        "leader_member_id": 1,
+        "ingress_endpoints": "0=10.0.0.1:20000,1=10.0.0.2:20000,2=10.0.0.3:20000"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "timer-event",
+      "stream": "log",
+      "bytes": "1800140001000000030000000000000063000000000000000010e49aa1010000",
+      "template": "timer-event",
+      "fields": {
+        "leadership_term_id": 3,
+        "correlation_id": 99,
+        "timestamp": 1793600000000
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-open-event",
+      "stream": "log",
+      "bytes": "24001500010000000300000000000000290000000000000007000000000000000010e49aa10100006600000023000000636176616c72793a7564703f656e64706f696e743d31302e302e302e393a333130303000000000",
+      "template": "session-open-event",
+      "fields": {
+        "leadership_term_id": 3,
+        "correlation_id": 41,
+        "cluster_session_id": 7,
+        "timestamp": 1793600000000,
+        "response_stream_id": 102,
+        "response_channel": "cavalry:udp?endpoint=10.0.0.9:31000",
+        "encoded_principal": ""
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-close-event-timeout",
+      "stream": "log",
+      "bytes": "1c00160001000000030000000000000007000000000000000010e49aa101000002000000",
+      "template": "session-close-event",
+      "fields": {
+        "leadership_term_id": 3,
+        "cluster_session_id": 7,
+        "timestamp": 1793600000000,
+        "close_reason": 2
+      }
+    },
+    {
+      "kind": "message",
+      "name": "session-close-event-client",
+      "stream": "log",
+      "bytes": "1c00160001000000030000000000000007000000000000000010e49aa101000000000000",
+      "template": "session-close-event",
+      "fields": {
+        "leadership_term_id": 3,
+        "cluster_session_id": 7,
+        "timestamp": 1793600000000,
+        "close_reason": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "cluster-action-snapshot",
+      "stream": "log",
+      "bytes": "2000170001000000030000000000000000000100000000000010e49aa10100000200000000000000",
+      "template": "cluster-action",
+      "fields": {
+        "leadership_term_id": 3,
+        "log_position": 65536,
+        "timestamp": 1793600000000,
+        "action": 2,
+        "flags": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "new-leadership-term-event",
+      "stream": "log",
+      "bytes": "3000180001000000030000000000000000000100000000000010e49aa1010000000001000000000000000000f56d9a420000000000000000",
+      "template": "new-leadership-term-event",
+      "fields": {
+        "leadership_term_id": 3,
+        "log_position": 65536,
+        "timestamp": 1793600000000,
+        "term_base_log_position": 65536,
+        "leader_member_id": 0,
+        "log_session_id": 1117416949,
+        "time_unit": 0,
+        "app_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "membership-change-event",
+      "stream": "log",
+      "bytes": "2800190001000000030000000000000000000100000000000010e49aa101000000000000030000000000000002000000e6000000302c31302e302e302e313a32303030302c31302e302e302e313a32303030312c31302e302e302e313a32303030322c31302e302e302e313a32303030332c31302e302e302e313a32303030347c312c31302e302e302e323a32303030302c31302e302e302e323a32303030312c31302e302e302e323a32303030322c31302e302e302e323a32303030332c31302e302e302e323a32303030347c322c31302e302e302e333a32303030302c31302e302e302e333a32303030312c31302e302e302e333a32303030322c31302e302e302e333a32303030332c31302e302e302e333a3230303034",
+      "template": "membership-change-event",
+      "fields": {
+        "leadership_term_id": 3,
+        "log_position": 65536,
+        "timestamp": 1793600000000,
+        "leader_member_id": 0,
+        "cluster_size": 3,
+        "change_type": 0,
+        "member_id": 2,
+        "cluster_members": "0,10.0.0.1:20000,10.0.0.1:20001,10.0.0.1:20002,10.0.0.1:20003,10.0.0.1:20004|1,10.0.0.2:20000,10.0.0.2:20001,10.0.0.2:20002,10.0.0.2:20003,10.0.0.2:20004|2,10.0.0.3:20000,10.0.0.3:20001,10.0.0.3:20002,10.0.0.3:20003,10.0.0.3:20004"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "canvass-position",
+      "stream": "consensus",
+      "bytes": "20003200010000000200000000000000000001000000000002000000000000000100000000000000",
+      "template": "canvass-position",
+      "fields": {
+        "log_leadership_term_id": 2,
+        "log_position": 65536,
+        "leadership_term_id": 2,
+        "follower_member_id": 1,
+        "protocol_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "canvass-position-empty-log",
+      "stream": "consensus",
+      "bytes": "2000320001000000ffffffffffffffff0000000000000000ffffffffffffffff0100000000000000",
+      "template": "canvass-position",
+      "fields": {
+        "log_leadership_term_id": -1,
+        "log_position": 0,
+        "leadership_term_id": -1,
+        "follower_member_id": 1,
+        "protocol_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "request-vote",
+      "stream": "consensus",
+      "bytes": "20003300010000000200000000000000000001000000000003000000000000000100000000000000",
+      "template": "request-vote",
+      "fields": {
+        "log_leadership_term_id": 2,
+        "log_position": 65536,
+        "candidate_term_id": 3,
+        "candidate_member_id": 1,
+        "protocol_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "vote-for",
+      "stream": "consensus",
+      "bytes": "2400340001000000030000000000000002000000000000000000010000000000010000000200000001000000",
+      "template": "vote",
+      "fields": {
+        "candidate_term_id": 3,
+        "log_leadership_term_id": 2,
+        "log_position": 65536,
+        "candidate_member_id": 1,
+        "follower_member_id": 2,
+        "vote": 1
+      }
+    },
+    {
+      "kind": "message",
+      "name": "vote-against",
+      "stream": "consensus",
+      "bytes": "2400340001000000030000000000000002000000000000000000010000000000010000000200000000000000",
+      "template": "vote",
+      "fields": {
+        "candidate_term_id": 3,
+        "log_leadership_term_id": 2,
+        "log_position": 65536,
+        "candidate_member_id": 1,
+        "follower_member_id": 2,
+        "vote": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "new-leadership-term",
+      "stream": "consensus",
+      "bytes": "6000350001000000020000000000000003000000000000000000010000000000ffffffffffffffff03000000000000000000010000000000008001000000000000000000000000000010e49aa101000000000000f56d9a4200000000000000000080010000000000",
+      "template": "new-leadership-term",
+      "fields": {
+        "log_leadership_term_id": 2,
+        "next_leadership_term_id": 3,
+        "next_term_base_log_position": 65536,
+        "next_log_position": -1,
+        "leadership_term_id": 3,
+        "term_base_log_position": 65536,
+        "log_position": 98304,
+        "leader_recording_id": 0,
+        "timestamp": 1793600000000,
+        "leader_member_id": 0,
+        "log_session_id": 1117416949,
+        "app_version": 0,
+        "is_startup": 0,
+        "commit_position": 98304
+      }
+    },
+    {
+      "kind": "message",
+      "name": "new-leadership-term-first",
+      "stream": "consensus",
+      "bytes": "6000350001000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff000000000000000000000000000000000000000000000000ffffffffffffffff0010e49aa101000000000000f56d9a4200000000010000000000000000000000",
+      "template": "new-leadership-term",
+      "fields": {
+        "log_leadership_term_id": -1,
+        "next_leadership_term_id": -1,
+        "next_term_base_log_position": -1,
+        "next_log_position": -1,
+        "leadership_term_id": 0,
+        "term_base_log_position": 0,
+        "log_position": 0,
+        "leader_recording_id": -1,
+        "timestamp": 1793600000000,
+        "leader_member_id": 0,
+        "log_session_id": 1117416949,
+        "app_version": 0,
+        "is_startup": 1,
+        "commit_position": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "append-position-catchup",
+      "stream": "consensus",
+      "bytes": "1500360001000000030000000000000000800100000000000100000001",
+      "template": "append-position",
+      "fields": {
+        "leadership_term_id": 3,
+        "log_position": 98304,
+        "follower_member_id": 1,
+        "flags": 1
+      }
+    },
+    {
+      "kind": "message",
+      "name": "append-position",
+      "stream": "consensus",
+      "bytes": "1500360001000000030000000000000000800100000000000100000000",
+      "template": "append-position",
+      "fields": {
+        "leadership_term_id": 3,
+        "log_position": 98304,
+        "follower_member_id": 1,
+        "flags": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "commit-position",
+      "stream": "consensus",
+      "bytes": "14003700010000000300000000000000008001000000000000000000",
+      "template": "commit-position",
+      "fields": {
+        "leadership_term_id": 3,
+        "log_position": 98304,
+        "leader_member_id": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "catchup-position",
+      "stream": "consensus",
+      "bytes": "140038000100000003000000000000000000010000000000020000000e00000031302e302e302e333a3230303033",
+      "template": "catchup-position",
+      "fields": {
+        "leadership_term_id": 3,
+        "log_position": 65536,
+        "follower_member_id": 2,
+        "catchup_endpoint": "10.0.0.3:20003"
+      }
+    },
+    {
+      "kind": "message",
+      "name": "stop-catchup",
+      "stream": "consensus",
+      "bytes": "0c00390001000000030000000000000002000000",
+      "template": "stop-catchup",
+      "fields": {
+        "leadership_term_id": 3,
+        "follower_member_id": 2
+      }
+    },
+    {
+      "kind": "message",
+      "name": "snapshot-marker-begin",
+      "stream": "snapshot",
+      "bytes": "280064000100000001000000000000000080010000000000030000000000000000000000000000000000000000000000",
+      "template": "snapshot-marker",
+      "fields": {
+        "type_id": 1,
+        "log_position": 98304,
+        "leadership_term_id": 3,
+        "index": 0,
+        "mark": 0,
+        "time_unit": 0,
+        "app_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "snapshot-marker-section",
+      "stream": "snapshot",
+      "bytes": "280064000100000001000000000000000080010000000000030000000000000002000000010000000000000000000000",
+      "template": "snapshot-marker",
+      "fields": {
+        "type_id": 1,
+        "log_position": 98304,
+        "leadership_term_id": 3,
+        "index": 2,
+        "mark": 1,
+        "time_unit": 0,
+        "app_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "snapshot-marker-end",
+      "stream": "snapshot",
+      "bytes": "280064000100000001000000000000000080010000000000030000000000000000000000020000000000000000000000",
+      "template": "snapshot-marker",
+      "fields": {
+        "type_id": 1,
+        "log_position": 98304,
+        "leadership_term_id": 3,
+        "index": 0,
+        "mark": 2,
+        "time_unit": 0,
+        "app_version": 0
+      }
+    },
+    {
+      "kind": "message",
+      "name": "reject-too-short-header",
+      "stream": "consensus",
+      "bytes": "14003700010000",
+      "error": "too-short"
+    },
+    {
+      "kind": "message",
+      "name": "reject-too-short-block",
+      "stream": "consensus",
+      "bytes": "14003700010000000300000000000000",
+      "error": "too-short"
+    },
+    {
+      "kind": "message",
+      "name": "reject-schema",
+      "stream": "consensus",
+      "bytes": "14003700020000000300000000000000008001000000000000000000",
+      "error": "schema"
+    },
+    {
+      "kind": "message",
+      "name": "reject-version-header",
+      "stream": "consensus",
+      "bytes": "14003700010001000300000000000000008001000000000000000000",
+      "error": "version"
+    },
+    {
+      "kind": "message",
+      "name": "reject-template-reserved",
+      "stream": "consensus",
+      "bytes": "100007000100000000000000000000000000000000000000",
+      "error": "template"
+    },
+    {
+      "kind": "message",
+      "name": "reject-template-unknown",
+      "stream": "consensus",
+      "bytes": "14000900010000000000000000000000000000000000000000000000",
+      "error": "template"
+    },
+    {
+      "kind": "message",
+      "name": "reject-stream",
+      "stream": "log",
+      "bytes": "14003700010000000300000000000000008001000000000000000000",
+      "error": "stream"
+    },
+    {
+      "kind": "message",
+      "name": "reject-block-length",
+      "stream": "consensus",
+      "bytes": "1500370001000000030000000000000000800100000000000000000000",
+      "error": "block-length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-length-variable-field",
+      "stream": "consensus",
+      "bytes": "140038000100000003000000000000000000010000000000020000000e00000031302e302e302e333a32",
+      "error": "length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-length-trailing",
+      "stream": "ingress",
+      "bytes": "10000400010000000300000000000000070000000000000000000000",
+      "error": "length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-version-field-major",
+      "stream": "consensus",
+      "bytes": "20003200010000000200000000000000000001000000000002000000000000000100000000000100",
+      "error": "version"
+    },
+    {
+      "kind": "message",
+      "name": "reject-version-field-negative",
+      "stream": "consensus",
+      "bytes": "2000330001000000020000000000000000000100000000000300000000000000010000000000ffff",
+      "error": "version"
+    },
+    {
+      "kind": "message",
+      "name": "reject-version-field-minus-one",
+      "stream": "consensus",
+      "bytes": "200032000100000002000000000000000000010000000000020000000000000001000000ffffffff",
+      "error": "version"
+    },
+    {
+      "kind": "message",
+      "name": "reject-length-before-version-field",
+      "stream": "consensus",
+      "bytes": "2000320001000000020000000000000000000100000000000200000000000000010000000000010000000000",
+      "error": "length"
+    },
+    {
+      "kind": "message",
+      "name": "reject-version-field-before-member-id",
+      "stream": "consensus",
+      "bytes": "2000320001000000020000000000000000000100000000000200000000000000feffffff00000100",
+      "error": "version"
+    },
+    {
+      "kind": "message",
+      "name": "reject-enum-code",
+      "stream": "egress",
+      "bytes": "2c0002000100000007000000000000002900000000000000030000000000000000000000050000000000000000e40b540200000000000000",
+      "error": "enum"
+    },
+    {
+      "kind": "message",
+      "name": "reject-enum-close-reason",
+      "stream": "log",
+      "bytes": "1c00160001000000030000000000000007000000000000000010e49aa101000003000000",
+      "error": "enum"
+    },
+    {
+      "kind": "message",
+      "name": "reject-enum-action",
+      "stream": "log",
+      "bytes": "2000170001000000030000000000000000000100000000000010e49aa10100000300000000000000",
+      "error": "enum"
+    },
+    {
+      "kind": "message",
+      "name": "reject-enum-change-type",
+      "stream": "log",
+      "bytes": "2800190001000000030000000000000000000100000000000010e49aa101000000000000030000000200000002000000e6000000302c31302e302e302e313a32303030302c31302e302e302e313a32303030312c31302e302e302e313a32303030322c31302e302e302e313a32303030332c31302e302e302e313a32303030347c312c31302e302e302e323a32303030302c31302e302e302e323a32303030312c31302e302e302e323a32303030322c31302e302e302e323a32303030332c31302e302e302e323a32303030347c322c31302e302e302e333a32303030302c31302e302e302e333a32303030312c31302e302e302e333a32303030322c31302e302e302e333a32303030332c31302e302e302e333a3230303034",
+      "error": "enum"
+    },
+    {
+      "kind": "message",
+      "name": "reject-enum-mark",
+      "stream": "snapshot",
+      "bytes": "280064000100000001000000000000000080010000000000030000000000000000000000030000000000000000000000",
+      "error": "enum"
+    },
+    {
+      "kind": "message",
+      "name": "reject-enum-time-unit",
+      "stream": "log",
+      "bytes": "3000180001000000030000000000000000000100000000000010e49aa1010000000001000000000000000000f56d9a420100000000000000",
+      "error": "enum"
+    },
+    {
+      "kind": "message",
+      "name": "reject-enum-vote",
+      "stream": "consensus",
+      "bytes": "2400340001000000030000000000000002000000000000000000010000000000010000000200000002000000",
+      "error": "enum"
+    },
+    {
+      "kind": "message",
+      "name": "reject-enum-is-startup",
+      "stream": "consensus",
+      "bytes": "6000350001000000020000000000000003000000000000000000010000000000ffffffffffffffff03000000000000000000010000000000008001000000000000000000000000000010e49aa101000000000000f56d9a4200000000020000000080010000000000",
+      "error": "enum"
+    },
+    {
+      "kind": "message",
+      "name": "reject-ascii",
+      "stream": "egress",
+      "bytes": "1400060001000000040000000000000007000000000000000100000010000000300131302e302e302e313a3230303030",
+      "error": "ascii"
+    },
+    {
+      "kind": "message",
+      "name": "reject-member-id-negative",
+      "stream": "consensus",
+      "bytes": "140037000100000003000000000000000080010000000000ffffffff",
+      "error": "member-id"
+    },
+    {
+      "kind": "message",
+      "name": "reject-member-id-below-null",
+      "stream": "egress",
+      "bytes": "2c00020001000000070000000000000029000000000000000300000000000000feffffff000000000000000000e40b540200000000000000",
+      "error": "member-id"
+    },
+    {
+      "kind": "message",
+      "name": "reject-position-negative",
+      "stream": "consensus",
+      "bytes": "15003600010000000300000000000000ffffffffffffffff0100000001",
+      "error": "position"
+    },
+    {
+      "kind": "message",
+      "name": "reject-position-below-null",
+      "stream": "consensus",
+      "bytes": "6000350001000000020000000000000003000000000000000000010000000000feffffffffffffff03000000000000000000010000000000008001000000000000000000000000000010e49aa101000000000000f56d9a4200000000000000000080010000000000",
+      "error": "position"
+    },
+    {
+      "kind": "message",
+      "name": "reject-term",
+      "stream": "consensus",
+      "bytes": "2400340001000000feffffffffffffff02000000000000000000010000000000010000000200000001000000",
+      "error": "term"
+    },
+    {
+      "kind": "members",
+      "name": "members-three",
+      "string": "0,10.0.0.1:20000,10.0.0.1:20001,10.0.0.1:20002,10.0.0.1:20003,10.0.0.1:20004|1,10.0.0.2:20000,10.0.0.2:20001,10.0.0.2:20002,10.0.0.2:20003,10.0.0.2:20004|2,10.0.0.3:20000,10.0.0.3:20001,10.0.0.3:20002,10.0.0.3:20003,10.0.0.3:20004",
+      "self_id": 1,
+      "members": [
+        {
+          "id": 0,
+          "ingress": {
+            "host": "10.0.0.1",
+            "port": 20000
+          },
+          "consensus": {
+            "host": "10.0.0.1",
+            "port": 20001
+          },
+          "log": {
+            "host": "10.0.0.1",
+            "port": 20002
+          },
+          "catchup": {
+            "host": "10.0.0.1",
+            "port": 20003
+          },
+          "archive": {
+            "host": "10.0.0.1",
+            "port": 20004
+          }
+        },
+        {
+          "id": 1,
+          "ingress": {
+            "host": "10.0.0.2",
+            "port": 20000
+          },
+          "consensus": {
+            "host": "10.0.0.2",
+            "port": 20001
+          },
+          "log": {
+            "host": "10.0.0.2",
+            "port": 20002
+          },
+          "catchup": {
+            "host": "10.0.0.2",
+            "port": 20003
+          },
+          "archive": {
+            "host": "10.0.0.2",
+            "port": 20004
+          }
+        },
+        {
+          "id": 2,
+          "ingress": {
+            "host": "10.0.0.3",
+            "port": 20000
+          },
+          "consensus": {
+            "host": "10.0.0.3",
+            "port": 20001
+          },
+          "log": {
+            "host": "10.0.0.3",
+            "port": 20002
+          },
+          "catchup": {
+            "host": "10.0.0.3",
+            "port": 20003
+          },
+          "archive": {
+            "host": "10.0.0.3",
+            "port": 20004
+          }
+        }
+      ]
+    },
+    {
+      "kind": "members",
+      "name": "members-one",
+      "string": "0,a:1,a:2,a:3,a:4,a:5",
+      "members": [
+        {
+          "id": 0,
+          "ingress": {
+            "host": "a",
+            "port": 1
+          },
+          "consensus": {
+            "host": "a",
+            "port": 2
+          },
+          "log": {
+            "host": "a",
+            "port": 3
+          },
+          "catchup": {
+            "host": "a",
+            "port": 4
+          },
+          "archive": {
+            "host": "a",
+            "port": 5
+          }
+        }
+      ]
+    },
+    {
+      "kind": "members",
+      "name": "members-ipv6",
+      "string": "0,[::1]:20000,[::1]:20001,[::1]:20002,[::1]:20003,[::1]:20004",
+      "members": [
+        {
+          "id": 0,
+          "ingress": {
+            "host": "::1",
+            "port": 20000
+          },
+          "consensus": {
+            "host": "::1",
+            "port": 20001
+          },
+          "log": {
+            "host": "::1",
+            "port": 20002
+          },
+          "catchup": {
+            "host": "::1",
+            "port": 20003
+          },
+          "archive": {
+            "host": "::1",
+            "port": 20004
+          }
+        }
+      ]
+    },
+    {
+      "kind": "members",
+      "name": "members-eight",
+      "string": "0,h0:1,h0:2,h0:3,h0:4,h0:5|1,h1:1,h1:2,h1:3,h1:4,h1:5|2,h2:1,h2:2,h2:3,h2:4,h2:5|3,h3:1,h3:2,h3:3,h3:4,h3:5|4,h4:1,h4:2,h4:3,h4:4,h4:5|5,h5:1,h5:2,h5:3,h5:4,h5:5|6,h6:1,h6:2,h6:3,h6:4,h6:5|7,h7:1,h7:2,h7:3,h7:4,h7:5",
+      "members": [
+        {
+          "id": 0,
+          "ingress": {
+            "host": "h0",
+            "port": 1
+          },
+          "consensus": {
+            "host": "h0",
+            "port": 2
+          },
+          "log": {
+            "host": "h0",
+            "port": 3
+          },
+          "catchup": {
+            "host": "h0",
+            "port": 4
+          },
+          "archive": {
+            "host": "h0",
+            "port": 5
+          }
+        },
+        {
+          "id": 1,
+          "ingress": {
+            "host": "h1",
+            "port": 1
+          },
+          "consensus": {
+            "host": "h1",
+            "port": 2
+          },
+          "log": {
+            "host": "h1",
+            "port": 3
+          },
+          "catchup": {
+            "host": "h1",
+            "port": 4
+          },
+          "archive": {
+            "host": "h1",
+            "port": 5
+          }
+        },
+        {
+          "id": 2,
+          "ingress": {
+            "host": "h2",
+            "port": 1
+          },
+          "consensus": {
+            "host": "h2",
+            "port": 2
+          },
+          "log": {
+            "host": "h2",
+            "port": 3
+          },
+          "catchup": {
+            "host": "h2",
+            "port": 4
+          },
+          "archive": {
+            "host": "h2",
+            "port": 5
+          }
+        },
+        {
+          "id": 3,
+          "ingress": {
+            "host": "h3",
+            "port": 1
+          },
+          "consensus": {
+            "host": "h3",
+            "port": 2
+          },
+          "log": {
+            "host": "h3",
+            "port": 3
+          },
+          "catchup": {
+            "host": "h3",
+            "port": 4
+          },
+          "archive": {
+            "host": "h3",
+            "port": 5
+          }
+        },
+        {
+          "id": 4,
+          "ingress": {
+            "host": "h4",
+            "port": 1
+          },
+          "consensus": {
+            "host": "h4",
+            "port": 2
+          },
+          "log": {
+            "host": "h4",
+            "port": 3
+          },
+          "catchup": {
+            "host": "h4",
+            "port": 4
+          },
+          "archive": {
+            "host": "h4",
+            "port": 5
+          }
+        },
+        {
+          "id": 5,
+          "ingress": {
+            "host": "h5",
+            "port": 1
+          },
+          "consensus": {
+            "host": "h5",
+            "port": 2
+          },
+          "log": {
+            "host": "h5",
+            "port": 3
+          },
+          "catchup": {
+            "host": "h5",
+            "port": 4
+          },
+          "archive": {
+            "host": "h5",
+            "port": 5
+          }
+        },
+        {
+          "id": 6,
+          "ingress": {
+            "host": "h6",
+            "port": 1
+          },
+          "consensus": {
+            "host": "h6",
+            "port": 2
+          },
+          "log": {
+            "host": "h6",
+            "port": 3
+          },
+          "catchup": {
+            "host": "h6",
+            "port": 4
+          },
+          "archive": {
+            "host": "h6",
+            "port": 5
+          }
+        },
+        {
+          "id": 7,
+          "ingress": {
+            "host": "h7",
+            "port": 1
+          },
+          "consensus": {
+            "host": "h7",
+            "port": 2
+          },
+          "log": {
+            "host": "h7",
+            "port": 3
+          },
+          "catchup": {
+            "host": "h7",
+            "port": 4
+          },
+          "archive": {
+            "host": "h7",
+            "port": 5
+          }
+        }
+      ]
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-empty",
+      "string": "",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-five-fields",
+      "string": "0,a:1,a:2,a:3,a:4",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-seven-fields",
+      "string": "0,a:1,a:2,a:3,a:4,a:5,a:6",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-id-not-integer",
+      "string": "x,a:1,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-id-negative",
+      "string": "-1,a:1,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-id-too-large",
+      "string": "2147483648,a:1,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-no-port",
+      "string": "0,a,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-empty-host",
+      "string": "0,:1,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-port-zero",
+      "string": "0,a:0,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-port-too-large",
+      "string": "0,a:65536,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-id-not-ascii-digit",
+      "string": "1\u00b2,a:1,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-port-not-ascii-digit",
+      "string": "0,a:\u0663,a:2,a:3,a:4,a:5",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-ipv6-unbracketed",
+      "string": "0,::1:20000,[::1]:20001,[::1]:20002,[::1]:20003,[::1]:20004",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-grammar-before-duplicate",
+      "string": "0,a:1,a:2,a:3,a:4,a:5|0,b:1,b:2,b:3,b",
+      "error": "members-grammar"
+    },
+    {
+      "kind": "members",
+      "name": "members-duplicate",
+      "string": "0,a:1,a:2,a:3,a:4,a:5|0,b:1,b:2,b:3,b:4,b:5",
+      "error": "members-duplicate"
+    },
+    {
+      "kind": "members",
+      "name": "members-count",
+      "string": "0,h0:1,h0:2,h0:3,h0:4,h0:5|1,h1:1,h1:2,h1:3,h1:4,h1:5|2,h2:1,h2:2,h2:3,h2:4,h2:5|3,h3:1,h3:2,h3:3,h3:4,h3:5|4,h4:1,h4:2,h4:3,h4:4,h4:5|5,h5:1,h5:2,h5:3,h5:4,h5:5|6,h6:1,h6:2,h6:3,h6:4,h6:5|7,h7:1,h7:2,h7:3,h7:4,h7:5|8,h8:1,h8:2,h8:3,h8:4,h8:5",
+      "error": "members-count"
+    },
+    {
+      "kind": "members",
+      "name": "members-self",
+      "string": "0,10.0.0.1:20000,10.0.0.1:20001,10.0.0.1:20002,10.0.0.1:20003,10.0.0.1:20004|1,10.0.0.2:20000,10.0.0.2:20001,10.0.0.2:20002,10.0.0.2:20003,10.0.0.2:20004|2,10.0.0.3:20000,10.0.0.3:20001,10.0.0.3:20002,10.0.0.3:20003,10.0.0.3:20004",
+      "self_id": 3,
+      "error": "members-self"
+    },
+    {
+      "kind": "arithmetic",
+      "name": "quorum-of-1",
+      "rule": "quorum",
+      "inputs": {
+        "members": 1
+      },
+      "fields": {
+        "quorum": 1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "quorum-of-2",
+      "rule": "quorum",
+      "inputs": {
+        "members": 2
+      },
+      "fields": {
+        "quorum": 2
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "quorum-of-3",
+      "rule": "quorum",
+      "inputs": {
+        "members": 3
+      },
+      "fields": {
+        "quorum": 2
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "quorum-of-4",
+      "rule": "quorum",
+      "inputs": {
+        "members": 4
+      },
+      "fields": {
+        "quorum": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "quorum-of-5",
+      "rule": "quorum",
+      "inputs": {
+        "members": 5
+      },
+      "fields": {
+        "quorum": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "quorum-of-6",
+      "rule": "quorum",
+      "inputs": {
+        "members": 6
+      },
+      "fields": {
+        "quorum": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "quorum-of-7",
+      "rule": "quorum",
+      "inputs": {
+        "members": 7
+      },
+      "fields": {
+        "quorum": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "quorum-of-8",
+      "rule": "quorum",
+      "inputs": {
+        "members": 8
+      },
+      "fields": {
+        "quorum": 5
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-all-level",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 98304,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 98304,
+            "age_ns": 1000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 98304,
+            "age_ns": 1000,
+            "term": 3
+          }
+        ],
+        "leader_position": 98304,
+        "leader_term": 3,
+        "term_base": 0
+      },
+      "fields": {
+        "quorum_position": 98304,
+        "commit_position": 98304
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-slowest-left-out",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 98304,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 98304,
+            "age_ns": 1000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 65536,
+            "age_ns": 1000,
+            "term": 3
+          }
+        ],
+        "leader_position": 98304,
+        "leader_term": 3,
+        "term_base": 0
+      },
+      "fields": {
+        "quorum_position": 98304,
+        "commit_position": 98304
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-follower-ahead-of-leader",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 65536,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 98304,
+            "age_ns": 1000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 98304,
+            "age_ns": 1000,
+            "term": 3
+          }
+        ],
+        "leader_position": 65536,
+        "leader_term": 3,
+        "term_base": 0
+      },
+      "fields": {
+        "quorum_position": 98304,
+        "commit_position": 65536
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-inactive-member",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 98304,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 98304,
+            "age_ns": 10000000000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 65536,
+            "age_ns": 1000,
+            "term": 3
+          }
+        ],
+        "leader_position": 98304,
+        "leader_term": 3,
+        "term_base": 0
+      },
+      "fields": {
+        "quorum_position": 65536,
+        "commit_position": 65536
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-no-quorum-active",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 98304,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 98304,
+            "age_ns": 20000000000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 98304,
+            "age_ns": 20000000000,
+            "term": 3
+          }
+        ],
+        "leader_position": 98304,
+        "leader_term": 3,
+        "term_base": 0
+      },
+      "fields": {
+        "quorum_position": 0,
+        "commit_position": 0
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-five-members",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 500,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 400,
+            "age_ns": 1,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 300,
+            "age_ns": 1,
+            "term": 3
+          },
+          {
+            "member": 3,
+            "position": 200,
+            "age_ns": 1,
+            "term": 3
+          },
+          {
+            "member": 4,
+            "position": 100,
+            "age_ns": 1,
+            "term": 3
+          }
+        ],
+        "leader_position": 500,
+        "leader_term": 3,
+        "term_base": 0
+      },
+      "fields": {
+        "quorum_position": 300,
+        "commit_position": 300
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-below-base-not-counted",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 1100,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 1000,
+            "age_ns": 1000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 960,
+            "age_ns": 1000,
+            "term": 3
+          }
+        ],
+        "leader_position": 1100,
+        "leader_term": 3,
+        "term_base": 1000
+      },
+      "fields": {
+        "quorum_position": 1000,
+        "commit_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-older-term-not-counted",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 1100,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 1100,
+            "age_ns": 1000,
+            "term": 1
+          },
+          {
+            "member": 2,
+            "position": 1000,
+            "age_ns": 1000,
+            "term": 1
+          }
+        ],
+        "leader_position": 1100,
+        "leader_term": 3,
+        "term_base": 1000
+      },
+      "fields": {
+        "quorum_position": 0,
+        "commit_position": 0
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "commit-position-at-base-counts",
+      "rule": "commit-position",
+      "inputs": {
+        "positions": [
+          {
+            "member": 0,
+            "position": 1100,
+            "age_ns": 0,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "position": 1000,
+            "age_ns": 1000,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "position": 960,
+            "age_ns": 1000,
+            "term": 1
+          }
+        ],
+        "leader_position": 1100,
+        "leader_term": 3,
+        "term_base": 1000
+      },
+      "fields": {
+        "quorum_position": 1000,
+        "commit_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-higher-term",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 3,
+        "position": 0,
+        "other_term": 2,
+        "other_position": 98304
+      },
+      "fields": {
+        "at_least": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-lower-term",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 2,
+        "position": 98304,
+        "other_term": 3,
+        "other_position": 0
+      },
+      "fields": {
+        "at_least": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-same-term-ahead",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 3,
+        "position": 98304,
+        "other_term": 3,
+        "other_position": 65536
+      },
+      "fields": {
+        "at_least": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-same-term-behind",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 3,
+        "position": 65536,
+        "other_term": 3,
+        "other_position": 98304
+      },
+      "fields": {
+        "at_least": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-equal",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 3,
+        "position": 65536,
+        "other_term": 3,
+        "other_position": 65536
+      },
+      "fields": {
+        "at_least": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-joined-term-no-entries",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 1,
+        "position": 1100,
+        "other_term": 2,
+        "other_position": 1000
+      },
+      "fields": {
+        "at_least": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-joined-term-outranks-longer-log",
+      "rule": "compare-log",
+      "inputs": {
+        "term": 2,
+        "position": 1000,
+        "other_term": 1,
+        "other_position": 1100
+      },
+      "fields": {
+        "at_least": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "compare-log-empty",
+      "rule": "compare-log",
+      "inputs": {
+        "term": -1,
+        "position": 0,
+        "other_term": 0,
+        "other_position": 0
+      },
+      "fields": {
+        "at_least": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-unanimous",
+      "rule": "ballot",
+      "inputs": {
+        "members": 3,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "vote": true,
+            "term": 3
+          }
+        ],
+        "timeout_passed": false
+      },
+      "fields": {
+        "leader": true,
+        "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-quorum-before-timeout",
+      "rule": "ballot",
+      "inputs": {
+        "members": 3,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "vote": true,
+            "term": 3
+          }
+        ],
+        "timeout_passed": false
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-quorum-at-timeout",
+      "rule": "ballot",
+      "inputs": {
+        "members": 3,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "vote": true,
+            "term": 3
+          }
+        ],
+        "timeout_passed": true
+      },
+      "fields": {
+        "leader": true,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-one-against",
+      "rule": "ballot",
+      "inputs": {
+        "members": 3,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 2,
+            "vote": false,
+            "term": 3
+          }
+        ],
+        "timeout_passed": true
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-short-of-quorum",
+      "rule": "ballot",
+      "inputs": {
+        "members": 5,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          },
+          {
+            "member": 1,
+            "vote": true,
+            "term": 3
+          }
+        ],
+        "timeout_passed": true
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-votes-for-an-older-term-not-leader",
+      "rule": "ballot",
+      "inputs": {
+        "members": 5,
+        "candidate_term": 5,
+        "votes": [
+          {
+            "member": 2,
+            "vote": true,
+            "term": 4
+          },
+          {
+            "member": 0,
+            "vote": true,
+            "term": 4
+          },
+          {
+            "member": 1,
+            "vote": true,
+            "term": 4
+          },
+          {
+            "member": 4,
+            "vote": true,
+            "term": 4
+          }
+        ],
+        "timeout_passed": true
+      },
+      "fields": {
+        "leader": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "ballot-single-member",
+      "rule": "ballot",
+      "inputs": {
+        "members": 1,
+        "candidate_term": 3,
+        "votes": [
+          {
+            "member": 0,
+            "vote": true,
+            "term": 3
+          }
+        ],
+        "timeout_passed": false
+      },
+      "fields": {
+        "leader": true,
+        "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-unanimous",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            98304
+          ],
+          [
+            2,
+            65536
+          ]
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "nominate": true,
+        "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-one-silent-before-deadline",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            98304
+          ],
+          null
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-one-silent-at-deadline",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            98304
+          ],
+          null
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": true,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-one-ahead-reported",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            131072
+          ],
+          [
+            3,
+            65536
+          ]
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-one-ahead-at-deadline",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            3,
+            131072
+          ],
+          [
+            3,
+            65536
+          ]
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": true,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-ahead-by-term",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            3,
+            0
+          ],
+          [
+            2,
+            131072
+          ],
+          [
+            2,
+            131072
+          ]
+        ],
+        "own": [
+          3,
+          0
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "nominate": true,
+        "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-voter-joined-later-term",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            1,
+            1100
+          ],
+          [
+            2,
+            1000
+          ],
+          null
+        ],
+        "own": [
+          1,
+          1100
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-short-of-quorum",
+      "rule": "candidate",
+      "inputs": {
+        "members": 5,
+        "reports": [
+          [
+            3,
+            98304
+          ],
+          [
+            4,
+            0
+          ],
+          null,
+          null,
+          null
+        ],
+        "own": [
+          3,
+          98304
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replication-stop-below-next-base",
+      "rule": "replication-stop",
+      "inputs": {
+        "append_position": 960,
+        "next_term_base_log_position": 1000,
+        "next_log_position": -1
+      },
+      "fields": {
+        "replicate": true,
+        "stop_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replication-stop-at-next-base-with-end",
+      "rule": "replication-stop",
+      "inputs": {
+        "append_position": 1000,
+        "next_term_base_log_position": 1000,
+        "next_log_position": 1100
+      },
+      "fields": {
+        "replicate": true,
+        "stop_position": 1100
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replication-stop-at-next-base-no-end",
+      "rule": "replication-stop",
+      "inputs": {
+        "append_position": 1000,
+        "next_term_base_log_position": 1000,
+        "next_log_position": -1
+      },
+      "fields": {
+        "replicate": false,
+        "stop_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replication-stop-nothing-known",
+      "rule": "replication-stop",
+      "inputs": {
+        "append_position": 960,
+        "next_term_base_log_position": -1,
+        "next_log_position": -1
+      },
+      "fields": {
+        "replicate": false,
+        "stop_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-returning-leader-truncates",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 4,
+        "append_position": 1100,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": 1000,
+        "stop_position": -1,
+        "records": [
+          5,
+          1000
+        ],
+        "action": "replay"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-behind-replicates",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 4,
+        "append_position": 960,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": 1000,
+        "records": null,
+        "action": "replicate"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-two-terms-behind",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 2,
+        "append_position": 200,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 3,
+          "next_term_base_log_position": 200,
+          "next_log_position": 500,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": 500,
+        "records": null,
+        "action": "replicate"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-own-term-replays",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 5,
+        "append_position": 3000,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 5,
+          "next_leadership_term_id": -1,
+          "next_term_base_log_position": -1,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "replay"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-other-log-term-canvasses",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 3,
+        "append_position": 900,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "canvass"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-no-next-term-fails",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 4,
+        "append_position": 960,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": -1,
+          "next_term_base_log_position": -1,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "fail"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-at-leaders-base-records",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 1,
+        "append_position": 1100,
+        "candidate_term": 2,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 1,
+          "next_leadership_term_id": 2,
+          "next_term_base_log_position": 1100,
+          "next_log_position": -1,
+          "leadership_term_id": 2,
+          "term_base_log_position": 1100,
+          "log_position": 1100
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": [
+          2,
+          1100
+        ],
+        "action": "replay"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-stale-tail-truncates",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 2,
+        "append_position": 300,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 4,
+          "next_term_base_log_position": 200,
+          "next_log_position": 1000,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 1000
+        }
+      },
+      "fields": {
+        "truncate_to": 200,
+        "stop_position": 1000,
+        "records": null,
+        "action": "replicate"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-at-next-base-no-end-waits",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 3,
+        "append_position": 500,
+        "candidate_term": 5,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 3,
+          "next_leadership_term_id": 4,
+          "next_term_base_log_position": 500,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "wait"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-below-candidate-term-ignored",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 2,
+        "append_position": 100,
+        "candidate_term": 4,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 3,
+          "next_term_base_log_position": 200,
+          "next_log_position": -1,
+          "leadership_term_id": 3,
+          "term_base_log_position": 200,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "ignore"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-above-candidate-term-in-canvass-replays",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 5,
+        "append_position": 3000,
+        "candidate_term": 2,
+        "in_canvass": true,
+        "message": {
+          "log_leadership_term_id": 5,
+          "next_leadership_term_id": -1,
+          "next_term_base_log_position": -1,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "replay"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "new-leadership-term-other-term-in-ballot-ignored",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 4,
+        "append_position": 960,
+        "candidate_term": 4,
+        "in_canvass": false,
+        "message": {
+          "log_leadership_term_id": 4,
+          "next_leadership_term_id": 5,
+          "next_term_base_log_position": 1000,
+          "next_log_position": -1,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 5000
+        }
+      },
+      "fields": {
+        "truncate_to": -1,
+        "stop_position": -1,
+        "records": null,
+        "action": "ignore"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-at-candidate-term-against",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          2,
+          200
+        ],
+        "state": 1,
+        "request": {
+          "candidate_term_id": 3,
+          "log_leadership_term_id": 2,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "vote": false,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-below-candidate-term-against",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 4,
+        "log": [
+          2,
+          200
+        ],
+        "state": 1,
+        "request": {
+          "candidate_term_id": 3,
+          "log_leadership_term_id": 2,
+          "log_position": 300
+        }
+      },
+      "fields": {
+        "vote": false,
+        "candidate_term": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-higher-term-log-behind-against-takes-term",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 2,
+        "log": [
+          2,
+          200
+        ],
+        "state": 1,
+        "request": {
+          "candidate_term_id": 3,
+          "log_leadership_term_id": 2,
+          "log_position": 100
+        }
+      },
+      "fields": {
+        "vote": false,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-higher-term-log-equal-for",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 2,
+        "log": [
+          2,
+          200
+        ],
+        "state": 1,
+        "request": {
+          "candidate_term_id": 3,
+          "log_leadership_term_id": 2,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "vote": true,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-higher-term-log-term-ahead-for",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 2,
+        "log": [
+          2,
+          500
+        ],
+        "state": 1,
+        "request": {
+          "candidate_term_id": 3,
+          "log_leadership_term_id": 3,
+          "log_position": 100
+        }
+      },
+      "fields": {
+        "vote": true,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-second-request-for-a-voted-term-against",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          2,
+          200
+        ],
+        "state": 4,
+        "request": {
+          "candidate_term_id": 3,
+          "log_leadership_term_id": 2,
+          "log_position": 300
+        }
+      },
+      "fields": {
+        "vote": false,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-in-follower-ballot-higher-term-for",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          2,
+          100
+        ],
+        "state": 4,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 2,
+          "log_position": 100
+        }
+      },
+      "fields": {
+        "vote": true,
+        "candidate_term": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-outside-the-voting-states-nothing",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          2,
+          200
+        ],
+        "state": 10,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 2,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "vote": null,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-in-init-nothing",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          2,
+          200
+        ],
+        "state": 0,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 2,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "vote": null,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-in-leader-ready-log-behind-against-takes-term",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          3,
+          200
+        ],
+        "state": 8,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 3,
+          "log_position": 100
+        }
+      },
+      "fields": {
+        "vote": false,
+        "candidate_term": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-in-leader-ready-log-at-least-nothing",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          3,
+          200
+        ],
+        "state": 8,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 3,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "vote": null,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-closed-nothing",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          3,
+          200
+        ],
+        "state": 17,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 3,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "vote": null,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-stale-candidate-term-holds-election",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 17,
+        "message": {
+          "leadership_term_id": 4,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "election"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-higher-term-in-leader-ready-fails-election",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 8,
+        "message": {
+          "leadership_term_id": 4,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "election"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-higher-log-term-in-leader-log-replication-fails-election",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 5,
+        "message": {
+          "leadership_term_id": 4,
+          "log_leadership_term_id": 4
+        }
+      },
+      "fields": {
+        "action": "election"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-higher-term-in-leader-replay-table",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 6,
+        "message": {
+          "leadership_term_id": 4,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "table"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-log-term-behind-answered",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 17,
+        "message": {
+          "leadership_term_id": 3,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "answer"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-log-term-behind-during-election-answered",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 8,
+        "message": {
+          "leadership_term_id": 2,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "answer"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-own-term-closed-answered",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 17,
+        "message": {
+          "leadership_term_id": 3,
+          "log_leadership_term_id": 3
+        }
+      },
+      "fields": {
+        "action": "answer"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-own-term-during-election-table",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 8,
+        "message": {
+          "leadership_term_id": 3,
+          "log_leadership_term_id": 3
+        }
+      },
+      "fields": {
+        "action": "table"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-term-behind",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 2,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": 3,
+        "next_term_base_log_position": 200,
+        "next_log_position": 500
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-term-before-leaders",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 4,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": 5,
+        "next_term_base_log_position": 1000,
+        "next_log_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-leaders-own-term",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 5,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": -1,
+        "next_term_base_log_position": -1,
+        "next_log_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-term-the-leader-lacks",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            4,
+            200,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 3,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": 4,
+        "next_term_base_log_position": 200,
+        "next_log_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "next-fields-gap-after-reported-term",
+      "rule": "next-fields",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            4,
+            200,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "reported_term": 2,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "next_leadership_term_id": 4,
+        "next_term_base_log_position": 200,
+        "next_log_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-mid-term",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 960
+      },
+      "fields": {
+        "term": 4,
+        "end_position": 1000
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-at-term-boundary",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 200
+      },
+      "fields": {
+        "term": 3,
+        "end_position": 500
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-at-leaders-base",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 1000
+      },
+      "fields": {
+        "term": 5,
+        "end_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-in-leaders-term",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 3000
+      },
+      "fields": {
+        "term": 5,
+        "end_position": -1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replay-end-at-log-start",
+      "rule": "replay-end",
+      "inputs": {
+        "terms": [
+          [
+            2,
+            0,
+            200
+          ],
+          [
+            3,
+            200,
+            500
+          ],
+          [
+            4,
+            500,
+            1000
+          ],
+          [
+            5,
+            1000,
+            -1
+          ]
+        ],
+        "position": 0
+      },
+      "fields": {
+        "term": 2,
+        "end_position": 200
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replication-record-stop-at-leaders-base",
+      "rule": "replication-record",
+      "inputs": {
+        "term_replicated": 4,
+        "term_base": 500,
+        "stop_position": 1000,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "recorded": [
+          [
+            4,
+            500
+          ],
+          [
+            5,
+            1000
+          ]
+        ],
+        "log_leadership_term_id": 5
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "replication-record-stop-below-base",
+      "rule": "replication-record",
+      "inputs": {
+        "term_replicated": 3,
+        "term_base": 200,
+        "stop_position": 500,
+        "leader_term": 5,
+        "leader_base": 1000
+      },
+      "fields": {
+        "recorded": [
+          [
+            3,
+            200
+          ]
+        ],
+        "log_leadership_term_id": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "entry-position-one-frame",
+      "rule": "entry-position",
+      "inputs": {
+        "position": 65536,
+        "length": 56,
+        "mtu": 1408
+      },
+      "fields": {
+        "fragments": 1,
+        "position_after": 65632
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "entry-position-aligned",
+      "rule": "entry-position",
+      "inputs": {
+        "position": 65536,
+        "length": 32,
+        "mtu": 1408
+      },
+      "fields": {
+        "fragments": 1,
+        "position_after": 65600
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "entry-position-full-frame",
+      "rule": "entry-position",
+      "inputs": {
+        "position": 0,
+        "length": 1376,
+        "mtu": 1408
+      },
+      "fields": {
+        "fragments": 1,
+        "position_after": 1408
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "entry-position-two-fragments",
+      "rule": "entry-position",
+      "inputs": {
+        "position": 0,
+        "length": 1377,
+        "mtu": 1408
+      },
+      "fields": {
+        "fragments": 2,
+        "position_after": 1472
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "entry-position-many-fragments",
+      "rule": "entry-position",
+      "inputs": {
+        "position": 98304,
+        "length": 100000,
+        "mtu": 1408
+      },
+      "fields": {
+        "fragments": 73,
+        "position_after": 200640
+      }
+    }
+  ]
+}
