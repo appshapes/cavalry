@@ -78,6 +78,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   for a file the operating system refused and nothing else. A purge moves
   `recording.segments_purged` once per file instead, as it removes the file, so the
   counter reads a running purge's progress.
+- Creates a `cavalry:udp` publication's log at position 0, or at the position its
+  channel's `init-term-id`, `term-id` and `term-offset` name with `init-term-id` as its
+  initial term id, so that its first setup frame carries that position and a join
+  names the same keys or is refused (`spec/udp.md`, version 2; ADR 0059).
 - Sends a `cavalry:udp` publication's log on a fourth thread, the sender, by the rules
   of `spec/udp.md`, "The sender" (ADR 0040, ADR 0041): `add publication` on
   `cavalry:udp?endpoint=<host>:<port>` resolves the host once, opens the channel's send
@@ -135,7 +139,12 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   a late retransmit from creating a second image, in a table of 4096. Every step has its
   counter, `receiver.*`, `image.*` and `channel.*`. `start recording` on a
   `cavalry:udp` channel records a publication sending on it or an image received on it,
-  the recording one of the image's readers. The receiver idles with the driver's
+  the recording one of the image's readers; on a stream with a live subscription and
+  no image yet it arms the recording, answered with `operation success`, which starts
+  at the image's join position when the stream's next image arrives, before the image
+  is announced, and answers the command a second time with `recording ready`, or with
+  `error` when that start fails or the stream's last subscription goes first, the four
+  `recording.armed*` counters saying which (ADR 0059). The receiver idles with the driver's
   strategy while it holds an endpoint and parks while it holds none. `start replay` on
   a `cavalry:udp` channel plays the recording to that channel's endpoint: the replay's
   publication takes the sender's path as a client's does, with the recording's term

@@ -1250,8 +1250,8 @@ impl Conductor {
         else {
             return;
         };
-        // A destination names its endpoint and nothing else: `interface` or `fc` on it
-        // is refused, as a subscription's channel refuses a publication's keys, since a
+        // A destination names its endpoint and nothing else: `interface`, `fc` or a
+        // position key on it is refused, as a subscription's channel refuses a publication's keys, since a
         // key that does nothing is a key the reader cannot check (ADR 0053).
         let destination = match parsed {
             Channel::Udp(udp)
@@ -6468,9 +6468,8 @@ mod recording {
     use cavalry_proto::frame::{DataFrameHeader, FrameType, HEADER_LENGTH as FRAME_HEADER};
     use cavalry_shm::broadcast::{BroadcastBuffer, Receiver};
     use cavalry_shm::counters::generated::{
-        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, RECORDING_ARMED, RECORDING_ARMED_DROPPED,
-        RECORDING_ARMED_STARTED, RECORDING_CATALOG_FULL, RECORDING_START_FAILED, RECORDING_STARTED,
-        RECORDING_STOPPED, RECORDING_WRITE_FAILED,
+        DRIVER_REGISTRY_FULL, LOG_BUFFER_REJECTED_FRAME, RECORDING_CATALOG_FULL,
+        RECORDING_START_FAILED, RECORDING_STARTED, RECORDING_STOPPED, RECORDING_WRITE_FAILED,
     };
     use cavalry_shm::log::ClaimError;
 
