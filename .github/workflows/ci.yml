@@ -100,7 +100,7 @@ jobs:
           dotnet-version: 10.0.x
       # mdBook for `just docs`, as a prebuilt binary checked against the action's own
       # manifest, pinned to the version the justfile names; bump both together (ADR 0006).
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           # mdbook for `just docs`; cbindgen for `just lint`'s header check (ADR 0051).
           tool: mdbook@0.5.4,cbindgen@0.29.4
