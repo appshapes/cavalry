@@ -502,7 +502,7 @@ counter ("Counters").
 | 0 | init | consolidates its log: stops any replay or catch-up, takes the higher of its stored candidate term and its leadership term as its candidate term. A cluster of one member goes to leader log replication as leader of candidate term + 1; every other member goes to canvass |
 | 1 | canvass | as a follower, sends canvass position to every other member every election status interval; moves to nominate at once when every member has reported and no member's log is ahead of its own, a unanimous candidate, or when the canvass deadline has passed and the members that have reported with a log not ahead of its own, itself among them, make a quorum, a quorum candidate ("Logs compared"; the arithmetic vectors pin both). The deadline is the leader heartbeat timeout after the last word from a leader, or the startup canvass timeout after the state began when the member started with no term. A member that receives a request vote for a term above its candidate term while canvassing votes for it, when the candidate's log is at least its own, and goes to follower ballot, as "Messages during an election" says; one that receives new leadership term for a term at least its candidate term goes to follower replay or follower log replication as that message's rules say |
 | 2 | nominate | waits a random delay up to half the election timeout, sending canvass position every election status interval, then takes candidate term + 1 as its candidate term, stores it before it sends anything, records its vote for itself and goes to candidate ballot |
-| 3 | candidate ballot | as a candidate, sends request vote to every member it has not sent one to; becomes leader of the candidate term, going to leader log replication, when every member has voted for it, or when the election timeout has passed and a quorum has, no member having voted against; goes back to canvass when the election timeout has passed without a quorum. A request vote from another candidate for a higher term moves it to follower ballot with its vote |
+| 3 | candidate ballot | as a candidate, sends request vote to every member it has not sent one to; becomes leader of the candidate term, going to leader log replication, when every member has voted for it, or when the election timeout has passed and a quorum has, no member having voted against; goes back to canvass when the election timeout has passed and it has not become leader, short of a quorum or with a vote against, so that every member canvasses again at once. A request vote from another candidate for a higher term moves it to follower ballot with its vote |
 | 4 | follower ballot | waits for the candidate it voted for; goes to follower replay or follower log replication on its new leadership term, or back to canvass when the election timeout passes |
 | 5 | leader log replication | as the leader, records its term with its append position as its base, before its own position counts, then adds its log publication at that position, the term base log position, which needs a publication created at a position ("Members and streams"); sends new leadership term and commit position every leader heartbeat interval; serves the catch-up positions of followers replicating what they lack (state 9, "Messages outside an election"); and waits until the quorum position reaches its append position, then goes to leader replay. It fails the election when its active members, those whose last append position is younger than the leader heartbeat timeout, fall below a quorum, and begins again at init |
 | 6 | leader replay | replays its own log, its recordings in position order, from its log position to its append position into its service, then goes to leader init; a leader with nothing to replay goes at once |
@@ -525,8 +525,8 @@ sender's candidate term, or log leadership term id is above its own term ends it
 election in failure and begins again at init, counted in `cluster.elections_failed`,
 while one in leader replay or leader init updates its table alone, the sender's next
 canvass position reaching leader ready; a leader reads a canvass position whose log
-leadership term id is below its own term and answers with new leadership term for
-that term, its next fields as the table gives them, the leader's term base log
+leadership term id is below its own term, neither term above it, and answers with new
+leadership term for that term, its next fields as the table gives them, the leader's term base log
 position standing for the next term's base when that term is the leader's own, and
 one at its own term updates its table alone during its election, since states 5 and 8
 send new leadership term to every member. The `canvass-position` vectors pin each
@@ -627,9 +627,11 @@ leader leads; the `canvass-position` vectors pin both. A follower that reads sto
 removes its catch-up subscription. Any member whose election has closed that reads
 request vote whose candidate term id, or commit position whose leadership term id, is
 above its own leadership term id holds an election, beginning at init, counted in
-`cluster.leader_step_downs` when it was the leader; a leader in states 5 to 8 answers
-a request vote with nothing, as the rule above says, and holds no election for it
-until its election has closed; a follower
+`cluster.leader_step_downs` when it was the leader; a leader in states 5 to 8 answers a
+request vote for a term above its own as "Messages during an election" says, with
+nothing when the candidate's log is at least its own and against, taking the term,
+when the candidate's log is behind, the `request-vote` vectors in leader ready pinning
+both, and holds no election for either until its election has closed; a follower
 reads commit position from its leader as the leader's heartbeat and as its commit
 position.
 
@@ -746,7 +748,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.elections` | an election begun, from init |
 | `cluster.elections_failed` | an election that failed in a state and began again at init |
 | `cluster.leader_heartbeat_timeouts` | a follower that held an election for want of a leader's heartbeat |
-| `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position whose leadership term id, a request vote whose candidate term id or a commit position whose leadership term id was above its own term |
+| `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its own term |
 | `cluster.votes_for`, `cluster.votes_against` | a vote sent, by its value |
 | `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state |
 | `cluster.sessions` | a gauge: open sessions |

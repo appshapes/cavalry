@@ -80,9 +80,10 @@ quorum is half the members plus one; a member is active while its last append
 position is younger than the leader heartbeat timeout. The
 election is Aeron's state machine, its eighteen states and the transitions the page
 lists, with a member voting for a candidate whose log is at least its own by term then
-position, its candidate term, the highest term it has voted in or proposed, stored in
-its log directory before the vote or request vote that raises it is sent, Aeron's node
-state file, so that it votes once in a term across a restart, and a member in canvass
+position, its candidate term, the highest term it has voted in, proposed or followed,
+stored in its log directory before the vote or request vote that raises it is sent,
+Aeron's node state file, a raise on following kept in memory alone, so that it votes
+once in a term across a restart, and a member in canvass
 following a leader of a term at least its candidate term alone, Raft's rule that a
 member that has voted in a term follows no leader of a lower one, which departs from
 Aeron's canvass (Alternatives); canvass position carries the sender's candidate term

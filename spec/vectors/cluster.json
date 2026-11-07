@@ -2677,6 +2677,50 @@
     },
     {
       "kind": "arithmetic",
+      "name": "request-vote-in-leader-ready-log-behind-against-takes-term",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          2,
+          200
+        ],
+        "state": 8,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 2,
+          "log_position": 100
+        }
+      },
+      "fields": {
+        "vote": false,
+        "candidate_term": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "request-vote-in-leader-ready-log-at-least-nothing",
+      "rule": "request-vote",
+      "inputs": {
+        "candidate_term": 3,
+        "log": [
+          2,
+          200
+        ],
+        "state": 8,
+        "request": {
+          "candidate_term_id": 4,
+          "log_leadership_term_id": 2,
+          "log_position": 200
+        }
+      },
+      "fields": {
+        "vote": null,
+        "candidate_term": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "canvass-position-stale-candidate-term-holds-election",
       "rule": "canvass-position",
       "inputs": {

@@ -732,6 +732,8 @@ VECTORS += [
     vote_vector("request-vote-in-follower-ballot-higher-term-for", 3, [2, 100], 4, (4, 2, 100)),
     vote_vector("request-vote-outside-the-voting-states-nothing", 3, [2, 200], 10, (4, 2, 200)),
     vote_vector("request-vote-in-init-nothing", 3, [2, 200], 0, (4, 2, 200)),
+    vote_vector("request-vote-in-leader-ready-log-behind-against-takes-term", 3, [2, 200], 8, (4, 2, 100)),
+    vote_vector("request-vote-in-leader-ready-log-at-least-nothing", 3, [2, 200], 8, (4, 2, 200)),
     canvass_vector("canvass-position-stale-candidate-term-holds-election", 3, CLOSED, 4, 2),
     canvass_vector("canvass-position-higher-term-in-leader-ready-fails-election", 3, 8, 4, 2),
     canvass_vector("canvass-position-higher-log-term-in-leader-log-replication-fails-election", 3, 5, 4, 4),
