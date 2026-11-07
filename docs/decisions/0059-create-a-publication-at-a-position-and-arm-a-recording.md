@@ -66,11 +66,20 @@ channel and stream, arms the recording: the driver answers `operation success` a
 once, counted in `recording.armed`, and holds the armed recording, at most one per
 receive endpoint and stream that has a live subscription, so that the subscriptions
 registry of `spec/client-protocol.md`, "Sizes", bounds the armed recordings and a table
-of its capacity is never full; when the first image of that stream arrives on the
-endpoint it starts the recording at the image's initial position, its join position,
-before the image is announced, so that every frame the image holds is in the
-recording, and sends `recording ready` to the arming client with the arming command's
-correlation id, counted in `recording.armed_started`. A second `start recording` while
+of its capacity is never full. When the next image of that stream arrives on the
+endpoint, the driver starts the recording at the image's initial position, its join
+position, before the image is announced, so that every frame the image holds is in the
+recording, with the steps, the codes and the counters a start on a live image has. The
+arming command, answered once with `operation success`, is answered a second time
+under its correlation id with exactly one event, so that the arming client learns
+every outcome: `recording ready` once the recording has started, counted in
+`recording.armed_started`; `error` with the code of the step that failed when the
+start fails, code 10 for the recordings registry, the recorder's request queue, the
+catalog or the counters file at capacity and code 12 for files that cannot be created,
+counted in that step's counter as a live start's failure is and in
+`recording.armed_failed`, the image announced all the same and no longer held by the
+recording as a reader, as a failed start frees a publication's limit; or `error` with
+code 20 when the armed recording is dropped, below. A second `start recording` while
 one is armed is code 22 with a message that says the recording is armed. An armed
 recording is dropped when the last subscription on its endpoint and stream goes
 before an image arrives, by `remove subscription`, `client close` or `client timeout`,
@@ -79,8 +88,11 @@ a receive endpoint that closes being one case of it, counted in
 subscription on the endpoint wants (`spec/udp.md`, "The receiver", step 1), so an
 armed recording that outlived its stream's last subscription could never start, and
 while the endpoint stayed open for another stream it would never be dropped either.
-Code 20 is now a stream and channel with no live
-publication, image or subscription. The three counters are static counters of
+Every armed recording so ends in one of `recording.armed_started`,
+`recording.armed_failed` and `recording.armed_dropped`, and `recording.armed` less the
+three is the recordings armed or starting, which `doctor` reads. Code 20 is now a
+stream and channel with no live publication, image or subscription, or an armed
+recording dropped. The four counters are static counters of
 `counters.toml`. Version 6 encodes every message as version 5 does, and a version 5
 driver answers the arming case with code 20.
 
@@ -121,6 +133,14 @@ card, as ADR 0053's first change did for card 225.
   start nor be dropped, and a client that armed and unsubscribed stream after stream
   would grow the table with no bound. Tying the armed recording to its stream's
   subscriptions bounds it by the subscriptions registry.
+- **A failed or dropped armed recording told by counters alone.** Lost: invariants 1
+  and 4. The arming client was answered `operation success`, so without a second answer
+  a cluster follower would believe its recording armed and never learn that nothing
+  records it, and a failed start counted in neither `recording.armed_started` nor
+  `recording.armed_dropped` would leave `recording.armed` above them for good and send
+  `doctor` to an image that is not missing. One second answer per armed command,
+  `recording ready` or `error`, and one counter per ending make the outcome the
+  client's to read and the operator's to explain.
 
 ## Evidence
 
@@ -148,7 +168,9 @@ receiver already reads; the driver keeps an armed-recording slot per receive end
 and stream with a live subscription, at most the subscriptions registry's capacity,
 drops it when the stream's last subscription on the endpoint goes, and starts a
 recording from the
-receiver's thread's announcement rather than a command; two commands of the client
+receiver's thread's announcement rather than a command; an armed `start recording` is
+answered twice under one correlation id, so a client that arms keeps the id until the
+second answer, `recording ready` or `error`, arrives; two commands of the client
 protocol answer differently from version 5, which this version's paragraph says.
 
 Revisit: when a client needs a term length of its own on a `cavalry:udp` publication,
