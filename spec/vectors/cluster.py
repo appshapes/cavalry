@@ -430,21 +430,41 @@ def replication_stop(append_position, next_term_base_log_position, next_log_posi
 
 def new_leadership_term_action(log_term, append, msg):
     """spec/cluster.md, "Messages during an election", new leadership term: what a reader with log
-    leadership term id `log_term` and append position `append` does with the message's fields."""
+    leadership term id `log_term` and append position `append` does with the message's fields, and
+    the term it records, the leader's term at its base when the reader's append position, after
+    any truncation, is at the leader's term base log position."""
+    none = {"truncate_to": NULL, "stop_position": NULL, "records": None}
     if msg["log_leadership_term_id"] != log_term:
-        return {"action": "canvass", "truncate_to": NULL, "stop_position": NULL}
+        return dict(none, action="canvass")
     truncate_to = NULL
     nb = msg["next_term_base_log_position"]
     if nb != NULL and append > nb:
         truncate_to, append = nb, nb
-    if append < msg["term_base_log_position"]:
+    base = msg["term_base_log_position"]
+    if append < base:
         if msg["next_leadership_term_id"] == NULL:
-            return {"action": "fail", "truncate_to": truncate_to, "stop_position": NULL}
+            return dict(none, action="fail", truncate_to=truncate_to)
         stop = replication_stop(append, nb, msg["next_log_position"])
         if stop["replicate"]:
-            return {"action": "replicate", "truncate_to": truncate_to, "stop_position": stop["stop_position"]}
-        return {"action": "wait", "truncate_to": truncate_to, "stop_position": NULL}
-    return {"action": "replay", "truncate_to": truncate_to, "stop_position": NULL}
+            return dict(none, action="replicate", truncate_to=truncate_to, stop_position=stop["stop_position"])
+        return dict(none, action="wait", truncate_to=truncate_to)
+    records = [msg["leadership_term_id"], base] if append == base else None
+    return dict(none, action="replay", truncate_to=truncate_to, records=records)
+
+
+def next_fields(terms, reported_term, leader_term, leader_base):
+    """spec/cluster.md, new leadership term's next fields: for a reported term that is the leader's
+    own, −1 for all three; else the term one above the reported one when the leader's record holds
+    it, with its base and its end position, the base of the term after it or −1 for an open term;
+    else the leader's own term at its base with −1 (Aeron's rule). `terms` is [term, base, end]."""
+    if reported_term == leader_term:
+        return {"next_leadership_term_id": NULL, "next_term_base_log_position": NULL, "next_log_position": NULL}
+    entry = next((t for t in terms if t[0] == reported_term + 1), None)
+    if entry is None:
+        return {"next_leadership_term_id": leader_term, "next_term_base_log_position": leader_base,
+                "next_log_position": NULL}
+    return {"next_leadership_term_id": entry[0], "next_term_base_log_position": entry[1],
+            "next_log_position": entry[2]}
 
 
 def nlt(log_leadership_term_id, next_leadership_term_id, next_term_base_log_position, next_log_position,
@@ -616,9 +636,29 @@ VECTORS += [
     arithmetic("new-leadership-term-no-next-term-fails", "new-leadership-term",
                {"log_leadership_term_id": 4, "append_position": 960, "message": nlt(4, NULL, NULL, NULL, 5, 1000, 5000)},
                new_leadership_term_action(4, 960, nlt(4, NULL, NULL, NULL, 5, 1000, 5000))),
+    arithmetic("new-leadership-term-at-leaders-base-records", "new-leadership-term",
+               {"log_leadership_term_id": 1, "append_position": 1100, "message": nlt(1, 2, 1100, NULL, 2, 1100, 1100)},
+               new_leadership_term_action(1, 1100, nlt(1, 2, 1100, NULL, 2, 1100, 1100))),
     arithmetic("new-leadership-term-at-next-base-no-end-waits", "new-leadership-term",
                {"log_leadership_term_id": 3, "append_position": 500, "message": nlt(3, 4, 500, NULL, 5, 1000, 5000)},
                new_leadership_term_action(3, 500, nlt(3, 4, 500, NULL, 5, 1000, 5000))),
+    arithmetic("next-fields-term-behind", "next-fields",
+               {"terms": LEADER_TERMS, "reported_term": 2, "leader_term": 5, "leader_base": 1000},
+               next_fields(LEADER_TERMS, 2, 5, 1000)),
+    arithmetic("next-fields-term-before-leaders", "next-fields",
+               {"terms": LEADER_TERMS, "reported_term": 4, "leader_term": 5, "leader_base": 1000},
+               next_fields(LEADER_TERMS, 4, 5, 1000)),
+    arithmetic("next-fields-leaders-own-term", "next-fields",
+               {"terms": LEADER_TERMS, "reported_term": 5, "leader_term": 5, "leader_base": 1000},
+               next_fields(LEADER_TERMS, 5, 5, 1000)),
+    arithmetic("next-fields-term-the-leader-lacks", "next-fields",
+               {"terms": [[2, 0, 200], [4, 200, 1000], [5, 1000, NULL]], "reported_term": 3, "leader_term": 5,
+                "leader_base": 1000},
+               next_fields([[2, 0, 200], [4, 200, 1000], [5, 1000, NULL]], 3, 5, 1000)),
+    arithmetic("next-fields-gap-after-reported-term", "next-fields",
+               {"terms": [[2, 0, 200], [4, 200, 1000], [5, 1000, NULL]], "reported_term": 2, "leader_term": 5,
+                "leader_base": 1000},
+               next_fields([[2, 0, 200], [4, 200, 1000], [5, 1000, NULL]], 2, 5, 1000)),
     arithmetic("replay-end-mid-term", "replay-end", {"terms": LEADER_TERMS, "position": 960},
                replay_end(LEADER_TERMS, 960)),
     arithmetic("replay-end-at-term-boundary", "replay-end", {"terms": LEADER_TERMS, "position": 200},
