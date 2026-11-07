@@ -7,9 +7,26 @@
 //! variable fields and the payload from the bytes, so decoding allocates nothing;
 //! [`Message::write`] puts a message in place. [`parse_members`] reads a members string
 //! into a caller's array, and the free functions compute what "Roles and the election"
-//! and "The log" define: the quorum, the commit position, the order of two logs, a
-//! ballot's outcome and the position after an entry. What a member does with a decoded
-//! message is `cavalry-raft`'s; this module is the bytes.
+//! and "The log" define:
+//!
+//! - [`quorum`], the quorum of a member count, and [`commit_position`], the quorum
+//!   position and the commit position from the members' append positions;
+//! - [`log_at_least`], the order of two logs, and [`candidate`], whether a canvassing
+//!   member nominates itself, unanimous or by quorum;
+//! - [`request_vote`], a reader's vote on a request vote and its candidate term after
+//!   it, and [`ballot`], whether a candidate wins its ballot;
+//! - [`canvass_position_action`], what a leader does with a canvass position;
+//! - [`new_leadership_term_action`], what a reader of new leadership term does with its
+//!   log, and [`next_fields`], the next fields a leader writes into it;
+//! - [`replication_stop`], where a follower's log replication stops, and
+//!   [`replication_record`], the terms it records there;
+//! - [`replay_end`], where a leader's replay begins and ends;
+//! - [`entry_position`], the position after an entry.
+//!
+//! A log leadership term id, wherever one is given, is the spec's: the highest term in a
+//! member's record of recorded terms, never the term of its last entry. What a member
+//! does with a decoded message is `cavalry-raft`'s; this module is the bytes and the
+//! rules.
 //!
 //! ```
 //! use cavalry_proto::cluster::{ClusterError, Message, Stream};
@@ -774,11 +791,14 @@ pub enum Message<'a> {
     },
     /// Template 50.
     CanvassPosition {
-        /// The term of the last entry in the sender's recording, −1 for none.
+        /// The sender's log leadership term id: the highest term in its record of
+        /// recorded terms (`spec/cluster.md`, "The log"), which is not the term of its
+        /// last entry; −1 for none.
         log_leadership_term_id: i64,
         /// The sender's append position.
         log_position: i64,
-        /// The highest term the sender has known, −1 for none.
+        /// The sender's candidate term: the highest term it has voted in, proposed or
+        /// followed, at least its log leadership term id; −1 for none.
         leadership_term_id: i64,
         /// The sender's member id.
         follower_member_id: i32,
@@ -787,7 +807,8 @@ pub enum Message<'a> {
     },
     /// Template 51.
     RequestVote {
-        /// The candidate's log leadership term id, −1 for none.
+        /// The candidate's log leadership term id, the highest term in its record, as
+        /// canvass position's; −1 for none.
         log_leadership_term_id: i64,
         /// The candidate's append position.
         log_position: i64,
@@ -802,7 +823,8 @@ pub enum Message<'a> {
     Vote {
         /// The request's candidate term id.
         candidate_term_id: i64,
-        /// The voter's log leadership term id, −1 for none.
+        /// The voter's log leadership term id, the highest term in its record, as
+        /// canvass position's; −1 for none.
         log_leadership_term_id: i64,
         /// The voter's append position.
         log_position: i64,
@@ -817,7 +839,9 @@ pub enum Message<'a> {
     NewLeadershipTerm {
         /// The term the receiver reported, −1 for none.
         log_leadership_term_id: i64,
-        /// The next term in the leader's log, or −1.
+        /// The lowest term in the leader's record above the log leadership term id, the
+        /// leader's own when none lies between; −1 when the log leadership term id is
+        /// the leader's own term ([`next_fields`]).
         next_leadership_term_id: i64,
         /// That term's base position, or −1.
         next_term_base_log_position: i64,
@@ -846,7 +870,8 @@ pub enum Message<'a> {
     },
     /// Template 54.
     AppendPosition {
-        /// The term the follower follows.
+        /// The sender's log leadership term id, the highest term in its record of
+        /// recorded terms, as canvass position's; not the term of its last entry.
         leadership_term_id: i64,
         /// The follower's append position.
         log_position: i64,
@@ -2256,7 +2281,9 @@ pub fn ballot(
 /// One member's canvass report: its log leadership term id and append position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LogReport {
-    /// The term of the last entry in its recording, −1 for none.
+    /// Its log leadership term id: the highest term in its record of recorded terms
+    /// (`spec/cluster.md`, "The log"), which is not the term of its last entry; −1 for
+    /// none.
     pub term: i64,
     /// Its append position.
     pub position: i64,
@@ -2305,7 +2332,7 @@ pub fn candidate(
 pub struct VoteRequest {
     /// The term the candidate proposes to lead.
     pub candidate_term_id: i64,
-    /// The candidate's log leadership term id.
+    /// The candidate's log leadership term id, the highest term in its record.
     pub log_leadership_term_id: i64,
     /// The candidate's append position.
     pub log_position: i64,
