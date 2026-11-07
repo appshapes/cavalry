@@ -38,10 +38,11 @@ The log directory gains a `terms` file, `spec/durable-log.md` version 2, "Terms"
 64-byte header, the magic `CVLYTERM`, a version of 0, the entry length 32, the
 candidate term as an i64 with its CRC32, and then 32-byte entries, each a state, a
 CRC32 of its other fields, the leadership term id, the term base log position and the
-recording id of the term's recording in this directory, −1 while the term has none.
-The writer appends an entry by writing its fields, then its checksum, then its state,
-1, last, and syncs; truncates by writing state 3 over each entry whose base is above
-the position and syncing; raises the candidate term by writing the value, then its
+recording id of the term's recording in this directory, −1 when the term has none at
+its append. An entry's fields are written once, by its append, and only its state
+changes after. The writer appends an entry by writing its fields, then its checksum,
+then its state, 1, last, and syncs; truncates by writing state 3 over each entry whose
+base is above the position and syncing; raises the candidate term by writing the value, then its
 checksum, and syncing; and a reader takes entries in file order, skipping state 3,
 stopping at the first entry whose state is 0 or whose checksum fails, the torn tail of
 a crash. The file holds at most 1048576 entries, the catalog's bound on recordings,
@@ -110,6 +111,15 @@ in any of the five languages.
   midway loses every term, while a state written in place loses at most the one entry
   being marked, which the reader then finds valid or torn, both of which the member
   can live with: a term marked deleted again, or a term it will record again.
+- **Setting a term's recording id in place once its recording exists.** Lost: the
+  entry's one checksum covers the recording id, so a rewrite torn by a crash leaves a
+  valid state over a checksum that fails. A reader takes that entry for the torn tail
+  and drops it with every term after it, and the next append, written at its index,
+  leaves the later entries behind it. A second checksum over the recording id alone
+  would make the rewrite safe, at the cost of a wider entry and a fifth write. Until
+  the consensus module needs the id of a recording that starts after its term is
+  recorded, a term recorded before its recording exists keeps −1. The module then
+  finds the recording in the catalog by its channel, stream and start position.
 - **The consensus channel as one multi-destination channel.** Lost, above: the
   messages differ per peer, and the leader's heartbeat must outlive one dead follower.
 - **The producer position as a member's append position.** Lost: invariant 1. A

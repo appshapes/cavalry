@@ -519,9 +519,12 @@ impl TermsFile {
             .map_or(-1, |entry| entry.leadership_term_id)
     }
 
-    /// Appends a term: its fields, then its checksum, then the state, synced. The term
-    /// must be above the last valid one and its base at least the last valid base;
-    /// past [`MAX_ENTRIES`] it is [`TermsError::Full`].
+    /// Appends a term: its fields and their checksum, synced, then the state, synced.
+    /// The term must be above the last valid one and its base at least the last valid
+    /// base; past [`MAX_ENTRIES`] it is [`TermsError::Full`]. The recording id is final
+    /// here, [`NO_RECORDING`] for a term whose recording does not exist yet: an entry's
+    /// fields are written once, and only its state changes after, so that no write but
+    /// the last append can tear an entry (ADR 0060, Alternatives).
     pub fn append(
         &mut self,
         leadership_term_id: i64,
@@ -546,28 +549,6 @@ impl TermsFile {
         self.write_at(at + 4, &bytes[4..], "append")?;
         self.write_at(at, &bytes[..4], "append")?;
         self.entries.push(entry);
-        Ok(())
-    }
-
-    /// Sets the recording id of the valid term `leadership_term_id`, once the term's
-    /// recording exists; a term not recorded is left alone.
-    pub fn set_recording(
-        &mut self,
-        leadership_term_id: i64,
-        recording_id: i64,
-    ) -> Result<(), TermsError> {
-        let Some(index) = self.entries.iter().position(|entry| {
-            entry.state == VALID && entry.leadership_term_id == leadership_term_id
-        }) else {
-            return Ok(());
-        };
-        let mut entry = self.entries[index];
-        entry.recording_id = recording_id;
-        let bytes = entry.encode();
-        let at = (HEADER_LENGTH + index * ENTRY_LENGTH) as u64;
-        self.write_at(at + 8, &bytes[8..], "write")?;
-        self.write_at(at + 4, &bytes[4..8], "write")?;
-        self.entries[index] = entry;
         Ok(())
     }
 
@@ -627,7 +608,6 @@ mod tests {
         assert_eq!(file.log_leadership_term_id(), -1);
         file.append(2, 0, NO_RECORDING).expect("appended");
         file.append(3, 4096, 1).expect("appended");
-        file.set_recording(2, 0).expect("set");
         file.set_candidate_term(4).expect("stored");
         drop(file);
         let file = TermsFile::open(&dir).expect("opened");
@@ -639,7 +619,7 @@ mod tests {
                 terms[0].term_base_log_position,
                 terms[0].recording_id
             ),
-            (2, 0, 0)
+            (2, 0, NO_RECORDING)
         );
         assert_eq!(
             (
@@ -670,6 +650,20 @@ mod tests {
         let terms: Vec<i64> = file.terms().map(|entry| entry.leadership_term_id).collect();
         assert_eq!(terms, vec![2, 3, 5]);
         assert_eq!(file.entries.len(), 4, "the deleted entry keeps its place");
+        // A truncation writes the state and nothing else: the fields and their checksum
+        // are the bytes the append wrote, so the entry's one write after its append
+        // cannot tear it.
+        let bytes = std::fs::read(TermsFile::path_in(&dir)).expect("read");
+        let at = HEADER_LENGTH + 2 * ENTRY_LENGTH;
+        let appended = TermsEntry {
+            state: VALID,
+            leadership_term_id: 4,
+            term_base_log_position: 8192,
+            recording_id: 2,
+        }
+        .encode();
+        assert_eq!(&bytes[at..at + 4], &DELETED.to_le_bytes());
+        assert_eq!(&bytes[at + 4..at + ENTRY_LENGTH], &appended[4..]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
