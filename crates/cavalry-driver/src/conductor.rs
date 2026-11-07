@@ -1223,9 +1223,10 @@ impl Conductor {
         else {
             return;
         };
-        // A destination names its endpoint and nothing else: `interface` or `fc` on it
-        // is refused, as a subscription's channel refuses a publication's keys, since a
-        // key that does nothing is a key the reader cannot check (ADR 0053).
+        // A destination names its endpoint and nothing else: `interface`, `fc` or a
+        // position key on it is refused, as a subscription's channel refuses a
+        // publication's keys, since a key that does nothing is a key the reader cannot
+        // check (ADR 0053, ADR 0059).
         let destination = match parsed {
             Channel::Udp(udp)
                 if !udp.is_control()
@@ -4625,7 +4626,8 @@ impl Conductor {
         }
     }
 
-    /// `start replay` (`spec/client-protocol.md`, "Commands"): the channel, the length,
+    /// `start replay` (`spec/client-protocol.md`, "Commands"): the channel, the position
+    /// keys on it (code 1, reason `position`), the length,
     /// a retention command on the recording (code 24, counted in `replay.start_failed`
     /// as the replayer's three refusals are) and the registry are checked here; the
     /// recording's slot, the position and the segment file are the replayer's, whose
@@ -4645,6 +4647,27 @@ impl Conductor {
         else {
             return;
         };
+        // The position keys create a client's publication at a position; a replay's
+        // publication starts at the replay's position under its recording's initial term
+        // id, so keys on its channel would do nothing and are refused (`spec/udp.md`,
+        // "The channel URI"; ADR 0059).
+        if let Channel::Udp(udp) = &channel
+            && udp.names_position()
+        {
+            self.statics.rejected_command.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::InvalidChannel,
+                &format!(
+                    "the replay channel: channel refused (position): it names init-term-id, \
+                     term-id or term-offset, which create a client's publication at a \
+                     position; a replay starts at the command's position under its \
+                     recording's initial term id, so remove the keys and name the position in \
+                     the command; see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        }
         // A `cavalry:udp` replay channel is resolved once, here, and kept with its `fc`
         // for the publication the replayer's reply creates (ADR 0043, ADR 0053).
         let udp = match channel {
@@ -7332,7 +7355,9 @@ mod recording {
     /// grammar code 1 with the reader's reason; a name with no address is code 9; a 65th
     /// destination is code 10, counted; a subscription's channel that names a
     /// publication's keys is code 1 with the reason `subscription`; a join under
-    /// another `fc` is code 1 with the reason `fc`, and under the same joins.
+    /// another `fc` is code 1 with the reason `fc`, and under the same joins. Version 2's
+    /// position keys (ADR 0059) are code 1 on a subscription, a destination and a
+    /// replay channel, the last with the reason `position`.
     #[test]
     fn destination_commands_and_a_control_channel_are_refused_with_the_spec_codes() {
         let mut h = Harness::new("udp-mdc-refusals");
@@ -7453,6 +7478,20 @@ mod recording {
         let (code, message) = h.last_error(202).expect("an error");
         assert_eq!(code, 1, "{message}");
         assert!(message.contains("(destination)"), "{message}");
+        // A replay's publication starts at the replay's position, so the keys on its
+        // channel are refused before the replay is registered.
+        h.conductor.start_replay(
+            203,
+            0,
+            cavalry_proto::client_protocol::NULL_POSITION,
+            NULL_LENGTH,
+            7,
+            b"cavalry:udp?endpoint=127.0.0.1:40123|init-term-id=7|term-id=9|term-offset=4096",
+        );
+        let (code, message) = h.last_error(203).expect("an error");
+        assert_eq!(code, 1, "{message}");
+        assert!(message.contains("(position)"), "{message}");
+        assert!(h.conductor.replays.is_empty());
         h.conductor.add_publication(
             1,
             16,
@@ -7491,9 +7530,9 @@ mod recording {
             "14 joined 2"
         );
         assert_eq!(h.conductor.publications.len(), 2);
-        // Ten of version 5's refusals, and the position keys refused on a subscription
-        // and on a destination; the code 11 answers count nothing.
-        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 12);
+        // Ten of version 5's refusals, and the position keys refused on a subscription,
+        // on a destination and on a replay channel; the code 11 answers count nothing.
+        assert_eq!(h.counter(CLIENT_PROTOCOL_REJECTED_COMMAND), 13);
     }
 
     /// An RTT measurement that reaches a control channel's socket is answered to the
