@@ -304,7 +304,7 @@ that reports a term behind the leader's.
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
 | 8 | 8 | log leadership term id | i64 | the term the receiver reported, which this message describes |
-| 16 | 8 | next leadership term id | i64 | the term one above the log leadership term id when the leader's record holds it, else the leader's own term, Aeron's rule, the `next-fields` vectors pinning it; −1 when the log leadership term id is the leader's own term |
+| 16 | 8 | next leadership term id | i64 | the lowest term in the leader's record above the log leadership term id, the leader's own term when none lies between, so that a reader whose log holds an uncommitted tail of the reported term truncates it to that term's base, a departure from Aeron's lookup of the term one above, whose record has no gaps (ADR 0058), the `next-fields` vectors pinning it; −1 when the log leadership term id is the leader's own term |
 | 24 | 8 | next term base log position | i64 | that term's base position, which is the leader's term base log position when the next term is the leader's own; −1 when the next leadership term id is −1 |
 | 32 | 8 | next log position | i64 | that term's end position, the base position of the term after it in the leader's record; −1 when the next term is the leader's own, whose end is not known, or the next leadership term id is −1 |
 | 40 | 8 | leadership term id | i64 | the leader's term |

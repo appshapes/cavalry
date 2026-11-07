@@ -128,11 +128,14 @@ from a replay, its append position the end of the contiguous span they hold from
 log's start and each position read from the recording that begins first among those
 holding it; every member's log holds every entry at the same position with the same
 payload, and two members' logs differ in the session ids of their frame headers
-alone. New leadership term carries Aeron's next fields, −1 for all three when the
-reported term is the leader's own, so a returning leader truncates no more than its
-uncommitted tail and a member two terms behind replicates one term at a time; a
-reader whose message carries no next term for a position below the leader's term base
-fails its election. A member's log leadership term id, which decides its vote and which its append
+alone. New leadership term's next fields name the lowest term in the leader's record
+above the reported one, the leader's own when none lies between, with its base and its
+end, −1 for all three when the reported term is the leader's own, a departure from
+Aeron's lookup of the term one above the reported one, so that a returning leader
+truncates no more than its uncommitted tail, a member whose log holds an uncommitted
+tail of a term the leader's record skips truncates it to the next recorded term's base,
+and a member two terms behind replicates one term at a time; a reader whose message
+carries no next term for a position below the leader's term base fails its election. A member's log leadership term id, which decides its vote and which its append
 position carries, is the highest term in its record of recorded terms, not the term
 of its last entry, as Aeron's `logLeadershipTermId` is: a member records a term, with
 its base, as the leader on entering leader log replication, as a follower when it
@@ -246,6 +249,20 @@ members string's seventh and eighth fields, Aeron's response endpoints.
   1. A follower that stamped entries with its own clock would replay to a different
   state from the leader's; the leader stamps, the log carries, and a service reads the
   timestamp as an entry's field.
+- **Aeron's next fields, the term one above the reported one when the leader's record
+  holds it, else the leader's own term at its base.** Lost: invariant 1. Aeron's
+  `Election.onCanvassPosition` looks up `logLeadershipTermId + 1` in a record that
+  `RecordingLog.ensureCoherent` has filled in, one entry per term from the first to the
+  leader's own, so the lookup never skips a term; a member of Cavalry records only the
+  terms it received, live or by replication, so a leader's record has gaps. With
+  Aeron's lookup over such a record, a follower whose log holds an uncommitted tail of
+  term 2 at position 300, reporting term 2 to a leader of term 5 whose record holds
+  terms 2 at 0, 4 at 200 and 5 at 1000, would be told next term 5 at 1000 and its tail
+  left in place below the leader's base, in place of the entries term 4 committed there,
+  the twelfth review's example. The lowest term above the reported one, 4 at 200 in
+  that example, has the follower truncate to 200 and replicate term 4, and a leader's
+  own record always holds its own term, so the field is never without a term; the
+  `next-fields` and `new-leadership-term` vectors pin both.
 
 ## Evidence
 
@@ -261,7 +278,8 @@ informed it: Aeron's sources named in Context, read on 2026-11-06, with
 `ClusterMember.quorumThreshold`, `quorumPosition`, `compareLog`, `isActive`,
 `isUnanimousCandidate`, `isQuorumCandidate`, `isUnanimousLeader` and
 `isQuorumLeader`; `ConsensusModuleAgent.updateLeaderPosition` and
-`quorumPositionBoundedByLeaderLog`; `Election`'s per-state methods; `SessionManager`'s
+`quorumPositionBoundedByLeaderLog`; `Election`'s per-state methods and `onCanvassPosition`;
+`RecordingLog.ensureCoherent` and `findTermEntry`; `SessionManager`'s
 connect, close and timeout checks; `ClusterMember.parse` and `ingressEndpoints`;
 `MillisecondClusterClock` as the default clock; ADR 0052's Decision and card 226's
 brief; issue 16. The change that accepts this ADR carries the page, its vectors from

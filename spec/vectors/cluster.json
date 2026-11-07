@@ -2335,6 +2335,30 @@
     },
     {
       "kind": "arithmetic",
+      "name": "new-leadership-term-stale-tail-truncates",
+      "rule": "new-leadership-term",
+      "inputs": {
+        "log_leadership_term_id": 2,
+        "append_position": 300,
+        "message": {
+          "log_leadership_term_id": 2,
+          "next_leadership_term_id": 4,
+          "next_term_base_log_position": 200,
+          "next_log_position": 1000,
+          "leadership_term_id": 5,
+          "term_base_log_position": 1000,
+          "log_position": 1000
+        }
+      },
+      "fields": {
+        "truncate_to": 200,
+        "stop_position": 1000,
+        "records": null,
+        "action": "replicate"
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "new-leadership-term-at-next-base-no-end-waits",
       "rule": "new-leadership-term",
       "inputs": {
@@ -2527,9 +2551,9 @@
         "leader_base": 1000
       },
       "fields": {
-        "next_leadership_term_id": 5,
-        "next_term_base_log_position": 1000,
-        "next_log_position": -1
+        "next_leadership_term_id": 4,
+        "next_term_base_log_position": 200,
+        "next_log_position": 1000
       }
     },
     {
