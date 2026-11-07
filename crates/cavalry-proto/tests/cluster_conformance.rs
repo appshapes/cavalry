@@ -8,10 +8,10 @@
 use cavalry_proto::cluster::{
     Ballot, Candidate, ChangeType, CloseReason, ClusterAction, ClusterError, CommitPosition,
     EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member, MemberPosition, Message,
-    NewLeadershipTermAction, RecordedTerms, ReplayEnd, ReplicationStop, SnapshotMark, Stream,
-    TermFields, TermSpan, TimeUnit, VERSION, ballot, candidate, commit_position, entry_position,
-    log_at_least, new_leadership_term_action, parse_members, quorum, replay_end,
-    replication_record, replication_stop,
+    NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd, ReplicationStop, SnapshotMark,
+    Stream, TermFields, TermSpan, TimeUnit, VERSION, ballot, candidate, commit_position,
+    entry_position, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
+    replay_end, replication_record, replication_stop,
 };
 use serde_json::{Map, Value, json};
 
@@ -446,10 +446,12 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                 action,
                 truncate_to,
                 stop_position,
+                records,
             } = new_leadership_term_action(
                 int(inputs, "log_leadership_term_id"),
                 int(inputs, "append_position"),
                 TermFields {
+                    leadership_term_id: int(m, "leadership_term_id"),
                     log_leadership_term_id: int(m, "log_leadership_term_id"),
                     next_leadership_term_id: int(m, "next_leadership_term_id"),
                     next_term_base_log_position: int(m, "next_term_base_log_position"),
@@ -457,7 +459,31 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                     term_base_log_position: int(m, "term_base_log_position"),
                 },
             );
-            json!({"action": action.name(), "truncate_to": truncate_to, "stop_position": stop_position})
+            let records = records.map(|(term, base)| json!([term, base]));
+            json!({"action": action.name(), "truncate_to": truncate_to, "stop_position": stop_position, "records": records})
+        }
+        "next-fields" => {
+            let terms: Vec<TermSpan> = inputs["terms"]
+                .as_array()
+                .expect("terms")
+                .iter()
+                .map(|t| TermSpan {
+                    term: t[0].as_i64().expect("term"),
+                    base: t[1].as_i64().expect("base"),
+                    end: t[2].as_i64().expect("end"),
+                })
+                .collect();
+            let NextFields {
+                next_leadership_term_id,
+                next_term_base_log_position,
+                next_log_position,
+            } = next_fields(
+                &terms,
+                int(inputs, "reported_term"),
+                int(inputs, "leader_term"),
+                int(inputs, "leader_base"),
+            );
+            json!({"next_leadership_term_id": next_leadership_term_id, "next_term_base_log_position": next_term_base_log_position, "next_log_position": next_log_position})
         }
         "replay-end" => {
             let terms: Vec<TermSpan> = inputs["terms"]

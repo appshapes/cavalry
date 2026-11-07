@@ -2352,11 +2352,17 @@ pub struct NewLeadershipTermAction {
     pub truncate_to: i64,
     /// The stop position of a replication, or −1.
     pub stop_position: i64,
+    /// The term and base the reader records before it reports: the leader's term at
+    /// its base when the reader's append position, after any truncation, is at that
+    /// base; `None` otherwise.
+    pub records: Option<(i64, i64)>,
 }
 
 /// The fields of new leadership term a reader decides by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TermFields {
+    /// The leader's term.
+    pub leadership_term_id: i64,
     /// The term the message describes, the reader's reported log leadership term id.
     pub log_leadership_term_id: i64,
     /// The term after it in the leader's log, or −1.
@@ -2385,6 +2391,7 @@ pub const fn new_leadership_term_action(
             action: TermAction::Canvass,
             truncate_to: NULL_VALUE,
             stop_position: NULL_VALUE,
+            records: None,
         };
     }
     let next_base = message.next_term_base_log_position;
@@ -2399,6 +2406,7 @@ pub const fn new_leadership_term_action(
                 action: TermAction::Fail,
                 truncate_to,
                 stop_position: NULL_VALUE,
+                records: None,
             };
         }
         let stop = replication_stop(append, next_base, message.next_log_position);
@@ -2407,18 +2415,69 @@ pub const fn new_leadership_term_action(
                 action: TermAction::Replicate,
                 truncate_to,
                 stop_position: stop.stop_position,
+                records: None,
             };
         }
         return NewLeadershipTermAction {
             action: TermAction::Wait,
             truncate_to,
             stop_position: NULL_VALUE,
+            records: None,
         };
     }
     NewLeadershipTermAction {
         action: TermAction::Replay,
         truncate_to,
         stop_position: NULL_VALUE,
+        records: if append == message.term_base_log_position {
+            Some((message.leadership_term_id, message.term_base_log_position))
+        } else {
+            None
+        },
+    }
+}
+
+/// The next fields of a new leadership term.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NextFields {
+    /// The next leadership term id, or −1.
+    pub next_leadership_term_id: i64,
+    /// The next term base log position, or −1.
+    pub next_term_base_log_position: i64,
+    /// The next log position, or −1.
+    pub next_log_position: i64,
+}
+
+/// The next fields a leader with `terms`, its record, of `leader_term` based at
+/// `leader_base` writes into new leadership term for `reported_term`
+/// (`spec/cluster.md`, "New leadership term, template 53"): −1 for all three when the
+/// reported term is the leader's own; else the term one above the reported one when
+/// the record holds it, with its base and end; else the leader's own term at its base
+/// with no end.
+pub fn next_fields(
+    terms: &[TermSpan],
+    reported_term: i64,
+    leader_term: i64,
+    leader_base: i64,
+) -> NextFields {
+    if reported_term == leader_term {
+        return NextFields {
+            next_leadership_term_id: NULL_VALUE,
+            next_term_base_log_position: NULL_VALUE,
+            next_log_position: NULL_VALUE,
+        };
+    }
+    match terms.iter().find(|t| t.term == reported_term + 1) {
+        Some(entry) => NextFields {
+            next_leadership_term_id: entry.term,
+            next_term_base_log_position: entry.base,
+            next_log_position: entry.end,
+        },
+        None => NextFields {
+            next_leadership_term_id: leader_term,
+            next_term_base_log_position: leader_base,
+            next_log_position: NULL_VALUE,
+        },
     }
 }
 
