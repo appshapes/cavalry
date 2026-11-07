@@ -1,6 +1,6 @@
 {
   "spec": "durable-log",
-  "version": 1,
+  "version": 2,
   "generated_by": "spec/vectors/durable-log.py",
   "vectors": [
     {
@@ -872,6 +872,256 @@
         "term_id": 10,
         "term_offset": 64
       }
+    },
+    {
+      "name": "terms-header",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000040000000000000093d168e1000000000000000000000000000000000000000000000000000000000000000000000000",
+      "fields": {
+        "magic": "43564c595445524d",
+        "version": 0,
+        "entry_length": 32,
+        "candidate_term": 4,
+        "candidate_checksum": 3781742995
+      },
+      "file_length": 128
+    },
+    {
+      "name": "terms-header-no-candidate",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "fields": {
+        "magic": "43564c595445524d",
+        "version": 0,
+        "entry_length": 32,
+        "candidate_term": -1,
+        "candidate_checksum": 558161692
+      },
+      "file_length": 64
+    },
+    {
+      "name": "terms-too-short",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000040000000000000093d168e1000000000000000000000000",
+      "error": "too-short",
+      "file_length": 40
+    },
+    {
+      "name": "terms-magic",
+      "region": "terms-header",
+      "bytes": "43564c59544944580000000020000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "magic",
+      "file_length": 128
+    },
+    {
+      "name": "terms-version",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0100000020000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "version",
+      "file_length": 128
+    },
+    {
+      "name": "terms-entry-length",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000040000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "entry-length",
+      "file_length": 128
+    },
+    {
+      "name": "terms-candidate-checksum",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "candidate",
+      "file_length": 128,
+      "candidate_term": -1
+    },
+    {
+      "name": "terms-length",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000040000000000000093d168e1000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "length",
+      "file_length": 33554528
+    },
+    {
+      "name": "terms-order-magic-before-version",
+      "region": "terms-header",
+      "bytes": "43564c59544944580100000020000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "error": "magic",
+      "file_length": 128
+    },
+    {
+      "name": "terms-entry-first",
+      "region": "terms-entry",
+      "bytes": "010000002f06fa7a020000000000000000000000000000000000000000000000",
+      "fields": {
+        "state": 1,
+        "checksum": 2063205935,
+        "leadership_term_id": 2,
+        "term_base_log_position": 0,
+        "recording_id": 0
+      },
+      "index": 0,
+      "previous": null
+    },
+    {
+      "name": "terms-entry-after-another",
+      "region": "terms-entry",
+      "bytes": "01000000d9fc1773030000000000000000100000000000000100000000000000",
+      "fields": {
+        "state": 1,
+        "checksum": 1930951897,
+        "leadership_term_id": 3,
+        "term_base_log_position": 4096,
+        "recording_id": 1
+      },
+      "index": 1,
+      "previous": {
+        "state": 1,
+        "checksum": 2063205935,
+        "leadership_term_id": 2,
+        "term_base_log_position": 0,
+        "recording_id": 0
+      }
+    },
+    {
+      "name": "terms-entry-deleted",
+      "region": "terms-entry",
+      "bytes": "03000000946a640604000000000000000020000000000000ffffffffffffffff",
+      "fields": {
+        "state": 3,
+        "checksum": 107244180,
+        "leadership_term_id": 4,
+        "term_base_log_position": 8192,
+        "recording_id": -1
+      },
+      "index": 2,
+      "previous": {
+        "state": 1,
+        "checksum": 1930951897,
+        "leadership_term_id": 3,
+        "term_base_log_position": 4096,
+        "recording_id": 1
+      }
+    },
+    {
+      "name": "terms-entry-empty-ends-the-file",
+      "region": "terms-entry",
+      "bytes": "0000000000000000000000000000000000000000000000000000000000000000",
+      "fields": {
+        "state": 0,
+        "checksum": 0,
+        "leadership_term_id": 0,
+        "term_base_log_position": 0,
+        "recording_id": 0
+      },
+      "index": 2,
+      "previous": {
+        "state": 1,
+        "checksum": 1930951897,
+        "leadership_term_id": 3,
+        "term_base_log_position": 4096,
+        "recording_id": 1
+      }
+    },
+    {
+      "name": "terms-entry-state",
+      "region": "terms-entry",
+      "bytes": "02000000d9fc1773030000000000000000100000000000000100000000000000",
+      "error": "state",
+      "index": 1,
+      "previous": {
+        "state": 1,
+        "checksum": 2063205935,
+        "leadership_term_id": 2,
+        "term_base_log_position": 0,
+        "recording_id": 0
+      }
+    },
+    {
+      "name": "terms-entry-checksum",
+      "region": "terms-entry",
+      "bytes": "0100000001000000030000000000000000100000000000000100000000000000",
+      "error": "checksum",
+      "index": 1,
+      "previous": {
+        "state": 1,
+        "checksum": 2063205935,
+        "leadership_term_id": 2,
+        "term_base_log_position": 0,
+        "recording_id": 0
+      }
+    },
+    {
+      "name": "terms-entry-term-negative",
+      "region": "terms-entry",
+      "bytes": "010000008d9bd50fffffffffffffffff00000000000000000000000000000000",
+      "error": "term",
+      "index": 0,
+      "previous": null
+    },
+    {
+      "name": "terms-entry-term-not-above",
+      "region": "terms-entry",
+      "bytes": "01000000fe9932f2020000000000000000100000000000000100000000000000",
+      "error": "term",
+      "index": 1,
+      "previous": {
+        "state": 1,
+        "checksum": 2063205935,
+        "leadership_term_id": 2,
+        "term_base_log_position": 0,
+        "recording_id": 0
+      }
+    },
+    {
+      "name": "terms-entry-position-not-aligned",
+      "region": "terms-entry",
+      "bytes": "0100000096a205da030000000000000064000000000000000100000000000000",
+      "error": "position",
+      "index": 1,
+      "previous": {
+        "state": 1,
+        "checksum": 2063205935,
+        "leadership_term_id": 2,
+        "term_base_log_position": 0,
+        "recording_id": 0
+      }
+    },
+    {
+      "name": "terms-entry-position-below",
+      "region": "terms-entry",
+      "bytes": "01000000e1546d06040000000000000000000000000000000100000000000000",
+      "error": "position",
+      "index": 2,
+      "previous": {
+        "state": 1,
+        "checksum": 1930951897,
+        "leadership_term_id": 3,
+        "term_base_log_position": 4096,
+        "recording_id": 1
+      }
+    },
+    {
+      "name": "terms-entry-recording",
+      "region": "terms-entry",
+      "bytes": "01000000acfc713703000000000000000010000000000000feffffffffffffff",
+      "error": "recording",
+      "index": 1,
+      "previous": {
+        "state": 1,
+        "checksum": 2063205935,
+        "leadership_term_id": 2,
+        "term_base_log_position": 0,
+        "recording_id": 0
+      }
+    },
+    {
+      "name": "terms-entry-order-state-before-term",
+      "region": "terms-entry",
+      "bytes": "020000008d9bd50fffffffffffffffff00000000000000000000000000000000",
+      "error": "state",
+      "index": 0,
+      "previous": null
     }
   ]
 }
