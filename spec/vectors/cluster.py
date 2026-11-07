@@ -486,6 +486,30 @@ def vote_vector(name, candidate_term, log, state, request):
     return arithmetic(name, "request-vote", inputs, request_vote(candidate_term, log, state, request))
 
 
+CLOSED = 17  # the election state "closed"
+
+
+def canvass_position_action(leader_term, state, msg):
+    """spec/cluster.md, "Messages during an election" and "Messages outside an election": what a
+    leader of `leader_term` in election state `state` (5 to 8, or 17 once closed) does with a canvass
+    position whose fields are `msg`: holds an election, from init, when the message's leadership
+    term id, the sender's candidate term, or its log leadership term id is above the leader's term,
+    in leader log replication, leader ready or closed, Raft's step-down (ADR 0058); answers with new
+    leadership term when the log leadership term id is below its term, or at it once closed; else
+    updates its table alone."""
+    if msg["leadership_term_id"] > leader_term or msg["log_leadership_term_id"] > leader_term:
+        return {"action": "election" if state in (5, 8, CLOSED) else "table"}
+    if msg["log_leadership_term_id"] < leader_term or state == CLOSED:
+        return {"action": "answer"}
+    return {"action": "table"}
+
+
+def canvass_vector(name, leader_term, state, leadership_term_id, log_leadership_term_id):
+    msg = {"leadership_term_id": leadership_term_id, "log_leadership_term_id": log_leadership_term_id}
+    inputs = {"leader_term": leader_term, "state": state, "message": msg}
+    return arithmetic(name, "canvass-position", inputs, canvass_position_action(leader_term, state, msg))
+
+
 def next_fields(terms, reported_term, leader_term, leader_base):
     """spec/cluster.md, new leadership term's next fields: for a reported term that is the leader's
     own, −1 for all three; else the lowest term in the leader's record above the reported one, the
@@ -708,6 +732,14 @@ VECTORS += [
     vote_vector("request-vote-in-follower-ballot-higher-term-for", 3, [2, 100], 4, (4, 2, 100)),
     vote_vector("request-vote-outside-the-voting-states-nothing", 3, [2, 200], 10, (4, 2, 200)),
     vote_vector("request-vote-in-init-nothing", 3, [2, 200], 0, (4, 2, 200)),
+    canvass_vector("canvass-position-stale-candidate-term-holds-election", 3, CLOSED, 4, 2),
+    canvass_vector("canvass-position-higher-term-in-leader-ready-fails-election", 3, 8, 4, 2),
+    canvass_vector("canvass-position-higher-log-term-in-leader-log-replication-fails-election", 3, 5, 4, 4),
+    canvass_vector("canvass-position-higher-term-in-leader-replay-table", 3, 6, 4, 2),
+    canvass_vector("canvass-position-log-term-behind-answered", 3, CLOSED, 3, 2),
+    canvass_vector("canvass-position-log-term-behind-during-election-answered", 3, 8, 2, 2),
+    canvass_vector("canvass-position-own-term-closed-answered", 3, CLOSED, 3, 3),
+    canvass_vector("canvass-position-own-term-during-election-table", 3, 8, 3, 3),
     arithmetic("next-fields-term-behind", "next-fields",
                {"terms": LEADER_TERMS, "reported_term": 2, "leader_term": 5, "leader_base": 1000},
                next_fields(LEADER_TERMS, 2, 5, 1000)),

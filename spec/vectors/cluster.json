@@ -2677,6 +2677,134 @@
     },
     {
       "kind": "arithmetic",
+      "name": "canvass-position-stale-candidate-term-holds-election",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 17,
+        "message": {
+          "leadership_term_id": 4,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "election"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-higher-term-in-leader-ready-fails-election",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 8,
+        "message": {
+          "leadership_term_id": 4,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "election"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-higher-log-term-in-leader-log-replication-fails-election",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 5,
+        "message": {
+          "leadership_term_id": 4,
+          "log_leadership_term_id": 4
+        }
+      },
+      "fields": {
+        "action": "election"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-higher-term-in-leader-replay-table",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 6,
+        "message": {
+          "leadership_term_id": 4,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "table"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-log-term-behind-answered",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 17,
+        "message": {
+          "leadership_term_id": 3,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "answer"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-log-term-behind-during-election-answered",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 8,
+        "message": {
+          "leadership_term_id": 2,
+          "log_leadership_term_id": 2
+        }
+      },
+      "fields": {
+        "action": "answer"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-own-term-closed-answered",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 17,
+        "message": {
+          "leadership_term_id": 3,
+          "log_leadership_term_id": 3
+        }
+      },
+      "fields": {
+        "action": "answer"
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "canvass-position-own-term-during-election-table",
+      "rule": "canvass-position",
+      "inputs": {
+        "leader_term": 3,
+        "state": 8,
+        "message": {
+          "leadership_term_id": 3,
+          "log_leadership_term_id": 3
+        }
+      },
+      "fields": {
+        "action": "table"
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "next-fields-term-behind",
       "rule": "next-fields",
       "inputs": {

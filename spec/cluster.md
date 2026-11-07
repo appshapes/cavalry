@@ -270,7 +270,7 @@ it has no leader.
 | --- | --- | --- | --- | --- |
 | 8 | 8 | log leadership term id | i64 | the highest term in the sender's record of recorded terms ("The log"), −1 for none |
 | 16 | 8 | log position | i64 | the sender's append position |
-| 24 | 8 | leadership term id | i64 | the highest term the sender has known, −1 for none |
+| 24 | 8 | leadership term id | i64 | the sender's candidate term, the highest term it has voted in, proposed or followed ("Messages during an election"), at least its log leadership term id; −1 for none |
 | 32 | 4 | follower member id | i32 | the sender's |
 | 36 | 4 | protocol version | i32 | 0 |
 
@@ -498,7 +498,7 @@ counter ("Counters").
 | Code | State | What the member does, and what moves it on |
 | --- | --- | --- |
 | 0 | init | consolidates its log: stops any replay or catch-up, takes the higher of its stored candidate term and its leadership term as its candidate term. A cluster of one member goes to leader log replication as leader of candidate term + 1; every other member goes to canvass |
-| 1 | canvass | as a follower, sends canvass position to every other member every election status interval; moves to nominate at once when every member has reported and no member's log is ahead of its own, a unanimous candidate, or when the canvass deadline has passed and the members that have reported with a log not ahead of its own, itself among them, make a quorum, a quorum candidate ("Logs compared"; the arithmetic vectors pin both). The deadline is the leader heartbeat timeout after the last word from a leader, or the startup canvass timeout after the state began when the member started with no term. A member that receives a request vote for a term above its own while canvassing votes and goes to follower ballot; one that receives new leadership term for a term at least its candidate term goes to follower replay or follower log replication as that message's rules say |
+| 1 | canvass | as a follower, sends canvass position to every other member every election status interval; moves to nominate at once when every member has reported and no member's log is ahead of its own, a unanimous candidate, or when the canvass deadline has passed and the members that have reported with a log not ahead of its own, itself among them, make a quorum, a quorum candidate ("Logs compared"; the arithmetic vectors pin both). The deadline is the leader heartbeat timeout after the last word from a leader, or the startup canvass timeout after the state began when the member started with no term. A member that receives a request vote for a term above its candidate term while canvassing votes for it, when the candidate's log is at least its own, and goes to follower ballot, as "Messages during an election" says; one that receives new leadership term for a term at least its candidate term goes to follower replay or follower log replication as that message's rules say |
 | 2 | nominate | waits a random delay up to half the election timeout, sending canvass position every election status interval, then takes candidate term + 1 as its candidate term, stores it before it sends anything, records its vote for itself and goes to candidate ballot |
 | 3 | candidate ballot | as a candidate, sends request vote to every member it has not sent one to; becomes leader of the candidate term, going to leader log replication, when every member has voted for it, or when the election timeout has passed and a quorum has, no member having voted against; goes back to canvass when the election timeout has passed without a quorum. A request vote from another candidate for a higher term moves it to follower ballot with its vote |
 | 4 | follower ballot | waits for the candidate it voted for; goes to follower replay or follower log replication on its new leadership term, or back to canvass when the election timeout passes |
@@ -518,11 +518,18 @@ counter ("Counters").
 
 **Messages during an election.** A member in init reads nothing. In every other state:
 canvass position updates the sender's position in the reader's table, and a leader in
-leader log replication or leader ready that reads one for a term above its own ends
-its election in failure and begins again at init; a leader reads a canvass position for
-a term below its own and answers with new leadership term for that term, its next
-fields as the table gives them, the leader's term base log position standing for the
-next term's base when that term is the leader's own. Request vote
+leader log replication or leader ready that reads one whose leadership term id, the
+sender's candidate term, or log leadership term id is above its own term ends its
+election in failure and begins again at init, counted in `cluster.elections_failed`,
+while one in leader replay or leader init updates its table alone, the sender's next
+canvass position reaching leader ready; a leader reads a canvass position whose log
+leadership term id is below its own term and answers with new leadership term for
+that term, its next fields as the table gives them, the leader's term base log
+position standing for the next term's base when that term is the leader's own, and
+one at its own term updates its table alone during its election, since states 5 and 8
+send new leadership term to every member. The `canvass-position` vectors pin each
+case: the leader's term, its state and the message's two terms give its action,
+answer, election or table. Request vote
 for a candidate term at or below the reader's candidate term is answered with a vote
 against, the candidate term unchanged, so that a member votes once in a term, a second
 request for a term it has voted in answered against whatever the candidate's log; one
@@ -539,9 +546,9 @@ vote, for, against or none, and the candidate term after it. Vote is read by a c
 candidate ballot for its own candidate term and recorded against the voter. New
 leadership term for the reader's candidate term, in follower ballot or candidate
 ballot, or in canvass for a term at least its candidate term, is read against the
-reader's log leadership term id, and one for any other term is ignored, a term below
-the candidate term in canvass among them, a departure from Aeron, which reads any term
-in canvass (ADR 0058), so that a member that has voted in a term follows no leader of
+reader's log leadership term id, and one for any other term is ignored, counted in
+`cluster.leadership_terms_ignored`, a term below the candidate term in canvass among
+them, a departure from Aeron, which reads any term in canvass (ADR 0058), so that a member that has voted in a term follows no leader of
 a lower one and never counts toward that leader's commits, Raft's rule: when the two
 differ the reader goes back to canvass and takes neither the sender
 as its leader nor the term; when they are the same the sender becomes the reader's
@@ -597,16 +604,28 @@ segments), is answered by nothing, and the follower's timeout counts it. Each re
 publication has a session id of its own in this version, so the follower's image of
 it is on its `catchup` endpoint alone; and sends stop catch-up, stopping the replay with `stop replay`, when a
 follower whose position was appended from the replay reports an append position at or
-past the leader's log position. A leader that reads canvass position for a term at or
-below its own first stops any replay it has running to that follower with `stop
+past the leader's log position. A leader that reads canvass position whose leadership term
+id, the sender's candidate term, is at or below its own term first stops any replay it
+has running to that follower with `stop
 replay` and drops any next replay it was waiting to start for it, as a new catch-up
 position from the follower does too, so that a follower that failed and canvasses
 again never joins a stale replay or finds two started for one request, then answers
-with new leadership term for the reported term, its next fields
-as the table gives them, the three −1 when the reported term is its own, so that a
-restarted member finds the leader and truncates no more than it must; a follower that reads stop catch-up for its term
-removes its catch-up subscription. Any member that reads request vote or commit
-position for a term above its own holds an election, beginning at init; a follower
+with new leadership term for the reported log leadership term id, its next fields
+as the table gives them, the three −1 when that term is its own, so that a
+restarted member finds the leader and truncates no more than it must; one whose
+leadership term id is above the leader's term has the leader hold an election,
+beginning at init, Raft's step-down, counted in `cluster.leader_step_downs`, a
+departure from Aeron, whose leader reads a canvass position's log leadership term id
+alone (ADR 0058), so that a member whose candidate term passed the leader's term, one
+that voted in a ballot the leader never saw, rejoins through the election it brings
+instead of canvassing for as long as the leader leads; the `canvass-position` vectors
+pin both. A follower that reads stop catch-up for its term
+removes its catch-up subscription. Any member whose election has closed that reads
+request vote whose candidate term id, or commit position whose leadership term id, is
+above its own leadership term id holds an election, beginning at init, counted in
+`cluster.leader_step_downs` when it was the leader; a leader in states 5 to 8 answers
+a request vote with nothing, as the rule above says, and holds no election for it
+until its election has closed; a follower
 reads commit position from its leader as the leader's heartbeat and as its commit
 position.
 
@@ -723,7 +742,9 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.elections` | an election begun, from init |
 | `cluster.elections_failed` | an election that failed in a state and began again at init |
 | `cluster.leader_heartbeat_timeouts` | a follower that held an election for want of a leader's heartbeat |
+| `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position whose leadership term id, a request vote whose candidate term id or a commit position whose leadership term id was above its own term |
 | `cluster.votes_for`, `cluster.votes_against` | a vote sent, by its value |
+| `cluster.leadership_terms_ignored` | a new leadership term ignored for its term: below the reader's candidate term in canvass, or not the candidate term in a ballot state |
 | `cluster.sessions` | a gauge: open sessions |
 | `cluster.sessions_refused` | a session connect refused, with the version, the response channel or the limit as the detail |
 | `cluster.connects_dropped` | a session connect dropped unanswered: the member's pending answers at their bound, the response channel refused by the driver, or the answer unsent at the session connect timeout |
@@ -817,7 +838,9 @@ encoder. Each vector has a `kind`:
   replay, wait or fail, and the term it records, from the message's fields, its own,
   its candidate term and whether it is in canvass; what a reader answers a request
   vote, for, against or nothing, and its candidate term after it, from its candidate
-  term, log and state and the request's fields; the
+  term, log and state and the request's fields; what a leader does with a canvass
+  position, answer with new leadership term, hold an election or update its table
+  alone, from its term, its election state and the message's two terms; the
   next fields a leader writes into new leadership term for a reported term, from its
   record of terms; which of the leader's
   recordings a replay begins in and where it ends, from the leader's terms and the
