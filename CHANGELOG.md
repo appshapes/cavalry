@@ -1641,6 +1641,8 @@ user-visible change, added in the same commit as the change. The format follows
   drops the armed recording, counted in `recording.armed`, `recording.armed_started`,
   `recording.armed_failed` and `recording.armed_dropped`; `cavalry-proto` parses the
   keys with 16 new channel
-  vectors, and the driver answers both with code 11 until card 227's driver change
+  vectors, and the driver creates the log at the keys'
+  position, joins under the same keys alone, and arms, starts, fails or drops the
+  recording as the page says
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).
