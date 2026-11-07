@@ -9,10 +9,10 @@ use cavalry_proto::cluster::{
     Ballot, Candidate, CanvassAction, CanvassTerms, ChangeType, CloseReason, ClusterAction,
     ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member,
     MemberPosition, Message, NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd,
-    ReplicationStop, SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, VERSION, VoteAnswer,
-    VoteRequest, ballot, candidate, canvass_position_action, commit_position, entry_position,
-    log_at_least, new_leadership_term_action, next_fields, parse_members, quorum, replay_end,
-    replication_record, replication_stop, request_vote,
+    ReplicationStop, SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote,
+    VoteAnswer, VoteRequest, ballot, candidate, canvass_position_action, commit_position,
+    entry_position, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
+    replay_end, replication_record, replication_stop, request_vote,
 };
 use serde_json::{Map, Value, json};
 
@@ -390,10 +390,14 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             let mut votes = vec![None; members];
             for vote in inputs["votes"].as_array().expect("votes") {
                 let member = usize::try_from(int(vote, "member")).expect("member");
-                votes[member] = Some(vote["vote"].as_bool().expect("vote"));
+                votes[member] = Some(Vote {
+                    vote: vote["vote"].as_bool().expect("vote"),
+                    term: int(vote, "term"),
+                });
             }
             let Ballot { leader, unanimous } = ballot(
                 members,
+                int(inputs, "candidate_term"),
                 &votes,
                 inputs["timeout_passed"].as_bool().expect("timeout_passed"),
             );

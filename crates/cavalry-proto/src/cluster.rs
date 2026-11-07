@@ -2205,14 +2205,33 @@ pub struct Ballot {
     pub unanimous: bool,
 }
 
-/// A candidate's ballot among `members` members, `votes[i]` the vote of member `i`,
-/// `None` for one not yet cast (`spec/cluster.md`, "candidate ballot"): leader at once
-/// when every member voted for, else leader once the election timeout has passed when
-/// a quorum voted for and none against.
-pub fn ballot(members: usize, votes: &[Option<bool>], timeout_passed: bool) -> Ballot {
-    let cast = votes.iter().take(members);
-    let for_ = cast.clone().filter(|v| **v == Some(true)).count();
-    let against = cast.clone().filter(|v| **v == Some(false)).count();
+/// One vote a candidate recorded against a member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Vote {
+    /// For the candidate, or against.
+    pub vote: bool,
+    /// The candidate term the vote answers.
+    pub term: i64,
+}
+
+/// A candidate's ballot for `candidate_term` among `members` members, `votes[i]` the
+/// vote of member `i`, `None` for one not yet cast (`spec/cluster.md`, "candidate
+/// ballot"): over the votes for the candidate's current candidate term alone, its own
+/// among them, leader at once when every member voted for, else leader once the
+/// election timeout has passed when a quorum voted for and none against; a vote for an
+/// older candidate term of the candidate's counts for nothing.
+pub fn ballot(
+    members: usize,
+    candidate_term: i64,
+    votes: &[Option<Vote>],
+    timeout_passed: bool,
+) -> Ballot {
+    let cast = votes
+        .iter()
+        .take(members)
+        .map(|v| v.filter(|v| v.term == candidate_term));
+    let for_ = cast.clone().filter(|v| v.is_some_and(|v| v.vote)).count();
+    let against = cast.clone().filter(|v| v.is_some_and(|v| !v.vote)).count();
     let counted = cast.count();
     if counted == members && for_ == members && members >= 1 {
         return Ballot {
@@ -2303,7 +2322,9 @@ pub const VOTING_STATES: [u8; 4] = [1, 2, 3, 4];
 /// an election", request vote): against with the term unchanged for a term at or below
 /// its own, so that it votes once in a term; against, taking the term, for a higher
 /// term from a log behind its own; for, taking the term, for a higher term from a log
-/// at least its own in one of [`VOTING_STATES`]; nothing in init or in any other state.
+/// at least its own in one of [`VOTING_STATES`]; nothing in init, once the election has
+/// closed ([`CLOSED_STATE`]), when the member holds an election instead, or in any
+/// other state.
 pub const fn request_vote(
     candidate_term: i64,
     log: LogReport,
@@ -2311,7 +2332,7 @@ pub const fn request_vote(
     request: VoteRequest,
 ) -> VoteAnswer {
     let term = request.candidate_term_id;
-    if state == 0 {
+    if state == 0 || state == CLOSED_STATE {
         return VoteAnswer {
             vote: None,
             candidate_term,
