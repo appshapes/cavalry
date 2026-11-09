@@ -54,7 +54,8 @@ mailed to nobody. With some of them, every run fails and names what is missing.
 
    The run takes twenty to thirty minutes: the writer agent drafts, the lint and the
    reviewer agent read it, and one fix cycle follows when either refused. The email then
-   arrives at the preview address with `[preview]` in front of its subject. The run's
+   arrives at the preview address with the subject `[preview] Cavalry <version>`, the
+   highest version in `Cargo.toml` among the commits the email covers. The run's
    artifact, `release-notes-email-<run id>`, holds `notes.md` (the draft), `lint.txt`,
    `review.md`, `email.md` and `email.html` (what was sent), `title.txt`, `window.txt`
    (the commits covered) and `sources/` (what the writer read).

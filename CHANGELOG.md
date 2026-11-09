@@ -1647,3 +1647,8 @@ user-visible change, added in the same commit as the change. The format follows
   same keys alone, and arms, starts, fails or drops the recording as the page says
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).
+- The release-notes email's subject is the product and its version, `Cavalry 0.1.0`:
+  the highest `version` under `Cargo.toml`'s `[workspace.package]` among the commits
+  the email covers, in place of `Cavalry: what's new, October 26 to November 1, 2026`,
+  the shape Brigade's email uses too. A preview still starts with `[preview]`, and the
+  email's own title still names the dates it covers (card 189).

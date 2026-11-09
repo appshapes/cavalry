@@ -23,7 +23,9 @@ says about why they received it are decided here, by code that release-notes-tes
               under sources/, commits.md (every commit's message, the review record),
               changelog.md (the lines the window added to CHANGELOG.md, the authority on what
               changed for a user), decisions.md (the ADRs the window added or changed, with their
-              status) and docs.md (the documentation pages the window touched).
+              status) and docs.md (the documentation pages the window touched). The subject is
+              `Cavalry <version>`, the highest product version (ADR 0002) among the commits the
+              email covers, the shape Brigade's email uses too.
   adopt       Takes the draft an earlier run wrote and its gate approved, so that what was
               previewed is what is sent: every run writes a new draft, and a gate can approve
               one and refuse the next (Brigade's first send was refused after a preview of the
@@ -234,6 +236,41 @@ def span(first, last):
     return f"{MONTHS[first.month - 1]} {first.day} to {last.day}, {last.year}"
 
 
+def product_version(ctx, sha):
+    """`version` under Cargo.toml's [workspace.package] at a commit, the product version (ADR 0002),
+    or None where there is none (the first commits had no Cargo.toml). Read line by line, since
+    tomllib is newer than the Python this script is held to."""
+    table = None
+    for line in (git(ctx, "show", f"{sha}:Cargo.toml", check=False) or "").splitlines():
+        header = re.match(r"\s*\[+\s*([^\[\]]+?)\s*\]", line)
+        if header:
+            table = header.group(1)
+        elif table == "workspace.package":
+            m = re.match(r'\s*version\s*=\s*"([^"]+)"', line)
+            if m:
+                return m.group(1)
+    return None
+
+
+def version_order(version):
+    """Semver's order, as far as a subject needs it: the three numbers, then a release above its
+    pre-releases. Cargo refuses a version that is not semver, so anything else is refused here."""
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?", version)
+    if not m:
+        die(f'"{version}" under Cargo.toml\'s [workspace.package] is not a version')
+    return int(m[1]), int(m[2]), int(m[3]), m[4] is None
+
+
+def latest_version(ctx, shas):
+    """The highest product version among the commits an email covers. Not the version at `last`:
+    `last` is the newest by commit date, and a commit made on a base from before a version bump
+    and merged after it is newer than the bump but carries the older version."""
+    versions = [v for v in (product_version(ctx, s) for s in shas) if v is not None]
+    if not versions:
+        die("no commit the email covers has a version under Cargo.toml's [workspace.package], and the subject names it")
+    return max(versions, key=version_order)
+
+
 # ---- window ------------------------------------------------------------------------------
 
 def last_send(ctx):
@@ -316,7 +353,7 @@ def window(ctx):
     last_date = datetime.date.fromisoformat(git(ctx, "show", "-s", "--format=%cs", last).strip())
     covered = span(first_date, last_date)
     title = f"What's new in Cavalry, {covered}"
-    subject = f"Cavalry: what's new, {covered}"
+    subject = f"Cavalry {latest_version(ctx, shas)}"
     (ctx.dir / "title.txt").write_text(title + "\n", encoding="utf-8")
 
     log = git(ctx, "log", "--reverse", "--no-merges", "--date=short", "--format=## %h %s%n%n_%cd_%n%n%b", *filters, *rng)
