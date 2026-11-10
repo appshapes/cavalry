@@ -1,4 +1,4 @@
-# 0065. Feed the committed log to a service through a replay of the member's recording
+# 0066. Feed the committed log to a service through a replay of the member's recording
 
 - **Status:** Accepted
 - **Date:** 2026-11-10

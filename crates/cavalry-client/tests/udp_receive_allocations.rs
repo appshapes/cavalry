@@ -81,7 +81,7 @@ fn offer(publication: &mut Publication, message: &[u8]) {
 
 /// Polls until `count` messages of this round have arrived, in order from `first`:
 /// with `Subscription::poll`, or, when `session` names the image, with the bounded
-/// poll of that image under the largest limit (ADR 0065). Nothing here allocates.
+/// poll of that image under the largest limit (ADR 0066). Nothing here allocates.
 fn drain(subscription: &mut Subscription, first: u64, count: u64, session: Option<i32>) {
     let deadline = Instant::now() + DEADLINE;
     let mut next = first;

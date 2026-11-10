@@ -733,7 +733,7 @@ on the service log stream ("Members and streams"), from the position of an entry
 or the position after the last entry it applied. The member names the recording in
 `cluster.log_recording_id` ("Counters"), which is −1 while the member has none. The
 path is the same on the leader and on a follower, and a service may start before its
-member, with it or after it (ADR 0065). A service reads its own replay's session on
+member, with it or after it (ADR 0066). A service reads its own replay's session on
 that stream and reads past any other, which is another service's.
 
 A member keeps two rules of order for the service. It adds `cluster.log_recording_id`

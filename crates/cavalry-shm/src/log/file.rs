@@ -1195,7 +1195,7 @@ impl TermReader {
     }
 
     /// [`TermReader::poll`] bounded by `limit_position` (`spec/log-buffer.md`,
-    /// "Reading"; ADR 0065): the read also stops before the first frame that begins at
+    /// "Reading"; ADR 0066): the read also stops before the first frame that begins at
     /// or past the limit, committed or not, and a frame that begins below it is
     /// delivered whole. A limit at or below the reader's position reads nothing, and
     /// the position never moves back. In Aeron, this is `Image.boundedPoll`.

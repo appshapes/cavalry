@@ -107,4 +107,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0061. Draw the finish line for early testers at the first release, after the fifth slice](decisions/0061-draw-the-finish-line-for-early-testers-at-the-first-release.md)
 - [0060. Replicate the log with an appointed leader, a term record and a per-peer consensus channel](decisions/0060-replicate-the-log-with-an-appointed-leader.md)
 - [0062. Add a client's counter with Aeron's counter commands, as client protocol version 7](decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md)
-- [0065. Feed the committed log to a service through a replay of the member's recording](decisions/0065-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)
+- [0066. Feed the committed log to a service through a replay of the member's recording](decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)

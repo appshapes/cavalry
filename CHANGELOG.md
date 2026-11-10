@@ -1739,5 +1739,5 @@ user-visible change, added in the same commit as the change. The format follows
   which reads one image and delivers no frame that begins at or past the limit, and
   `cavalry-shm` the `TermReader::bounded_poll` under it. The reader of the committed
   log and the counter follow
-  ([ADR 0065](docs/decisions/0065-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
   card 227).
