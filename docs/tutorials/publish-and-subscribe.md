@@ -141,8 +141,8 @@ decides on, and every state is a counter `doctor` reads.
 
 ## What to read next
 
-- [Run a driver and read doctor](../how-to/run-the-driver.md): the binary's flags, the
-  two configuration keys and every `doctor` line.
+- [Run a driver and read doctor](../how-to/run-the-driver.md): the binary's flags, its
+  configuration keys and every `doctor` line.
 - [Record a stream to the durable log](../how-to/record-a-stream.md) and
   [Replay a recording](../how-to/replay-a-recording.md): the two commands from a shell,
   what the log directory holds, and replaying between two instants.
