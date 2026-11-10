@@ -240,7 +240,13 @@ sees only a history that a reachable member reports. A leader whose log was lost
 together with a quorum of members that never ran or lost theirs too, leads before a
 silent member that holds the history comes back. That is a quorum that lost its log,
 which neither Raft nor Aeron can recover. The remedy is the same: a new cluster, with
-the old directories kept for what they hold.
+the old directories kept for what they hold. When that silent member does come back
+after the leader has closed, nothing tells its term 0 from the new one, since every
+leader of this version leads term 0: if its append position is the leader's log
+position at that moment, follower log await joins it, and its log then holds the old
+history up to that position and the new one after it, a divergence no counter
+reports. It is the same loss, a quorum's, seen from the member that survived it, and
+the page does not claim to detect it.
 
 Revisit: when card 228 builds the election, which removes "The appointed leader" from
 the page and the refusal to start on a log from the module; when card 230 builds the
