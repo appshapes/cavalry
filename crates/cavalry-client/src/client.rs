@@ -16,6 +16,7 @@ use cavalry_shm::counters::{CounterValue, CountersReader, CountersWriter};
 use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
+use crate::committed_log::CommittedLog;
 use crate::conductor::{
     COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
     RECORDING_QUEUE, RECORDING_REGISTRY, REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE,
@@ -1056,6 +1057,36 @@ impl Cavalry {
     /// The driver's counters file, read-only: what `doctor` reads, from the client.
     pub fn counters(&self) -> &CountersReader {
         &self.counters
+    }
+
+    /// The counters file as the handles that check a record before they trust its
+    /// value hold it ([`Recording`], [`CommittedLog`]).
+    pub(crate) fn shared_counters(&self) -> Arc<CountersReader> {
+        Arc::clone(&self.counters)
+    }
+
+    /// Opens the committed log of the cluster member on this client's driver at
+    /// `position`, for a service to read (`spec/cluster.md`, "The service"; ADR 0065):
+    /// it adds a subscription on `cavalry:ipc` and stream [`SERVICE_LOG_STREAM_ID`] and
+    /// starts a replay that follows the member's recording of the log from `position`.
+    /// `position` is where an entry begins: 0, or [`CommittedLog::position`] of an
+    /// earlier handle.
+    ///
+    /// Returns `None` while the driver hosts no member that has a recording of its
+    /// log: the member has not started, its election has not given it a log yet, or
+    /// it has closed. A service that starts before its member calls again, with a
+    /// pause between two calls: each reads the counters file's records to find the
+    /// member, which is not a call for a loop that spins. Nothing is sent to the
+    /// driver until a member is found.
+    ///
+    /// The refusals are those of [`Cavalry::add_subscription`] and
+    /// [`Cavalry::start_replay`]: a position that is not a multiple of 32 or is past
+    /// what the member has recorded is [`ClientError::Refused`] with code 23, and a
+    /// driver whose replays registry is full, 64 replays, is code 10.
+    ///
+    /// [`SERVICE_LOG_STREAM_ID`]: crate::SERVICE_LOG_STREAM_ID
+    pub fn committed_log(&mut self, position: i64) -> Result<Option<CommittedLog>, ClientError> {
+        CommittedLog::open(self, position)
     }
 
     /// Sends `client close`, so the driver removes this client's publications and

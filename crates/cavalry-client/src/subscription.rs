@@ -320,6 +320,120 @@ impl Subscription {
         Ok(delivered)
     }
 
+    /// Reads up to `fragment_limit` fragments of one image, the first whose session id
+    /// is `session_id`, and no frame that begins at or past `limit_position`: a frame
+    /// that begins below the limit is delivered whole, and a limit at or below the
+    /// image's position reads nothing (`spec/log-buffer.md`, "Reading"; ADR 0065). In
+    /// Aeron, this is `Image.boundedPoll`. A limit of `i64::MAX` reads the image with
+    /// no bound. The subscription's other images are not read by this call.
+    ///
+    /// The bound is for a stream that may be read only as far as something else has
+    /// got: a cluster's service reads its log no further than the commit position
+    /// ([`CommittedLog`](crate::CommittedLog)). A bound cannot be applied in the
+    /// handler instead, since a frame the handler was given is behind the image's
+    /// position and cannot be handed back.
+    ///
+    /// Images the driver announced since the last poll join first, as in
+    /// [`poll`](Self::poll). Returns how many fragments were delivered, 0 when the
+    /// subscription holds no image of that session, or the [`Fault`] that stopped the
+    /// poll. Nothing here allocates, locks, opens or unmaps, on the fault path either.
+    pub fn bounded_poll<F>(
+        &mut self,
+        session_id: i32,
+        mut handler: F,
+        limit_position: i64,
+        fragment_limit: usize,
+    ) -> Result<usize, Fault>
+    where
+        F: FnMut(&[u8], &DataFrameHeader),
+    {
+        if self.shared.closed().is_some() {
+            return Err(Fault::Closed);
+        }
+        self.apply_events()?;
+        let Some(index) = self
+            .images
+            .iter()
+            .position(|image| image.session_id == session_id)
+        else {
+            return Ok(0);
+        };
+        self.bounded_poll_at(index, limit_position, fragment_limit, &mut handler)
+    }
+
+    /// Reads every image but the first of `session_id` with no bound, up to
+    /// `fragment_limit` fragments in all, and drops what it reads: for a reader of one
+    /// session on a stream others may publish on, whose images would otherwise hold
+    /// their publishers at this subscription's position (`spec/log-buffer.md`, "The
+    /// driver": a publication's limit follows its slowest subscriber).
+    pub(crate) fn discard_others(
+        &mut self,
+        session_id: i32,
+        fragment_limit: usize,
+    ) -> Result<usize, Fault> {
+        if self.shared.closed().is_some() {
+            return Err(Fault::Closed);
+        }
+        self.apply_events()?;
+        let kept = self
+            .images
+            .iter()
+            .position(|image| image.session_id == session_id);
+        let mut dropped = 0;
+        let mut index = 0;
+        while index < self.images.len() && dropped < fragment_limit {
+            if Some(index) == kept {
+                index += 1;
+                continue;
+            }
+            // A fault removes the image at `index` and returns: the next call goes on.
+            dropped += self.bounded_poll_at(
+                index,
+                i64::MAX,
+                fragment_limit - dropped,
+                &mut |_: &[u8], _: &DataFrameHeader| {},
+            )?;
+            index += 1;
+        }
+        Ok(dropped)
+    }
+
+    /// The bounded read of the image at `index`, its position stored after it; a frame
+    /// that fails a check removes the image, as in [`poll`](Self::poll).
+    fn bounded_poll_at<F>(
+        &mut self,
+        index: usize,
+        limit_position: i64,
+        fragment_limit: usize,
+        handler: &mut F,
+    ) -> Result<usize, Fault>
+    where
+        F: FnMut(&[u8], &DataFrameHeader),
+    {
+        let Some(image) = self.images.get_mut(index) else {
+            return Ok(0);
+        };
+        match image
+            .reader
+            .bounded_poll(limit_position, fragment_limit, handler)
+        {
+            Ok(poll) => {
+                image.position.store_release(poll.position);
+                Ok(poll.fragments)
+            }
+            Err(error) => {
+                let image = self.images.swap_remove(index);
+                let fault = Fault::Image {
+                    session_id: image.session_id,
+                    position: image.position(),
+                    reason: error.reason(),
+                };
+                self.retire(image);
+                Err(fault)
+            }
+        }
+    }
+
     /// Applies what the conductor queued: new images join, withdrawn ones go.
     fn apply_events(&mut self) -> Result<(), Fault> {
         while let Some(event) = self.incoming.poll() {
