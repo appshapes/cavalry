@@ -687,24 +687,27 @@ fn run(config: &Config) -> ExitCode {
         (Some(members), Some(id)) => Some((members.as_str(), id)),
         (members, _) => {
             // A member id of -1, its default, is read as unset (`Config::from_vars`).
-            let (set, unset, missing) = if members.is_some() {
+            // The anchor is the missing key's, as doctor's finding for the same case.
+            let (set, unset, missing, anchor) = if members.is_some() {
                 (
                     "CAVALRY_CLUSTER_MEMBERS",
                     "CAVALRY_CLUSTER_MEMBER_ID",
                     "is unset or -1, no member",
+                    "clustermemberid",
                 )
             } else {
                 (
                     "CAVALRY_CLUSTER_MEMBER_ID",
                     "CAVALRY_CLUSTER_MEMBERS",
                     "is not",
+                    "clustermembers",
                 )
             };
             eprintln!(
                 "cavalry run: {set} is set and {unset} {missing}, so the driver did not \
                  start: a cluster member needs both, the cluster's members string and this \
                  host's id in it; set {unset}, or unset {set} for a driver in no cluster; \
-                 `cavalry doctor` checks both; see docs/reference/config.md#clustermembers"
+                 `cavalry doctor` checks both; see docs/reference/config.md#{anchor}"
             );
             return ExitCode::FAILURE;
         }
