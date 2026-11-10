@@ -4,7 +4,8 @@
 - **Date:** 2026-11-10
 - **Invariants affected:** 1, 2, 3, 6
 - **Supersedes:** none. Adds a command to `spec/client-protocol.md`, which moves to
-  version 8; every version 7 encoding is unchanged.
+  version 8; every version 7 encoding is unchanged. Amends `spec/cluster.md`, "The
+  log", within version 0, with no encoding and no vector.
 
 ## Context
 
@@ -66,6 +67,17 @@ nothing for a recording the handle has seen stop, and it allocates nothing.
 
 A version 7 driver answers the command with error code 6, as it answers any type id
 it does not know, and a version 8 client's other commands are version 7 commands.
+
+`spec/cluster.md`, "The log", says what ADR 0060 decided and the page did not: a
+recording holds a position once a sync that returned success has covered it, so a
+member's append position is its recording's synced position. And it says who asks: a
+member asks its driver to sync its recording of the log whenever the recorder has
+written past what it has synced, once for each position written that it sees, and
+without waiting for the answer. It asks once per position and not once per duty
+cycle because the recorder writes nothing while it syncs: the next block it takes
+holds everything that arrived meanwhile, and one request covers it, so the syncs
+group the entries by themselves. A request the driver refuses is not sent again
+until the position written moves, and the recorder's own sync covers what it left.
 
 ## Alternatives considered
 
@@ -143,6 +155,13 @@ it does not know, and a version 8 client's other commands are version 7 commands
   `tests/sync_allocations.rs`: two hundred rounds of a message, `request_sync` and
   the synced position reaching it allocate nothing in any thread of the process, the
   client's and the driver's.
+- The commit this is for, measured on card 227's stack with the consensus module
+  asking as "The log" now says, three members over three drivers on the loopback of
+  a macOS laptop: ten entries, each appended once every member had committed the one
+  before, took 10.013 s without the requests, since two commits are then at least a
+  recorder's second apart, and from 186 ms to 228 ms with them, in twenty runs. That
+  test, and the module's allocation gate with the requests in it, land with the
+  module.
 - What no test here covers: an `fdatasync` that fails. A test cannot make one fail on
   the recorder's descriptors without a failing disk, as ADR 0065 records, so the
   branch of `Recorder::sync_now` that marks the recording when the command's own sync
