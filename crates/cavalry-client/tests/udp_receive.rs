@@ -404,8 +404,25 @@ fn every_message_arrives_once_and_in_order_through_a_lossy_reordering_shim() {
         subscription.poll(|_, _| {}, 0).expect("the poll applies");
         subscription.image_count() == 0
     }));
+    // `image.ended` is the receiver's, counted as it retires the image, before the
+    // conductor hears of it, so it is there by now. `image.removed` is not, yet: the
+    // conductor sends `unavailable image` first and then frees the image's counters,
+    // unlinks its log and counts (`on_image_retired`), and unlinking a log of three
+    // terms takes the conductor long enough that this thread, which has just seen the
+    // image go, can read the counter before it moves. That read, made at once, is what
+    // failed about one run in twenty on a loaded laptop and never in CI (card 197,
+    // issue 112): `left: 0, right: 1` on this counter, with every message delivered
+    // once and in order above. So the counter is waited for, as the driver's own tests
+    // wait for it (`cycle_until`), and the wait's end names what it read.
     assert_eq!(read_counter(dir.path(), IMAGE_ENDED), 1);
-    assert_eq!(read_counter(dir.path(), IMAGE_REMOVED), 1);
+    assert!(
+        wait_until(Duration::from_secs(10), || {
+            read_counter(dir.path(), IMAGE_REMOVED) == 1
+        }),
+        "the conductor counts the image removed once its log is unlinked, after \
+         `unavailable image`: image.removed is {} ten seconds after the image went",
+        read_counter(dir.path(), IMAGE_REMOVED)
+    );
     let (forwarded, dropped, duplicated, held, _) = shim.stop();
     assert!(dropped > 0 && duplicated > 0 && held > 0, "the faults ran");
     assert!(forwarded > 0);
