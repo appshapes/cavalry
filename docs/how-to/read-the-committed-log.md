@@ -113,6 +113,7 @@ its services read what it appends in the same way.
   When the member's driver stopped with it, as `cavalry run` stops both, the program's
   last line is `client closed (driver-closed)` and it exits 1: the position in the
   line before it still holds.
-- A service is given entries later than the cluster commits them, by up to a second:
-  an entry reaches a service once the member's recorder has synced it, and the
-  recorder syncs once a second. No entry is lost or reordered by the wait.
+- A service can be given an entry a moment after the cluster commits it: an entry
+  reaches a service once its own member's recorder has synced it, which the member
+  asks for as soon as the entry is written, and a quorum of the other members can
+  have synced it first. No entry is lost or reordered by the wait.
