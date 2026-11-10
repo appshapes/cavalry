@@ -39,6 +39,10 @@ pub enum Kind {
     Path,
     /// One of [`KeyDef::values`].
     Enum,
+    /// Any text.
+    String,
+    /// A whole number.
+    Integer,
 }
 
 /// One key of `config.toml`: its names, what it takes, and the text of its row on the
@@ -81,16 +85,27 @@ pub struct Config {
     pub log_dir: Option<PathBuf>,
     /// `conductor.idle.strategy`: what the conductor does on an idle duty cycle.
     pub conductor_idle_strategy: IdleStrategy,
+    /// `cluster.members`: the members string of the cluster this driver is a member
+    /// of, as it was set; `None` for no cluster. `doctor` checks it, and `cavalry run`
+    /// refuses a string the cluster protocol refuses (`spec/cluster.md`, "Members and
+    /// streams"; ADR 0060).
+    pub cluster_members: Option<String>,
+    /// `cluster.member.id`: this driver's member id in the members string; `None` for
+    /// no member.
+    pub cluster_member_id: Option<i32>,
 }
 
 impl Default for Config {
     /// Every key at its default: the directory of [`Driver::default_dir`], the log
-    /// directory of [`Driver::default_log_dir`] and [`IdleStrategy::Backoff`].
+    /// directory of [`Driver::default_log_dir`], [`IdleStrategy::Backoff`] and no
+    /// cluster.
     fn default() -> Self {
         Self {
             dir: Driver::default_dir(),
             log_dir: Driver::default_log_dir(),
             conductor_idle_strategy: IdleStrategy::Backoff,
+            cluster_members: None,
+            cluster_member_id: None,
         }
     }
 }
@@ -124,6 +139,18 @@ impl Config {
                     key: &generated::CONDUCTOR_IDLE_STRATEGY,
                     value,
                 })?;
+        }
+        if let Some(value) = set(&generated::CLUSTER_MEMBERS) {
+            config.cluster_members = Some(value);
+        }
+        if let Some(value) = set(&generated::CLUSTER_MEMBER_ID) {
+            // A member id is 0 to 2147483647 (`spec/cluster.md`, "Values"); what is not
+            // one is refused here, before anything starts.
+            let id = value.parse::<i32>().ok().filter(|id| *id >= 0);
+            config.cluster_member_id = Some(id.ok_or(ConfigError::Invalid {
+                key: &generated::CLUSTER_MEMBER_ID,
+                value,
+            })?);
         }
         Ok(config)
     }
@@ -176,6 +203,8 @@ impl fmt::Display for ConfigError {
                         match key.kind {
                             Kind::Path => "path",
                             Kind::Enum => "value",
+                            Kind::String => "string",
+                            Kind::Integer => "whole number from 0 to 2147483647",
                         }
                     )?;
                 }
@@ -296,6 +325,42 @@ mod tests {
             assert!(!envs.contains(&key.env), "{} twice", key.env);
             envs.push(key.env);
         }
-        assert_eq!(generated::KEYS.len(), 3);
+        assert_eq!(generated::KEYS.len(), 5);
+    }
+
+    #[test]
+    fn the_cluster_keys_are_read_and_a_member_id_that_is_no_id_is_refused() {
+        let config = Config::from_vars(table(&[])).expect("defaults");
+        assert_eq!(
+            (config.cluster_members, config.cluster_member_id),
+            (None, None)
+        );
+        let members = "0,a:1,a:2,a:3,a:4,a:5|1,b:1,b:2,b:3,b:4,b:5";
+        let config = Config::from_vars(table(&[
+            ("CAVALRY_CLUSTER_MEMBERS", members),
+            ("CAVALRY_CLUSTER_MEMBER_ID", "1"),
+        ]))
+        .expect("valid");
+        assert_eq!(config.cluster_members.as_deref(), Some(members));
+        assert_eq!(config.cluster_member_id, Some(1));
+        assert_eq!(generated::CLUSTER_MEMBERS.kind, Kind::String);
+        assert_eq!(generated::CLUSTER_MEMBER_ID.kind, Kind::Integer);
+        assert_eq!(generated::CLUSTER_MEMBERS.doctor, "cluster-members");
+        assert_eq!(generated::CLUSTER_MEMBER_ID.doctor, "cluster-member-id");
+
+        for value in ["one", "-1", "2147483648", "1.5"] {
+            let error = Config::from_vars(table(&[("CAVALRY_CLUSTER_MEMBER_ID", value)]))
+                .expect_err("refused");
+            assert_eq!(error.key().name, "cluster.member.id");
+            let text = error.to_string();
+            assert!(
+                text.contains("a whole number from 0 to 2147483647"),
+                "{text}"
+            );
+            assert!(
+                text.ends_with("docs/reference/config.md#clustermemberid"),
+                "{text}"
+            );
+        }
     }
 }

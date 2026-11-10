@@ -24,8 +24,8 @@ Checks on config.toml:
   name             lowercase, dotted (`conductor.idle.strategy`) or one segment (`dir`),
                    unique; its environment variable, CAVALRY_ plus the name upper-cased
                    with dots as underscores, and its Rust constant name are unique
-  type             "path", or "enum" with `values`: distinct non-empty strings, and the
-                   default is one of them
+  type             "path"; "enum" with `values`: distinct non-empty strings, and the
+                   default is one of them; "string"; or "integer"
   default          a non-empty string: the value, or for a path the rule in words
   flag             "" or `--name`, unique
   term             a non-empty string; `just lint-docs` checks it is a glossary row
@@ -68,7 +68,7 @@ ADR = "../decisions/0020-configure-by-environment-variable.md"
 
 SCHEMA = 0
 KEYS = ("name", "type", "default", "flag", "term", "doc", "why_not_default", "doctor")
-TYPES = ("path", "enum")
+TYPES = ("path", "enum", "string", "integer")
 NAME = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
 FLAG = re.compile(r"^--[a-z][a-z0-9-]*$")
 CHECK = re.compile(r"^[a-z][a-z0-9-]*$")

@@ -22,6 +22,8 @@ In Aeron, the keys are system properties in the Java driver, `aeron.dir`, and en
 | [`dir`](#dir) | path | `cavalry-<user> under /dev/shm on Linux when /dev/shm exists, else under the temporary directory` | `CAVALRY_DIR` | `--dir` | `driver-directory-backing` |
 | [`conductor.idle.strategy`](#conductoridlestrategy) | one of `backoff`, `yield`, `busy-spin` | `backoff` | `CAVALRY_CONDUCTOR_IDLE_STRATEGY` | none | `conductor-idle-strategy` |
 | [`log.dir`](#logdir) | path | `cavalry/log under $XDG_DATA_HOME when that variable is set, else ~/.local/share/cavalry/log, and /var/lib/cavalry/log when the driver runs as root; with neither a home nor root the driver refuses to start and names this key` | `CAVALRY_LOG_DIR` | `--log-dir` | `log-directory-backing` |
+| [`cluster.members`](#clustermembers) | string | `empty, which is no cluster: the driver runs as it does without one` | `CAVALRY_CLUSTER_MEMBERS` | none | `cluster-members` |
+| [`cluster.member.id`](#clustermemberid) | integer | `-1, which is no member` | `CAVALRY_CLUSTER_MEMBER_ID` | none | `cluster-member-id` |
 
 ## dir
 
@@ -61,3 +63,29 @@ What the conductor's thread does on a duty cycle that found no work: backoff spi
 The log directory: where the driver's recorder writes the durable log, the catalog, the segment files and the time indexes, on disk and never under the driver directory, held under an advisory lock by one driver at a time (spec/durable-log.md); run, doctor and record read it. Its path is at most 337 bytes, so that a segment roll opens its file on the standard library's stack buffer instead of allocating on the recorder thread; doctor warns on a longer one.
 
 **Why the default cannot always be right.** The home filesystem can be small, a network mount where a sync and a lock mean little, or absent for a service user; a container's is ephemeral; the operator usually wants the log on a disk chosen for room and durability, which the driver cannot pick.
+
+## cluster.members
+
+- **Type:** string
+- **Default:** `empty, which is no cluster: the driver runs as it does without one`
+- **Environment variable:** `CAVALRY_CLUSTER_MEMBERS`
+- **Flag:** none
+- **Doctor check:** `cluster-members`
+- **Glossary:** members string
+
+The members string of the cluster this driver is a member of: `id,ingress,consensus,log,catchup,archive` for each member, an id and five `host:port` endpoints, members separated by `\|` (spec/cluster.md, Members and streams). Every member of a cluster is given the same string. Set together with cluster.member.id, it makes `cavalry run` start the member's consensus module beside the driver.
+
+**Why the default cannot always be right.** A cluster is the hosts an operator chose, and each member's five endpoints are addresses on those hosts; a driver cannot find them from inside, and one that guessed would join a cluster it was not meant for.
+
+## cluster.member.id
+
+- **Type:** integer
+- **Default:** `-1, which is no member`
+- **Environment variable:** `CAVALRY_CLUSTER_MEMBER_ID`
+- **Flag:** none
+- **Doctor check:** `cluster-member-id`
+- **Glossary:** member
+
+This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host. The member with the lowest id is the cluster's appointed leader (spec/cluster.md, The appointed leader).
+
+**Why the default cannot always be right.** Every member of a cluster holds the same members string, so the id alone says which member a host is; no default is right on more than one of them.

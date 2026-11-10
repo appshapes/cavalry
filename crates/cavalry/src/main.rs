@@ -16,11 +16,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
+use cavalry::cluster::ConsensusModule;
 use cavalry::config::Config;
 use cavalry::{
-    Cavalry, ClientError, Driver, FOLLOW_LENGTH, Image, NULL_LENGTH, NULL_POSITION, Positions,
-    Subscription, doctor, index,
+    Cavalry, ClientError, Driver, FOLLOW_LENGTH, IdleStrategy, Image, NULL_LENGTH, NULL_POSITION,
+    Positions, Subscription, doctor, index,
 };
 
 const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
@@ -660,15 +664,43 @@ fn configure(flags: Flags) -> Result<Config, ExitCode> {
     Ok(config)
 }
 
+/// Why `cavalry run` stops: a signal, or the cluster member it runs that cannot go on.
+enum Stop {
+    Signal,
+    Member(String),
+}
+
 /// Installs the signal handler, then starts a driver and waits for a signal; the driver
 /// closes on the way out, leaving −1 in the heartbeat so that doctor and the clients
 /// know. The handler goes first, so that no signal between the start and the handler
 /// kills the process with a fresh heartbeat behind it, and a handler that cannot be
-/// installed refuses to start at all, with the directory untouched.
+/// installed refuses to start at all, with the directory untouched. With
+/// `cluster.members` and `cluster.member.id` set, the driver is a cluster member: its
+/// consensus module starts beside it, on a thread of its own, and stops before it
+/// (ADR 0060; ADR 0063).
 fn run(config: &Config) -> ExitCode {
-    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let member = match (&config.cluster_members, config.cluster_member_id) {
+        (None, None) => None,
+        (Some(members), Some(id)) => Some((members.as_str(), id)),
+        (members, _) => {
+            let (set, unset) = if members.is_some() {
+                ("CAVALRY_CLUSTER_MEMBERS", "CAVALRY_CLUSTER_MEMBER_ID")
+            } else {
+                ("CAVALRY_CLUSTER_MEMBER_ID", "CAVALRY_CLUSTER_MEMBERS")
+            };
+            eprintln!(
+                "cavalry run: {set} is set and {unset} is not, so the driver did not start: a \
+                 cluster member needs both, the cluster's members string and this host's id \
+                 in it; set {unset}, or unset {set} for a driver in no cluster; `cavalry \
+                 doctor` checks both; see docs/reference/config.md#clustermembers"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let (stop, stopped) = std::sync::mpsc::channel::<Stop>();
+    let signal = stop.clone();
     if let Err(error) = ctrlc::set_handler(move || {
-        let _ = stop.send(());
+        let _ = signal.send(Stop::Signal);
     }) {
         eprintln!(
             "cavalry run: cannot install the signal handler, so the driver did not start: \
@@ -701,10 +733,45 @@ fn run(config: &Config) -> ExitCode {
         log_dir.display(),
         config.conductor_idle_strategy.name()
     );
-    match stopped.recv() {
-        Ok(()) => eprintln!("cavalry run: stopping"),
-        // The handler's sender is gone without a signal: a bug, never silent.
-        Err(_) => eprintln!("cavalry run: the signal handler went away; stopping"),
+    let member_stop = Arc::new(AtomicBool::new(false));
+    let mut member_thread = None;
+    let mut failed = false;
+    if let Some((members, id)) = member {
+        match start_member(
+            dir,
+            log_dir,
+            members,
+            id,
+            config.conductor_idle_strategy,
+            Arc::clone(&member_stop),
+            stop,
+        ) {
+            Ok(thread) => member_thread = Some(thread),
+            Err(error) => {
+                eprintln!("cavalry run: {error}");
+                failed = true;
+            }
+        }
+    }
+    if !failed {
+        match stopped.recv() {
+            Ok(Stop::Signal) => eprintln!("cavalry run: stopping"),
+            Ok(Stop::Member(error)) => {
+                eprintln!("cavalry run: the cluster member stopped, so the driver stops: {error}");
+                failed = true;
+            }
+            // Every sender is gone without a signal: a bug, never silent.
+            Err(_) => eprintln!("cavalry run: the signal handler went away; stopping"),
+        }
+    }
+    // The member first: it is a client of the driver, and closes its client while the
+    // driver is there to hear it.
+    member_stop.store(true, Ordering::Release);
+    if let Some(thread) = member_thread
+        && thread.join().is_err()
+    {
+        eprintln!("cavalry run: the cluster member's thread panicked");
+        failed = true;
     }
     match driver.close() {
         Ok(()) => {
@@ -712,7 +779,11 @@ fn run(config: &Config) -> ExitCode {
                 "cavalry run: closed; {} stays for doctor, and the next driver remakes it",
                 dir.display()
             );
-            ExitCode::SUCCESS
+            if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(error) => {
             eprintln!("cavalry run: {error}");
@@ -721,9 +792,126 @@ fn run(config: &Config) -> ExitCode {
     }
 }
 
+/// How long a cluster member's duty cycle may fail without a cycle that works before
+/// `cavalry run` gives the member up and stops: the leader heartbeat timeout, after
+/// which the cluster has counted the member out anyway.
+const MEMBER_FAILURE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Starts the cluster member `id` of `members` as a client of the driver in `dir`,
+/// with its record of terms in `log_dir`, and runs its duty cycle on a thread of its
+/// own with the conductor's idle strategy, until `stop` is set. An error of the start
+/// is returned; a duty cycle that fails is tried again every 100 ms, said once for each
+/// different error, and given up after [`MEMBER_FAILURE_TIMEOUT`] of failures on end,
+/// which `stopped` is told.
+fn start_member(
+    dir: &Path,
+    log_dir: &Path,
+    members: &str,
+    id: i32,
+    strategy: IdleStrategy,
+    stop: Arc<AtomicBool>,
+    stopped: std::sync::mpsc::Sender<Stop>,
+) -> Result<std::thread::JoinHandle<()>, String> {
+    let mut module =
+        ConsensusModule::start(dir, log_dir, members, id).map_err(|error| error.to_string())?;
+    eprintln!(
+        "cavalry run: cluster member {id} started: it follows or leads as \
+         docs/reference/cluster.md#roles-and-the-election says, and `cavalry doctor` shows \
+         cluster.role and cluster.election_state"
+    );
+    std::thread::Builder::new()
+        .name("cavalry-consensus".to_string())
+        .spawn(move || {
+            let mut idle = Idle::new(strategy);
+            let mut failing_since: Option<Instant> = None;
+            let mut last_error = String::new();
+            while !stop.load(Ordering::Acquire) {
+                match module.do_work() {
+                    Ok(work) => {
+                        failing_since = None;
+                        idle.idle(work);
+                    }
+                    Err(error) => {
+                        let text = error.to_string();
+                        if text != last_error {
+                            eprintln!("cavalry run: cluster member {id}: {text}");
+                            last_error = text;
+                        }
+                        let since = *failing_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= MEMBER_FAILURE_TIMEOUT {
+                            let _ = stopped.send(Stop::Member(last_error));
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            }
+            if let Err(error) = module.close() {
+                eprintln!("cavalry run: cluster member {id}: {error}");
+            }
+        })
+        .map_err(|error| {
+            format!(
+                "the cluster member's thread could not start: {error}; free a thread on this \
+                 host and run cavalry again"
+            )
+        })
+}
+
+/// The idle strategy of the consensus module's thread, the conductor's: busy-spin never
+/// leaves the CPU, yield gives it up on every idle cycle, and backoff spins, then
+/// yields, then sleeps from 1 µs to 1 ms, doubling, until there is work again.
+struct Idle {
+    strategy: IdleStrategy,
+    spins: u32,
+    yields: u32,
+    park: Duration,
+}
+
+impl Idle {
+    const MAX_SPINS: u32 = 10;
+    const MAX_YIELDS: u32 = 20;
+    const MIN_PARK: Duration = Duration::from_micros(1);
+    const MAX_PARK: Duration = Duration::from_millis(1);
+
+    fn new(strategy: IdleStrategy) -> Self {
+        Self {
+            strategy,
+            spins: 0,
+            yields: 0,
+            park: Self::MIN_PARK,
+        }
+    }
+
+    fn idle(&mut self, work: usize) {
+        if work > 0 {
+            self.spins = 0;
+            self.yields = 0;
+            self.park = Self::MIN_PARK;
+            return;
+        }
+        match self.strategy {
+            IdleStrategy::BusySpin => std::hint::spin_loop(),
+            IdleStrategy::Yield => std::thread::yield_now(),
+            IdleStrategy::Backoff => {
+                if self.spins < Self::MAX_SPINS {
+                    self.spins += 1;
+                    std::hint::spin_loop();
+                } else if self.yields < Self::MAX_YIELDS {
+                    self.yields += 1;
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(self.park);
+                    self.park = (self.park * 2).min(Self::MAX_PARK);
+                }
+            }
+        }
+    }
+}
+
 /// Prints the report and exits with its verdict: 0 when no check failed, 1 otherwise.
 fn doctor(config: &Config) -> ExitCode {
-    let report = doctor::examine_with(&config.dir, config.log_dir.as_deref());
+    let report = doctor::examine_config(config);
     println!("{report}");
     ExitCode::from(report.exit_code())
 }

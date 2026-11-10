@@ -50,5 +50,41 @@ pub const LOG_DIR: KeyDef = KeyDef {
     anchor: "docs/reference/config.md#logdir",
 };
 
+/// `cluster.members`, string: The members string of the cluster this driver is a member of: `id,ingress,consensus,log,catchup,archive` for each member, an id and five `host:port` endpoints, members separated by `|` (spec/cluster.md, Members and streams). Every member of a cluster is given the same string. Set together with cluster.member.id, it makes `cavalry run` start the member's consensus module beside the driver.
+pub const CLUSTER_MEMBERS: KeyDef = KeyDef {
+    name: "cluster.members",
+    env: "CAVALRY_CLUSTER_MEMBERS",
+    flag: None,
+    kind: Kind::String,
+    values: &[],
+    default: "empty, which is no cluster: the driver runs as it does without one",
+    term: "members string",
+    doc: "The members string of the cluster this driver is a member of: `id,ingress,consensus,log,catchup,archive` for each member, an id and five `host:port` endpoints, members separated by `|` (spec/cluster.md, Members and streams). Every member of a cluster is given the same string. Set together with cluster.member.id, it makes `cavalry run` start the member's consensus module beside the driver.",
+    why_not_default: "A cluster is the hosts an operator chose, and each member's five endpoints are addresses on those hosts; a driver cannot find them from inside, and one that guessed would join a cluster it was not meant for.",
+    doctor: "cluster-members",
+    anchor: "docs/reference/config.md#clustermembers",
+};
+
+/// `cluster.member.id`, integer: This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host. The member with the lowest id is the cluster's appointed leader (spec/cluster.md, The appointed leader).
+pub const CLUSTER_MEMBER_ID: KeyDef = KeyDef {
+    name: "cluster.member.id",
+    env: "CAVALRY_CLUSTER_MEMBER_ID",
+    flag: None,
+    kind: Kind::Integer,
+    values: &[],
+    default: "-1, which is no member",
+    term: "member",
+    doc: "This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host. The member with the lowest id is the cluster's appointed leader (spec/cluster.md, The appointed leader).",
+    why_not_default: "Every member of a cluster holds the same members string, so the id alone says which member a host is; no default is right on more than one of them.",
+    doctor: "cluster-member-id",
+    anchor: "docs/reference/config.md#clustermemberid",
+};
+
 /// Every key of `config.toml`, in the file's order.
-pub const KEYS: &[&KeyDef] = &[&DIR, &CONDUCTOR_IDLE_STRATEGY, &LOG_DIR];
+pub const KEYS: &[&KeyDef] = &[
+    &DIR,
+    &CONDUCTOR_IDLE_STRATEGY,
+    &LOG_DIR,
+    &CLUSTER_MEMBERS,
+    &CLUSTER_MEMBER_ID,
+];
