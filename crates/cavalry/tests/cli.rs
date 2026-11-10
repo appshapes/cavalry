@@ -803,6 +803,18 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
             stderr.contains(&format!("cluster member {member} started")),
             "{stderr}"
         );
+        // The start line names the two counters by the labels this test read them by,
+        // in the file it read them from, and no command that does not show them.
+        assert!(
+            stderr.contains(&format!(
+                "the counters labelled `{CLUSTER_ROLE} {member}` and \
+                 `{CLUSTER_ELECTION_STATE} {member}` in {}",
+                dirs[member].0.join("counters").display()
+            )),
+            "{stderr}"
+        );
+        assert!(stderr.contains("docs/reference/counters.md"), "{stderr}");
+        assert!(!stderr.contains("`cavalry doctor` shows"), "{stderr}");
         assert!(stderr.contains("closed;"), "{stderr}");
     }
 
