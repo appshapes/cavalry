@@ -1907,6 +1907,15 @@ user-visible change, added in the same commit as the change. The format follows
   and `crates/cavalry-client/tests/reallocation_counted.rs` holds the counting
   allocator to it ([Run the bench](docs/how-to/run-the-bench.md), "When it does not
   work"; card 211).
+- The fixer's run finds the `ci` run GitHub held on its push when the listing by commit
+  leaves it out, by reading `ci.yml`'s own newest runs, and approves it; it reads the
+  branch's tip, so a pull request object that lags the push no longer hides the run.
+  When the head has no `ci` run the step can find after two minutes, on a pull request
+  that does not conflict with `master`, or a held run refuses the approval, the run now
+  fails and says what to run, where it printed `approved 0` and passed before, so a
+  fixer's push no longer goes without its gates in silence
+  ([Ask the agent to make a change](docs/how-to/ask-the-agent.md), "The fixer's push
+  has no gates"; card 215).
 - The soak samples its processes: each minute `scripts/soak.sh` adds one line for the
   driver and one for the soak program to `samples/processes-<start>.txt`, one file
   for each run, with the process's
