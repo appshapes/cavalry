@@ -39,7 +39,10 @@ first one. Why the loop is built this way is in ADR 0004
      times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
      pull request merges as one squash commit when `gates (linux)`, `gates (macos)`,
-     `bench (linux)` and `bench (grip)` pass, and the issue closes. A push after the
+     `bench (linux)` and `bench (grip)` pass, and the issue closes. For a change no
+     file of which can move the bench, a page or an ADR, the bench checks pass in
+     seconds without their hosts
+     ([ADR 0071](../decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md)). A push after the
      approval, yours or the agent's, or a review that requests changes on the approved
      head, disarms the merge; the reviewer's approval of the new head arms it again.
 

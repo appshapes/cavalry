@@ -114,4 +114,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0066. Feed the committed log to a service through a replay of the member's recording](decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)
 - [0067. Register the election's state machine with its core, and count each of its steps](decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md)
 - [0068. Give an image being retired to no new subscription, and hold an add until its endpoint has closed](decisions/0068-give-an-image-being-retired-to-no-new-subscription.md)
+- [0071. Run the bench jobs only for a change that can move the bench](decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md)
 - [0072. Wait in a client's connect for a driver that is creating its files](decisions/0072-wait-in-a-clients-connect-for-a-driver-that-is-creating-its-files.md)

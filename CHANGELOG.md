@@ -1964,6 +1964,17 @@ user-visible change, added in the same commit as the change. The format follows
   only for recordings still waiting for their image. The new how-to,
   [Run a cluster of three members](docs/how-to/run-a-cluster.md), starts three members
   on one host and reads each finding (card 227).
+- CI takes the two bench hosts only for a change that can move the bench. A first
+  job reads the change's files, and when every one of them is on a list of paths known
+  not to matter, pages, ADRs, spec pages, other workflows, scripts the bench does not
+  run and the clients, the four bench checks keep their names and pass in seconds on a
+  hosted runner; anything under `crates/` or `bench/`, a manifest, the `justfile`,
+  `ci.yml` or a path nobody listed runs the bench as before, a run started by hand
+  always does, and so does a push onto a commit that has no green run of its own, so a
+  page never turns an unmeasured or red `master` green. 22 of the last 80 commits were
+  of the first kind and each had held the hosts for about 21 minutes a run
+  ([ADR 0071](docs/decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md);
+  [Run the bench](docs/how-to/run-the-bench.md), step 3; card 246).
 - A client that connects while its driver is still starting now waits for it. A
   driver takes a few milliseconds to create its three files, and a client started in
   that time, a program run right after `cavalry run` or after `cavalry doctor` first
