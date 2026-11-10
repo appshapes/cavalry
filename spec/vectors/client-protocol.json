@@ -1,6 +1,6 @@
 {
  "spec": "spec/client-protocol.md",
- "version": 6,
+ "version": 7,
  "generated_by": "spec/vectors/client-protocol.py",
  "vectors": [
   {
@@ -452,6 +452,100 @@
    }
   },
   {
+   "name": "add-counter",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000040000000200000019000000636c75737465722e636f6d6d69745f706f736974696f6e2032000000",
+   "fields": {
+    "client_id": 3,
+    "correlation_id": 20,
+    "counter_type_id": 109,
+    "key": "02000000",
+    "label": "cluster.commit_position 2",
+    "name": "add_counter"
+   }
+  },
+  {
+   "name": "add-counter-empty-key-and-label",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d0000000000000000000000",
+   "fields": {
+    "client_id": 3,
+    "correlation_id": 20,
+    "counter_type_id": 109,
+    "key": "",
+    "label": "",
+    "name": "add_counter"
+   }
+  },
+  {
+   "name": "add-counter-key-and-label-at-their-bounds",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d00000070000000abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab7c0000006c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c",
+   "fields": {
+    "client_id": 3,
+    "correlation_id": 20,
+    "counter_type_id": 109,
+    "key": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+    "label": "llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll",
+    "name": "add_counter"
+   }
+  },
+  {
+   "name": "add-counter-label-of-two-byte-characters",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d00000004000000020000007c000000c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9c3a9",
+   "fields": {
+    "client_id": 3,
+    "correlation_id": 20,
+    "counter_type_id": 109,
+    "key": "02000000",
+    "label": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+    "name": "add_counter"
+   }
+  },
+  {
+   "name": "add-counter-extremes",
+   "region": "command",
+   "type": 9,
+   "bytes": "ffffffffffffff7fffffffffffffff7f000000800200000000ff000019000000636c75737465722e636f6d6d69745f706f736974696f6e2032000000",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "counter_type_id": -2147483648,
+    "key": "00ff",
+    "label": "cluster.commit_position 2",
+    "name": "add_counter"
+   }
+  },
+  {
+   "name": "remove-counter",
+   "region": "command",
+   "type": 10,
+   "bytes": "030000000000000015000000000000001400000000000000",
+   "fields": {
+    "client_id": 3,
+    "correlation_id": 21,
+    "registration_id": 20,
+    "name": "remove_counter"
+   }
+  },
+  {
+   "name": "remove-counter-extremes",
+   "region": "command",
+   "type": 10,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7f",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "registration_id": 9223372036854775807,
+    "name": "remove_counter"
+   }
+  },
+  {
    "name": "remove-destination-extremes",
    "region": "command",
    "type": 8,
@@ -899,18 +993,89 @@
    }
   },
   {
+   "name": "counter-ready",
+   "region": "event",
+   "type": 3848,
+   "bytes": "140000000000000061000000",
+   "fields": {
+    "correlation_id": 20,
+    "counter_id": 97,
+    "name": "counter_ready"
+   }
+  },
+  {
+   "name": "counter-ready-extremes",
+   "region": "event",
+   "type": 3848,
+   "bytes": "ffffffffffffff7fffffff7f",
+   "fields": {
+    "correlation_id": 9223372036854775807,
+    "counter_id": 2147483647,
+    "name": "counter_ready"
+   }
+  },
+  {
+   "name": "unavailable-counter",
+   "region": "event",
+   "type": 3849,
+   "bytes": "140000000000000061000000",
+   "fields": {
+    "registration_id": 20,
+    "counter_id": 97,
+    "name": "unavailable_counter"
+   }
+  },
+  {
+   "name": "unavailable-counter-extremes",
+   "region": "event",
+   "type": 3849,
+   "bytes": "ffffffffffffff7fffffff7f",
+   "fields": {
+    "registration_id": 9223372036854775807,
+    "counter_id": 2147483647,
+    "name": "unavailable_counter"
+   }
+  },
+  {
+   "name": "operation-success-counter",
+   "region": "event",
+   "type": 3844,
+   "bytes": "1500000000000000",
+   "fields": {
+    "correlation_id": 21,
+    "name": "operation_success"
+   }
+  },
+  {
+   "name": "error-unknown-counter",
+   "region": "event",
+   "type": 3841,
+   "bytes": "15000000000000000500000051000000726567697374726174696f6e203230206973206e6f74206120636f756e746572206f66207468697320636c69656e742028636c69656e742d70726f746f636f6c2e6d642c204572726f7220636f64657329000000",
+   "fields": {
+    "offending_correlation_id": 21,
+    "error_code": 5,
+    "error_message": "registration 20 is not a counter of this client (client-protocol.md, Error codes)",
+    "name": "error"
+   }
+  },
+  {
+   "name": "error-counter-type-not-a-clients",
+   "region": "event",
+   "type": 3841,
+   "bytes": "14000000000000000b0000007b000000636f756e7465722074797065203139206973206e6f74206f6e65206120636c69656e7420616464733b20616464206120636f756e7465722077686f73652073636f706520697320636c69656e7420696e20636f756e746572732e746f6d6c2028646f63732f7265666572656e63652f636f756e746572732e6d642900",
+   "fields": {
+    "offending_correlation_id": 20,
+    "error_code": 11,
+    "error_message": "counter type 19 is not one a client adds; add a counter whose scope is client in counters.toml (docs/reference/counters.md)",
+    "name": "error"
+   }
+  },
+  {
    "name": "too-short-before-correlation-id",
    "region": "command",
    "type": 1,
    "bytes": "000000000000000001000000",
    "error": "too-short"
-  },
-  {
-   "name": "unknown-type-reserved",
-   "region": "command",
-   "type": 9,
-   "bytes": "00000000000000000100000000000000",
-   "error": "type"
   },
   {
    "name": "unknown-type-aeron-reserved",
@@ -1025,6 +1190,27 @@
    "error": "too-short"
   },
   {
+   "name": "add-counter-too-short-no-key",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000",
+   "error": "too-short"
+  },
+  {
+   "name": "add-counter-too-short-no-label",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d0000000400000002000000",
+   "error": "too-short"
+  },
+  {
+   "name": "remove-counter-too-short-no-registration-id",
+   "region": "command",
+   "type": 10,
+   "bytes": "03000000000000001500000000000000",
+   "error": "too-short"
+  },
+  {
    "name": "string-negative-length",
    "region": "command",
    "type": 1,
@@ -1072,6 +1258,62 @@
    "type": 7,
    "bytes": "0300000000000000120000000000000004000000000000000b000000636176616c72793a7564",
    "error": "string"
+  },
+  {
+   "name": "add-counter-key-negative-length",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000ffffffff",
+   "error": "string"
+  },
+  {
+   "name": "add-counter-key-runs-past-message",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000040000000200",
+   "error": "string"
+  },
+  {
+   "name": "add-counter-label-runs-past-message",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000040000000200000019000000636c75737465722e636f6d6d69745f706f736974696f6e",
+   "error": "string"
+  },
+  {
+   "name": "add-counter-key-over-112",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000710000006b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b00000019000000636c75737465722e636f6d6d69745f706f736974696f6e2032000000",
+   "error": "counter"
+  },
+  {
+   "name": "add-counter-label-over-124",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d00000004000000020000007d0000006c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c000000",
+   "error": "counter"
+  },
+  {
+   "name": "add-counter-label-not-utf8",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000040000000200000008000000636c7573746572ff",
+   "error": "counter"
+  },
+  {
+   "name": "add-counter-order-string-before-counter",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000710000006b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b00000019000000636c75737465722e636f6d6d69745f706f736974696f6e",
+   "error": "string"
+  },
+  {
+   "name": "add-counter-order-counter-before-length",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000710000006b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b00000019000000636c75737465722e636f6d6d69745f706f736974696f6e203200000000000000",
+   "error": "counter"
   },
   {
    "name": "length-trailing-bytes",
@@ -1137,6 +1379,20 @@
    "error": "length"
   },
   {
+   "name": "add-counter-length-trailing",
+   "region": "command",
+   "type": 9,
+   "bytes": "030000000000000014000000000000006d000000040000000200000019000000636c75737465722e636f6d6d69745f706f736974696f6e203200000000000000",
+   "error": "length"
+  },
+  {
+   "name": "remove-counter-length-trailing",
+   "region": "command",
+   "type": 10,
+   "bytes": "03000000000000001500000000000000140000000000000000000000",
+   "error": "length"
+  },
+  {
    "name": "event-too-short",
    "region": "event",
    "type": 3844,
@@ -1146,7 +1402,7 @@
   {
    "name": "event-unknown-type",
    "region": "event",
-   "type": 3848,
+   "type": 3851,
    "bytes": "0300000000000000",
    "error": "type"
   },
@@ -1212,6 +1468,20 @@
    "type": 3841,
    "bytes": "0400000000000000010000000800000061626300",
    "error": "string"
+  },
+  {
+   "name": "event-counter-ready-too-short",
+   "region": "event",
+   "type": 3848,
+   "bytes": "1400000000000000",
+   "error": "too-short"
+  },
+  {
+   "name": "event-unavailable-counter-length-trailing",
+   "region": "event",
+   "type": 3849,
+   "bytes": "14000000000000006100000000000000",
+   "error": "length"
   },
   {
    "name": "event-length-trailing",

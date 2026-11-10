@@ -1,4 +1,4 @@
-# Client protocol, version 6
+# Client protocol, version 7
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -40,7 +40,15 @@ is dropped with its stream's last subscription; and it reads the position keys o
 a destination's and a replay's and reading past them on a recording's (ADR 0059); every
 version 5
 encoding is unchanged, so a version 5 client's commands are version 6 commands, and a
-version 5 driver answers the arming case with code 20.
+version 5 driver answers the arming case with code 20. Version 7 adds `add counter`
+and `remove counter`, Aeron's type ids 9 and 10, their events `counter ready` and
+`unavailable counter`, Aeron's 3848 and 3849, Aeron's error code 5 and a registry of
+the counters clients have added, for a counter whose type `counters.toml` gives a
+client (`spec/counters-file.md`, "`counters.toml`"; ADR 0062); every version 6
+encoding is unchanged, so a version 6 client's commands are version 7 commands, a
+version 6 driver answers the two commands with code 6, and a version 6 client closes
+on the first of the two events a version 7 driver sends, as the reserved-id rule
+below says.
 
 ## The driver directory
 
@@ -89,7 +97,8 @@ A command is a command ring record whose type is the command's type id and whose
 is the fields in the command's table, in order, with no gaps; an event is a broadcast
 buffer record the same way. Integers are little-endian (`spec/README.md`). A string field
 is an i32 length, from 0 to 4096, the string's bytes in UTF-8, and zero bytes to the next
-multiple of 4, so that the field after it is 4-byte aligned. The message's length is
+multiple of 4, so that the field after it is 4-byte aligned. A bytes field is encoded
+as a string field is and checked as one, and its bytes are opaque. The message's length is
 exactly the length of its fields: a record whose message is shorter is `too-short`, one
 whose message is longer is `length`, and a string whose length is below 0, above 4096 or
 whose bytes or padding run past the message is `string`.
@@ -106,6 +115,8 @@ whose bytes or padding run past the message is `string`.
 | 6 | client keepalive | client id, correlation id |
 | 7 | add destination | client id, correlation id, registration id, channel |
 | 8 | remove destination | client id, correlation id, registration id, channel |
+| 9 | add counter | client id, correlation id, counter type id, key, label |
+| 10 | remove counter | client id, correlation id, registration id |
 | 11 | client close | client id, correlation id |
 | 257 (`0x0101`) | start recording | client id, correlation id, stream id, channel |
 | 258 (`0x0102`) | stop recording | client id, correlation id, recording id |
@@ -115,9 +126,10 @@ whose bytes or padding run past the message is `string`.
 | 262 (`0x0106`) | purge segments | client id, correlation id, recording id, new start position |
 | 263 (`0x0107`) | purge recording | client id, correlation id, recording id |
 
-Type ids 1 to 255 (`0x01` to `0xFF`) are Aeron's: 9, 10 and 12 to 255 are reserved for
+Type ids 1 to 255 (`0x01` to `0xFF`) are Aeron's: 12 to 255 are reserved for
 the commands Aeron's control protocol numbers, present and future, and a later version
-takes one with its feature under Aeron's number, as version 5 took 7 and 8. Type ids 257 to 511 (`0x0101` to
+takes one with its feature under Aeron's number, as version 5 took 7 and 8 and version
+7 took 9 and 10. Type ids 257 to 511 (`0x0101` to
 `0x01FF`) are Cavalry's own, taken in order from 257, and 264 to 511 are reserved for
 later versions; 256, and 512 and above, lie outside both ranges and are reserved too. The
 driver answers any reserved id with an `error` event whose code is 6. Every command
@@ -136,6 +148,10 @@ Then, by command:
 | add publication, add exclusive publication, add subscription, start recording | 20 | 4 + n + pad | channel | string | `cavalry:ipc`, or a `cavalry:udp` channel as `spec/udp.md`, "The channel URI", says; any other string is answered with error code 1, a host that does not resolve with code 9 |
 | remove publication, remove subscription | 16 | 8 | registration id | i64 | 0 or more: the correlation id of the add command that registered it |
 | add destination, remove destination | 16 | 8 | registration id | i64 | 0 or more: the client's registration of the publication, the correlation id of its add publication or add exclusive publication command |
+| add counter | 16 | 4 | counter type id | i32 | the `id` of a counter to which `counters.toml` gives the scope `client`; any other is answered with error code 11 |
+| add counter | 20 | 4 + n + pad | key | bytes | 0 to 112 bytes, opaque: what the counter's `doc` in `counters.toml` says its key is; a longer one is `counter` ("What the driver rejects") |
+| add counter | after key | 4 + n + pad | label | string | 0 to 124 bytes of UTF-8: the counter's name in `counters.toml`, a space and the key's text, as `spec/counters-file.md` says of an instance counter's; a longer one, or one that is not UTF-8, is `counter` |
+| remove counter | 16 | 8 | registration id | i64 | 0 or more: the client's registration of the counter, the correlation id of its add counter command |
 | add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: `cavalry:udp?endpoint=<host>:<port>` and nothing else (`spec/udp.md`, "The channel URI"); `cavalry:ipc`, a control channel, one naming `interface`, `fc` or a position key, an endpoint the control address cannot send to (add destination) or any other string is answered with error code 1, a host that does not resolve with code 9 |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
@@ -241,6 +257,29 @@ What the driver does with each, after the checks of "What the driver rejects":
   as `stop recording` of a stopped recording is. The codes are `add destination`'s,
   but code 9, the refusal of an endpoint the control address cannot send to and a
   full table, which a remove that resolves nothing and adds nothing never meets.
+- **add counter.** The command names a counter type id, a key and a label. The type id
+  is the `id` of a counter to which `counters.toml` gives the scope `client`
+  (`spec/counters-file.md`, "`counters.toml`"); any other id, one of the driver's own
+  static or instance counters among them, is error code 11, with a message that names
+  the id and the page that lists the counters a client adds. The driver registers the
+  counter under the command's correlation id, its registration id; allocates a record
+  of the counters file as that page says, with the type id, the key's bytes followed by
+  zero bytes to the record's 112, and the label; and answers `counter ready` with the
+  counter id. From then on the client that added the counter is its owner and the one
+  writer of its value, with the stores `spec/counters-file.md`, "Value slot", gives an
+  owner, and the driver never writes it. The driver compares the counter with none it
+  holds: two commands with one type id and one key register two counters. The client
+  counters registry at capacity is code 10 and adds one to `driver.registry_full`
+  ("Sizes"); a counters file with no free record is code 10 and adds one to
+  `counters.allocation_failed`. Either registers nothing (ADR 0062).
+- **remove counter.** The command names the client's registration of a counter. The
+  driver forgets the registration, answers `operation success`, sends `unavailable
+  counter` with the registration id and the counter id, and frees the record, which
+  is not allocated again before the counter reuse timeout has passed ("Liveness and
+  timeouts"; `spec/counters-file.md`, "Metadata record"). The owner stores no value
+  after it sends the command, and a client that reads another client's counter stops
+  at the `unavailable counter` that names it. A registration the driver does not
+  know, or that belongs to another client, is error code 5.
 - **add subscription.** The driver registers the subscription under the command's
   correlation id and answers `subscription ready`. Then, for every live publication whose
   stream id and channel match, now and whenever one is added later, it allocates a
@@ -277,8 +316,9 @@ What the driver does with each, after the checks of "What the driver rejects":
   is sent for a subscription its client removed. An unknown registration id, or one that
   belongs to another client, is error code 2.
 - **client keepalive.** The driver refreshes the client's liveness. No answer.
-- **client close.** The driver removes the client's publications and subscriptions as if
-  each had been removed, and forgets the client. No answer.
+- **client close.** The driver removes the client's publications, subscriptions and
+  counters as if each had been removed, a counter with its `unavailable counter` and
+  without an `operation success`, and forgets the client. No answer.
 - **start recording.** A position key on the channel takes no part, as its `fc` takes
   none: the command matches a stream by its resolved channel, so a client records the
   publication it created at a position under the channel it holds (ADR 0059). The driver finds the live publications whose stream id and channel
@@ -583,21 +623,24 @@ the publication window, since the limit respects its position.
 | 3845 (`0x0F05`) | unavailable image | correlation id, subscriber registration id, stream id, channel |
 | 3846 (`0x0F06`) | exclusive publication ready | as publication ready |
 | 3847 (`0x0F07`) | subscription ready | correlation id, channel status indicator id |
+| 3848 (`0x0F08`) | counter ready | correlation id, counter id |
+| 3849 (`0x0F09`) | unavailable counter | registration id, counter id |
 | 3850 (`0x0F0A`) | client timeout | client id |
 | 4097 (`0x1001`) | recording ready | correlation id, recording id, session id, recording position counter id, recording synced position counter id |
 | 4098 (`0x1002`) | recording stopped | recording id, stop position |
 | 4099 (`0x1003`) | replay ready | correlation id, replay session id, recording id, start position, session id, stream id |
 | 4100 (`0x1004`) | replay stopped | replay session id, position, reason |
 
-Type ids 3841 to 4095 (`0x0F01` to `0x0FFF`) are Aeron's: 3848, 3849 and 3851 to 4095 are
+Type ids 3841 to 4095 (`0x0F01` to `0x0FFF`) are Aeron's: 3851 to 4095 are
 reserved for the events Aeron's control protocol numbers, present and future. Type ids
 4097 to 4351 (`0x1001` to `0x10FF`) are Cavalry's own, taken in order from 4097, and 4101
 to 4351 are reserved for later versions; 4096, and 4352 and above, lie outside both ranges
 and are reserved too. A client that receives any reserved id reports `type` and closes,
 since an event it cannot decode may be the one it needed. A version 0 client therefore
-closes on the first recording event a version 1 driver sends, and a version 1 client on
-the first replay event a version 2 driver sends, so an upgrade restarts the clients
-before the driver; a client that sends a command to a driver of an earlier version is
+closes on the first recording event a version 1 driver sends, a version 1 client on
+the first replay event a version 2 driver sends, and a version 6 client on the first
+`counter ready` or `unavailable counter` a version 7 driver sends, so an upgrade
+restarts the clients before the driver; a client that sends a command to a driver of an earlier version is
 answered with code 6 and keeps running.
 
 | Event | Offset | Size | Field | Type | Bound |
@@ -626,6 +669,10 @@ answered with code 6 and keeps running.
 | unavailable image | 20 | 4 + n + pad | channel | string | the publisher's channel |
 | subscription ready | 0 | 8 | correlation id | i64 | 0 or more: the add command's, which is the subscription's registration id |
 | subscription ready | 8 | 4 | channel status indicator id | i32 | −1 for `cavalry:ipc`; else 0 to the counters file's capacity − 1: the endpoint's `channel.status` counter |
+| counter ready | 0 | 8 | correlation id | i64 | 0 or more: the add counter command's, which is the counter's registration id |
+| counter ready | 8 | 4 | counter id | i32 | 0 to the counters file's capacity − 1: the record the driver allocated, whose value the client owns |
+| unavailable counter | 0 | 8 | registration id | i64 | 0 or more: the counter's, as `counter ready` named it |
+| unavailable counter | 8 | 4 | counter id | i32 | 0 to the counters file's capacity − 1: the record the driver is about to free |
 | client timeout | 0 | 8 | client id | i64 | 0 or more: the client the driver timed out |
 | recording ready | 0 | 8 | correlation id | i64 | 0 or more: the start recording command's |
 | recording ready | 8 | 8 | recording id | i64 | 0 or more: the recording's slot in the catalog (`spec/durable-log.md`) |
@@ -646,8 +693,11 @@ answered with code 6 and keeps running.
 
 The driver sends `unavailable image` for an image once the publication's end of stream
 position is stored and every subscriber of the image has reached it or the linger has
-passed, then removes the log (`spec/log-buffer.md`, "Closing"). It sends `client timeout`
-after it has removed a timed-out client's publications and subscriptions, so that the
+passed, then removes the log (`spec/log-buffer.md`, "Closing"). It sends `unavailable
+counter` for a counter a client added before it frees the counter's record, when the
+counter's owner removes it, closes or is timed out, so that a client reading the
+counter stops before the record can be allocated again. It sends `client timeout`
+after it has removed a timed-out client's publications, subscriptions and counters, so that the
 client, if it is only slow, learns that it must attach again. It sends `recording stopped`
 after the catalog's stop fields are synced, so the position a client reads from the event
 is what the catalog holds. It sends `replay stopped` after the replayer has written its
@@ -663,6 +713,7 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 2 | unknown subscription | remove subscription names a registration id the driver does not know, or another client's |
 | 3 | unknown publication | remove publication, add destination or remove destination names a registration id the driver does not know, or another client's |
 | 4 | channel endpoint error | a `cavalry:udp` endpoint's socket could not be opened, bound or connected, and the message carries the operating system's reason and the endpoint; or an `add subscription` waited the closing endpoint wait for its channel's previous receive endpoint to close, and the message names the endpoint and the wait |
+| 5 | unknown counter | remove counter names a registration id the driver does not know, or another client's |
 | 6 | unknown command type | the record's type is not a command of this version |
 | 7 | malformed command | the message failed a decoding check of "What the driver rejects" after its first 16 bytes were read, or start replay's length is below −1 |
 | 9 | unknown host | a `cavalry:udp` channel's host does not resolve; the message names it |
@@ -675,7 +726,7 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's retained position or above its extent; truncate recording names one that is not a multiple of 32 from the retained position to the stop position or at which no frame begins; purge segments names one that is not a segment base above the retained position and at most the stop position; the message names the bounds |
 | 24 | recording busy | truncate recording, purge segments, purge recording or start replay names a recording that is live or stopping, that a replay is reading, or that a retention command is working on; the message says which and what to do |
 
-Codes 5, 8, 13 and 14 are Aeron's for features outside this version, 15 to 19 are
+Codes 8, 13 and 14 are Aeron's for features outside this version, 15 to 19 are
 left free for Aeron's later codes, and all are reserved; Cavalry's own codes count up
 from 20 and stay below 100, because the C ABI carries them to a caller on their
 values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
@@ -729,6 +780,7 @@ with error code 10 and registers nothing:
 | send endpoints | 64 | every resolved `cavalry:udp` channel a publication sends on |
 | receive endpoints | 64 | every resolved `cavalry:udp` channel a subscription receives on |
 | destinations | 64 per send endpoint | every destination added to a control channel's send endpoint and not removed (`spec/udp.md`, "The sender") |
+| client counters | 256 | every counter a client added with `add counter` and has not removed, whichever client |
 
 The counters file is sized so that the registries fill before it does: the static
 counters of `counters.toml`, 91 with the armed recording's four (ADR 0059) after the
@@ -737,8 +789,8 @@ the sender limit and the sender's flow control receivers), three per image (6144
 subscriber's position, the rebuild position and the high-water mark), three per
 recording (3072), one per replay (64), five per replay publication (640: its position
 and its limit, and over `cavalry:udp` the sender position, the sender limit and the
-flow control receivers beside them; ADR 0043, ADR 0053) and six per endpoint (768)
-come to 15,899, fewer than 16384.
+flow control receivers beside them; ADR 0043, ADR 0053), six per endpoint (768) and one per client counter
+(256; ADR 0062) come to 16,155, fewer than 16384.
 
 ## What the driver rejects
 
@@ -751,7 +803,8 @@ and each answer adds one to `client_protocol.errors`.
 | `too-short` | the message is shorter than 16 bytes | none: no correlation id to answer |
 | `type` | the type is not a command of this version | `error`, code 6 |
 | `too-short` | the message is shorter than the command's fields | `error`, code 7 |
-| `string` | a string's length is below 0, above 4096, or its bytes or padding run past the message | `error`, code 7 |
+| `string` | a string's length is below 0, above 4096, or its bytes or padding run past the message; a bytes field's the same | `error`, code 7 |
+| `counter` | an `add counter`'s key is longer than 112 bytes, or its label is longer than 124 bytes or is not UTF-8 | `error`, code 7 |
 | `length` | the message is longer than the command's fields | `error`, code 7 |
 
 The vectors cover these: they are checks on bytes. A command that decodes is then
@@ -771,7 +824,9 @@ with the reason
 `subscription`, `fc`, `position`, `control` or `destination` and adds one to
 `client_protocol.rejected_command` too; a `cavalry:udp` host that does not resolve is
 code 9; a `cavalry:udp` endpoint whose socket fails is code 4;
-an unknown or another client's registration is code 2 or 3; a registry or the counters
+an unknown or another client's registration is code 2, 3 or 5; an `add counter` whose
+type id `counters.toml` does not give a client is code 11 and adds one to
+`client_protocol.rejected_command`; a registry or the counters
 file at capacity is code 10 and adds one to `driver.registry_full`; a log that could not
 be created or sized is code 12 and adds one to `driver.log_create_failed`; a stream id and
 channel no live publication, image or subscription has is code 20; a stream whose live
@@ -795,7 +850,8 @@ command's that failed, is code 12 and adds one to `recording.retention_failed`. 
 
 A record the ring itself rejects (`spec/command-ring.md`, "Reading") never reaches these
 checks and gets no answer: the client's response timeout reports it. A client runs the
-same decoding checks, `too-short`, `type`, `string` and `length`, on every event, and
+same decoding checks, `too-short`, `type`, `string` and `length`, on every event, none
+of which carries a field `counter` checks, and
 reports the first that fails and closes, as the broadcast buffer page says of `record`.
 
 ## Counters
@@ -826,7 +882,9 @@ counter's name, a space, and the replay session id, the recording id, the replay
 publication's session id and its stream id in decimal separated by spaces; the replayer
 stores it with a release store after each block. A replay publication's
 `publication.position` and `publication.limit` are keyed and labelled as a publication's,
-with the replay session id where the correlation id goes.
+with the replay session id where the correlation id goes. A counter a client adds with
+`add counter` is a `client` counter of `counters.toml`, keyed and labelled by the
+client that adds it and written by that client alone (ADR 0062).
 
 ## Vectors
 

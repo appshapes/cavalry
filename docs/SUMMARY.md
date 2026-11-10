@@ -103,3 +103,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0057. Take the C ABI to version 1 with add and remove destination](decisions/0057-take-the-c-abi-to-version-1-with-destinations.md)
 - [0058. Specify the cluster protocol, version 0, from Aeron Cluster's codecs](decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md)
 - [0059. Create a publication at a position and arm a recording on a subscription](decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md)
+- [0062. Add a client's counter with Aeron's counter commands, as client protocol version 7](decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md)
