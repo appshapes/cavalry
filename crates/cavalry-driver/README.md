@@ -10,6 +10,13 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `cavalry-shm`, and it never sits in the message path as a broker. The directory
   protocol, the commands it reads and the events it answers with are
   `spec/client-protocol.md` (ADR 0019).
+- Chooses each publication's session id: the first is a random i32, drawn from the
+  operating system's randomness when the driver starts, and each next one is one
+  more, past any id a live publication of the stream holds (`spec/client-protocol.md`,
+  "Commands"). Random, and not the clock: two drivers started in one instant, a
+  cluster's members under one supervisor, must not send one stream under one session
+  id, since a receiver that hears both on an endpoint holds them as one session and
+  answers the first alone.
 - Runs the conductor on a dedicated thread with an idle strategy, what the thread does
   when it has no work: busy-spin, yield or backoff. Backoff is the default; `doctor`
   recommends busy-spin on isolated cores. On every duty cycle the conductor stores its
@@ -40,7 +47,16 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   and its position, `recording.position`, bounds the publisher's limit, so that a slow
   disk back-pressures the publisher and never loses a byte (ADR 0025). The log
   directory is opened under a lock at start and recovered (`spec/durable-log.md`, "The
-  driver"); a second driver on it refuses to start.
+  driver"); a second driver on it refuses to start. A recording one of whose
+  syncs failed is given up with no stop run, since a sync asked again about bytes a
+  sync has failed on can return success and write nothing; a stop whose own writes or
+  syncs fail stops the recording all the same. Either is announced, in `recording
+  stopped` and to every replay that followed the recording, at the position the last
+  sync that returned success covered, never the position written, and its catalog
+  slot stays live for the next start's recovery. A write the disk refused with no
+  sync failing is followed by a stop that runs, at the position written.
+  `recording.write_failed` counts a recording once, whichever failed (ADR 0064, ADR
+  0065).
 - Plays a recording back on a third thread, the replayer, which idles with the same
   strategy while it holds a replay and parks until the conductor hands it a request
   while it holds none, so a driver that replays nothing wakes no CPU for it:
@@ -53,6 +69,11 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   ends at its end, no faster than the slowest subscriber's position plus the window
   and never past what the recorder has synced; a subscription on the replay stream
   reads it as any stream, and `replay stopped` says where it ended and why (ADR 0030).
+  A replay that follows a live recording allocates nothing while it runs: once a
+  second the replayer asks the catalog where the recording stopped, and it reads the
+  stop alone (`cavalry_log::catalog::CatalogReader::stop_position`), not the
+  descriptor with its two strings. `cavalry-client`'s `replay_follow_allocations`
+  test is the gate, over three seconds of such a replay.
 - Truncates, purges and deletes a stopped recording on command: `truncate recording`,
   `purge segments` and `purge recording` (`spec/client-protocol.md`, "Commands"; ADR
   0031). The conductor admits each into a registry of commands in progress, bounded at

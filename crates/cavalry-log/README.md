@@ -16,7 +16,11 @@ The durable log: recording and replay. Data plane.
   slot after a retention command's file work failed is the same rules in two halves,
   `dir::repair_files` on the thread that has the files and `LogDir::apply_repair`, the
   one catalog write they end in, on the thread that owns the catalog, each reporting
-  what it did (ADR 0031).
+  what it did (ADR 0031). A reader of the catalog that asks only where a recording
+  stopped calls `catalog::CatalogReader::stop_position`: the checks of
+  `CatalogReader::get` and no descriptor built, so no allocation, which is what the
+  driver's replayer needs once a second for every replay that follows a live
+  recording (invariant 2).
 - Writes a recording for the driver: `LogDir::start` takes the catalog slot and
   creates the time index and the first segment file; `recorder::RecordingWriter` writes
   each block of committed frames with one positional write, appends an index entry at
@@ -31,7 +35,12 @@ The durable log: recording and replay. Data plane.
   stack-formatted segment name comes from one function); `cavalry doctor --log-dir`
   warns on a longer path. A roll that fails on a full disk
   is an `io` error and is retried at the next write, never a stuck writer. On any error
-  from `write`, the block was taken exactly when `position()` moved. The delete of a
+  from `write`, the block was taken exactly when `position()` moved. A sync that
+  fails is remembered: `RecordingWriter::sync_failed()` says so from then on,
+  `synced_position()` stays what the last sync that succeeded covered, and the caller
+  neither syncs the recording again nor stops it with `LogDir::stop`, which syncs,
+  since a sync asked a second time about bytes a sync has failed on can return
+  success and write nothing (ADR 0065). The delete of a
   stopped recording, state 3, is `CatalogWriter::delete`, which the driver's `purge
   recording` writes and counts in `recording.deleted` (ADR 0031); every transition
   the writer writes is one the driver counts.

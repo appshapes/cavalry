@@ -152,6 +152,8 @@ pub struct RecordingWriter {
     dir: PathBuf,
     position: i64,
     synced_position: i64,
+    /// A sync of the segment or the index has failed ([`RecordingWriter::sync_failed`]).
+    sync_failed: bool,
     segment: File,
     segment_path: PathBuf,
     /// The next segment's path, formatted in place at a roll; the two paths swap, so
@@ -254,6 +256,7 @@ impl LogDir {
             dir,
             position: start,
             synced_position: start,
+            sync_failed: false,
             segment,
             segment_path,
             next_path,
@@ -344,6 +347,19 @@ impl RecordingWriter {
         self.synced_position
     }
 
+    /// Whether a sync of this recording's segment or time index has failed, in
+    /// [`sync`](Self::sync) or in the sync a [`write`](Self::write) makes of a segment
+    /// it closes. From then on the caller neither syncs the recording again nor stops
+    /// it with [`LogDir::stop`], which syncs: a writeback error is reported once to
+    /// each open file description, and a filesystem need not mark the pages that
+    /// failed dirty again, so a sync asked a second time can return success and write
+    /// nothing, and a stop would put a position in the catalog that is not on the disk
+    /// (ADR 0065). [`synced_position`](Self::synced_position) stays what the last sync
+    /// that succeeded covered.
+    pub fn sync_failed(&self) -> bool {
+        self.sync_failed
+    }
+
     /// How many segment files the recording has, from the start position's segment to
     /// the one being written: what `recording.bytes` counts times the segment file
     /// length (ADR 0031).
@@ -425,12 +441,14 @@ impl RecordingWriter {
     }
 
     fn sync_files(&mut self) -> Result<(), RecorderError> {
-        self.segment
-            .sync_data()
-            .map_err(io("sync", &self.segment_path))?;
-        self.index
-            .sync_data()
-            .map_err(io("sync", &self.index_path))?;
+        if let Err(error) = self.segment.sync_data() {
+            self.sync_failed = true;
+            return Err(io("sync", &self.segment_path)(error));
+        }
+        if let Err(error) = self.index.sync_data() {
+            self.sync_failed = true;
+            return Err(io("sync", &self.index_path)(error));
+        }
         self.synced_position = self.position;
         self.unsynced = false;
         Ok(())
@@ -461,9 +479,10 @@ impl RecordingWriter {
     /// writer keeps, so the roll allocates nothing; the operating system call takes a
     /// short path on its own stack buffer too.
     fn roll(&mut self) -> Result<(), RecorderError> {
-        self.segment
-            .sync_data()
-            .map_err(io("sync", &self.segment_path))?;
+        if let Err(error) = self.segment.sync_data() {
+            self.sync_failed = true;
+            return Err(io("sync", &self.segment_path)(error));
+        }
         let base = self.segment_base + self.segment_length;
         let mut name = [0u8; SEGMENT_NAME_CAPACITY];
         let Some(file_name) =
