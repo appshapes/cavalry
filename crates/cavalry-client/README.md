@@ -49,6 +49,14 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   live at once; one more is refused with `replays-full` and stopped again, and a start
   while 16 starts wait for the client's own conductor is refused with
   `replay-queue-full` before anything reaches the driver.
+- Adds a counter the client owns: `Cavalry::add_counter(type_id, key, label)` has the
+  driver allocate a record of its counters file, of a type `counters.toml` gives the
+  scope `client`, and returns a `Counter` that alone writes the value, with a release
+  store for a position another process loads. `cavalry doctor` and every reader of
+  the file see it. The driver frees it when the `Counter` is closed or dropped and
+  when the client closes or is timed out, and a `Counter` stores nothing once its
+  client is closed, since the record may be another counter's by then
+  (`spec/client-protocol.md`, "Commands"; ADR 0062).
 
 In Aeron, this is the client, with `tryClaim` and `commit`
 ([glossary](../../docs/glossary.md)).

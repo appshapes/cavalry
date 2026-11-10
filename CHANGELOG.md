@@ -1717,6 +1717,15 @@ user-visible change, added in the same commit as the change. The format follows
   code 11 the driver answered both commands with is gone
   ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
+- The Rust client adds a counter: `Cavalry::add_counter(type_id, key, label)` returns a
+  `Counter` the client owns, whose value it alone writes, with `store_release` for a
+  position another process loads, `set`, `increment` and `add`; `cavalry doctor` and
+  every reader of the counters file see it under its label. The driver frees it when
+  the `Counter` is closed or dropped and when the client closes or is timed out, and a
+  `Counter` stores nothing once its client is closed. A key or a label past its bound
+  is refused before anything is sent. `cavalry` re-exports `Counter`
+  ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
+  card 227).
 - The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
   appointed leader", the path the replicated log takes through the election's states
   until the election is built. Every member canvasses, and the member with the lowest
