@@ -332,6 +332,9 @@ pub const RECORDING_ARMED_DROPPED: CounterId = CounterId(107);
 /// `recording.armed_failed`, a static counter: Armed recordings whose start failed when the stream's next image arrived, at a step a start on a live image fails at: the recordings registry, the recorder's request queue, the catalog or the counters file at capacity (code 10), or the recording's files not created (code 12). Each also counts in that step's counter, driver.registry_full, recording.catalog_full or recording.start_failed; the arming command is answered a second time with error and the code, and the image is announced all the same and no longer held by the recording (spec/client-protocol.md, Commands, start recording; ADR 0059).
 pub const RECORDING_ARMED_FAILED: CounterId = CounterId(108);
 
+/// `cluster.commit_position`, a client gauge: The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_COMMIT_POSITION: CounterId = CounterId(109);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -452,7 +455,7 @@ pub const COUNTERS: &[CounterDef] = &[
         kind: Kind::Counter,
         scope: Scope::Static,
         doc: "Error events the driver sent, whatever the code: every command this version refused after the ring delivered it (spec/client-protocol.md, Error codes); the causes with a counter of their own are client_protocol.rejected_command, driver.registry_full and driver.log_create_failed.",
-        doctor: "Compare with client_protocol.rejected_command, driver.registry_full and driver.log_create_failed; an error none of them explains is code 2, 3 or 11, a client naming a registration the driver does not know, or a bug the error event's message names.",
+        doctor: "Compare with client_protocol.rejected_command, driver.registry_full and driver.log_create_failed; an error none of them explains is code 2, 3 or 5, a client naming a registration the driver does not know, or code 11, a bug the error event's message names.",
     },
     CounterDef {
         id: DRIVER_REGISTRY_FULL,
@@ -1205,5 +1208,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Static,
         doc: "Armed recordings whose start failed when the stream's next image arrived, at a step a start on a live image fails at: the recordings registry, the recorder's request queue, the catalog or the counters file at capacity (code 10), or the recording's files not created (code 12). Each also counts in that step's counter, driver.registry_full, recording.catalog_full or recording.start_failed; the arming command is answered a second time with error and the code, and the image is announced all the same and no longer held by the recording (spec/client-protocol.md, Commands, start recording; ADR 0059).",
         doctor: "An armed recording failed to start and records nothing: read driver.registry_full, recording.catalog_full and recording.start_failed to see which step failed, fix that as their findings say, then send start recording again on the live image.",
+    },
+    CounterDef {
+        id: CLUSTER_COMMIT_POSITION,
+        name: "cluster.commit_position",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A cluster.commit_position that stays where it is while the member's recording.position moves is a commit that waits for a quorum: check that a majority of the members in the members string are running and that each reaches the others' consensus endpoints.",
     },
 ];

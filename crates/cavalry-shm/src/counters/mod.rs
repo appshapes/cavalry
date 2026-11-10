@@ -105,6 +105,10 @@ pub enum Scope {
     /// One counter per key, allocated when the instance is created; the entry's `doc`
     /// says the key's layout.
     Instance,
+    /// One counter per key, allocated when a client adds it with `add counter` and
+    /// freed when that client removes it, closes or is timed out; the client alone
+    /// writes its value (`spec/client-protocol.md`, "Commands"; ADR 0062).
+    Client,
 }
 
 /// One entry of `counters.toml`, as [`generated::COUNTERS`] lists them.

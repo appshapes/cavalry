@@ -9,7 +9,9 @@
 # kind:   "counter" never decreases while allocated; "gauge" moves both ways.
 # scope:  "static", one counter allocated when the driver starts, in the record whose
 #         type id is this id; "instance", one per key, allocated with the instance,
-#         with the key's layout stated in doc.
+#         with the key's layout stated in doc; "client", one per key, allocated when a
+#         client adds it with add counter, written by that client alone and freed when
+#         it removes the counter, closes or is timed out (ADR 0062).
 # doc:    one sentence for the reference page: what a change in the value means.
 # doctor: what an operator does when this counter says something is wrong, or "".
 schema = 0
@@ -132,7 +134,7 @@ name = "client_protocol.errors"
 kind = "counter"
 scope = "static"
 doc = "Error events the driver sent, whatever the code: every command this version refused after the ring delivered it (spec/client-protocol.md, Error codes); the causes with a counter of their own are client_protocol.rejected_command, driver.registry_full and driver.log_create_failed."
-doctor = "Compare with client_protocol.rejected_command, driver.registry_full and driver.log_create_failed; an error none of them explains is code 2, 3 or 11, a client naming a registration the driver does not know, or a bug the error event's message names."
+doctor = "Compare with client_protocol.rejected_command, driver.registry_full and driver.log_create_failed; an error none of them explains is code 2, 3 or 5, a client naming a registration the driver does not know, or code 11, a bug the error event's message names."
 
 [[counter]]
 id = 15
@@ -1151,3 +1153,15 @@ machine = "channel"
 from = "active"
 to = "closing"
 counter = "channel.closed"
+
+# A client's counters (spec/client-protocol.md, "Commands", add counter; ADR 0062): a
+# client adds one of these with the key and the label it gives, and writes its value.
+# The consensus module of the replicated log is the first such client (ADR 0060).
+
+[[counter]]
+id = 109
+name = "cluster.commit_position"
+kind = "gauge"
+scope = "client"
+doc = "The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "A cluster.commit_position that stays where it is while the member's recording.position moves is a commit that waits for a quorum: check that a majority of the members in the members string are running and that each reaches the others' consensus endpoints."

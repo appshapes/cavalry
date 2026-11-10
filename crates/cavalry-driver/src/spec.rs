@@ -52,8 +52,8 @@ pub const PUBLICATION_LINGER: Duration = Duration::from_secs(5);
 pub const COUNTER_REUSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The counters file's capacity, in counters: sized so that the registries fill before
-/// it does, 15,892 at most in client protocol version 5 (`spec/client-protocol.md`,
-/// "Sizes"; ADR 0040, ADR 0053).
+/// it does, 16,155 at most in client protocol version 7 (`spec/client-protocol.md`,
+/// "Sizes"; ADR 0040, ADR 0053, ADR 0059, ADR 0062).
 pub const COUNTERS_CAPACITY: u32 = 16384;
 
 /// The command ring's capacity, in bytes.
@@ -76,6 +76,11 @@ pub const MAX_CLIENTS: usize = 256;
 
 /// How many publication registrations the driver holds, shared or not.
 pub const MAX_PUBLICATIONS: usize = 1024;
+
+/// How many counters clients have added with `add counter` and not removed, whichever
+/// client: one record of the counters file each (`spec/client-protocol.md`, "Sizes";
+/// ADR 0062).
+pub const MAX_CLIENT_COUNTERS: usize = 256;
 
 /// How many subscription registrations the driver holds.
 pub const MAX_SUBSCRIPTIONS: usize = 1024;
