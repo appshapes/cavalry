@@ -152,7 +152,16 @@ in any of the five languages.
   in one write of four bytes, the state, which is what makes a crash during either
   read as the state before it; a checksum over the state would be a second write that
   a crash could separate from the first. The cost is a state damaged from 1 to 3, or
-  from 3 to 1, that no check detects, and the page says so.
+  from 3 to 1, or from 1 to 0 in the last whole entry, that no check detects, and the
+  page says so.
+- **An empty last entry whose checksum matches its fields written valid again at the
+  member's start.** It would undo a state damaged from 1 to 0 in the last entry, the
+  one undetected case that drops a term. Lost: the same rule would bring back a term
+  whose state was damaged from 3 to 0, one the member truncated. A member that drops
+  a term claims an older log than it holds, and at worst loses a vote it could have
+  won; a member that claims a term it truncated can win the vote of a member whose
+  log holds entries a quorum committed and that it lacks. Of the two errors, the
+  reader keeps the one towards the older log.
 - **Setting a term's recording id in place once its recording exists.** Lost: the
   entry's one checksum covers the recording id, so a rewrite torn by a crash leaves a
   valid state over a checksum that fails, which a reader takes for damage, so a crash

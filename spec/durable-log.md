@@ -209,7 +209,8 @@ slot, so a file in which neither checksum matches is damaged, as is one in which
 whose checksum matches holds a value below −1, and the reader refuses both with
 `candidate`.
 
-Entry i is at 64 + i × 32.
+Entry i is at 64 + i × 32. A reader ignores bytes past the last whole entry, which a
+write cut short can leave; the next append writes over them.
 
 | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- |
@@ -237,8 +238,13 @@ writer syncs an entry's fields and checksum before it writes the state, so no cr
 leaves it, and the reader refuses the file with `checksum` and drops no term. The
 state is an entry's commit word and lies outside its checksum on purpose, as a
 catalog slot's does, so that an append and a truncation each end in one write of four
-bytes. The cost is that a state damaged from 1 to 3, or from 3 to 1, is not detected:
-the reader can then take a term for truncated that was not, or the reverse. The member's candidate term
+bytes. The cost is damage to a state that no check detects. A state damaged from 1 to
+3, or from 3 to 1, makes the reader take a term for truncated that was not, or the
+reverse. A state damaged from 1 to 0 in the file's last whole entry reads as the torn
+tail of a crash, since a torn append leaves the same bytes: the reader drops that
+term, the member's log leadership term id falls to the term before it, and the next
+append writes over the entry. A state damaged to 0 before the last entry is refused
+with `state`. The member's candidate term
 at its start is the higher of the stored candidate term and its log leadership term
 id, as "Roles and the election" of `spec/cluster.md` has init take it.
 

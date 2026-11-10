@@ -52,7 +52,9 @@ const SLOT_OFFSETS: [usize; 2] = [16, 32];
 const SLOT_LENGTH: usize = 12;
 /// The recording id of a term that has no recording yet.
 pub const NO_RECORDING: i64 = -1;
-/// An entry's state: empty, the file ends here.
+/// An entry's state: empty. The file ends at an empty entry when it is the last whole
+/// one, the torn tail of a crash; an empty entry before the last is damage, which
+/// [`TermsFile::open`] checks, since the check needs the file's length.
 pub const EMPTY: i32 = 0;
 /// An entry's state: valid.
 pub const VALID: i32 = 1;
@@ -475,8 +477,10 @@ impl TermsEntry {
     }
 
     /// The checks of "What a reader rejects" on an entry, in order, against the valid
-    /// entry before it: the first failure by name. An empty entry parses as itself, the
-    /// file's end, its other fields unread.
+    /// entry before it: the first failure by name. An empty entry parses as itself,
+    /// its other fields unread: the file's end only as the last whole entry, which
+    /// [`TermsFile::open`] checks against the file's length, refusing one before the
+    /// last as [`TermsError::EmptyBeforeLast`].
     pub fn parse(bytes: &[u8], previous: Option<&TermsEntry>) -> Result<Self, TermsError> {
         if bytes.len() < ENTRY_LENGTH {
             return Err(TermsError::TooShort {
