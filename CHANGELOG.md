@@ -1679,6 +1679,7 @@ user-visible change, added in the same commit as the change. The format follows
   string's order until card 228, the keys `cluster.members` and `cluster.member.id`,
   and the service's bounded poll
   ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
+  card 227).
 - `spec/client-protocol.md` version 7 adds a client's counter: `add counter` and
   `remove counter`, Aeron's commands 9 and 10, answered with `counter ready` and
   `unavailable counter`, Aeron's events 3848 and 3849, and error code 5, `unknown
