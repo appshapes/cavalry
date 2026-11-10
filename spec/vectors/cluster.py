@@ -186,6 +186,8 @@ SNAPSHOT = dict(type_id=1, log_position=98304, leadership_term_id=3, index=0, ma
 VECTORS = [
     message("session-message-log", 1, "log", SESSION_MESSAGE, payload=b"hello"),
     message("session-message-ingress", 1, "ingress", dict(SESSION_MESSAGE, timestamp=0), payload=b"hello"),
+    message("session-message-log-of-no-session", 1, "log", dict(SESSION_MESSAGE, cluster_session_id=NULL),
+            payload=b"hello"),
     message("session-message-egress-empty", 1, "egress", SESSION_MESSAGE, payload=b""),
     message("session-event-ok", 2, "egress", SESSION_EVENT_OK, {"detail": ""}),
     message("session-event-redirect", 2, "egress",
@@ -419,6 +421,25 @@ def candidate(count, reports, own, deadline_passed):
     if deadline_passed and len(not_ahead) >= quorum(count):
         return {"nominate": True, "unanimous": False}
     return {"nominate": False, "unanimous": False}
+
+
+def appointed_leader(ids):
+    """spec/cluster.md, "The appointed leader": the member with the lowest id in the members
+    string leads, whatever the order the string gives the members in."""
+    return {"leader": min(ids)}
+
+
+def leader_ready(count, counted, startup_timeout_passed):
+    """spec/cluster.md, "The appointed leader": in leader ready the appointed leader closes its
+    election at once when every member counts for its term at its log position, itself among
+    them, and with a quorum of them once the startup canvass timeout has passed since it
+    entered leader log replication. `counted` is how many members count, as "The commit
+    position" counts them."""
+    if count >= 1 and counted >= count:
+        return {"closes": True, "unanimous": True}
+    if startup_timeout_passed and counted >= quorum(count):
+        return {"closes": True, "unanimous": False}
+    return {"closes": False, "unanimous": False}
 
 
 def replication_stop(append_position, next_term_base_log_position, next_log_position):
@@ -794,11 +815,35 @@ VECTORS += [
                {"position": 0, "length": 1377, "mtu": 1408}, entry_position(0, 1377, 1408)),
     arithmetic("entry-position-many-fragments", "entry-position",
                {"position": 98304, "length": 100000, "mtu": 1408}, entry_position(98304, 100000, 1408)),
+    arithmetic("appointed-leader-lowest-of-three", "appointed-leader", {"members": [0, 1, 2]},
+               appointed_leader([0, 1, 2])),
+    arithmetic("appointed-leader-string-order-does-not-decide", "appointed-leader", {"members": [7, 3, 5]},
+               appointed_leader([7, 3, 5])),
+    arithmetic("appointed-leader-of-one", "appointed-leader", {"members": [4]}, appointed_leader([4])),
+    arithmetic("appointed-leader-of-eight", "appointed-leader", {"members": [10, 11, 12, 13, 14, 15, 16, 9]},
+               appointed_leader([10, 11, 12, 13, 14, 15, 16, 9])),
+    arithmetic("leader-ready-every-member", "leader-ready",
+               {"members": 3, "counted": 3, "startup_timeout_passed": False}, leader_ready(3, 3, False)),
+    arithmetic("leader-ready-quorum-before-the-timeout-waits", "leader-ready",
+               {"members": 3, "counted": 2, "startup_timeout_passed": False}, leader_ready(3, 2, False)),
+    arithmetic("leader-ready-quorum-at-the-timeout", "leader-ready",
+               {"members": 3, "counted": 2, "startup_timeout_passed": True}, leader_ready(3, 2, True)),
+    arithmetic("leader-ready-alone-at-the-timeout-waits", "leader-ready",
+               {"members": 3, "counted": 1, "startup_timeout_passed": True}, leader_ready(3, 1, True)),
+    arithmetic("leader-ready-of-one", "leader-ready",
+               {"members": 1, "counted": 1, "startup_timeout_passed": False}, leader_ready(1, 1, False)),
+    arithmetic("leader-ready-five-short-of-quorum-at-the-timeout", "leader-ready",
+               {"members": 5, "counted": 2, "startup_timeout_passed": True}, leader_ready(5, 2, True)),
+    arithmetic("leader-ready-five-quorum-at-the-timeout", "leader-ready",
+               {"members": 5, "counted": 3, "startup_timeout_passed": True}, leader_ready(5, 3, True)),
 ]
 
 assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], True) == {"leader": True, "unanimous": False}
 assert ballot(3, 4, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], True) == {"leader": False, "unanimous": False}
 assert at_least(3, 0, 2, 98304) and not at_least(2, 98304, 3, 0)
+assert appointed_leader([7, 3, 5]) == {"leader": 3}
+assert leader_ready(3, 2, False) == {"closes": False, "unanimous": False}
+assert leader_ready(3, 2, True) == {"closes": True, "unanimous": False}
 for v in VECTORS:
     if v["kind"] == "message" and "error" not in v:
         t = next(i for i, t in TEMPLATES.items() if t[0] == v["template"])

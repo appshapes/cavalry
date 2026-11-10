@@ -7,12 +7,13 @@
 
 use cavalry_proto::cluster::{
     Ballot, Candidate, CanvassAction, CanvassTerms, ChangeType, CloseReason, ClusterAction,
-    ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LogReport, MAX_MEMBERS, Member,
-    MemberPosition, Message, NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd,
+    ClusterError, CommitPosition, EMPTY_MEMBER, EventCode, LeaderReady, LogReport, MAX_MEMBERS,
+    Member, MemberPosition, Message, NewLeadershipTermAction, NextFields, RecordedTerms, ReplayEnd,
     ReplicationStop, SnapshotMark, Stream, TermFields, TermSpan, TimeUnit, VERSION, Vote,
-    VoteAnswer, VoteRequest, ballot, candidate, canvass_position_action, commit_position,
-    entry_position, log_at_least, new_leadership_term_action, next_fields, parse_members, quorum,
-    replay_end, replication_record, replication_stop, request_vote,
+    VoteAnswer, VoteRequest, appointed_leader, ballot, candidate, canvass_position_action,
+    commit_position, entry_position, leader_ready, log_at_least, new_leadership_term_action,
+    next_fields, parse_members, quorum, replay_end, replication_record, replication_stop,
+    request_vote,
 };
 use serde_json::{Map, Value, json};
 
@@ -565,6 +566,25 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             )
             .unwrap_or_else(|| panic!("{name}: no position after the entry"));
             json!({"fragments": after.fragments, "position_after": after.position_after})
+        }
+        "appointed-leader" => {
+            let ids: Vec<i32> = inputs["members"]
+                .as_array()
+                .expect("members")
+                .iter()
+                .map(|id| i32::try_from(id.as_i64().expect("id")).expect("id"))
+                .collect();
+            json!({"leader": appointed_leader(&ids)})
+        }
+        "leader-ready" => {
+            let LeaderReady { closes, unanimous } = leader_ready(
+                usize::try_from(int(inputs, "members")).expect("members"),
+                usize::try_from(int(inputs, "counted")).expect("counted"),
+                inputs["startup_timeout_passed"]
+                    .as_bool()
+                    .expect("startup_timeout_passed"),
+            );
+            json!({"closes": closes, "unanimous": unanimous})
         }
         other => panic!("{name}: unknown rule {other}"),
     };

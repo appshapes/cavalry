@@ -1692,3 +1692,16 @@ user-visible change, added in the same commit as the change. The format follows
   `cavalry-client` and `cavalry-ffi` READMEs and `examples/quickstart.rs` said
   `not-connected` lasts until the subscription's image joins; they now say it lasts
   until the driver has made the image, which the subscription takes on a later poll.
+- The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
+  appointed leader", the path the replicated log takes through the election's states
+  until the election is built. The member with the lowest id leads; every other
+  member canvasses and never nominates; the leader closes its election with every
+  member, or with a quorum after the startup canvass timeout of 60 s; a member that
+  would need the catch-up or a truncation fails its election and is counted; a member
+  does not restart on a log that holds a term. A session message with cluster session
+  id −1 is one the leader's own process appended, of no session. `cavalry-proto` has
+  the two rules, `cluster::appointed_leader` and `cluster::leader_ready`, with their
+  vectors, and the Counters table names `cluster.terms_led`. The consensus module is a
+  client of its driver, not a thread linked to the conductor by queues
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).

@@ -31,6 +31,19 @@
     },
     {
       "kind": "message",
+      "name": "session-message-log-of-no-session",
+      "stream": "log",
+      "bytes": "18000100010000000300000000000000ffffffffffffffff0010e49aa101000068656c6c6f",
+      "template": "session-message",
+      "fields": {
+        "leadership_term_id": 3,
+        "cluster_session_id": -1,
+        "timestamp": 1793600000000,
+        "payload": "68656c6c6f"
+      }
+    },
+    {
+      "kind": "message",
       "name": "session-message-egress-empty",
       "stream": "egress",
       "bytes": "1800010001000000030000000000000007000000000000000010e49aa1010000",
@@ -3383,6 +3396,167 @@
       "fields": {
         "fragments": 73,
         "position_after": 200640
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "appointed-leader-lowest-of-three",
+      "rule": "appointed-leader",
+      "inputs": {
+        "members": [
+          0,
+          1,
+          2
+        ]
+      },
+      "fields": {
+        "leader": 0
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "appointed-leader-string-order-does-not-decide",
+      "rule": "appointed-leader",
+      "inputs": {
+        "members": [
+          7,
+          3,
+          5
+        ]
+      },
+      "fields": {
+        "leader": 3
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "appointed-leader-of-one",
+      "rule": "appointed-leader",
+      "inputs": {
+        "members": [
+          4
+        ]
+      },
+      "fields": {
+        "leader": 4
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "appointed-leader-of-eight",
+      "rule": "appointed-leader",
+      "inputs": {
+        "members": [
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          9
+        ]
+      },
+      "fields": {
+        "leader": 9
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-every-member",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "counted": 3,
+        "startup_timeout_passed": false
+      },
+      "fields": {
+        "closes": true,
+        "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-quorum-before-the-timeout-waits",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "counted": 2,
+        "startup_timeout_passed": false
+      },
+      "fields": {
+        "closes": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-quorum-at-the-timeout",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "counted": 2,
+        "startup_timeout_passed": true
+      },
+      "fields": {
+        "closes": true,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-alone-at-the-timeout-waits",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "counted": 1,
+        "startup_timeout_passed": true
+      },
+      "fields": {
+        "closes": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-of-one",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 1,
+        "counted": 1,
+        "startup_timeout_passed": false
+      },
+      "fields": {
+        "closes": true,
+        "unanimous": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-five-short-of-quorum-at-the-timeout",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 5,
+        "counted": 2,
+        "startup_timeout_passed": true
+      },
+      "fields": {
+        "closes": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-five-quorum-at-the-timeout",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 5,
+        "counted": 3,
+        "startup_timeout_passed": true
+      },
+      "fields": {
+        "closes": true,
+        "unanimous": false
       }
     }
   ]
