@@ -1882,3 +1882,18 @@ user-visible change, added in the same commit as the change. The format follows
   new cluster, every member on a new log directory
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
   card 227).
+- `cavalry run` starts a cluster member. Two configuration keys name the cluster,
+  `cluster.members`, the members string every member is given, and
+  `cluster.member.id`, this host's id in it, set as `CAVALRY_CLUSTER_MEMBERS` and
+  `CAVALRY_CLUSTER_MEMBER_ID`. With both set, `run` starts the member's consensus
+  module beside the driver, on a thread of its own with the conductor's idle strategy,
+  and stops it before the driver; with one set and not the other it starts nothing and
+  says which is missing. Its start line names the member's role and election state,
+  the counters labelled `cluster.role <id>` and `cluster.election_state <id>` in the
+  driver's `counters` file. `CAVALRY_CLUSTER_MEMBER_ID=-1`, the id's default written out,
+  is no member, the same as the variable unset. `cavalry doctor` checks both keys, `cluster-members` and
+  `cluster-member-id`: set together, a members string the protocol takes, an id the
+  string holds, and every endpoint a name that resolves. `cavalry::cluster` re-exports
+  `ConsensusModule` for a program that runs a member itself
+  ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
+  card 227).

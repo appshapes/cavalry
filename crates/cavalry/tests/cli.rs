@@ -21,6 +21,8 @@ fn cavalry() -> Command {
     // (`Driver::default_log_dir`) lands there and never under the developer's home.
     command.env_remove("CAVALRY_DIR");
     command.env_remove("CAVALRY_CONDUCTOR_IDLE_STRATEGY");
+    command.env_remove("CAVALRY_CLUSTER_MEMBERS");
+    command.env_remove("CAVALRY_CLUSTER_MEMBER_ID");
     command.env_remove("XDG_DATA_HOME");
     command
 }
@@ -689,4 +691,246 @@ fn record_truncates_purges_and_deletes_a_stopped_recording() {
 
     client.close().expect("closes");
     driver.close().expect("closes");
+}
+
+/// Free loopback ports, each held until all are chosen so that none repeats.
+fn free_ports(count: usize) -> Vec<u16> {
+    let sockets: Vec<std::net::UdpSocket> = (0..count)
+        .map(|_| std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket"))
+        .collect();
+    sockets
+        .iter()
+        .map(|socket| socket.local_addr().expect("bound").port())
+        .collect()
+}
+
+/// The value of a member's cluster counter named `name` in the driver directory `dir`,
+/// read as `doctor` reads it, or `None` while the member has not added it.
+fn cluster_counter(dir: &Path, name: &str) -> Option<i64> {
+    let client = Cavalry::connect_to(dir).ok()?;
+    let counters = client.counters();
+    let value = (0..counters.capacity()).find_map(|id| {
+        let record = counters.record(id).ok()??;
+        // The label is the name, a space and the member id.
+        let named = record
+            .label()
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(' '));
+        named.then(|| counters.read(id).ok())?
+    });
+    client.close().ok()?;
+    value
+}
+
+/// The members a test started, each killed when the test ends before it stopped them:
+/// a failed assertion would otherwise leave three drivers running after the test.
+struct Runs(Vec<Child>);
+
+impl Drop for Runs {
+    fn drop(&mut self) {
+        for run in &mut self.0 {
+            let _ = run.kill();
+            let _ = run.wait();
+        }
+    }
+}
+
+/// `cluster.role` and `cluster.election_state` in `counters.toml`, by name: the
+/// consensus module labels each of its counters with the counter's name and its
+/// member id, and a name does not move when an id in that file does.
+const CLUSTER_ROLE: &str = "cluster.role";
+const CLUSTER_ELECTION_STATE: &str = "cluster.election_state";
+
+#[test]
+fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader() {
+    let ports = free_ports(15);
+    let members = (0..3)
+        .map(|member| {
+            let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]
+                .iter()
+                .map(|port| format!("127.0.0.1:{port}"))
+                .collect();
+            format!("{member},{}", endpoints.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let dirs: Vec<TestDir> = (0..3)
+        .map(|member| TestDir::new(&format!("cluster-{member}")))
+        .collect();
+    let start = |member: usize| {
+        cavalry()
+            .args(["run", "--dir", &dirs[member].arg()])
+            .args(["--log-dir", &format!("{}-log", dirs[member].arg())])
+            .env("CAVALRY_CLUSTER_MEMBERS", &members)
+            .env("CAVALRY_CLUSTER_MEMBER_ID", member.to_string())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run starts")
+    };
+    let mut runs = Runs((0..3).map(start).collect());
+    for (member, run) in runs.0.iter_mut().enumerate() {
+        wait_until_running(run, || {
+            let mut c = cavalry();
+            c.args(["doctor", "--dir", &dirs[member].arg()]);
+            c
+        });
+    }
+    // Every member's election closes, state 17, the member with the lowest id leading,
+    // role 2, and the others following, role 0: read from each driver's counters file.
+    wait("every member's election closed", || {
+        dirs.iter()
+            .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
+    });
+    assert_eq!(cluster_counter(&dirs[0].0, CLUSTER_ROLE), Some(2));
+    assert_eq!(cluster_counter(&dirs[1].0, CLUSTER_ROLE), Some(0));
+    assert_eq!(cluster_counter(&dirs[2].0, CLUSTER_ROLE), Some(0));
+
+    // Doctor with the keys set as the members have them finds nothing wrong with them.
+    let output = cavalry()
+        .args(["doctor", "--dir", &dirs[1].arg()])
+        .env("CAVALRY_CLUSTER_MEMBERS", &members)
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "1")
+        .output()
+        .expect("doctor runs");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("cluster-member"), "{text}");
+
+    // SIGTERM stops the member and then the driver, and the exit is clean.
+    while let Some(run) = runs.0.pop() {
+        let member = runs.0.len();
+        let stderr = terminate(run);
+        assert!(
+            stderr.contains(&format!("cluster member {member} started")),
+            "{stderr}"
+        );
+        // The start line names the two counters by the labels this test read them by,
+        // in the file it read them from, and no command that does not show them.
+        assert!(
+            stderr.contains(&format!(
+                "the counters labelled `{CLUSTER_ROLE} {member}` and \
+                 `{CLUSTER_ELECTION_STATE} {member}` in {}",
+                dirs[member].0.join("counters").display()
+            )),
+            "{stderr}"
+        );
+        assert!(stderr.contains("docs/reference/counters.md"), "{stderr}");
+        assert!(!stderr.contains("`cavalry doctor` shows"), "{stderr}");
+        assert!(stderr.contains("closed;"), "{stderr}");
+    }
+
+    // A member does not start again on the log directory it had: run says why and what
+    // to do, closes the driver it started, and exits 1.
+    let output = start(2).wait_with_output().expect("run exits");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("member refused (restart)"), "{stderr}");
+    assert!(
+        stderr.contains("every member on a new log directory"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("closed;"), "{stderr}");
+    for dir in &dirs {
+        let _ = std::fs::remove_dir_all(format!("{}-log", dir.arg()));
+    }
+}
+
+#[test]
+fn one_cluster_key_without_the_other_stops_run_and_fails_doctor() {
+    let dir = TestDir::new("cluster-keys");
+    let output = cavalry()
+        .args(["run", "--dir", &dir.arg()])
+        .env("XDG_DATA_HOME", dir.arg())
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "1")
+        .output()
+        .expect("runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("CAVALRY_CLUSTER_MEMBER_ID is set and CAVALRY_CLUSTER_MEMBERS is not"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("docs/reference/config.md#clustermembers"),
+        "{stderr}"
+    );
+    assert!(!dir.0.exists(), "nothing was started");
+
+    // Doctor names the key that is wrong, and a members string the protocol refuses.
+    let output = cavalry()
+        .args(["doctor", "--dir", &dir.arg()])
+        .env("CAVALRY_CLUSTER_MEMBERS", "0,127.0.0.1:9000")
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "0")
+        .output()
+        .expect("doctor runs");
+    assert_eq!(output.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("FAIL cluster-members"), "{text}");
+    assert!(text.contains("members-grammar"), "{text}");
+
+    // A member id that is not a whole number is refused before anything starts.
+    let output = cavalry()
+        .args(["run", "--dir", &dir.arg()])
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "two")
+        .output()
+        .expect("runs");
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("CAVALRY_CLUSTER_MEMBER_ID is `two`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("or -1 for no member"), "{stderr}");
+    assert!(!dir.0.exists(), "nothing was started");
+}
+
+#[test]
+fn a_member_id_of_minus_one_written_out_is_no_member() {
+    // The id's default, -1, written into a unit file, is no member: without a members
+    // string `run` starts a driver in no cluster, as with the key unset.
+    let dir = TestDir::new("cluster-no-member");
+    let log_dir = TestDir::new("cluster-no-member-log");
+    let mut run = cavalry()
+        .args(["run", "--dir", &dir.arg(), "--log-dir", &log_dir.arg()])
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "-1")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run starts");
+    let text = wait_until_running(&mut run, || {
+        let mut c = cavalry();
+        c.args(["doctor", "--dir", &dir.arg(), "--log-dir", &log_dir.arg()])
+            .env("CAVALRY_CLUSTER_MEMBER_ID", "-1");
+        c
+    });
+    assert!(!text.contains("cluster-member"), "{text}");
+    let stderr = terminate(run);
+    assert!(!stderr.contains("cluster member"), "{stderr}");
+    assert!(stderr.contains("closed;"), "{stderr}");
+
+    // With a members string, -1 is the id left out, and `run` says so before anything
+    // starts.
+    let other = TestDir::new("cluster-no-member-other");
+    let output = cavalry()
+        .args(["run", "--dir", &other.arg(), "--log-dir", &log_dir.arg()])
+        .env(
+            "CAVALRY_CLUSTER_MEMBERS",
+            "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004",
+        )
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "-1")
+        .output()
+        .expect("runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "CAVALRY_CLUSTER_MEMBERS is set and CAVALRY_CLUSTER_MEMBER_ID is unset or -1, no \
+             member"
+        ),
+        "{stderr}"
+    );
+    // The page it names is the missing key's, as doctor's finding names it.
+    assert!(
+        stderr.contains("docs/reference/config.md#clustermemberid"),
+        "{stderr}"
+    );
+    assert!(!other.0.exists(), "nothing was started");
 }

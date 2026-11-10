@@ -19,6 +19,9 @@ cavalry-driver = { path = "../cavalry-driver" }
 # The time index lookup, re-exported as `cavalry::index`: what resolves an instant to
 # a position for `cavalry replay --from <instant>` and for a program (ADR 0030).
 cavalry-log = { path = "../cavalry-log" }
+# The consensus module of a cluster member, re-exported as `cavalry::cluster`: what
+# `cavalry run` starts beside the driver when the cluster's keys are set (ADR 0063).
+cavalry-raft = { path = "../cavalry-raft" }
 # `cavalry doctor`, control plane, behind `cli`.
 cavalry-control = { path = "../cavalry-control", optional = true }
 # `cavalry run` stops on SIGINT, SIGTERM and SIGHUP: the handler std does not have.
