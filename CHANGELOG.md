@@ -1873,7 +1873,11 @@ user-visible change, added in the same commit as the change. The format follows
   commit position, as `spec/cluster.md`, "The service", orders it
   ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)).
   Every counter holds the member's value from its add: −1 for the term before the
-  first, never the 0 of its allocation. A member does not start again on
+  first, never the 0 of its allocation. A follower that leaves the log holds its
+  recording until the driver has said where it stopped, and takes that stop as its
+  log's end. A stop that fails, or whose position the member has not read within
+  1 s (`stop-timeout`), is tried again on the next duty cycle and is never dropped.
+  A member does not start again on
   a log directory that holds a term: the error says to start the cluster again as a
   new cluster, every member on a new log directory
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
