@@ -1726,6 +1726,46 @@ user-visible change, added in the same commit as the change. The format follows
   is refused before anything is sent. `cavalry` re-exports `Counter`
   ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
+- A driver's session ids start at a random i32, as `spec/client-protocol.md` has
+  always said. The first id came from the driver's clock, in steps of 256 ns, so two
+  drivers that read the same clock value as they started, the same microsecond where
+  the clock steps by one, chose the same session ids. When both then sent one stream to
+  one receive endpoint, as the members of a cluster started together send their
+  consensus streams, the receiver held the two publications as one session, answered
+  the first, and never answered the second: its publisher read `not connected` for as
+  long as it ran, and `cavalry doctor` reported `udp-publication-not-connected` on a
+  subscription that was there. On a macOS laptop, 2 of 42 starts of three members
+  together did this. The id is now drawn from the operating system's randomness (card
+  227).
+- A replay that follows a live recording no longer allocates on the driver's replayer
+  thread. Once a second the replayer reads the recording's catalog slot to learn
+  whether it stopped, and each read built the descriptor's channel and source
+  identity as two strings: two allocations a second for every such replay, on a
+  thread that copies frames. The replayer now reads the stop alone, through
+  `CatalogReader::stop_position` in `cavalry-log`, which runs the checks `get` runs.
+  A new allocation gate, `cavalry-client`'s `replay_follow_allocations`, holds three
+  seconds of a following replay to no allocation at all (invariant 2; card 227).
+- The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
+  appointed leader", the path the replicated log takes through the election's states
+  until the election is built. Every member canvasses, and the member with the lowest
+  id is the one that may lead: it leads where canvass would have it nominate, with no
+  ballot, and never while a member that reported holds a log ahead of its own, so a
+  leader that lost its log directory does not lead a second time. In leader ready it
+  waits for every member it has heard to join its log, for at most 10 s, before it appends the
+  term's first entry. A member that would need the catch-up or a truncation fails its
+  election and is counted; a leader below a quorum stays the leader and is counted; a
+  member leaves the live log when it begins an election, and a follower whose image of
+  the log is gone begins one; a member does not restart on a log that holds a term,
+  and a cluster is started again as a new cluster, every member on a new log
+  directory. A session message with cluster session id −1 is one the leader's own
+  process appended, of no session. `cavalry-proto` has the three rules,
+  `cluster::appointed_leader`, `cluster::appointed_canvass` and
+  `cluster::leader_ready`, with their vectors, and the Counters table names
+  `cluster.terms_led`, `cluster.appointed_leader_behind`,
+  `cluster.leader_quorum_losses` and `cluster.log_images_lost`. The consensus module is
+  a client of its driver, not a thread linked to the conductor by queues
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
 - The cluster protocol says how a service reads the committed log, and the client has
   the poll it needs. A service is a client of its member's driver: it reads the
   member's own recording of the log through a replay that follows the recording, on
