@@ -122,7 +122,9 @@ conflict: a conflict is resolved in place, as step 4 says.
 Read the state in one go, then wait. A review lands up to thirty minutes after a push,
 most inside fifteen, the longest on an ADR with reviews behind it, and its run is
 cancelled at sixty (card 213); a fix run takes up to thirty minutes; the `bench (linux)` and `bench (grip)` jobs each
-have their host, `bench` and `grip`, to themselves. Poll no more often than every five
+have their host, `bench` and `grip`, to themselves, and take it only for a change
+that can move the bench: for a page or an ADR they pass in seconds on a hosted runner
+(ADR 0071). Poll no more often than every five
 minutes, and touch nothing a rule below does not name. Every wait here is the loop's own work in progress; the stalls are the rules.
 
 ```
