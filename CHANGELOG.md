@@ -1860,13 +1860,20 @@ user-visible change, added in the same commit as the change. The format follows
   on three drivers appoint their leader, the followers arm their recordings before its
   first frame, and an entry the leader's process offers is committed once a quorum has
   synced it, with every member's recording holding the same bytes. The module stores
-  the member's role, election state, term, append position and commit position, and
-  what it counts, as client counters in the driver's counters file: the eleven
-  counts of its core, from `Counts::by_counter`, `cluster.commit_position`, and five
-  counters this change registers in `counters.toml`, ids 121 to 125,
-  `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
-  `cluster.append_position` and `cluster.messages_rejected`, with the member's role
-  as the state machine `cluster_role`. A member does not start again on
+  the member's role, election state, term, append position and commit position, the
+  recording that holds its log, and what it counts, as client counters in the
+  driver's counters file: the eleven counts of its core, from `Counts::by_counter`,
+  `cluster.commit_position`, and six counters this change registers in
+  `counters.toml`, ids 121 to 126, `cluster.role`, `cluster.election_state`,
+  `cluster.leadership_term_id`, `cluster.append_position`,
+  `cluster.messages_rejected` and `cluster.log_recording_id`, with the member's role
+  as the state machine `cluster_role`. `cluster.log_recording_id` names the
+  recording a service replays, −1 while the member records none, and is added
+  holding −1 before `cluster.commit_position` is added and stored before each
+  commit position, as `spec/cluster.md`, "The service", orders it
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)).
+  Every counter holds the member's value from its add: −1 for the term before the
+  first, never the 0 of its allocation. A member does not start again on
   a log directory that holds a term: the error says to start the cluster again as a
   new cluster, every member on a new log directory
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
