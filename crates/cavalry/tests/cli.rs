@@ -809,10 +809,10 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
     }
     // Every member's election closes, state 17, the member with the lowest id leading,
     // role 2, and the others following, role 0: read from each driver's counters file.
-    // A wait that fails says what each member was doing, from the same counters and
-    // from what its `run` wrote: a duty cycle that fails is said there once for each
-    // different error, and the test's own message could not tell a member that never
-    // bound an endpoint from one whose leader closed without it.
+    // A wait that fails says where each member's election stood, from the same
+    // counters, and the members string, whose ports a member's error names; `Runs`
+    // then prints what each member's `run` wrote. Together they tell a member that
+    // could not bind an endpoint from one whose leader closed without it.
     let deadline = Instant::now() + Duration::from_secs(10);
     while !dirs
         .iter()
@@ -826,10 +826,6 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
                     cluster_counter(&dir.0, CLUSTER_ELECTION_STATE),
                     cluster_counter(&dir.0, CLUSTER_ROLE)
                 ));
-            }
-            while let Some(run) = runs.0.pop() {
-                let member = runs.0.len();
-                report.push(format!("member {member}'s run wrote:\n{}", terminate(run)));
             }
             panic!(
                 "every member's election closed within 10 s\n{}",
