@@ -24,9 +24,14 @@ ADR 0049 decided what an `add subscription` does when it meets the endpoint clos
 it waits for the close and then binds the endpoint again. It did not decide the
 moment before. An add that arrived there found an active endpoint with a live image
 on its stream, joined that image as a second subscription joins a live image, and was
-sent `available image` for it. The receiver's reply came a duty cycle later, the log
+sent `available image` for it. What followed was the receiver's to decide, by when
+it read its requests. When it read the removal and the new reader in one duty cycle,
+the image had a reader again before the receiver looked, and lived on. When it read
+the removal first, it retired the image: its reply came a duty cycle later, the log
 was unlinked, and a subscriber whose conductor had not opened the log yet read the
-missing file as corruption and closed its client (`cavalry-client`, `image_available`).
+missing file as corruption and closed its client (`cavalry-client`,
+`image_available`). One that had opened it held an image that ended at once, on an
+endpoint the new subscription kept open, with the session's cool-down ahead.
 
 Card 227 reaches that moment by design. A cluster follower that begins its election
 again leaves the log, removing its subscription on its `log` endpoint, and joins the
@@ -130,12 +135,15 @@ stream or waits for one: it is never handed a log that is about to go. A cluster
 follower leaves the log and joins it again in a few milliseconds, as often as its
 elections ask, on a driver whose receiver is behind.
 
-Harder. An add after a stream's last subscription waits for the retire as well as
-for the close. A retire the receiver puts off, at its pending replies' bound, and the
-log of an image whose recording has yet to stop, both lengthen that wait, and past
-the closing endpoint wait, 5 s, the add is code 4 as ADR 0049 has it. A member of a
-cluster stops its recording before it removes its subscription, so its own add does
-not wait on one.
+Harder. The add that the receiver would have read in one duty cycle with the removal,
+which kept the image, is held like any other now: the endpoint closes and is bound
+again, so its port must still be free then, and the stream's next image begins where
+the sender is when it answers the new endpoint. An add after a stream's last
+subscription waits for the retire as well as for the close. A retire the receiver puts
+off, at its pending replies' bound, and the log of an image whose recording has yet to
+stop, both lengthen that wait, and past the closing endpoint wait, 5 s, the add is
+code 4 as ADR 0049 has it. A member of a cluster stops its recording before it removes
+its subscription, so its own add does not wait on one.
 
 To maintain. The mark is the conductor's, set where a subscription is dropped and
 read where a subscription joins an image and where a recording finds one. A new place
