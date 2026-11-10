@@ -144,8 +144,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   its socket still with the receiver, waits for the receiver's close and then runs as
   it arrived, so a client that removes and adds on one channel needs no retry and is
   given no image that is being retired, and one still waiting after the
-  closing endpoint wait, 5 s, a receiver starved that long, is code 4 with nothing
-  registered, counted in `subscription.add_deferred_timed_out` (ADR 0049, ADR 0068); a setup
+  closing endpoint wait, 5 s, a receiver starved that long or a retired image's
+  recording not yet stopped, its recorder behind, is code 4 with nothing registered,
+  the message naming both causes and what to do for each, counted in
+  `subscription.add_deferred_timed_out` (ADR 0049, ADR 0068); a setup
   frame for that stream goes back to the
   conductor, which creates the image, a log of type 2 under `images/` at the position
   the setup names with a registration id of its own, allocates its two counters and a

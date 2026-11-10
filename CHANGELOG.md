@@ -1907,6 +1907,9 @@ user-visible change, added in the same commit as the change. The format follows
   moment. The add now waits for the endpoint to close and binds it again, as an add
   on a closing endpoint does, and is given the stream's next image at once; on an
   endpoint that another stream's subscription keeps open it runs at once and is not
-  given the image being retired
+  given the image being retired. An add that waits past 5 s is code 4 as before, and
+  its message and `cavalry doctor`'s `subscription.add_deferred_timed_out` finding now
+  name both causes and what to do for each: a recording of the image being retired
+  that has not yet stopped, its recorder behind, and a receiver thread starved of CPU
   ([ADR 0068](docs/decisions/0068-give-an-image-being-retired-to-no-new-subscription.md);
   card 227).

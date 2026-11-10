@@ -2731,9 +2731,13 @@ impl Conductor {
     /// for its channel's previous receive endpoint to close with code 4, the bind it
     /// would have made, and counts it; nothing is registered, and the close that comes
     /// later runs nothing for it (`spec/client-protocol.md`, "Commands", "Liveness and
-    /// timeouts"; ADR 0049). The receiver falls that far behind when its thread is
-    /// starved, under cgroup CPU throttling, or when the endpoint's remove waits behind a
-    /// full request queue. Returns how many it answered.
+    /// timeouts"; ADR 0049). The endpoint stays open that long for one of two causes,
+    /// and the message names both with what to do for each: its images are still being
+    /// retired, a retired image's log kept until its recording has written up to where
+    /// the image stopped, a recorder behind a slow or failing disk (ADR 0068); or the
+    /// receiver is behind, its thread starved under cgroup CPU throttling, or the
+    /// endpoint's remove or an image's retire waiting behind a full request queue.
+    /// Returns how many it answered.
     fn time_out_pending_subscriptions(&mut self, now: i64) -> usize {
         let wait = spec::nanos(spec::CLOSING_ENDPOINT_WAIT);
         let waited = |pending: &PendingSubscription| now.saturating_sub(pending.arrived) >= wait;
@@ -2756,10 +2760,16 @@ impl Conductor {
                 ErrorCode::ChannelEndpointError,
                 &format!(
                     "the channel's endpoint {}: the previous receive endpoint on it has not \
-                     closed in the {} s this add waited, its socket still with the receiver, \
-                     so a new one cannot be bound; the driver's receiver thread is behind, \
-                     starved of CPU or busy: give the driver's threads the CPU they need, then \
-                     add the subscription again; see {ERRORS_DOC}",
+                     closed in the {} s this add waited, its images still being retired or \
+                     its socket still with the receiver, so a new one cannot be bound; if a \
+                     recording of one of its images has not yet stopped, the image's log is \
+                     kept until the recorder has written up to where the image stopped and \
+                     the recorder is behind, on a slow or failing disk: check \
+                     recording.write_failed and the log directory's disk with `cavalry \
+                     doctor`, or stop the recording before removing the stream's last \
+                     subscription; otherwise the driver's receiver thread is behind, starved \
+                     of CPU or busy: give the driver's threads the CPU they need; then add \
+                     the subscription again; see {ERRORS_DOC}",
                     pending.endpoint,
                     spec::CLOSING_ENDPOINT_WAIT.as_secs()
                 ),
@@ -14720,6 +14730,18 @@ mod receiving {
         assert_eq!(code, 4, "{message}");
         assert!(message.contains(&format!("127.0.0.1:{port}")), "{message}");
         assert!(message.contains("has not closed in the 5 s"), "{message}");
+        // Both causes, each with what to do (ADR 0068): a recording of an image being
+        // retired that has not yet stopped, and the receiver behind.
+        assert!(
+            message.contains("its images still being retired"),
+            "{message}"
+        );
+        assert!(message.contains("the recorder is behind"), "{message}");
+        assert!(
+            message.contains("stop the recording before removing"),
+            "{message}"
+        );
+        assert!(message.contains("receiver thread is behind"), "{message}");
         assert!(message.contains("add the subscription again"), "{message}");
         assert!(h.conductor.pending_subscriptions.is_empty());
         assert!(h.conductor.subscriptions.is_empty(), "nothing registered");
