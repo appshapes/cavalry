@@ -452,11 +452,7 @@ fn replay_exits_1_and_names_the_positions_not_printed_when_its_log_goes_first() 
 fn replay_on_a_udp_channel_plays_to_the_endpoints_subscriber_and_prints_the_summary() {
     let dir = TestDir::new("replay-udp");
     let (driver, mut client, end) = recorded(&dir, 9, 20, false);
-    let port = std::net::UdpSocket::bind("127.0.0.1:0")
-        .expect("a loopback socket")
-        .local_addr()
-        .expect("bound")
-        .port();
+    let port = loopback_ports(1)[0];
     let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
     let mut subscription = client
         .add_subscription(&channel, 9)
@@ -562,11 +558,7 @@ fn replay_on_a_udp_channel_exits_1_when_the_driver_goes_before_the_replay_ends()
     let dir = TestDir::new("replay-udp-driver-gone");
     let (driver, mut client, publication, recording, end) = recording(&dir, 10, 4, false);
     assert_eq!(end, 4 * 64);
-    let port = std::net::UdpSocket::bind("127.0.0.1:0")
-        .expect("a loopback socket")
-        .local_addr()
-        .expect("bound")
-        .port();
+    let port = loopback_ports(1)[0];
     let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
     let mut subscription = client
         .add_subscription(&channel, 10)
@@ -693,41 +685,38 @@ fn record_truncates_purges_and_deletes_a_stopped_recording() {
     driver.close().expect("closes");
 }
 
-/// Loopback ports for a cluster's endpoints, from 20000 to 31999: below the range the
-/// operating system gives a socket bound to port 0, which starts at 32768 on Linux and
-/// at 49152 on macOS. A follower binds its `log` endpoint again when it leaves the log
-/// and joins it again (ADR 0068). While the endpoint is closed, a port from that range
-/// can be given to any socket bound to port 0: another test's socket in this process,
-/// or a member's send socket. The bind then fails with `Address already in use`, code
-/// 4, and the member's election never closes. Each port is free when it is chosen, and
-/// each is chosen once in this process. The process id picks where the choice starts,
-/// so that two test processes on one host start apart.
-fn free_ports(count: usize) -> Vec<u16> {
+/// Loopback ports for this file's tests, counted out from 10000 to 19999 and never
+/// tried: no socket is opened here to choose one.
+///
+/// This file's tests run at once, and most of them start child processes. On macOS a
+/// socket is marked close-on-exec a moment after it is created, not as it is created,
+/// so a child that another test starts in that moment keeps the socket, and with it
+/// the port, for as long as the child lives. A test that bound a socket to find a
+/// free port and dropped it could then find the port taken when its driver, or a
+/// member of its cluster, came to bind it: `Address already in use`, code 4. A member
+/// that cannot bind an endpoint stops, or never joins the log, and its election never
+/// closes.
+///
+/// The range is below the ports an operating system gives a socket bound to port 0,
+/// from 32768 on Linux and from 49152 on macOS, so no send socket of a driver is
+/// given one of them, and apart from the 20000 to 31999 of `cavalry-raft`'s cluster
+/// tests. Each port is given once in this process. The process id picks where the
+/// count starts, through a hash that puts neighbouring ids far apart, so that two
+/// test processes on one host seldom meet. A port another program holds is not seen
+/// here: it shows as the bind's refusal, in the error of the test's own driver or in
+/// the standard error of the member, which `Runs` prints.
+fn loopback_ports(count: usize) -> Vec<u16> {
     use std::sync::atomic::{AtomicU32, Ordering};
-    const FIRST: u32 = 20_000;
-    const SPAN: u32 = 12_000;
+    const FIRST: u32 = 10_000;
+    const SPAN: u32 = 10_000;
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let start = (std::process::id() % 60) * 200;
-    let mut sockets = Vec::with_capacity(count);
-    for _ in 0..SPAN {
-        if sockets.len() == count {
-            break;
-        }
-        let offset = (start + NEXT.fetch_add(1, Ordering::Relaxed)) % SPAN;
-        let port = u16::try_from(FIRST + offset).expect("below 32000");
-        if let Ok(socket) = std::net::UdpSocket::bind(("127.0.0.1", port)) {
-            sockets.push(socket);
-        }
-    }
-    assert_eq!(
-        sockets.len(),
-        count,
-        "free loopback ports from {FIRST} to {}",
-        FIRST + SPAN - 1
-    );
-    sockets
-        .iter()
-        .map(|socket| socket.local_addr().expect("bound").port())
+    let count = u32::try_from(count).expect("a few ports");
+    // In 64 bits, so that the product does not wrap.
+    let start = u64::from(std::process::id()) * 2_654_435_761 % u64::from(SPAN);
+    let start = u32::try_from(start).expect("below the span");
+    let first = NEXT.fetch_add(count, Ordering::Relaxed);
+    (0..count)
+        .map(|port| u16::try_from(FIRST + (start + first + port) % SPAN).expect("below 20000"))
         .collect()
 }
 
@@ -775,7 +764,7 @@ const CLUSTER_ELECTION_STATE: &str = "cluster.election_state";
 
 #[test]
 fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader() {
-    let ports = free_ports(15);
+    let ports = loopback_ports(15);
     let members = (0..3)
         .map(|member| {
             let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]
