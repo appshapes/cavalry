@@ -19,7 +19,11 @@ committed once a quorum, two of three, has it on disk.
   log directory of its own. On three hosts the steps are the same with each host's
   address in place of `127.0.0.1`.
 - Five free UDP ports for each member. The steps use 9000 to 9004, 9010 to 9014 and
-  9020 to 9024.
+  9020 to 9024. On several hosts, each member's five ports must also be reachable over
+  UDP from every other member's host: open them in each host's firewall and in any
+  cloud security group between the hosts. A member whose `log` port the leader's host
+  cannot reach is left out of the cluster, and `doctor` reports it as
+  `cluster-joined-late`.
 - Log directories that hold no cluster yet. A member does not start again on a log
   directory that holds a term of an earlier run: this version has neither the election
   nor the catch-up that a restart needs.
@@ -67,11 +71,11 @@ committed once a quorum, two of three, has it on disk.
    CAVALRY_CLUSTER_MEMBER_ID=0 target/release/cavalry doctor --dir /tmp/cavalry-member-0 --log-dir /tmp/cavalry-member-0-log
    ```
 
-   You will see `note cluster-member  this driver is cluster member 0, the leader in
-   term 0, election closed: append position 96, commit position 96`. For members 1 and
-   2, with their own id and directories in the command, the line says `a follower in
-   term 0, election closed`, with the same two positions once their recorders have
-   synced, which they do once a second.
+   You will see a line that begins `note cluster-member` and says `this driver is
+   cluster member 0, the leader in term 0, election closed: append position 96,
+   commit position 96`. For members 1 and 2, with their own id and directories in the
+   command, the line says `a follower in term 0, election closed`, with the same two
+   positions once their recorders have synced, which they do once a second.
 
 5. Stop a member with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -80,7 +84,7 @@ committed once a quorum, two of three, has it on disk.
 
 - `cavalry doctor` on each member's directory, with the member's two variables set as
   in step 4, prints one `note cluster-member` line and no `WARN` or `FAIL` line whose
-  check begins `cluster-`.
+  check begins `cluster-` or `cluster.`.
 - Exactly one member says `the leader`, the member with the lowest id.
 - Every member reports `election closed` and the same `commit position`.
 - `ls /tmp/cavalry-member-1-log` lists `terms`, the member's record of the terms it
@@ -131,21 +135,67 @@ committed once a quorum, two of three, has it on disk.
   cluster again as a new cluster: stop every member, give every member a new log
   directory, and start them together. A new log directory on one member alone joins
   nothing.
-- `WARN cluster-no-leader`: the member is in canvass and has no leader to follow. The
-  appointed leader is not running, its consensus endpoint is not reached from this
-  host, or it still waits for a member. Run `doctor` on the leader's host.
-- `WARN cluster-joined-late`: the member's elections fail one after another. It
-  started after the cluster's first entry, or lost what it held, and this version
-  cannot bring it up to the leader's log. The cluster runs without it. To have it
-  back, start the cluster again as a new cluster.
+- `WARN cluster-no-leader` on a member that is not the appointed leader: the member is
+  in canvass and has no leader to follow. The appointed leader is not running, its
+  consensus endpoint is not reached from this host, or it still waits for a member.
+  The message names the appointed leader's id; run `doctor` on that member's host.
+- `WARN cluster-no-leader` on the appointed leader, whose message begins `member 0 is
+  the appointed leader`: it does not lead yet. It leads once every other member's
+  canvass position has reached it, or, after the 60 s startup canvass timeout, once
+  two of three have, itself among them. A member it has not heard is not running, or
+  cannot reach this member's consensus endpoint. Run `doctor` on each other member's
+  host, and check that the other hosts reach this host's consensus port, 9001 in step
+  1. `doctor` tells the two cases apart from `CAVALRY_CLUSTER_MEMBERS`; without it, the
+  message describes both.
+- `note cluster-joining`: the member has taken its leader and joins the leader's log.
+  An image of the log must arrive on the member's `log` endpoint, and then its append
+  position must reach the leader, each within 10 s. Once both have, the election
+  closes, and the next `doctor` shows `election closed` and no `cluster-joining`. If
+  either takes longer, the election fails, and `doctor` reports `cluster-joined-late`.
+  The message names the network path the two steps need, the same path as the first
+  case of `cluster-joined-late` below.
+- `WARN cluster-joined-late`: the member's elections fail one after another, and the
+  cluster runs without it. The message says how many failed, and how many of them on
+  an image of the leader's log that joined past the member's append position.
+  - With none on such an image, there are two causes, and the counters do not tell
+    them apart. The first is the network: the leader's log does not reach the member.
+    No image of the log arrived on the member's `log` endpoint, the fourth field of
+    its entry in `CAVALRY_CLUSTER_MEMBERS`, within 10 s. The leader then closed its
+    election with the other two and appended, and every later election of this member
+    fails. The second is a member that started after the cluster's first entry, or
+    lost what it held. Check the network first, because a new cluster leaves the
+    member out again while the path is closed. The leader's host must reach the
+    member's `log` endpoint over UDP, 9022 for member 2 in step 1. The member's host
+    must reach the leader's `consensus` endpoint, 9001 in step 1. With
+    `CAVALRY_CLUSTER_MEMBERS` set, the message names both endpoints. Open the path,
+    then start the cluster again as a new cluster.
+  - With one or more on such an image, the leader's log reaches the member, and the
+    member's log is behind it: it started late or lost what it held. This version
+    cannot bring it up to the leader's log. To have it back, start the cluster again
+    as a new cluster.
 - `FAIL cluster-leader-behind`: this member is the appointed leader and other members
-  hold a log ahead of its own, so it does not lead. Its log directory was lost or
-  replaced while the others kept theirs; a container whose log directory is not on a
-  volume does this at every restart. Start the cluster again as a new cluster, and
-  keep the old log directories for what they hold.
+  hold a log ahead of its own. Found in canvass, it does not lead: the note says `a
+  follower`. Found in leader ready, it leads and does not close its election: the note
+  says `the leader` and `election leader ready`, and nothing of its term is appended
+  or committed. Either way its log directory was lost or replaced while the others
+  kept theirs; a container whose log directory is not on a volume does this at every
+  restart. Start the cluster again as a new cluster, and keep the old log directories
+  for what they hold.
 - `WARN cluster-quorum-lost`: the leader heard from fewer than two of three members
   within 10 s, and nothing was committed while that lasted. Check that two members run
   and that each reaches the leader's consensus endpoint.
+- `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
+  read, and acted on none of them. Another member sends them from another version of
+  Cavalry, as during an upgrade, and the member may canvass with no leader for as long
+  as that lasts. Run `cavalry --version` on every member's host and start every member
+  on the same version.
+- `WARN cluster.leader_heartbeat_timeouts`: the follower heard nothing from its leader
+  for 10 s and began its election again. Check that the leader runs, that `doctor` on
+  the leader's host shows no `cluster-quorum-lost`, and that this host reaches the
+  leader's consensus endpoint.
+- `WARN cluster.log_images_lost`: the follower lost its image of the leader's log
+  stream and began its election again. Check the network path from the leader's log
+  endpoint to this host, and the image counters of stream 100 on this member's driver.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Up to a second of entries waits at any moment, since a recorder syncs once
   a second. If the commit position stays where it is while the append position moves,
