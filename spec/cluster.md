@@ -40,7 +40,8 @@ are where a member receives:
 | `catchup` | the member, on the log stream | the leader's replay of the log to a member that is behind, from the position it asked for |
 | `archive` | the member | a peer's request to replicate its recording of the log; named here, used by no message of this version |
 
-The streams are `cavalry:udp` streams with these stream ids, constants in this version:
+The streams are `cavalry:udp` streams, but for the service log, with these stream ids,
+constants in this version:
 
 | Stream | Stream id | Publication | Subscriptions |
 | --- | --- | --- | --- |
@@ -48,6 +49,7 @@ The streams are `cavalry:udp` streams with these stream ids, constants in this v
 | consensus | 108 | one per member per peer, `cavalry:udp?endpoint=<the peer's consensus endpoint>` | each member's, `cavalry:udp?endpoint=<its consensus endpoint>` |
 | ingress | 101 | a client's, `cavalry:udp?endpoint=<a member's ingress endpoint>` | each member's, `cavalry:udp?endpoint=<its ingress endpoint>` |
 | egress | 102 | the leader's, one per open session, and any member's, one per connect it answers with a redirect or a refusal, at most the pending answers of "Values" at a time, each on the client's response channel | the client's, on its response channel |
+| service log | 104 | the member's driver's, one for each service: a replay of the member's recording of the log that follows it, on `cavalry:ipc` ("The service") | the service's, on `cavalry:ipc` |
 
 A member sends a consensus message to one peer on its publication to that peer, and to
 every peer by sending it on each. Every stream of this page carries messages of this
@@ -723,10 +725,44 @@ not open, is ignored and counts as no activity, each counted in
 
 ## The service
 
-The service is a subscriber to the member's log stream through the client API and the
-C ABI, reading entries up to the commit position and no further: the member's log
-subscription is bounded by `cluster.commit_position` ("Counters"), so that a service
-never reads an entry a quorum does not hold. It reads session messages, timer events,
+The service is a client of its member's driver, through the client API and the C ABI,
+as the consensus module is. It reads the member's own recording of the log through a
+replay that follows the recording, `start replay` with a length of 2^63 − 1
+(`spec/client-protocol.md`, "Commands"), into a `cavalry:ipc` subscription of its own
+on the service log stream ("Members and streams"), from the position of an entry: 0,
+or the position after the last entry it applied. The member names the recording in
+`cluster.log_recording_id` ("Counters"), which is −1 while the member has none. The
+path is the same on the leader and on a follower, and a service may start before its
+member, with it or after it (ADR 0065). A service reads its own replay's session on
+that stream and reads past any other, which is another service's.
+
+A member keeps two rules of order for the service. It adds `cluster.log_recording_id`
+and stores −1 in it before it adds `cluster.commit_position`, and a service reads the
+recording's id only of a member whose `cluster.commit_position` it has found: a
+counter holds 0 between its allocation and its first store, and 0 is a recording id.
+And it stores another value in `cluster.log_recording_id` before it stores a commit
+position that the recording does not hold.
+
+The service reads entries up to the commit position and no further: it polls the
+replay's image bounded by the member's `cluster.commit_position` ("Counters"), a read
+that delivers no frame that begins at or past the bound (`spec/log-buffer.md`,
+"Reading"), so that a service never reads an entry a quorum does not hold; and since a
+replay of a live recording reads no further than the recording's synced position, it
+never reads an entry its own member does not hold durably. The service takes a commit
+position as its bound only when two checks hold after it has loaded it. The counter's
+record is the member's: allocated, of the counter's type, and with the member id as
+the first four bytes of its key (`spec/counters-file.md`, "Metadata record"). And
+`cluster.log_recording_id`, loaded after the commit position, is the id of the
+recording the service replays, from a record that is the member's by the same test.
+From the first load at which either fails, because the member left the recording or
+its consensus module closed and the driver freed its counters, the service reads the
+counters no more and keeps the highest commit position it took. The bound never falls,
+and neither a record the driver has given to another counter nor a commit position of
+a later log is ever a bound. When the member's recording stops, the replay ends at the
+stop position; the service has read no further than its bound, and it starts a replay
+again, from its own position, when a member names a recording again.
+
+It reads session messages, timer events,
 session open and close events, cluster actions and new leadership term events in log
 order, each entry once, with the cluster's time as each entry's timestamp field and
 from no clock of its own, so that every member's service reaches the same state at
@@ -751,6 +787,7 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.election_state` | a gauge: the election state's code of "Roles and the election", 17 when no election runs |
 | `cluster.leadership_term_id` | a gauge: the member's leadership term id, −1 before the first |
 | `cluster.commit_position` | a gauge: the commit position the member knows, the bound of its service's reading |
+| `cluster.log_recording_id` | a gauge: the id of the member's recording of the log, −1 while it has none; the recording its service replays ("The service") |
 | `cluster.append_position` | a gauge: the member's append position |
 | `cluster.elections` | an election begun, from init |
 | `cluster.elections_failed` | an election that failed in a state and began again at init |
@@ -775,7 +812,7 @@ that a reader of a counters file knows which transition it saw.
 | Value | This version |
 | --- | --- |
 | schema id, version | 1, 0 |
-| stream ids | log 100, ingress 101, egress 102, consensus 108; 104, 105 and 107 reserved for Aeron's service, consensus module and snapshot streams, out of this version |
+| stream ids | log 100, ingress 101, egress 102, service log 104, consensus 108; 105 and 107 reserved for Aeron's consensus module and snapshot streams, out of this version. In Aeron 104 is the service stream, which carries the consensus module's messages to a service; here it carries the log a service reads ("The service") |
 | members | at most 8; a ninth is `members-count` |
 | member id | 0 to 2147483647, unique |
 | leader heartbeat interval | 200 ms: how often the leader sends commit position with nothing to report, and new leadership term during an election |

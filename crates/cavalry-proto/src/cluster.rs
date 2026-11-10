@@ -83,6 +83,11 @@ pub const INGRESS_STREAM_ID: i32 = 101;
 /// The egress stream's id.
 pub const EGRESS_STREAM_ID: i32 = 102;
 
+/// The service log stream's id: the `cavalry:ipc` stream a service's replay of its
+/// member's recording of the log is played into (`spec/cluster.md`, "The service";
+/// ADR 0065).
+pub const SERVICE_LOG_STREAM_ID: i32 = 104;
+
 /// The consensus stream's id.
 pub const CONSENSUS_STREAM_ID: i32 = 108;
 

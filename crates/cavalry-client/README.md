@@ -12,7 +12,11 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   place, commit it. Nothing is allocated per message, and a codec encodes straight into
   the claimed slice.
 - Delivers to the subscriber's fragment handler as a view into mapped memory, one image
-  per connected publisher.
+  per connected publisher. `Subscription::poll` reads every image in turn;
+  `Subscription::bounded_poll` reads one image, the one of a session, and no frame
+  that begins at or past a limit position, for a stream that may be read only as far
+  as something else has got, as a cluster's service reads its log no further than the
+  commit position (ADR 0065).
 - Returns back-pressure as a result code when the receiver window or the log buffer is
   full. The caller decides what to do; the driver never buffers more.
 - Says when its client is gone. Once the client is closed, by `close` or because the
