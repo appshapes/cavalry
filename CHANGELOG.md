@@ -1897,3 +1897,13 @@ user-visible change, added in the same commit as the change. The format follows
   `ConsensusModule` for a program that runs a member itself
   ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
   card 227).
+- The allocation tests of `cavalry-client` over the UDP send path and the UDP receive
+  path fail on a reallocation as well as on an allocation, which is what the bench's
+  gate has counted since
+  [ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md).
+  Before, a `Vec` or a `String` grown past a capacity it already had inside a test's
+  window was not counted, so the tests and the bench disagreed on what an allocation
+  is. `just lint` refuses an allocation test that reads one count without the other,
+  and `crates/cavalry-client/tests/reallocation_counted.rs` holds the counting
+  allocator to it ([Run the bench](docs/how-to/run-the-bench.md), "When it does not
+  work"; card 211).

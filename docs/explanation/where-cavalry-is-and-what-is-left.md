@@ -194,9 +194,12 @@ first five before the release.
    counter.
 5. **Card 159.** The soak week's close-out: the first and the last counters samples,
    and every `doctor` finding explained or carded.
-6. **Card 211.** The client's allocation tests do not count a reallocation.
-   Recommended before the release, since the release repeats the claim the tests
-   make.
+6. **Card 211.** The client's allocation tests did not count a reallocation. Done
+   on 2026-11-10: the two tests over the UDP send path and the UDP receive path read
+   the allocator's count of allocations alone, so a buffer grown past a capacity it
+   already had was not counted. They now fail on either, as the bench's gate does,
+   and `just lint` refuses a test that reads one count without the other. The send
+   path and the receive path made no reallocation.
 
 Five more open cards are debts too, but not a tester's, so they are not on the path
 to the line. Cards 177, 198 and 219 are the bench harness's and the bench hosts'.
