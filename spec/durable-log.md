@@ -190,12 +190,24 @@ entries in the order they were written.
 
 | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- |
-| 0 | 8 | magic | bytes | the bytes `43 56 4C 59 54 45 52 4D` (`CVLYTERM`) |
+| 0 | 8 | magic | bytes | the bytes `43 56 4C 59 54 45 52 4D` (`CVLYTERM`), written last when the file is created; eight zero bytes until then |
 | 8 | 4 | version | i32 | 0 |
 | 12 | 4 | entry length | i32 | 32 |
-| 16 | 8 | candidate term | i64 | −1 for none, else 0 or more |
-| 24 | 4 | candidate checksum | u32 | the zlib CRC32 of bytes 16 to 24 |
-| 28 | 36 | reserved | bytes | written as 0, never read |
+| 16 | 8 | candidate term, slot 0 | i64 | −1 for none, else 0 or more |
+| 24 | 4 | candidate checksum, slot 0 | u32 | the zlib CRC32 of bytes 16 to 24 |
+| 28 | 4 | reserved | bytes | written as 0, never read |
+| 32 | 8 | candidate term, slot 1 | i64 | −1 for none, else 0 or more |
+| 40 | 4 | candidate checksum, slot 1 | u32 | the zlib CRC32 of bytes 32 to 40 |
+| 44 | 20 | reserved | bytes | written as 0, never read |
+
+The candidate term is stored in two slots, so that a raise a crash tears reads as the
+candidate term stored before it. The stored candidate term is the higher of the slots
+whose checksum matches. A raise writes only the other slot, the one the stored
+candidate term is not read from, slot 1 when both slots hold it. A slot whose checksum
+does not match is the raise a crash tore, and it is not read. A crash tears at most one
+slot, so a file in which neither checksum matches is damaged, as is one in which a slot
+whose checksum matches holds a value below −1, and the reader refuses both with
+`candidate`.
 
 Entry i is at 64 + i × 32.
 
@@ -205,7 +217,7 @@ Entry i is at 64 + i × 32.
 | 4 | 4 | checksum | u32 | the zlib CRC32 of bytes 8 to 32 |
 | 8 | 8 | leadership term id | i64 | 0 or more, above every valid entry before it |
 | 16 | 8 | term base log position | i64 | 0 or more, a multiple of 32, at least every valid entry's before it |
-| 24 | 8 | recording id | i64 | the recording of this term in the catalog, or −1 while the term has none |
+| 24 | 8 | recording id | i64 | the recording of this term in the catalog, or −1 for a term that has none when its entry is appended; written once, by the append |
 
 The file holds at most 1048576 entries, the catalog's bound on recordings; a member
 that would record a term past it refuses with `terms full`, and the operator starts a
@@ -214,11 +226,14 @@ valid entry's term is above every valid entry's before it and its base at least
 theirs, so the entries a reader takes are the member's terms in order; the term base
 log position of the first term a member records is the position of its log at the
 time, 0 for a cluster's first term. The reader takes entries in file order, skips an
-entry whose state is 3, and stops at the first entry whose state is 0 or whose
-checksum fails, the torn tail of a crash, which the next write overwrites; a torn
-candidate checksum reads as a candidate term of −1, and the member's candidate term
-is then the higher of that and its log leadership term id, as "Roles and the
-election" of `spec/cluster.md` has init take it.
+entry whose state is 3, and stops at the first entry whose state is 0, the file's end,
+or whose checksum fails with no entry or an empty entry after it, the torn tail of a
+crash, which the next write overwrites. An entry whose checksum fails with an entry
+that is not empty after it is not a torn tail: the writer syncs an entry's fields and
+checksum before it writes the state, so no crash leaves it, the file is damaged, and
+the reader refuses it with `checksum` and drops no term. The member's candidate term
+at its start is the higher of the stored candidate term and its log leadership term
+id, as "Roles and the election" of `spec/cluster.md` has init take it.
 
 ## The driver
 
@@ -334,16 +349,26 @@ whole one. A `start recording` whose channel is longer than 256 bytes or whose s
 identity is longer than 128 is refused with a named error before any slot is written.
 
 The consensus module is the terms file's only writer, from its own thread (ADR
-0060). It creates the file with its header, the candidate term −1, and syncs, before
-the member's first message; appends an entry by writing bytes 8 to 32, then the
-checksum, then the state, 1, and syncing, before the member reports an append position
-for the term; truncates by writing state 3 over each valid entry whose term base log
-position is above the truncation position, from the last entry backwards, and syncing,
-before the member reports its log leadership term id again; and raises the candidate
-term by writing the value, then its checksum, and syncing, before the vote or request
-vote that raises it is sent. A crash leaves at most one write torn, which the reader
-reads as the state before it. The recovery pass of this section leaves the file alone:
-it names files by recording id, and `terms` is none.
+0060). It creates the file as the driver creates the catalog's header, before the
+member's first message: every field after the magic, both candidate slots at −1 under
+their checksums, and a sync, then the magic and a sync. A terms file shorter than its
+header, or whose magic is zero while it holds no whole entry and no slot whose
+checksum matches holds a candidate term of 0 or more, was torn while the module
+created it, and the module writes the header again; a zero magic over a whole entry
+or over such a slot is damage, since creation writes neither, and the member refuses
+to start with `not-ready`. The module appends an entry in two synced writes, before
+the member reports an append position for the term: the checksum and the fields,
+bytes 4 to 32, and a sync, then the state, 1, and a sync, so that a crash between the
+two leaves an empty entry. An entry's fields are written once, by its append, and
+only its state changes after it. The module truncates by writing state 3 over each
+valid entry whose term base log position is above the truncation position, from the
+last entry backwards, each write synced, before the member reports its log leadership
+term id again. It raises the candidate term in one synced write, the other slot's
+value and checksum, before the vote or request vote that raises it is sent. A crash
+leaves at most one write torn, which the reader reads as the state before it: an
+empty entry, a valid entry not yet deleted, or the candidate term stored before the
+raise. The recovery pass of this section leaves the file alone: it names files by
+recording id, and `terms` is none.
 
 ## What a reader rejects
 
@@ -407,18 +432,19 @@ The terms file, with the file's length:
 | Check | Reported when |
 | --- | --- |
 | `too-short` | The file is shorter than 64 bytes. |
+| `not-ready` | The magic is eight zero bytes: the creator has not finished. |
 | `magic` | The magic is any other value than `CVLYTERM`. |
 | `version` | The version is not 0. |
 | `entry-length` | The entry length is not 32. |
-| `candidate` | The candidate checksum does not match bytes 16 to 24: the candidate term reads as −1, and the reader goes on. |
 | `length` | The file holds more than 1048576 whole entries. |
+| `candidate` | Neither candidate checksum matches its slot, or a slot whose checksum matches holds a candidate term below −1: the file is damaged. One checksum that does not match is not a failure: that slot is the raise a crash tore, and the stored candidate term is the other slot's. |
 
 An entry, with its index and the entry before it:
 
 | Check | Reported when |
 | --- | --- |
 | `state` | The state is not 0, 1 or 3. |
-| `checksum` | The state is 1 or 3 and the checksum does not match bytes 8 to 32: the file ends here. |
+| `checksum` | The state is 1 or 3 and the checksum does not match bytes 8 to 32. With no entry or an empty entry after it, the entry is the torn tail of a crash and the file ends here; with an entry that is not empty after it, the file is damaged and the reader refuses it. |
 | `term` | The term is below 0, or not above the valid entry before it. |
 | `position` | The term base log position is below 0, not a multiple of 32, or below the valid entry's before it. |
 | `recording` | The recording id is below −1. |
@@ -430,7 +456,9 @@ vectors with the file length the reader sees and the whole slots it holds, under
 0 and version 1; descriptor vectors with the slot index, in both forms, a valid vector's
 `fields` naming its `form`, 0 or 1, and its retained position;
 index header and entry vectors, an entry vector with the entry before it; terms
-header vectors with the file length, and terms entry vectors with the entry's index and
+header vectors with the file length, a valid vector's `fields` naming the candidate
+term each slot holds, `null` for a slot whose checksum does not match, and the stored
+candidate term, and terms entry vectors with the entry's index and
 the valid entry before it, under version 2; and position
 vectors, arithmetic, from a descriptor's fields and a position to the segment file name,
 the segment base position, the offset in the segment, the term id and the term offset.

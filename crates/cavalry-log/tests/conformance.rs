@@ -175,16 +175,27 @@ fn every_vector_agrees_with_the_layout_layer() {
                 let file_length = vector["file_length"].as_u64().expect("a file length");
                 match (TermsHeader::parse(&bytes, file_length), error) {
                     (Ok(header), None) => {
+                        let fields = &vector["fields"];
+                        let slots = fields["candidate_terms"].as_array().expect("two slots");
+                        assert_eq!(slots.len(), header.candidate_slots.len(), "{name}");
+                        for (slot, expected) in header.candidate_slots.iter().zip(slots) {
+                            // `null` is a slot whose checksum does not match.
+                            assert_eq!(*slot, expected.as_i64(), "{name}");
+                        }
                         assert_eq!(
-                            header.candidate_term,
-                            int(&vector["fields"], "candidate_term"),
+                            header.candidate_term(),
+                            Some(int(fields, "candidate_term")),
                             "{name}"
                         );
-                        assert_eq!(
-                            &header.encode()[..],
-                            &bytes[..TERMS_HEADER_LENGTH],
-                            "{name}"
-                        );
+                        // A torn slot's bytes are whatever the crash left, so only a
+                        // header with both slots whole encodes back to its bytes.
+                        if header.candidate_slots.iter().all(Option::is_some) {
+                            assert_eq!(
+                                &header.encode()[..],
+                                &bytes[..TERMS_HEADER_LENGTH],
+                                "{name}"
+                            );
+                        }
                     }
                     (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
                     (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),

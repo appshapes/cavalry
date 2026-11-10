@@ -36,16 +36,25 @@ thread and reads them at one moment, its start.
 
 The log directory gains a `terms` file, `spec/durable-log.md` version 2, "Terms": a
 64-byte header, the magic `CVLYTERM`, a version of 0, the entry length 32, the
-candidate term as an i64 with its CRC32, and then 32-byte entries, each a state, a
-CRC32 of its other fields, the leadership term id, the term base log position and the
-recording id of the term's recording in this directory, −1 when the term has none at
-its append. An entry's fields are written once, by its append, and only its state
-changes after. The writer appends an entry by writing its fields, then its checksum,
-then its state, 1, last, and syncs; truncates by writing state 3 over each entry whose
-base is above the position and syncing; raises the candidate term by writing the value, then its
-checksum, and syncing; and a reader takes entries in file order, skipping state 3,
-stopping at the first entry whose state is 0 or whose checksum fails, the torn tail of
-a crash. The file holds at most 1048576 entries, the catalog's bound on recordings,
+candidate term in two slots, each an i64 with its CRC32, and then 32-byte entries,
+each a state, a CRC32 of its other fields, the leadership term id, the term base log
+position and the recording id of the term's recording in this directory, −1 when the
+term has none at its append. The stored candidate term is the higher of the slots
+whose checksum matches, and a raise writes only the other slot, in one synced write,
+so that a raise a crash tears reads as the candidate term stored before it and a
+member votes once in a term across that crash; neither checksum matching is damage
+the reader refuses, since a crash tears at most one slot. The writer creates the file
+as the catalog's header is created, every field and a sync, then the magic and a
+sync, and writes a creation a crash tore again; a zero magic over a term or a vote,
+which creation writes neither of, is damage, and the member refuses to start. An
+entry's fields are written once, by its append, and only its state changes after.
+The writer appends an entry by writing its checksum and fields and syncing, then its
+state, 1, and syncing; truncates by writing state 3 over each entry whose base is
+above the position and syncing; and a reader takes entries in file order, skipping
+state 3, stopping at the first entry whose state is 0, or whose checksum fails with
+no entry after it, the torn tail of a crash; a checksum that fails before another
+entry is damage the reader refuses, with no term dropped, since the append's order
+lets no crash leave it. The file holds at most 1048576 entries, the catalog's bound on recordings,
 and `cavalry doctor` warns from 90 percent of it; a member refuses to record a term
 past the bound with `terms full`, and the operator starts a new directory, as for the
 catalog. The recovery pass leaves the file alone: it names files by recording id, and
@@ -111,11 +120,28 @@ in any of the five languages.
   midway loses every term, while a state written in place loses at most the one entry
   being marked, which the reader then finds valid or torn, both of which the member
   can live with: a term marked deleted again, or a term it will record again.
+- **One candidate term slot under one checksum.** Lost: invariant 1. A raise writes
+  the term and then its checksum, and a crash between the two leaves a checksum that
+  fails. Read as −1, the member's candidate term falls back to its log leadership
+  term id, and a member that voted in term 4 and crashed can vote in term 4 again:
+  two leaders in one term. Read as damage, every crash during a vote stops the member
+  until an operator acts. Two slots cost twelve of the header's reserved bytes and no
+  write more, and the vote before a torn raise is still on disk, under a checksum
+  that matches.
+- **The header written in one write, with no order.** Lost: a crash during it leaves
+  a short file or a zero magic, which a reader cannot tell from damage, so a member
+  that crashed while it first started would wait for an operator. The catalog's
+  header is written with its magic last for the same reason.
+- **A failing entry checksum always read as the torn tail.** Lost: invariant 1. The
+  append syncs an entry's fields and checksum before it writes the state, so a
+  failing checksum under a state of 1 or 3 with an entry after it is not a crash's
+  work. Ending the file there would drop every later term in silence, and the next
+  append would write over the damaged entry.
 - **Setting a term's recording id in place once its recording exists.** Lost: the
   entry's one checksum covers the recording id, so a rewrite torn by a crash leaves a
   valid state over a checksum that fails. A reader takes that entry for the torn tail
-  and drops it with every term after it, and the next append, written at its index,
-  leaves the later entries behind it. A second checksum over the recording id alone
+  when it is the last and for damage when it is not, so a crash during the rewrite
+  would stop the member or drop the term. A second checksum over the recording id alone
   would make the rewrite safe, at the cost of a wider entry and a fifth write. Until
   the consensus module needs the id of a recording that starts after its term is
   recorded, a term recorded before its recording exists keeps −1. The module then

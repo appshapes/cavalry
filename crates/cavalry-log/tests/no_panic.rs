@@ -216,9 +216,14 @@ fn terms_headers_and_entries_never_panic() {
             bytes[8..12].copy_from_slice(&0i32.to_le_bytes());
             bytes[12..16].copy_from_slice(&(TERMS_ENTRY_LENGTH as i32).to_le_bytes());
         }
+        // The candidate slots: both checksums right, one right, or neither.
         if round % 2 == 0 && bytes.len() >= 28 {
             let crc = crc32(&bytes[16..24]);
             bytes[24..28].copy_from_slice(&crc.to_le_bytes());
+        }
+        if round % 3 != 1 && bytes.len() >= 44 {
+            let crc = crc32(&bytes[32..40]);
+            bytes[40..44].copy_from_slice(&crc.to_le_bytes());
         }
         // Lengths around the bound as well as well inside it.
         let file_length = if round % 5 == 0 {

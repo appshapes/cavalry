@@ -876,78 +876,152 @@
     {
       "name": "terms-header",
       "region": "terms-header",
-      "bytes": "43564c595445524d0000000020000000040000000000000093d168e1000000000000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf442100000000040000000000000093d168e10000000000000000000000000000000000000000",
       "fields": {
         "magic": "43564c595445524d",
         "version": 0,
         "entry_length": 32,
-        "candidate_term": 4,
-        "candidate_checksum": 3781742995
+        "candidate_terms": [
+          -1,
+          4
+        ],
+        "candidate_term": 4
       },
       "file_length": 128
     },
     {
       "name": "terms-header-no-candidate",
       "region": "terms-header",
-      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf442100000000ffffffffffffffff1cdf44210000000000000000000000000000000000000000",
       "fields": {
         "magic": "43564c595445524d",
         "version": 0,
         "entry_length": 32,
-        "candidate_term": -1,
-        "candidate_checksum": 558161692
+        "candidate_terms": [
+          -1,
+          -1
+        ],
+        "candidate_term": -1
       },
       "file_length": 64
     },
     {
+      "name": "terms-header-higher-in-slot-0",
+      "region": "terms-header",
+      "bytes": "43564c595445524d00000000200000000600000000000000eed64da300000000040000000000000093d168e10000000000000000000000000000000000000000",
+      "fields": {
+        "magic": "43564c595445524d",
+        "version": 0,
+        "entry_length": 32,
+        "candidate_terms": [
+          6,
+          4
+        ],
+        "candidate_term": 6
+      },
+      "file_length": 128
+    },
+    {
+      "name": "terms-header-slot-0-torn",
+      "region": "terms-header",
+      "bytes": "43564c595445524d000000002000000006000000000000001cdf442100000000040000000000000093d168e10000000000000000000000000000000000000000",
+      "fields": {
+        "magic": "43564c595445524d",
+        "version": 0,
+        "entry_length": 32,
+        "candidate_terms": [
+          null,
+          4
+        ],
+        "candidate_term": 4
+      },
+      "file_length": 128
+    },
+    {
+      "name": "terms-header-slot-1-torn",
+      "region": "terms-header",
+      "bytes": "43564c595445524d00000000200000000600000000000000eed64da300000000090000000000000093d168e10000000000000000000000000000000000000000",
+      "fields": {
+        "magic": "43564c595445524d",
+        "version": 0,
+        "entry_length": 32,
+        "candidate_terms": [
+          6,
+          null
+        ],
+        "candidate_term": 6
+      },
+      "file_length": 128
+    },
+    {
       "name": "terms-too-short",
       "region": "terms-header",
-      "bytes": "43564c595445524d0000000020000000040000000000000093d168e1000000000000000000000000",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf4421000000000400000000000000",
       "error": "too-short",
       "file_length": 40
     },
     {
+      "name": "terms-not-ready",
+      "region": "terms-header",
+      "bytes": "00000000000000000000000020000000ffffffffffffffff1cdf442100000000ffffffffffffffff1cdf44210000000000000000000000000000000000000000",
+      "error": "not-ready",
+      "file_length": 64
+    },
+    {
       "name": "terms-magic",
       "region": "terms-header",
-      "bytes": "43564c59544944580000000020000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": "43564c59544944580000000020000000ffffffffffffffff1cdf442100000000ffffffffffffffff1cdf44210000000000000000000000000000000000000000",
       "error": "magic",
       "file_length": 128
     },
     {
       "name": "terms-version",
       "region": "terms-header",
-      "bytes": "43564c595445524d0100000020000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": "43564c595445524d0100000020000000ffffffffffffffff1cdf442100000000ffffffffffffffff1cdf44210000000000000000000000000000000000000000",
       "error": "version",
       "file_length": 128
     },
     {
       "name": "terms-entry-length",
       "region": "terms-header",
-      "bytes": "43564c595445524d0000000040000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": "43564c595445524d0000000040000000ffffffffffffffff1cdf442100000000ffffffffffffffff1cdf44210000000000000000000000000000000000000000",
       "error": "entry-length",
       "file_length": 128
     },
     {
-      "name": "terms-candidate-checksum",
-      "region": "terms-header",
-      "bytes": "43564c595445524d0000000020000000040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-      "error": "candidate",
-      "file_length": 128,
-      "candidate_term": -1
-    },
-    {
       "name": "terms-length",
       "region": "terms-header",
-      "bytes": "43564c595445524d0000000020000000040000000000000093d168e1000000000000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": "43564c595445524d0000000020000000ffffffffffffffff1cdf442100000000040000000000000093d168e10000000000000000000000000000000000000000",
       "error": "length",
       "file_length": 33554528
     },
     {
+      "name": "terms-candidate-neither-checksum",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000060000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000",
+      "error": "candidate",
+      "file_length": 128
+    },
+    {
+      "name": "terms-candidate-below-none",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000fbffffffffffffffe6d10ea500000000040000000000000093d168e10000000000000000000000000000000000000000",
+      "error": "candidate",
+      "file_length": 128
+    },
+    {
       "name": "terms-order-magic-before-version",
       "region": "terms-header",
-      "bytes": "43564c59544944580100000020000000ffffffffffffffff1cdf4421000000000000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": "43564c59544944580100000020000000ffffffffffffffff1cdf442100000000ffffffffffffffff1cdf44210000000000000000000000000000000000000000",
       "error": "magic",
       "file_length": 128
+    },
+    {
+      "name": "terms-order-length-before-candidate",
+      "region": "terms-header",
+      "bytes": "43564c595445524d0000000020000000060000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000",
+      "error": "length",
+      "file_length": 33554528
     },
     {
       "name": "terms-entry-first",

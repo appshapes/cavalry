@@ -1647,9 +1647,14 @@ user-visible change, added in the same commit as the change. The format follows
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).
 - `spec/durable-log.md` version 2 adds the terms file, a cluster member's record of
-  recorded terms and its candidate term, with 21 vectors, and `cavalry-log::terms`
-  creates, reads, appends to, truncates and stores it with one synced write each and a
-  torn tail read as the write before it; ADR 0060 decides the replicated log's shape
+  recorded terms and its candidate term, with 27 vectors, and `cavalry-log::terms`
+  creates, reads, appends to, truncates and stores it, two synced writes for a term
+  and one for a vote, each write a crash tears read as the state before it: the
+  candidate term has two slots under a checksum each, so a member that crashes while
+  it stores a vote restarts with the vote stored before, never with none; the file is
+  created with its magic last, so a creation a crash tore is written again; and a
+  checksum that fails before another entry, or in both candidate slots, is refused as
+  damage with what to do, and drops no term; ADR 0060 decides the replicated log's shape
   for card 227: the consensus channel one publication per peer, a member's append
   position its recording's synced position, the leader appointed by the members
   string's order until card 228, the keys `cluster.members` and `cluster.member.id`,

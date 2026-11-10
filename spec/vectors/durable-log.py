@@ -96,22 +96,40 @@ def encode_descriptor(d, body_checksum=None, stop_checksum=None, retained_checks
 TERMS_MAGIC = b"CVLYTERM"
 TERMS_HEADER_LENGTH = 64
 TERMS_ENTRY_LENGTH = 32
-TERMS_HEADER = struct.Struct("<8siiqI36s")  # magic, version, entry length, candidate term, candidate checksum, reserved
+# magic, version, entry length, then the two candidate slots, each a term, its checksum and reserved bytes
+TERMS_HEADER = struct.Struct("<8siiqI4sqI20s")
 TERMS_ENTRY = struct.Struct("<iIqqq")  # state, checksum, leadership term id, term base log position, recording id
 
 
-def terms_header(candidate_term=-1, version=0, entry_length=TERMS_ENTRY_LENGTH, magic=TERMS_MAGIC, candidate_checksum=None):
-    """The terms file's header (spec/durable-log.md, "Terms"): the candidate checksum is the
-    zlib CRC32 of the candidate term's eight bytes unless one is given."""
-    if candidate_checksum is None:
-        candidate_checksum = zlib.crc32(struct.pack("<q", candidate_term)) & 0xFFFFFFFF
+def candidate_checksum(candidate_term):
+    """A candidate slot's checksum: the zlib CRC32 of the candidate term's eight bytes."""
+    return zlib.crc32(struct.pack("<q", candidate_term)) & 0xFFFFFFFF
+
+
+def terms_header(slots=(-1, -1), version=0, entry_length=TERMS_ENTRY_LENGTH, magic=TERMS_MAGIC, checksums=(None, None)):
+    """The terms file's header (spec/durable-log.md, "Terms"): the two candidate slots, each
+    under the zlib CRC32 of its eight bytes unless a checksum is given. `written` is what
+    the encoder packs; the fields a reader decodes are the candidate term each slot holds,
+    None for a slot whose checksum does not match, and the stored candidate term, the
+    higher of the slots that hold one."""
+    sums = [candidate_checksum(term) if given is None else given for term, given in zip(slots, checksums)]
+    held = [term if checksum == candidate_checksum(term) else None for term, checksum in zip(slots, sums)]
+    stored = max((term for term in held if term is not None), default=None)
     return {"magic": magic.hex(), "version": version, "entry_length": entry_length,
-            "candidate_term": candidate_term, "candidate_checksum": candidate_checksum}
+            "candidate_terms": held, "candidate_term": stored,
+            "written": {"candidate_terms": list(slots), "candidate_checksums": sums}}
+
+
+def terms_header_fields(h):
+    """The fields of a valid terms header vector: what a reader decodes, less what the
+    encoder alone needs."""
+    return {name: value for name, value in h.items() if name != "written"}
 
 
 def encode_terms_header(h):
-    return TERMS_HEADER.pack(bytes.fromhex(h["magic"]), h["version"], h["entry_length"], h["candidate_term"],
-                             h["candidate_checksum"], b"")
+    terms, sums = h["written"]["candidate_terms"], h["written"]["candidate_checksums"]
+    return TERMS_HEADER.pack(bytes.fromhex(h["magic"]), h["version"], h["entry_length"], terms[0], sums[0], b"",
+                             terms[1], sums[1], b"")
 
 
 def terms_entry(leadership_term_id, term_base_log_position, recording_id=-1, state=VALID, checksum=None):
@@ -292,25 +310,38 @@ def main():
     vectors.append(position_vector("position-second-segment-of-late-start", late, 64 * 1024 * 1024 + 128 * 1024 * 1024 + 64))
     # Terms file (version 2): the header with the file length, then entries with their
     # index and the valid entry before them, each rejection in the order the checks run.
-    th = terms_header(candidate_term=4)
+    # A created file holds -1 in both slots; its first raise, to 4, writes slot 1; the
+    # next, to 6, writes slot 0, the slot the stored candidate term is not read from.
     two = TERMS_HEADER_LENGTH + 2 * TERMS_ENTRY_LENGTH
-    vectors.append(valid("terms-header", "terms-header", encode_terms_header(th), th, file_length=two))
-    vectors.append(valid("terms-header-no-candidate", "terms-header", encode_terms_header(terms_header()), terms_header(),
-                         file_length=TERMS_HEADER_LENGTH))
-    vectors.append(invalid("terms-too-short", "terms-header", "too-short", encode_terms_header(th)[:40], file_length=40))
-    vectors.append(invalid("terms-magic", "terms-header", "magic", encode_terms_header(terms_header(magic=b"CVLYTIDX")),
-                           file_length=two))
-    vectors.append(invalid("terms-version", "terms-header", "version", encode_terms_header(terms_header(version=1)),
-                           file_length=two))
-    vectors.append(invalid("terms-entry-length", "terms-header", "entry-length",
-                           encode_terms_header(terms_header(entry_length=64)), file_length=two))
-    torn = terms_header(candidate_term=4, candidate_checksum=0)
-    vectors.append(invalid("terms-candidate-checksum", "terms-header", "candidate", encode_terms_header(torn),
-                           file_length=two, candidate_term=-1))
-    vectors.append(invalid("terms-length", "terms-header", "length", encode_terms_header(th),
-                           file_length=TERMS_HEADER_LENGTH + (1048576 + 1) * TERMS_ENTRY_LENGTH))
-    vectors.append(invalid("terms-order-magic-before-version", "terms-header", "magic",
-                           encode_terms_header(terms_header(magic=b"CVLYTIDX", version=1)), file_length=two))
+    over = TERMS_HEADER_LENGTH + (1048576 + 1) * TERMS_ENTRY_LENGTH
+
+    def valid_terms_header(name, h, file_length=two):
+        vectors.append(valid(name, "terms-header", encode_terms_header(h), terms_header_fields(h), file_length=file_length))
+
+    def invalid_terms_header(name, error, raw, file_length=two):
+        vectors.append(invalid(name, "terms-header", error, raw, file_length=file_length))
+
+    th = terms_header(slots=(-1, 4))
+    valid_terms_header("terms-header", th)
+    valid_terms_header("terms-header-no-candidate", terms_header(), file_length=TERMS_HEADER_LENGTH)
+    valid_terms_header("terms-header-higher-in-slot-0", terms_header(slots=(6, 4)))
+    # A raise torn by a crash: the slot's value written and its checksum not. The stored
+    # candidate term is the other slot's, the one stored before the raise.
+    valid_terms_header("terms-header-slot-0-torn", terms_header(slots=(6, 4), checksums=(candidate_checksum(-1), None)))
+    valid_terms_header("terms-header-slot-1-torn", terms_header(slots=(6, 9), checksums=(None, candidate_checksum(4))))
+    invalid_terms_header("terms-too-short", "too-short", encode_terms_header(th)[:40], file_length=40)
+    invalid_terms_header("terms-not-ready", "not-ready", encode_terms_header(terms_header(magic=bytes(8))),
+                         file_length=TERMS_HEADER_LENGTH)
+    invalid_terms_header("terms-magic", "magic", encode_terms_header(terms_header(magic=b"CVLYTIDX")))
+    invalid_terms_header("terms-version", "version", encode_terms_header(terms_header(version=1)))
+    invalid_terms_header("terms-entry-length", "entry-length", encode_terms_header(terms_header(entry_length=64)))
+    invalid_terms_header("terms-length", "length", encode_terms_header(th), file_length=over)
+    neither = terms_header(slots=(6, 4), checksums=(0, 0))
+    invalid_terms_header("terms-candidate-neither-checksum", "candidate", encode_terms_header(neither))
+    invalid_terms_header("terms-candidate-below-none", "candidate", encode_terms_header(terms_header(slots=(-5, 4))))
+    invalid_terms_header("terms-order-magic-before-version", "magic",
+                         encode_terms_header(terms_header(magic=b"CVLYTIDX", version=1)))
+    invalid_terms_header("terms-order-length-before-candidate", "length", encode_terms_header(neither), file_length=over)
     first = terms_entry(2, 0, 0)
     vectors.append(valid("terms-entry-first", "terms-entry", encode_terms_entry(first), first, index=0, previous=None))
     second = terms_entry(3, 4096, 1)

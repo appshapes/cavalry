@@ -11,7 +11,14 @@
 //! [`TermsHeader::parse`] and [`TermsEntry::parse`] are the checks of "What a reader
 //! rejects", in order, which the vectors of `spec/vectors/durable-log.json` pin.
 //!
-//! Nothing here runs per message: the file is written once per term and once per vote.
+//! A crash tears at most one write, and the reader reads each as the state before it.
+//! The candidate term has two slots, each under its own checksum, and a raise writes the
+//! slot the stored candidate term is not read from, so a torn raise reads as the vote
+//! stored before it. An append syncs an entry's fields before it writes the state, so a
+//! torn append reads as an empty entry. The file is created with its magic last, so a
+//! torn creation is written again and is never taken for damage.
+//!
+//! Nothing here runs per message: the file is written twice per term and once per vote.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -37,6 +44,10 @@ pub const MAX_ENTRIES: u64 = 1_048_576;
 const READ_ENTRIES: usize = 128;
 /// The candidate term of a member that has voted in and proposed no term.
 pub const NO_CANDIDATE_TERM: i64 = -1;
+/// Where each candidate slot begins in the header: the term, then its checksum.
+const SLOT_OFFSETS: [usize; 2] = [16, 32];
+/// A candidate slot's length: the term, an i64, and its CRC32.
+const SLOT_LENGTH: usize = 12;
 /// The recording id of a term that has no recording yet.
 pub const NO_RECORDING: i64 = -1;
 /// An entry's state: empty, the file ends here.
@@ -65,6 +76,10 @@ pub enum TermsError {
         /// The length found.
         found: u64,
     },
+    /// The magic is eight zero bytes: the creator has not finished. The writer writes a
+    /// torn creation again, so [`TermsFile::open`] returns this only for a zero magic
+    /// over a term or a vote, which creation never writes: damage.
+    NotReady,
     /// The magic is not `CVLYTERM`.
     Magic,
     /// The version is not 0.
@@ -77,8 +92,9 @@ pub enum TermsError {
         /// The entry length found.
         found: i32,
     },
-    /// The candidate checksum does not match: the candidate term reads as −1 and the
-    /// reader goes on, so a reader reports this and keeps the header.
+    /// Neither candidate slot's checksum matches, or a slot whose checksum matches
+    /// holds a term below −1: damage, since a crash tears at most one slot. One slot
+    /// whose checksum does not match is no error: it is the raise a crash tore.
     Candidate,
     /// The file holds more whole entries than the bound.
     Length {
@@ -90,8 +106,16 @@ pub enum TermsError {
         /// The state found.
         found: i32,
     },
-    /// A valid or deleted entry's checksum does not match: the file ends here.
+    /// A valid or deleted entry's checksum does not match. As the file's last entry it
+    /// is the torn tail of a crash, and the file ends here; [`TermsFile::open`] reports
+    /// [`TermsError::Damaged`] when an entry follows it.
     Checksum,
+    /// An entry's checksum does not match and an entry that is not empty follows it: no
+    /// crash leaves that, so the file is damaged, and no term is dropped.
+    Damaged {
+        /// The index of the entry whose checksum does not match.
+        index: u64,
+    },
     /// An entry's term is below 0 or not above the valid entry before it.
     Term {
         /// The term found.
@@ -129,13 +153,14 @@ impl TermsError {
         match self {
             TermsError::Io { .. } => "io",
             TermsError::TooShort { .. } => "too-short",
+            TermsError::NotReady => "not-ready",
             TermsError::Magic => "magic",
             TermsError::Version { .. } => "version",
             TermsError::EntryLength { .. } => "entry-length",
             TermsError::Candidate => "candidate",
             TermsError::Length { .. } => "length",
             TermsError::State { .. } => "state",
-            TermsError::Checksum => "checksum",
+            TermsError::Checksum | TermsError::Damaged { .. } => "checksum",
             TermsError::Term { .. } => "term",
             TermsError::Position { .. } => "position",
             TermsError::Recording { .. } => "recording",
@@ -182,8 +207,16 @@ impl std::fmt::Display for TermsError {
             TermsError::TooShort { found } => write!(
                 f,
                 "terms file rejected (too-short): {found} bytes, under the 64 of the header; \
-                 the file was torn while it was created, so remove it and start the member \
-                 again; see {DOC}"
+                 the file was torn while it was created, and the member writes it again when \
+                 it starts, so start the member; see {DOC}"
+            ),
+            TermsError::NotReady => write!(
+                f,
+                "terms file not ready (not-ready): the magic is zero, so the file's creation \
+                 did not finish. A member that is starting writes the file again: read it \
+                 again. A member that refused to start with this found a term or a vote under \
+                 the zero magic, so the file is damaged: restore it from the member's last \
+                 good copy, or start a new log directory for this member; see {DOC}"
             ),
             TermsError::Magic => write!(
                 f,
@@ -202,9 +235,10 @@ impl std::fmt::Display for TermsError {
             ),
             TermsError::Candidate => write!(
                 f,
-                "terms file: the candidate term's checksum does not match, so the candidate \
-                 term reads as -1, the write it was torn in being the last; nothing to do; \
-                 see {DOC}"
+                "terms file rejected (candidate): neither candidate term slot's checksum \
+                 matches, or a slot holds a candidate term below -1, so the member's stored \
+                 vote cannot be read and the file is damaged: restore it from the member's \
+                 last good copy, or start a new log directory for this member; see {DOC}"
             ),
             TermsError::Length { found } => write!(
                 f,
@@ -219,9 +253,16 @@ impl std::fmt::Display for TermsError {
             ),
             TermsError::Checksum => write!(
                 f,
-                "terms entry rejected (checksum): the entry's checksum does not match, the \
-                 torn tail of a crash, which the next write overwrites; nothing to do; see \
-                 {DOC}"
+                "terms entry rejected (checksum): the entry's checksum does not match; as the \
+                 file's last entry it is the torn tail of a crash, which the next write \
+                 overwrites, and there is nothing to do; see {DOC}"
+            ),
+            TermsError::Damaged { index } => write!(
+                f,
+                "terms file rejected (checksum): entry {index}'s checksum does not match and \
+                 an entry follows it, so it is not the torn tail of a crash and the file is \
+                 damaged; no term was dropped: restore the file from the member's last good \
+                 copy, or start a new log directory for this member; see {DOC}"
             ),
             TermsError::Term { found } => write!(
                 f,
@@ -259,38 +300,68 @@ impl std::fmt::Display for TermsError {
 
 impl std::error::Error for TermsError {}
 
-/// The terms file's header, read or written: the candidate term with its checksum.
+/// The terms file's header, read or written: the two candidate term slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TermsHeader {
-    /// The candidate term stored, −1 for none.
-    pub candidate_term: i64,
+    /// The candidate term each slot holds, −1 for none, or `None` for a slot whose
+    /// checksum does not match, the raise a crash tore. A header that parsed holds a
+    /// term in at least one slot.
+    pub candidate_slots: [Option<i64>; 2],
 }
 
 impl TermsHeader {
-    /// The header's bytes: the magic, version 0, entry length 32, the candidate term and
-    /// its checksum, the rest zero.
+    /// The header of a created file: both slots hold −1, no candidate term.
+    pub const CREATED: Self = Self {
+        candidate_slots: [Some(NO_CANDIDATE_TERM); 2],
+    };
+
+    /// The stored candidate term: the higher of the slots that hold one, or `None` when
+    /// neither does, which a header that parsed never is.
+    pub fn candidate_term(&self) -> Option<i64> {
+        match self.candidate_slots {
+            [Some(first), Some(second)] => Some(first.max(second)),
+            [Some(term), None] | [None, Some(term)] => Some(term),
+            [None, None] => None,
+        }
+    }
+
+    /// The slot a raise writes: the one the stored candidate term is not read from,
+    /// slot 1 when both slots hold it, so that a raise a crash tears leaves the stored
+    /// candidate term as it was.
+    pub fn raise_slot(&self) -> usize {
+        match self.candidate_slots {
+            [Some(first), Some(second)] if second > first => 0,
+            [None, Some(_)] => 0,
+            _ => 1,
+        }
+    }
+
+    /// The header's bytes: the magic, version 0, entry length 32, the two candidate
+    /// slots, the rest zero. A slot that holds no term is written with a checksum that
+    /// does not match, as a torn raise leaves it.
     pub fn encode(&self) -> [u8; HEADER_LENGTH] {
         let mut bytes = [0u8; HEADER_LENGTH];
         bytes[..8].copy_from_slice(&MAGIC);
         bytes[8..12].copy_from_slice(&VERSION.to_le_bytes());
         bytes[12..16].copy_from_slice(&(ENTRY_LENGTH as i32).to_le_bytes());
-        bytes[16..24].copy_from_slice(&self.candidate_term.to_le_bytes());
-        let checksum = crc32(&bytes[16..24]);
-        bytes[24..28].copy_from_slice(&checksum.to_le_bytes());
+        for (slot, at) in self.candidate_slots.iter().zip(SLOT_OFFSETS) {
+            bytes[at..at + SLOT_LENGTH].copy_from_slice(&encode_slot(*slot));
+        }
         bytes
     }
 
     /// The checks of "What a reader rejects" on the header, in order, with the file's
-    /// length: the first failure by name. A candidate checksum that does not match is
-    /// [`TermsError::Candidate`], after which a reader keeps the header with a candidate
-    /// term of −1, as [`TermsFile::open`] does. The reader goes on past `candidate`, so
-    /// the `length` check runs after it all the same, and a file over the bound is
-    /// [`TermsError::Length`] whatever its candidate checksum.
+    /// length: the first failure by name. One slot whose checksum does not match is no
+    /// failure, the slot reads as `None`; neither matching, or a matching slot below −1,
+    /// is [`TermsError::Candidate`].
     pub fn parse(bytes: &[u8], file_length: u64) -> Result<Self, TermsError> {
         if file_length < HEADER_LENGTH as u64 || bytes.len() < HEADER_LENGTH {
             return Err(TermsError::TooShort {
                 found: file_length.min(bytes.len() as u64),
             });
+        }
+        if bytes[..8] == [0u8; 8] {
+            return Err(TermsError::NotReady);
         }
         if bytes[..8] != MAGIC {
             return Err(TermsError::Magic);
@@ -305,23 +376,51 @@ impl TermsHeader {
                 found: entry_length,
             });
         }
-        let candidate_term = i64::from_le_bytes(bytes[16..24].try_into().unwrap_or([0; 8]));
-        let checksum = u32::from_le_bytes(bytes[24..28].try_into().unwrap_or([0; 4]));
-        let candidate_torn = checksum != crc32(&bytes[16..24]);
         let entries = Self::entries(file_length);
         if entries > MAX_ENTRIES {
             return Err(TermsError::Length { found: entries });
         }
-        if candidate_torn {
+        let candidate_slots = Self::slots(bytes);
+        let below_none = |term: &i64| *term < NO_CANDIDATE_TERM;
+        if candidate_slots == [None, None] || candidate_slots.iter().flatten().any(below_none) {
             return Err(TermsError::Candidate);
         }
-        Ok(Self { candidate_term })
+        Ok(Self { candidate_slots })
     }
 
     /// The whole entries a file of `file_length` bytes holds after the header.
     pub const fn entries(file_length: u64) -> u64 {
         file_length.saturating_sub(HEADER_LENGTH as u64) / ENTRY_LENGTH as u64
     }
+
+    /// The candidate slots of a header's bytes, whatever its magic: the term of each
+    /// slot whose checksum matches.
+    fn slots(bytes: &[u8]) -> [Option<i64>; 2] {
+        SLOT_OFFSETS.map(|at| decode_slot(bytes, at))
+    }
+}
+
+/// A candidate slot's bytes: the term and its checksum, or, for a slot that holds no
+/// term, a zero term under a checksum that does not match.
+fn encode_slot(slot: Option<i64>) -> [u8; SLOT_LENGTH] {
+    let mut bytes = [0u8; SLOT_LENGTH];
+    let checksum = match slot {
+        Some(term) => {
+            bytes[..8].copy_from_slice(&term.to_le_bytes());
+            crc32(&bytes[..8])
+        }
+        None => !crc32(&bytes[..8]),
+    };
+    bytes[8..].copy_from_slice(&checksum.to_le_bytes());
+    bytes
+}
+
+/// The term of the candidate slot at `at`, when its checksum matches.
+fn decode_slot(header: &[u8], at: usize) -> Option<i64> {
+    let term = header.get(at..at + 8)?;
+    let checksum = header.get(at + 8..at + SLOT_LENGTH)?;
+    let matches = u32::from_le_bytes(checksum.try_into().ok()?) == crc32(term);
+    matches.then(|| i64::from_le_bytes(term.try_into().unwrap_or([0; 8])))
 }
 
 /// One entry of the terms file: a term the member recorded, with its base and its
@@ -419,6 +518,8 @@ impl TermsEntry {
 pub struct TermsFile {
     path: PathBuf,
     file: File,
+    /// The candidate slots as the file holds them, which choose the slot a raise writes.
+    header: TermsHeader,
     candidate_term: i64,
     /// Every entry in file order, deleted ones included, so that an index is a file
     /// offset; bounded by [`MAX_ENTRIES`].
@@ -431,39 +532,65 @@ impl TermsFile {
         dir.join(FILE_NAME)
     }
 
-    /// Creates the file in `dir` with its header, the candidate term −1 and no entry,
-    /// synced; a file already there is [`TermsError::Io`].
+    /// Creates the file in `dir` with its header, the candidate term −1 and no entry:
+    /// every field after the magic, synced, then the magic, synced, so that a creation a
+    /// crash tears is told from damage by its zero magic. A file already there is
+    /// [`TermsError::Io`].
     pub fn create(dir: &Path) -> Result<Self, TermsError> {
         let path = Self::path_in(dir);
-        let io = |what: &'static str| {
-            let path = path.clone();
-            move |source| TermsError::Io { what, path, source }
-        };
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(&path)
-            .map_err(io("create"))?;
-        let header = TermsHeader {
-            candidate_term: NO_CANDIDATE_TERM,
-        };
-        file.write_all(&header.encode()).map_err(io("write"))?;
-        file.sync_all().map_err(io("sync"))?;
-        Ok(Self {
+            .map_err(|source| TermsError::Io {
+                what: "create",
+                path: path.clone(),
+                source,
+            })?;
+        Self::write_header(&file, &path)?;
+        Ok(Self::created(path, file))
+    }
+
+    /// A file that holds the created header and no entry.
+    fn created(path: PathBuf, file: File) -> Self {
+        Self {
             path,
             file,
+            header: TermsHeader::CREATED,
             candidate_term: NO_CANDIDATE_TERM,
             entries: Vec::new(),
-        })
+        }
+    }
+
+    /// Writes the created header over whatever the file holds, the way the catalog's is
+    /// written (`spec/durable-log.md`, "The driver"): the file emptied, every field
+    /// after the magic and a sync, then the magic and a sync.
+    fn write_header(file: &File, path: &Path) -> Result<(), TermsError> {
+        let io = |what: &'static str| {
+            let path = path.to_path_buf();
+            move |source| TermsError::Io { what, path, source }
+        };
+        let encoded = TermsHeader::CREATED.encode();
+        file.set_len(0).map_err(io("empty"))?;
+        file.write_all_at(&encoded[8..], 8)
+            .map_err(io("write the header of"))?;
+        file.sync_all().map_err(io("sync"))?;
+        file.write_all_at(&encoded[..8], 0)
+            .map_err(io("write the magic of"))?;
+        file.sync_all().map_err(io("sync"))
     }
 
     /// Opens the file in `dir`, reading its header and every entry up to the torn tail,
-    /// which the next write overwrites; a candidate checksum that does not match reads
-    /// as −1. Creates the file when there is none. The file's length is checked
-    /// against the bound before a byte is read, and the entries are read 128 at a time
-    /// into a fixed buffer, so that what the reader holds is bounded by [`MAX_ENTRIES`]
-    /// whatever is on disk.
+    /// which the next write overwrites, and creates the file when there is none. A file
+    /// a crash tore while it was created, shorter than its header or with a zero magic
+    /// over no term and no vote, is written again; a zero magic over a term or a vote is
+    /// [`TermsError::NotReady`]. A candidate slot whose checksum does not match is the
+    /// raise a crash tore, and the candidate term is the other slot's. An entry whose
+    /// checksum fails before an entry that is not empty is [`TermsError::Damaged`]. The
+    /// file's length is checked against the bound before a byte is read, and the entries
+    /// are read 128 at a time into a fixed buffer, so that what the reader holds is
+    /// bounded by [`MAX_ENTRIES`] whatever is on disk.
     pub fn open(dir: &Path) -> Result<Self, TermsError> {
         let path = Self::path_in(dir);
         if !path.exists() {
@@ -489,10 +616,20 @@ impl TermsFile {
             file.read_exact_at(&mut header, 0)
                 .map_err(io("read the header of"))?;
         }
-        let candidate_term = match TermsHeader::parse(&header, file_length) {
-            Ok(header) => header.candidate_term,
-            Err(TermsError::Candidate) => NO_CANDIDATE_TERM,
-            Err(error) => return Err(error),
+        // A creation a crash tore: creation writes no entry and no candidate term but
+        // −1, so a zero magic over either is not one, and the header's parse refuses it.
+        let voted = |term: &i64| *term > NO_CANDIDATE_TERM;
+        let torn_creation = file_length < HEADER_LENGTH as u64
+            || (header[..8] == [0u8; 8]
+                && whole == 0
+                && !TermsHeader::slots(&header).iter().flatten().any(voted));
+        if torn_creation {
+            Self::write_header(&file, &path)?;
+            return Ok(Self::created(path, file));
+        }
+        let header = TermsHeader::parse(&header, file_length)?;
+        let Some(candidate_term) = header.candidate_term() else {
+            return Err(TermsError::Candidate);
         };
         let mut entries = Vec::new();
         let mut previous: Option<TermsEntry> = None;
@@ -503,10 +640,18 @@ impl TermsFile {
             let bytes = &mut chunk[..count * ENTRY_LENGTH];
             let at = HEADER_LENGTH as u64 + index * ENTRY_LENGTH as u64;
             file.read_exact_at(bytes, at).map_err(io("read"))?;
-            for entry_bytes in bytes.as_chunks::<ENTRY_LENGTH>().0 {
+            for (offset, entry_bytes) in bytes.as_chunks::<ENTRY_LENGTH>().0.iter().enumerate() {
                 let entry = match TermsEntry::parse(entry_bytes, previous.as_ref()) {
                     Ok(entry) => entry,
-                    Err(TermsError::Checksum) => break 'read,
+                    Err(TermsError::Checksum) => {
+                        // The torn tail of a crash when nothing follows it; damage when
+                        // an entry does, and then no term is dropped.
+                        let torn = index + offset as u64;
+                        if Self::is_followed(&file, torn, whole).map_err(io("read"))? {
+                            return Err(TermsError::Damaged { index: torn });
+                        }
+                        break 'read;
+                    }
                     Err(error) => return Err(error),
                 };
                 if entry.state == EMPTY {
@@ -522,9 +667,22 @@ impl TermsFile {
         Ok(Self {
             path,
             file,
+            header,
             candidate_term,
             entries,
         })
+    }
+
+    /// Whether an entry that is not empty follows the entry at `index`, of the `whole`
+    /// entries the file holds: the state of the next entry, read from the file.
+    fn is_followed(file: &File, index: u64, whole: u64) -> io::Result<bool> {
+        if index + 1 >= whole {
+            return Ok(false);
+        }
+        let mut state = [0u8; 4];
+        let at = HEADER_LENGTH as u64 + (index + 1) * ENTRY_LENGTH as u64;
+        file.read_exact_at(&mut state, at)?;
+        Ok(i32::from_le_bytes(state) != EMPTY)
     }
 
     /// The candidate term stored, −1 for none.
@@ -544,7 +702,7 @@ impl TermsFile {
             .map_or(-1, |entry| entry.leadership_term_id)
     }
 
-    /// Appends a term: its fields and their checksum, synced, then the state, synced.
+    /// Appends a term in two synced writes: its checksum and fields, then its state.
     /// The term must be above the last valid one and its base at least the last valid
     /// base; past [`MAX_ENTRIES`] it is [`TermsError::Full`]. The recording id is final
     /// here, [`NO_RECORDING`] for a term whose recording does not exist yet: an entry's
@@ -593,9 +751,11 @@ impl TermsFile {
         Ok(())
     }
 
-    /// Raises the candidate term: the value, then its checksum, synced. A value below −1
-    /// or below the candidate term stored is refused, since the module only raises it
-    /// ("The driver"); the value stored already needs no write.
+    /// Raises the candidate term in one synced write: the term and its checksum, in the
+    /// slot the stored candidate term is not read from, so that a crash during the write
+    /// leaves the candidate term stored before it. A value below −1 or below the
+    /// candidate term stored is refused, since the module only raises it ("The driver");
+    /// the value stored already needs no write.
     pub fn set_candidate_term(&mut self, candidate_term: i64) -> Result<(), TermsError> {
         if candidate_term < NO_CANDIDATE_TERM || candidate_term < self.candidate_term {
             return Err(TermsError::Refused {
@@ -607,10 +767,10 @@ impl TermsFile {
         if candidate_term == self.candidate_term {
             return Ok(());
         }
-        let header = TermsHeader { candidate_term };
-        let bytes = header.encode();
-        self.write_at(16, &bytes[16..24], "store")?;
-        self.write_at(24, &bytes[24..28], "store")?;
+        let slot = self.header.raise_slot();
+        let bytes = encode_slot(Some(candidate_term));
+        self.write_at(SLOT_OFFSETS[slot] as u64, &bytes, "store")?;
+        self.header.candidate_slots[slot] = Some(candidate_term);
         self.candidate_term = candidate_term;
         Ok(())
     }
@@ -629,6 +789,11 @@ impl TermsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The candidate slots of a terms file's bytes.
+    fn read_slots(bytes: &[u8]) -> [Option<i64>; 2] {
+        TermsHeader::slots(&bytes[..HEADER_LENGTH])
+    }
 
     fn dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cavalry-terms-{name}-{}", std::process::id()));
@@ -705,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn a_torn_tail_ends_the_file_and_a_torn_candidate_reads_as_none() {
+    fn a_torn_tail_ends_the_file_and_a_torn_raise_reads_as_the_candidate_term_before_it() {
         let dir = dir("torn");
         let mut file = TermsFile::create(&dir).expect("created");
         file.append(2, 0, 0).expect("appended");
@@ -723,7 +888,7 @@ mod tests {
         .encode();
         torn[..4].copy_from_slice(&EMPTY.to_le_bytes());
         bytes.extend_from_slice(&torn);
-        // A third entry whose checksum is wrong, as a crash mid-write leaves it.
+        // A third entry whose checksum is wrong, behind the empty one: never read.
         let mut bad = TermsEntry {
             state: VALID,
             leadership_term_id: 4,
@@ -733,12 +898,170 @@ mod tests {
         .encode();
         bad[4] ^= 0xFF;
         bytes.extend_from_slice(&bad);
-        // The candidate term's checksum torn.
-        bytes[24] ^= 0xFF;
+        // The created file's first raise wrote slot 1, so the raise to 9 writes slot 0.
+        // A crash tears it: the term is written and its checksum is not.
+        assert_eq!(read_slots(&bytes), [Some(NO_CANDIDATE_TERM), Some(7)]);
+        bytes[16..24].copy_from_slice(&9i64.to_le_bytes());
         std::fs::write(&path, &bytes).expect("written");
-        let file = TermsFile::open(&dir).expect("opened");
+        let mut file = TermsFile::open(&dir).expect("opened");
         assert_eq!(file.terms().count(), 1);
-        assert_eq!(file.candidate_term(), NO_CANDIDATE_TERM);
+        assert_eq!(
+            file.candidate_term(),
+            7,
+            "the vote stored before the torn raise, not none"
+        );
+        // The next raise writes the torn slot again, and the vote before it stays.
+        file.set_candidate_term(9)
+            .expect("raised over the torn slot");
+        drop(file);
+        let mut bytes = std::fs::read(&path).expect("read");
+        assert_eq!(read_slots(&bytes), [Some(9), Some(7)]);
+        // A raise to 11 torn in slot 1, the other way: the checksum written, the term not.
+        let raised = encode_slot(Some(11));
+        bytes[40..44].copy_from_slice(&raised[8..]);
+        std::fs::write(&path, &bytes).expect("written");
+        let mut file = TermsFile::open(&dir).expect("opened");
+        assert_eq!(
+            file.candidate_term(),
+            9,
+            "the vote stored before the torn raise"
+        );
+        file.set_candidate_term(11)
+            .expect("raised over the torn slot");
+        drop(file);
+        let bytes = std::fs::read(&path).expect("read");
+        assert_eq!(read_slots(&bytes), [Some(9), Some(11)]);
+        assert_eq!(TermsFile::open(&dir).expect("opened").candidate_term(), 11);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn neither_candidate_slot_or_a_slot_below_none_is_damage_with_something_to_do() {
+        let dir = dir("candidate-damage");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.set_candidate_term(7).expect("stored");
+        drop(file);
+        let path = TermsFile::path_in(&dir);
+        let whole = std::fs::read(&path).expect("read");
+        // Both checksums fail: no crash leaves that, and the stored vote cannot be read.
+        let mut bytes = whole.clone();
+        bytes[24] ^= 0xFF;
+        bytes[40] ^= 0xFF;
+        std::fs::write(&path, &bytes).expect("written");
+        let refused = TermsFile::open(&dir).expect_err("neither slot");
+        assert_eq!(refused.reason(), "candidate");
+        let message = refused.to_string();
+        assert!(message.contains("damaged"), "{message}");
+        assert!(message.contains("restore it"), "{message}");
+        assert!(!message.contains("nothing to do"), "{message}");
+        // A slot whose checksum matches a term below -1: a term no writer stores.
+        let mut bytes = whole;
+        bytes[16..28].copy_from_slice(&encode_slot(Some(-5)));
+        std::fs::write(&path, &bytes).expect("written");
+        assert_eq!(TermsFile::open(&dir).unwrap_err().reason(), "candidate");
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            bytes,
+            "a refused file is left as it was"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_creation_torn_by_a_crash_is_written_again() {
+        let dir = dir("torn-creation");
+        let path = TermsFile::path_in(&dir);
+        let created = TermsHeader::CREATED.encode();
+        let mut no_magic = created;
+        no_magic[..8].fill(0);
+        // Shorter than the header; every field written and the magic not; and a file of
+        // zeros, grown before a byte of it was written.
+        for torn in [&created[..40], &no_magic[..], &[0u8; HEADER_LENGTH][..]] {
+            std::fs::write(&path, torn).expect("written");
+            let mut file = TermsFile::open(&dir).expect("a torn creation opens");
+            assert_eq!(file.candidate_term(), NO_CANDIDATE_TERM);
+            assert_eq!(file.terms().count(), 0);
+            assert_eq!(std::fs::read(&path).expect("read"), created);
+            // The file written again is a whole one: it takes a term and a vote.
+            file.append(2, 0, 0).expect("appended");
+            file.set_candidate_term(3).expect("stored");
+            drop(file);
+            let file = TermsFile::open(&dir).expect("opened");
+            assert_eq!(
+                (file.log_leadership_term_id(), file.candidate_term()),
+                (2, 3)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_zero_magic_over_a_term_or_a_vote_is_not_ready_and_the_file_is_left_alone() {
+        let dir = dir("not-ready");
+        let path = TermsFile::path_in(&dir);
+        let entry = TermsEntry {
+            state: VALID,
+            leadership_term_id: 2,
+            term_base_log_position: 0,
+            recording_id: 0,
+        };
+        // A term under a zero magic.
+        let mut over_a_term = TermsHeader::CREATED.encode().to_vec();
+        over_a_term[..8].fill(0);
+        over_a_term.extend_from_slice(&entry.encode());
+        // A vote under a zero magic: creation writes -1 in both slots and nothing else.
+        let voted = TermsHeader {
+            candidate_slots: [Some(NO_CANDIDATE_TERM), Some(4)],
+        };
+        let mut over_a_vote = voted.encode().to_vec();
+        over_a_vote[..8].fill(0);
+        for damaged in [over_a_term, over_a_vote] {
+            std::fs::write(&path, &damaged).expect("written");
+            let refused = TermsFile::open(&dir).expect_err("not a torn creation");
+            assert_eq!(refused.reason(), "not-ready");
+            assert!(refused.to_string().contains("damaged"), "{refused}");
+            assert_eq!(
+                std::fs::read(&path).expect("read"),
+                damaged,
+                "the term or the vote is not written over"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_checksum_that_fails_before_an_entry_is_damage_and_drops_no_term() {
+        let dir = dir("damaged-entry");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.append(2, 0, 0).expect("appended");
+        file.append(3, 4096, 1).expect("appended");
+        file.append(4, 8192, 2).expect("appended");
+        drop(file);
+        let path = TermsFile::path_in(&dir);
+        let mut bytes = std::fs::read(&path).expect("read");
+        // Entry 1's checksum fails and entry 2 follows it: the writer syncs an entry's
+        // fields before its state, so no crash leaves this.
+        bytes[HEADER_LENGTH + ENTRY_LENGTH + 4] ^= 0xFF;
+        std::fs::write(&path, &bytes).expect("written");
+        let refused = TermsFile::open(&dir).expect_err("damage");
+        assert_eq!(refused.reason(), "checksum");
+        assert!(
+            matches!(refused, TermsError::Damaged { index: 1 }),
+            "{refused:?}"
+        );
+        let message = refused.to_string();
+        assert!(message.contains("damaged"), "{message}");
+        assert!(!message.contains("nothing to do"), "{message}");
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            bytes,
+            "term 4 is still in the file"
+        );
+        // An empty entry after it is no entry: the failing checksum is the torn tail.
+        bytes[HEADER_LENGTH + 2 * ENTRY_LENGTH..][..4].copy_from_slice(&EMPTY.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("written");
+        let file = TermsFile::open(&dir).expect("a torn tail opens");
+        assert_eq!(file.log_leadership_term_id(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -785,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_over_the_bound_is_length_before_an_entry_is_read_and_after_a_torn_candidate() {
+    fn a_file_over_the_bound_is_length_before_an_entry_is_read_and_before_its_candidate_slots() {
         let dir = dir("bound");
         let mut file = TermsFile::create(&dir).expect("created");
         file.append(2, 0, 0).expect("appended");
@@ -799,13 +1122,16 @@ mod tests {
         grown.set_len(over).expect("grown");
         let refused = TermsFile::open(&dir).expect_err("over the bound");
         assert_eq!(refused.reason(), "length");
-        // The candidate checksum torn too: the reader goes on past `candidate`, so the
-        // file is still `length`, from the header's parse as from the open.
+        // Both candidate checksums torn too: `length` is checked before `candidate`, so
+        // the file is still `length`, from the header's parse as from the open.
         grown.write_all_at(&[0xFF], 24).expect("torn");
+        grown.write_all_at(&[0xFF], 40).expect("torn");
         drop(grown);
         assert_eq!(TermsFile::open(&dir).unwrap_err().reason(), "length");
-        let mut header = TermsHeader { candidate_term: 7 }.encode();
-        header[24] ^= 0xFF;
+        let header = TermsHeader {
+            candidate_slots: [None, None],
+        }
+        .encode();
         assert_eq!(
             TermsHeader::parse(&header, over).unwrap_err().reason(),
             "length"
@@ -822,7 +1148,10 @@ mod tests {
     #[test]
     fn the_reader_takes_entries_across_its_read_buffer_up_to_the_torn_tail() {
         let dir = dir("chunks");
-        let mut bytes = TermsHeader { candidate_term: 3 }.encode().to_vec();
+        let stored = TermsHeader {
+            candidate_slots: [Some(3), Some(NO_CANDIDATE_TERM)],
+        };
+        let mut bytes = stored.encode().to_vec();
         for term in 0..300 {
             let entry = TermsEntry {
                 state: VALID,
@@ -832,13 +1161,24 @@ mod tests {
             };
             bytes.extend_from_slice(&entry.encode());
         }
-        // Entry 200, in the reader's second buffer, torn by its checksum alone.
-        bytes[HEADER_LENGTH + 200 * ENTRY_LENGTH + 4] ^= 0xFF;
+        // The last entry, in the reader's third buffer, torn by its checksum alone.
+        bytes[HEADER_LENGTH + 299 * ENTRY_LENGTH + 4] ^= 0xFF;
         std::fs::write(TermsFile::path_in(&dir), &bytes).expect("written");
         let file = TermsFile::open(&dir).expect("opened");
-        assert_eq!(file.terms().count(), 200);
-        assert_eq!(file.log_leadership_term_id(), 199);
+        assert_eq!(file.terms().count(), 299);
+        assert_eq!(file.log_leadership_term_id(), 298);
         assert_eq!(file.candidate_term(), 3);
+        drop(file);
+        // The last entry of the reader's first buffer torn, the entry after it in the
+        // second: the reader looks past its buffer before it calls a checksum the tail.
+        bytes[HEADER_LENGTH + (READ_ENTRIES - 1) * ENTRY_LENGTH + 4] ^= 0xFF;
+        std::fs::write(TermsFile::path_in(&dir), &bytes).expect("written");
+        let refused = TermsFile::open(&dir).expect_err("damage");
+        let last_of_first_buffer = READ_ENTRIES as u64 - 1;
+        assert!(
+            matches!(refused, TermsError::Damaged { index } if index == last_of_first_buffer),
+            "{refused:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -884,8 +1224,17 @@ mod tests {
         );
         file.set_candidate_term(5).expect("the value stored");
         drop(file);
-        let file = TermsFile::open(&dir).expect("opened");
+        let mut file = TermsFile::open(&dir).expect("opened");
         assert_eq!(file.candidate_term(), 5, "the refusals wrote nothing");
+        // Each raise writes the slot the stored term is not read from, so the term
+        // stored before a raise is on disk until the raise after it.
+        let path = TermsFile::path_in(&dir);
+        let slots = |path: &Path| read_slots(&std::fs::read(path).expect("read"));
+        assert_eq!(slots(&path), [Some(NO_CANDIDATE_TERM), Some(5)]);
+        file.set_candidate_term(8).expect("raised");
+        assert_eq!(slots(&path), [Some(8), Some(5)]);
+        file.set_candidate_term(9).expect("raised");
+        assert_eq!(slots(&path), [Some(8), Some(9)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
