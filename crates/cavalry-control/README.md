@@ -17,10 +17,14 @@ is allowed here.
   it (ADR 0020).
 - Explains a driver from its directory: `doctor` opens the counters file and the command
   ring read-only, as their pages say a reader does, and every finding names the docs
-  anchor that explains it (`CLAUDE.md`, invariant 4). The checks of the two
-  configuration keys are here: the filesystem under the driver directory, and the idle
-  strategy the running conductor recorded in its counter against the host's isolated
-  CPUs. The `cavalry doctor` command is this module behind a `main`.
+  anchor that explains it (`CLAUDE.md`, invariant 4). The checks of the configuration
+  keys are here: the filesystem under the driver directory (`driver-directory-backing`)
+  and under the log directory (`log-directory-backing`), the idle strategy the running
+  conductor recorded in its counter against the host's isolated CPUs
+  (`conductor-idle-strategy`), and the two cluster keys, checked together and against
+  the members string (`cluster-members`, `cluster-member-id`). `doctor::examine_config`
+  runs every check with the configuration the keys give, and the `cavalry doctor`
+  command is that call behind a `main`.
 - May use `async` and an executor: nothing a message passes through lives here.
 
 In Aeron, this is AeronStat and hand-written tooling: the open project has no admin API
