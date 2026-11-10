@@ -822,7 +822,13 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
             "{stderr}"
         );
         assert!(stderr.contains("docs/reference/counters.md"), "{stderr}");
-        assert!(!stderr.contains("`cavalry doctor` shows"), "{stderr}");
+        // And the command that reads them for the operator, which the test ran above.
+        assert!(
+            stderr.contains(
+                "`cavalry doctor` explains the member from them in its `cluster-member` note"
+            ),
+            "{stderr}"
+        );
         assert!(stderr.contains("closed;"), "{stderr}");
     }
 
