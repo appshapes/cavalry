@@ -5,7 +5,7 @@
 //! every one. It prints each payload it offered on stdout, one line of hex an entry.
 //! Beside each member it runs a service, a client of the member's driver that reads
 //! the committed log as the entries commit (`spec/cluster.md`, "The service"; ADR
-//! 0065) and writes each entry to a file as `cavalry replay` prints a message, its
+//! 0066) and writes each entry to a file as `cavalry replay` prints a message, its
 //! position and its body in hex.
 //! It then closes the three modules, which ends the log's stream, and the three
 //! drivers, which leaves each member's recording stopped at its end, and prints on

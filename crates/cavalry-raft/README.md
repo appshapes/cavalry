@@ -33,7 +33,7 @@ commit path runs per message.
   hold is stored. A service is a client of the same driver that replays that
   recording and reads it no further than `cluster.commit_position`:
   `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
-  0065).
+  0066).
 - Runs the same core in memory: `memory::Cluster` is several members in one process on
   a clock the caller steps, with loss, delay, cuts, paused syncs and a member started
   again on an empty log directory to set: what the example below and most of the
