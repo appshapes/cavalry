@@ -1729,7 +1729,10 @@ user-visible change, added in the same commit as the change. The format follows
 - A `Recording` follows its recording's stop. `Recording::stop_position()` says where
   the recording stopped once the driver has sent `recording stopped`, whichever
   client stopped it or whatever ended it, and `position()` and `synced_position()` are
-  that position from then on. Before this, a handle kept reading the two counters of
+  that position from then on. That position is durable: the catalog's stop, or the
+  position last synced when the stop's own writes failed
+  ([ADR 0064](docs/decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md)).
+  Before this, a handle kept reading the two counters of
   a stopped recording, which the driver frees at the stop and gives to other counters
   a second later, so a position could become another counter's value. Each read now
   checks that the record is still the recording's, by the recording id in its key, and

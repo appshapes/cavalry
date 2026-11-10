@@ -117,7 +117,9 @@ and `client.purge_recording(id)?`, each with a position, since a program resolve
 instant through `cavalry::index::position_after` or `position_at` itself. Dropping the
 `Recording` stops nothing. After a stop, whichever client asked for it,
 `recording.stop_position()` is the position the recording stopped at, and `position()`
-and `synced_position()` return it too.
+and `synced_position()` return it too. That position is durable: the stop synced it, or,
+when the stop's own writes failed, the last sync before the stop covered it (see
+`recording-write-failed` below).
 
 ## How to verify it worked
 
@@ -156,7 +158,12 @@ and `synced_position()` return it too.
   taken and stopped at its start.
 - `recording-write-failed` in `doctor`: a write failed and the recording stopped at the
   position written; what was written is whole and replayable. Free space, or move the
-  log directory, and start the recording again.
+  log directory, and start the recording again. When the stop's own writes failed too,
+  `recording stopped` and `recording.stop_position()` give the position the last sync
+  before the stop covered, which can be below what `position()` returned before. The
+  catalog lists the recording as live until the driver's next start, which rebuilds its
+  stop from the files, at or above that position
+  ([ADR 0064](../decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md)).
 - `driver failed (log-dir): log directory locked`: another driver holds the directory;
   stop it, or give this one its own with `--log-dir`.
 - `error 24 (recording busy)`: the recording is live, read by a replay, or under
