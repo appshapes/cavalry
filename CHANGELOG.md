@@ -1726,6 +1726,17 @@ user-visible change, added in the same commit as the change. The format follows
   is refused before anything is sent. `cavalry` re-exports `Counter`
   ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
+- A driver's session ids start at a random i32, as `spec/client-protocol.md` has
+  always said. The first id came from the driver's clock, in steps of 256 ns, so two
+  drivers that read the same clock value as they started, the same microsecond where
+  the clock steps by one, chose the same session ids. When both then sent one stream to
+  one receive endpoint, as the members of a cluster started together send their
+  consensus streams, the receiver held the two publications as one session, answered
+  the first, and never answered the second: its publisher read `not connected` for as
+  long as it ran, and `cavalry doctor` reported `udp-publication-not-connected` on a
+  subscription that was there. On a macOS laptop, 2 of 42 starts of three members
+  together did this. The id is now drawn from the operating system's randomness (card
+  227).
 - A replay that follows a live recording no longer allocates on the driver's replayer
   thread. Once a second the replayer reads the recording's catalog slot to learn
   whether it stopped, and each read built the descriptor's channel and source
