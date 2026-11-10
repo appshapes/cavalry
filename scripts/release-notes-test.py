@@ -100,7 +100,15 @@ class Repo:
         self.write("docs/how-to/run-the-bench.md", "# Run the bench\n\n## Steps\n\nWords.\n")
         self.write("docs/decisions/0001-first.md", "# 0001. First\n\n- **Status:** Accepted\n")
         self.write("CHANGELOG.md", "# Changelog\n\n## Unreleased\n\n### Added\n\n- The first thing.\n")
+        self.cargo("0.9.0")
         self.first = self.commit("Initial", "2026-01-01T10:00:00Z")
+
+    def cargo(self, version):
+        """The workspace manifest, with a `version` in a table before [workspace.package] that
+        a reader taking the file's first `version` would wrongly take."""
+        self.write("Cargo.toml", '[workspace]\nmembers = ["crates/*"]\n\n[workspace.metadata.example]\n'
+                   'version = "9.9.9"\n\n[[workspace.metadata.list]]\nname = "x"\n\n[workspace.package]\n'
+                   f'# The product version.\nversion = "{version}"  # ADR 0002\nedition = "2024"\n')
 
     def git(self, *args, env=None):
         full = {**os.environ, "GIT_TERMINAL_PROMPT": "0", **(env or {})}
@@ -134,6 +142,7 @@ class Repo:
         self.git("merge", "-q", "--no-ff", "-m", "Merge b", "b", env={"GIT_AUTHOR_DATE": "2026-01-03T09:00:00Z", "GIT_COMMITTER_DATE": "2026-01-03T09:00:00Z"})
         self.append("CHANGELOG.md", "- The third thing.\n")
         self.write("docs/decisions/0002-second.md", "# 0002. Second\n\n- **Status:** Accepted\n")
+        self.cargo("0.10.0")
         self.c3 = self.commit("Third thing", "2026-01-03T10:00:00Z")
         self.git("checkout", "-q", "-b", "dangling", self.first)
         self.dangling = self.commit("Dangling", "2026-01-04T10:00:00Z")
@@ -199,7 +208,7 @@ class Window(Base):
         self.assertEqual((run.outputs["first"], run.outputs["last"]), (self.repo.c2[:7], self.repo.c3[:7]))
         self.assertEqual((run.outputs["first_date"], run.outputs["last_date"]), ("2026-01-02", "2026-01-03"))
         self.assertEqual(run.outputs["title"], "What's new in Cavalry, January 2 to 3, 2026")
-        self.assertEqual(run.outputs["subject"], "Cavalry: what's new, January 2 to 3, 2026")
+        self.assertEqual(run.outputs["subject"], "Cavalry 0.10.0")
         self.assertEqual(run.read("window.txt"), f"{self.repo.c2}\n{self.repo.cb}\n{self.repo.c3}\n")
         self.assertEqual(run.read("title.txt"), "What's new in Cavalry, January 2 to 3, 2026\n")
         commits = run.read("sources/commits.md")
@@ -236,6 +245,41 @@ class Window(Base):
         self.assertEqual(run.outputs["count"], "4")
         self.assertIn("- The first thing.", run.read("sources/changelog.md"))
         self.assertIn("- Added: 0001. First; Status: Accepted.", run.read("sources/decisions.md"))
+
+    def test_the_subject_is_the_version_at_the_newest_commit_covered(self):
+        """Not the checkout's version: the window ends at c2, before c3 moved it to 0.10.0."""
+        run = self.run_script("window", env={"RELEASE_NOTES_FROM": self.repo.c2, "GITHUB_SHA": self.repo.c2})
+        self.passes(run, 'the subject is "Cavalry 0.9.0"')
+        self.assertEqual((run.outputs["count"], run.outputs["subject"]), ("1", "Cavalry 0.9.0"))
+        self.assertIn('version = "0.10.0"', (self.repo.path / "Cargo.toml").read_text(encoding="utf-8"))
+
+    def test_the_subject_is_the_highest_version_not_the_newest_commits(self):
+        """A commit made on a base from before c3's bump to 0.10.0 and merged after it is the
+        window's newest commit, and it carries 0.9.0, which also sorts last as text."""
+        self.repo.git("checkout", "-q", "-b", "stale", self.repo.c2)
+        stale = self.repo.commit("Stale base", "2026-01-03T12:00:00Z")
+        self.repo.git("checkout", "-q", "master")
+        self.repo.git("merge", "-q", "--no-ff", "-m", "Merge stale", "stale", env={"GIT_AUTHOR_DATE": "2026-01-03T13:00:00Z", "GIT_COMMITTER_DATE": "2026-01-03T13:00:00Z"})
+        run = self.run_script("window", env={"RELEASE_NOTES_FROM": self.repo.c3})
+        self.passes(run)
+        self.assertEqual((run.outputs["count"], run.outputs["last"]), ("2", stale[:7]))
+        self.assertEqual(run.outputs["subject"], "Cavalry 0.10.0")
+
+    def test_refuses_a_manifest_with_no_product_version(self):
+        """Every `version` here is outside [workspace.package]: a reader that ignored the table,
+        stayed in it past the next header, or took `[[bin]]` for no header would find one."""
+        self.repo.write("Cargo.toml", '[package]\nname = "cavalry"\nversion = "0.3.0"\n\n[workspace.package]\n'
+                        'edition = "2024"\n\n[[bin]]\nname = "cavalry"\nversion = "9.9.9"\n\n'
+                        '[workspace.metadata.x]\nversion = "8.8.8"\n')
+        moved = self.repo.commit("No workspace version", "2026-01-04T10:00:00Z")
+        run = self.run_script("window", env={"RELEASE_NOTES_FROM": moved})
+        self.fails(run, "no commit the email covers has a version under Cargo.toml's [workspace.package]")
+        self.assertNotIn("subject", run.outputs)
+
+    def test_refuses_a_version_that_is_not_semver(self):
+        self.repo.cargo("next")
+        moved = self.repo.commit("Not a version", "2026-01-04T10:00:00Z")
+        self.fails(self.run_script("window", env={"RELEASE_NOTES_FROM": moved}), '"next" under Cargo.toml\'s [workspace.package] is not a version')
 
     def test_from_refuses_what_is_not_a_commit_on_this_history(self):
         self.fails(self.run_script("window", env={"RELEASE_NOTES_FROM": "nosuch"}), "nosuch is not a commit of this checkout")
@@ -318,6 +362,11 @@ class Window(Base):
 
 
 class Span(unittest.TestCase):
+    def test_versions_in_semver_order(self):
+        versions = ["0.9.0", "0.10.0-rc.1", "0.10.0", "0.2.0+build.5"]
+        self.assertEqual(max(versions, key=rn.version_order), "0.10.0")
+        self.assertEqual(sorted(versions, key=rn.version_order), ["0.2.0+build.5", "0.9.0", "0.10.0-rc.1", "0.10.0"])
+
     def test_the_dates_in_words(self):
         d = datetime.date
         self.assertEqual(rn.span(d(2026, 10, 16), d(2026, 10, 16)), "October 16, 2026")

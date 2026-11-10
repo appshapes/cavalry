@@ -1643,9 +1643,15 @@ user-visible change, added in the same commit as the change. The format follows
   keys with 16 new channel
   vectors, the driver refuses the keys on a subscription, a destination and a replay
   channel with code 1, the replay's with the reason `position`, since a replay starts
-  at its own position, and it answers both with code 11 until card 227's driver change
+  at its own position, and it creates the log at the keys' position, joins under the
+  same keys alone, and arms, starts, fails or drops the recording as the page says
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).
+- The release-notes email's subject is the product and its version, `Cavalry 0.1.0`:
+  the highest `version` under `Cargo.toml`'s `[workspace.package]` among the commits
+  the email covers, in place of `Cavalry: what's new, October 26 to November 1, 2026`,
+  the shape Brigade's email uses too. A preview still starts with `[preview]`, and the
+  email's own title still names the dates it covers (card 189).
 - `spec/durable-log.md` version 2 adds the terms file, a cluster member's record of
   recorded terms and its candidate term, with 27 vectors, and `cavalry-log::terms`
   creates, reads, appends to, truncates and stores it, two synced writes for a term
