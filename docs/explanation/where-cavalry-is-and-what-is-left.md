@@ -177,8 +177,11 @@ first five before the release.
    The fix changes `spec/client-protocol.md`, so it needs an ADR.
 2. **Issues 14 and 16.** Two behaviours `spec/client-protocol.md` does not state.
    Unspecified behaviour is a bug in the spec, and the release freezes the page.
-3. **Cards 223, 233 and 235.** One race in the Go, Python and .NET conformance
-   runners: one fix across the three generated runners.
+3. **Cards 223, 233 and 235.** One race in the conformance runners. Done on
+   2026-11-10: the round polled once after ten offers, and a publication can accept
+   an offer before the subscription holds its image, so the poll could deliver
+   nothing. No message was lost. The five language runners now wait for the image
+   first.
 4. **Card 197, issue 112.** The test that sends a stream through a lossy, reordering
    path fails about one laptop run in five. It is the proof of the receive path's
    delivery, so the card must say whether the test or the product is wrong.
@@ -281,11 +284,13 @@ condition of ADR 0061.
 
 ## How this page stays true
 
-The card that closes an item of "The roadmap" edits this page in the same commit, as
-the card that lands a slice's last feature edits the README's status paragraph. The
-date and the commit in the first paragraph move with each edit. When 0.1.0 is
-published and the six conditions hold, ADR 0061's Revisit fires, and this page
-becomes the survey for the slice after it.
+The card that closes an item of "The roadmap" marks the item done on this page in the
+same commit, with the date and what was found, as the card that lands a slice's last
+feature edits the README's status paragraph. The sections above "The roadmap" stay the
+reading at the commit the first paragraph names; they are read again, and the date and
+the commit moved, when a slice ends. When 0.1.0 is published and the six conditions
+hold, ADR 0061's Revisit fires, and this page becomes the survey for the slice after
+it.
 
 ## Decisions behind this page
 

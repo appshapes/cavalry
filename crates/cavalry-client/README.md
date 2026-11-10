@@ -93,7 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut publication = client.add_publication("cavalry:ipc", 1001)?;
 
     // Publish by claim and commit: write in place, nothing copied, nothing allocated.
-    // Until the subscription's image joins, the driver answers `not-connected`.
+    // Until the driver has made the subscription's image, it answers `not-connected`.
+    // The subscription takes the image on a later poll, so a poll right after the first
+    // accepted claim can deliver nothing; nothing is lost, and the loop below polls
+    // until the message arrives. `Subscription::poll` says how to wait for the image.
     loop {
         match publication.try_claim(5) {
             Ok(mut claim) => {

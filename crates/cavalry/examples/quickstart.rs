@@ -133,9 +133,12 @@ fn publish_and_read(
         }
         if sent < MESSAGES {
             // Claim a frame, write the message in place, commit: nothing is copied and
-            // nothing is allocated. Until the subscription's image joins, the driver
-            // answers `not-connected`; a full window is `back-pressured`; both mean
-            // "poll and try again".
+            // nothing is allocated. Until the driver has made the subscription's image,
+            // it answers `not-connected`; a full window is `back-pressured`; both mean
+            // "poll and try again". The subscription takes the image on a later poll,
+            // so a poll right after the first accepted claim can deliver nothing; nothing
+            // is lost, and this loop polls until every message arrives. See
+            // `Subscription::poll`.
             match publication.try_claim(8) {
                 Ok(mut claim) => {
                     claim.body().copy_from_slice(&sent.to_le_bytes());

@@ -264,7 +264,12 @@ impl Subscription {
     /// `handler` as its body and its header, a view into the log; stores each image's
     /// position with a release store after its share (`spec/log-buffer.md`, "Reading").
     /// Images the driver announced since the last poll join first; the images are
-    /// polled in turn, starting one further along each call. Returns how many fragments
+    /// polled in turn, starting one further along each call. An image joins once the
+    /// client's conductor has handed it over, which is after the driver made it, so a
+    /// publication can accept an offer before the subscription holds the image: a poll
+    /// then delivers nothing, and the frames arrive on a later poll, from the image's
+    /// join position, none lost. A caller that needs the image first polls until
+    /// [`image_count`](Self::image_count) is above 0. Returns how many fragments
     /// were delivered, or the [`Fault`] that stopped the poll, with what was delivered
     /// before it already handed over and not counted in the result. A client that is
     /// closed is [`Fault::Closed`], one acquire load per poll. Nothing here allocates,
