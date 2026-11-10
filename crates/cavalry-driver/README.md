@@ -10,6 +10,13 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `cavalry-shm`, and it never sits in the message path as a broker. The directory
   protocol, the commands it reads and the events it answers with are
   `spec/client-protocol.md` (ADR 0019).
+- Chooses each publication's session id: the first is a random i32, drawn from the
+  operating system's randomness when the driver starts, and each next one is one
+  more, past any id a live publication of the stream holds (`spec/client-protocol.md`,
+  "Commands"). Random, and not the clock: two drivers started in one instant, a
+  cluster's members under one supervisor, must not send one stream under one session
+  id, since a receiver that hears both on an endpoint holds them as one session and
+  answers the first alone.
 - Runs the conductor on a dedicated thread with an idle strategy, what the thread does
   when it has no work: busy-spin, yield or backoff. Backoff is the default; `doctor`
   recommends busy-spin on isolated cores. On every duty cycle the conductor stores its
