@@ -272,6 +272,11 @@ pub struct Counts {
     pub log_images_lost: u64,
 }
 
+/// One more in a count, which stays at its highest value sooner than it wraps.
+fn count(counter: &mut u64) {
+    *counter = counter.saturating_add(1);
+}
+
 /// One member as the others know it: its last report, the term the report was for and
 /// when it arrived.
 #[derive(Clone, Copy, Debug)]
@@ -524,7 +529,7 @@ impl Consensus {
                     if leadership_term_id == self.term {
                         self.leader_word(clock, log_position, commit_position);
                     } else {
-                        self.counts.leadership_terms_ignored += 1;
+                        count(&mut self.counts.leadership_terms_ignored);
                     }
                     return Ok(());
                 }
@@ -544,7 +549,7 @@ impl Consensus {
                 );
                 match action.action {
                     TermAction::Ignore => {
-                        self.counts.leadership_terms_ignored += 1;
+                        count(&mut self.counts.leadership_terms_ignored);
                         Ok(())
                     }
                     TermAction::Canvass => Ok(()),
@@ -679,7 +684,7 @@ impl Consensus {
 
     /// An election that failed in its state: counted, and begun again at init.
     fn fail(&mut self, clock: Clock) {
-        self.counts.elections_failed += 1;
+        count(&mut self.counts.elections_failed);
         self.enter(ElectionState::Init, clock);
     }
 
@@ -703,7 +708,7 @@ impl Consensus {
         // The canvass interval runs on from the last election: a member whose
         // elections fail one after another, one that cannot join without the
         // catch-up, still sends at most one round every election status interval.
-        self.counts.elections += 1;
+        count(&mut self.counts.elections);
         self.role = Role::Follower;
         Ok(self.enter(ElectionState::Canvass, clock))
     }
@@ -768,7 +773,7 @@ impl Consensus {
         self.log_term = term;
         self.term = term;
         self.term_base = self.append_position;
-        self.counts.terms_led += 1;
+        count(&mut self.counts.terms_led);
         self.role = Role::Leader;
         self.quorate = true;
         Ok(self.enter(ElectionState::LeaderLogReplication, clock))
@@ -789,7 +794,7 @@ impl Consensus {
             .count();
         let quorate = active >= quorum(self.count);
         if self.quorate && !quorate {
-            self.counts.quorum_lost += 1;
+            count(&mut self.counts.quorum_lost);
         }
         self.quorate = quorate;
     }
@@ -1002,7 +1007,7 @@ impl Consensus {
             }
             Some(_) => {
                 // Init leaves the log this image is on.
-                self.counts.join_position_mismatches += 1;
+                count(&mut self.counts.join_position_mismatches);
                 self.fail(clock);
                 Ok(1)
             }
@@ -1052,11 +1057,11 @@ impl Consensus {
     /// the log is no longer available.
     fn follow<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         if clock.now_ns.saturating_sub(self.last_leader_word_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
-            self.counts.leader_heartbeat_timeouts += 1;
+            count(&mut self.counts.leader_heartbeat_timeouts);
             return Ok(self.enter(ElectionState::Init, clock));
         }
         if io.log_image(self.log_session_id)?.is_none() {
-            self.counts.log_images_lost += 1;
+            count(&mut self.counts.log_images_lost);
             return Ok(self.enter(ElectionState::Init, clock));
         }
         if self.append_position != self.last_append_sent
