@@ -84,12 +84,13 @@ leadership it has taken. So a member ahead of it in canvass holds a history the
 leader lost, and no truncation can bring that member back. Aeron's quorum candidate
 would lead without it, and discard the history.
 
-In leader ready the appointed leader waits again with canvass's two cases, since a
-member that reported in canvass has still to join the term. It closes its election at
-once when every member counts for its term at or past its log position, and with a
-quorum once the startup canvass timeout has passed since its canvass began, the one
-deadline of a cold start, so that a cluster started together replicates to every
-member from the term's first entry. It does not close while the last report of any
+In leader ready the appointed leader waits for the members its canvass heard, since
+each has still to join the term. It closes its election at once when every member it
+heard in its canvass counts for its term at its log position, and with a quorum once
+the leader heartbeat timeout, 10 s, has passed since it entered leader ready, so that
+a cluster started together replicates to every member from the term's first entry,
+and a member that canvassed and then stopped holds the others for no longer than a
+member takes to be found not active. It does not close while the last report of any
 member holds a log ahead of its own: that is a member that holds the history and was
 silent through the canvass. Each member the appointed leader finds ahead, in canvass
 or in leader ready, is counted once in an election in
@@ -108,10 +109,18 @@ start a new cluster, with a new log directory on every member. A new log directo
 the leader alone is the lost history that the canvass guard keeps from leading. On a
 follower alone it is a member that cannot join until card 230's catch-up.
 
+Two rules the path leans on are made explicit on the page, for the election as much as
+for this path. A member leaves the live log in init, removing its subscription and so
+stopping its recording of the leader's image, so that the image it joins next is a
+new one whose join position follower log await checks. And a follower whose image of
+its leader's log is no longer available begins again at init, counted in
+`cluster.log_images_lost`: it can append nothing from an image it does not have.
+
 The `appointed-leader`, `appointed-canvass` and `leader-ready` vectors pin the three
 rules that are arithmetic. The page's Counters table gains `cluster.terms_led`, the
-transition from follower to leader, `cluster.appointed_leader_behind` and
-`cluster.leader_quorum_losses`, three transitions that no counter named.
+transition from follower to leader, `cluster.appointed_leader_behind`,
+`cluster.leader_quorum_losses` and `cluster.log_images_lost`, four transitions that no
+counter named.
 
 Until card 229's sessions, the leader's module appends for its own process:
 `ConsensusModule::offer(payload)` writes a session message whose cluster session id is
@@ -167,8 +176,16 @@ quorum of synced positions (ADR 0060).
   the term's first entry while the third, which reported in canvass a moment before,
   joins an image whose join position is past its append position, fails state 15 and
   cannot catch up before card 230: a cluster of three would run as two at most
-  starts. Canvass's startup rule, every member or a quorum after 60 s, is Aeron's own
-  answer to a cold start, applied again in the state where the members join.
+  starts. Canvass has brought the members up by then, but not onto the log: the wait
+  for that is leader ready's, for the members the canvass heard.
+- **One deadline for the canvass and for leader ready, the startup canvass timeout
+  from the canvass's start.** Lost. A canvass that ends at its deadline, a member
+  missing, would leave leader ready no wait at all, and the leader would close with
+  the first quorum to join: of five members with four there, the fourth, which
+  canvassed with the others, joins an image that has moved and stays out until card
+  230. Waiting for every member the canvass heard, for at most the leader heartbeat
+  timeout, costs a start with a member missing nothing, and a start in which a member
+  stops between its canvass and its join 10 s.
 - **Let a member restart on its log.** Lost for this feature. A restarted leader's
   append position is what its recorder had synced; a follower may hold more, which
   only a truncation resolves, or less, which only a catch-up resolves. Starting it
@@ -215,8 +232,8 @@ process.
 
 Harder: the module pays the client protocol's round trip for each command, at its
 start and at a change of term, never per entry; a cluster of this feature starts
-together or waits 60 s for a member that does not come, and then runs without it until
-card 230; no member restarts on its log until cards 228 and 230; a commit waits up to
+together or waits 60 s in canvass for a member that does not come, and then runs
+without it until card 230; no member restarts on its log until cards 228 and 230; a commit waits up to
 a second for the slowest member of its quorum. An appointed leader whose log directory
 was lost waits in canvass, counted, until the operator starts a new cluster. The guard
 sees only a history that a reachable member reports. A leader whose log was lost,

@@ -1708,14 +1708,22 @@ user-visible change, added in the same commit as the change. The format follows
   card 227).
 - The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
   appointed leader", the path the replicated log takes through the election's states
-  until the election is built. The member with the lowest id leads; every other
-  member canvasses and never nominates; the leader closes its election with every
-  member, or with a quorum after the startup canvass timeout of 60 s; a member that
-  would need the catch-up or a truncation fails its election and is counted; a member
-  does not restart on a log that holds a term. A session message with cluster session
-  id −1 is one the leader's own process appended, of no session. `cavalry-proto` has
-  the two rules, `cluster::appointed_leader` and `cluster::leader_ready`, with their
-  vectors, and the Counters table names `cluster.terms_led`. The consensus module is a
-  client of its driver, not a thread linked to the conductor by queues
+  until the election is built. Every member canvasses, and the member with the lowest
+  id is the one that may lead: it leads where canvass would have it nominate, with no
+  ballot, and never while a member that reported holds a log ahead of its own, so a
+  leader that lost its log directory does not lead a second time. In leader ready it
+  waits for every member its canvass heard, for at most 10 s, before it appends the
+  term's first entry. A member that would need the catch-up or a truncation fails its
+  election and is counted; a leader below a quorum stays the leader and is counted; a
+  member leaves the live log when it begins an election, and a follower whose image of
+  the log is gone begins one; a member does not restart on a log that holds a term,
+  and a cluster is started again as a new cluster, every member on a new log
+  directory. A session message with cluster session id −1 is one the leader's own
+  process appended, of no session. `cavalry-proto` has the three rules,
+  `cluster::appointed_leader`, `cluster::appointed_canvass` and
+  `cluster::leader_ready`, with their vectors, and the Counters table names
+  `cluster.terms_led`, `cluster.appointed_leader_behind`,
+  `cluster.leader_quorum_losses` and `cluster.log_images_lost`. The consensus module is
+  a client of its driver, not a thread linked to the conductor by queues
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
   card 227).
