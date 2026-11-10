@@ -2337,34 +2337,63 @@ pub fn appointed_leader(member_ids: &[i32]) -> i32 {
     member_ids.iter().copied().min().unwrap_or(-1)
 }
 
-/// Whether an appointed leader in leader ready closes its election.
+/// Whether the appointed leader leads from canvass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct LeaderReady {
-    /// Whether it appends the new leadership term event and closes.
-    pub closes: bool,
-    /// Whether every member counted, which decides at once.
+pub struct AppointedCanvass {
+    /// Whether it goes to leader log replication.
+    pub leads: bool,
+    /// Whether every member reported and none is ahead, which decides at once.
     pub unanimous: bool,
+    /// How many members that reported hold a log ahead of its own.
+    pub ahead: usize,
 }
 
-/// An appointed leader's close of its election in leader ready, among `members`
-/// members of which `counted` count for its term at its log position, itself among
-/// them: those whose last report is for the leader's term, at that position, and
-/// younger than the leader heartbeat timeout (`spec/cluster.md`, "The appointed
-/// leader"). It closes at once when every member counts, and with a quorum of them
-/// once its deadline has passed, the leader heartbeat timeout after it entered leader
-/// ready: more than the election's leader waits for, since no member of this version
-/// catches up with a term whose first entry it missed.
-pub const fn leader_ready(members: usize, counted: usize, deadline_passed: bool) -> LeaderReady {
-    if members >= 1 && counted >= members {
-        return LeaderReady {
-            closes: true,
-            unanimous: true,
-        };
+/// The appointed leader's canvass among `members` members, with [`candidate`]'s
+/// `reports`, `own` and deadline (`spec/cluster.md`, "The appointed leader"): it leads
+/// when canvass's rule makes it a candidate, unanimous or at the deadline with a
+/// quorum, and no member that has reported holds a log ahead of its own, whatever the
+/// deadline. Where [`candidate`] would lead with a quorum and truncate the member
+/// ahead, the appointed leader does not: this version has no truncation, and a member
+/// ahead of it holds a history it lost.
+pub fn appointed_canvass(
+    members: usize,
+    reports: &[Option<LogReport>],
+    own: LogReport,
+    deadline_passed: bool,
+) -> AppointedCanvass {
+    let ahead = reports
+        .iter()
+        .take(members)
+        .flatten()
+        .filter(|r| !log_at_least(own.term, own.position, r.term, r.position))
+        .count();
+    let nominated = candidate(members, reports, own, deadline_passed);
+    AppointedCanvass {
+        leads: nominated.nominate && ahead == 0,
+        unanimous: nominated.unanimous,
+        ahead,
     }
-    LeaderReady {
-        closes: deadline_passed && counted >= quorum(members),
-        unanimous: false,
+}
+
+/// Whether an appointed leader in leader ready closes its election, among `members`
+/// members of which it heard `heard` in its canvass, itself among them, `counted`
+/// count for its term at its log position, and `ahead` last reported a log ahead of
+/// its own (`spec/cluster.md`, "The appointed leader"): at once when every member it
+/// heard counts, and with a quorum once its deadline has passed, the leader heartbeat
+/// timeout after it entered leader ready; never with fewer than a quorum, and never
+/// while a member is ahead. A member counts when its last report is for the leader's
+/// term, at the leader's log position, and younger than the leader heartbeat timeout.
+pub const fn leader_ready(
+    members: usize,
+    heard: usize,
+    counted: usize,
+    ahead: usize,
+    deadline_passed: bool,
+) -> bool {
+    if ahead > 0 || counted < quorum(members) {
+        return false;
     }
+    counted >= heard || deadline_passed
 }
 
 /// The fields of a request vote a reader answers.

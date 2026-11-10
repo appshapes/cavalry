@@ -429,18 +429,26 @@ def appointed_leader(ids):
     return {"leader": min(ids)}
 
 
-def leader_ready(count, counted, deadline_passed):
+def appointed_canvass(count, reports, own, deadline_passed):
+    """spec/cluster.md, "The appointed leader": the appointed leader leads from canvass when
+    canvass's rule makes it a candidate, unanimous or at the deadline with a quorum, and no
+    member that has reported holds a log ahead of its own, whatever the deadline. `ahead` is
+    how many reported members do. `reports` and `own` are `candidate`'s."""
+    ahead = len([r for r in reports if r is not None and not at_least(own[0], own[1], r[0], r[1])])
+    nominated = candidate(count, reports, own, deadline_passed)
+    return {"leads": nominated["nominate"] and ahead == 0, "unanimous": nominated["unanimous"], "ahead": ahead}
+
+
+def leader_ready(count, heard, counted, ahead, deadline_passed):
     """spec/cluster.md, "The appointed leader": in leader ready the appointed leader closes its
-    election at once when every member counts for its term at its log position, itself among
-    them, and with a quorum of them once its deadline has passed, the leader heartbeat timeout
-    after it entered leader ready. `counted` is how many members count: those whose last
-    report is for the leader's term, at its log position, and younger than the leader
-    heartbeat timeout."""
-    if count >= 1 and counted >= count:
-        return {"closes": True, "unanimous": True}
-    if deadline_passed and counted >= quorum(count):
-        return {"closes": True, "unanimous": False}
-    return {"closes": False, "unanimous": False}
+    election at once when every member it heard in its canvass, itself among them, counts for
+    its term at its log position, and with a quorum of the members once its deadline has
+    passed, the leader heartbeat timeout after it entered leader ready; never while a member's
+    last report holds a log ahead of its own. `heard` is how many members reported in the
+    canvass, `counted` how many count, `ahead` how many are ahead."""
+    if ahead > 0 or counted < quorum(count):
+        return {"closes": False}
+    return {"closes": counted >= heard or deadline_passed}
 
 
 def replication_stop(append_position, next_term_base_log_position, next_log_position):
@@ -823,40 +831,81 @@ VECTORS += [
     arithmetic("appointed-leader-of-one", "appointed-leader", {"members": [4]}, appointed_leader([4])),
     arithmetic("appointed-leader-of-eight", "appointed-leader", {"members": [10, 11, 12, 13, 14, 15, 16, 9]},
                appointed_leader([10, 11, 12, 13, 14, 15, 16, 9])),
-    arithmetic("leader-ready-every-member", "leader-ready",
-               {"members": 3, "counted": 3, "deadline_passed": False}, leader_ready(3, 3, False)),
-    arithmetic("leader-ready-quorum-before-the-deadline-waits", "leader-ready",
-               {"members": 3, "counted": 2, "deadline_passed": False}, leader_ready(3, 2, False)),
-    arithmetic("leader-ready-quorum-at-the-deadline", "leader-ready",
-               {"members": 3, "counted": 2, "deadline_passed": True}, leader_ready(3, 2, True)),
-    arithmetic("leader-ready-alone-at-the-deadline-waits", "leader-ready",
-               {"members": 3, "counted": 1, "deadline_passed": True}, leader_ready(3, 1, True)),
-    arithmetic("leader-ready-of-one", "leader-ready",
-               {"members": 1, "counted": 1, "deadline_passed": False}, leader_ready(1, 1, False)),
-    arithmetic("leader-ready-five-short-of-quorum-at-the-deadline", "leader-ready",
-               {"members": 5, "counted": 2, "deadline_passed": True}, leader_ready(5, 2, True)),
-    arithmetic("leader-ready-five-quorum-at-the-deadline", "leader-ready",
-               {"members": 5, "counted": 3, "deadline_passed": True}, leader_ready(5, 3, True)),
-    # The appointed leader that started again on an empty log directory, among members that
-    # hold a term it no longer has: every report is of a log ahead of its own, so it is no
-    # candidate, at once or at any deadline, and never leads ("The appointed leader").
-    arithmetic("candidate-empty-log-among-members-with-a-term", "candidate",
-               {"members": 3, "reports": [[NULL, 0], [0, 4096], [0, 4096]], "own": [NULL, 0],
-                "deadline_passed": True}, {"nominate": False, "unanimous": False}),
-    arithmetic("candidate-empty-log-one-member-ahead-one-silent", "candidate",
-               {"members": 3, "reports": [[NULL, 0], [0, 4096], None], "own": [NULL, 0],
-                "deadline_passed": True}, {"nominate": False, "unanimous": False}),
-    arithmetic("candidate-empty-log-one-member-level-one-silent", "candidate",
+    arithmetic("appointed-canvass-every-member-level", "appointed-canvass",
+               {"members": 3, "reports": [[NULL, 0], [NULL, 0], [NULL, 0]], "own": [NULL, 0],
+                "deadline_passed": False}, appointed_canvass(3, [[NULL, 0], [NULL, 0], [NULL, 0]], [NULL, 0], False)),
+    arithmetic("appointed-canvass-one-silent-before-the-deadline", "appointed-canvass",
                {"members": 3, "reports": [[NULL, 0], [NULL, 0], None], "own": [NULL, 0],
-                "deadline_passed": True}, {"nominate": True, "unanimous": False}),
+                "deadline_passed": False}, appointed_canvass(3, [[NULL, 0], [NULL, 0], None], [NULL, 0], False)),
+    arithmetic("appointed-canvass-one-silent-at-the-deadline", "appointed-canvass",
+               {"members": 3, "reports": [[NULL, 0], [NULL, 0], None], "own": [NULL, 0],
+                "deadline_passed": True}, appointed_canvass(3, [[NULL, 0], [NULL, 0], None], [NULL, 0], True)),
+    arithmetic("appointed-canvass-alone-at-the-deadline", "appointed-canvass",
+               {"members": 3, "reports": [[NULL, 0], None, None], "own": [NULL, 0],
+                "deadline_passed": True}, appointed_canvass(3, [[NULL, 0], None, None], [NULL, 0], True)),
+    # The appointed leader started again on an empty log directory, among members that hold a
+    # term it no longer has: it never leads, at once or at any deadline.
+    arithmetic("appointed-canvass-empty-log-among-members-with-a-term", "appointed-canvass",
+               {"members": 3, "reports": [[NULL, 0], [0, 4096], [0, 4096]], "own": [NULL, 0],
+                "deadline_passed": True}, appointed_canvass(3, [[NULL, 0], [0, 4096], [0, 4096]], [NULL, 0], True)),
+    arithmetic("appointed-canvass-empty-log-one-ahead-one-silent", "appointed-canvass",
+               {"members": 3, "reports": [[NULL, 0], [0, 4096], None], "own": [NULL, 0],
+                "deadline_passed": True}, appointed_canvass(3, [[NULL, 0], [0, 4096], None], [NULL, 0], True)),
+    # Where `candidate` would lead with a quorum and leave the member ahead behind, the
+    # appointed leader does not: no truncation of this version brings that member back.
+    arithmetic("appointed-canvass-quorum-level-one-ahead", "appointed-canvass",
+               {"members": 3, "reports": [[NULL, 0], [NULL, 0], [0, 4096]], "own": [NULL, 0],
+                "deadline_passed": True}, appointed_canvass(3, [[NULL, 0], [NULL, 0], [0, 4096]], [NULL, 0], True)),
+    arithmetic("appointed-canvass-ahead-by-position", "appointed-canvass",
+               {"members": 3, "reports": [[0, 4096], [0, 4096], [0, 8192]], "own": [0, 4096],
+                "deadline_passed": True}, appointed_canvass(3, [[0, 4096], [0, 4096], [0, 8192]], [0, 4096], True)),
+    arithmetic("appointed-canvass-of-one", "appointed-canvass",
+               {"members": 1, "reports": [[NULL, 0]], "own": [NULL, 0],
+                "deadline_passed": False}, appointed_canvass(1, [[NULL, 0]], [NULL, 0], False)),
+    arithmetic("appointed-canvass-five-four-level-at-the-deadline", "appointed-canvass",
+               {"members": 5, "reports": [[NULL, 0], [NULL, 0], [NULL, 0], [NULL, 0], None], "own": [NULL, 0],
+                "deadline_passed": True}, appointed_canvass(5, [[NULL, 0], [NULL, 0], [NULL, 0], [NULL, 0], None], [NULL, 0], True)),
+    arithmetic("leader-ready-every-member", "leader-ready",
+               {"members": 3, "heard": 3, "counted": 3, "ahead": 0,
+                "deadline_passed": False}, leader_ready(3, 3, 3, 0, False)),
+    arithmetic("leader-ready-one-heard-not-yet-joined-waits", "leader-ready",
+               {"members": 3, "heard": 3, "counted": 2, "ahead": 0,
+                "deadline_passed": False}, leader_ready(3, 3, 2, 0, False)),
+    arithmetic("leader-ready-one-heard-not-joined-at-the-deadline", "leader-ready",
+               {"members": 3, "heard": 3, "counted": 2, "ahead": 0,
+                "deadline_passed": True}, leader_ready(3, 3, 2, 0, True)),
+    arithmetic("leader-ready-every-member-heard-of-a-quorum", "leader-ready",
+               {"members": 3, "heard": 2, "counted": 2, "ahead": 0,
+                "deadline_passed": False}, leader_ready(3, 2, 2, 0, False)),
+    arithmetic("leader-ready-alone-at-the-deadline-waits", "leader-ready",
+               {"members": 3, "heard": 2, "counted": 1, "ahead": 0,
+                "deadline_passed": True}, leader_ready(3, 2, 1, 0, True)),
+    arithmetic("leader-ready-of-one", "leader-ready",
+               {"members": 1, "heard": 1, "counted": 1, "ahead": 0,
+                "deadline_passed": False}, leader_ready(1, 1, 1, 0, False)),
+    arithmetic("leader-ready-five-four-heard-three-joined-waits", "leader-ready",
+               {"members": 5, "heard": 4, "counted": 3, "ahead": 0,
+                "deadline_passed": False}, leader_ready(5, 4, 3, 0, False)),
+    arithmetic("leader-ready-five-four-heard-three-joined-at-the-deadline", "leader-ready",
+               {"members": 5, "heard": 4, "counted": 3, "ahead": 0,
+                "deadline_passed": True}, leader_ready(5, 4, 3, 0, True)),
+    arithmetic("leader-ready-five-short-of-a-quorum-at-the-deadline", "leader-ready",
+               {"members": 5, "heard": 4, "counted": 2, "ahead": 0,
+                "deadline_passed": True}, leader_ready(5, 4, 2, 0, True)),
+    arithmetic("leader-ready-a-member-ahead-never-closes", "leader-ready",
+               {"members": 3, "heard": 2, "counted": 2, "ahead": 1,
+                "deadline_passed": True}, leader_ready(3, 2, 2, 1, True)),
 ]
 
 assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], True) == {"leader": True, "unanimous": False}
 assert ballot(3, 4, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], True) == {"leader": False, "unanimous": False}
 assert at_least(3, 0, 2, 98304) and not at_least(2, 98304, 3, 0)
 assert appointed_leader([7, 3, 5]) == {"leader": 3}
-assert leader_ready(3, 2, False) == {"closes": False, "unanimous": False}
-assert leader_ready(3, 2, True) == {"closes": True, "unanimous": False}
+assert leader_ready(3, 3, 2, 0, False) == {"closes": False}
+assert leader_ready(3, 3, 2, 0, True) == {"closes": True}
+assert leader_ready(3, 2, 2, 1, True) == {"closes": False}
+assert appointed_canvass(3, [(NULL, 0), (NULL, 0), (0, 4096)], (NULL, 0), True) == {"leads": False, "unanimous": False, "ahead": 1}
+assert candidate(3, [(NULL, 0), (NULL, 0), (0, 4096)], (NULL, 0), True)["nominate"]
 for v in VECTORS:
     if v["kind"] == "message" and "error" not in v:
         t = next(i for i, t in TEMPLATES.items() if t[0] == v["template"])

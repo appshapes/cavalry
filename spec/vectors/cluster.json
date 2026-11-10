@@ -3463,106 +3463,124 @@
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-every-member",
-      "rule": "leader-ready",
+      "name": "appointed-canvass-every-member-level",
+      "rule": "appointed-canvass",
       "inputs": {
         "members": 3,
-        "counted": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ]
+        ],
+        "own": [
+          -1,
+          0
+        ],
         "deadline_passed": false
       },
       "fields": {
-        "closes": true,
-        "unanimous": true
+        "leads": true,
+        "unanimous": true,
+        "ahead": 0
       }
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-quorum-before-the-deadline-waits",
-      "rule": "leader-ready",
+      "name": "appointed-canvass-one-silent-before-the-deadline",
+      "rule": "appointed-canvass",
       "inputs": {
         "members": 3,
-        "counted": 2,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          null
+        ],
+        "own": [
+          -1,
+          0
+        ],
         "deadline_passed": false
       },
       "fields": {
-        "closes": false,
-        "unanimous": false
+        "leads": false,
+        "unanimous": false,
+        "ahead": 0
       }
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-quorum-at-the-deadline",
-      "rule": "leader-ready",
+      "name": "appointed-canvass-one-silent-at-the-deadline",
+      "rule": "appointed-canvass",
       "inputs": {
         "members": 3,
-        "counted": 2,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          null
+        ],
+        "own": [
+          -1,
+          0
+        ],
         "deadline_passed": true
       },
       "fields": {
-        "closes": true,
-        "unanimous": false
+        "leads": true,
+        "unanimous": false,
+        "ahead": 0
       }
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-alone-at-the-deadline-waits",
-      "rule": "leader-ready",
+      "name": "appointed-canvass-alone-at-the-deadline",
+      "rule": "appointed-canvass",
       "inputs": {
         "members": 3,
-        "counted": 1,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          null,
+          null
+        ],
+        "own": [
+          -1,
+          0
+        ],
         "deadline_passed": true
       },
       "fields": {
-        "closes": false,
-        "unanimous": false
+        "leads": false,
+        "unanimous": false,
+        "ahead": 0
       }
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-of-one",
-      "rule": "leader-ready",
-      "inputs": {
-        "members": 1,
-        "counted": 1,
-        "deadline_passed": false
-      },
-      "fields": {
-        "closes": true,
-        "unanimous": true
-      }
-    },
-    {
-      "kind": "arithmetic",
-      "name": "leader-ready-five-short-of-quorum-at-the-deadline",
-      "rule": "leader-ready",
-      "inputs": {
-        "members": 5,
-        "counted": 2,
-        "deadline_passed": true
-      },
-      "fields": {
-        "closes": false,
-        "unanimous": false
-      }
-    },
-    {
-      "kind": "arithmetic",
-      "name": "leader-ready-five-quorum-at-the-deadline",
-      "rule": "leader-ready",
-      "inputs": {
-        "members": 5,
-        "counted": 3,
-        "deadline_passed": true
-      },
-      "fields": {
-        "closes": true,
-        "unanimous": false
-      }
-    },
-    {
-      "kind": "arithmetic",
-      "name": "candidate-empty-log-among-members-with-a-term",
-      "rule": "candidate",
+      "name": "appointed-canvass-empty-log-among-members-with-a-term",
+      "rule": "appointed-canvass",
       "inputs": {
         "members": 3,
         "reports": [
@@ -3586,14 +3604,15 @@
         "deadline_passed": true
       },
       "fields": {
-        "nominate": false,
-        "unanimous": false
+        "leads": false,
+        "unanimous": false,
+        "ahead": 2
       }
     },
     {
       "kind": "arithmetic",
-      "name": "candidate-empty-log-one-member-ahead-one-silent",
-      "rule": "candidate",
+      "name": "appointed-canvass-empty-log-one-ahead-one-silent",
+      "rule": "appointed-canvass",
       "inputs": {
         "members": 3,
         "reports": [
@@ -3614,17 +3633,114 @@
         "deadline_passed": true
       },
       "fields": {
-        "nominate": false,
-        "unanimous": false
+        "leads": false,
+        "unanimous": false,
+        "ahead": 1
       }
     },
     {
       "kind": "arithmetic",
-      "name": "candidate-empty-log-one-member-level-one-silent",
-      "rule": "candidate",
+      "name": "appointed-canvass-quorum-level-one-ahead",
+      "rule": "appointed-canvass",
       "inputs": {
         "members": 3,
         "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            0,
+            4096
+          ]
+        ],
+        "own": [
+          -1,
+          0
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "leads": false,
+        "unanimous": false,
+        "ahead": 1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "appointed-canvass-ahead-by-position",
+      "rule": "appointed-canvass",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            0,
+            4096
+          ],
+          [
+            0,
+            4096
+          ],
+          [
+            0,
+            8192
+          ]
+        ],
+        "own": [
+          0,
+          4096
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "leads": false,
+        "unanimous": false,
+        "ahead": 1
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "appointed-canvass-of-one",
+      "rule": "appointed-canvass",
+      "inputs": {
+        "members": 1,
+        "reports": [
+          [
+            -1,
+            0
+          ]
+        ],
+        "own": [
+          -1,
+          0
+        ],
+        "deadline_passed": false
+      },
+      "fields": {
+        "leads": true,
+        "unanimous": true,
+        "ahead": 0
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "appointed-canvass-five-four-level-at-the-deadline",
+      "rule": "appointed-canvass",
+      "inputs": {
+        "members": 5,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
           [
             -1,
             0
@@ -3642,8 +3758,159 @@
         "deadline_passed": true
       },
       "fields": {
-        "nominate": true,
-        "unanimous": false
+        "leads": true,
+        "unanimous": false,
+        "ahead": 0
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-every-member",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "heard": 3,
+        "counted": 3,
+        "ahead": 0,
+        "deadline_passed": false
+      },
+      "fields": {
+        "closes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-one-heard-not-yet-joined-waits",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "heard": 3,
+        "counted": 2,
+        "ahead": 0,
+        "deadline_passed": false
+      },
+      "fields": {
+        "closes": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-one-heard-not-joined-at-the-deadline",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "heard": 3,
+        "counted": 2,
+        "ahead": 0,
+        "deadline_passed": true
+      },
+      "fields": {
+        "closes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-every-member-heard-of-a-quorum",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "heard": 2,
+        "counted": 2,
+        "ahead": 0,
+        "deadline_passed": false
+      },
+      "fields": {
+        "closes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-alone-at-the-deadline-waits",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "heard": 2,
+        "counted": 1,
+        "ahead": 0,
+        "deadline_passed": true
+      },
+      "fields": {
+        "closes": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-of-one",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 1,
+        "heard": 1,
+        "counted": 1,
+        "ahead": 0,
+        "deadline_passed": false
+      },
+      "fields": {
+        "closes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-five-four-heard-three-joined-waits",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 5,
+        "heard": 4,
+        "counted": 3,
+        "ahead": 0,
+        "deadline_passed": false
+      },
+      "fields": {
+        "closes": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-five-four-heard-three-joined-at-the-deadline",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 5,
+        "heard": 4,
+        "counted": 3,
+        "ahead": 0,
+        "deadline_passed": true
+      },
+      "fields": {
+        "closes": true
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-five-short-of-a-quorum-at-the-deadline",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 5,
+        "heard": 4,
+        "counted": 2,
+        "ahead": 0,
+        "deadline_passed": true
+      },
+      "fields": {
+        "closes": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "leader-ready-a-member-ahead-never-closes",
+      "rule": "leader-ready",
+      "inputs": {
+        "members": 3,
+        "heard": 2,
+        "counted": 2,
+        "ahead": 1,
+        "deadline_passed": true
+      },
+      "fields": {
+        "closes": false
       }
     }
   ]
