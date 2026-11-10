@@ -159,48 +159,79 @@ pub trait Io {
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault>;
 }
 
-/// Why [`Consensus::new`] refused its members.
+/// Why [`Consensus::new`] refused its members. The members are checked in the order of
+/// `spec/cluster.md`, "What a reader rejects", each check over every member, and each
+/// variant is one check, named by [`MembersRefused::reason`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MembersRefused {
-    /// No member, or more than [`MAX_MEMBERS`].
+    /// `members-grammar`: no member was given, as an empty members string is.
+    Empty,
+    /// `members-grammar`: a member id below 0, which no members string can hold.
+    Negative {
+        /// The id.
+        id: i32,
+    },
+    /// `members-duplicate`: two members with one id.
+    Duplicate {
+        /// The id.
+        id: i32,
+    },
+    /// `members-count`: more than [`MAX_MEMBERS`] members.
     Count {
         /// How many were given.
         found: usize,
     },
-    /// Two members with one id, or an id below 0.
-    Id {
-        /// The id.
-        id: i32,
-    },
-    /// The member's own id is not among the members.
+    /// `members-self`: the member's own id is not among the members.
     NotAMember {
         /// The id.
         id: i32,
     },
 }
 
+impl MembersRefused {
+    /// The name in `spec/cluster.md`, "What a reader rejects", of the check that
+    /// refused the members.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            MembersRefused::Empty | MembersRefused::Negative { .. } => "members-grammar",
+            MembersRefused::Duplicate { .. } => "members-duplicate",
+            MembersRefused::Count { .. } => "members-count",
+            MembersRefused::NotAMember { .. } => "members-self",
+        }
+    }
+}
+
 impl core::fmt::Display for MembersRefused {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
+        let reason = self.reason();
+        match *self {
+            MembersRefused::Empty => write!(
+                f,
+                "members refused ({reason}): no member was given; give the members string \
+                 of the cluster, 1 to {MAX_MEMBERS} members"
+            ),
+            MembersRefused::Negative { id } => write!(
+                f,
+                "members refused ({reason}): member id {id} is below 0; give each member an \
+                 id from 0 to 2147483647"
+            ),
+            MembersRefused::Duplicate { id } => write!(
+                f,
+                "members refused ({reason}): two members have the id {id}; give each member \
+                 its own id"
+            ),
             MembersRefused::Count { found } => write!(
                 f,
-                "members refused (members-count): {found} members, and a cluster has 1 to \
-                 {MAX_MEMBERS}; give the members string of the cluster; see \
-                 docs/reference/cluster.md#members-and-streams"
-            ),
-            MembersRefused::Id { id } => write!(
-                f,
-                "members refused (members-duplicate): member id {id} is below 0 or given \
-                 twice; give each member one id from 0 upward; see \
-                 docs/reference/cluster.md#members-and-streams"
+                "members refused ({reason}): {found} members, and a cluster has at most \
+                 {MAX_MEMBERS}; give the members string of the cluster"
             ),
             MembersRefused::NotAMember { id } => write!(
                 f,
-                "members refused (members-self): member id {id} is not in the members \
-                 string; set the member id to one the string holds; see \
-                 docs/reference/cluster.md#members-and-streams"
+                "members refused ({reason}): member id {id} is not in the members string; \
+                 set the member id to one the string holds"
             ),
-        }
+        }?;
+        f.write_str("; see docs/reference/cluster.md#what-a-reader-rejects")
     }
 }
 
@@ -343,8 +374,21 @@ impl Consensus {
     /// no term and no vote: a member of this version starts on a log that holds
     /// neither (`spec/cluster.md`, "The appointed leader"), which its caller checks.
     pub fn new(member_ids: &[i32], member_id: i32) -> Result<Self, MembersRefused> {
+        // `spec/cluster.md`, "What a reader rejects": grammar, duplicate, count and self,
+        // in that order, each over every member.
+        if member_ids.is_empty() {
+            return Err(MembersRefused::Empty);
+        }
+        if let Some(&id) = member_ids.iter().find(|&&id| id < 0) {
+            return Err(MembersRefused::Negative { id });
+        }
+        for (index, &id) in member_ids.iter().enumerate() {
+            if member_ids.iter().take(index).any(|&other| other == id) {
+                return Err(MembersRefused::Duplicate { id });
+            }
+        }
         let count = member_ids.len();
-        if count == 0 || count > MAX_MEMBERS {
+        if count > MAX_MEMBERS {
             return Err(MembersRefused::Count { found: count });
         }
         let mut peers = [Peer {
@@ -358,9 +402,6 @@ impl Consensus {
         }; MAX_MEMBERS];
         let mut own = None;
         for (index, (&id, peer)) in member_ids.iter().zip(peers.iter_mut()).enumerate() {
-            if id < 0 || member_ids.iter().take(index).any(|&other| other == id) {
-                return Err(MembersRefused::Id { id });
-            }
             peer.id = id;
             if id == member_id {
                 own = Some(index);

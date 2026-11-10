@@ -178,30 +178,76 @@ fn eight_members_replicate_and_a_ninth_is_refused() {
         assert_eq!(cluster.commit_position(id), Some(position));
     }
 
+    // Each refusal names the check of `spec/cluster.md`, "What a reader rejects", that
+    // failed, in the spec's order: grammar, duplicate, count, self, each over every
+    // member, so that an operator who searches for the name finds the rule.
     let nine: Vec<i32> = (0..9).collect();
-    assert_eq!(
-        Consensus::new(&nine, 0).err(),
-        Some(MembersRefused::Count { found: 9 })
-    );
-    assert_eq!(
-        Consensus::new(&[], 0).err(),
-        Some(MembersRefused::Count { found: 0 })
-    );
-    assert_eq!(
-        Consensus::new(&[0, 1, 1], 0).err(),
-        Some(MembersRefused::Id { id: 1 })
-    );
-    assert_eq!(
-        Consensus::new(&[0, -4, 1], 0).err(),
-        Some(MembersRefused::Id { id: -4 })
-    );
-    let not_a_member = Consensus::new(&[0, 1, 2], 3).expect_err("3 is not a member");
-    assert_eq!(not_a_member, MembersRefused::NotAMember { id: 3 });
-    assert!(
-        not_a_member
-            .to_string()
-            .contains("docs/reference/cluster.md#members-and-streams")
-    );
+    let mut nine_with_a_duplicate = nine.clone();
+    nine_with_a_duplicate.push(3);
+    for (members, own, refused, reason, says) in [
+        (
+            &[][..],
+            0,
+            MembersRefused::Empty,
+            "members-grammar",
+            "no member was given",
+        ),
+        (
+            &[0, -4, 1][..],
+            0,
+            MembersRefused::Negative { id: -4 },
+            "members-grammar",
+            "member id -4 is below 0",
+        ),
+        (
+            &[0, 1, 1, -4][..],
+            0,
+            MembersRefused::Negative { id: -4 },
+            "members-grammar",
+            "member id -4 is below 0",
+        ),
+        (
+            &[0, 1, 1][..],
+            0,
+            MembersRefused::Duplicate { id: 1 },
+            "members-duplicate",
+            "two members have the id 1",
+        ),
+        (
+            &nine_with_a_duplicate[..],
+            0,
+            MembersRefused::Duplicate { id: 3 },
+            "members-duplicate",
+            "two members have the id 3",
+        ),
+        (
+            &nine[..],
+            0,
+            MembersRefused::Count { found: 9 },
+            "members-count",
+            "9 members",
+        ),
+        (
+            &[0, 1, 2][..],
+            3,
+            MembersRefused::NotAMember { id: 3 },
+            "members-self",
+            "member id 3 is not in the members string",
+        ),
+    ] {
+        let found = Consensus::new(members, own).expect_err("refused");
+        assert_eq!(found, refused, "{members:?}");
+        assert_eq!(found.reason(), reason, "{members:?}");
+        let message = found.to_string();
+        assert!(
+            message.starts_with(&format!("members refused ({reason}): {says}")),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("; see docs/reference/cluster.md#what-a-reader-rejects"),
+            "{message}"
+        );
+    }
 }
 
 /// A cold start with a member missing. The appointed leader canvasses for the startup
