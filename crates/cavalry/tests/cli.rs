@@ -704,14 +704,19 @@ fn free_ports(count: usize) -> Vec<u16> {
         .collect()
 }
 
-/// The value of a member's cluster counter of `type_id` in the driver directory `dir`,
+/// The value of a member's cluster counter named `name` in the driver directory `dir`,
 /// read as `doctor` reads it, or `None` while the member has not added it.
-fn cluster_counter(dir: &Path, type_id: i32) -> Option<i64> {
+fn cluster_counter(dir: &Path, name: &str) -> Option<i64> {
     let client = Cavalry::connect_to(dir).ok()?;
     let counters = client.counters();
     let value = (0..counters.capacity()).find_map(|id| {
         let record = counters.record(id).ok()??;
-        (record.type_id() == type_id).then(|| counters.read(id).ok())?
+        // The label is the name, a space and the member id.
+        let named = record
+            .label()
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(' '));
+        named.then(|| counters.read(id).ok())?
     });
     client.close().ok()?;
     value
@@ -730,9 +735,11 @@ impl Drop for Runs {
     }
 }
 
-/// `cluster.role` and `cluster.election_state` in `counters.toml`.
-const CLUSTER_ROLE: i32 = 110;
-const CLUSTER_ELECTION_STATE: i32 = 111;
+/// `cluster.role` and `cluster.election_state` in `counters.toml`, by name: the
+/// consensus module labels each of its counters with the counter's name and its
+/// member id, and a name does not move when an id in that file does.
+const CLUSTER_ROLE: &str = "cluster.role";
+const CLUSTER_ELECTION_STATE: &str = "cluster.election_state";
 
 #[test]
 fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader() {
