@@ -84,3 +84,12 @@ int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, size_
   }
   return count;
 }
+
+int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, size_t fragment_limit,
+                                  cavalry_go_error_t *error) {
+  int count = cavalry_committed_log_poll(log, cavalry_go_trampoline, (void *) index, fragment_limit);
+  if (count < 0) {
+    cavalry_go_keep(error, "cavalry_committed_log_poll");
+  }
+  return count;
+}

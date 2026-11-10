@@ -892,7 +892,7 @@ class GoPackage(unittest.TestCase):
             ["Client.IsClosed", "Client.Closed", "Client.Close", "Client.AddPublication", "Client.AddExclusivePublication",
              "Client.AddSubscription", "Client.StartRecording", "Client.StopRecording", "Client.TruncateRecording",
              "Client.PurgeSegments", "Client.PurgeRecording", "Client.StartReplay", "Client.StopReplay",
-             "Client.AddDestination", "Client.RemoveDestination"]))
+             "Client.AddDestination", "Client.RemoveDestination", "Client.CommittedLog"]))
         for label in methods:
             body = module.functions[label][2]
             self.assertTrue(body.startswith("{\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n"), label)

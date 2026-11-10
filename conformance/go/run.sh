@@ -5,7 +5,10 @@
 # the table does not hold, which need no driver; checks that
 # its generated files are gofmt's, starts a driver on a directory of its own, runs
 # conformance/go/quickstart through clients/go with the runner's Go, then
-# clients/go/README.md's example through conformance/go/readme, and cleans up.
+# clients/go/README.md's example through conformance/go/readme; then starts three cluster
+# members on the loopback, each a `cavalry run` in a member's role, and runs
+# conformance/go/committed_log beside member 1, the client's committed log against a
+# cluster (spec/c-abi.md, version 2; ADR 0068); and cleans up.
 # `just conformance` runs this after conformance/node (clients/README.md; ADR 0046, card
 # 207).
 set -euo pipefail
@@ -14,13 +17,17 @@ cd "$(dirname "$0")/../.."
 if [ -d /dev/shm ]; then base=/dev/shm; else base="${TMPDIR:-/tmp}"; fi
 export CAVALRY_DIR="${base%/}/cavalry-conformance-go-$$"
 export CAVALRY_LOG_DIR="${CAVALRY_DIR}.log"
-rm -rf "$CAVALRY_DIR" "$CAVALRY_LOG_DIR"
+cluster="${CAVALRY_DIR}.cluster"
+rm -rf "$CAVALRY_DIR" "$CAVALRY_LOG_DIR" "$cluster"
+member_pids=""
 cleanup() {
-    if [ -n "${driver_pid:-}" ] && kill -0 "$driver_pid" 2>/dev/null; then
-        kill -TERM "$driver_pid" 2>/dev/null || true
-        wait "$driver_pid" 2>/dev/null || true
-    fi
-    rm -rf "$CAVALRY_DIR" "$CAVALRY_LOG_DIR"
+    for pid in ${driver_pid:-} $member_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    rm -rf "$CAVALRY_DIR" "$CAVALRY_LOG_DIR" "$cluster"
 }
 trap cleanup EXIT
 
@@ -55,3 +62,32 @@ echo "conformance/go: run quickstart"
 # line the README says the reader will see (conformance/go/readme).
 echo "conformance/go: run clients/go/README.md's example"
 (cd conformance/go && go run ./readme)
+
+# The committed log: three members of one cluster, each with five free loopback ports,
+# its own driver directory and its own log directory, started together as
+# docs/how-to/run-a-cluster.md starts them (conformance/python/run.sh is the shape). A
+# member's output goes to a file beside its directories, printed if the cluster does not
+# form.
+echo "conformance/go: cavalry run, three cluster members, in the background, under $cluster"
+mkdir -p "$cluster"
+CAVALRY_CLUSTER_MEMBERS=$(cd conformance/go && go run ./members)
+export CAVALRY_CLUSTER_MEMBERS
+for id in 0 1 2; do
+    CAVALRY_CLUSTER_MEMBER_ID=$id target/release/cavalry run --dir "$cluster/member-$id" \
+        --log-dir "$cluster/member-$id-log" >"$cluster/member-$id.out" 2>&1 &
+    member_pids="$member_pids $!"
+done
+formed=""
+for _ in $(seq 1 600); do
+    if CAVALRY_CLUSTER_MEMBER_ID=1 target/release/cavalry doctor --dir "$cluster/member-1" \
+        --log-dir "$cluster/member-1-log" 2>/dev/null | grep -q 'election closed'; then formed=yes; break; fi
+    sleep 0.1
+done
+[ -n "$formed" ] || {
+    echo "conformance/go: member 1 did not close its election in 60 s; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+echo "conformance/go: run committed_log beside member 1"
+(cd conformance/go && go run ./committed_log "$cluster/member-1" 1)

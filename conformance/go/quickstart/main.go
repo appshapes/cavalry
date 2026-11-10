@@ -1017,6 +1017,14 @@ func main() {
 	mustOK(replay.Close())
 	mustOK(replaySub.Close())
 	mustOK(ipcSub.Close())
+
+	// This driver hosts no cluster member, so it has no committed log to open: nil, and no
+	// error (spec/c-abi.md, version 2). The log beside a member is
+	// conformance/go/committed_log's round.
+	if log, err := client.CommittedLog(0); err != nil || log != nil {
+		fail("a driver that hosts no cluster member gave a committed log, or an error: %v", err)
+	}
+	say("no committed log on a driver that hosts no cluster member")
 	mustOK(client.Close())
 
 	// The report, never gated: the laptop's or the runner's cost of this side of the

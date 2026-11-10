@@ -514,6 +514,17 @@ class Clients(unittest.TestCase):
         self.assertIn("Publication.Abort", finding)
         self.assertIn("panics", finding)
 
+    def test_an_allocation_in_the_go_committed_logs_poll_fails(self):
+        """The committed log's Poll in the Go client is held as the subscription's is, and
+        the *HandlerError it builds after its ABI call is the one error it may build."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_go("func (l *CommittedLog) Poll(handler EntryHandler, fragmentLimit int) (int, error) {\n",
+                     "func (l *CommittedLog) Poll(handler EntryHandler, fragmentLimit int) (int, error) {\n"
+                     "\t_ = make([]byte, 1)\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("CommittedLog.Poll", finding)
+        self.assertIn("allocates", finding)
+
     def test_an_allocation_in_go_fails(self):
         self.edit_go("func (p *Publication) SetReservedValue(value int64) int32 {\n",
                      "func (p *Publication) SetReservedValue(value int64) int32 {\n\t_ = make([]byte, 1)\n")
@@ -604,7 +615,7 @@ class Clients(unittest.TestCase):
                      "  pthread_mutex_lock(&lock);\n  error->code = (int32_t) cavalry_errcode();\n", file=self.go_shim)
         found = lint.findings(self.tmp)
         for name in ("cavalry_go_try_claim", "cavalry_go_set_reserved_value", "cavalry_go_commit", "cavalry_go_abort",
-                     "cavalry_go_offer", "cavalry_go_poll"):
+                     "cavalry_go_offer", "cavalry_go_poll", "cavalry_go_committed_log_poll"):
             self.assertTrue(any(f"go: {name} " in f and "calls cavalry_go_keep" in f and "pthread_mutex_*" in f
                                 for f in found), (name, found))
 

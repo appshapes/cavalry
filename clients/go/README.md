@@ -9,7 +9,8 @@ against the header and linked with `cavalry-ffi`'s static library, and gives the
 handles the forms a Go user expects. A `Client` closes with `Close`; a `Publication`
 claims a slice of the log as a `[]byte` over it or offers a `[]byte`; a `Subscription`
 polls with a fragment handler function that receives the body as a `[]byte` into the
-log and the frame's `Header`; a `Recording` and a `Replay` wrap the driver's archive.
+log and the frame's `Header`; a `Recording` and a `Replay` wrap the driver's archive; a
+`CommittedLog` is a service's read of a cluster's committed log beside a member (below).
 Every message the client sends or receives goes through one `extern "C"` call on the
 caller's goroutine, as the ABI's page promises (ADR 0046's boundary; ADR 0051). The
 module has no dependency beyond Go's standard library: cgo is part of the Go toolchain,
@@ -25,13 +26,41 @@ caller's bytes is passed to `cavalry_publication_offer` as the address of its fi
 element, which cgo allows because the bytes hold no Go pointer and the ABI copies them
 before it returns.
 
+### The committed log
+
+A service is a program beside a cluster member that applies the entries the cluster
+has committed (`docs/how-to/read-the-committed-log.md`). `client.CommittedLog(position)`
+opens the log of the member on the client's driver at a position, 0 or the `Position`
+an earlier run reached, and returns `nil` and no error while the driver hosts no
+member with a log, so a service started before its member asks again. `log.Poll(handler,
+fragmentLimit)` calls `handler(body, header, position)` for each committed entry, in
+order, none at or past the member's commit position, and returns the entry count;
+`position` is the entry's position in the log. `log.Position()` is the position after
+the last entry delivered, the one a service keeps for its next start, and
+`log.CommitPosition()` the bound of the last poll. `log.IsEnded()` says that the member
+closed or left its log: once a poll then returns 0, close the log and open another
+from `log.Position()`. `log.FailedAt()` is false unless the driver's replay of the
+member's recording failed. `log.Close()` stops the driver's replay and is idempotent;
+a log closed after its client is freed, and the driver ends the replay by itself.
+`log.MemberID` and `log.RecordingID` say whose log it is (`spec/c-abi.md`, "Functions",
+committed log; ADR 0068).
+
+A committed log is polled through the trampoline a subscription is polled through, so
+an open log holds one slot of the table of 4,096 ("Threads"), which its `Close` frees,
+and `Registered` counts it. A handler's panic goes where a subscription's goes ("The
+panic"): every entry the ABI delivers reaches the handler, and `Poll` returns a
+`*HandlerError` once the ABI has returned. An entry whose handler call panicked was
+delivered and is not delivered again, so a service that must apply every entry
+recovers its own panics and stops there, with the entry's `position` in hand to open
+the log at again.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no goroutine, no
   channel, no allocation, no copy of a fragment for the handler. `clients/lint.py`
   reads the per-message functions of `cavalry.go` and `trampoline.go`, the claim, the
-  reserved value, the commit, the abort, the offer, the poll, the header's values and
-  the trampoline, for Go's forms of each (`sync`, a lock or a wait through a variable
+  reserved value, the commit, the abort, the offer, a subscription's and a committed
+  log's poll, the header's values and the trampoline, for Go's forms of each (`sync`, a lock or a wait through a variable
   or a field, such as `registryMu.Lock()`, which names no `sync.`, a `go` statement, a
   channel send or receive, `select`, `panic`, and `make`, `new` and `append`), and
   those of `shim.c`, the C trampoline and the poll, for C's (`pthread_mutex_*`,
@@ -173,8 +202,8 @@ making on it, an add or a command for up to 10 s; no message passes through a
 `Client`, so the mutex is never on a message's path. `conformance/go/quickstart`
 shares one client among eight goroutines that add and close at once.
 
-A `Publication`, `Subscription`, `Recording`, `Replay` or `Image` is used from one
-goroutine at a time, as the Rust API's handles are: the client adds no lock to them.
+A `Publication`, `Subscription`, `CommittedLog`, `Recording`, `Replay` or `Image` is
+used from one goroutine at a time, as the Rust API's handles are: the client adds no lock to them.
 A program with several goroutines gives each its own `Publication` and
 `Subscription`. Two handles may be used from two goroutines at once, a client and its
 publications and subscriptions among them. `Client.AddDestination` and
@@ -182,9 +211,9 @@ publications and subscriptions among them. `Client.AddDestination` and
 may run beside that publication's `Offer` or `TryClaim` in another goroutine, but not
 beside its `Close` (`spec/c-abi.md`, "Threads"; ADR 0057).
 
-The table the trampoline reads subscriptions from holds 4,096 subscriptions:
-`AddSubscription` above that returns an `*Error` with `ErrSubscriptionsFull`, and
-each `Subscription.Close` frees a slot. The table is written under a lock when a
+The table the trampoline reads subscriptions from holds 4,096 subscriptions and
+committed logs together: `AddSubscription` or `CommittedLog` above that returns an
+`*Error` with `ErrSubscriptionsFull`, and each `Close` frees a slot. The table is written under a lock when a
 subscription is added or closed, never on a message's path, and read with one atomic
 load per fragment. The package's own test, `cavalry_test.go`, which
 `conformance/go/run.sh` runs with `go test` and which needs no driver, fills the
