@@ -28,6 +28,7 @@ Not yet: Raft, and a release on crates.io
 | If you want to | Read |
 | --- | --- |
 | Understand why Cavalry exists and what it must beat | [`docs/explanation/why-cavalry.md`](docs/explanation/why-cavalry.md) |
+| Know what works today, what is left, and when early testers can start | [`docs/explanation/where-cavalry-is-and-what-is-left.md`](docs/explanation/where-cavalry-is-and-what-is-left.md) |
 | Work on the code, human or agent | [`CLAUDE.md`](CLAUDE.md), the invariants and gates |
 | Know what a word means | [`docs/glossary.md`](docs/glossary.md) |
 | Know what each crate does and must never do | [`crates/*/README.md`](crates/) |
