@@ -21,8 +21,7 @@ struct TestDir(PathBuf);
 
 impl TestDir {
     fn new(test: &str) -> Self {
-        let path =
-            std::env::temp_dir().join(format!("cavalry-raft-{}-{test}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cavalry-raft-{}-{test}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         TestDir(path)
     }
@@ -121,7 +120,10 @@ fn counter(member: &Member, type_id: i32) -> i64 {
             return reader.read_acquire(id).expect("the counter is read");
         }
     }
-    panic!("member {} has no counter of type {type_id}", member.module.member_id());
+    panic!(
+        "member {} has no counter of type {type_id}",
+        member.module.member_id()
+    );
 }
 
 #[test]
@@ -173,18 +175,25 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
     // The term event, 56 bytes in a frame of 96, and a thousand entries of 40 bytes,
     // each in a frame of 96 (`spec/cluster.md`, "The log").
     let end = 96 + i64::from(ENTRIES) * 96;
-    run_until(&mut members, "every member committed every entry", |members| {
-        members
-            .iter()
-            .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
-    });
+    run_until(
+        &mut members,
+        "every member committed every entry",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
+        },
+    );
 
     // Each member's recording holds the same bytes up to the commit position: the
     // leader's of its publication and each follower's of the leader's image.
     let recordings: Vec<Vec<u8>> = members
         .iter()
         .map(|member| {
-            let id = member.module.log_recording_id().expect("a recording of the log");
+            let id = member
+                .module
+                .log_recording_id()
+                .expect("a recording of the log");
             let file = member.log_dir.join(format!("{id}-0.rec"));
             let bytes = std::fs::read(&file).expect("the segment file is read");
             bytes[..usize::try_from(end).expect("a position")].to_vec()
@@ -222,7 +231,10 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
         assert_eq!(counter(member, CLUSTER_COMMIT_POSITION.0), end);
         assert_eq!(counter(member, CLUSTER_ELECTION_STATE.0), 17);
         assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 1);
-        assert_eq!(counter(member, CLUSTER_ROLE.0), if index == 0 { 2 } else { 0 });
+        assert_eq!(
+            counter(member, CLUSTER_ROLE.0),
+            if index == 0 { 2 } else { 0 }
+        );
         assert_eq!(counter(member, CLUSTER_TERMS_LED.0), i64::from(index == 0));
     }
 
@@ -245,12 +257,75 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
         }
     ));
     let text = again.to_string();
-    assert!(text.contains("every member on a new log directory"), "{text}");
+    assert!(
+        text.contains("every member on a new log directory"),
+        "{text}"
+    );
     assert!(
         text.contains("docs/reference/cluster.md#roles-and-the-election"),
         "{text}"
     );
     driver.close().expect("the driver closes");
+
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+}
+
+/// A follower's host is lost while the cluster runs: its module and its driver stop
+/// at once. The leader and the other follower are a quorum, so entries offered after
+/// it are committed all the same, once the leader's log is no longer held back by the
+/// receiver that went silent; the leader never loses its quorum.
+#[test]
+fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
+    let dir = TestDir::new("follower-lost");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until(&mut members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    members[0]
+        .module
+        .offer(b"three of three")
+        .expect("the leader appends");
+    let before = 2 * 96;
+    run_until(
+        &mut members,
+        "the first entry committed on all three",
+        |members| members.iter().all(|m| m.module.commit_position() == before),
+    );
+
+    let lost = members.remove(2);
+    drop(lost.module);
+    lost.driver.close().expect("the driver closes");
+
+    const ENTRIES: i64 = 100;
+    for i in 0..ENTRIES {
+        loop {
+            match members[0].module.offer(&i.to_le_bytes()) {
+                Ok(()) => break,
+                Err(RaftError::Offer(Refused::BackPressured)) => {
+                    for member in members.iter_mut() {
+                        member.module.do_work().expect("the member's duty cycle");
+                    }
+                }
+                Err(other) => panic!("{other}"),
+            }
+        }
+    }
+    let end = before + ENTRIES * 96;
+    run_until(
+        &mut members,
+        "the two committed what the leader appended",
+        |members| members.iter().all(|m| m.module.commit_position() == end),
+    );
+    assert_eq!(members[0].module.role(), Role::Leader);
+    assert_eq!(members[0].module.counts().quorum_lost, 0);
+    assert_eq!(members[1].module.counts().leader_heartbeat_timeouts, 0);
+    assert_eq!(members[1].module.counts().log_images_lost, 0);
 
     for member in members {
         member.module.close().expect("the member closes");
