@@ -607,7 +607,9 @@ registration, the two are the same number.
 The driver stops a recording by itself when its publication closes: at the end of stream
 position, once the recorder has written up to it; and when its image is retired, at the
 position `spec/udp.md`, "The receiver", step 5 names. It also stops a recording whose write
-failed, at the position written, adding one to `recording.write_failed`; and one whose
+failed, at the position written, and one whose sync failed, at the position last
+synced and with no stop run, as this paragraph says below, each adding one to
+`recording.write_failed`; and one whose
 block scan found a committed frame that fails a check of `spec/frame.md`, at that frame,
 adding one to `log_buffer.rejected_frame`, as a subscriber that found it would stop
 delivering, so the recording ends at the last frame that checked. A stop is writes and
@@ -621,7 +623,20 @@ the next open's recovery to rebuild its stop from the files. The stop position t
 driver then announces, and hands to the replayer, is the position the recorder had
 synced before the stop began, the value of `recording.synced_position`; every frame
 below it survives a power loss, so the stop recovery rebuilds is at or above it.
-`recording.position` keeps the position written (ADR 0064). Every stop, by command,
+`recording.position` keeps the position written (ADR 0064). A recording one of whose
+syncs failed, the recorder's sync once a second or the sync of a segment a write
+closes, is stopped the same way with no stop run at all: from the failure on the
+recorder writes and syncs nothing of it, in that duty cycle or a later one, and it
+makes none of the stop's writes or syncs, since a sync asked a second time about
+bytes a sync has failed on can return success and write nothing. The catalog slot is
+left live for the next open's recovery, and the stop position the driver announces,
+and hands to the replayer, is the position the last sync that returned success
+covered, the start position when none did (ADR 0065). A write that failed with no
+sync failing, a full disk's refusal of a block or of the next segment file, is
+followed by a stop that runs, at the position written. `recording.write_failed`
+counts a recording once, whichever of its writes, its syncs and its stop failed. So
+the position in `recording stopped` is on every path one that a sync which returned
+success covered. Every stop, by command,
 by close or by failure, adds one to `recording.stopped`, is announced to every client with
 `recording stopped`, and frees the recording's two counters after the counter reuse
 timeout; the log of a recorded publication or image is removed only once its recording is
@@ -696,7 +711,7 @@ answered with code 6 and keeps running.
 | recording ready | 20 | 4 | recording position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.position` counter, what the operating system holds |
 | recording ready | 24 | 4 | recording synced position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.synced_position` counter, what a sync has made durable |
 | recording stopped | 0 | 8 | recording id | i64 | 0 or more |
-| recording stopped | 8 | 8 | stop position | i64 | 0 or more, a multiple of 32: the catalog's stop position; for a stop whose own writes or syncs failed, the position the recorder had synced before it ("Commands"; ADR 0064) |
+| recording stopped | 8 | 8 | stop position | i64 | 0 or more, a multiple of 32: the catalog's stop position; for a stop whose own writes or syncs failed, and for a recording given up after a sync of its own failed, the position the last sync that returned success covered ("Commands"; ADR 0064, ADR 0065) |
 | replay ready | 0 | 8 | correlation id | i64 | 0 or more: the start replay command's |
 | replay ready | 8 | 8 | replay session id | i64 | 0 or more: the command's correlation id, which names the replay's log and which `stop replay` names |
 | replay ready | 16 | 8 | recording id | i64 | 0 or more: the recording being played |
@@ -716,9 +731,11 @@ counter stops before the record can be allocated again. It sends `client timeout
 after it has removed a timed-out client's publications, subscriptions and counters, so that the
 client, if it is only slow, learns that it must attach again. It sends `recording stopped`
 after the catalog's stop fields are synced, so the position a client reads from the event
-is what the catalog holds; for a stop whose own writes or syncs failed, it sends it after
-the failure with the position the recorder had synced before the stop, so the position a
-client reads from the event is durable either way (ADR 0064). It sends `replay stopped`
+is what the catalog holds; for a stop whose own writes or syncs failed, and for a
+recording given up after a sync of its own failed, it sends it after the
+failure with the position the last sync that returned success covered, so the position a
+client reads from the event is one such a sync covered on every path (ADR 0064, ADR
+0065). It sends `replay stopped`
 after the replayer has written its
 last frame and the end of stream position is stored, so the position a client reads from
 the event is where the replay's images end. Every event goes to every client; a client acts on the ones

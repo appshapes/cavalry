@@ -299,7 +299,9 @@ already cut.
 
 When the driver starts, and again at every `stop recording` for the slot it closes, it
 repairs the catalog; a stop whose own writes or syncs fail leaves its slot to the next
-start's repair (`spec/client-protocol.md`, "Commands"; ADR 0064). At start-up it first
+start's repair (`spec/client-protocol.md`, "Commands"; ADR 0064), and so does a
+recording given up after a sync of its own failed, for which no stop is run (ADR
+0065). At start-up it first
 truncates the file to whole slots, then drops
 a last slot whose state is 0; an empty slot before the last cannot come from one writer,
 so it is damage: it gets state 2 and `cavalry doctor` names it, and no recording takes
@@ -321,7 +323,8 @@ retained position, and segment files whose bytes lie wholly before the retained
 position are removed, not read, each adding one to `recording.files_removed`. A valid
 slot whose creation checksum holds but whose stop checksum
 does not, or whose stop position is −1, was torn during a stop, live at a crash, left
-live by a stop whose own writes or syncs failed (ADR 0064), or being cut by a truncate
+live by a stop whose own writes or syncs failed (ADR 0064) or by a recording given up
+after a sync of its own failed (ADR 0065), or being cut by a truncate
 the crash took, and
 its stop fields are derived wholly from the files, in this order. First the time index:
 one that is missing, too short for its header, or whose magic, version or recording id
