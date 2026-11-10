@@ -20,6 +20,11 @@ pub(crate) enum Response {
     SubscriptionReady { correlation_id: i64 },
     /// `operation success`.
     Success { correlation_id: i64 },
+    /// `counter ready`.
+    CounterReady {
+        correlation_id: i64,
+        counter_id: i32,
+    },
     /// `recording ready`.
     RecordingReady {
         correlation_id: i64,
@@ -51,6 +56,7 @@ impl Response {
             Response::PublicationReady { correlation_id, .. }
             | Response::SubscriptionReady { correlation_id }
             | Response::Success { correlation_id }
+            | Response::CounterReady { correlation_id, .. }
             | Response::RecordingReady { correlation_id, .. }
             | Response::ReplayReady { correlation_id, .. }
             | Response::Error { correlation_id, .. } => *correlation_id,

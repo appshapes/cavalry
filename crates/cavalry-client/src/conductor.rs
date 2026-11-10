@@ -753,6 +753,13 @@ fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<O
         Event::OperationSuccess { correlation_id } if correlation_id == pending => {
             Outcome::Answer(Response::Success { correlation_id })
         }
+        Event::CounterReady {
+            correlation_id,
+            counter_id,
+        } if correlation_id == pending => Outcome::Answer(Response::CounterReady {
+            correlation_id,
+            counter_id,
+        }),
         Event::RecordingReady {
             correlation_id,
             recording_id,
