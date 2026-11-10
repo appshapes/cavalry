@@ -261,9 +261,9 @@ condition of ADR 0061.
 - The debts are about six pull requests. They fit between reviews.
 - The sixth slice is about twelve pull requests, six to eight days, and then the
   seven days of soak.
-- The sum is about 30 days if nothing waits: five weeks, so 2026-12-14. Seven weeks,
-  so 2026-12-28, if the review loop or a person's hand costs days, or if the first
-  candidate's soak finds a defect and a second candidate soaks again.
+- The sum is 28 to 35 days if nothing waits: at most five weeks, so 2026-12-14.
+  Seven weeks, so 2026-12-28, if the review loop or a person's hand costs days, or if
+  the first candidate's soak finds a defect and a second candidate soaks again.
 
 ## What could move the line
 
