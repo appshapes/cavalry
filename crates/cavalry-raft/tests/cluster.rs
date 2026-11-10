@@ -385,7 +385,7 @@ fn offer(members: &mut [Member], running: &[usize], from: u32, count: u32) {
 }
 
 /// A service beside each member reads the committed log through its member's driver
-/// (`spec/cluster.md`, "The service"; ADR 0065): the same entries at the same positions
+/// (`spec/cluster.md`, "The service"; ADR 0066): the same entries at the same positions
 /// on the leader and on both followers, none past the commit position even when the
 /// member's own recording holds more, from any position and at any time, and to the
 /// bound it last took once its member is gone.

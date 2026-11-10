@@ -4,7 +4,7 @@ A how-to page: one task, run a program beside a cluster member that reads every 
 the cluster has committed, in order, each once. What a service reads and how it is
 bounded is [`spec/cluster.md`, "The service"](../reference/cluster.md#the-service); why
 it reads a replay of its member's recording is
-[ADR 0065](../decisions/0065-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md).
+[ADR 0066](../decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md).
 In Aeron, this is a clustered service ([glossary](../glossary.md)).
 
 A service is a program that applies the cluster's log: every member has one beside it,

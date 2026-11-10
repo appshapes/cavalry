@@ -1,4 +1,4 @@
-//! A service beside a cluster member (`spec/cluster.md`, "The service"; ADR 0065): a
+//! A service beside a cluster member (`spec/cluster.md`, "The service"; ADR 0066): a
 //! client of the member's driver that reads the cluster's committed log, every entry a
 //! quorum of members holds, in order, each once, and prints a line for each: its
 //! position, its template id, and its length. `docs/how-to/read-the-committed-log.md`
@@ -54,7 +54,11 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                         .ok_or(format!("--entries needs a count above 0; got `{text}`"))?,
                 );
             }
-            other => return Err(format!("`{other}` is not an argument cluster-service takes")),
+            other => {
+                return Err(format!(
+                    "`{other}` is not an argument cluster-service takes"
+                ));
+            }
         }
     }
     Ok(parsed)
@@ -108,7 +112,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut read = 0u64;
     loop {
         let limit = match args.entries {
-            Some(entries) => usize::try_from(entries - read).unwrap_or(usize::MAX).min(64),
+            Some(entries) => usize::try_from(entries - read)
+                .unwrap_or(usize::MAX)
+                .min(64),
             None => 64,
         };
         let entries = log.poll(

@@ -351,7 +351,7 @@ fn a_claim_commits_aborts_or_is_aborted_on_drop_and_the_reader_sees_it() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_bounded_poll_stops_before_the_first_frame_at_or_past_its_limit() {
-    // `spec/log-buffer.md`, "Reading": the bounded read (ADR 0065). Four frames of 64
+    // `spec/log-buffer.md`, "Reading": the bounded read (ADR 0066). Four frames of 64
     // bytes at 0, 64, 128 and 192, the third aborted and so padding, and a fifth
     // claimed at 256 and not committed.
     let dir = Dir::new("bounded");

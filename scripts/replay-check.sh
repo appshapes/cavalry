@@ -17,7 +17,7 @@
 # bodies, and the payloads in them must be the payloads the leader was offered, in
 # order. Beside each member a service read the committed log while the entries were
 # committed, through a replay that follows the member's recording, no further than the
-# commit position (ADR 0065), and wrote a line for each entry: the lines of each
+# commit position (ADR 0066), and wrote a line for each entry: the lines of each
 # member's service must be the lines of that member's replay. An entry missing,
 # repeated, out of order or changed on any member, or read differently by a service
 # as it committed, fails it.

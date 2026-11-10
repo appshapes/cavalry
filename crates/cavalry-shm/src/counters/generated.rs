@@ -377,7 +377,7 @@ pub const CLUSTER_MESSAGES_REJECTED: CounterId = CounterId(122);
 /// `cluster.appointed_leader_behind`, a client counter: Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election: it does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_APPOINTED_LEADER_BEHIND: CounterId = CounterId(123);
 
-/// `cluster.log_recording_id`, a client gauge: The id of one cluster member's recording of the log, the recording its service replays to read the committed log (spec/cluster.md, The service; ADR 0065): -1 while the member has none, before its election has given it a log and after it left one. The member's consensus module adds the counter and stores the value with a release store; key: member id (i32), little-endian; label text: the member id in decimal.
+/// `cluster.log_recording_id`, a client gauge: The id of one cluster member's recording of the log, the recording its service replays to read the committed log (spec/cluster.md, The service; ADR 0066): -1 while the member has none, before its election has given it a log and after it left one. The member's consensus module adds the counter and stores the value with a release store; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LOG_RECORDING_ID: CounterId = CounterId(124);
 
 /// Every entry of `counters.toml`, in the file's order.
@@ -1379,7 +1379,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.log_recording_id",
         kind: Kind::Gauge,
         scope: Scope::Client,
-        doc: "The id of one cluster member's recording of the log, the recording its service replays to read the committed log (spec/cluster.md, The service; ADR 0065): -1 while the member has none, before its election has given it a log and after it left one. The member's consensus module adds the counter and stores the value with a release store; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doc: "The id of one cluster member's recording of the log, the recording its service replays to read the committed log (spec/cluster.md, The service; ADR 0066): -1 while the member has none, before its election has given it a log and after it left one. The member's consensus module adds the counter and stores the value with a release store; key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A cluster.log_recording_id of -1 on a member whose election has closed is a follower whose armed recording has not started: check recording.armed and recording.armed_dropped on its driver.",
     },
 ];

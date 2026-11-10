@@ -1066,7 +1066,7 @@ impl Cavalry {
     }
 
     /// Opens the committed log of the cluster member on this client's driver at
-    /// `position`, for a service to read (`spec/cluster.md`, "The service"; ADR 0065):
+    /// `position`, for a service to read (`spec/cluster.md`, "The service"; ADR 0066):
     /// it adds a subscription on `cavalry:ipc` and stream [`SERVICE_LOG_STREAM_ID`] and
     /// starts a replay that follows the member's recording of the log from `position`.
     /// `position` is where an entry begins: 0, or [`CommittedLog::position`] of an
@@ -1083,6 +1083,55 @@ impl Cavalry {
     /// [`Cavalry::start_replay`]: a position that is not a multiple of 32 or is past
     /// what the member has recorded is [`ClientError::Refused`] with code 23, and a
     /// driver whose replays registry is full, 64 replays, is code 10.
+    ///
+    /// ```
+    /// use cavalry_client::{Cavalry, CommittedLog};
+    ///
+    /// /// A service's loop: every committed entry from `position` on, in order, each
+    /// /// once, until the member's log ends. Returns where to open the log again.
+    /// fn apply(client: &mut Cavalry, position: i64) -> Result<i64, Box<dyn std::error::Error>> {
+    ///     // Ask until the member on this driver has its log.
+    ///     let mut log: CommittedLog = loop {
+    ///         if let Some(log) = client.committed_log(position)? {
+    ///             break log;
+    ///         }
+    ///         std::thread::sleep(std::time::Duration::from_millis(100));
+    ///     };
+    ///     loop {
+    ///         let entries = log.poll(
+    ///             |entry, _header, entry_position| {
+    ///                 // Apply `entry`, in `spec/cluster.md`'s encoding, at its position.
+    ///                 let _ = (entry, entry_position);
+    ///             },
+    ///             64,
+    ///         )?;
+    ///         if entries == 0 {
+    ///             if log.is_ended() {
+    ///                 // The member closed or left its log: what was read stays read.
+    ///                 let next = log.position();
+    ///                 log.close(client)?;
+    ///                 return Ok(next);
+    ///             }
+    ///             std::thread::yield_now();
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cavalry-doc-committed-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # let driver = cavalry_driver::Driver::start(&dir, dir.join("log"))?;
+    /// let mut client = Cavalry::connect_to(&dir)?;
+    /// // A driver that hosts no cluster member has no committed log to open, and a
+    /// // service beside it asks again later, as `apply` does.
+    /// assert!(client.committed_log(0)?.is_none());
+    /// # let _ = apply;
+    /// # client.close()?;
+    /// # driver.close()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// [`SERVICE_LOG_STREAM_ID`]: crate::SERVICE_LOG_STREAM_ID
     pub fn committed_log(&mut self, position: i64) -> Result<Option<CommittedLog>, ClientError> {

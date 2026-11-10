@@ -132,7 +132,7 @@ fn every_message_arrives_once_and_in_order() {
     driver.close().expect("the driver closes");
 }
 
-/// The bounded poll (`spec/log-buffer.md`, "Reading"; ADR 0065): one image of the
+/// The bounded poll (`spec/log-buffer.md`, "Reading"; ADR 0066): one image of the
 /// subscription is read, the one of the session named, and no frame of it that begins
 /// at or past the limit; the other image is not read by the call, the image's position
 /// is stored after it, and a plain poll reads what is left of both.

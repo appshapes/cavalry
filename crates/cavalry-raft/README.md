@@ -27,15 +27,22 @@ commit path runs per message.
   `cluster.role`, `cluster.election_state`, `cluster.commit_position` and the rest of
   `spec/cluster.md`, "Counters". One thread calls `do_work()`; the leader's process
   appends with `offer(payload)`, up to 1,344 bytes an entry.
+- Tells a service where the log is: `cluster.log_recording_id` holds the id of the
+  member's recording of the log, −1 while it has none, stored before the member's
+  commit position exists and changed before a commit position the recording does not
+  hold is stored. A service is a client of the same driver that replays that
+  recording and reads it no further than `cluster.commit_position`:
+  `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
+  0065).
 - Runs the same core in memory: `memory::Cluster` is several members in one process on
   a clock the caller steps, with loss, delay, cuts, paused syncs and a member started
   again on an empty log directory to set: what the example below and most of the
   crate's tests run.
-- To come, each with its card: `cavalry run` starting the module from two
-  configuration keys, the service's bounded poll and `doctor`'s checks (card 227), the
-  election and mixed versions in a rolling upgrade (card 228), the cluster client (card
-  229), snapshots and catch-up (card 230), and standby members, which follow the log
-  without voting, in the open core.
+- To come, each with its card: the C ABI's calls for a service, so that a service is
+  a program in any of the five client languages (card 227), the election and mixed
+  versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots
+  and catch-up (card 230), and standby members, which follow the log without voting,
+  in the open core.
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).

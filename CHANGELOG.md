@@ -1739,7 +1739,7 @@ user-visible change, added in the same commit as the change. The format follows
   which reads one image and delivers no frame that begins at or past the limit, and
   `cavalry-shm` the `TermReader::bounded_poll` under it. The reader of the committed
   log and the counter follow
-  ([ADR 0065](docs/decisions/0065-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
   card 227).
 - A replay that follows a live recording no longer allocates on the driver's replayer
   thread. Once a second the replayer reads the recording's catalog slot to learn
@@ -1852,3 +1852,24 @@ user-visible change, added in the same commit as the change. The format follows
   in `cavalry` is its program
   ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md), feature 3;
   [Run a cluster of three members](docs/how-to/run-a-cluster.md); card 227).
+- A service reads a cluster's committed log through the Rust client.
+  `Cavalry::committed_log(position)` opens the log of the cluster member on the
+  client's driver, or returns `None` while the driver has no member with a log, and
+  `CommittedLog::poll(handler, fragment_limit)` hands over every committed entry, in
+  order, each once, with its position; `position()` is where to open the log again,
+  `commit_position()` the bound of the last read, and `is_ended()` says that the
+  member closed or left its log. The same call serves the leader's service and a
+  follower's, and a service may start before, with or after its member. The member's
+  consensus module names its recording of the log in a new counter,
+  `cluster.log_recording_id`, and a service takes a commit position as its bound only
+  while that counter still names the recording it replays, so a record the driver gave
+  to another counter, or a later member's commit position, is never a bound. `cavalry`
+  re-exports `CommittedLog`; `examples/cluster-service.rs` is a service that prints
+  each entry, and the how-to is
+  [Read a cluster's committed log from a service](docs/how-to/read-the-committed-log.md)
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
+  card 227).
+- `just replay-check` runs a service beside each of its three cluster members. Each
+  reads the committed log while the 100,000 entries are committed and writes a line
+  an entry, and the gate fails unless each service's lines are the lines of its
+  member's replay: six equal hashes where there were three (card 227).

@@ -11,7 +11,7 @@ the two crates where `unsafe` is permitted.
   claims a frame in place and commits it with one release store, a `TermReader` reads
   committed frames where its position says, to the end of what is committed or, with
   `bounded_poll`, no further than a limit position
-  ([ADR 0065](../../docs/decisions/0065-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)),
+  ([ADR 0066](../../docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)),
   or scans a `Block` of them with their
   headers for the recorder to write in one go
   ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)) or, from any

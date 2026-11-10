@@ -323,7 +323,7 @@ impl Subscription {
     /// Reads up to `fragment_limit` fragments of one image, the first whose session id
     /// is `session_id`, and no frame that begins at or past `limit_position`: a frame
     /// that begins below the limit is delivered whole, and a limit at or below the
-    /// image's position reads nothing (`spec/log-buffer.md`, "Reading"; ADR 0065). In
+    /// image's position reads nothing (`spec/log-buffer.md`, "Reading"; ADR 0066). In
     /// Aeron, this is `Image.boundedPoll`. A limit of `i64::MAX` reads the image with
     /// no bound. The subscription's other images are not read by this call.
     ///

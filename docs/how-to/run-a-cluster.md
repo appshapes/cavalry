@@ -112,6 +112,8 @@ committed once a quorum, two of three, has it on disk.
   chain, each member's recording is replayed through a driver of its own, and the gate
   fails unless the three members' lines hash the same and their payloads are the ones
   the leader was offered, in order (`scripts/replay-check.sh`).
+- A program beside a member reads the entries as the cluster commits them:
+  [Read a cluster's committed log from a service](read-the-committed-log.md).
 
 ## When it does not work
 

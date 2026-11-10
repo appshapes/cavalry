@@ -23,6 +23,7 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [Replay a recording into a subscription](how-to/replay-a-recording.md)
 - [Publish between two hosts](how-to/publish-between-two-hosts.md)
 - [Run a cluster of three members](how-to/run-a-cluster.md)
+- [Read a cluster's committed log from a service](how-to/read-the-committed-log.md)
 - [Set up a bench host for the latency gate](how-to/set-up-a-bench-host.md)
 - [Set up a soak host](how-to/set-up-a-soak-host.md)
 - [Send the weekly release-notes email](how-to/send-the-release-notes.md)
@@ -109,4 +110,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0060. Replicate the log with an appointed leader, a term record and a per-peer consensus channel](decisions/0060-replicate-the-log-with-an-appointed-leader.md)
 - [0062. Add a client's counter with Aeron's counter commands, as client protocol version 7](decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md)
 - [0063. Run the consensus module as a client of its driver, and lead by appointment through the election's states](decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md)
-- [0065. Feed the committed log to a service through a replay of the member's recording](decisions/0065-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)
+- [0066. Feed the committed log to a service through a replay of the member's recording](decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)

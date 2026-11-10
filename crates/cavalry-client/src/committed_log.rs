@@ -1,5 +1,5 @@
 //! A cluster's committed log as a service reads it (`spec/cluster.md`, "The service";
-//! ADR 0065): a replay that follows the recording of the log that the cluster member on
+//! ADR 0066): a replay that follows the recording of the log that the cluster member on
 //! this driver keeps, polled no further than the member's commit position.
 
 use std::sync::Arc;

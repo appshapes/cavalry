@@ -466,7 +466,7 @@ impl Counters {
     /// stored in it before `cluster.commit_position` is added: a service reads the
     /// recording's id only of a member whose commit position it has found, so it never
     /// reads the 0 a counter holds between its allocation and its first store
-    /// (`spec/cluster.md`, "The service"; ADR 0065).
+    /// (`spec/cluster.md`, "The service"; ADR 0066).
     fn add(client: &mut Cavalry, member_id: i32) -> Result<Self, ClientError> {
         let log_recording_id = Stored::add(
             client,

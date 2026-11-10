@@ -2,7 +2,7 @@
 //! module, not its client, and not the three drivers of this process, while the leader
 //! appends an entry every cycle; and neither does the service beside each member,
 //! which reads the committed log in every cycle, nor the replay the driver plays it
-//! (`CLAUDE.md`, invariant 2; ADR 0065). A test of its own, since the counting
+//! (`CLAUDE.md`, invariant 2; ADR 0066). A test of its own, since the counting
 //! allocator is the whole process's.
 
 use std::alloc::System;

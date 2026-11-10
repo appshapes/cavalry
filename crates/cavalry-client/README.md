@@ -16,7 +16,7 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `Subscription::bounded_poll` reads one image, the one of a session, and no frame
   that begins at or past a limit position, for a stream that may be read only as far
   as something else has got, as a cluster's service reads its log no further than the
-  commit position (ADR 0065).
+  commit position (ADR 0066).
 - Returns back-pressure as a result code when the receiver window or the log buffer is
   full. The caller decides what to do; the driver never buffers more.
 - Says when its client is gone. Once the client is closed, by `close` or because the
@@ -44,6 +44,14 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   records to other counters a second later, so each read checks that the record is
   still the recording's, and a position is never another counter's value. A client
   follows 1,024 recordings at most, the driver's own bound.
+- Reads a cluster's committed log for a service: `Cavalry::committed_log(position)`
+  returns a `CommittedLog` once the driver hosts a cluster member that has a recording
+  of its log, and `CommittedLog::poll` hands over every entry a quorum of members
+  holds, in order, each once, with its position. The log is read from the member's
+  own recording through a replay that follows it, on the leader and on a follower
+  alike, and no further than the member's commit position, which is taken only while
+  the member's counters say the log is still that recording (ADR 0066). A service may
+  start before its member, with it or after it, at position 0 or where it stopped.
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

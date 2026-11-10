@@ -190,7 +190,7 @@ frame that begins below the limit is delivered whole, wherever it ends. A limit 
 below the subscriber's position reads nothing, and the position is stored as it was; a
 limit never moves the position back. In Aeron, this is `Image.boundedPoll`. The cluster's
 service reads its log so, bounded by the commit position (`spec/cluster.md`, "The
-service"; ADR 0065).
+service"; ADR 0066).
 
 ## The receiver
 
