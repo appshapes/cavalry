@@ -12,7 +12,11 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   place, commit it. Nothing is allocated per message, and a codec encodes straight into
   the claimed slice.
 - Delivers to the subscriber's fragment handler as a view into mapped memory, one image
-  per connected publisher.
+  per connected publisher. `Subscription::poll` reads every image in turn;
+  `Subscription::bounded_poll` reads one image, the one of a session, and no frame
+  that begins at or past a limit position, for a stream that may be read only as far
+  as something else has got, as a cluster's service reads its log no further than the
+  commit position (ADR 0066).
 - Returns back-pressure as a result code when the receiver window or the log buffer is
   full. The caller decides what to do; the driver never buffers more.
 - Says when its client is gone. Once the client is closed, by `close` or because the
@@ -36,7 +40,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   The client follows the stop of each recording it started, whoever stopped it:
   `Recording::stop_position()` is `None` while the recording is live and its stop
   position after the driver's `recording stopped`, and from then on both positions are
-  that position. The driver frees a stopped recording's counters and gives their
+  that position. A sync that returned success covered it: the catalog's stop, or,
+  when the stop's own writes or syncs failed or a sync of the recording failed
+  before it, the position last synced (ADR 0064, ADR 0065). The
+  driver frees a stopped recording's counters and gives their
   records to other counters a second later, so each read checks that the record is
   still the recording's, and a position is never another counter's value. A client
   follows 1,024 recordings at most, the driver's own bound.
