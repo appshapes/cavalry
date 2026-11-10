@@ -20,6 +20,6 @@ pub use client::{Cavalry, DIR_ENV};
 pub use counter::Counter;
 pub use error::{ClientError, Closed};
 pub use publication::{Offer, Publication};
-pub use recording::Recording;
+pub use recording::{ArmedRecording, Recording};
 pub use replay::Replay;
 pub use subscription::{Fault, Image, MAX_IMAGES, Subscription};

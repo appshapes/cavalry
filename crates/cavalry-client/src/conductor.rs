@@ -93,7 +93,18 @@ pub(crate) const RECORDING_QUEUE: usize = 16;
 pub(crate) struct RecordingRegistration {
     pub(crate) correlation_id: i64,
     pub(crate) stop: Arc<RecordingStop>,
+    /// Where the conductor puts the command's second answer when the driver arms the
+    /// recording instead of starting it (`spec/client-protocol.md`, "Commands", start
+    /// recording): the queue of one an [`ArmedRecording`](crate::ArmedRecording)
+    /// polls. `None` for `start_recording`, which holds no armed recording.
+    pub(crate) armed: Option<spsc::Producer<Response>>,
 }
+
+/// How many registrations the conductor's recordings registry holds: the recordings
+/// the driver holds, starting or live, the recordings it holds armed, at most one for
+/// each stream and endpoint a live subscription holds and so at most its subscriptions
+/// registry, and one for the command in flight.
+pub(crate) const RECORDING_REGISTRY: usize = MAX_RECORDINGS + MAX_SUBSCRIPTIONS + 1;
 
 /// The scratch buffer every command is encoded into: the longest command is a channel
 /// of 4096 bytes and its header, and the ring's own limit is far above.
@@ -265,7 +276,7 @@ impl Conductor {
             replay_registrations,
             replays: ReplayRegistry::with_capacity(MAX_REPLAYS + 1),
             recording_registrations,
-            recordings: RecordingRegistry::with_capacity(MAX_RECORDINGS + 1),
+            recordings: RecordingRegistry::with_capacity(RECORDING_REGISTRY),
             client_id,
             scratch: vec![0u8; COMMAND_SCRATCH],
         }
@@ -395,9 +406,16 @@ impl Conductor {
         let client_id = self.client_id;
         while received < 16 {
             let shared = &self.shared;
+            let recordings = &self.recordings;
             let mut outcome = Ok(Outcome::Nothing);
             let got = self.receiver.receive(|type_id, message| {
-                outcome = event(client_id, shared.pending(), type_id, message);
+                outcome = event(
+                    client_id,
+                    shared.pending(),
+                    &|correlation_id| recordings.awaits(correlation_id),
+                    type_id,
+                    message,
+                );
             });
             match got {
                 Ok(true) => {
@@ -419,6 +437,13 @@ impl Conductor {
                             } = response
                             {
                                 self.recordings.bind(correlation_id, recording_id);
+                            }
+                            // `operation success` to a command that registered for a
+                            // second answer: the driver armed its recording, and the
+                            // event that names this correlation id next is that answer,
+                            // whatever command the user's thread waits on by then.
+                            if let Response::Success { correlation_id } = response {
+                                self.recordings.armed(correlation_id);
                             }
                             // Full means the caller gave up on several answers in a row and
                             // the queue holds them; the caller clears the queue before its
@@ -461,6 +486,7 @@ impl Conductor {
                                 stop.set(stop_position);
                             }
                         }
+                        Outcome::ArmedAnswer(response) => self.recordings.answer(response),
                     }
                 }
                 Ok(false) => break,
@@ -692,6 +718,9 @@ enum Outcome {
         recording_id: i64,
         stop_position: i64,
     },
+    /// The second answer to an armed `start recording` of this client: `recording
+    /// ready` or `error` under the arming command's correlation id.
+    ArmedAnswer(Response),
 }
 
 /// The recordings whose stop this client follows: one registration per `start
@@ -704,19 +733,26 @@ enum Outcome {
 /// a free place among its [`MAX_RECORDINGS`] and sends `recording stopped` as it frees
 /// one, so by the time this conductor reads a `recording ready` it has read the stop of
 /// every recording that made room for it, and at most [`MAX_RECORDINGS`] of its
-/// registrations have no stop stored. The capacity is one more than that, for the
-/// command in flight. Full even so, [`RecordingRegistry::admit`] refuses.
+/// registrations follow a recording with no stop stored. A registration whose command
+/// the driver answered by arming the recording waits for the second answer, and the
+/// driver holds at most [`MAX_SUBSCRIPTIONS`] armed. The capacity is the two together
+/// and one more, for the command in flight ([`RECORDING_REGISTRY`]). Full even so,
+/// [`RecordingRegistry::admit`] refuses.
 pub(crate) struct RecordingRegistry {
     recordings: Vec<FollowedRecording>,
     capacity: usize,
 }
 
 /// One registration: the command's correlation id, the recording id once `recording
-/// ready` gave it, −1 until then, and the stop shared with the handle.
+/// ready` gave it, −1 until then, the stop shared with the handle, and, for a command
+/// that may be answered twice, where its second answer goes and whether the first,
+/// `operation success`, has been read.
 struct FollowedRecording {
     correlation_id: i64,
     recording_id: i64,
     stop: Arc<RecordingStop>,
+    armed: Option<spsc::Producer<Response>>,
+    armed_answered: bool,
 }
 
 impl RecordingRegistry {
@@ -743,8 +779,58 @@ impl RecordingRegistry {
             correlation_id: registration.correlation_id,
             recording_id: -1,
             stop: registration.stop,
+            armed: registration.armed,
+            armed_answered: false,
         });
         true
+    }
+
+    /// `operation success` for the command `correlation_id`: when its registration
+    /// holds a place for a second answer, the driver armed the recording, and the next
+    /// event that names the correlation id is that answer.
+    pub(crate) fn armed(&mut self, correlation_id: i64) {
+        if let Some(recording) = self.recordings.iter_mut().find(|recording| {
+            recording.correlation_id == correlation_id && recording.armed.is_some()
+        }) {
+            recording.armed_answered = true;
+        }
+    }
+
+    /// Whether an event that names `correlation_id` is the second answer to an armed
+    /// `start recording` of this client: its registration read `operation success` and
+    /// still waits. Correlation ids come from the driver's one counter, so no other
+    /// client's event names one of this client's.
+    pub(crate) fn awaits(&self, correlation_id: i64) -> bool {
+        self.recordings.iter().any(|recording| {
+            recording.correlation_id == correlation_id
+                && recording.armed_answered
+                && recording.armed.is_some()
+        })
+    }
+
+    /// The second answer to an armed `start recording`: handed to the handle through
+    /// its queue of one, which holds nothing before it. `recording ready` binds the
+    /// registration to its recording, whose stop it follows from here; `error`, the
+    /// armed recording dropped or its start failed, ends the registration.
+    pub(crate) fn answer(&mut self, response: Response) {
+        let correlation_id = response.correlation_id();
+        let Some(index) = self
+            .recordings
+            .iter()
+            .position(|recording| recording.correlation_id == correlation_id)
+        else {
+            return;
+        };
+        let Some(mut answers) = self.recordings[index].armed.take() else {
+            return;
+        };
+        if let Response::RecordingReady { recording_id, .. } = response {
+            self.recordings[index].recording_id = recording_id;
+        } else {
+            self.recordings.swap_remove(index);
+        }
+        // One answer into a queue of one that nothing else is offered to.
+        let _ = answers.offer(response);
     }
 
     /// Forgets a registration whose stop is stored, which its handle has read or will
@@ -804,7 +890,13 @@ fn log_name(log_file_name: &[u8]) -> Option<(LogDirectory, i64)> {
 /// pending correlation id are the answer; every other event, `recording stopped` among
 /// them, leaves the client open and is nothing to it. An `available image` whose log
 /// file name is not the page's shape is `corrupt`.
-fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<Outcome, Closed> {
+fn event(
+    client_id: i64,
+    pending: i64,
+    awaits: &dyn Fn(i64) -> bool,
+    type_id: i32,
+    message: &[u8],
+) -> Result<Outcome, Closed> {
     let event = Event::parse(type_id, message).map_err(|_| Closed::Corrupt)?;
     if let Event::ClientTimeout { client_id: id } = event
         && id == client_id
@@ -859,6 +951,35 @@ fn event(client_id: i64, pending: i64, type_id: i32, message: &[u8]) -> Result<O
                 recording_id,
                 stop_position,
             });
+        }
+        // An armed recording's second answer, looked for before the pending command's:
+        // the image may arrive while the user's thread has not yet cleared the arming
+        // command's correlation id, and the answer is the handle's, not the command's.
+        Event::RecordingReady {
+            correlation_id,
+            recording_id,
+            session_id,
+            recording_position_counter_id,
+            recording_synced_position_counter_id,
+        } if awaits(correlation_id) => {
+            return Ok(Outcome::ArmedAnswer(Response::RecordingReady {
+                correlation_id,
+                recording_id,
+                session_id,
+                position_counter_id: recording_position_counter_id,
+                synced_position_counter_id: recording_synced_position_counter_id,
+            }));
+        }
+        Event::Error {
+            offending_correlation_id,
+            error_code,
+            error_message,
+        } if awaits(offending_correlation_id) => {
+            return Ok(Outcome::ArmedAnswer(Response::Error {
+                correlation_id: offending_correlation_id,
+                code: error_code,
+                message: String::from_utf8_lossy(error_message).into_owned(),
+            }));
         }
         _ => {}
     }
@@ -961,9 +1082,9 @@ mod tests {
     use cavalry_shm::spsc;
 
     use super::{
-        Event, LogDirectory, MAX_RECORDINGS, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome,
-        RecordingRegistration, RecordingRegistry, Registry, ReplayRegistration, ReplayRegistry,
-        event, log_name,
+        Event, LogDirectory, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome,
+        RECORDING_REGISTRY, RecordingRegistration, RecordingRegistry, Registry, ReplayRegistration,
+        ReplayRegistry, event, log_name,
     };
     use crate::error::Closed;
     use crate::recording::RecordingStop;
@@ -1040,9 +1161,111 @@ mod tests {
             RecordingRegistration {
                 correlation_id,
                 stop: Arc::clone(&stop),
+                armed: None,
             },
             stop,
         )
+    }
+
+    /// The second answer to an armed `start recording` is its handle's, not the pending
+    /// command's: the registration that read `operation success` takes the `recording
+    /// ready` or the `error` that names its correlation id next, even while the user's
+    /// thread still names that id as pending, and a `start_recording` registration,
+    /// with no place for a second answer, never does.
+    #[test]
+    fn an_armed_recordings_second_answer_goes_to_its_handle() {
+        let mut registry = RecordingRegistry::with_capacity(4);
+        let encode = |event: Event<'_>| {
+            let mut buffer = [0u8; 256];
+            let length = event.write(&mut buffer).expect("the event encodes");
+            (event.event_type() as i32, buffer[..length].to_vec())
+        };
+        let ready = |correlation_id| {
+            encode(Event::RecordingReady {
+                correlation_id,
+                recording_id: 7,
+                session_id: 3,
+                recording_position_counter_id: 200,
+                recording_synced_position_counter_id: 201,
+            })
+        };
+
+        let stop = Arc::new(RecordingStop::new());
+        let (producer, mut answers) = spsc::queue::<Response>(1);
+        assert!(registry.admit(RecordingRegistration {
+            correlation_id: 40,
+            stop: Arc::clone(&stop),
+            armed: Some(producer),
+        }));
+        // Before `operation success`, `recording ready` under the pending id is the
+        // command's one answer: the driver started the recording at once.
+        let (type_id, message) = ready(40);
+        assert!(!registry.awaits(40));
+        assert!(matches!(
+            event(5, 40, &|id| registry.awaits(id), type_id, &message),
+            Ok(Outcome::Answer(Response::RecordingReady { .. }))
+        ));
+        // `operation success` arms it. The image arrives before the user's thread has
+        // cleared its pending id: the answer is the handle's all the same.
+        registry.armed(40);
+        assert!(registry.awaits(40));
+        let outcome = event(5, 40, &|id| registry.awaits(id), type_id, &message);
+        let Ok(Outcome::ArmedAnswer(response)) = outcome else {
+            panic!("the second answer was read as {outcome:?}");
+        };
+        registry.answer(response.clone());
+        assert_eq!(answers.poll(), Some(response));
+        assert!(!registry.awaits(40), "answered twice, and no third time");
+        // The registration follows the recording the second answer named.
+        registry
+            .stop(7)
+            .expect("bound by the second answer")
+            .set(4096);
+        assert_eq!(stop.get(), Some(4096));
+
+        // An armed recording dropped, or one whose start failed: `error` under the
+        // arming id goes to the handle and ends the registration, with nothing pending.
+        let dropped_stop = Arc::new(RecordingStop::new());
+        let (producer, mut answers) = spsc::queue::<Response>(1);
+        assert!(registry.admit(RecordingRegistration {
+            correlation_id: 41,
+            stop: Arc::clone(&dropped_stop),
+            armed: Some(producer),
+        }));
+        registry.armed(41);
+        let before = registry.len();
+        let (type_id, message) = encode(Event::Error {
+            offending_correlation_id: 41,
+            error_code: 20,
+            error_message: b"the stream's last subscription is gone",
+        });
+        let outcome = event(5, NO_PENDING, &|id| registry.awaits(id), type_id, &message);
+        let Ok(Outcome::ArmedAnswer(response)) = outcome else {
+            panic!("the second answer was read as {outcome:?}");
+        };
+        registry.answer(response);
+        assert!(matches!(
+            answers.poll(),
+            Some(Response::Error {
+                correlation_id: 41,
+                code: 20,
+                ..
+            })
+        ));
+        assert_eq!(registry.len(), before - 1);
+
+        // `start_recording` registers no place for a second answer: `operation
+        // success` under its id arms nothing here, and a later event that names the id
+        // is nobody's.
+        let (plain, _plain_stop) = recording(42);
+        assert!(registry.admit(plain));
+        registry.armed(42);
+        assert!(!registry.awaits(42));
+        let (type_id, message) = ready(42);
+        assert_eq!(
+            event(5, NO_PENDING, &|id| registry.awaits(id), type_id, &message),
+            Ok(Outcome::Nothing)
+        );
     }
 
     /// The full case first (CLAUDE.md, gate 3): the registry at its capacity with every
@@ -1052,7 +1275,7 @@ mod tests {
     /// a recording this client does not follow finds nothing.
     #[test]
     fn a_full_recording_registry_sweeps_then_refuses_and_a_stop_frees_a_place() {
-        let capacity = MAX_RECORDINGS + 1;
+        let capacity = RECORDING_REGISTRY;
         let mut registry = RecordingRegistry::with_capacity(capacity);
         let mut held = Vec::with_capacity(capacity);
         for id in 0..capacity as i64 {
@@ -1194,24 +1417,33 @@ mod tests {
     fn client_timeout_for_this_client_closes_it() {
         let (type_id, message) = CLIENT_TIMEOUT;
         assert_eq!(
-            event(5, NO_PENDING, type_id, message),
+            event(5, NO_PENDING, &|_| false, type_id, message),
             Err(Closed::ClientTimeout)
         );
-        assert_eq!(event(5, 3, type_id, message), Err(Closed::ClientTimeout));
+        assert_eq!(
+            event(5, 3, &|_| false, type_id, message),
+            Err(Closed::ClientTimeout)
+        );
     }
 
     #[test]
     fn client_timeout_for_another_client_leaves_it_open() {
         let (type_id, message) = CLIENT_TIMEOUT;
-        assert_eq!(event(6, NO_PENDING, type_id, message), Ok(Outcome::Nothing));
+        assert_eq!(
+            event(6, NO_PENDING, &|_| false, type_id, message),
+            Ok(Outcome::Nothing)
+        );
     }
 
     #[test]
     fn a_decoded_event_nobody_waits_for_leaves_it_open() {
         let (type_id, message) = OPERATION_SUCCESS;
-        assert_eq!(event(5, NO_PENDING, type_id, message), Ok(Outcome::Nothing));
         assert_eq!(
-            event(5, 4, type_id, message),
+            event(5, NO_PENDING, &|_| false, type_id, message),
+            Ok(Outcome::Nothing)
+        );
+        assert_eq!(
+            event(5, 4, &|_| false, type_id, message),
             Ok(Outcome::Nothing),
             "another command's"
         );
@@ -1221,7 +1453,7 @@ mod tests {
     fn the_pending_commands_event_is_its_answer() {
         let (type_id, message) = OPERATION_SUCCESS;
         assert_eq!(
-            event(5, 3, type_id, message),
+            event(5, 3, &|_| false, type_id, message),
             Ok(Outcome::Answer(Response::Success { correlation_id: 3 }))
         );
         // `error`: type 3841, offending correlation id 4, code 1, message "abc".
@@ -1229,7 +1461,7 @@ mod tests {
             4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0x61, 0x62, 0x63, 0,
         ];
         assert_eq!(
-            event(5, 4, 3841, error),
+            event(5, 4, &|_| false, 3841, error),
             Ok(Outcome::Answer(Response::Error {
                 correlation_id: 4,
                 code: 1,
@@ -1257,7 +1489,7 @@ mod tests {
         message.extend_from_slice(source);
         message.push(0);
         assert_eq!(
-            event(5, NO_PENDING, 0x0F02, &message),
+            event(5, NO_PENDING, &|_| false, 0x0F02, &message),
             Ok(Outcome::ImageAvailable {
                 correlation_id: 7,
                 session_id: -2,
@@ -1290,7 +1522,7 @@ mod tests {
                 "the `{error}` vector"
             );
             assert_eq!(
-                event(5, NO_PENDING, type_id, message),
+                event(5, NO_PENDING, &|_| false, type_id, message),
                 Err(Closed::Corrupt),
                 "the `{error}` vector"
             );

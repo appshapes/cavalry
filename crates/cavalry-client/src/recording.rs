@@ -11,10 +11,15 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::time::Instant;
 
+use cavalry_proto::client_protocol::ErrorCode;
 use cavalry_shm::counters::generated::{RECORDING_POSITION, RECORDING_SYNCED_POSITION};
 use cavalry_shm::counters::{CounterId, CounterValue, CountersReader};
+use cavalry_shm::spsc;
 
+use crate::conductor::{RESPONSE_TIMEOUT, Shared};
+use crate::response::Response;
 use crate::{Cavalry, ClientError};
 
 /// Where a recording stopped, as `recording stopped` said it: shared between the
@@ -259,6 +264,214 @@ impl Recording {
     /// [`stop_position`]: Recording::stop_position
     pub fn stop(&self, client: &mut Cavalry) -> Result<(), ClientError> {
         client.stop_recording(self.recording_id)
+    }
+}
+
+/// `recording ready` as a handle is made from it: the recording's id and session, the
+/// records of its two counters, and when the answer was read.
+pub(crate) struct RecordingAnswer {
+    recording_id: i64,
+    session_id: i32,
+    position_counter_id: u32,
+    synced_position_counter_id: u32,
+    read: Instant,
+}
+
+impl RecordingAnswer {
+    /// The answer `response` carries; anything but a `recording ready` with two counter
+    /// ids a counters file can hold is [`ClientError::Driver`].
+    pub(crate) fn new(response: Response) -> Result<Self, ClientError> {
+        let Response::RecordingReady {
+            recording_id,
+            session_id,
+            position_counter_id,
+            synced_position_counter_id,
+            ..
+        } = response
+        else {
+            return Err(ClientError::Driver {
+                what: format!("{response:?} in answer to start recording"),
+            });
+        };
+        let counter = |id: i32| -> Result<u32, ClientError> {
+            u32::try_from(id).map_err(|_| ClientError::Driver {
+                what: format!("recording counter id {id}"),
+            })
+        };
+        Ok(Self {
+            recording_id,
+            session_id,
+            position_counter_id: counter(position_counter_id)?,
+            synced_position_counter_id: counter(synced_position_counter_id)?,
+            read: Instant::now(),
+        })
+    }
+
+    /// The handle, once it can be made. `Ok(None)` while a counter's record is not the
+    /// recording's and `stop` holds no stop: the recording has already stopped and its
+    /// counters are freed, and the conductor stores the stop within its next cycles,
+    /// since `recording stopped` follows `recording ready`. No stop within the response
+    /// timeout of the answer is a driver that named records that were never the
+    /// recording's: [`ClientError::Driver`].
+    pub(crate) fn recording(
+        &self,
+        channel: &str,
+        stream_id: i32,
+        counters: &Arc<CountersReader>,
+        stop: &Arc<RecordingStop>,
+    ) -> Result<Option<Recording>, ClientError> {
+        if let Some(recording) = Recording::new(
+            self.recording_id,
+            self.session_id,
+            stream_id,
+            channel,
+            counters,
+            self.position_counter_id,
+            self.synced_position_counter_id,
+            stop,
+        ) {
+            return Ok(Some(recording));
+        }
+        if self.read.elapsed() < RESPONSE_TIMEOUT {
+            return Ok(None);
+        }
+        Err(ClientError::Driver {
+            what: format!(
+                "recording ready for recording {} with counters {} and {}, which are not that \
+                 recording's, and no recording stopped after it",
+                self.recording_id, self.position_counter_id, self.synced_position_counter_id
+            ),
+        })
+    }
+}
+
+/// A recording the driver may hold armed: what [`Cavalry::arm_recording`] returns. The
+/// driver arms a recording on a `cavalry:udp` stream that has a live subscription and
+/// no publication or image yet, and starts it when the stream's next image arrives, at
+/// the image's join position, so that every frame of the image is in the recording
+/// (`spec/client-protocol.md`, "Commands", start recording; ADR 0059). The arming
+/// command is answered twice, and this handle holds the place of the second answer:
+/// [`ArmedRecording::poll`] returns the [`Recording`] once the driver has started it.
+///
+/// The recording is the driver's, armed or started: dropping this handle disarms
+/// nothing, since the protocol has no command for that, and the recording starts with
+/// the image all the same. The driver drops an armed recording when the stream's last
+/// subscription on the endpoint goes, and `poll` then returns the driver's error.
+pub struct ArmedRecording {
+    stream_id: i32,
+    channel: String,
+    counters: Arc<CountersReader>,
+    shared: Arc<Shared>,
+    stop: Arc<RecordingStop>,
+    answers: spsc::Consumer<Response>,
+    ready: Option<RecordingAnswer>,
+    done: bool,
+}
+
+impl ArmedRecording {
+    pub(crate) fn new(
+        stream_id: i32,
+        channel: &str,
+        counters: Arc<CountersReader>,
+        shared: Arc<Shared>,
+        stop: Arc<RecordingStop>,
+        answers: spsc::Consumer<Response>,
+        ready: Option<RecordingAnswer>,
+    ) -> Self {
+        Self {
+            stream_id,
+            channel: channel.to_string(),
+            counters,
+            shared,
+            stop,
+            answers,
+            ready,
+            done: false,
+        }
+    }
+
+    /// The stream the recording is armed on.
+    pub fn stream_id(&self) -> i32 {
+        self.stream_id
+    }
+
+    /// The channel the recording is armed on.
+    pub fn channel(&self) -> &str {
+        &self.channel
+    }
+
+    /// The recording, once: `Ok(None)` while the driver holds it armed, and
+    /// `Ok(Some(recording))` by the first poll after the driver has started it, with
+    /// the stream's next image or, when the stream already had a publication or an
+    /// image, at the command. Call it from the loop that polls the subscription; it
+    /// reads one queue of one and sends nothing.
+    ///
+    /// The driver's second answer may be an error instead, returned once as
+    /// [`ClientError::Refused`]: code 20 when the armed recording was dropped, the
+    /// stream's last subscription on the endpoint gone, and code 10 or 12 when its
+    /// start failed at a registry, the catalog, the counters file or its files. After
+    /// the recording or an error the handle is spent, [`ArmedRecording::is_done`], and
+    /// every later poll is `Ok(None)`. A closed client is [`ClientError::Closed`] at
+    /// every poll while the recording is still armed.
+    pub fn poll(&mut self) -> Result<Option<Recording>, ClientError> {
+        if self.done {
+            return Ok(None);
+        }
+        if self.ready.is_none() {
+            match self.answers.poll() {
+                Some(Response::Error { code, message, .. }) => {
+                    self.done = true;
+                    return Err(ClientError::Refused {
+                        code: ErrorCode::from_code(code),
+                        raw_code: code,
+                        message,
+                    });
+                }
+                Some(answer) => match RecordingAnswer::new(answer) {
+                    Ok(ready) => self.ready = Some(ready),
+                    Err(error) => {
+                        self.done = true;
+                        return Err(error);
+                    }
+                },
+                None => {
+                    return match self.shared.closed() {
+                        Some(reason) => Err(ClientError::Closed(reason)),
+                        None => Ok(None),
+                    };
+                }
+            }
+        }
+        let Some(ready) = &self.ready else {
+            return Ok(None);
+        };
+        match ready.recording(&self.channel, self.stream_id, &self.counters, &self.stop) {
+            Ok(Some(recording)) => {
+                self.done = true;
+                Ok(Some(recording))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => {
+                self.done = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether [`ArmedRecording::poll`] has handed over the recording or returned the
+    /// armed recording's error: nothing more comes from this handle.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+}
+
+impl std::fmt::Debug for ArmedRecording {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArmedRecording")
+            .field("stream_id", &self.stream_id)
+            .field("channel", &self.channel)
+            .field("done", &self.done)
+            .finish()
     }
 }
 

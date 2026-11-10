@@ -115,7 +115,9 @@ read from the counters file, `client.stop_recording(id)?`, from any client, or
 `client.truncate_recording(id, position)?`, `client.purge_segments(id, segment_base)?`
 and `client.purge_recording(id)?`, each with a position, since a program resolves an
 instant through `cavalry::index::position_after` or `position_at` itself. Dropping the
-`Recording` stops nothing.
+`Recording` stops nothing. After a stop, whichever client asked for it,
+`recording.stop_position()` is the position the recording stopped at, and `position()`
+and `synced_position()` return it too.
 
 ## How to verify it worked
 
@@ -137,6 +139,12 @@ instant through `cavalry::index::position_after` or `position_at` itself. Droppi
   channel; start the publisher first. A publication is gone once its client is.
 - `error 22 (already recording)`: every live publication on the stream is recorded; the
   message names the recording. Stop one with `--stop`, or let it be.
+- `no recording yet (recording-armed)` from `start_recording` in a program: the stream
+  is a `cavalry:udp` stream with a subscription and no publication or image, so the
+  driver holds the recording armed and starts it when the stream's next image arrives.
+  Call `client.arm_recording(channel, stream_id)?` before the publisher starts and
+  poll the `ArmedRecording` it returns, which hands over the `Recording` at the
+  image's first frame; or call `start_recording` once the image is there.
 - `error 21 (unknown recording)`: the id is not in the catalog; `doctor` lists the live
   recordings by id.
 - `error 10 (resource temporarily unavailable)`: the recordings registry (1024), the

@@ -17,14 +17,14 @@ use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
 use crate::conductor::{
-    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_RECORDINGS, MAX_REPLAYS, MAX_SUBSCRIPTIONS,
-    NO_PENDING, RECORDING_QUEUE, REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE,
+    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
+    RECORDING_QUEUE, RECORDING_REGISTRY, REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE,
     RESPONSE_TIMEOUT, RecordingRegistration, ReplayRegistration, Shared, nanos, now_nanos,
 };
 use crate::counter::Counter;
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
-use crate::recording::{Recording, RecordingStop};
+use crate::recording::{ArmedRecording, Recording, RecordingAnswer, RecordingStop};
 use crate::replay::{Replay, ReplayEnd};
 use crate::response::Response;
 use crate::subscription::{
@@ -380,20 +380,94 @@ impl Cavalry {
     /// catalog, registry or counters file at capacity code 10. On a `cavalry:udp`
     /// channel the logs that match are the publications sending on it and the images
     /// received on it (ADR 0042).
+    ///
+    /// A `cavalry:udp` stream with a live subscription and no publication or image is
+    /// not refused: the driver arms the recording, to start with the stream's next
+    /// image (ADR 0059). This call returns a started recording or nothing, so it
+    /// returns [`ClientError::RecordingArmed`] then, and the driver holds the armed
+    /// recording all the same; [`Cavalry::arm_recording`] is the call for that order.
     pub fn start_recording(
         &mut self,
         channel: &str,
         stream_id: i32,
     ) -> Result<Recording, ClientError> {
+        let stop = Arc::new(RecordingStop::new());
+        let ready = match self.record(channel, stream_id, &stop, None)? {
+            Response::Success { .. } => return Err(ClientError::RecordingArmed { stream_id }),
+            ready => RecordingAnswer::new(ready)?,
+        };
+        // A record that is not the recording's by now is a recording that has already
+        // stopped, whose counters the driver freed: the handle is made once the
+        // conductor has stored the stop, which follows the answer.
+        loop {
+            if let Some(recording) = ready.recording(channel, stream_id, &self.counters, &stop)? {
+                return Ok(recording);
+            }
+            if let Some(reason) = self.shared.closed() {
+                return Err(ClientError::Closed(reason));
+            }
+            std::thread::sleep(Duration::from_micros(50));
+        }
+    }
+
+    /// Asks the driver to record `channel` and `stream_id` as
+    /// [`Cavalry::start_recording`] does, and holds the recording when the driver arms
+    /// it instead of starting it: on a `cavalry:udp` stream with a live subscription
+    /// and no publication or image yet, the driver answers at once and starts the
+    /// recording when the stream's next image arrives, at the image's join position, so
+    /// that every frame of the image is recorded (`spec/client-protocol.md`,
+    /// "Commands", start recording; ADR 0059). A follower of a cluster arms the
+    /// recording of its leader's log this way before the leader's first frame.
+    ///
+    /// Returns an [`ArmedRecording`], which [`ArmedRecording::poll`] turns into the
+    /// [`Recording`] once the driver has started it; when the stream already had a
+    /// publication or an image the recording started at once, and the first poll hands
+    /// it over. The refusals are those of `start_recording`. The driver holds one
+    /// armed recording for each stream and endpoint with a live subscription, so a
+    /// second call for the stream is [`ClientError::Refused`] with code 22, and this
+    /// client holds as many as the driver's subscriptions registry.
+    pub fn arm_recording(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+    ) -> Result<ArmedRecording, ClientError> {
+        let stop = Arc::new(RecordingStop::new());
+        let (producer, answers) = spsc::queue::<Response>(1);
+        let ready = match self.record(channel, stream_id, &stop, Some(producer))? {
+            Response::Success { .. } => None,
+            ready => Some(RecordingAnswer::new(ready)?),
+        };
+        Ok(ArmedRecording::new(
+            stream_id,
+            channel,
+            Arc::clone(&self.counters),
+            Arc::clone(&self.shared),
+            stop,
+            answers,
+            ready,
+        ))
+    }
+
+    /// Registers a recording with the conductor and sends its `start recording`: what
+    /// `start_recording` and `arm_recording` share. Returns the first answer,
+    /// `recording ready` or `operation success`; any other is [`ClientError::Driver`].
+    fn record(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+        stop: &Arc<RecordingStop>,
+        armed: Option<spsc::Producer<Response>>,
+    ) -> Result<Response, ClientError> {
         let correlation_id = self.producer.next_correlation_id();
         // Registered before the command goes, so that the conductor holds the place for
-        // this recording's stop when `recording ready` gives it the id
+        // this recording's stop when `recording ready` gives it the id, and for an
+        // armed recording's second answer when `operation success` says it is armed
         // (`Conductor::events`): the driver frees a stopped recording's counters, and
         // the handle must not read them after.
-        let stop = Arc::new(RecordingStop::new());
         let mut registration = RecordingRegistration {
             correlation_id,
-            stop: Arc::clone(&stop),
+            stop: Arc::clone(stop),
+            armed,
         };
         // One command is in flight per client, so the queue holds one at most; it is
         // full only while the conductor does not run, and then the command would wait
@@ -417,67 +491,23 @@ impl Cavalry {
             stream_id,
             channel: channel.as_bytes(),
         };
-        match self.request(&command, correlation_id, "start recording")? {
-            Response::RecordingReady {
-                recording_id,
-                session_id,
-                position_counter_id,
-                synced_position_counter_id,
-                ..
-            } => {
-                if stop.refused() {
-                    // More recordings than the driver's own bound have no stop stored:
-                    // a driver that does not conform. The recording is the driver's and
-                    // stays; this client cannot follow its stop, so it hands out no
-                    // handle that would read its counters after it.
-                    return Err(ClientError::Driver {
-                        what: format!(
-                            "recording ready for recording {recording_id} with {} \
-                             recordings of this client still live, more than the driver \
-                             holds",
-                            MAX_RECORDINGS + 1
-                        ),
-                    });
-                }
-                let counter = |id: i32| -> Result<u32, ClientError> {
-                    u32::try_from(id).map_err(|_| ClientError::Driver {
-                        what: format!("recording counter id {id}"),
-                    })
-                };
-                let position = counter(position_counter_id)?;
-                let synced_position = counter(synced_position_counter_id)?;
-                // A record that is not the recording's by now is a recording that has
-                // already stopped, whose counters the driver freed: the handle is made
-                // once the conductor has stored the stop, which follows the answer.
-                let deadline = Instant::now() + RESPONSE_TIMEOUT;
-                loop {
-                    if let Some(recording) = Recording::new(
-                        recording_id,
-                        session_id,
-                        stream_id,
-                        channel,
-                        &self.counters,
-                        position,
-                        synced_position,
-                        &stop,
-                    ) {
-                        return Ok(recording);
-                    }
-                    if let Some(reason) = self.shared.closed() {
-                        return Err(ClientError::Closed(reason));
-                    }
-                    if Instant::now() >= deadline {
-                        return Err(ClientError::Driver {
-                            what: format!(
-                                "recording ready for recording {recording_id} with \
-                                 counters {position} and {synced_position}, which are not \
-                                 that recording's, and no recording stopped after it"
-                            ),
-                        });
-                    }
-                    std::thread::sleep(Duration::from_micros(50));
-                }
-            }
+        let answer = self.request(&command, correlation_id, "start recording")?;
+        if stop.refused() {
+            // More registrations than the driver's own bounds allow have no stop
+            // stored and no second answer read: a driver that does not conform. The
+            // recording, started or armed, is the driver's and stays; this client
+            // cannot follow it, so it hands out no handle that would read its counters
+            // after its stop.
+            return Err(ClientError::Driver {
+                what: format!(
+                    "{answer:?} in answer to start recording with {RECORDING_REGISTRY} \
+                     recordings of this client still live or armed, more than the driver \
+                     holds"
+                ),
+            });
+        }
+        match answer {
+            answer @ (Response::RecordingReady { .. } | Response::Success { .. }) => Ok(answer),
             other => Err(ClientError::Driver {
                 what: format!("{other:?} in answer to start recording"),
             }),

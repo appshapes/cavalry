@@ -1736,3 +1736,15 @@ user-visible change, added in the same commit as the change. The format follows
   returns the last value read from the recording's own record when it is not and the
   stop has not arrived. `MAX_RECORDINGS`, 1,024, moves to `cavalry-proto`, where the
   driver's registry and the client's take it (card 227).
+- The Rust client holds an armed recording: `Cavalry::arm_recording(channel,
+  stream_id)` returns an `ArmedRecording`, and `ArmedRecording::poll()` returns the
+  `Recording` once the driver has started it with the stream's next image, or the
+  driver's error when it dropped the armed recording or its start failed. Before
+  this, a `start recording` the driver answered by arming was an error that named a
+  driver bug, and the second answer was dropped. `Cavalry::start_recording` now
+  returns `ClientError::RecordingArmed`, reason `recording-armed`, on such a stream,
+  with what to call instead. `cavalry` re-exports `ArmedRecording`. The C ABI is
+  unchanged: its call for an armed recording and the error's own code come with its
+  next version
+  ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
+  card 227).

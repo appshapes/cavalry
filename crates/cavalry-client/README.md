@@ -40,6 +40,16 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   records to other counters a second later, so each read checks that the record is
   still the recording's, and a position is never another counter's value. A client
   follows 1,024 recordings at most, the driver's own bound.
+- Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
+  `cavalry:udp` stream with a subscription and no publication or image yet, returns
+  an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the
+  driver has started it with the stream's next image, at the image's join position, so
+  that every frame of the image is recorded (ADR 0059). This is the order a cluster
+  follower needs: subscribe, arm, then the leader's first frame. The driver drops an
+  armed recording when the stream's last subscription goes, and `poll()` then returns
+  its error, code 20. `Cavalry::start_recording` on such a stream returns
+  `ClientError::RecordingArmed`, reason `recording-armed`, and holds nothing, while
+  the driver keeps the armed recording.
   `Cavalry::truncate_recording(id, position)`, `purge_segments(id, segment_base)` and
   `purge_recording(id)` cut, purge and delete a stopped recording; a live one, one a
   replay reads or one under another of the three is refused with code 24 (ADR 0031).
