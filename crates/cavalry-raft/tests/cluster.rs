@@ -10,7 +10,7 @@ use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, CommittedLog};
+use cavalry_client::{Cavalry, ClientError, CommittedLog};
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_proto::cluster::{Message, Stream};
@@ -858,6 +858,125 @@ fn a_service_reads_the_committed_log_on_every_member_and_nothing_past_the_commit
     for client in clients {
         client.close().expect("the client closes");
     }
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+}
+
+/// A service beside a follower that left the log and joined it again
+/// (`spec/cluster.md`, "The service"). The member names a new recording, which begins
+/// where it joined, its append position. A service that had read to that position
+/// opens the log there and reads on. A service whose position is below it is refused
+/// the replay with code 23: the entries before it are in the recording the member
+/// left, which this version names to no service.
+#[test]
+fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
+    let dir = TestDir::new("service-joins-again");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until(&mut members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    const ENTRIES: i64 = 10;
+    offer_entries(&mut members, ENTRIES);
+    let first = 96 + ENTRIES * 96;
+    run_until(&mut members, "the first entries committed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.commit_position() == first && m.module.append_position() == first)
+    });
+
+    // A service on follower 1 reads every entry committed so far.
+    let mut client = Cavalry::connect_to(&members[1].dir).expect("the service's client connects");
+    let mut log = client
+        .committed_log(0)
+        .expect("the driver answers")
+        .expect("the member has its log");
+    let first_recording = log.recording_id();
+    let mut read = Read::new();
+    run_until(&mut members, "the service read the first entries", |_| {
+        poll_log(&mut log, &mut read);
+        log.position() == first
+    });
+
+    // The leader's module stands still: each follower leaves the log, and the
+    // service's handle comes to its end at the position it had read.
+    run_until(
+        &mut members[1..],
+        "each follower timed out its silent leader and the service's log ended",
+        |members| {
+            poll_log(&mut log, &mut read);
+            log.is_ended()
+                && members.iter().all(|m| {
+                    m.module.counts().leader_heartbeat_timeouts == 1
+                        && m.module.election_state() == ElectionState::Canvass
+                })
+        },
+    );
+    assert_eq!(log.position(), first);
+    assert_eq!(read.len(), usize::try_from(ENTRIES).expect("a count") + 1);
+    log.close(&mut client).expect("the handle closes");
+
+    // The leader runs again, the follower joins the log on a new recording, and the
+    // leader appends more.
+    run_until(
+        &mut members,
+        "each follower joined the log again",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.election_state() == ElectionState::Closed)
+                && members[1..].iter().all(|m| {
+                    m.module
+                        .log_recording_id()
+                        .is_some_and(|id| id != first_recording)
+                })
+        },
+    );
+    offer_entries(&mut members, ENTRIES);
+    let second = first + ENTRIES * 96;
+    run_until(
+        &mut members,
+        "the entries after the join committed",
+        |members| {
+            members.iter().all(|m| {
+                m.module.commit_position() == second && m.module.append_position() == second
+            })
+        },
+    );
+
+    // Below the start of the recording the member names now: refused, and said so.
+    let refused = client
+        .committed_log(0)
+        .expect_err("position 0 is below the start of the member's new recording");
+    assert!(
+        matches!(refused, ClientError::Refused { raw_code: 23, .. }),
+        "{refused}"
+    );
+    // At its start, the position the service had read to: the service reads on, the
+    // ten entries appended after the join and nothing before them.
+    let mut log = client
+        .committed_log(first)
+        .expect("the driver answers")
+        .expect("the member has its log");
+    assert_ne!(log.recording_id(), first_recording);
+    assert_eq!(
+        Some(log.recording_id()),
+        members[1].module.log_recording_id()
+    );
+    let mut after = Read::new();
+    run_until(&mut members, "the service read what came after", |_| {
+        poll_log(&mut log, &mut after);
+        log.position() == second
+    });
+    assert_eq!(after.len(), usize::try_from(ENTRIES).expect("a count"));
+    assert_eq!(after[0].0, first);
+    log.close(&mut client).expect("the handle closes");
+    client.close().expect("the service's client closes");
+
     for member in members {
         member.module.close().expect("the member closes");
         member.driver.close().expect("the driver closes");

@@ -42,9 +42,9 @@ commit path runs per message.
   way the member stays in init with the recording held, and the next `do_work()`
   stops it again.
 - Tells a service where the log is: `cluster.log_recording_id` holds the id of the
-  member's recording of the log, −1 while it has none, stored before the member's
-  commit position exists and changed before a commit position the recording does not
-  hold is stored. A service is a client of the same driver that replays that
+  recording the member records the live log into, −1 while it records none, stored
+  before the member's commit position exists and changed before a commit position
+  the recording does not hold is stored. A service is a client of the same driver that replays that
   recording and reads it no further than `cluster.commit_position`:
   `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
   0066).

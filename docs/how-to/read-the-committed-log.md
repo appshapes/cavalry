@@ -94,9 +94,14 @@ its services read what it appends in the same way.
   whose line says `election closed` has a log. `WARN cluster-no-leader` and `WARN
   cluster-joined-late` are explained in
   [Run a cluster of three members](run-a-cluster.md#when-it-does-not-work).
-- `error 23 (position out of range)`: `--from` is past what this member has recorded.
-  The message gives the recording's extent. Use a `next position` that a run on this
-  member printed, or 0.
+- `error 23 (position out of range)`: `--from` is past what this member has recorded,
+  or below where the recording it names begins. The message gives the recording's
+  extent. When `--from` is past it, use a `next position` that a run on this member
+  printed, or 0. When the recording begins above `--from`, the member left the log
+  and joined it again: it records into a new recording from where it joined, and in
+  this version a service cannot read the entries before that from this member. Read
+  them on a member that has not left the log, one whose `cluster.elections` counter
+  is 1: its recording begins at 0.
 - `poll refused (closed)` with `the client closed: corrupt`, right after the `reading
   member` line: `--from` is a multiple of 32 at which no entry begins. The driver's
   replay finds no frame there and ends at once, and in this version the client that

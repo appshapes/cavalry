@@ -1083,9 +1083,18 @@ impl Cavalry {
     /// driver until a member is found.
     ///
     /// The refusals are those of [`Cavalry::add_subscription`] and
-    /// [`Cavalry::start_replay`]: a position that is not a multiple of 32 or is past
-    /// what the member has recorded is [`ClientError::Refused`] with code 23, and a
-    /// driver whose replays registry is full, 64 replays, is code 10.
+    /// [`Cavalry::start_replay`]: a position that is not a multiple of 32, is past
+    /// what the member has recorded, or is below where the recording the member names
+    /// begins is [`ClientError::Refused`] with code 23, and a driver whose replays
+    /// registry is full, 64 replays, is code 10.
+    ///
+    /// The recording the member names begins at 0 on a member that has not left the
+    /// log. A member that left the log and joined it again records into a new
+    /// recording, which begins where it joined, and the entries below that are in the
+    /// recording it left, which this version names to no service. A service whose
+    /// position is below the new recording's start is refused here, with code 23, and
+    /// reads no more of that member's log (`spec/cluster.md`, "The service" and "Out
+    /// of this version").
     ///
     /// ```
     /// use cavalry_client::{Cavalry, CommittedLog};
