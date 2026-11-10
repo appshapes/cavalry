@@ -28,6 +28,7 @@ use cavalry_shm::counters::generated::{
 /// process appended (`spec/cluster.md`, "The appointed leader").
 pub const NO_SESSION: i64 = -1;
 
+// state machine: cluster_role
 /// A member's role, with the value of the `cluster.role` gauge (`spec/cluster.md`,
 /// "Counters").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

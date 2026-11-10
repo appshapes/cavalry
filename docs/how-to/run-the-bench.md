@@ -177,6 +177,33 @@ shared runner is
    ([ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md)), each
    against its own profile's baseline (ADR 0016).
 
+   **When the bench jobs run.** The four bench jobs take their hosts for a change
+   that can move the bench, and for no other
+   ([ADR 0071](../decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md)).
+   CI's first job, `changes`, lists the change's files, a pull request's against its
+   base and a push's between the commit before it and the commit after, and
+   `scripts/bench-needed.py` answers `bench=false` only when every one of them is on
+   its list of paths known not to matter: `docs/`, `spec/`, `.claude/`, `.github/`
+   other than `ci.yml`, `scripts/` other than the scripts the bench jobs and the
+   decision run, `clients/`, `conformance/`, and the root's markdown. Then
+   `bench (linux)`, `bench (grip)`, `bench (udp)` and `bench (udp peer)` keep their
+   names, run on a hosted runner, print `bench-needed answered bench=false for this
+   change` and pass in seconds, and the `changes` job's log names each file with its
+   reason. Every other file runs the bench as before: anything under `crates/` or
+   `bench/`, a manifest or the lock, `counters.toml`, `config.toml`, the `justfile`,
+   `ci.yml`, and a path nobody listed. A push to `master` has one more condition:
+   the commit before it must have a completed, successful run of its own on `master`.
+   Runs of one branch go one at a time with one waiting, and a newer push takes the
+   waiting run's place, so a commit whose run was replaced that way, or whose bench
+   failed, has none, and the push after it runs the bench over both, pages or not;
+   the `changes` job's log says `the commit before the push, <commit>, has no
+   completed, successful run`. `python3 scripts/bench-needed.py --files <path>...`
+   prints the answer for the paths you give it. To run the bench at a commit whose
+   change it was skipped for, start the workflow by hand, which always runs it:
+   `gh workflow run ci.yml --ref <branch>`. On `master` such a run takes the waiting
+   place like a push, so start it when `gh run list --branch master --workflow ci.yml`
+   shows none waiting, or the next push takes its place.
+
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
    `python3 scripts/bench-compare.py --update`, which writes the newest result's git,
    date, percentiles and clock step into `bench/baseline.json` for that profile, as one
@@ -188,7 +215,9 @@ shared runner is
    Cargo.toml Cargo.lock justfile` prints nothing, so a dependency bump, a change to
    the recipes that build the harness or to the host check ends a tree as a code
    change does; a run of master's job at the tree is a process of it, and so is a run
-   of a pull request whose head is at the tree. A push gives the first run, and
+   of a pull request whose head is at the tree. A change the bench jobs report for
+   without their hosts (step 3, "When the bench jobs run") touches none of those
+   paths, so it is at its base's tree and adds no process to it. A push gives the first run, and
    `gh run rerun <run id> --job <job id>`, or the job's re-run button on the run's
    page, gives the next at the same commit whether the first passed or failed; for the
    link rows, whose two jobs re-run together only with the whole run, it is
@@ -402,8 +431,9 @@ shared runner is
    larger of the row's and the new process's, `p99_99_ns` the slowest run of both,
    still with no list, so the gate goes on comparing with `p99_99_ns`.
 
-5. Measure the link between the two bench hosts, which the `bench (udp)` job does on
-   every push with its peer job `bench (udp peer)`
+5. Measure the link between the two bench hosts, which the `bench (udp)` job does for
+   every push whose change can move the bench (step 3) with its peer job
+   `bench (udp peer)`
    ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). On `grip`, the
    peer, in one terminal:
 
@@ -561,6 +591,11 @@ shared runner is
   [ADR 0047](../decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md)
   the count left reallocations out, so a loop that grows a vector which already has a
   capacity fails the gate now where it passed before; size the vector at setup. The
+  crates' allocation tests count the same thing: each reads the `reallocations` of
+  `stats_alloc` beside its `allocations` and fails on either, `just lint` refuses a
+  test that reads one without the other, and
+  `crates/cavalry-client/tests/reallocation_counted.rs` shows a vector pushed past
+  its capacity counted (card 211). The
   harness's loops allocate on no path but their error returns, so the allocation is
   in the crates the row runs: `cavalry-shm` for a log row, `cavalry-client` and the
   driver's conductor for a client row, and the driver's sender and receiver as well

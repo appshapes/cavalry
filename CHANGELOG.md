@@ -1855,6 +1855,126 @@ user-visible change, added in the same commit as the change. The format follows
   transitions
   ([ADR 0067](docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md);
   card 227).
+- A cluster member runs over a driver: `cavalry_raft::ConsensusModule` is the consensus
+  module of the replicated log, a client of the driver in its directory. Three members
+  on three drivers appoint their leader, the followers arm their recordings before its
+  first frame, and an entry the leader's process offers is committed once a quorum has
+  synced it, with every member's recording holding the same bytes. The module stores
+  the member's role, election state, term, append position and commit position, the
+  recording that holds its log, and what it counts, as client counters in the
+  driver's counters file: the eleven counts of its core, from `Counts::by_counter`,
+  `cluster.commit_position`, and six counters this change registers in
+  `counters.toml`, ids 121 to 126, `cluster.role`, `cluster.election_state`,
+  `cluster.leadership_term_id`, `cluster.append_position`,
+  `cluster.messages_rejected` and `cluster.log_recording_id`, with the member's role
+  as the state machine `cluster_role`. `cluster.log_recording_id` names the
+  recording a service replays, −1 while the member records none, and is added
+  holding −1 before `cluster.commit_position` is added and stored before each
+  commit position, as `spec/cluster.md`, "The service", orders it
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)).
+  Every counter holds the member's value from its add: −1 for the term before the
+  first, never the 0 of its allocation. A follower that leaves the log holds its
+  recording until the driver has said where it stopped, and takes that stop as its
+  log's end. A stop that fails, or whose position the member has not read within
+  1 s (`stop-timeout`), is tried again on the next duty cycle and is never dropped.
+  A member does not start again on
+  a log directory that holds a term: the error says to start the cluster again as a
+  new cluster, every member on a new log directory
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
+- `cavalry run` starts a cluster member. Two configuration keys name the cluster,
+  `cluster.members`, the members string every member is given, and
+  `cluster.member.id`, this host's id in it, set as `CAVALRY_CLUSTER_MEMBERS` and
+  `CAVALRY_CLUSTER_MEMBER_ID`. With both set, `run` starts the member's consensus
+  module beside the driver, on a thread of its own with the conductor's idle strategy,
+  and stops it before the driver; with one set and not the other it starts nothing and
+  says which is missing. Its start line names the member's role and election state,
+  the counters labelled `cluster.role <id>` and `cluster.election_state <id>` in the
+  driver's `counters` file. `CAVALRY_CLUSTER_MEMBER_ID=-1`, the id's default written out,
+  is no member, the same as the variable unset. `cavalry doctor` checks both keys, `cluster-members` and
+  `cluster-member-id`: set together, a members string the protocol takes, an id the
+  string holds, and every endpoint a name that resolves. `cavalry::cluster` re-exports
+  `ConsensusModule` for a program that runs a member itself
+  ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
+  card 227).
+- The allocation tests of `cavalry-client` over the UDP send path and the UDP receive
+  path fail on a reallocation as well as on an allocation, which is what the bench's
+  gate has counted since
+  [ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md).
+  Before, a `Vec` or a `String` grown past a capacity it already had inside a test's
+  window was not counted, so the tests and the bench disagreed on what an allocation
+  is. `just lint` refuses an allocation test that reads one count without the other,
+  and `crates/cavalry-client/tests/reallocation_counted.rs` holds the counting
+  allocator to it ([Run the bench](docs/how-to/run-the-bench.md), "When it does not
+  work"; card 211).
+- The fixer's run finds the `ci` run GitHub held on its push when the listing by commit
+  leaves it out, by reading `ci.yml`'s own newest runs, and approves it; it reads the
+  branch's tip, so a pull request object that lags the push no longer hides the run.
+  When the head has no `ci` run the step can find after two minutes, on a pull request
+  that does not conflict with `master`, or a held run refuses the approval, the run now
+  fails and says what to run, where it printed `approved 0` and passed before, so a
+  fixer's push no longer goes without its gates in silence
+  ([Ask the agent to make a change](docs/how-to/ask-the-agent.md), "The fixer's push
+  has no gates"; card 215).
+- A subscription added right after a stream's last one was removed is no longer given
+  an image the driver is retiring. Removing the last subscription on a `cavalry:udp`
+  endpoint and stream starts the retire of its image, and until the receiver had
+  finished the driver still listed the image as live: a subscription added in that
+  moment was sent `available image` for it, the image's log was unlinked a duty cycle
+  later, and a client that had not opened the log yet closed with `corrupt`. A cluster
+  follower that leaves the log and joins it again adds its subscription in that
+  moment. The add now waits for the endpoint to close and binds it again, as an add
+  on a closing endpoint does, and is given the stream's next image at once; on an
+  endpoint that another stream's subscription keeps open it runs at once and is not
+  given the image being retired. An add that waits past 5 s is code 4 as before, and
+  its message and `cavalry doctor`'s `subscription.add_deferred_timed_out` finding now
+  name both causes and what to do for each: a recording of the image being retired
+  that has not yet stopped, its recorder behind, and a receiver thread starved of CPU
+  ([ADR 0068](docs/decisions/0068-give-an-image-being-retired-to-no-new-subscription.md);
+  card 227).
+- The soak samples its processes: each minute `scripts/soak.sh` adds one line for the
+  driver and one for the soak program to `samples/processes-<start>.txt`, one file
+  for each run, with the process's
+  resident memory, its three parts on Linux (heap and stacks, files on a disk, files
+  on a tmpfs, which is where the driver's mappings are), its virtual size, its
+  threads and its open descriptors, so that a week shows a course and not one
+  reading. [Set up a soak host](docs/how-to/set-up-a-soak-host.md), steps 5 and 6,
+  says what a line holds and how to tell growth from the mappings a driver brings
+  into RAM when it starts (card 240).
+- `cavalry doctor` explains a cluster member from its counters. On a driver that is a
+  member it prints `cluster-member`, a note with the member's id, whether it leads or
+  follows, its term, its election's state and its append and commit positions. It
+  warns when the member follows no leader (`cluster-no-leader`), saying from
+  `CAVALRY_CLUSTER_MEMBERS` whether it is the appointed leader and what it waits for,
+  or which member is and on whose host to look next. It notes a member that has
+  taken its leader and joins its log, with the network path that needs
+  (`cluster-joining`). It warns when the member's elections fail
+  (`cluster-joined-late`), because the leader's log does not reach it, which it names
+  first with the two endpoints to check before a new cluster, or because it started
+  late or lost its log; and when the leader has lost its quorum
+  (`cluster-quorum-lost`). It fails when the appointed leader found
+  members ahead of its own log and so does not lead, or leads and does not close its
+  election (`cluster-leader-behind`), and it notes a commit position behind the
+  leader's own append position (`cluster-commit-waits`). It warns too, with the
+  counter's own advice, when the member rejected consensus messages, as from a member
+  of another version (`cluster.messages_rejected`), stopped hearing its leader
+  (`cluster.leader_heartbeat_timeouts`) or lost the leader's log stream
+  (`cluster.log_images_lost`). Each names what to do. An armed recording that has
+  started, which every follower has, is no longer reported: `recording.armed` warns
+  only for recordings still waiting for their image. The new how-to,
+  [Run a cluster of three members](docs/how-to/run-a-cluster.md), starts three members
+  on one host and reads each finding (card 227).
+- CI takes the two bench hosts only for a change that can move the bench. A first
+  job reads the change's files, and when every one of them is on a list of paths known
+  not to matter, pages, ADRs, spec pages, other workflows, scripts the bench does not
+  run and the clients, the four bench checks keep their names and pass in seconds on a
+  hosted runner; anything under `crates/` or `bench/`, a manifest, the `justfile`,
+  `ci.yml` or a path nobody listed runs the bench as before, a run started by hand
+  always does, and so does a push onto a commit that has no green run of its own, so a
+  page never turns an unmeasured or red `master` green. 22 of the last 80 commits were
+  of the first kind and each had held the hosts for about 21 minutes a run
+  ([ADR 0071](docs/decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md);
+  [Run the bench](docs/how-to/run-the-bench.md), step 3; card 246).
 - `cavalry doctor`'s `recording-write-failed` finding says where such a recording
   stopped: at the position written after a write the disk refused, and at the position
   last synced, with no stop in the catalog until the driver starts again, after a sync

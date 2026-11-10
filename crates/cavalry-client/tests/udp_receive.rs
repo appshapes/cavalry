@@ -404,14 +404,30 @@ fn every_message_arrives_once_and_in_order_through_a_lossy_reordering_shim() {
         subscription.poll(|_, _| {}, 0).expect("the poll applies");
         subscription.image_count() == 0
     }));
-    assert_eq!(read_counter(dir.path(), IMAGE_ENDED), 1);
-    assert_eq!(read_counter(dir.path(), IMAGE_REMOVED), 1);
+    // The conductor sends `unavailable image` before it unlinks the image's log and
+    // counts `image.removed` (`Conductor::on_image_retired`, then `remove_udp_image`),
+    // so a client that has just seen its image go can read that counter before it
+    // moves. The count is waited for here, and both of the image's counts are read
+    // again once the driver has closed and nothing can move them: each exactly once.
+    let counters = CountersReader::open(dir.path()).expect("the counters file opens");
+    let count = |id: cavalry_shm::counters::CounterId| {
+        counters
+            .read_acquire(id.record())
+            .expect("the counter is read")
+    };
+    assert!(
+        wait_until(Duration::from_secs(10), || count(IMAGE_REMOVED) == 1),
+        "image.removed is {} ten seconds after the subscription saw its image go",
+        count(IMAGE_REMOVED)
+    );
     let (forwarded, dropped, duplicated, held, _) = shim.stop();
     assert!(dropped > 0 && duplicated > 0 && held > 0, "the faults ran");
     assert!(forwarded > 0);
     subscription.close().expect("closes");
     client.close().expect("closes");
     driver.close().expect("the driver closes");
+    assert_eq!(count(IMAGE_ENDED), 1, "the image ended once");
+    assert_eq!(count(IMAGE_REMOVED), 1, "and was removed once");
 }
 
 /// Card 196: a body whose aligned frame does not divide the 16 MiB term leaves a padding

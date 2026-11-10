@@ -299,10 +299,10 @@ pub const IMAGE_UNSUBSCRIBED: CounterId = CounterId(96);
 /// `image.removed`, a static counter: Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5).
 pub const IMAGE_REMOVED: CounterId = CounterId(97);
 
-/// `subscription.add_deferred`, a static counter: `add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049).
+/// `subscription.add_deferred`, a static counter: `add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068).
 pub const SUBSCRIPTION_ADD_DEFERRED: CounterId = CounterId(98);
 
-/// `subscription.add_deferred_timed_out`, a static counter: `add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049).
+/// `subscription.add_deferred_timed_out`, a static counter: `add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close, its images still being retired or its socket still with the receiver, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049; ADR 0068).
 pub const SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT: CounterId = CounterId(99);
 
 /// `subscription.add_deferred_waiting`, a static gauge: `add subscription` commands waiting now for a `cavalry:udp` channel's previous receive endpoint to close, each holding a slot of the subscriptions registry until the close runs it, its client goes or the closing endpoint wait refuses it (spec/client-protocol.md, Commands, Sizes; ADR 0049).
@@ -367,6 +367,24 @@ pub const CLUSTER_ELECTION_STEPS: CounterId = CounterId(119);
 
 /// `cluster.elections_closed`, a client counter: Elections one cluster member closed: leader ready to closed, its term's first entry appended, or follower ready to closed, its append position sent to its leader (spec/cluster.md, Counters; ADR 0067); key and label as cluster.elections.
 pub const CLUSTER_ELECTIONS_CLOSED: CounterId = CounterId(120);
+
+/// `cluster.role`, a client gauge: One cluster member's role: 0 follower, 1 candidate, 2 leader (spec/cluster.md, Counters). The member's consensus module adds the counter and stores it; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_ROLE: CounterId = CounterId(121);
+
+/// `cluster.election_state`, a client gauge: The state of one cluster member's election, the code spec/cluster.md, Roles and the election, gives it, 17 when no election runs; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_ELECTION_STATE: CounterId = CounterId(122);
+
+/// `cluster.leadership_term_id`, a client gauge: The term one cluster member leads or follows, -1 before the first; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LEADERSHIP_TERM_ID: CounterId = CounterId(123);
+
+/// `cluster.append_position`, a client gauge: One cluster member's append position: the end of the contiguous span its recordings of the log hold, as a sync has made it durable (spec/cluster.md, The log; ADR 0060); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_APPEND_POSITION: CounterId = CounterId(124);
+
+/// `cluster.messages_rejected`, a client counter: Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_MESSAGES_REJECTED: CounterId = CounterId(125);
+
+/// `cluster.log_recording_id`, a client gauge: The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LOG_RECORDING_ID: CounterId = CounterId(126);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -1159,7 +1177,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "subscription.add_deferred",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049).",
+        doc: "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068).",
         doctor: "",
     },
     CounterDef {
@@ -1167,8 +1185,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "subscription.add_deferred_timed_out",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "`add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049).",
-        doctor: "The receiver did not close a channel's previous receive endpoint within 5 s of an add on it, so the add was refused with code 4: the driver's receiver thread is behind, starved of CPU under a cgroup quota or busy; give the driver's threads the CPU they need, then add the subscription again.",
+        doc: "`add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close, its images still being retired or its socket still with the receiver, and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049; ADR 0068).",
+        doctor: "A channel's previous receive endpoint did not close within 5 s of an add on it, its images still being retired or its socket still with the receiver, so the add was refused with code 4. If a recording of one of its images had not yet stopped, the image's log was kept until the recorder had written up to where the image stopped, and a recording.position that does not move is a recorder behind a slow or failing disk: check recording.write_failed and the log directory's disk with `cavalry doctor`, or stop the recording before removing the stream's last subscription. Otherwise the driver's receiver thread is behind, starved of CPU under a cgroup quota or busy: give the driver's threads the CPU they need. Then add the subscription again.",
     },
     CounterDef {
         id: SUBSCRIPTION_ADD_DEFERRED_WAITING,
@@ -1337,5 +1355,53 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Elections one cluster member closed: leader ready to closed, its term's first entry appended, or follower ready to closed, its append position sent to its leader (spec/cluster.md, Counters; ADR 0067); key and label as cluster.elections.",
         doctor: "A cluster.elections_closed that stays below cluster.elections minus cluster.elections_failed is an election still running: the member's cluster.election_state gauge (spec/cluster.md, Counters) is the state it waits in, and docs/reference/counters.md, State machines, cluster_election, names the counter of each way out of that state.",
+    },
+    CounterDef {
+        id: CLUSTER_ROLE,
+        name: "cluster.role",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "One cluster member's role: 0 follower, 1 candidate, 2 leader (spec/cluster.md, Counters). The member's consensus module adds the counter and stores it; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_ELECTION_STATE,
+        name: "cluster.election_state",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The state of one cluster member's election, the code spec/cluster.md, Roles and the election, gives it, 17 when no election runs; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A member that stays at 1, canvass, has found no leader it can follow: the appointed leader is not running, cannot be reached on the consensus endpoints, or holds a log behind this member's. A leader that stays at 8, leader ready, waits for a member that has not joined its log, for at most 10 s.",
+    },
+    CounterDef {
+        id: CLUSTER_LEADERSHIP_TERM_ID,
+        name: "cluster.leadership_term_id",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The term one cluster member leads or follows, -1 before the first; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_APPEND_POSITION,
+        name: "cluster.append_position",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "One cluster member's append position: the end of the contiguous span its recordings of the log hold, as a sync has made it durable (spec/cluster.md, The log; ADR 0060); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "An append position behind the leader's on one member is a recorder whose disk syncs slowly, or a member the log no longer reaches: compare its recording.synced_position and its cluster.election_state.",
+    },
+    CounterDef {
+        id: CLUSTER_MESSAGES_REJECTED,
+        name: "cluster.messages_rejected",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A member sends consensus messages this member cannot read: check that every member runs the same version.",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_RECORDING_ID,
+        name: "cluster.log_recording_id",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A cluster.log_recording_id that stays at -1 on a member whose cluster.election_state is 17, its election closed, is a follower whose recording of the leader's image never started, so that its cluster.append_position does not move: its driver's recording.armed_failed counts the failure and names the counter of the step that failed. A member in an election holds -1 until it has joined the log.",
     },
 ];
