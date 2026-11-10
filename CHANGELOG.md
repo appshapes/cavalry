@@ -1908,7 +1908,8 @@ user-visible change, added in the same commit as the change. The format follows
   allocator to it ([Run the bench](docs/how-to/run-the-bench.md), "When it does not
   work"; card 211).
 - The soak samples its processes: each minute `scripts/soak.sh` adds one line for the
-  driver and one for the soak program to `samples/processes.txt`, with the process's
+  driver and one for the soak program to `samples/processes-<start>.txt`, one file
+  for each run, with the process's
   resident memory, its three parts on Linux (heap and stacks, files on a disk, files
   on a tmpfs, which is where the driver's mappings are), its virtual size, its
   threads and its open descriptors, so that a week shows a course and not one

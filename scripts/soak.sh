@@ -8,9 +8,10 @@
 #
 #   - every SAMPLE_SECONDS it writes `cavalry doctor`'s report and a copy of the
 #     counters file under $SOAK_DIR/samples, named by the time, and appends one line
-#     for the driver and one for the program to $SOAK_DIR/samples/processes.txt, with
-#     the same time: the process's resident memory, its parts, its virtual size, its
-#     threads and its open descriptors (card 240); nothing prunes them;
+#     for the driver and one for the program to the run's own file there,
+#     processes-<the run's start>.txt, with the same time: the process's resident
+#     memory, its parts, its virtual size, its threads and its open descriptors (card
+#     240); nothing prunes them;
 #   - every ROTATE_SECONDS it stops the recording and starts a new one, purges the
 #     segments of the one it stopped before the middle of its hour, and deletes every
 #     recording older than KEEP_RECORDINGS rotations, so retention runs on a host whose
@@ -52,6 +53,9 @@ soak="$SOAK_BIN/examples/soak"
 log_dir="$SOAK_DIR/log"
 samples="$SOAK_DIR/samples"
 state="$SOAK_DIR/recordings.txt"   # one line per recording started: <id> <start epoch> <state>
+# One file of process samples for each run, named by the run's start, so that a run's
+# first line and its last are of the same two processes.
+processes="$samples/processes-$(date -u +%Y%m%dT%H%M%SZ).txt"
 stop_file="$SOAK_DIR/stop"
 
 say() { printf 'soak.sh: %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -149,35 +153,45 @@ rotate() {
 # each page once, so `shmem_kib` is the mappings and `anon_kib` is what could leak.
 # `fds` counts /proc/<pid>/fd. Where there is no /proc, as on macOS, `ps` gives the
 # resident memory, the virtual size and the threads, `lsof` the descriptors, and the
-# three parts read `-`. A process that is gone is `<time> <name> pid=<pid> gone`.
+# three parts read `-`; whether there is one is decided once, when the script starts.
+# A value that could not be read is `-`, never 0, and a process whose resident memory
+# could not be read, because it ended before or while the script looked, has
+# `<time> <name> pid=<pid> gone` for its line. On Linux the function starts no
+# process of its own, so that a sample costs the host next to nothing.
 #
 # A soak of a cluster (ADR 0061, condition 5) samples each member with one more call.
+if [ -r /proc/self/status ]; then have_proc=1; else have_proc=0; fi
 sample_process() {
     local at=$1 name=$2 pid=$3
-    local rss=- anon=- file=- shmem=- vsz=- threads=- fds=-
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    local rss="" anon=- file=- shmem=- vsz=- threads=- fds=- key value _
+    if [ -n "$pid" ] && [ "$have_proc" = 1 ]; then
+        while read -r key value _; do
+            case "$key" in
+                VmRSS:) rss=$value ;;
+                RssAnon:) anon=$value ;;
+                RssFile:) file=$value ;;
+                RssShmem:) shmem=$value ;;
+                VmSize:) vsz=$value ;;
+                Threads:) threads=$value ;;
+            esac
+        done 2>/dev/null < "/proc/$pid/status"
+        set -- "/proc/$pid/fd"/*
+        if [ -e "$1" ]; then fds=$#; fi
+    elif [ -n "$pid" ]; then
+        read -r rss vsz < <(ps -o rss= -o vsz= -p "$pid" 2>/dev/null)
+        if [ -n "$rss" ]; then
+            threads=$(ps -M -p "$pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+            fds=$(lsof -n -P -a -p "$pid" -d 0-1048575 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+            if [ "$threads" = 0 ]; then threads=-; fi
+            if [ "$fds" = 0 ]; then fds=-; fi
+        fi
+    fi
+    if [ -z "$rss" ]; then
         printf '%s %s pid=%s gone\n' "$at" "$name" "${pid:--}"
         return
     fi
-    if [ -r "/proc/$pid/status" ]; then
-        read -r rss anon file shmem vsz threads < <(awk '
-            $1 == "VmRSS:" { rss = $2 }
-            $1 == "RssAnon:" { anon = $2 }
-            $1 == "RssFile:" { file = $2 }
-            $1 == "RssShmem:" { shmem = $2 }
-            $1 == "VmSize:" { vsz = $2 }
-            $1 == "Threads:" { threads = $2 }
-            function known(value) { return value == "" ? "-" : value }
-            END { print known(rss), known(anon), known(file), known(shmem), known(vsz), known(threads) }
-        ' "/proc/$pid/status" 2>/dev/null)
-        fds=$(ls "/proc/$pid/fd" 2>/dev/null | wc -l | tr -d ' ')
-    else
-        read -r rss vsz < <(ps -o rss= -o vsz= -p "$pid" 2>/dev/null)
-        threads=$(ps -M -p "$pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
-        fds=$(lsof -a -p "$pid" -d 0-1048575 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
-    fi
     printf '%s %s pid=%s rss_kib=%s anon_kib=%s file_kib=%s shmem_kib=%s vsz_kib=%s threads=%s fds=%s\n' \
-        "$at" "$name" "$pid" "${rss:--}" "${anon:--}" "${file:--}" "${shmem:--}" "${vsz:--}" "${threads:--}" "${fds:--}"
+        "$at" "$name" "$pid" "$rss" "$anon" "$file" "$shmem" "${vsz:--}" "$threads" "$fds"
 }
 sample() {
     local at
@@ -188,7 +202,7 @@ sample() {
     {
         sample_process "$at" driver "$driver_pid"
         sample_process "$at" soak "$soak_pid"
-    } >> "$samples/processes.txt"
+    } >> "$processes"
 }
 
 say "starting: driver on $CAVALRY_DIR, log directory $log_dir, stream $STREAM_ID at $RATE messages/s"
