@@ -289,17 +289,17 @@ public final class Quickstart {
         List<Integer> seen = new ArrayList<>();
         FragmentHandler unexpected = (body, header) -> fail("a fragment the test did not expect, after " + seen);
 
+        // A subscription takes its image on a poll, once the client's conductor has handed it
+        // over, which is after the driver made it: a publication can accept an offer before
+        // the subscription holds the image, and a poll then delivers nothing (cards 223, 233
+        // and 235). So wait for the image first. Nothing is offered yet, so these polls deliver
+        // nothing, and the one poll of ten below reads every message.
         long until = deadline();
-        while (true) {
-            subscription.poll(unexpected, 10); // nothing is offered yet; the image joins on a poll
-            long position = publication.offer(message(0));
-            if (position >= 0) break;
-            if (position == Abi.PUBLICATION_CLOSED || position == Abi.PUBLICATION_MAX_POSITION_EXCEEDED
-                || position == Abi.PUBLICATION_ERROR || passed(until)) {
-                fail(name + ": the first offer returned " + codeName(position) + " (" + position + ")");
-            }
+        while (subscription.imageCount() == 0) {
+            subscription.poll(unexpected, 10);
+            if (passed(until)) fail(name + ": the subscription held no image after 10 s");
         }
-        for (int i = 1; i < 10; i++) offerOrFail(name, publication, message(i), i);
+        for (int i = 0; i < 10; i++) offerOrFail(name, publication, message(i), i);
 
         FragmentHandler throwsOn3 = (body, header) -> {
             int index = indexOf(body);

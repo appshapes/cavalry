@@ -1664,3 +1664,11 @@ user-visible change, added in the same commit as the change. The format follows
   line, with what waits on a person and an estimate
   ([Where is Cavalry, and what is left before early testers?](docs/explanation/where-cavalry-is-and-what-is-left.md);
   card 234).
+- The five language runners' handler round no longer fails about one CI run in
+  several with "it saw []". The round offered ten messages and polled once; a
+  publication can accept an offer before the subscription holds its image, which it
+  takes on a poll after the client's conductor hands it over, so that one poll could
+  deliver nothing. No message was lost: the ten arrived on a later poll, once and in
+  order. The runners now poll until `image_count` is above 0 before the ten offers,
+  and `Subscription::poll`'s documentation says what a caller sees and what to do
+  (cards 223, 233 and 235).
