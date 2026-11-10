@@ -1180,6 +1180,19 @@ impl Conductor {
             } => {
                 self.change_destination(client_id, correlation_id, registration_id, channel, false);
             }
+            // The counter commands of version 7 decode, and their registry is the second
+            // of ADR 0062's three changes: until it lands the driver answers both with
+            // code 11 and registers nothing, as the CHANGELOG says.
+            Command::AddCounter { correlation_id, .. }
+            | Command::RemoveCounter { correlation_id, .. } => self.send_error(
+                correlation_id,
+                ErrorCode::GenericError,
+                &format!(
+                    "this driver decodes add counter and remove counter and does not yet \
+                     register a client's counter (ADR 0062): nothing was added or removed; \
+                     run a driver that holds the client counters registry; see {ERRORS_DOC}"
+                ),
+            ),
         }
     }
 

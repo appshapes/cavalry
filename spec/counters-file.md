@@ -52,7 +52,7 @@ Record i is at offset 128 + i × 256 and is 256 bytes, Aeron's counter metadata 
 | 0 | 4 | state | i32 | the driver, with a release store | everyone, with an acquire load | 0 unused, 1 allocated, −1 reclaimed |
 | 4 | 4 | type id | i32 | the driver | everyone | the `id` of a counter in `counters.toml` |
 | 8 | 8 | reclaim deadline | i64 | the driver | the driver | nanoseconds since the Unix epoch, or 0 |
-| 16 | 112 | key | bytes | the driver | everyone | opaque; the counter's `doc` in `counters.toml` says its layout, and a static counter's key is all zero |
+| 16 | 112 | key | bytes | the driver | everyone | opaque; the counter's `doc` in `counters.toml` says its layout, a static counter's key is all zero, and a client counter's is the bytes its `add counter` gave, with zero bytes after them |
 | 128 | 4 | label length | i32 | the driver | everyone | 0 to 124 |
 | 132 | 124 | label | bytes | the driver | everyone | UTF-8; the first label-length bytes are the label, the rest are 0 |
 
@@ -63,7 +63,11 @@ state is not 1 is not a counter. To free counter i the driver sets state to −1
 reclaim deadline to the time after which the record may be reused; it reuses the record
 by allocating it again, after the deadline, which rewrites every field. The label of a
 static counter is its name in `counters.toml`; the label of an instance counter is that
-name, a space, and the key's text as the counter's `doc` defines it.
+name, a space, and the key's text as the counter's `doc` defines it. A client counter's
+type id, key and label are the ones its `add counter` gave
+(`spec/client-protocol.md`, "Commands"; ADR 0062): the driver writes them for the
+client, checks the label's length and that it is UTF-8, and leaves the instance
+counter's rule for the label to the client.
 
 ## Value slot
 
@@ -87,8 +91,11 @@ consistent pair of counters reads each twice and retries when they moved.
 `counters.toml` at the repository root is the single source of every counter. Each
 `[[counter]]` entry has an `id` that is never reused, a `name`, a `kind` (`counter` or
 `gauge`), a `scope` (`static`, one counter allocated when the driver starts, with the
-record whose type id is the entry's id; or `instance`, one counter per key, allocated
-when the instance is created), a `doc` sentence and a `doctor` sentence. The reference
+record whose type id is the entry's id; `instance`, one counter per key, allocated
+when the instance is created; or `client`, one counter per key, allocated when a
+client adds it with `add counter` and freed when that client removes it, closes or is
+timed out, its value written by that client and never by the driver), a `doc`
+sentence and a `doctor` sentence. The reference
 page `docs/reference/counters.md` and the Rust constants in `cavalry-shm` are generated
 from it, and `just lint-counters` fails when either is stale or an entry lacks a field.
 

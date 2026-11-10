@@ -19,6 +19,11 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("the vectors' strings are UTF-8")
 }
 
+/// A bytes field as the vectors give one: lowercase hex.
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The decoded command as the vector's `fields` object: the field names of the spec's
 /// tables plus `name`.
 fn command_fields(command: &Command<'_>) -> Value {
@@ -137,6 +142,22 @@ fn command_fields(command: &Command<'_>) -> Value {
         } => {
             json!({"name": "add_destination", "client_id": client_id, "correlation_id": correlation_id, "registration_id": registration_id, "channel": text(channel)})
         }
+        Command::AddCounter {
+            client_id,
+            correlation_id,
+            type_id,
+            key,
+            label,
+        } => {
+            json!({"name": "add_counter", "client_id": client_id, "correlation_id": correlation_id, "counter_type_id": type_id, "key": to_hex(key), "label": text(label)})
+        }
+        Command::RemoveCounter {
+            client_id,
+            correlation_id,
+            registration_id,
+        } => {
+            json!({"name": "remove_counter", "client_id": client_id, "correlation_id": correlation_id, "registration_id": registration_id})
+        }
         Command::RemoveDestination {
             client_id,
             correlation_id,
@@ -235,6 +256,18 @@ fn event_fields(event: &Event<'_>) -> Value {
             stream_id,
         } => {
             json!({"name": "replay_ready", "correlation_id": correlation_id, "replay_session_id": replay_session_id, "recording_id": recording_id, "start_position": start_position, "session_id": session_id, "stream_id": stream_id})
+        }
+        Event::CounterReady {
+            correlation_id,
+            counter_id,
+        } => {
+            json!({"name": "counter_ready", "correlation_id": correlation_id, "counter_id": counter_id})
+        }
+        Event::UnavailableCounter {
+            registration_id,
+            counter_id,
+        } => {
+            json!({"name": "unavailable_counter", "registration_id": registration_id, "counter_id": counter_id})
         }
         Event::ReplayStopped {
             replay_session_id,

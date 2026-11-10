@@ -801,7 +801,7 @@ mod tests {
     use cavalry_shm::spsc;
 
     use super::{
-        LogDirectory, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome, Registry,
+        Event, LogDirectory, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome, Registry,
         ReplayRegistration, ReplayRegistry, event, log_name,
     };
     use crate::error::Closed;
@@ -944,10 +944,11 @@ mod tests {
     const CLIENT_TIMEOUT: (i32, &[u8]) = (3850, &[5, 0, 0, 0, 0, 0, 0, 0]);
     /// `operation-success`: type 3844, correlation id 3.
     const OPERATION_SUCCESS: (i32, &[u8]) = (3844, &[3, 0, 0, 0, 0, 0, 0, 0]);
-    /// The vectors whose `error` is set, with that error.
+    /// The vectors whose `error` is set, with that error: `event-too-short`,
+    /// `event-unknown-type`, `event-string-runs-past-message` and `event-length-trailing`.
     const MALFORMED: [(&str, i32, &[u8]); 4] = [
         ("too-short", 3844, &[3, 0, 0, 0]),
-        ("type", 3848, &[3, 0, 0, 0, 0, 0, 0, 0]),
+        ("type", 3851, &[3, 0, 0, 0, 0, 0, 0, 0]),
         (
             "string",
             3841,
@@ -1050,6 +1051,13 @@ mod tests {
     #[test]
     fn an_event_that_fails_a_decoding_check_closes_it() {
         for (error, type_id, message) in MALFORMED {
+            // The fixture fails the check it is named for, so that one which drifts from
+            // the vectors fails here rather than passing on another check.
+            assert_eq!(
+                Event::parse(type_id, message).map_err(|e| e.reason()),
+                Err(error),
+                "the `{error}` vector"
+            );
             assert_eq!(
                 event(5, NO_PENDING, type_id, message),
                 Err(Closed::Corrupt),

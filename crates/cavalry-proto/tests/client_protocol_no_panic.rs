@@ -1,6 +1,6 @@
 //! Every byte string, under every type id, either decodes to a message that encodes to
 //! the same length and decodes again to the same message, or is rejected with one of
-//! the spec's four reasons. Never a panic (invariant 2; CLAUDE.md gate 1, "frame
+//! the spec's five reasons. Never a panic (invariant 2; CLAUDE.md gate 1, "frame
 //! parsers are fuzzed"; ADR 0019). The bytes themselves need not round-trip: a string's
 //! padding is zero when written and not read, so a padding byte a mutation set is
 //! decoded past and written back as zero. This runs on every `just test`.
@@ -21,13 +21,14 @@ impl XorShift {
     }
 }
 
-const REASONS: [&str; 4] = ["too-short", "type", "string", "length"];
+const REASONS: [&str; 5] = ["too-short", "type", "string", "counter", "length"];
 
-const COMMAND_TYPES: [i32; 16] = [
-    1, 2, 3, 4, 5, 6, 7, 8, 11, 0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107,
+const COMMAND_TYPES: [i32; 18] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107,
 ];
-const EVENT_TYPES: [i32; 12] = [
-    0x0F01, 0x0F02, 0x0F03, 0x0F04, 0x0F05, 0x0F06, 0x0F07, 0x0F0A, 0x1001, 0x1002, 0x1003, 0x1004,
+const EVENT_TYPES: [i32; 14] = [
+    0x0F01, 0x0F02, 0x0F03, 0x0F04, 0x0F05, 0x0F06, 0x0F07, 0x0F08, 0x0F09, 0x0F0A, 0x1001, 0x1002,
+    0x1003, 0x1004,
 ];
 
 fn check(type_id: i32, bytes: &[u8]) {
@@ -117,6 +118,18 @@ fn valid_messages() -> Vec<(i32, Vec<u8>)> {
             registration_id: 4,
             channel: b"",
         },
+        Command::AddCounter {
+            client_id: 3,
+            correlation_id: 20,
+            type_id: 109,
+            key: &[2, 0, 0, 0],
+            label: b"cluster.commit_position 2",
+        },
+        Command::RemoveCounter {
+            client_id: 3,
+            correlation_id: 21,
+            registration_id: 20,
+        },
     ];
     let events = [
         Event::Error {
@@ -141,6 +154,14 @@ fn valid_messages() -> Vec<(i32, Vec<u8>)> {
             publication_limit_counter_id: 13,
             channel_status_indicator_id: -1,
             log_file_name: b"publications/7.logbuffer",
+        },
+        Event::CounterReady {
+            correlation_id: 20,
+            counter_id: 97,
+        },
+        Event::UnavailableCounter {
+            registration_id: 20,
+            counter_id: 97,
         },
         Event::ClientTimeout { client_id: 5 },
         Event::RecordingReady {
