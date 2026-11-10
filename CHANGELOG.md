@@ -1896,6 +1896,7 @@ user-visible change, added in the same commit as the change. The format follows
   string holds, and every endpoint a name that resolves. `cavalry::cluster` re-exports
   `ConsensusModule` for a program that runs a member itself
   ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
+  card 227).
 - A subscription added right after a stream's last one was removed is no longer given
   an image the driver is retiring. Removing the last subscription on a `cavalry:udp`
   endpoint and stream starts the retire of its image, and until the receiver had
