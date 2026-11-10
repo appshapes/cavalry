@@ -1941,3 +1941,26 @@ user-visible change, added in the same commit as the change. The format follows
   reading. [Set up a soak host](docs/how-to/set-up-a-soak-host.md), steps 5 and 6,
   says what a line holds and how to tell growth from the mappings a driver brings
   into RAM when it starts (card 240).
+- `cavalry doctor` explains a cluster member from its counters. On a driver that is a
+  member it prints `cluster-member`, a note with the member's id, whether it leads or
+  follows, its term, its election's state and its append and commit positions. It
+  warns when the member follows no leader (`cluster-no-leader`), saying from
+  `CAVALRY_CLUSTER_MEMBERS` whether it is the appointed leader and what it waits for,
+  or which member is and on whose host to look next. It notes a member that has
+  taken its leader and joins its log, with the network path that needs
+  (`cluster-joining`). It warns when the member's elections fail
+  (`cluster-joined-late`), because the leader's log does not reach it, which it names
+  first with the two endpoints to check before a new cluster, or because it started
+  late or lost its log; and when the leader has lost its quorum
+  (`cluster-quorum-lost`). It fails when the appointed leader found
+  members ahead of its own log and so does not lead, or leads and does not close its
+  election (`cluster-leader-behind`), and it notes a commit position behind the
+  leader's own append position (`cluster-commit-waits`). It warns too, with the
+  counter's own advice, when the member rejected consensus messages, as from a member
+  of another version (`cluster.messages_rejected`), stopped hearing its leader
+  (`cluster.leader_heartbeat_timeouts`) or lost the leader's log stream
+  (`cluster.log_images_lost`). Each names what to do. An armed recording that has
+  started, which every follower has, is no longer reported: `recording.armed` warns
+  only for recordings still waiting for their image. The new how-to,
+  [Run a cluster of three members](docs/how-to/run-a-cluster.md), starts three members
+  on one host and reads each finding (card 227).
