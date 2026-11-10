@@ -765,7 +765,8 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
     assert_eq!(cluster_counter(&dirs[1].0, CLUSTER_ROLE), Some(0));
     assert_eq!(cluster_counter(&dirs[2].0, CLUSTER_ROLE), Some(0));
 
-    // Doctor with the keys set as the members have them finds nothing wrong with them.
+    // Doctor with the keys set as the members have them finds nothing wrong with them,
+    // and explains the member.
     let output = cavalry()
         .args(["doctor", "--dir", &dirs[1].arg()])
         .env("CAVALRY_CLUSTER_MEMBERS", &members)
@@ -773,7 +774,14 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
         .output()
         .expect("doctor runs");
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(!text.contains("cluster-member"), "{text}");
+    assert!(!text.contains("FAIL cluster-member"), "{text}");
+    // And says what the member is, from its counters.
+    assert!(
+        text.contains("note cluster-member")
+            && text
+                .contains("this driver is cluster member 1, a follower in term 0, election closed"),
+        "{text}"
+    );
 
     // SIGTERM stops the member and then the driver, and the exit is clean.
     for (member, run) in runs.drain(..).enumerate().rev() {
