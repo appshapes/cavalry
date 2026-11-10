@@ -1194,6 +1194,66 @@ impl TermReader {
         })
     }
 
+    /// [`TermReader::poll`] bounded by `limit_position` (`spec/log-buffer.md`,
+    /// "Reading"; ADR 0066): the read also stops before the first frame that begins at
+    /// or past the limit, committed or not, and a frame that begins below it is
+    /// delivered whole. A limit at or below the reader's position reads nothing, and
+    /// the position never moves back. In Aeron, this is `Image.boundedPoll`.
+    ///
+    /// A loop of its own and not a parameter of [`TermReader::poll`]: that loop is the
+    /// subscriber's per-message path and its shape is measured, as its comment says,
+    /// and a reader that passes no bound must not pay for one.
+    #[inline]
+    pub fn bounded_poll<F>(
+        &mut self,
+        limit_position: i64,
+        limit: usize,
+        mut handler: F,
+    ) -> Result<Poll, LogError>
+    where
+        F: FnMut(&[u8], &DataFrameHeader),
+    {
+        let positions = self.mapped.positions;
+        let term_length = positions.term_length();
+        let partition = positions.partition_of(self.position);
+        let mut offset = positions.term_offset_of(self.position);
+        let term_begin = self.position - i64::from(offset);
+        // Where in this term the read stops: the limit's offset, or the term's end when
+        // the limit is past it. The position is 0 or more and so is the term's begin,
+        // so the difference cannot overflow, and it is above the offset here.
+        let limit_offset = if limit_position <= self.position {
+            offset
+        } else {
+            (limit_position - term_begin).min(i64::from(term_length)) as u32
+        };
+        let mut fragments = 0;
+        while fragments < limit && offset < limit_offset {
+            let frame = self.mapped.frame(partition, offset);
+            let word = frame.word();
+            if layout::frame_word_length(word) <= 0 {
+                break;
+            }
+            let bytes = frame.header(word);
+            // The spec's checks, built out only to measure their cost (ADR 0010).
+            #[cfg(not(cavalry_unchecked))]
+            let header = DataFrameHeader::parse_within(&bytes, (term_length - offset) as usize)?;
+            #[cfg(cavalry_unchecked)]
+            let header = DataFrameHeader::decode_unchecked(&bytes);
+            let frame_length = header.frame_length() as u32;
+            if header.frame_type() == FrameType::Data {
+                let body = self.mapped.body(partition, offset, frame_length);
+                handler(body, &header);
+                fragments += 1;
+            }
+            offset += aligned_length(frame_length);
+            self.position = term_begin + i64::from(offset);
+        }
+        Ok(Poll {
+            position: self.position,
+            fragments,
+        })
+    }
+
     /// Scans a block of committed frames from the position, as Aeron's
     /// `TermBlockScanner` does behind `Image.rawPoll`: it loads each frame's length with
     /// an acquire load and checks the frame as `spec/frame.md` says, as [`TermReader::poll`]
