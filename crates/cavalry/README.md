@@ -13,7 +13,9 @@ binary's `main`.
   second dependency. One shared driver per host, `cavalry run`, is the production shape
   and the ten-minute path's; `examples/quickstart.rs` is that path's program, and
   `just quickstart` runs it end to end; `examples/replay-check.rs` is the replay gate's
-  program, which `just replay-check` runs.
+  program, which `just replay-check` runs, and `examples/cluster-replay-check.rs` is
+  the same gate's program for a cluster: three members in one process, whose
+  recordings the gate replays and compares.
 - `cavalry::cluster` is a cluster member's consensus module, re-exported from
   `cavalry-raft`: `ConsensusModule` replicates the cluster's log across drivers and
   commits it at a quorum, as a client of the driver beside it (ADR 0063).
