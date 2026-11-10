@@ -1030,13 +1030,20 @@ fn cluster_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Fin
     if !running {
         return 0;
     }
+    // The cluster's counters, by their names in `counters.toml`: their ids are not one
+    // range, and each feature of the cluster adds its own after whatever came before.
+    let cluster_ids: Vec<i32> = COUNTERS
+        .iter()
+        .filter(|entry| entry.name.starts_with("cluster."))
+        .map(|entry| entry.id.0)
+        .collect();
     let mut members: Vec<MemberCounters> = Vec::new();
     for id in 0..reader.capacity() {
         let Some(fields) = reader.record(id).ok().flatten() else {
             continue;
         };
         let type_id = fields.type_id();
-        if !(CLUSTER_COMMIT_POSITION.0..=CLUSTER_APPOINTED_LEADER_BEHIND.0).contains(&type_id) {
+        if !cluster_ids.contains(&type_id) {
             continue;
         }
         let Ok(value) = reader.read_acquire(id) else {

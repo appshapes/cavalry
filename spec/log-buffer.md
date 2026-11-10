@@ -184,6 +184,14 @@ in `counters.toml`) with a release store, so that the driver's acquire load of t
 position orders the subscriber's reads before any cleaning. A subscriber whose position
 is at or past the end of stream position has seen everything the publication wrote.
 
+A read may be bounded by a limit position: it stops, as at a length of 0, before the
+first frame that begins at or past the limit, whether that frame is committed or not. A
+frame that begins below the limit is delivered whole, wherever it ends. A limit at or
+below the subscriber's position reads nothing, and the position is stored as it was; a
+limit never moves the position back. In Aeron, this is `Image.boundedPoll`. The cluster's
+service reads its log so, bounded by the commit position (`spec/cluster.md`, "The
+service"; ADR 0066).
+
 ## The receiver
 
 An image, type 2, is the log the driver's receiver rebuilds from a stream that arrives
