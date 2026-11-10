@@ -35,7 +35,12 @@ commit path runs per message.
   replays, and the eleven counts of `Counts::by_counter`. The counters of sessions, of
   the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
   with those features. One thread calls `do_work()`; the leader's process appends
-  with `offer(payload)`, up to 1,344 bytes an entry.
+  with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
+  holds its recording until the driver has said where it stopped, and that stop is
+  where its log ends. A stop that the driver refuses or does not answer is a `client`
+  error, and a stop position not read within 1 s is a `stop-timeout` error. Either
+  way the member stays in init with the recording held, and the next `do_work()`
+  stops it again.
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one
   process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
   member started again on an empty log directory to set: what the example below and

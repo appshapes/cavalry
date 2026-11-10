@@ -458,6 +458,25 @@ fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
     }
 }
 
+/// A leave whose stop position was not read in time is an error that names the
+/// recording held, what the operator does next and where the leave is explained.
+/// No test here makes a stop fail on a running driver, which takes a seam the client
+/// and the driver do not have; this is the text such a leave returns.
+#[test]
+fn a_stop_timeout_says_what_to_do_next() {
+    let error = RaftError::StopTimeout { recording_id: 7 };
+    assert_eq!(error.reason(), "stop-timeout");
+    let text = error.to_string();
+    assert!(text.contains("recording 7"), "{text}");
+    assert!(text.contains("holding the recording"), "{text}");
+    assert!(text.contains("Call do_work again"), "{text}");
+    assert!(text.contains("cavalry doctor"), "{text}");
+    assert!(
+        text.contains("docs/reference/cluster.md#roles-and-the-election"),
+        "{text}"
+    );
+}
+
 /// Offers `count` entries on the leader, `members[0]`, each made again once every
 /// member has run while the log is back-pressured.
 fn offer_entries(members: &mut [Member], count: i64) {

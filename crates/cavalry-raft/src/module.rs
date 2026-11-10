@@ -87,11 +87,18 @@ pub enum RaftError {
     },
     /// The offer was refused by the member's state; offer again as the reason says.
     Offer(Refused),
+    /// A member leaving the log stopped the recording it held, and 1 s later had not
+    /// read where the recording stopped. It holds the recording still, in init, and the
+    /// next duty cycle stops it again and waits for its stop.
+    StopTimeout {
+        /// The recording held.
+        recording_id: i64,
+    },
 }
 
 impl RaftError {
     /// The reason's name: `members`, `member`, `restart`, `terms`, `client`, `poll`,
-    /// `unsupported`, `payload-too-long` or `offer`.
+    /// `unsupported`, `payload-too-long`, `offer` or `stop-timeout`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
@@ -103,6 +110,7 @@ impl RaftError {
             RaftError::Unsupported { .. } => "unsupported",
             RaftError::PayloadTooLong { .. } => "payload-too-long",
             RaftError::Offer(_) => "offer",
+            RaftError::StopTimeout { .. } => "stop-timeout",
         }
     }
 }
@@ -141,6 +149,15 @@ impl core::fmt::Display for RaftError {
                  at most {MAX_PAYLOAD_LENGTH}; send it in parts of that length; see {DOC}"
             ),
             RaftError::Offer(refused) => write!(f, "{refused}"),
+            RaftError::StopTimeout { recording_id } => write!(
+                f,
+                "member stopped ({reason}): the member stopped recording {recording_id} as \
+                 it left the log, and 1 s later the driver had not said where it stopped, so \
+                 the member does not know where its log ends; it stays in init holding the \
+                 recording. Call do_work again, which stops it again and waits; if this \
+                 repeats, run `cavalry doctor`: the driver or this process is starved of CPU; \
+                 see {DOC}"
+            ),
         }
     }
 }
@@ -412,19 +429,40 @@ impl Io for ClientIo {
         })
     }
 
+    /// Stops the recording held and takes its stop as the log's end, then drops the
+    /// subscription. The recording stays held until its stop has been read: a stop the
+    /// driver refused or did not answer, or a stop position not read within
+    /// `STOP_TIMEOUT`, returns with nothing else changed. The core then stays in init
+    /// with the log joined and calls again on the next cycle, which stops the recording
+    /// again, a success with nothing written for one already stopped, and waits again.
+    /// So a leave that fails never loses the recording whose stop is the log's end, and
+    /// it never takes a synced position short of the stop.
     fn leave_log(&mut self) -> Result<(), Self::Fault> {
-        if let Some(held) = self.held.take() {
+        if let Some(held) = self.held.as_ref() {
+            // A stop already read, the driver's at the image's end or this member's own
+            // on a cycle before, needs no command.
+            if held.recording.stop_position().is_none() {
+                self.client.stop_recording(held.recording.recording_id())?;
+            }
+            let deadline = Instant::now() + STOP_TIMEOUT;
+            let stop = loop {
+                if let Some(stop) = held.recording.stop_position() {
+                    break stop;
+                }
+                if Instant::now() >= deadline {
+                    return Err(RaftError::StopTimeout {
+                        recording_id: held.recording.recording_id(),
+                    });
+                }
+                std::thread::sleep(Duration::from_micros(50));
+            };
             // The recording's stop is where this member's log ends when the recording
             // began where the log ended before it; one that began past it is no part of
             // the member's contiguous log.
-            self.client.stop_recording(held.recording.recording_id())?;
-            let deadline = Instant::now() + STOP_TIMEOUT;
-            while held.recording.stop_position().is_none() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_micros(50));
-            }
             if held.start == self.stopped_at {
-                self.stopped_at = held.recording.synced_position();
+                self.stopped_at = stop;
             }
+            self.held = None;
         }
         // The driver drops a recording still armed with the stream's last subscription.
         self.armed = None;
@@ -809,7 +847,9 @@ impl ConsensusModule {
 
     /// The id of this member's recording of the log, once it has one: the leader's of
     /// its publication, a follower's of the leader's image; `None` before the first and
-    /// from when the member leaves the log until it has joined it again. Each duty
+    /// from when the member has left the log, its recording's stop read, until it has
+    /// joined it again. A leave that failed holds the recording, named, while the next
+    /// cycle tries it again. Each duty
     /// cycle stores it in `cluster.log_recording_id`, −1 for `None`, before the commit
     /// position (`spec/cluster.md`, "The service").
     pub fn log_recording_id(&self) -> Option<i64> {
