@@ -877,7 +877,10 @@ impl<'a> Command<'a> {
     /// [`ProtocolError::String`] when a string is longer than [`MAX_STRING_LENGTH`],
     /// with [`ProtocolError::Counter`] when an `add counter`'s key or label is outside
     /// its bound, and with [`ProtocolError::TooShort`] when `buffer` is shorter than the
-    /// message; nothing is written then.
+    /// message; nothing is written then. An `add counter`'s bounds are checked first,
+    /// so a key or a label longer than [`MAX_STRING_LENGTH`] is `counter` here, where
+    /// [`parse`](Self::parse), which reads each field before it checks the counter, calls
+    /// it `string`; both are a malformed command, code 7.
     pub fn write(&self, buffer: &mut [u8]) -> Result<usize, ProtocolError> {
         let needed = self.encoded_length()?;
         if buffer.len() < needed {

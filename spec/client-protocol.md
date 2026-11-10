@@ -270,7 +270,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   owner, and the driver never writes it. The driver compares the counter with none it
   holds: two commands with one type id and one key register two counters. The client
   counters registry at capacity is code 10 and adds one to `driver.registry_full`
-  ("Sizes"); a counters file with no free record is code 10 and adds one to
+  ("Sizes"); a counters file with no free record is code 10 too, and adds one to
+  `driver.registry_full`, as it does for every command that needs a counter, and to
   `counters.allocation_failed`. Either registers nothing (ADR 0062).
 - **remove counter.** The command names the client's registration of a counter. The
   driver forgets the registration, answers `operation success`, sends `unavailable
