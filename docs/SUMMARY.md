@@ -107,3 +107,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0061. Draw the finish line for early testers at the first release, after the fifth slice](decisions/0061-draw-the-finish-line-for-early-testers-at-the-first-release.md)
 - [0060. Replicate the log with an appointed leader, a term record and a per-peer consensus channel](decisions/0060-replicate-the-log-with-an-appointed-leader.md)
 - [0062. Add a client's counter with Aeron's counter commands, as client protocol version 7](decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md)
+- [0064. Announce a stop whose own writes failed at the position last synced](decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md)
