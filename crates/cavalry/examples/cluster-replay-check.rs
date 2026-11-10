@@ -95,16 +95,39 @@ fn end_position(frames: i64) -> i64 {
     }
 }
 
-/// The members string of three members on free loopback ports, each port held until
-/// all fifteen are chosen so that none repeats.
+/// The members string of three members on the loopback, their fifteen ports taken
+/// from 20000 to 31999, each tried by binding it.
+///
+/// The range is below the ports an operating system gives a socket bound to port 0,
+/// from 32768 on Linux and from 49152 on macOS. A member binds its endpoints after
+/// this returns, a follower its `log` endpoint only when it joins the log, and every
+/// publication of the three drivers has a send socket bound to port 0 meanwhile. A
+/// port chosen by binding port 0 and releasing it could be given to one of those
+/// first, and the member's own bind would then be refused, `Address already in use`.
+/// The process id picks where the choice starts, so that two runs on one host start
+/// apart. This program starts no child process, so a socket it drops is closed.
 fn members_string() -> Result<String, std::io::Error> {
-    let sockets = (0..15)
-        .map(|_| UdpSocket::bind("127.0.0.1:0"))
-        .collect::<Result<Vec<_>, _>>()?;
-    let ports = sockets
-        .iter()
-        .map(|socket| socket.local_addr().map(|address| address.port()))
-        .collect::<Result<Vec<_>, _>>()?;
+    const FIRST: u16 = 20_000;
+    const SPAN: u16 = 12_000;
+    const PORTS: usize = 15;
+    let start = u16::try_from(std::process::id() % u32::from(SPAN)).unwrap_or(0);
+    let mut ports = Vec::with_capacity(PORTS);
+    for offset in 0..SPAN {
+        // Both sums stay below 32000.
+        let port = FIRST + (start + offset) % SPAN;
+        if UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            ports.push(port);
+            if ports.len() == PORTS {
+                break;
+            }
+        }
+    }
+    if ports.len() < PORTS {
+        return Err(std::io::Error::other(format!(
+            "no {PORTS} free loopback ports from {FIRST} to {}; free some and run it again",
+            FIRST + SPAN - 1
+        )));
+    }
     Ok(ports
         .chunks(5)
         .enumerate()
