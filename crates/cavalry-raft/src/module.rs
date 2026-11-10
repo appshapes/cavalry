@@ -172,6 +172,19 @@ impl From<TermsError> for RaftError {
     }
 }
 
+/// The two clocks of a duty cycle: a monotonic one since the module started, and the
+/// wall clock's milliseconds, the cluster's time.
+fn read_clock(started: Instant) -> Clock {
+    Clock {
+        now_ns: u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        time_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+            }),
+    }
+}
+
 /// `cavalry:udp?endpoint=<host>:<port>` for an endpoint of the members string.
 fn endpoint_channel(endpoint: &Endpoint<'_>) -> String {
     format!("cavalry:udp?endpoint={}", host_port(endpoint))
@@ -507,6 +520,9 @@ pub struct ConsensusModule {
     counters: Counters,
     messages_rejected: u64,
     started: Instant,
+    /// The clock of the last duty cycle, which an offer between two cycles is stamped
+    /// with: the clock is read once a cycle and never per entry.
+    clock: Clock,
 }
 
 impl ConsensusModule {
@@ -565,6 +581,7 @@ impl ConsensusModule {
             });
         }
         let counters = Counters::add(&mut client, member_id)?;
+        let started = Instant::now();
         Ok(Self {
             core,
             consensus,
@@ -589,19 +606,9 @@ impl ConsensusModule {
             },
             counters,
             messages_rejected: 0,
-            started: Instant::now(),
+            started,
+            clock: read_clock(started),
         })
-    }
-
-    fn clock(&self) -> Clock {
-        Clock {
-            now_ns: u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX),
-            time_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |since| {
-                    i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-                }),
-        }
     }
 
     /// One duty cycle: the consensus messages that have arrived, at most 16, what a
@@ -610,7 +617,8 @@ impl ConsensusModule {
     /// An error is a step the member cannot go on without; the member stays in the
     /// state it was in, and a later call tries the step again.
     pub fn do_work(&mut self) -> Result<usize, RaftError> {
-        let clock = self.clock();
+        self.clock = read_clock(self.started);
+        let clock = self.clock;
         let Self {
             core,
             consensus,
@@ -652,7 +660,8 @@ impl ConsensusModule {
     /// Appends `payload` to the cluster's log as a session message of no session, for
     /// the leader's own process (`spec/cluster.md`, "The appointed leader"). It is
     /// committed once a quorum has recorded it, which
-    /// [`ConsensusModule::commit_position`] says. A follower, a leader whose election
+    /// [`ConsensusModule::commit_position`] says. The entry carries the cluster's time
+    /// of the last duty cycle. A follower, a leader whose election
     /// has not closed and a back-pressured log are [`RaftError::Offer`], each with what
     /// to do; a payload over [`MAX_PAYLOAD_LENGTH`] is [`RaftError::PayloadTooLong`].
     pub fn offer(&mut self, payload: &[u8]) -> Result<(), RaftError> {
@@ -661,9 +670,8 @@ impl ConsensusModule {
                 length: payload.len(),
             });
         }
-        let clock = self.clock();
         self.core
-            .offer(clock, payload, &mut self.io)?
+            .offer(self.clock, payload, &mut self.io)?
             .map_err(RaftError::Offer)
     }
 
