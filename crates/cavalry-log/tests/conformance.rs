@@ -9,6 +9,10 @@ use cavalry_log::layout::{
     CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, ENTRY_LENGTH, HEADER_LENGTH, IndexEntry,
     IndexHeader, Recording, State, locate,
 };
+use cavalry_log::terms::{
+    self, ENTRY_LENGTH as TERMS_ENTRY_LENGTH, HEADER_LENGTH as TERMS_HEADER_LENGTH, TermsEntry,
+    TermsHeader,
+};
 use serde_json::Value;
 
 const VECTORS: &str = include_str!("../../../spec/vectors/durable-log.json");
@@ -69,7 +73,10 @@ fn descriptor_from(fields: &Value) -> Descriptor {
 fn every_vector_agrees_with_the_layout_layer() {
     let doc: Value = serde_json::from_str(VECTORS).expect("the vectors are JSON");
     assert_eq!(doc["spec"], "durable-log");
-    assert_eq!(doc["version"], 1, "the vectors are for catalog version 1");
+    assert_eq!(
+        doc["version"], 2,
+        "the vectors are for the page's version 2"
+    );
     let mut count = 0;
     for vector in doc["vectors"].as_array().expect("a vector list") {
         let name = vector["name"].as_str().expect("a name");
@@ -158,6 +165,70 @@ fn every_vector_agrees_with_the_layout_layer() {
                         );
                         assert_eq!(entry.position, int(&vector["fields"], "position"), "{name}");
                         assert_eq!(&entry.encode()[..], &bytes[..ENTRY_LENGTH], "{name}");
+                    }
+                    (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
+                    (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
+                }
+            }
+            "terms-header" => {
+                let bytes = hex(vector["bytes"].as_str().expect("bytes"));
+                let file_length = vector["file_length"].as_u64().expect("a file length");
+                match (TermsHeader::parse(&bytes, file_length), error) {
+                    (Ok(header), None) => {
+                        let fields = &vector["fields"];
+                        let slots = fields["candidate_terms"].as_array().expect("two slots");
+                        assert_eq!(slots.len(), header.candidate_slots.len(), "{name}");
+                        for (slot, expected) in header.candidate_slots.iter().zip(slots) {
+                            // `null` is a slot whose checksum does not match.
+                            assert_eq!(*slot, expected.as_i64(), "{name}");
+                        }
+                        assert_eq!(
+                            header.candidate_term(),
+                            Some(int(fields, "candidate_term")),
+                            "{name}"
+                        );
+                        // A torn slot's bytes are whatever the crash left, so only a
+                        // header with both slots whole encodes back to its bytes.
+                        if header.candidate_slots.iter().all(Option::is_some) {
+                            assert_eq!(
+                                &header.encode()[..],
+                                &bytes[..TERMS_HEADER_LENGTH],
+                                "{name}"
+                            );
+                        }
+                    }
+                    (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
+                    (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
+                }
+            }
+            "terms-entry" => {
+                let bytes = hex(vector["bytes"].as_str().expect("bytes"));
+                let previous = vector.get("previous").and_then(|p| {
+                    p.as_object().map(|_| TermsEntry {
+                        state: i32::try_from(int(p, "state")).expect("a state"),
+                        leadership_term_id: int(p, "leadership_term_id"),
+                        term_base_log_position: int(p, "term_base_log_position"),
+                        recording_id: int(p, "recording_id"),
+                    })
+                });
+                match (TermsEntry::parse(&bytes, previous.as_ref()), error) {
+                    (Ok(entry), None) => {
+                        let fields = &vector["fields"];
+                        assert_eq!(i64::from(entry.state), int(fields, "state"), "{name}");
+                        if entry.state != terms::EMPTY {
+                            assert_eq!(
+                                entry.leadership_term_id,
+                                int(fields, "leadership_term_id"),
+                                "{name}"
+                            );
+                            assert_eq!(
+                                entry.term_base_log_position,
+                                int(fields, "term_base_log_position"),
+                                "{name}"
+                            );
+                            assert_eq!(entry.recording_id, int(fields, "recording_id"), "{name}");
+                            assert_eq!(&entry.encode()[..], &bytes[..TERMS_ENTRY_LENGTH], "{name}");
+                        }
                     }
                     (Err(found), Some(expected)) => assert_eq!(found.reason(), expected, "{name}"),
                     (outcome, expected) => panic!("{name}: {outcome:?} against {expected:?}"),
