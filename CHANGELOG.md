@@ -1726,3 +1726,13 @@ user-visible change, added in the same commit as the change. The format follows
   is refused before anything is sent. `cavalry` re-exports `Counter`
   ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
+- A `Recording` follows its recording's stop. `Recording::stop_position()` says where
+  the recording stopped once the driver has sent `recording stopped`, whichever
+  client stopped it or whatever ended it, and `position()` and `synced_position()` are
+  that position from then on. Before this, a handle kept reading the two counters of
+  a stopped recording, which the driver frees at the stop and gives to other counters
+  a second later, so a position could become another counter's value. Each read now
+  checks that the record is still the recording's, by the recording id in its key, and
+  returns the last value read from the recording's own record when it is not and the
+  stop has not arrived. `MAX_RECORDINGS`, 1,024, moves to `cavalry-proto`, where the
+  driver's registry and the client's take it (card 227).

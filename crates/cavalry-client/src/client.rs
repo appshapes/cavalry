@@ -17,14 +17,14 @@ use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
 use crate::conductor::{
-    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
-    REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE, RESPONSE_TIMEOUT, ReplayRegistration, Shared,
-    nanos, now_nanos,
+    COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_RECORDINGS, MAX_REPLAYS, MAX_SUBSCRIPTIONS,
+    NO_PENDING, RECORDING_QUEUE, REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE,
+    RESPONSE_TIMEOUT, RecordingRegistration, ReplayRegistration, Shared, nanos, now_nanos,
 };
 use crate::counter::Counter;
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
-use crate::recording::Recording;
+use crate::recording::{Recording, RecordingStop};
 use crate::replay::{Replay, ReplayEnd};
 use crate::response::Response;
 use crate::subscription::{
@@ -46,13 +46,16 @@ pub struct Cavalry {
     shared: Arc<Shared>,
     producer: Producer,
     ring: CommandRing,
-    counters: CountersReader,
+    /// Shared with the recording handles, which check a record before they trust its
+    /// value ([`Recording`]).
+    counters: Arc<CountersReader>,
     /// The counters file mapped writable, for the counters this client adds and owns;
     /// opened at the first [`Cavalry::add_counter`] (ADR 0062).
     counters_writer: Option<CountersWriter>,
     responses: spsc::Consumer<Response>,
     registrations: spsc::Producer<Registration>,
     replay_registrations: spsc::Producer<ReplayRegistration>,
+    recording_registrations: spsc::Producer<RecordingRegistration>,
     conductor: Option<JoinHandle<()>>,
     scratch: Vec<u8>,
 }
@@ -114,7 +117,7 @@ impl Cavalry {
         let client_id = producer.next_correlation_id();
         let broadcast = BroadcastBuffer::open(&dir, false)?;
         let receiver = broadcast.receiver()?;
-        let counters = CountersReader::open(&dir)?;
+        let counters = Arc::new(CountersReader::open(&dir)?);
 
         let mut scratch = vec![0u8; COMMAND_SCRATCH];
         let keepalive = Command::ClientKeepalive {
@@ -134,6 +137,8 @@ impl Cavalry {
             spsc::queue::<Registration>(REGISTRATION_QUEUE);
         let (replay_registrations, replay_registration_consumer) =
             spsc::queue::<ReplayRegistration>(REPLAY_QUEUE);
+        let (recording_registrations, recording_registration_consumer) =
+            spsc::queue::<RecordingRegistration>(RECORDING_QUEUE);
         let conductor_ring = CommandRing::open(&dir, true)?;
         let counters_writer = CountersWriter::open(&dir)?;
         let conductor = Conductor::new(
@@ -146,6 +151,7 @@ impl Cavalry {
             response_producer,
             registration_consumer,
             replay_registration_consumer,
+            recording_registration_consumer,
             client_id,
         );
         let handle = std::thread::Builder::new()
@@ -167,6 +173,7 @@ impl Cavalry {
             responses,
             registrations,
             replay_registrations,
+            recording_registrations,
             conductor: Some(handle),
             scratch,
         })
@@ -363,7 +370,9 @@ impl Cavalry {
     /// the one with the lowest registration id not yet being recorded, so that a second
     /// call records the next one (`spec/client-protocol.md`, "Commands"; ADR 0025).
     /// Waits for `recording ready` up to the response timeout and returns the
-    /// [`Recording`], whose two positions read from the counters file. The recording
+    /// [`Recording`], whose two positions read from the counters file while it is live
+    /// and are its stop position once the driver has said it stopped, which this client
+    /// follows for as long as the handle lives. The recording
     /// belongs to the driver: it outlives this client, dropping the handle stops nothing,
     /// and [`Cavalry::stop_recording`] from any client stops it. No live publication is
     /// [`ClientError::Refused`] with error code 20, every one already recorded code 22, a
@@ -377,6 +386,31 @@ impl Cavalry {
         stream_id: i32,
     ) -> Result<Recording, ClientError> {
         let correlation_id = self.producer.next_correlation_id();
+        // Registered before the command goes, so that the conductor holds the place for
+        // this recording's stop when `recording ready` gives it the id
+        // (`Conductor::events`): the driver frees a stopped recording's counters, and
+        // the handle must not read them after.
+        let stop = Arc::new(RecordingStop::new());
+        let mut registration = RecordingRegistration {
+            correlation_id,
+            stop: Arc::clone(&stop),
+        };
+        // One command is in flight per client, so the queue holds one at most; it is
+        // full only while the conductor does not run, and then the command would wait
+        // out the response timeout as well.
+        let deadline = Instant::now() + RESPONSE_TIMEOUT;
+        while let Err(back) = self.recording_registrations.offer(registration) {
+            if let Some(reason) = self.shared.closed() {
+                return Err(ClientError::Closed(reason));
+            }
+            if Instant::now() >= deadline {
+                return Err(ClientError::ResponseTimeout {
+                    command: "start recording",
+                });
+            }
+            registration = back;
+            std::thread::sleep(Duration::from_micros(50));
+        }
         let command = Command::StartRecording {
             client_id: self.client_id,
             correlation_id,
@@ -391,21 +425,58 @@ impl Cavalry {
                 synced_position_counter_id,
                 ..
             } => {
-                let counter = |id: i32| -> Result<CounterValue, ClientError> {
-                    Ok(self.counters.value(u32::try_from(id).map_err(|_| {
-                        ClientError::Driver {
-                            what: format!("recording counter id {id}"),
-                        }
-                    })?)?)
+                if stop.refused() {
+                    // More recordings than the driver's own bound have no stop stored:
+                    // a driver that does not conform. The recording is the driver's and
+                    // stays; this client cannot follow its stop, so it hands out no
+                    // handle that would read its counters after it.
+                    return Err(ClientError::Driver {
+                        what: format!(
+                            "recording ready for recording {recording_id} with {} \
+                             recordings of this client still live, more than the driver \
+                             holds",
+                            MAX_RECORDINGS + 1
+                        ),
+                    });
+                }
+                let counter = |id: i32| -> Result<u32, ClientError> {
+                    u32::try_from(id).map_err(|_| ClientError::Driver {
+                        what: format!("recording counter id {id}"),
+                    })
                 };
-                Ok(Recording::new(
-                    recording_id,
-                    session_id,
-                    stream_id,
-                    channel.to_string(),
-                    counter(position_counter_id)?,
-                    counter(synced_position_counter_id)?,
-                ))
+                let position = counter(position_counter_id)?;
+                let synced_position = counter(synced_position_counter_id)?;
+                // A record that is not the recording's by now is a recording that has
+                // already stopped, whose counters the driver freed: the handle is made
+                // once the conductor has stored the stop, which follows the answer.
+                let deadline = Instant::now() + RESPONSE_TIMEOUT;
+                loop {
+                    if let Some(recording) = Recording::new(
+                        recording_id,
+                        session_id,
+                        stream_id,
+                        channel,
+                        &self.counters,
+                        position,
+                        synced_position,
+                        &stop,
+                    ) {
+                        return Ok(recording);
+                    }
+                    if let Some(reason) = self.shared.closed() {
+                        return Err(ClientError::Closed(reason));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(ClientError::Driver {
+                            what: format!(
+                                "recording ready for recording {recording_id} with \
+                                 counters {position} and {synced_position}, which are not \
+                                 that recording's, and no recording stopped after it"
+                            ),
+                        });
+                    }
+                    std::thread::sleep(Duration::from_micros(50));
+                }
             }
             other => Err(ClientError::Driver {
                 what: format!("{other:?} in answer to start recording"),

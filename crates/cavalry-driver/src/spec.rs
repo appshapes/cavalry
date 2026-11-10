@@ -89,8 +89,9 @@ pub const MAX_SUBSCRIPTIONS: usize = 1024;
 pub const MAX_IMAGES: usize = 2048;
 
 /// How many recordings the driver holds: starting or live, one per publication at most
-/// (ADR 0025).
-pub const MAX_RECORDINGS: usize = 1024;
+/// (ADR 0025); the one definition is `cavalry_proto`'s, which the client shares, as it
+/// shares [`MAX_REPLAYS`].
+pub const MAX_RECORDINGS: usize = cavalry_proto::client_protocol::MAX_RECORDINGS;
 
 /// How many replays the driver holds: starting or live (ADR 0030); the one definition
 /// is `cavalry_proto`'s, which the client shares (ADR 0036).

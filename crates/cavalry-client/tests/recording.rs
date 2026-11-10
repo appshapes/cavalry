@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, ClientError};
-use cavalry_driver::Driver;
+use cavalry_driver::{Driver, spec};
 use cavalry_log::catalog::CatalogReader;
 use cavalry_proto::client_protocol::ErrorCode;
+use cavalry_shm::counters::generated::{RECORDING_POSITION, RECORDING_SYNCED_POSITION};
 
 /// A directory of its own per test, removed when the guard drops.
 struct TestDir(PathBuf);
@@ -171,6 +172,123 @@ fn a_recording_follows_the_publisher_and_stops_on_request() {
     driver.close().expect("closes, stopping the live recording");
     let catalog = CatalogReader::open(&log_dir).expect("the catalog opens");
     assert!(!catalog.get(2).expect("reads").expect("the slot").is_live());
+}
+
+/// The record of the counters file that holds `type_id` for recording `recording_id`,
+/// whose key is the recording id (`spec/client-protocol.md`, "Counters").
+fn recording_counter(client: &Cavalry, type_id: i32, recording_id: i64) -> u32 {
+    let counters = client.counters();
+    (0..counters.capacity())
+        .find(|&id| {
+            counters.record(id).ok().flatten().is_some_and(|record| {
+                record.type_id() == type_id && record.key()[..8] == recording_id.to_le_bytes()
+            })
+        })
+        .expect("the recording's counter is allocated")
+}
+
+/// The driver frees a stopped recording's counters and gives their records to other
+/// counters after the counter reuse timeout (`spec/counters-file.md`, "Metadata
+/// record"). A handle that went on reading them would report another counter's value
+/// as the recording's position, so the handle learns the stop from `recording stopped`
+/// and reads no counter after it.
+#[test]
+fn a_stopped_recordings_handle_reads_its_stop_and_never_a_counter_given_away() {
+    let dir = TestDir::new("stop");
+    let driver_dir = dir.path().join("driver");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut client = Cavalry::connect_to(&driver_dir).expect("connects");
+    let mut publication = client
+        .add_exclusive_publication("cavalry:ipc", 81)
+        .expect("a publication");
+    let recording = client
+        .start_recording("cavalry:ipc", 81)
+        .expect("a recording");
+    assert_eq!(recording.stop_position(), None, "live");
+    let mut after = 0;
+    for i in 0..10u8 {
+        wait("the offer goes through", || {
+            match publication.offer(&[i; 32]) {
+                Ok(position) => {
+                    after = position;
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+    }
+    wait("recording.position follows the publisher", || {
+        recording.position() == after
+    });
+    let position_record = recording_counter(&client, RECORDING_POSITION.0, 0);
+    let synced_record = recording_counter(&client, RECORDING_SYNCED_POSITION.0, 0);
+
+    // The stop: the handle learns it from the event, and both positions are the stop
+    // position from then on, what the catalog holds.
+    recording.stop(&mut client).expect("stops");
+    wait("the handle learns the stop", || {
+        recording.stop_position().is_some()
+    });
+    assert_eq!(recording.stop_position(), Some(after));
+    assert_eq!(
+        (recording.position(), recording.synced_position()),
+        (after, after)
+    );
+
+    // Past the reuse timeout the driver gives the freed records to the next counters
+    // it allocates: a second publication's and its recording's, which then move.
+    std::thread::sleep(spec::COUNTER_REUSE_TIMEOUT + Duration::from_millis(200));
+    let mut other = client
+        .add_exclusive_publication("cavalry:ipc", 82)
+        .expect("a second publication");
+    let second = client
+        .start_recording("cavalry:ipc", 82)
+        .expect("a second recording");
+    let mut moved = 0;
+    for i in 0..40u8 {
+        wait("the offer goes through", || match other.offer(&[i; 32]) {
+            Ok(position) => {
+                moved = position;
+                true
+            }
+            Err(_) => false,
+        });
+    }
+    wait("the second recording follows its publisher", || {
+        second.synced_position() == moved
+    });
+    assert_ne!(moved, after);
+    // The first recording's two records are other counters' now.
+    let counters = client.counters();
+    for (record, type_id) in [
+        (position_record, RECORDING_POSITION.0),
+        (synced_record, RECORDING_SYNCED_POSITION.0),
+    ] {
+        let now = counters.record(record).expect("the record reads");
+        let still_the_first = now.is_some_and(|fields| {
+            fields.type_id() == type_id && fields.key()[..8] == 0i64.to_le_bytes()
+        });
+        assert!(!still_the_first, "record {record} was not given away");
+        // What the handle read before it followed the stop: the record's value now,
+        // another counter's, which is not where the first recording stopped.
+        assert_ne!(counters.read(record).ok(), Some(after));
+    }
+    // And the handle still says where its recording stopped, whatever they hold.
+    assert_eq!(
+        (recording.position(), recording.synced_position()),
+        (after, after)
+    );
+    assert_eq!(recording.stop_position(), Some(after));
+    // A recording that stops when its publication closes is learnt the same way.
+    drop(other);
+    wait("the second recording stops at its end of stream", || {
+        second.stop_position() == Some(moved)
+    });
+    assert_eq!(second.position(), moved);
+    drop(publication);
+    client.close().expect("closes");
+    driver.close().expect("closes");
 }
 
 /// The three retention commands through the client API (ADR 0031): a live recording is

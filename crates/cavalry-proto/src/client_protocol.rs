@@ -89,6 +89,13 @@ pub const FOLLOW_LENGTH: i64 = i64::MAX;
 /// the how-to's "64" move together (ADR 0036).
 pub const MAX_REPLAYS: usize = 64;
 
+/// How many recordings the driver holds, starting or live: its recordings registry's
+/// capacity (`spec/client-protocol.md`, "Sizes"; ADR 0025). The client's conductor
+/// follows the stop of at most this many recordings for one process, and one more for
+/// the command in flight, since the driver admits no more; it lives here so that the two
+/// sides move together, as [`MAX_REPLAYS`] does.
+pub const MAX_RECORDINGS: usize = 1024;
+
 /// The docs anchor every error message names.
 const DOC: &str = "docs/reference/client-protocol.md#what-the-driver-rejects";
 
