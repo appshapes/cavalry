@@ -35,6 +35,10 @@ pub enum Role {
     Leader = 2,
 }
 
+// not a state machine: the election's states as the core holds them. Its machine is
+// registered in `counters.toml`, with the counters of [`Counts`] on its transitions, by
+// the consensus module, which stores those counters in the counters file and is this
+// crate's next change (ADR 0063); the core has no counters file to move one in.
 /// The states of the election a member of this version enters, each with the code
 /// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
