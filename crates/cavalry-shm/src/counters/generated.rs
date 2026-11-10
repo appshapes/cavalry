@@ -335,6 +335,7 @@ pub const RECORDING_ARMED_FAILED: CounterId = CounterId(108);
 /// `cluster.commit_position`, a client gauge: The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_COMMIT_POSITION: CounterId = CounterId(109);
 
+<<<<<<< HEAD
 /// `cluster.role`, a client gauge: One cluster member's role: 0 follower, 1 candidate, 2 leader (spec/cluster.md, Counters). The member's consensus module adds the counter and stores it; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_ROLE: CounterId = CounterId(110);
 
@@ -377,6 +378,8 @@ pub const CLUSTER_MESSAGES_REJECTED: CounterId = CounterId(122);
 /// `cluster.appointed_leader_behind`, a client counter: Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election: it does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_APPOINTED_LEADER_BEHIND: CounterId = CounterId(123);
 
+=======
+>>>>>>> 227-consensus-core
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1259,6 +1262,7 @@ pub const COUNTERS: &[CounterDef] = &[
         doc: "The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A cluster.commit_position that stays where it is while the member's recording.position moves is a commit that waits for a quorum: check that a majority of the members in the members string are running and that each reaches the others' consensus endpoints.",
     },
+<<<<<<< HEAD
     CounterDef {
         id: CLUSTER_ROLE,
         name: "cluster.role",
@@ -1371,4 +1375,6 @@ pub const COUNTERS: &[CounterDef] = &[
         doc: "Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election: it does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "The appointed leader's log directory was lost or replaced while other members kept theirs: it will not lead. Start the cluster again as a new cluster, every member on a new log directory, and keep the old directories for what they hold.",
     },
+=======
+>>>>>>> 227-consensus-core
 ];

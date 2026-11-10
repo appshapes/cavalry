@@ -3672,6 +3672,38 @@
     },
     {
       "kind": "arithmetic",
+      "name": "appointed-canvass-ahead-by-a-term-of-no-entries",
+      "rule": "appointed-canvass",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        "own": [
+          -1,
+          0
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "leads": false,
+        "unanimous": false,
+        "ahead": 1
+      }
+    },
+    {
+      "kind": "arithmetic",
       "name": "appointed-canvass-ahead-by-position",
       "rule": "appointed-canvass",
       "inputs": {

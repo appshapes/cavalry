@@ -453,7 +453,7 @@ impl Consensus {
             ElectionState::FollowerLogAwait => self.follower_log_await(clock, io),
             ElectionState::FollowerReady => Ok(self.follower_ready(clock, io)),
             ElectionState::Closed => match self.role {
-                Role::Leader => Ok(self.lead(clock, io)),
+                Role::Leader => Ok(self.commit(clock, io)),
                 Role::Follower | Role::Candidate => self.follow(clock, io),
             },
         }
@@ -703,7 +703,8 @@ impl Consensus {
     }
 
     /// State 0. The member takes its candidate term, leaves the live log when it had
-    /// joined one, and canvasses with no report held from the election before.
+    /// joined one, and canvasses with no report held from the election before; a
+    /// cluster of one member leads at once.
     fn init<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         // Out of the live log, so that the image joined next is a new one whose join
         // position follower log await checks.
@@ -715,6 +716,13 @@ impl Consensus {
         for peer in self.peers.iter_mut().take(self.count) {
             peer.reported = false;
             peer.ahead_counted = false;
+        }
+        // A cluster of one member leads from init, with nobody to canvass. A fault
+        // at its writes leaves it in init with nothing counted.
+        if self.count == 1 {
+            let work = self.lead(clock, io, 1)?;
+            count(&mut self.counts.elections);
+            return Ok(work);
         }
         // The canvass interval runs on from the last election: a member whose
         // elections fail one after another, one that cannot join without the
@@ -774,10 +782,15 @@ impl Consensus {
         if !appointed_canvass(self.count, &reports, own, deadline_passed).leads {
             return Ok(work);
         }
-        // Where an elected member would nominate itself: the term it proposes is
-        // stored, and recorded at its append position, before anything in memory
-        // moves. A fault at either write leaves the member in canvass, and the next
-        // cycle proposes the same term again.
+        self.lead(clock, io, reports.iter().flatten().count())
+    }
+
+    /// Leads candidate term + 1, where an elected member would nominate itself and
+    /// win: the term it proposes is stored, and recorded at its append position, before
+    /// anything in memory moves. A fault at either write leaves the member in the
+    /// state it was in, and the next cycle proposes the same term again. `heard` is how
+    /// many members reported in its canvass, itself among them.
+    fn lead<I: Io>(&mut self, clock: Clock, io: &mut I, heard: usize) -> Result<usize, I::Fault> {
         let term = self.candidate_term.saturating_add(1);
         io.store_candidate_term(term)?;
         io.record_term(term, self.append_position)?;
@@ -788,7 +801,7 @@ impl Consensus {
         count(&mut self.counts.terms_led);
         self.role = Role::Leader;
         self.quorate = true;
-        self.heard = reports.iter().flatten().count();
+        self.heard = heard;
         Ok(self.enter(ElectionState::LeaderLogReplication, clock))
     }
 
@@ -1004,7 +1017,7 @@ impl Consensus {
     /// positions, sent when it rises and every leader heartbeat interval. A leader
     /// whose active members fall below a quorum stays the leader: its commit position
     /// stays where it was.
-    fn lead<I: Io>(&mut self, clock: Clock, io: &mut I) -> usize {
+    fn commit<I: Io>(&mut self, clock: Clock, io: &mut I) -> usize {
         self.report_own(clock);
         let commit = commit_position(
             self.positions(clock).get(..self.count).unwrap_or(&[]),

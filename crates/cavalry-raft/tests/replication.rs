@@ -643,3 +643,22 @@ fn a_follower_that_loses_its_image_begins_again_and_joins_a_new_one_only_when_le
     assert_eq!(cluster.commit_position(0), Some(missed));
     assert_eq!(cluster.commit_position(1), Some(missed));
 }
+
+/// A cluster of one member is its own quorum: it leads from init, with nobody to
+/// canvass, closes its election, and commits what its own recorder has synced.
+#[test]
+fn a_cluster_of_one_leads_from_init_and_commits_alone() {
+    let ids = [5];
+    let mut cluster = Cluster::new(&ids).expect("one member");
+    let mut safety = Safety::new(&ids);
+    safety.run(&mut cluster, 1);
+    assert_eq!(cluster.role(5), Some(Role::Leader));
+    assert_ne!(cluster.election_state(5), Some(ElectionState::Canvass));
+    safety.run(&mut cluster, 20);
+    assert_eq!(cluster.election_state(5), Some(ElectionState::Closed));
+    let counts = cluster.counts(5).expect("the member");
+    assert_eq!((counts.elections, counts.terms_led), (1, 1));
+    let entry = cluster.offer(b"alone").expect("the leader appends");
+    safety.run(&mut cluster, 20);
+    assert_eq!(cluster.commit_position(5), Some(entry));
+}
