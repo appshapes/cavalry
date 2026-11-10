@@ -111,3 +111,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0064. Announce a stop whose own writes failed at the position last synced](decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md)
 - [0065. Give up a recording whose sync failed, without a stop of its own](decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md)
 - [0066. Feed the committed log to a service through a replay of the member's recording](decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)
+- [0067. Register the election's state machine with its core, and count each of its steps](decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md)

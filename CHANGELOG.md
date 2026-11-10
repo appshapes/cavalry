@@ -1831,3 +1831,27 @@ user-visible change, added in the same commit as the change. The format follows
   log and the counter follow
   ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
   card 227).
+- `cavalry-raft` has its first public items: the core of a cluster member.
+  `Consensus` is one member's state machine on the appointed leader's path of
+  `spec/cluster.md`: the leader canvasses, leads when no member's log is ahead of its
+  own, records its term, announces it, appends the term's first entry and commits what
+  a quorum has recorded; a follower canvasses, joins the leader's log at its append
+  position and reports that position as it rises. It does no I/O of its own: it
+  reaches the consensus stream, the log, its recording and its `terms` file through
+  the `Io` trait. `memory::Cluster` gives it that in memory, one to eight members in
+  one process on a clock the caller steps, with loss, delay up to 10 s, cuts, paused
+  syncs and a member started again on an empty log directory to set, which the
+  crate's README example and its tests run; its consensus stream holds at most 4,096
+  messages in flight and loses, and counts, one sent while it is full. The module
+  that runs the core over a driver follows
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
+- The election of a cluster member is a registered state machine, `cluster_election`,
+  and every move of it adds one to a counter: `counters.toml` has the eleven
+  `cluster.*` counters a member's core keeps, ids 110 to 120, among them two new ones,
+  `cluster.election_steps` and `cluster.elections_closed`, and
+  `cavalry_raft::Counts::by_counter` pairs each count with its counter's id for the
+  module to store. `docs/reference/counters.md` lists them and the machine's
+  transitions
+  ([ADR 0067](docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md);
+  card 227).
