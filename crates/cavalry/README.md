@@ -24,7 +24,8 @@ binary's `main`.
   cluster: `run` starts the member's consensus module on a thread of its own, stops it
   before the driver, and refuses one key without the other; `doctor` explains the
   driver from its counters and exits 0 when no check failed, listing every recording's
-  two positions; `record <stream id>` records a stream's live publication to the durable
+  two positions and, on a driver that is a cluster member, what the member is and
+  what it waits for; `record <stream id>` records a stream's live publication to the durable
   log, `record --stop <id>` stops it (ADR 0025), and `record --truncate <id> --to <point>`,
   `--purge <id> --before <point>` and `--delete <id>` cut, purge and delete a stopped
   one (ADR 0031); `replay --recording <id> --from
