@@ -37,9 +37,13 @@ In Aeron, this is the media driver ([glossary](../glossary.md)).
    `~/.local/share/cavalry/log` by default; `--log-dir <path>` or `CAVALRY_LOG_DIR`
    chooses another, and `doctor` checks what it is on (`log-directory-backing`). On a
    host with isolated CPUs, run the driver on one of them with
-   `CAVALRY_CONDUCTOR_IDLE_STRATEGY=busy-spin`. Those are the three configuration keys
-   this version has; [the configuration reference](../reference/config.md) says what each
-   does and why its default is not always right. Recording a stream is
+   `CAVALRY_CONDUCTOR_IDLE_STRATEGY=busy-spin`. Two more keys, set together, make the
+   driver a member of a cluster: `CAVALRY_CLUSTER_MEMBERS` and
+   `CAVALRY_CLUSTER_MEMBER_ID` ([`cluster.members`](../reference/config.md#clustermembers));
+   [Run a cluster of three members](run-a-cluster.md) is the page for that, and for
+   the `cluster-*` lines `doctor` prints on such a driver.
+   [The configuration reference](../reference/config.md) lists every key, what it does
+   and why its default is not always right. Recording a stream is
    [its own page](record-a-stream.md).
 
 2. In another terminal, read `doctor`:

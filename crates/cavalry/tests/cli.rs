@@ -941,5 +941,10 @@ fn a_member_id_of_minus_one_written_out_is_no_member() {
         ),
         "{stderr}"
     );
+    // The page it names is the missing key's, as doctor's finding names it.
+    assert!(
+        stderr.contains("docs/reference/config.md#clustermemberid"),
+        "{stderr}"
+    );
     assert!(!other.0.exists(), "nothing was started");
 }
