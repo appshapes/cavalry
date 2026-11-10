@@ -383,6 +383,9 @@ pub const CLUSTER_APPEND_POSITION: CounterId = CounterId(124);
 /// `cluster.messages_rejected`, a client counter: Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_MESSAGES_REJECTED: CounterId = CounterId(125);
 
+/// `cluster.log_recording_id`, a client gauge: The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LOG_RECORDING_ID: CounterId = CounterId(126);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1392,5 +1395,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A member sends consensus messages this member cannot read: check that every member runs the same version.",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_RECORDING_ID,
+        name: "cluster.log_recording_id",
+        kind: Kind::Gauge,
+        scope: Scope::Client,
+        doc: "The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A cluster.log_recording_id that stays at -1 on a member whose cluster.election_state is 17, its election closed, is a follower whose recording of the leader's image never started, so that its cluster.append_position does not move: its driver's recording.armed_failed counts the failure and names the counter of the step that failed. A member in an election holds -1 until it has joined the log.",
     },
 ];
