@@ -113,12 +113,15 @@ branch locally; GitHub has already deleted it on origin.
   than thirty minutes late, run `gh run list --workflow "review pr"`: each run is named
   with its pull request number and attempt, a run `in_progress` is still working, a
   `failure` is the second miss, with what the session did in its job summary and in
-  its log (`gh run view <run id> --log` prints the result, the denied tool calls and
-  the session's last text under `Reviewer session, attempt`; a first miss's run reads
-  `cancelled` in the list, since the second attempt takes its place, and its log holds
-  the same), and a
-  run `cancelled` after sixty minutes hit the job's timeout, which runs nothing again
-  (card 213). Add the `review` label to the pull request to run it again. Pull requests from forks are not reviewed by the agent, only by a person.
+  its log: `gh run view <run id> --log` prints the result, the denied tool calls and
+  the session's last text after the line `## Reviewer session, attempt 2 of 2`. The
+  first miss is the `attempt 1` run for the same pull request listed before it, and
+  its log holds the same lines after `attempt 1 of 2`; that run reads `success` or
+  `cancelled` in the list, as its last job ended or was replaced by the second
+  attempt, and `gh run view <run id>` shows its `review` job as passed either way. A
+  run whose `review` job itself reads `cancelled` held no finished session: the review
+  of a newer head took its place, or after sixty minutes it hit the job's timeout,
+  which runs nothing again (card 213). Add the `review` label to the pull request to run it again. Pull requests from forks are not reviewed by the agent, only by a person.
 - **The pull request is approved but not merged.** Either it has no `auto-merge`
   label, or a required check failed, or the merge was disarmed since the approval: a
   push, yours or the agent's, or a review that requested changes on the approved head,
