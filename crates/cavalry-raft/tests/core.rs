@@ -240,6 +240,8 @@ fn an_appointed_leader_whose_log_is_behind_a_members_never_leads() {
         leader.do_work(at(ms), &mut io).expect("no fault");
     }
     assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    // The stub keeps its first 64 calls: forget the canvass's, to see what follows.
+    io.clear();
     for ms in (60_100..=80_000u64).step_by(100) {
         leader
             .on_message(at(ms), &append_position(1, 0), &mut io)
@@ -252,6 +254,64 @@ fn an_appointed_leader_whose_log_is_behind_a_members_never_leads() {
     assert_eq!(leader.election_state(), ElectionState::LeaderReady);
     assert_eq!(leader.counts().appointed_leader_behind, 1);
     assert_eq!(io.count(|c| matches!(c, Call::Append(_))), 0);
+}
+
+/// Leader ready waits for every member it has heard, and a member is heard whenever
+/// it first reports. The leader leads at the canvass deadline with one member heard and
+/// one silent. The silent one then reports and joins; the one the canvass heard is
+/// slow. Two of three count, which is a quorum and as many as the canvass heard, and
+/// the leader still waits: the member it heard has not joined. And a member that
+/// reports the leader's term in a canvass position, having recorded it and gone back
+/// to canvass, has not joined either, and does not count.
+#[test]
+fn leader_ready_waits_for_a_member_it_heard_whoever_else_has_joined() {
+    let mut io = Stub::new();
+    let mut leader = Consensus::new(&[0, 1, 2], 0).expect("a member");
+    for ms in (1..=59_901u64).step_by(100) {
+        leader
+            .on_message(at(ms), &canvass_position(1, -1, 0), &mut io)
+            .expect("no fault");
+        leader.do_work(at(ms), &mut io).expect("no fault");
+    }
+    for ms in 60_002..=60_010u64 {
+        leader.do_work(at(ms), &mut io).expect("no fault");
+    }
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    // The stub keeps its first 64 calls: forget the canvass's, to see what follows.
+    io.clear();
+
+    // Member 2, silent through the canvass, reports and joins. Member 1 has not.
+    leader
+        .on_message(at(60_020), &canvass_position(2, -1, 0), &mut io)
+        .expect("no fault");
+    leader
+        .on_message(at(60_030), &append_position(2, 0), &mut io)
+        .expect("no fault");
+    for ms in 60_031..=60_040u64 {
+        leader.do_work(at(ms), &mut io).expect("no fault");
+    }
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    assert_eq!(io.count(|c| matches!(c, Call::Append(_))), 0);
+
+    // Member 1 reports the leader's term at the base in a canvass position: it recorded
+    // the term and went back to canvass. It has not joined, and does not count.
+    leader
+        .on_message(at(60_050), &canvass_position(1, 0, 0), &mut io)
+        .expect("no fault");
+    leader.do_work(at(60_051), &mut io).expect("no fault");
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+
+    // Its append position does: every member heard counts, and the election closes.
+    leader
+        .on_message(at(60_060), &append_position(1, 0), &mut io)
+        .expect("no fault");
+    leader.do_work(at(60_061), &mut io).expect("no fault");
+    leader.do_work(at(60_062), &mut io).expect("no fault");
+    assert_eq!(leader.election_state(), ElectionState::Closed);
+    assert_eq!(
+        io.count(|c| *c == Call::Append(Template::NewLeadershipTermEvent)),
+        1
+    );
 }
 
 /// A follower records the leader's term before it reports a position for it, joins

@@ -441,11 +441,13 @@ def appointed_canvass(count, reports, own, deadline_passed):
 
 def leader_ready(count, heard, counted, ahead, deadline_passed):
     """spec/cluster.md, "The appointed leader": in leader ready the appointed leader closes its
-    election at once when every member it heard in its canvass, itself among them, counts for
-    its term at its log position, and with a quorum of the members once its deadline has
-    passed, the leader heartbeat timeout after it entered leader ready; never while a member's
-    last report holds a log ahead of its own. `heard` is how many members reported in the
-    canvass, `counted` how many count, `ahead` how many are ahead."""
+    election at once when every member it has heard, itself among them, counts for its term at
+    its log position, and with a quorum of the members once its deadline has passed, the leader
+    heartbeat timeout after it entered leader ready; never while a member's last report holds
+    a log ahead of its own. `heard` is how many members it has had a canvass position or an
+    append position from since its canvass began, itself among them; `counted` is how many
+    count, each one of those heard, since a member counts by an append position it sent;
+    `ahead` is how many are ahead. So `counted >= heard` is every member heard counting."""
     if ahead > 0 or counted < quorum(count):
         return {"closes": False}
     return {"closes": counted >= heard or deadline_passed}
@@ -871,6 +873,9 @@ VECTORS += [
     arithmetic("leader-ready-every-member", "leader-ready",
                {"members": 3, "heard": 3, "counted": 3, "ahead": 0,
                 "deadline_passed": False}, leader_ready(3, 3, 3, 0, False)),
+    # One member heard has not joined: the third of three that all canvassed, or the second,
+    # which canvassed and is slow, while a third that was silent through the canvass reported
+    # after it and has joined. The leader waits for the member it heard either way.
     arithmetic("leader-ready-one-heard-not-yet-joined-waits", "leader-ready",
                {"members": 3, "heard": 3, "counted": 2, "ahead": 0,
                 "deadline_passed": False}, leader_ready(3, 3, 2, 0, False)),

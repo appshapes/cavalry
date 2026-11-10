@@ -84,13 +84,18 @@ leadership it has taken. So a member ahead of it in canvass holds a history the
 leader lost, and no truncation can bring that member back. Aeron's quorum candidate
 would lead without it, and discard the history.
 
-In leader ready the appointed leader waits for the members its canvass heard, since
-each has still to join the term. It closes its election at once when every member it
-heard in its canvass counts for its term at its log position, and with a quorum once
-the leader heartbeat timeout, 10 s, has passed since it entered leader ready, so that
-a cluster started together replicates to every member from the term's first entry,
-and a member that canvassed and then stopped holds the others for no longer than a
-member takes to be found not active. It does not close while the last report of any
+In leader ready the appointed leader waits for the members it has heard, since each
+has still to join the term. A member is heard once the leader has had a canvass
+position or an append position from it since its canvass began, so a member that was
+silent through the canvass and reports after it is heard too. A member counts by an
+append position alone, for the leader's term and at its log position: on this path a
+member sends one only once it has joined the leader's log, and a canvass position,
+whatever term it names, comes from a member that has not. The leader closes its
+election at once when every member it has heard counts, and with a quorum once the
+leader heartbeat timeout, 10 s, has passed since it entered leader ready, so that a
+cluster started together replicates to every member from the term's first entry, and
+a member that canvassed and then stopped holds the others for no longer than a member
+takes to be found not active. It does not close while the last report of any
 member holds a log ahead of its own: that is a member that holds the history and was
 silent through the canvass. Each member the appointed leader finds ahead, in canvass
 or in leader ready, is counted once in an election in
@@ -177,15 +182,33 @@ quorum of synced positions (ADR 0060).
   joins an image whose join position is past its append position, fails state 15 and
   cannot catch up before card 230: a cluster of three would run as two at most
   starts. Canvass has brought the members up by then, but not onto the log: the wait
-  for that is leader ready's, for the members the canvass heard.
+  for that is leader ready's, for the members it has heard.
 - **One deadline for the canvass and for leader ready, the startup canvass timeout
   from the canvass's start.** Lost. A canvass that ends at its deadline, a member
   missing, would leave leader ready no wait at all, and the leader would close with
   the first quorum to join: of five members with four there, the fourth, which
   canvassed with the others, joins an image that has moved and stays out until card
-  230. Waiting for every member the canvass heard, for at most the leader heartbeat
-  timeout, costs a start with a member missing nothing, and a start in which a member
-  stops between its canvass and its join 10 s.
+  230. Waiting for every member heard, for at most the leader heartbeat timeout, costs
+  a start with a member missing nothing, and a start in which a member stops between
+  its canvass and its join 10 s.
+- **Heard as the members that reported in the canvass alone, a number fixed when the
+  leader leads.** Lost: the rule compares how many members count with how many were
+  heard, and a member that was silent through the canvass, reported after it and
+  joined would count in the place of a slower member the canvass did hear; the leader
+  would close, and the member it heard would join an image that had moved. This was
+  the second form of the paragraph, and its review found the path. Heard as every
+  member that has reported since the canvass began makes every member that counts one
+  that was heard, so the two counts say what the sentence says.
+- **A third count in the rule, the members heard that do not count yet.** Lost: with
+  heard defined as above it is the difference of the two counts the rule already
+  takes, and a count that can be derived is one more thing for the page and the code
+  to keep equal.
+- **Count a member in leader ready as the commit position counts it, by any report
+  for the leader's term at or past its base.** Lost: a follower that recorded the
+  term and went back to canvass, its image not arriving, reports the leader's term at
+  the base in a canvass position without having joined. Counting it would close the
+  election on a member that is not on the log. An append position is what a member
+  sends when it is.
 - **Let a member restart on its log.** Lost for this feature. A restarted leader's
   append position is what its recorder had synced; a follower may hold more, which
   only a truncation resolves, or less, which only a catch-up resolves. Starting it
