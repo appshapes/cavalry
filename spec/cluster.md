@@ -684,12 +684,17 @@ a ballot the other members vote in; this version takes no vote, a departure card
 ends (ADR 0063). It passes states 5 to 7 as any leader. In leader ready it waits for
 more than a quorum, since no member of this version can catch up with a term whose
 first entry it missed: it appends the new leadership term event and closes its
-election at once when every member it heard in its canvass, itself among them, counts
-for its term at its log position, its last report being for the leader's term, at
-that position and no other, and younger than the leader heartbeat timeout; and with a
-quorum of the members once the leader heartbeat timeout has passed since it entered
-leader ready, a member that has not joined its log by then being one that is not
-active. It closes with no fewer than a quorum, and not while the last report of any
+election at once when every member it has heard, itself among them, counts for its
+term at its log position. A member is heard once the leader has had a canvass position
+or an append position from it since its canvass began, a member that was silent
+through the canvass and reports after it among them. A member counts when its last
+report is an append position, which on this path a member sends only once it has
+joined the leader's log (state 16), for the leader's term, at the leader's log
+position and no other, and younger than the leader heartbeat timeout; a canvass
+position counts for no member here, whatever term it names, since its sender has not
+joined. With a quorum of the members counting, the leader closes once the leader
+heartbeat timeout has passed since it entered leader ready, a member it heard that has
+not joined its log by then being one that is not active. It closes with no fewer than a quorum, and not while the last report of any
 member holds a log ahead of its own, a member that holds the history and was silent
 through the canvass; the `leader-ready` vectors pin the rule. Each member the
 appointed leader finds ahead, in canvass or in leader ready, is counted once in an
@@ -849,7 +854,7 @@ that a reader of a counters file knows which transition it saw.
 | members | at most 8; a ninth is `members-count` |
 | member id | 0 to 2147483647, unique |
 | leader heartbeat interval | 200 ms: how often the leader sends commit position with nothing to report, and new leadership term during an election |
-| leader heartbeat timeout | 10 s: a follower with nothing from its leader for this long holds an election; a member's append position older than this leaves it out of the quorum position, and a leader whose active members fall below a quorum holds an election, in state 5 as outside one, or stays the leader when it is appointed; the time a replication, a catch-up or a join may make no progress before the election fails; and how long an appointed leader waits in leader ready for every member it heard in its canvass before it closes with a quorum ("The appointed leader") |
+| leader heartbeat timeout | 10 s: a follower with nothing from its leader for this long holds an election; a member's append position older than this leaves it out of the quorum position, and a leader whose active members fall below a quorum holds an election, in state 5 as outside one, or stays the leader when it is appointed; the time a replication, a catch-up or a join may make no progress before the election fails; and how long an appointed leader waits in leader ready for every member it has heard before it closes with a quorum ("The appointed leader") |
 | election timeout | 1 s: how long a candidate waits for a quorum of votes, how long a voter waits for its candidate, and twice the longest random delay before a nomination |
 | election status interval | 100 ms: how often canvass position is sent |
 | startup canvass timeout | 60 s: how long a member that started with no term canvasses before a quorum candidate proceeds, the appointed leader among them ("The appointed leader"); at least twice the leader heartbeat timeout |
@@ -935,8 +940,9 @@ encoder. Each vector has a `kind`:
   ids; whether the appointed leader leads from canvass and how many members are ahead
   of it, from the members' reports, its own log and whether its deadline has passed;
   whether an appointed leader in leader ready closes its election, from the member
-  count, how many members it heard in its canvass, how many count for its term at its
-  log position, how many are ahead of it and whether its deadline has passed.
+  count, how many members it has heard since its canvass began, how many of those
+  count for its term at its log position, how many are ahead of it and whether its
+  deadline has passed.
 
 A conforming implementation decodes every valid vector to its fields, encodes those
 fields to the same bytes, parses every members string, computes every arithmetic

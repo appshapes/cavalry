@@ -1723,7 +1723,7 @@ user-visible change, added in the same commit as the change. The format follows
   id is the one that may lead: it leads where canvass would have it nominate, with no
   ballot, and never while a member that reported holds a log ahead of its own, so a
   leader that lost its log directory does not lead a second time. In leader ready it
-  waits for every member its canvass heard, for at most 10 s, before it appends the
+  waits for every member it has heard to join its log, for at most 10 s, before it appends the
   term's first entry. A member that would need the catch-up or a truncation fails its
   election and is counted; a leader below a quorum stays the leader and is counted; a
   member leaves the live log when it begins an election, and a follower whose image of
