@@ -19,3 +19,15 @@ workspace = true
 [package.metadata.cavalry]
 data_plane = true
 allowed-dependencies = []
+
+[dependencies]
+# The cluster protocol: the consensus messages and the log's entries the core reads and
+# writes, and the rules of `spec/cluster.md` it decides by, the commit position, what a
+# reader does with new leadership term, the appointed leader (ADR 0058; ADR 0063). A
+# workspace member.
+cavalry-proto = { path = "../cavalry-proto" }
+
+[dev-dependencies]
+# The counting allocator of the allocation test, so that the core's zero-allocation
+# claim is a test (CLAUDE.md, gate 2), as in `cavalry-client`. Dev only.
+stats_alloc = "0.1"

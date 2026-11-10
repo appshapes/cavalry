@@ -49,7 +49,9 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   reader does with new leadership term and what a leader writes into it;
   `replication_stop` and `replication_record`, where a follower's log replication
   stops and the terms it records there; `replay_end`, where a leader's replay begins
-  and ends; and `entry_position`, the position after an entry. A log leadership term
+  and ends; `entry_position`, the position after an entry; and, until the election is
+  built, `appointed_leader`, the member that leads, and `leader_ready`, when it closes
+  its election (ADR 0063). A log leadership term
   id given to any of them is the highest term in the member's record of recorded
   terms, not the term of its last entry. What a member does with a message is
   `cavalry-raft`'s.

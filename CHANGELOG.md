@@ -1706,6 +1706,33 @@ user-visible change, added in the same commit as the change. The format follows
   changes
   ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
+- The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
+  appointed leader", the path the replicated log takes through the election's states
+  until the election is built. The member with the lowest id leads; every other
+  member canvasses and never nominates; the leader closes its election with every
+  member, or with a quorum after the startup canvass timeout of 60 s; a member that
+  would need the catch-up or a truncation fails its election and is counted; a member
+  does not restart on a log that holds a term. A session message with cluster session
+  id −1 is one the leader's own process appended, of no session. `cavalry-proto` has
+  the two rules, `cluster::appointed_leader` and `cluster::leader_ready`, with their
+  vectors, and the Counters table names `cluster.terms_led`. The consensus module is a
+  client of its driver, not a thread linked to the conductor by queues
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
+- `spec/client-protocol.md` version 7 adds a client's counter: `add counter` and
+  `remove counter`, Aeron's commands 9 and 10, answered with `counter ready` and
+  `unavailable counter`, Aeron's events 3848 and 3849, and error code 5, `unknown
+  counter`. A client adds a counter of a type `counters.toml` gives the new scope
+  `client`, with a key of at most 112 bytes and a label of at most 124, owns it and
+  alone writes its value; the driver frees it when the client removes it, closes or
+  is timed out, and holds at most 256. Every version 6 encoding is unchanged; a
+  version 6 client closes on the first of the two events, so an upgrade restarts
+  the clients before the driver. `cavalry-proto` reads and writes the two commands
+  and the two events over 28 new vectors, 143 in all, and the driver answers both
+  commands with code 11 until its registry lands, the second of the ADR's three
+  changes
+  ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
+  card 227).
 - The driver adds and frees a client's counter: `add counter` allocates a record of
   the counters file with the type id, key and label the client gave and answers
   `counter ready`; `remove counter` answers `operation success`, then `unavailable

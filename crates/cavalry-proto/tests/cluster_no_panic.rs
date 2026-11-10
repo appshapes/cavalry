@@ -8,9 +8,10 @@
 
 use cavalry_proto::cluster::{
     CLOSED_STATE, CanvassTerms, EMPTY_MEMBER, LogReport, MAX_MEMBERS, MemberPosition, Message,
-    Stream, TermFields, TermSpan, Vote, VoteRequest, ballot, candidate, canvass_position_action,
-    commit_position, entry_position, log_at_least, new_leadership_term_action, next_fields,
-    parse_members, quorum, replay_end, replication_record, replication_stop, request_vote,
+    Stream, TermFields, TermSpan, Vote, VoteRequest, appointed_leader, ballot, candidate,
+    canvass_position_action, commit_position, entry_position, leader_ready, log_at_least,
+    new_leadership_term_action, next_fields, parse_members, quorum, replay_end, replication_record,
+    replication_stop, request_vote,
 };
 
 /// Deterministic, so a failure reproduces: xorshift64.
@@ -275,6 +276,19 @@ fn no_extreme_input_panics_the_election_arithmetic() {
             .collect();
         let nomination = candidate(members, &reports, own, r.next().is_multiple_of(2));
         assert!(!nomination.unanimous || nomination.nominate);
+
+        // The appointed leader's two rules, with any member count, any count of
+        // members counted, more than there are among them, and any ids, none among them.
+        let counted = [0, 1, 2, members, usize::MAX][r.below(5)];
+        let ready = leader_ready(members, counted, r.next().is_multiple_of(2));
+        assert!(!ready.unanimous || ready.closes);
+        let ids: Vec<i32> = (0..r.below(10)).map(|_| r.extreme() as i32).collect();
+        let leader = appointed_leader(&ids);
+        assert!(if ids.is_empty() {
+            leader == -1
+        } else {
+            ids.iter().all(|&id| leader <= id) && ids.contains(&leader)
+        });
 
         let candidate_term = r.extreme();
         let state = r.next() as u8;

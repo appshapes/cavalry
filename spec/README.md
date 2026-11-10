@@ -45,4 +45,4 @@ Protocol).
 | `durable-log.md`, the durable log | 2 | ADR 0024, ADR 0031, ADR 0060 |
 | `udp.md`, the UDP transport | 2 | ADR 0040, ADR 0045, ADR 0053, ADR 0059 |
 | `c-abi.md`, the C ABI | 1 | ADR 0051, ADR 0057 |
-| `cluster.md`, the cluster protocol | 0 | ADR 0058 |
+| `cluster.md`, the cluster protocol | 0 | ADR 0058, ADR 0063 |

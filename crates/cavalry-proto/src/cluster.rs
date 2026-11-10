@@ -2327,6 +2327,47 @@ pub fn candidate(
     }
 }
 
+/// The appointed leader among the members with these ids (`spec/cluster.md`, "The
+/// appointed leader"): the member with the lowest id, whatever order the members string
+/// gives them in; −1 for no member. Until the election is built, this member leads and
+/// every other follows it.
+pub fn appointed_leader(member_ids: &[i32]) -> i32 {
+    member_ids.iter().copied().min().unwrap_or(-1)
+}
+
+/// Whether an appointed leader in leader ready closes its election.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LeaderReady {
+    /// Whether it appends the new leadership term event and closes.
+    pub closes: bool,
+    /// Whether every member counted, which decides at once.
+    pub unanimous: bool,
+}
+
+/// An appointed leader's close of its election in leader ready, among `members`
+/// members of which `counted` count for its term at its log position, itself among
+/// them, as [`commit_position`] counts a member (`spec/cluster.md`, "The appointed
+/// leader"): at once when every member counts, and with a quorum of them once the
+/// startup canvass timeout has passed since it entered leader log replication. The two
+/// cases are [`candidate`]'s, a canvassing member's at a cold start, which an appointed
+/// leader never is.
+pub const fn leader_ready(
+    members: usize,
+    counted: usize,
+    startup_timeout_passed: bool,
+) -> LeaderReady {
+    if members >= 1 && counted >= members {
+        return LeaderReady {
+            closes: true,
+            unanimous: true,
+        };
+    }
+    LeaderReady {
+        closes: startup_timeout_passed && counted >= quorum(members),
+        unanimous: false,
+    }
+}
+
 /// The fields of a request vote a reader answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VoteRequest {
