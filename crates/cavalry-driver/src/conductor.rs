@@ -4961,7 +4961,9 @@ impl Conductor {
 
     /// The recorder stopped a recording: its entry goes, its counters are freed after
     /// the reuse timeout, a command that asked gets `operation success`, and every
-    /// client gets `recording stopped`.
+    /// client gets `recording stopped` with the stop position the recorder reported, a
+    /// durable one: the catalog's, or the last sync's when the stop's own writes failed,
+    /// which still stopped the recording (ADR 0064).
     fn on_stopped(
         &mut self,
         recording_id: i64,
@@ -12273,6 +12275,326 @@ mod replay {
         assert_eq!(h.counter(RECORDING_DELETED), 0);
         assert!(h.conductor.commands.is_empty());
         assert!(segment(&h, 0, 0).exists(), "nothing was written or removed");
+        drop(appender);
+    }
+
+    /// A stop whose own writes fail (invariant 1; ADR 0064). Ten frames are synced,
+    /// 640 bytes, and ten more are written and not synced, 1,280. Then the stop's
+    /// catalog write, the last step of `LogDir::stop`, is refused: the slot's stop
+    /// checksum no longer matches its stop fields. The stop's index entry and syncs go
+    /// through files the recorder holds open, which a test cannot make fail without a
+    /// full disk; a failure at any step of the stop takes the same branch of
+    /// `Recorder::stop_at`. The recording is stopped all the same: the command is
+    /// answered with `operation success`, `recording.write_failed` and
+    /// `recording.stopped` move by one, and `recording stopped` carries 640, the
+    /// position the last sync before the stop made durable, and not 1,280, the position
+    /// written. The position counter keeps 1,280 and the synced counter 640. At the
+    /// next open, recovery rebuilds the stop from the files, at or above 640.
+    #[test]
+    fn a_stop_whose_own_write_fails_announces_the_position_last_synced() {
+        let (mut h, mut appender) = recorded("recording-stop-fails");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let synced = h.conductor.recordings[0].synced.clone().expect("attached");
+        assert_eq!(synced.load_acquire(), 640, "ten frames synced");
+        // Ten more, written within a few milliseconds of the test's clock: no sync.
+        let written = offer(&mut h, &mut appender, 10, 10);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(written, 1280);
+        assert_eq!(position.load_acquire(), 1280, "written");
+        assert_eq!(synced.load_acquire(), 640, "not synced");
+        let _ = events(&mut h);
+
+        let catalog = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(h.log_dir.join(cavalry_log::layout::CATALOG_FILE_NAME))
+            .expect("the catalog opens");
+        let at = cavalry_log::layout::CatalogHeader::slot_offset(0) + 4;
+        let mut checksum = [0u8; 4];
+        catalog
+            .read_exact_at(&mut checksum, at)
+            .expect("the stop checksum reads");
+        let damaged = (u32::from_le_bytes(checksum) ^ u32::MAX).to_le_bytes();
+        catalog
+            .write_all_at(&damaged, at)
+            .expect("the stop checksum is damaged");
+
+        stop_recording(&mut h, 4);
+        let events = events(&mut h);
+        assert_eq!(successes(&events), vec![4], "the stop is answered");
+        let stopped: Vec<(i64, i64)> = events
+            .iter()
+            .filter_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::RecordingStopped {
+                    recording_id,
+                    stop_position,
+                }) => Some((recording_id, stop_position)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stopped,
+            vec![(0, 640)],
+            "the position last synced, not the position written"
+        );
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_WRITE_FAILED),
+            1
+        );
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        assert_eq!(position.load_acquire(), 1280, "not lowered");
+        assert_eq!(synced.load_acquire(), 640, "the last sync");
+
+        // The recorder holds the directory's lock until it goes. The slot reads live,
+        // and recovery rebuilds its stop from the files: the stop's own syncs ran
+        // before its catalog write failed, so the files hold all 1,280 bytes.
+        drop(appender);
+        drop(h.recorder);
+        let (log, recovery) =
+            cavalry_log::dir::LogDir::open(&h.log_dir, h.now).expect("the log directory opens");
+        assert_eq!(recovery.recovered, 1, "the live slot's stop is rebuilt");
+        let rebuilt = log
+            .catalog()
+            .get(0)
+            .expect("the slot reads")
+            .expect("the slot holds the recording")
+            .stop_position();
+        assert!(
+            rebuilt >= 640,
+            "recovery's stop {rebuilt} is below the stop announced"
+        );
+        assert_eq!(rebuilt, 1280);
+    }
+
+    /// A recording one of whose syncs failed is given up with no stop run (invariant
+    /// 1; ADR 0065). Ten frames are synced, 640 bytes, and ten more are written and not
+    /// synced, 1,280. Then the recording is marked as the two failure branches of
+    /// `Recorder::record` mark it when a sync fails: a test cannot make an `fdatasync`
+    /// on the recorder's own descriptors fail, so it takes the branch's effect through
+    /// `Recorder::fail_sync`, and what it does not cover is the branch's own lines and
+    /// the writer's, which set the mark. The recorder's next visit stops the recording without `LogDir::stop`:
+    /// `recording stopped` carries 640, the position the last sync that succeeded
+    /// covered, and not 1,280; no command is answered, since none asked;
+    /// `recording.write_failed` and `recording.stopped` move by one; the counters keep
+    /// 1,280 and 640; and the catalog holds no stop, where the stop that ran before
+    /// this decision wrote 1,280 after a sync that may have written nothing. Frames
+    /// committed after the failure are not written. At the next open, recovery
+    /// rebuilds the stop from the files, at or above 640.
+    #[test]
+    fn a_recording_whose_sync_failed_is_given_up_at_the_position_last_synced() {
+        let (mut h, mut appender) = recorded("recording-sync-failed");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let synced = h.conductor.recordings[0].synced.clone().expect("attached");
+        assert_eq!(synced.load_acquire(), 640, "ten frames synced");
+        let written = offer(&mut h, &mut appender, 10, 10);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(written, 1280);
+        assert_eq!(position.load_acquire(), 1280, "written");
+        assert_eq!(synced.load_acquire(), 640, "not synced");
+        let _ = events(&mut h);
+
+        // The failure, and ten frames more that the recorder must not write after it.
+        h.recorder.fail_sync(0);
+        offer(&mut h, &mut appender, 20, 10);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        let events = events(&mut h);
+        assert_eq!(successes(&events), Vec::<i64>::new(), "no command asked");
+        let stopped: Vec<(i64, i64)> = events
+            .iter()
+            .filter_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::RecordingStopped {
+                    recording_id,
+                    stop_position,
+                }) => Some((recording_id, stop_position)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stopped,
+            vec![(0, 640)],
+            "the position last synced, not the position written"
+        );
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_WRITE_FAILED),
+            1
+        );
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        assert_eq!(
+            position.load_acquire(),
+            1280,
+            "nothing written after the failure"
+        );
+        assert_eq!(synced.load_acquire(), 640, "the last sync that succeeded");
+        assert!(h.conductor.recordings.is_empty());
+        assert_eq!(h.recorder.live_recordings(), 0);
+
+        // No stop was run: the slot reads live, with no stop position.
+        let slot = cavalry_log::catalog::CatalogReader::open(&h.log_dir)
+            .expect("the catalog opens")
+            .get(0)
+            .expect("the slot reads")
+            .expect("the slot holds the recording");
+        assert!(slot.is_live(), "the catalog holds no stop: {slot:?}");
+
+        // The recorder holds the directory's lock until it goes. Recovery rebuilds the
+        // stop from the files, which here hold what was written before the failure.
+        drop(appender);
+        drop(h.recorder);
+        let (log, recovery) =
+            cavalry_log::dir::LogDir::open(&h.log_dir, h.now).expect("the log directory opens");
+        assert_eq!(recovery.recovered, 1, "the live slot's stop is rebuilt");
+        let rebuilt = log
+            .catalog()
+            .get(0)
+            .expect("the slot reads")
+            .expect("the slot holds the recording")
+            .stop_position();
+        assert!(
+            rebuilt >= 640,
+            "recovery's stop {rebuilt} is below the stop announced"
+        );
+        assert_eq!(rebuilt, 1280);
+    }
+
+    /// The same failure with no room for the stop's reply (invariant 1; ADR 0065). The
+    /// recorder's pending replies are at their bound when the sync fails, so the
+    /// recording cannot be stopped yet, and it waits for room. While it waits it is
+    /// neither written nor synced again, whatever is committed and however long it
+    /// lasts: before this decision the recorder synced it again in the next cycle,
+    /// that sync returned success, and `recording.synced_position` moved over the
+    /// bytes the first sync had failed on. Ten frames are synced, 640 bytes, and ten
+    /// more written and not synced, 1,280; the replies are filled with the conductor
+    /// taking none; the recording is marked as a failed sync marks it; ten more frames
+    /// are committed and more than a sync interval passes over several of the
+    /// recorder's duty cycles. The position stays 1,280 and the synced position 640,
+    /// the recording is still the recorder's, and nothing is counted. Once the
+    /// conductor takes replies the recording is given up: `recording stopped` carries
+    /// 640, and the catalog holds no stop.
+    #[test]
+    fn a_recording_whose_sync_failed_is_not_synced_again_while_it_waits_for_room() {
+        use crate::recorder::{PENDING_REPLIES, Request};
+
+        let (mut h, mut appender) = recorded("recording-sync-failed-no-room");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let synced = h.conductor.recordings[0].synced.clone().expect("attached");
+        assert_eq!(synced.load_acquire(), 640, "ten frames synced");
+        let written = offer(&mut h, &mut appender, 10, 10);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(written, 1280);
+        assert_eq!(position.load_acquire(), 1280, "written");
+        assert_eq!(synced.load_acquire(), 640, "not synced");
+        let _ = events(&mut h);
+
+        // Stops of ids no recording holds, each answered, until the recorder's pending
+        // replies are at their bound: the recorder's duty cycle alone runs, so the
+        // conductor takes none, and the clock stands still, so no sync falls due.
+        let fill = |h: &mut Harness| {
+            while h
+                .conductor
+                .recorder
+                .requests
+                .offer(Request::Stop {
+                    recording_id: 1_000_000,
+                    correlation_id: None,
+                })
+                .is_ok()
+            {}
+        };
+        for _ in 0..10_000 {
+            if h.recorder.pending_replies() >= PENDING_REPLIES {
+                break;
+            }
+            fill(&mut h);
+            h.recorder.duty_cycle(h.now);
+        }
+        assert_eq!(h.recorder.pending_replies(), PENDING_REPLIES);
+        assert_eq!(
+            synced.load_acquire(),
+            640,
+            "no sync while the replies filled"
+        );
+
+        // The failure, ten frames more, and more than a sync interval over several
+        // duty cycles with no room for the stop's reply.
+        h.recorder.fail_sync(0);
+        offer(&mut h, &mut appender, 20, 10);
+        for _ in 0..8 {
+            h.now += SECOND;
+            h.recorder.duty_cycle(h.now);
+        }
+        assert_eq!(position.load_acquire(), 1280, "not written while it waits");
+        assert_eq!(
+            synced.load_acquire(),
+            640,
+            "not synced again while it waits"
+        );
+        assert_eq!(h.recorder.live_recordings(), 1, "not stopped yet");
+        assert_eq!(h.recorder.pending_replies(), PENDING_REPLIES);
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_WRITE_FAILED),
+            0
+        );
+        assert_eq!(h.counter(RECORDING_STOPPED), 0);
+
+        // The conductor takes replies again, and the recording is given up.
+        for _ in 0..10_000 {
+            if h.conductor.recordings.is_empty() {
+                break;
+            }
+            h.cycle();
+        }
+        assert!(
+            h.conductor.recordings.is_empty(),
+            "the recording was given up"
+        );
+        let stopped: Vec<(i64, i64)> = events(&mut h)
+            .iter()
+            .filter_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::RecordingStopped {
+                    recording_id,
+                    stop_position,
+                }) => Some((recording_id, stop_position)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stopped, vec![(0, 640)], "the position last synced");
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_WRITE_FAILED),
+            1
+        );
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        assert_eq!(position.load_acquire(), 1280);
+        assert_eq!(synced.load_acquire(), 640);
+        assert_eq!(h.recorder.live_recordings(), 0);
+        let slot = cavalry_log::catalog::CatalogReader::open(&h.log_dir)
+            .expect("the catalog opens")
+            .get(0)
+            .expect("the slot reads")
+            .expect("the slot holds the recording");
+        assert!(slot.is_live(), "the catalog holds no stop: {slot:?}");
         drop(appender);
     }
 }

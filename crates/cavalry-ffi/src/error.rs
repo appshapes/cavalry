@@ -151,6 +151,10 @@ pub(crate) fn set_client(error: &ClientError) {
         ClientError::SubscriptionsFull { .. } => CAVALRY_ERR_SUBSCRIPTIONS_FULL,
         ClientError::ReplaysFull { .. } => CAVALRY_ERR_REPLAYS_FULL,
         ClientError::ReplayQueueFull { .. } => CAVALRY_ERR_REPLAY_QUEUE_FULL,
+        // The code this answer had before the client named it, so that version 1 of
+        // the ABI stands as it is; the message is the client's own. A code of its own,
+        // and the call that holds an armed recording, come with the ABI's next version.
+        ClientError::RecordingArmed { .. } => CAVALRY_ERR_DRIVER,
         ClientError::ResponseTimeout { .. } => CAVALRY_ERR_RESPONSE_TIMEOUT,
         ClientError::CommandRing(_) => CAVALRY_ERR_COMMAND_RING,
         ClientError::Broadcast(_) => CAVALRY_ERR_BROADCAST,

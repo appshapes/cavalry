@@ -1766,3 +1766,52 @@ user-visible change, added in the same commit as the change. The format follows
   a client of its driver, not a thread linked to the conductor by queues
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
   card 227).
+- A `Recording` follows its recording's stop. `Recording::stop_position()` says where
+  the recording stopped once the driver has sent `recording stopped`, whichever
+  client stopped it or whatever ended it, and `position()` and `synced_position()` are
+  that position from then on. That position is durable: the catalog's stop, or the
+  position last synced when the stop's own writes failed
+  ([ADR 0064](docs/decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md)).
+  Before this, a handle kept reading the two counters of
+  a stopped recording, which the driver frees at the stop and gives to other counters
+  a second later, so a position could become another counter's value. Each read now
+  checks that the record is still the recording's, by the recording id in its key, and
+  returns the last value read from the recording's own record when it is not and the
+  stop has not arrived. `MAX_RECORDINGS`, 1,024, moves to `cavalry-proto`, where the
+  driver's registry and the client's take it (card 227).
+- The Rust client holds an armed recording: `Cavalry::arm_recording(channel,
+  stream_id)` returns an `ArmedRecording`, and `ArmedRecording::poll()` returns the
+  `Recording` once the driver has started it with the stream's next image, or the
+  driver's error when it dropped the armed recording or its start failed. Before
+  this, a `start recording` the driver answered by arming was an error that named a
+  driver bug, and the second answer was dropped. `Cavalry::start_recording` now
+  returns `ClientError::RecordingArmed`, reason `recording-armed`, on such a stream,
+  with what to call instead. `cavalry` re-exports `ArmedRecording`. The C ABI is
+  unchanged: its call for an armed recording and the error's own code come with its
+  next version
+  ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
+  card 227).
+- The driver announces a stop whose own writes or syncs failed at the position last
+  synced. A full disk can refuse the stop's index entry, its syncs or its catalog write.
+  The recording is still stopped, and `recording.write_failed` counts the failure.
+  `recording stopped` now carries the position the recorder had synced before the stop,
+  where it carried the position written, which no sync may have covered. So the stop
+  position a client reads is durable on every path, and the stop that recovery rebuilds
+  at the next open is at or above it. The `stop recording` command is still answered
+  with `operation success`
+  ([ADR 0064](docs/decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md);
+  card 227).
+- The driver gives up a recording one of whose syncs failed, and runs no stop for
+  it. Before, it ran the recording's stop, whose sync, asked about bytes a sync had
+  already failed on, can return success and write nothing: the catalog then held the
+  position written as the stop and `recording stopped` carried it, for bytes that may
+  not be on the disk. Now the recorder writes and syncs nothing more of such a
+  recording, `recording stopped` carries the position the last sync that succeeded
+  covered, and the catalog's slot stays live until the next start's recovery. A write
+  the disk refused with no sync failing is followed by a stop as before, at the
+  position written. `recording.write_failed` counts a recording once, whichever of
+  its writes, its syncs and its stop failed. With ADR 0064, the position a client
+  reads from `recording stopped` is on every path one a sync that returned success
+  covered
+  ([ADR 0065](docs/decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md);
+  card 227).

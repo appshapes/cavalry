@@ -18,13 +18,13 @@ use cavalry_shm::spsc;
 
 use crate::conductor::{
     COMMAND_SCRATCH, Conductor, DRIVER_TIMEOUT, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING,
-    REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE, RESPONSE_TIMEOUT, ReplayRegistration, Shared,
-    nanos, now_nanos,
+    RECORDING_QUEUE, RECORDING_REGISTRY, REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE,
+    RESPONSE_TIMEOUT, RecordingRegistration, ReplayRegistration, Shared, nanos, now_nanos,
 };
 use crate::counter::Counter;
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
-use crate::recording::Recording;
+use crate::recording::{ArmedRecording, Recording, RecordingAnswer, RecordingStop};
 use crate::replay::{Replay, ReplayEnd};
 use crate::response::Response;
 use crate::subscription::{
@@ -46,13 +46,16 @@ pub struct Cavalry {
     shared: Arc<Shared>,
     producer: Producer,
     ring: CommandRing,
-    counters: CountersReader,
+    /// Shared with the recording handles, which check a record before they trust its
+    /// value ([`Recording`]).
+    counters: Arc<CountersReader>,
     /// The counters file mapped writable, for the counters this client adds and owns;
     /// opened at the first [`Cavalry::add_counter`] (ADR 0062).
     counters_writer: Option<CountersWriter>,
     responses: spsc::Consumer<Response>,
     registrations: spsc::Producer<Registration>,
     replay_registrations: spsc::Producer<ReplayRegistration>,
+    recording_registrations: spsc::Producer<RecordingRegistration>,
     conductor: Option<JoinHandle<()>>,
     scratch: Vec<u8>,
 }
@@ -114,7 +117,7 @@ impl Cavalry {
         let client_id = producer.next_correlation_id();
         let broadcast = BroadcastBuffer::open(&dir, false)?;
         let receiver = broadcast.receiver()?;
-        let counters = CountersReader::open(&dir)?;
+        let counters = Arc::new(CountersReader::open(&dir)?);
 
         let mut scratch = vec![0u8; COMMAND_SCRATCH];
         let keepalive = Command::ClientKeepalive {
@@ -134,6 +137,8 @@ impl Cavalry {
             spsc::queue::<Registration>(REGISTRATION_QUEUE);
         let (replay_registrations, replay_registration_consumer) =
             spsc::queue::<ReplayRegistration>(REPLAY_QUEUE);
+        let (recording_registrations, recording_registration_consumer) =
+            spsc::queue::<RecordingRegistration>(RECORDING_QUEUE);
         let conductor_ring = CommandRing::open(&dir, true)?;
         let counters_writer = CountersWriter::open(&dir)?;
         let conductor = Conductor::new(
@@ -146,6 +151,7 @@ impl Cavalry {
             response_producer,
             registration_consumer,
             replay_registration_consumer,
+            recording_registration_consumer,
             client_id,
         );
         let handle = std::thread::Builder::new()
@@ -167,6 +173,7 @@ impl Cavalry {
             responses,
             registrations,
             replay_registrations,
+            recording_registrations,
             conductor: Some(handle),
             scratch,
         })
@@ -363,7 +370,9 @@ impl Cavalry {
     /// the one with the lowest registration id not yet being recorded, so that a second
     /// call records the next one (`spec/client-protocol.md`, "Commands"; ADR 0025).
     /// Waits for `recording ready` up to the response timeout and returns the
-    /// [`Recording`], whose two positions read from the counters file. The recording
+    /// [`Recording`], whose two positions read from the counters file while it is live
+    /// and are its stop position once the driver has said it stopped, which this client
+    /// follows for as long as the handle lives. The recording
     /// belongs to the driver: it outlives this client, dropping the handle stops nothing,
     /// and [`Cavalry::stop_recording`] from any client stops it. No live publication is
     /// [`ClientError::Refused`] with error code 20, every one already recorded code 22, a
@@ -371,42 +380,134 @@ impl Cavalry {
     /// catalog, registry or counters file at capacity code 10. On a `cavalry:udp`
     /// channel the logs that match are the publications sending on it and the images
     /// received on it (ADR 0042).
+    ///
+    /// A `cavalry:udp` stream with a live subscription and no publication or image is
+    /// not refused: the driver arms the recording, to start with the stream's next
+    /// image (ADR 0059). This call returns a started recording or nothing, so it
+    /// returns [`ClientError::RecordingArmed`] then, and the driver holds the armed
+    /// recording all the same; [`Cavalry::arm_recording`] is the call for that order.
     pub fn start_recording(
         &mut self,
         channel: &str,
         stream_id: i32,
     ) -> Result<Recording, ClientError> {
+        let stop = Arc::new(RecordingStop::new());
+        let ready = match self.record(channel, stream_id, &stop, None)? {
+            Response::Success { .. } => return Err(ClientError::RecordingArmed { stream_id }),
+            ready => RecordingAnswer::new(ready)?,
+        };
+        // A record that is not the recording's by now is a recording that has already
+        // stopped, whose counters the driver freed: the handle is made once the
+        // conductor has stored the stop, which follows the answer.
+        loop {
+            if let Some(recording) = ready.recording(channel, stream_id, &self.counters, &stop)? {
+                return Ok(recording);
+            }
+            if let Some(reason) = self.shared.closed() {
+                return Err(ClientError::Closed(reason));
+            }
+            std::thread::sleep(Duration::from_micros(50));
+        }
+    }
+
+    /// Asks the driver to record `channel` and `stream_id` as
+    /// [`Cavalry::start_recording`] does, and holds the recording when the driver arms
+    /// it instead of starting it: on a `cavalry:udp` stream with a live subscription
+    /// and no publication or image yet, the driver answers at once and starts the
+    /// recording when the stream's next image arrives, at the image's join position, so
+    /// that every frame of the image is recorded (`spec/client-protocol.md`,
+    /// "Commands", start recording; ADR 0059). A follower of a cluster arms the
+    /// recording of its leader's log this way before the leader's first frame.
+    ///
+    /// Returns an [`ArmedRecording`], which [`ArmedRecording::poll`] turns into the
+    /// [`Recording`] once the driver has started it; when the stream already had a
+    /// publication or an image the recording started at once, and the first poll hands
+    /// it over. The refusals are those of `start_recording`. The driver holds one
+    /// armed recording for each stream and endpoint with a live subscription, so a
+    /// second call for the stream is [`ClientError::Refused`] with code 22, and this
+    /// client holds as many as the driver's subscriptions registry.
+    pub fn arm_recording(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+    ) -> Result<ArmedRecording, ClientError> {
+        let stop = Arc::new(RecordingStop::new());
+        let (producer, answers) = spsc::queue::<Response>(1);
+        let ready = match self.record(channel, stream_id, &stop, Some(producer))? {
+            Response::Success { .. } => None,
+            ready => Some(RecordingAnswer::new(ready)?),
+        };
+        Ok(ArmedRecording::new(
+            stream_id,
+            channel,
+            Arc::clone(&self.counters),
+            Arc::clone(&self.shared),
+            stop,
+            answers,
+            ready,
+        ))
+    }
+
+    /// Registers a recording with the conductor and sends its `start recording`: what
+    /// `start_recording` and `arm_recording` share. Returns the first answer,
+    /// `recording ready` or `operation success`; any other is [`ClientError::Driver`].
+    fn record(
+        &mut self,
+        channel: &str,
+        stream_id: i32,
+        stop: &Arc<RecordingStop>,
+        armed: Option<spsc::Producer<Response>>,
+    ) -> Result<Response, ClientError> {
         let correlation_id = self.producer.next_correlation_id();
+        // Registered before the command goes, so that the conductor holds the place for
+        // this recording's stop when `recording ready` gives it the id, and for an
+        // armed recording's second answer when `operation success` says it is armed
+        // (`Conductor::events`): the driver frees a stopped recording's counters, and
+        // the handle must not read them after.
+        let mut registration = RecordingRegistration {
+            correlation_id,
+            stop: Arc::clone(stop),
+            armed,
+        };
+        // One command is in flight per client, so the queue holds one at most; it is
+        // full only while the conductor does not run, and then the command would wait
+        // out the response timeout as well.
+        let deadline = Instant::now() + RESPONSE_TIMEOUT;
+        while let Err(back) = self.recording_registrations.offer(registration) {
+            if let Some(reason) = self.shared.closed() {
+                return Err(ClientError::Closed(reason));
+            }
+            if Instant::now() >= deadline {
+                return Err(ClientError::ResponseTimeout {
+                    command: "start recording",
+                });
+            }
+            registration = back;
+            std::thread::sleep(Duration::from_micros(50));
+        }
         let command = Command::StartRecording {
             client_id: self.client_id,
             correlation_id,
             stream_id,
             channel: channel.as_bytes(),
         };
-        match self.request(&command, correlation_id, "start recording")? {
-            Response::RecordingReady {
-                recording_id,
-                session_id,
-                position_counter_id,
-                synced_position_counter_id,
-                ..
-            } => {
-                let counter = |id: i32| -> Result<CounterValue, ClientError> {
-                    Ok(self.counters.value(u32::try_from(id).map_err(|_| {
-                        ClientError::Driver {
-                            what: format!("recording counter id {id}"),
-                        }
-                    })?)?)
-                };
-                Ok(Recording::new(
-                    recording_id,
-                    session_id,
-                    stream_id,
-                    channel.to_string(),
-                    counter(position_counter_id)?,
-                    counter(synced_position_counter_id)?,
-                ))
-            }
+        let answer = self.request(&command, correlation_id, "start recording")?;
+        if stop.refused() {
+            // More registrations than the driver's own bounds allow have no stop
+            // stored and no second answer read: a driver that does not conform. The
+            // recording, started or armed, is the driver's and stays; this client
+            // cannot follow it, so it hands out no handle that would read its counters
+            // after its stop.
+            return Err(ClientError::Driver {
+                what: format!(
+                    "{answer:?} in answer to start recording with {RECORDING_REGISTRY} \
+                     recordings of this client still live or armed, more than the driver \
+                     holds"
+                ),
+            });
+        }
+        match answer {
+            answer @ (Response::RecordingReady { .. } | Response::Success { .. }) => Ok(answer),
             other => Err(ClientError::Driver {
                 what: format!("{other:?} in answer to start recording"),
             }),
@@ -602,9 +703,12 @@ impl Cavalry {
 
     /// Stops recording `recording_id`, whichever client started it: the driver writes the
     /// catalog's stop at the position written and answers once it is synced
-    /// (`spec/client-protocol.md`, "Commands"). A recording already stopped is success
-    /// with nothing written; an id the catalog does not hold is [`ClientError::Refused`]
-    /// with error code 21.
+    /// (`spec/client-protocol.md`, "Commands"). A stop whose own writes or syncs fail is
+    /// success too, since the recording is stopped all the same; the driver counts it in
+    /// `recording.write_failed` and announces the position last synced, which
+    /// [`Recording::stop_position`] returns (ADR 0064). A recording already stopped is
+    /// success with nothing written; an id the catalog does not hold is
+    /// [`ClientError::Refused`] with error code 21.
     pub fn stop_recording(&mut self, recording_id: i64) -> Result<(), ClientError> {
         let correlation_id = self.producer.next_correlation_id();
         let command = Command::StopRecording {

@@ -14,6 +14,7 @@ const DOC_DIRECTORY: &str = "docs/reference/client-protocol.md#the-driver-direct
 const DOC_LIVENESS: &str = "docs/reference/client-protocol.md#liveness-and-timeouts";
 const DOC_ERRORS: &str = "docs/reference/client-protocol.md#error-codes";
 const DOC_SIZES: &str = "docs/reference/client-protocol.md#sizes";
+const DOC_COMMANDS: &str = "docs/reference/client-protocol.md#commands";
 const DOC_BROADCAST: &str = "docs/reference/broadcast-buffer.md#receiving";
 const DOC_REPLAY: &str = "docs/how-to/replay-a-recording.md#when-it-does-not-work";
 
@@ -133,6 +134,18 @@ pub enum ClientError {
         /// The bound: the client's own on starts in flight.
         limit: usize,
     },
+    /// The driver answered `start recording` by arming the recording: the stream has a
+    /// live subscription and no publication or image yet, so the recording starts when
+    /// the stream's next image arrives (`spec/client-protocol.md`, "Commands"; ADR
+    /// 0059). [`Cavalry::start_recording`](crate::Cavalry::start_recording) returns a
+    /// started recording or nothing, so it returns this; the driver holds the armed
+    /// recording all the same, and
+    /// [`Cavalry::arm_recording`](crate::Cavalry::arm_recording) is the call that holds
+    /// it from the start.
+    RecordingArmed {
+        /// The stream the recording is armed on.
+        stream_id: i32,
+    },
     /// An add or remove command went unanswered for the response timeout.
     ResponseTimeout {
         /// The command, by name.
@@ -167,7 +180,8 @@ pub enum ClientError {
 
 impl ClientError {
     /// The reason's name: `not-found`, `driver-gone`, `closed`, `refused`,
-    /// `subscriptions-full`, `replays-full`, `replay-queue-full`, `response-timeout`,
+    /// `subscriptions-full`, `replays-full`, `replay-queue-full`, `recording-armed`,
+    /// `response-timeout`,
     /// `command-ring`, `broadcast`, `counters`, `protocol`, `log`, `driver` or `io`.
     pub const fn reason(&self) -> &'static str {
         match self {
@@ -178,6 +192,7 @@ impl ClientError {
             ClientError::SubscriptionsFull { .. } => "subscriptions-full",
             ClientError::ReplaysFull { .. } => "replays-full",
             ClientError::ReplayQueueFull { .. } => "replay-queue-full",
+            ClientError::RecordingArmed { .. } => "recording-armed",
             ClientError::ResponseTimeout { .. } => "response-timeout",
             ClientError::CommandRing(_) => "command-ring",
             ClientError::Broadcast(_) => "broadcast",
@@ -262,6 +277,15 @@ impl fmt::Display for ClientError {
                 "command refused ({reason}): this client has {limit} replay starts waiting for \
                  the driver's answer, its own queue's bound, and sent nothing; wait for one to \
                  be answered, then start the next; see {DOC_REPLAY}"
+            ),
+            ClientError::RecordingArmed { stream_id } => write!(
+                f,
+                "no recording yet ({reason}): stream {stream_id} has a subscription and no \
+                 publication or image, so the driver armed the recording, which starts when \
+                 the stream's next image arrives, and this call holds no handle on it; call \
+                 `Cavalry::arm_recording` before the publisher starts to hold the recording \
+                 from its first frame, or start the recording once the image is there; see \
+                 {DOC_COMMANDS}"
             ),
             ClientError::ResponseTimeout { command } => write!(
                 f,
