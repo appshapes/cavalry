@@ -151,8 +151,9 @@ recording and a client's counter stay out, and "Out of this version" names each.
   `clients/generate-test.py` holds the five generators' parse of it to them: 59 tests.
 - The runners, `just conformance`'s, against the version 2 library on the laptop: C,
   with the null handle of a driver that hosts no member and a subscription's header
-  refused its entry position, and Python, Node, Go and .NET, each to `ok`. The JVM
-  runner needs Java 25, which the laptop lacks; CI's gates run it.
+  refused its entry position, and Python, Node, Go, .NET and the JVM, each to `ok`.
+  The JVM runner ran with Homebrew's Java 25 first on the path, which the laptop's
+  path does not hold by itself.
 
 ## Consequences
 
