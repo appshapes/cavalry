@@ -291,6 +291,9 @@ struct Peer {
     /// The log leadership term id the report carried, −1 for none.
     term: i64,
     at_ns: u64,
+    /// Whether the last report was an append position, which a member sends once it
+    /// has joined its leader's log, and not a canvass position.
+    appended: bool,
     /// Whether this election has counted the member as ahead of the appointed leader.
     ahead_counted: bool,
 }
@@ -322,9 +325,6 @@ pub struct Consensus {
     log: Option<Log>,
     /// Whether a quorum of members was active at the leader's last cycle.
     quorate: bool,
-    /// How many members the leader heard in its canvass, itself among them: the ones
-    /// leader ready waits for.
-    heard: usize,
     last_heartbeat_ns: Option<u64>,
     last_commit_sent: i64,
     // A follower's part.
@@ -353,6 +353,7 @@ impl Consensus {
             position: 0,
             term: -1,
             at_ns: 0,
+            appended: false,
             ahead_counted: false,
         }; MAX_MEMBERS];
         let mut own = None;
@@ -385,7 +386,6 @@ impl Consensus {
             counts: Counts::default(),
             log: None,
             quorate: true,
-            heard: 0,
             last_heartbeat_ns: None,
             last_commit_sent: -1,
             leader_log_position: 0,
@@ -485,7 +485,7 @@ impl Consensus {
                 let Some(index) = self.other(follower_member_id) else {
                     return Ok(());
                 };
-                self.report(index, log_position, log_leadership_term_id, clock);
+                self.report(index, log_position, log_leadership_term_id, false, clock);
                 if self.role != Role::Leader {
                     return Ok(());
                 }
@@ -514,7 +514,7 @@ impl Consensus {
                 if self.role == Role::Leader
                     && let Some(index) = self.other(follower_member_id)
                 {
-                    self.report(index, log_position, leadership_term_id, clock);
+                    self.report(index, log_position, leadership_term_id, true, clock);
                 }
                 Ok(())
             }
@@ -647,6 +647,7 @@ impl Consensus {
             position: 0,
             term: -1,
             at_ns: 0,
+            appended: false,
             ahead_counted: false,
         })
     }
@@ -661,11 +662,14 @@ impl Consensus {
             .filter(|&index| index != self.own)
     }
 
-    fn report(&mut self, index: usize, position: i64, term: i64, clock: Clock) {
+    /// A member's report: its log's term and position, when it arrived, and whether it
+    /// was an append position.
+    fn report(&mut self, index: usize, position: i64, term: i64, appended: bool, clock: Clock) {
         if let Some(peer) = self.peers.get_mut(index) {
             peer.reported = true;
             peer.position = position;
             peer.term = term;
+            peer.appended = appended;
             peer.at_ns = clock.now_ns;
         }
     }
@@ -722,7 +726,7 @@ impl Consensus {
         // A cluster of one member leads from init, with nobody to canvass. A fault
         // at its writes leaves it in init with nothing counted.
         if self.count == 1 {
-            let work = self.lead(clock, io, 1)?;
+            let work = self.lead(clock, io)?;
             count(&mut self.counts.elections);
             return Ok(work);
         }
@@ -784,15 +788,14 @@ impl Consensus {
         if !appointed_canvass(self.count, &reports, own, deadline_passed).leads {
             return Ok(work);
         }
-        self.lead(clock, io, reports.iter().flatten().count())
+        self.lead(clock, io)
     }
 
     /// Leads candidate term + 1, where an elected member would nominate itself and
     /// win: the term it proposes is stored, and recorded at its append position, before
     /// anything in memory moves. A fault at either write leaves the member in the
-    /// state it was in, and the next cycle proposes the same term again. `heard` is how
-    /// many members reported in its canvass, itself among them.
-    fn lead<I: Io>(&mut self, clock: Clock, io: &mut I, heard: usize) -> Result<usize, I::Fault> {
+    /// state it was in, and the next cycle proposes the same term again.
+    fn lead<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let term = self.candidate_term.saturating_add(1);
         io.store_candidate_term(term)?;
         io.record_term(term, self.append_position)?;
@@ -803,7 +806,6 @@ impl Consensus {
         count(&mut self.counts.terms_led);
         self.role = Role::Leader;
         self.quorate = true;
-        self.heard = heard;
         Ok(self.enter(ElectionState::LeaderLogReplication, clock))
     }
 
@@ -856,7 +858,7 @@ impl Consensus {
     /// The leader's own place in its table, set on every cycle, and its quorum
     /// watched.
     fn report_own(&mut self, clock: Clock) {
-        self.report(self.own, self.append_position, self.term, clock);
+        self.report(self.own, self.append_position, self.term, true, clock);
         self.watch_quorum(clock);
     }
 
@@ -967,21 +969,24 @@ impl Consensus {
         Ok(work)
     }
 
-    /// State 8. The heartbeat until every member the leader heard in its canvass counts
-    /// for the term at the leader's log position, or a quorum once the leader heartbeat
-    /// timeout has passed in this state, and no member's last report holds a log ahead
-    /// of the leader's; then the term's first entry, the new leadership term event.
+    /// State 8. The heartbeat until every member the leader has heard counts for the
+    /// term at the leader's log position, or a quorum once the leader heartbeat timeout
+    /// has passed in this state, and no member's last report holds a log ahead of the
+    /// leader's; then the term's first entry, the new leadership term event. A member
+    /// is heard once it has reported since the canvass began, in a canvass position or
+    /// an append position; it counts by an append position alone, which it sends once
+    /// it has joined the log.
     fn leader_ready<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         self.report_own(clock);
         let work = self.announce(clock, io);
-        let counted = self
-            .peers
-            .iter()
-            .take(self.count)
+        let members = || self.peers.iter().take(self.count);
+        let heard = members().filter(|peer| peer.reported).count();
+        let counted = members()
             .filter(|peer| {
                 // At the leader's log position and no other: a position past it is of
                 // entries this leader's log does not hold.
                 peer.reported
+                    && peer.appended
                     && peer.term == self.term
                     && peer.position == self.append_position
                     && clock.now_ns.saturating_sub(peer.at_ns) < LEADER_HEARTBEAT_TIMEOUT_NS
@@ -993,7 +998,7 @@ impl Consensus {
             term: self.term,
             position: self.append_position,
         });
-        if !leader_ready(self.count, self.heard, counted, ahead, deadline_passed) {
+        if !leader_ready(self.count, heard, counted, ahead, deadline_passed) {
             return Ok(work);
         }
         let Some(log) = self.log else {
