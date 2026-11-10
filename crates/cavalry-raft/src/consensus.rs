@@ -21,6 +21,7 @@ use cavalry_proto::cluster::{
 /// process appended (`spec/cluster.md`, "The appointed leader").
 pub const NO_SESSION: i64 = -1;
 
+// state machine: cluster_role
 /// A member's role, with the value of the `cluster.role` gauge (`spec/cluster.md`,
 /// "Counters").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -35,6 +36,7 @@ pub enum Role {
     Leader = 2,
 }
 
+// state machine: cluster_election
 /// The states of the election a member of this version enters, each with the code
 /// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -26,8 +26,21 @@ allowed-dependencies = []
 # reader does with new leadership term, the appointed leader (ADR 0058; ADR 0063). A
 # workspace member.
 cavalry-proto = { path = "../cavalry-proto" }
+# The consensus module is a client of its driver (ADR 0063): its consensus messages,
+# its log and its counters go through the commands every program uses. A workspace
+# member.
+cavalry-client = { path = "../cavalry-client" }
+# The `terms` file, the member's record of terms and its candidate term
+# (spec/durable-log.md, "Terms"; ADR 0060). A workspace member.
+cavalry-log = { path = "../cavalry-log" }
+# The ids of the cluster's counters, generated from counters.toml (ADR 0012). A
+# workspace member.
+cavalry-shm = { path = "../cavalry-shm" }
 
 [dev-dependencies]
 # The counting allocator of the allocation test, so that the core's zero-allocation
 # claim is a test (CLAUDE.md, gate 2), as in `cavalry-client`. Dev only.
 stats_alloc = "0.1"
+# The module's tests run three drivers in the test process, one a member (ADR 0007).
+# Dev only.
+cavalry-driver = { path = "../cavalry-driver" }

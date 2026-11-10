@@ -115,6 +115,19 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 107 | `recording.armed_dropped` | counter | static | Armed recordings dropped because the last subscription on their receive endpoint and stream went before an image arrived, by remove subscription, client close or client timeout, a receive endpoint that closes being one case of it, since the receiver creates no image for a stream no subscription wants; the arming command is answered a second time with error code 20 (spec/client-protocol.md, Commands, start recording; ADR 0059). | A dropped armed recording recorded nothing: its stream's last subscription on the endpoint was removed, or its client closed or timed out, before the image arrived. Keep a subscription on the stream open until the image arrives, then the recording starts on its own; check client.timed_out if nobody removed it. |
 | 108 | `recording.armed_failed` | counter | static | Armed recordings whose start failed when the stream's next image arrived, at a step a start on a live image fails at: the recordings registry, the recorder's request queue, the catalog or the counters file at capacity (code 10), or the recording's files not created (code 12). Each also counts in that step's counter, driver.registry_full, recording.catalog_full or recording.start_failed; the arming command is answered a second time with error and the code, and the image is announced all the same and no longer held by the recording (spec/client-protocol.md, Commands, start recording; ADR 0059). | An armed recording failed to start and records nothing: read driver.registry_full, recording.catalog_full and recording.start_failed to see which step failed, fix that as their findings say, then send start recording again on the live image. |
 | 109 | `cluster.commit_position` | gauge | client | The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal. | A cluster.commit_position that stays where it is while the member's recording.position moves is a commit that waits for a quorum: check that a majority of the members in the members string are running and that each reaches the others' consensus endpoints. |
+| 110 | `cluster.role` | gauge | client | One cluster member's role: 0 follower, 1 candidate, 2 leader (spec/cluster.md, Counters). The member's consensus module adds the counter and stores it; key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 111 | `cluster.election_state` | gauge | client | The state of one cluster member's election, the code spec/cluster.md, Roles and the election, gives it, 17 when no election runs; key: member id (i32), little-endian; label text: the member id in decimal. | A member that stays at 1, canvass, has found no leader it can follow: the appointed leader is not running, cannot be reached on the consensus endpoints, or holds a log behind this member's. A leader that stays at 8, leader ready, waits for a member that has not joined its log, for at most 10 s. |
+| 112 | `cluster.leadership_term_id` | gauge | client | The term one cluster member leads or follows, -1 before the first; key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 113 | `cluster.append_position` | gauge | client | One cluster member's append position: the end of the contiguous span its recordings of the log hold, as a sync has made it durable (spec/cluster.md, The log; ADR 0060); key: member id (i32), little-endian; label text: the member id in decimal. | An append position behind the leader's on one member is a recorder whose disk syncs slowly, or a member the log no longer reaches: compare its recording.synced_position and its cluster.election_state. |
+| 114 | `cluster.elections` | counter | client | Elections one cluster member began, from init (spec/cluster.md, Counters); key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 115 | `cluster.elections_failed` | counter | client | Elections of one cluster member that failed in a state and began again at init: in this version a member that could join the leader's log only with a catch-up or a truncation, about ten a second while it canvasses (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal. | This member started after the cluster's first entry, or lost what it held: it cannot join until the catch-up is built. Start the cluster again as a new cluster, every member on a new log directory. |
+| 116 | `cluster.terms_led` | counter | client | Terms one cluster member began to lead, on entering leader log replication (spec/cluster.md, Counters); key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 117 | `cluster.quorum_lost` | counter | client | Times the active members of the leader fell below a quorum: the appointed leader stays the leader and its commit position stops (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal. | The leader hears from fewer than a quorum of members: check that a majority of the members in the members string are running and that each reaches the leader's consensus endpoint. Nothing is committed until a quorum reports again. |
+| 118 | `cluster.leader_heartbeat_timeouts` | counter | client | Times one follower began again at init because its leader sent no commit position and no new leadership term for the leader heartbeat timeout, 10 s (spec/cluster.md, Roles and the election); key: member id (i32), little-endian; label text: the member id in decimal. | The follower lost its leader's consensus messages: check that the leader is running and reaches this member's consensus endpoint. |
+| 119 | `cluster.leadership_terms_ignored` | counter | client | New leadership terms one cluster member ignored for their term (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 120 | `cluster.join_position_mismatches` | counter | client | Images of the leader's log that joined at a position other than the member's append position, so that the member failed its election (spec/cluster.md, state 15); key: member id (i32), little-endian; label text: the member id in decimal. | The leader appended while this member was subscribing or away, and this version has no catch-up: the member stays out. Start the cluster again as a new cluster, every member on a new log directory. |
+| 121 | `cluster.log_images_lost` | counter | client | Times one follower's image of its leader's log was no longer available, so that it began again at init (spec/cluster.md, The commit position); key: member id (i32), little-endian; label text: the member id in decimal. | The leader's log stopped reaching this member: check that the leader is running and reaches this member's log endpoint. |
+| 122 | `cluster.messages_rejected` | counter | client | Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal. | A member sends consensus messages this member cannot read: check that every member runs the same version. |
 
 ## State machines
 
@@ -205,3 +218,27 @@ States: `initializing`, `active`, `closing`, `errored`.
 | --- | --- | --- |
 | `initializing` | `active` | `channel.opened` |
 | `active` | `closing` | `channel.closed` |
+
+### `cluster_role`
+
+States: `follower`, `candidate`, `leader`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `follower` | `leader` | `cluster.terms_led` |
+
+### `cluster_election`
+
+States: `init`, `canvass`, `leader_log_replication`, `leader_replay`, `leader_init`, `leader_ready`, `follower_replay`, `follower_log_init`, `follower_log_await`, `follower_ready`, `closed`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `init` | `canvass` | `cluster.elections` |
+| `canvass` | `leader_log_replication` | `cluster.terms_led` |
+| `canvass` | `init` | `cluster.elections_failed` |
+| `follower_replay` | `init` | `cluster.elections_failed` |
+| `follower_log_await` | `init` | `cluster.elections_failed` |
+| `follower_log_await` | `init` | `cluster.join_position_mismatches` |
+| `follower_ready` | `init` | `cluster.elections_failed` |
+| `closed` | `init` | `cluster.leader_heartbeat_timeouts` |
+| `closed` | `init` | `cluster.log_images_lost` |

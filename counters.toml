@@ -1165,3 +1165,184 @@ kind = "gauge"
 scope = "client"
 doc = "The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "A cluster.commit_position that stays where it is while the member's recording.position moves is a commit that waits for a quorum: check that a majority of the members in the members string are running and that each reaches the others' consensus endpoints."
+
+[[counter]]
+id = 110
+name = "cluster.role"
+kind = "gauge"
+scope = "client"
+doc = "One cluster member's role: 0 follower, 1 candidate, 2 leader (spec/cluster.md, Counters). The member's consensus module adds the counter and stores it; key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = ""
+
+[[counter]]
+id = 111
+name = "cluster.election_state"
+kind = "gauge"
+scope = "client"
+doc = "The state of one cluster member's election, the code spec/cluster.md, Roles and the election, gives it, 17 when no election runs; key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "A member that stays at 1, canvass, has found no leader it can follow: the appointed leader is not running, cannot be reached on the consensus endpoints, or holds a log behind this member's. A leader that stays at 8, leader ready, waits for a member that has not joined its log, for at most 10 s."
+
+[[counter]]
+id = 112
+name = "cluster.leadership_term_id"
+kind = "gauge"
+scope = "client"
+doc = "The term one cluster member leads or follows, -1 before the first; key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = ""
+
+[[counter]]
+id = 113
+name = "cluster.append_position"
+kind = "gauge"
+scope = "client"
+doc = "One cluster member's append position: the end of the contiguous span its recordings of the log hold, as a sync has made it durable (spec/cluster.md, The log; ADR 0060); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "An append position behind the leader's on one member is a recorder whose disk syncs slowly, or a member the log no longer reaches: compare its recording.synced_position and its cluster.election_state."
+
+[[counter]]
+id = 114
+name = "cluster.elections"
+kind = "counter"
+scope = "client"
+doc = "Elections one cluster member began, from init (spec/cluster.md, Counters); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = ""
+
+[[counter]]
+id = 115
+name = "cluster.elections_failed"
+kind = "counter"
+scope = "client"
+doc = "Elections of one cluster member that failed in a state and began again at init: in this version a member that could join the leader's log only with a catch-up or a truncation, about ten a second while it canvasses (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "This member started after the cluster's first entry, or lost what it held: it cannot join until the catch-up is built. Start the cluster again as a new cluster, every member on a new log directory."
+
+[[counter]]
+id = 116
+name = "cluster.terms_led"
+kind = "counter"
+scope = "client"
+doc = "Terms one cluster member began to lead, on entering leader log replication (spec/cluster.md, Counters); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = ""
+
+[[counter]]
+id = 117
+name = "cluster.quorum_lost"
+kind = "counter"
+scope = "client"
+doc = "Times the active members of the leader fell below a quorum: the appointed leader stays the leader and its commit position stops (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "The leader hears from fewer than a quorum of members: check that a majority of the members in the members string are running and that each reaches the leader's consensus endpoint. Nothing is committed until a quorum reports again."
+
+[[counter]]
+id = 118
+name = "cluster.leader_heartbeat_timeouts"
+kind = "counter"
+scope = "client"
+doc = "Times one follower began again at init because its leader sent no commit position and no new leadership term for the leader heartbeat timeout, 10 s (spec/cluster.md, Roles and the election); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "The follower lost its leader's consensus messages: check that the leader is running and reaches this member's consensus endpoint."
+
+[[counter]]
+id = 119
+name = "cluster.leadership_terms_ignored"
+kind = "counter"
+scope = "client"
+doc = "New leadership terms one cluster member ignored for their term (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = ""
+
+[[counter]]
+id = 120
+name = "cluster.join_position_mismatches"
+kind = "counter"
+scope = "client"
+doc = "Images of the leader's log that joined at a position other than the member's append position, so that the member failed its election (spec/cluster.md, state 15); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "The leader appended while this member was subscribing or away, and this version has no catch-up: the member stays out. Start the cluster again as a new cluster, every member on a new log directory."
+
+[[counter]]
+id = 121
+name = "cluster.log_images_lost"
+kind = "counter"
+scope = "client"
+doc = "Times one follower's image of its leader's log was no longer available, so that it began again at init (spec/cluster.md, The commit position); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "The leader's log stopped reaching this member: check that the leader is running and reaches this member's log endpoint."
+
+[[counter]]
+id = 122
+name = "cluster.messages_rejected"
+kind = "counter"
+scope = "client"
+doc = "Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "A member sends consensus messages this member cannot read: check that every member runs the same version."
+
+# A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
+# 3). In this version a follower becomes the leader by appointment and no member is a
+# candidate or stops leading (ADR 0063).
+
+[[state_machine]]
+name = "cluster_role"
+states = ["follower", "candidate", "leader"]
+
+[[transition]]
+machine = "cluster_role"
+from = "follower"
+to = "leader"
+counter = "cluster.terms_led"
+
+# A cluster member's election, the states of spec/cluster.md this version enters (ADR
+# 0063). The transitions that begin an election, give it a leader or end it in failure
+# are counted; the steps between them are read from cluster.election_state, and a
+# counter for each is the election's (ADR 0052, feature 4).
+
+[[state_machine]]
+name = "cluster_election"
+states = ["init", "canvass", "leader_log_replication", "leader_replay", "leader_init", "leader_ready", "follower_replay", "follower_log_init", "follower_log_await", "follower_ready", "closed"]
+
+[[transition]]
+machine = "cluster_election"
+from = "init"
+to = "canvass"
+counter = "cluster.elections"
+
+[[transition]]
+machine = "cluster_election"
+from = "canvass"
+to = "leader_log_replication"
+counter = "cluster.terms_led"
+
+[[transition]]
+machine = "cluster_election"
+from = "canvass"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_replay"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_log_await"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_log_await"
+to = "init"
+counter = "cluster.join_position_mismatches"
+
+[[transition]]
+machine = "cluster_election"
+from = "follower_ready"
+to = "init"
+counter = "cluster.elections_failed"
+
+[[transition]]
+machine = "cluster_election"
+from = "closed"
+to = "init"
+counter = "cluster.leader_heartbeat_timeouts"
+
+[[transition]]
+machine = "cluster_election"
+from = "closed"
+to = "init"
+counter = "cluster.log_images_lost"
