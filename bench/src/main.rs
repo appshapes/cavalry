@@ -4085,15 +4085,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `--purging` adds the recorded rows with a purge running, after the recorded
-    /// rows and before the UDP rows, and the rows grow by its two.
+    /// `--purging` adds the recorded rows with a purge running, right after the
+    /// recorded rows, and the rows grow by its two.
     #[test]
     fn purging_adds_the_recorded_purging_benchmark_after_recorded() {
+        let without = options(&[]).rows().len();
         let options = options(&["--purging"]);
+        let recorded = Benchmark::ALL
+            .iter()
+            .position(|benchmark| matches!(benchmark, Benchmark::Client { recorded: true, .. }))
+            .expect("the recorded benchmark");
         let mut expected = Benchmark::ALL.to_vec();
-        expected.insert(5, Benchmark::PURGING);
+        expected.insert(recorded + 1, Benchmark::PURGING);
         assert_eq!(options.benchmarks(), expected);
-        assert_eq!(options.rows().len(), 20);
+        assert_eq!(options.rows().len(), without + 2);
         assert!(
             options
                 .rows()
