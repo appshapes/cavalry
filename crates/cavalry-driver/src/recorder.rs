@@ -175,7 +175,9 @@ pub(crate) enum Reply {
         recording_id: i64,
         /// Its publication.
         publication_id: i64,
-        /// The position written, which the catalog holds as the stop position.
+        /// The position written, which the catalog holds as the stop position; or, when
+        /// the stop itself failed, the position the last sync before it made durable
+        /// (ADR 0064).
         stop_position: i64,
         /// The `stop recording` command's correlation id, when a command asked.
         correlation_id: Option<i64>,
@@ -551,27 +553,34 @@ impl Recorder {
     }
 
     /// Stops the recording at `index` at the position written: the stop entry, the
-    /// syncs and the catalog's stop fields (`LogDir::stop`). A stop that fails counts
-    /// `recording.write_failed` and leaves the slot live for the next open's recovery;
-    /// the reply still carries the position written.
+    /// syncs, the removal of a segment wholly past the stop and the catalog's stop
+    /// fields (`LogDir::stop`). The reply carries the catalog's stop position, which
+    /// the stop synced. A stop whose own writes or syncs fail still stops the
+    /// recording: it counts `recording.write_failed`, leaves the slot live for the next
+    /// open's recovery, and the reply carries the position the last sync before the
+    /// stop made durable, read before `LogDir::stop` takes the writer. Recovery's stop
+    /// is never below that position (`spec/client-protocol.md`, "Commands"; ADR 0064).
+    /// The position counter keeps the position written, what the operating system
+    /// holds, and the synced counter the last sync.
     fn stop_at(&mut self, index: usize, now: i64, correlation_id: Option<i64>) -> Step {
         let live = self.live.swap_remove(index);
-        let written = live.writer.position();
+        let synced_before = live.writer.synced_position();
         let stop_position = match self.log.stop(live.writer, now) {
             Ok(descriptor) => {
+                let stopped = descriptor.stop_position();
                 if let Some(synced) = &live.synced {
-                    synced.store_release(descriptor.stop_position());
+                    synced.store_release(stopped);
                 }
-                descriptor.stop_position()
+                if let Some(position) = &live.position {
+                    position.store_release(stopped);
+                }
+                stopped
             }
             Err(_) => {
                 self.write_failed.increment();
-                written
+                synced_before
             }
         };
-        if let Some(position) = &live.position {
-            position.store_release(stop_position);
-        }
         // During duty cycles a stop happens only with room for its reply; only the
         // shutdown loop finds none, after the conductor has stopped reading.
         if self.pending.len() < PENDING_REPLIES {

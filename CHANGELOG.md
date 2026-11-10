@@ -1748,3 +1748,13 @@ user-visible change, added in the same commit as the change. The format follows
   next version
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).
+- The driver announces a stop whose own writes or syncs failed at the position last
+  synced. A full disk can refuse the stop's index entry, its syncs or its catalog write.
+  The recording is still stopped, and `recording.write_failed` counts the failure.
+  `recording stopped` now carries the position the recorder had synced before the stop,
+  where it carried the position written, which no sync may have covered. So the stop
+  position a client reads is durable on every path, and the stop that recovery rebuilds
+  at the next open is at or above it. The `stop recording` command is still answered
+  with `operation success`
+  ([ADR 0064](docs/decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md);
+  card 227).
