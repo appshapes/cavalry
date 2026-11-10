@@ -224,11 +224,18 @@ retention commands the soak runs do is
      in `soak.log` at that minute, as the rotation is of those 16 KiB, and a value
      that rises hour after hour is a finding, with a card as its next step.
    - `rss_kib` and `vsz_kib` follow from the others. Use `rss_kib` alone only where
-     the parts read `-`. There the mappings are in the first line already, so what
-     the last line adds to the first is growth, and the line cannot say of which
-     part: on a macOS laptop an hour's run added 224 KiB to the driver's 204416, one
-     16 KiB page about every six minutes, where the same build on `kip` added the
-     rotation's 16 KiB and nothing else.
+     the parts read `-`, and expect it to rise there for a reason that is not growth.
+     On Linux the driver brings every page of a mapping in when it maps it. macOS has
+     no call for that, so there the driver reads each page once, and the process is
+     charged for a page of its command ring, its broadcast buffer or its counters file
+     only at the first write to that page. On a macOS laptop an hour's run added
+     224 KiB to the driver's 204416, one 16 KiB page about every six minutes, where
+     the same build on `kip` added the rotation's 16 KiB and nothing else; `vmmap`
+     showed each of those pages to be the command ring's, which a client's keepalives
+     fill at about 45 bytes a second, and the heap and the stacks unmoved (card 244).
+     The three files are 8240 KiB together, so a driver on macOS reads at most about
+     8 MiB above its first sample however long it runs. A rise beyond that is growth,
+     and `vmmap <pid>` names its region.
 
 7. Stop it, when the week is up or when something has to change:
 
