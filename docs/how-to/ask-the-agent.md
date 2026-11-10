@@ -84,6 +84,26 @@ branch locally; GitHub has already deleted it on origin.
   review. A fixer run that ended early with some blockers done is not this case: it
   pushed those as commits, its comment says which gates ran on the head it left, and
   the review of that head lists what is left.
+- **The fixer's push has no gates.** The `claude` run that pushed a fix ends in a
+  failure, in its job `approve-fixer-runs`, step "Approve the runs GitHub held on the
+  fixer's push", and no review of the push starts. GitHub holds the `ci` run of every
+  push the fixer makes until it is approved, and the step approves it; the failure is
+  one of two things, and the step's last line says which and names the commands.
+  `run <id>, held on the fixer's push <commit>, refused the approval`: the step found
+  the held run and GitHub refused the call, with its reason on the line above.
+  `<commit>, the head of #<number>, has no ci run listed after two minutes`: the step
+  found no `ci` run at the branch's tip, neither in the runs listed under that commit
+  nor among the newest hundred runs of `ci.yml`, on a pull request that does not
+  conflict with `master`. Run `gh run list --workflow ci.yml --branch <branch>`. A
+  run that reads `action_required` is the held one: approve it with
+  `gh api -X POST repos/<owner>/<repository>/actions/runs/<id>/approve`. When there is
+  none, push to the branch, which raises a run and its review. After an approval by
+  hand, add the `review` label to the pull request, since the failed step skipped the
+  one that asks for the review. Two endings of the step are warnings and not this
+  case, and the run goes on to ask for the review: a pull request that conflicts with
+  `master` has no run to hold, and the entry on a conflict below is the one to read;
+  and when GitHub did not say within the two minutes whether the pull request
+  conflicts, the warning names the two commands that tell (card 215).
 - **No review arrived.** A review lands within about thirty minutes of the push, most
   inside fifteen. A reviewer session that ends without submitting one is run again
   once, on its own, and a comment on the pull request says so. When the review is more
