@@ -87,10 +87,16 @@ dedicated hosts (ADR 0016, ADR 0034, ADR 0044), and a weekly email of the change
   `bench (udp)`.
 
 The latency gate's baselines are in `bench/baseline.json`. The rows below are 32-byte
-messages on `grip`, an Intel Core i7-10700 with isolated cores, recorded on 2026-11-04
-from 13 processes. A sample is the time from the publisher's timestamp to the
-subscriber's handler. Each number is the largest the host measured over those
-processes, so it is the slow edge of the host's band and not a typical run.
+messages on `grip`, an Intel Core i7-10700 with isolated cores. A sample is the time
+from the publisher's timestamp to the subscriber's handler. Four rows,
+`one_way_32_exclusive`, `one_way_32_client`, `one_way_32_recorded` and
+`one_way_32_udp`, were recorded on 2026-11-04 from 13 processes, and each of their
+numbers is the largest the host measured over those processes. The `one_way_32_ffi`
+row was added by hand on 2026-11-06 from 3 processes at the tree of c208279, in
+commit b409b78: its p50, p99 and max are the largest over those 3 processes, and its
+p99.99 is the slowest of their 63 runs, the number the gate compares a row with when
+the row has no list of runs (ADR 0033). Either way a number is the slow edge of the
+host's band and not a typical run.
 
 | Row | Path | p50 | p99 | p99.99 | max |
 | --- | --- | --- | --- | --- | --- |
