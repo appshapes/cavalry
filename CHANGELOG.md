@@ -1820,7 +1820,8 @@ user-visible change, added in the same commit as the change. The format follows
   member's own recording of the log through a replay that follows the recording, on
   the `cavalry:ipc` service log stream, 104, and polls it no further than the member's
   commit position, so the path is the same on the leader and on a follower and a
-  service may start at any time, from any entry. `spec/cluster.md`, "The service",
+  service may start at any time, from any entry the recording its member names
+  holds. `spec/cluster.md`, "The service",
   says so, with the member's new counter `cluster.log_recording_id` and the two
   checks a service makes before it takes a commit position as its bound;
   `spec/log-buffer.md`, "Reading", says what a bounded read is. The Rust client gains
