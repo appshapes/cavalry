@@ -108,6 +108,10 @@ export class HandlerError extends Error {
 /** The body as a Buffer into the log, valid for the call, and the frame's header. */
 export type FragmentHandler = (body: Buffer, header: Header) => void;
 
+/** A committed log's entry: the body and the header as a fragment's, and the entry's position
+ * in the log. */
+export type EntryHandler = (body: Buffer, header: Header, position: number) => void;
+
 export class Client {
   constructor(dir?: string | null);
   readonly dir: string;
@@ -127,6 +131,7 @@ export class Client {
   purgeRecording(recordingId: number): void;
   startReplay(recordingId: number, position: number, length: number, replayStreamId: number, channel: string): Replay;
   stopReplay(replaySessionId: number): void;
+  committedLog(position: number): CommittedLog | null;
   [Symbol.dispose](): void;
 }
 
@@ -187,6 +192,18 @@ export class Subscription {
   images(): Image[];
   readonly isConnected: boolean;
   readonly isClosed: boolean;
+  close(): void;
+}
+
+export class CommittedLog {
+  readonly recordingId: number;
+  readonly memberId: number;
+  poll(handler: EntryHandler, fragmentLimit: number): number;
+  fault(): { code: number; sessionId: number; position: number };
+  position(): number;
+  commitPosition(): number;
+  readonly isEnded: boolean;
+  failedAt(): number | null;
   close(): void;
 }
 

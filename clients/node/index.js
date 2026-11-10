@@ -478,6 +478,15 @@ class Client {
     return new Replay(handle);
   }
   stopReplay(replaySessionId) { check("cavalry_stop_replay", addon.cavalry_stop_replay(this.handle, replaySessionId)); }
+  /** The committed log of the cluster member on this client's driver, opened at `position`, 0
+   * or the `position()` an earlier `CommittedLog` reached: a `CommittedLog`, or null while the
+   * driver hosts no member that has a recording of its log, so a service started before its
+   * member asks again (spec/cluster.md, "The service"; spec/c-abi.md, "Functions"). */
+  committedLog(position) {
+    const [code, handle] = addon.cavalry_committed_log(this.handle, position);
+    check("cavalry_committed_log", code);
+    return handle === null ? null : new CommittedLog(handle, this);
+  }
 }
 if (typeof Symbol.dispose === "symbol") Client.prototype[Symbol.dispose] = function dispose() { this.close(); };
 
@@ -623,6 +632,64 @@ class Subscription {
   }
 }
 
+class CommittedLog {
+  /** A service's read of a cluster's committed log, beside the member on the client's driver:
+   * `poll(handler, fragmentLimit)` calls `handler(body, header, position)` for each entry a
+   * quorum has committed, in order and none at or past the member's commit position, `body` a
+   * Buffer into the log valid for the call, `header` the one `Header` this object keeps and
+   * `position` the entry's position in the log, and returns the entry count. A handler's
+   * exception is kept until the ABI has returned and then thrown as `HandlerError`, as a
+   * subscription's is; its entry was delivered and is not delivered again. `position()` is the
+   * position after the last entry delivered: where a service opens the log again. */
+  constructor(handle, client) {
+    this.handle = handle;
+    this._client = client;
+    this._header = new Header(null);
+    this._state = addon.registerCommittedLog(this._header);
+    this._header._state = this._state;
+    const c = new Struct("cavalry_committed_log_constants_t");
+    check("cavalry_committed_log_constants", addon.cavalry_committed_log_constants(handle, c.buffer));
+    this.recordingId = c.int64("recording_id");
+    this.memberId = c.int32("member_id");
+  }
+  /** One ABI call; the handler's exception, if any, is thrown after it returns. */
+  poll(handler, fragmentLimit) {
+    const result = addon.committedLogPoll(this._state, this.handle, handler, fragmentLimit);
+    if (typeof result === "number") return result;
+    throw new HandlerError(result[0], result[1], result[2], result[3]);
+  }
+  /** What the last poll stopped on: {code, sessionId, position}; code 0 for none. */
+  fault() {
+    const f = new Struct("cavalry_fault_t");
+    check("cavalry_committed_log_fault", addon.cavalry_committed_log_fault(this.handle, f.buffer));
+    return { code: f.int32("code"), sessionId: f.int32("session_id"), position: f.int64("position") };
+  }
+  /** The position after the last entry delivered, or the position the log was opened at. */
+  position() { return addon.cavalry_committed_log_position(this.handle); }
+  /** The bound of the last poll: the highest commit position taken from the member's counter. */
+  commitPosition() { return addon.cavalry_committed_log_commit_position(this.handle); }
+  /** Whether the member closed or left its log: once a poll then returns 0, close this log and
+   * open another from `position()`. */
+  get isEnded() { return addon.cavalry_committed_log_is_ended(this.handle); }
+  /** The position after the last frame the driver's replay played before it failed, or null for
+   * a log that is live or that ended because its member closed or left the recording. */
+  failedAt() {
+    const [failed, position] = addon.cavalry_committed_log_failed_at(this.handle);
+    return failed ? position : null;
+  }
+  /** Stops the replay through the client and frees the handle; a second close does nothing.
+   * After the client's own close it frees the handle alone, and the driver ends the replay by
+   * itself. From inside a handler of its own poll the ABI refuses the close, which throws
+   * CavalryError with CAVALRY_ERR_POLLING and leaves the log open. */
+  close() {
+    if (this.handle === null) return;
+    const result = addon.cavalry_committed_log_close(this.handle, this._client.handle);
+    if (result !== 0 && addon.cavalry_errcode() === constants.CAVALRY_ERR_POLLING) throw error("cavalry_committed_log_close");
+    this.handle = null;
+    check("cavalry_committed_log_close", result);
+  }
+}
+
 class Recording {
   /** A recording the driver makes; `close` frees the handle and stops nothing. */
   constructor(handle) {
@@ -675,6 +742,6 @@ function buffersHeld() { return addon.buffersHeld(); }
 module.exports = {
   ABI_VERSION, constants, LAYOUT, HEADER_FIELDS,
   NOT_CONNECTED, BACK_PRESSURED, ADMIN_ACTION, CLOSED, MAX_POSITION_EXCEEDED, ERROR, NULL_POSITION,
-  CavalryError, HandlerError, Client, Publication, Subscription, Header, Image, Recording, Replay,
+  CavalryError, HandlerError, Client, Publication, Subscription, CommittedLog, Header, Image, Recording, Replay,
   abiVersion, version, buffersHeld, addon,
 };

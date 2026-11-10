@@ -4,8 +4,8 @@ boundary's second part): the per-message functions a generator writes, the wrapp
 of the ABI's seven per-message functions of a publication and a subscription
 (`crates/cavalry-ffi/README.md`: the claim, the reserved value, the commit and abort, the
 offer, the poll and the header's values), the wrapper of the committed log's two, its poll
-and an entry's position, where a package has a committed log object, Python's so far (ADR
-0068), and the trampoline that calls the user's handler, hold no lock, no `await` and no
+and an entry's position, where a package has a committed log object, Python's and Node's
+so far (ADR 0068), and the trampoline that calls the user's handler, hold no lock, no `await` and no
 raise, in the language's forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
 `raise`, and building one of the package's own exceptions. For JavaScript, read from
@@ -14,7 +14,7 @@ and matches braces, they are `async` on the function, `await`, `Promise`, `.then
 `throw`, building one of the package's own `Error` classes, and `Atomics.wait`, the one
 blocking wait the language has. The Node client's addon, `clients/node/src/addon.c`, is
 generated client code in C on the same path, so its per-message functions, the trampoline,
-the finalizer of each Buffer, the addon's own `poll`, `headerField`, `view` and `detach`,
+the finalizer of each Buffer, the addon's own `poll`, `committedLogPoll`, `headerField`, `view` and `detach`,
 and the wrappers of the claim, the reserved value, the commit, the abort and the offer, are
 read by the same tokenizer for C's forms: a lock, `pthread_mutex_*`, `pthread_rwlock_*`,
 C11's `mtx_*`, libuv's `uv_mutex_*` and `uv_rwlock_*`, and N-API's
@@ -23,7 +23,7 @@ argument readers, which throw a TypeError or a RangeError for an argument the AB
 parameter cannot take, before the ABI is called. A call reaches the package's own functions by name: a
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
-The one raise allowed is in `poll`, a subscription's or in Python a committed log's,
+The one raise allowed is in `poll`, a subscription's or a committed log's,
 after the last line that calls the ABI, where the
 user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
@@ -120,6 +120,7 @@ RULES = {
             "Publication.abort",
             "Publication.offer",
             "Subscription.poll",
+            "CommittedLog.poll",
             "Header.frameLength",
             "Header.version",
             "Header.flags",
@@ -130,7 +131,7 @@ RULES = {
             "Header.termId",
             "Header.reservedValue",
         ],
-        "raise_after": ("Subscription.poll", "addon.poll"),
+        "raise_after": [("Subscription.poll", "addon.poll"), ("CommittedLog.poll", "addon.committedLogPoll")],
         # The addon is generated client code in C on the same path: the functions the
         # per-message functions above call and the trampoline the ABI calls, with the
         # finalizer Node calls for each of their Buffers. The argument readers may throw a
@@ -142,6 +143,7 @@ RULES = {
                 "trampoline",
                 "buffer_freed",
                 "fn_poll",
+                "fn_committedLogPoll",
                 "fn_headerField",
                 "fn_view",
                 "fn_detach",
@@ -719,12 +721,15 @@ def node_findings(language: str, path: str, rules: dict) -> list[str]:
     for name in rules["functions"]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
-    allowed_in, abi_call = rules["raise_after"]
+    # Each poll and the addon call after which it may throw: a subscription's and a
+    # committed log's.
+    raise_after = dict(rules["raise_after"])
     for name in present:
         line, _, body, start = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(path, ROOT)}:{line})"
         abi_line = None
-        if name == allowed_in:  # the last line that calls the ABI through the addon
+        if name in raise_after:  # the last line that calls the ABI through the addon
+            abi_call = raise_after[name]
             base = line_of(module.code, start) - 1
             for m in re.finditer(re.escape(abi_call) + r"\s*\(", body):
                 at = base + body.count("\n", 0, m.start()) + 1

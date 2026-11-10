@@ -10,7 +10,8 @@ the ABI function for function, and the client's own code (`index.js`, typed by
 with `close()` or `using`; a `Publication` claims a slice of the log as a `Buffer`
 over it or offers a `Buffer`; a `Subscription` polls with a fragment handler function
 that receives the body as a `Buffer` into the log and the frame's header; a
-`Recording` and a `Replay` wrap the driver's archive. Every message the client sends or
+`Recording` and a `Replay` wrap the driver's archive; a `CommittedLog` is a service's
+read of a cluster's committed log beside a member (below). Every message the client sends or
 receives goes through one `extern "C"` call on the caller's thread, as the ABI's page
 promises (ADR 0046's boundary; ADR 0051). The package has no runtime dependency: N-API
 is part of Node, and `npm install` in `clients/node` builds the addon with the
@@ -23,14 +24,41 @@ the Rust crates is not an option, since it would go round the header (ADR 0046,
 Alternatives). The cost of the choice is a C compiler at install, which `node-gyp`
 needs and both CI runners and the ten-minute path's machines have.
 
+### The committed log
+
+A service is a program beside a cluster member that applies the entries the cluster
+has committed (`docs/how-to/read-the-committed-log.md`). `client.committedLog(position)`
+opens the log of the member on the client's driver at a position, 0 or the
+`position()` an earlier run reached, and returns `null` while the driver hosts no
+member with a log, so a service started before its member asks again. `log.poll(handler,
+fragmentLimit)` calls `handler(body, header, position)` for each committed entry, in
+order, none at or past the member's commit position, and returns the entry count;
+`position` is the entry's position in the log, a number. `log.position()` is the
+position after the last entry delivered, the one a service keeps for its next start,
+and `log.commitPosition()` the bound of the last poll. `log.isEnded` says that the
+member closed or left its log: once a poll then returns 0, close the log and open
+another from `log.position()`. `log.failedAt()` is `null` unless the driver's replay of
+the member's recording failed. `log.close()` stops the driver's replay, and a second
+close does nothing; a log closed after its client is freed, and the driver ends the
+replay by itself. `log.memberId` and `log.recordingId` say whose log it is
+(`spec/c-abi.md`, "Functions", committed log; ADR 0068).
+
+The addon reads a committed log through the trampoline a subscription's poll uses,
+with one step more for each entry: the number its position is handed to the handler
+as. A handler's exception goes where a subscription's goes ("The exception"): every
+entry the ABI delivers reaches the handler, and `poll` throws `HandlerError` once the
+ABI has returned. An entry whose handler call threw was delivered and is not
+delivered again, so a service that must apply every entry catches its own exceptions
+and stops there, with the entry's `position` in hand to open the log at again.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no `await`, no
   promise, no copy of a fragment into a new array for the handler. `clients/lint.py`
   reads the per-message functions of `index.js` for JavaScript's forms of each
   (`async`, `await`, `Promise`, `.then`, `throw`, `Atomics.wait`), and those of
-  `src/addon.c`, the trampoline, the Buffers' finalizer, `poll`, `headerField`, `view`,
-  `detach` and the wrappers of the claim, the reserved value, the commit, the abort
+  `src/addon.c`, the trampoline, the Buffers' finalizer, `poll`, `committedLogPoll`,
+  `headerField`, `view`, `detach` and the wrappers of the claim, the reserved value, the commit, the abort
   and the offer, for C's (`pthread_mutex_*`, `pthread_rwlock_*`, `mtx_*`,
   `uv_mutex_*`, `uv_rwlock_*`, `napi_*threadsafe_function*`, and `napi_throw*` and
   `napi_fatal_*` outside the argument readers). `just lint` fails on any of them, in

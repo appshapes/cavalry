@@ -353,7 +353,9 @@ static int ncalls, fail_at = -1;
 static const napi_status fail_with = napi_generic_failure;
 static bool handler_throws, pending;
 static int handler_ran, scopes_open, buffers_live;
-static char handles[8];
+static size_t handler_argc;
+static int64_t position_made;
+static char handles[9];
 #define HANDLE(i) ((void *) &handles[i])
 
 static napi_status step(const char *name) {
@@ -404,10 +406,11 @@ napi_status napi_get_undefined(napi_env env, napi_value *result) {
 }
 napi_status napi_call_function(napi_env env, napi_value recv, napi_value func, size_t argc, const napi_value *argv,
                                napi_value *result) {
-  (void) env; (void) recv; (void) func; (void) argc; (void) argv;
+  (void) env; (void) recv; (void) func; (void) argv;
   napi_status s = step("napi_call_function");
   if (s != napi_ok) return s;
   handler_ran++;
+  handler_argc = argc;
   if (handler_throws) { pending = true; return napi_pending_exception; }
   *result = HANDLE(5);
   return napi_ok;
@@ -437,6 +440,16 @@ napi_status napi_detach_arraybuffer(napi_env env, napi_value arraybuffer) {
   if (s == napi_ok) buffers_live--;
   return s;
 }
+napi_status napi_create_int64(napi_env env, int64_t value, napi_value *result) {
+  (void) env;
+  napi_status s = step("napi_create_int64");
+  if (s == napi_ok) { *result = HANDLE(8); position_made = value; }
+  return s;
+}
+int64_t cavalry_committed_log_entry_position(const cavalry_header_t *header) {
+  (void) header;
+  return 960;
+}
 int cavalry_header_values(const cavalry_header_t *header, cavalry_header_values_t *values) {
   (void) header;
   memset(values, 0, sizeof *values);
@@ -452,23 +465,32 @@ static int failures;
 
 static void reset(int at, bool throws) {
   ncalls = 0; fail_at = at; handler_throws = throws; pending = false;
-  handler_ran = 0; scopes_open = 0; buffers_live = 0;
+  handler_ran = 0; scopes_open = 0; buffers_live = 0; handler_argc = 0; position_made = -1;
 }
 
 static void fragment(subscription_state_t *s) {
   trampoline(s, (const uint8_t *) "body", 4, (const cavalry_header_t *) HANDLE(1));
 }
 
-static void one(int at, bool throws) {
+static void one(int at, bool throws, bool positions) {
   subscription_state_t s;
   memset(&s, 0, sizeof s);
   s.env = (napi_env) HANDLE(0);
+  s.positions = positions;
   reset(at, throws);
   fragment(&s);
   const char *failed = at < ncalls ? calls[at] : NULL;
-  char where[160];
-  snprintf(where, sizeof where, "with %s failing (call %d), the handler %s", failed ? failed : "no call", at,
+  char where[200];
+  snprintf(where, sizeof where, "%s, with %s failing (call %d), the handler %s",
+           positions ? "a committed log's entry" : "a subscription's fragment", failed ? failed : "no call", at,
            throws ? "throwing" : "returning");
+  /* A committed log's handler is handed three arguments, the third the position the ABI gave
+   * for the header; a subscription's two, with no position asked for. */
+  if (handler_ran) {
+    EXPECT(handler_argc == (positions ? 3u : 2u), "%s: the handler was handed %u argument(s)", where,
+           (unsigned) handler_argc);
+    EXPECT(position_made == (positions ? 960 : -1), "%s: the position made was %lld", where, (long long) position_made);
+  }
   if (handler_ran && !throws) {
     EXPECT(s.raised == 0 && s.undelivered == 0 && s.first == FIRST_NONE,
            "%s: the handler returned, yet the fragment was counted (raised %u, undelivered %u)", where,
@@ -494,16 +516,19 @@ static void one(int at, bool throws) {
 }
 
 int main(void) {
-  for (int throws = 0; throws < 2; throws++) {
-    subscription_state_t s;
-    memset(&s, 0, sizeof s);
-    reset(-1, throws);
-    fragment(&s);
-    int n = ncalls;
-    printf("a fragment whose handler %s calls:", throws ? "throws" : "returns");
-    for (int i = 0; i < n; i++) printf(" %s", calls[i]);
-    printf("\n");
-    for (int at = 0; at <= n; at++) one(at, throws);
+  for (int positions = 0; positions < 2; positions++) {
+    for (int throws = 0; throws < 2; throws++) {
+      subscription_state_t s;
+      memset(&s, 0, sizeof s);
+      s.positions = positions;
+      reset(-1, throws);
+      fragment(&s);
+      int n = ncalls;
+      printf("%s whose handler %s calls:", positions ? "an entry" : "a fragment", throws ? "throws" : "returns");
+      for (int i = 0; i < n; i++) printf(" %s", calls[i]);
+      printf("\n");
+      for (int at = 0; at <= n; at++) one(at, throws, positions);
+    }
   }
   /* The first failure of a poll stays its cause: a later fragment's throw is counted only. */
   subscription_state_t s;
@@ -568,11 +593,12 @@ class NodePackage(unittest.TestCase):
     def test_the_addon_wraps_every_function_and_the_poll_is_its_own(self):
         """One N-API function per ABI function, registered under the ABI's name, except the
         two that take the C fragment handler: the addon's `poll` makes the one
-        `cavalry_subscription_poll` call with its trampoline, and the header's fields are
-        read through `headerField`; `cavalry_committed_log_poll` is not bound in this
-        package yet (ADR 0068)."""
+        `cavalry_subscription_poll` call with its trampoline and its `committedLogPoll` the
+        one `cavalry_committed_log_poll` call with the same trampoline (ADR 0068), and the
+        header's fields are read through `headerField`."""
         addon = gen_node.write_node(self.header)["src/addon.c"]
         self.assertEqual(gen_node.HANDLER_FUNCTIONS, ("cavalry_subscription_poll", "cavalry_committed_log_poll"))
+        self.assertEqual(addon.count("cavalry_committed_log_poll("), 2)  # the nested refusal and the poll itself
         for fn in self.header.functions:
             if fn.name in gen_node.HANDLER_FUNCTIONS:
                 self.assertNotIn(f"fn_{fn.name}", addon)
@@ -580,7 +606,8 @@ class NodePackage(unittest.TestCase):
             self.assertIn(f"static napi_value fn_{fn.name}(napi_env env, napi_callback_info info)", addon)
             self.assertIn(f'{{ "{fn.name}", NULL, fn_{fn.name}, NULL, NULL, NULL, napi_default, NULL }},', addon)
         self.assertEqual(addon.count("cavalry_subscription_poll("), 2)  # the nested refusal and the poll itself
-        for own in ("registerSubscription", "poll", "headerField", "view", "detach", "stringAt", "buffersHeld"):
+        for own in ("registerSubscription", "poll", "registerCommittedLog", "committedLogPoll", "headerField", "view",
+                    "detach", "stringAt", "buffersHeld"):
             self.assertIn(f'{{ "{own}", NULL, fn_{own}, NULL, NULL, NULL, napi_default, NULL }},', addon)
         self.assertIn("cavalry_header_values(s->current, &s->values)", addon)
 
@@ -623,7 +650,8 @@ class NodePackage(unittest.TestCase):
     def test_the_trampoline_counts_and_reports_every_fragment_the_handler_did_not_see(self):
         """Invariant 1: the ABI has consumed a fragment before the trampoline runs, so a
         fragment the handler does not see, because N-API refused a step of the call, is
-        counted and its failure kept for poll to report, never dropped. The generated
+        counted and its failure kept for poll to report, never dropped; a committed log's
+        entry is held to the same, with the step that makes its position. The generated
         trampoline and its helpers are compiled with the runner's `cc` against
         TRAMPOLINE_HARNESS, a stand-in for N-API that fails each call of a fragment in turn,
         for a handler that returns and one that throws: a fragment the handler returned from
@@ -654,6 +682,11 @@ class NodePackage(unittest.TestCase):
         self.assertIn("a fragment whose handler returns calls: napi_open_handle_scope napi_create_external_buffer "
                       "napi_get_reference_value napi_get_undefined napi_call_function napi_get_typedarray_info "
                       "napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
+        # A committed log's entry asks for one thing more, the number its position is handed
+        # to the handler as (ADR 0068).
+        self.assertIn("an entry whose handler returns calls: napi_open_handle_scope napi_create_external_buffer "
+                      "napi_get_reference_value napi_get_undefined napi_create_int64 napi_call_function "
+                      "napi_get_typedarray_info napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
         self.assertIn("0 failure(s)", ran.stdout)
 
     def test_every_struct_argument_is_checked_for_its_size_and_alignment(self):

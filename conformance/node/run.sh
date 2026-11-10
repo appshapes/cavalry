@@ -3,7 +3,10 @@
 # addon against them with npm's own node-gyp (`npm install` in clients/node, nothing from
 # the registry), starts a driver on a directory of its own, runs
 # conformance/node/quickstart.js through clients/node with the runner's Node, then
-# clients/node/README.md's example through conformance/node/readme.js, and cleans up.
+# clients/node/README.md's example through conformance/node/readme.js; then starts three
+# cluster members on the loopback, each a `cavalry run` in a member's role, and runs
+# conformance/node/committed_log.js beside member 1, the client's committed log against a
+# cluster (spec/c-abi.md, version 2; ADR 0068); and cleans up.
 # `just conformance` runs this after conformance/python (clients/README.md; ADR 0046, card
 # 206). The runner takes `--expose-gc` so that its allocation round can read the heap after
 # a full collection.
@@ -13,13 +16,17 @@ cd "$(dirname "$0")/../.."
 if [ -d /dev/shm ]; then base=/dev/shm; else base="${TMPDIR:-/tmp}"; fi
 export CAVALRY_DIR="${base%/}/cavalry-conformance-node-$$"
 export CAVALRY_LOG_DIR="${CAVALRY_DIR}.log"
-rm -rf "$CAVALRY_DIR" "$CAVALRY_LOG_DIR"
+cluster="${CAVALRY_DIR}.cluster"
+rm -rf "$CAVALRY_DIR" "$CAVALRY_LOG_DIR" "$cluster"
+member_pids=""
 cleanup() {
-    if [ -n "${driver_pid:-}" ] && kill -0 "$driver_pid" 2>/dev/null; then
-        kill -TERM "$driver_pid" 2>/dev/null || true
-        wait "$driver_pid" 2>/dev/null || true
-    fi
-    rm -rf "$CAVALRY_DIR" "$CAVALRY_LOG_DIR"
+    for pid in ${driver_pid:-} $member_pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    rm -rf "$CAVALRY_DIR" "$CAVALRY_LOG_DIR" "$cluster"
 }
 trap cleanup EXIT
 
@@ -49,3 +56,48 @@ node --expose-gc conformance/node/quickstart.js
 # line the README says the reader will see (conformance/node/readme.js).
 echo "conformance/node: run clients/node/README.md's example"
 node conformance/node/readme.js
+
+# The committed log: three members of one cluster, each with five free loopback ports,
+# its own driver directory and its own log directory, started together as
+# docs/how-to/run-a-cluster.md starts them (conformance/python/run.sh is the shape). A
+# member's output goes to a file beside its directories, printed if the cluster does not
+# form.
+echo "conformance/node: cavalry run, three cluster members, in the background, under $cluster"
+mkdir -p "$cluster"
+CAVALRY_CLUSTER_MEMBERS=$(node -e '
+const dgram = require("dgram");
+const sockets = [];
+const ports = [];
+const next = () => {
+  if (ports.length === 15) {
+    for (const s of sockets) s.close();
+    const members = [0, 1, 2].map((m) => m + "," + ports.slice(m * 5, m * 5 + 5).map((p) => "127.0.0.1:" + p).join(","));
+    console.log(members.join("|"));
+    return;
+  }
+  const s = dgram.createSocket("udp4");
+  sockets.push(s);
+  s.bind(0, "127.0.0.1", () => { ports.push(s.address().port); next(); });
+};
+next();
+')
+export CAVALRY_CLUSTER_MEMBERS
+for id in 0 1 2; do
+    CAVALRY_CLUSTER_MEMBER_ID=$id target/release/cavalry run --dir "$cluster/member-$id" \
+        --log-dir "$cluster/member-$id-log" >"$cluster/member-$id.out" 2>&1 &
+    member_pids="$member_pids $!"
+done
+formed=""
+for _ in $(seq 1 600); do
+    if CAVALRY_CLUSTER_MEMBER_ID=1 target/release/cavalry doctor --dir "$cluster/member-1" \
+        --log-dir "$cluster/member-1-log" 2>/dev/null | grep -q 'election closed'; then formed=yes; break; fi
+    sleep 0.1
+done
+[ -n "$formed" ] || {
+    echo "conformance/node: member 1 did not close its election in 60 s; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
+
+echo "conformance/node: run committed_log.js beside member 1"
+node conformance/node/committed_log.js "$cluster/member-1" 1
