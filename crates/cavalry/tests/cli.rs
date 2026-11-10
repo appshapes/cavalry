@@ -452,11 +452,7 @@ fn replay_exits_1_and_names_the_positions_not_printed_when_its_log_goes_first() 
 fn replay_on_a_udp_channel_plays_to_the_endpoints_subscriber_and_prints_the_summary() {
     let dir = TestDir::new("replay-udp");
     let (driver, mut client, end) = recorded(&dir, 9, 20, false);
-    let port = std::net::UdpSocket::bind("127.0.0.1:0")
-        .expect("a loopback socket")
-        .local_addr()
-        .expect("bound")
-        .port();
+    let port = loopback_ports(1)[0];
     let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
     let mut subscription = client
         .add_subscription(&channel, 9)
@@ -562,11 +558,7 @@ fn replay_on_a_udp_channel_exits_1_when_the_driver_goes_before_the_replay_ends()
     let dir = TestDir::new("replay-udp-driver-gone");
     let (driver, mut client, publication, recording, end) = recording(&dir, 10, 4, false);
     assert_eq!(end, 4 * 64);
-    let port = std::net::UdpSocket::bind("127.0.0.1:0")
-        .expect("a loopback socket")
-        .local_addr()
-        .expect("bound")
-        .port();
+    let port = loopback_ports(1)[0];
     let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
     let mut subscription = client
         .add_subscription(&channel, 10)
@@ -693,14 +685,38 @@ fn record_truncates_purges_and_deletes_a_stopped_recording() {
     driver.close().expect("closes");
 }
 
-/// Free loopback ports, each held until all are chosen so that none repeats.
-fn free_ports(count: usize) -> Vec<u16> {
-    let sockets: Vec<std::net::UdpSocket> = (0..count)
-        .map(|_| std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket"))
-        .collect();
-    sockets
-        .iter()
-        .map(|socket| socket.local_addr().expect("bound").port())
+/// Loopback ports for this file's tests, counted out from 10000 to 19999 and never
+/// tried: no socket is opened here to choose one.
+///
+/// This file's tests run at once, and most of them start child processes. On macOS a
+/// socket is marked close-on-exec a moment after it is created, not as it is created,
+/// so a child that another test starts in that moment keeps the socket, and with it
+/// the port, for as long as the child lives. A test that bound a socket to find a
+/// free port and dropped it could then find the port taken when its driver, or a
+/// member of its cluster, came to bind it: `Address already in use`, code 4. A member
+/// that cannot bind an endpoint stops, or never joins the log, and its election never
+/// closes.
+///
+/// The range is below the ports an operating system gives a socket bound to port 0,
+/// from 32768 on Linux and from 49152 on macOS, so no send socket of a driver is
+/// given one of them, and apart from the 20000 to 31999 of `cavalry-raft`'s cluster
+/// tests. Each port is given once in this process. The process id picks where the
+/// count starts, through a hash that puts neighbouring ids far apart, so that two
+/// test processes on one host seldom meet. A port another program holds is not seen
+/// here: it shows as the bind's refusal, in the error of the test's own driver or in
+/// the standard error of the member, which `Runs` prints.
+fn loopback_ports(count: usize) -> Vec<u16> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    const FIRST: u32 = 10_000;
+    const SPAN: u32 = 10_000;
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let count = u32::try_from(count).expect("a few ports");
+    // In 64 bits, so that the product does not wrap.
+    let start = u64::from(std::process::id()) * 2_654_435_761 % u64::from(SPAN);
+    let start = u32::try_from(start).expect("below the span");
+    let first = NEXT.fetch_add(count, Ordering::Relaxed);
+    (0..count)
+        .map(|port| u16::try_from(FIRST + (start + first + port) % SPAN).expect("below 20000"))
         .collect()
 }
 
@@ -723,14 +739,19 @@ fn cluster_counter(dir: &Path, name: &str) -> Option<i64> {
 }
 
 /// The members a test started, each killed when the test ends before it stopped them:
-/// a failed assertion would otherwise leave three drivers running after the test.
+/// a failed assertion would otherwise leave three drivers running after the test. When
+/// the test failed, each member's standard error is printed with the failure, so that
+/// the reason a member gave, a duty cycle's error among them, is in the test's output.
 struct Runs(Vec<Child>);
 
 impl Drop for Runs {
     fn drop(&mut self) {
-        for run in &mut self.0 {
+        for (member, run) in self.0.iter_mut().enumerate() {
             let _ = run.kill();
             let _ = run.wait();
+            if std::thread::panicking() {
+                eprintln!("member {member}'s standard error:\n{}", stderr_of(run));
+            }
         }
     }
 }
@@ -743,7 +764,7 @@ const CLUSTER_ELECTION_STATE: &str = "cluster.election_state";
 
 #[test]
 fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader() {
-    let ports = free_ports(15);
+    let ports = loopback_ports(15);
     let members = (0..3)
         .map(|member| {
             let endpoints: Vec<String> = ports[member * 5..member * 5 + 5]
@@ -777,15 +798,37 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
     }
     // Every member's election closes, state 17, the member with the lowest id leading,
     // role 2, and the others following, role 0: read from each driver's counters file.
-    wait("every member's election closed", || {
-        dirs.iter()
-            .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
-    });
+    // A wait that fails says where each member's election stood, from the same
+    // counters, and the members string, whose ports a member's error names; `Runs`
+    // then prints what each member's `run` wrote. Together they tell a member that
+    // could not bind an endpoint from one whose leader closed without it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !dirs
+        .iter()
+        .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
+    {
+        if Instant::now() >= deadline {
+            let mut report = vec![format!("the members string: {members}")];
+            for (member, dir) in dirs.iter().enumerate() {
+                report.push(format!(
+                    "member {member}: {CLUSTER_ELECTION_STATE} {:?}, {CLUSTER_ROLE} {:?}",
+                    cluster_counter(&dir.0, CLUSTER_ELECTION_STATE),
+                    cluster_counter(&dir.0, CLUSTER_ROLE)
+                ));
+            }
+            panic!(
+                "every member's election closed within 10 s\n{}",
+                report.join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(cluster_counter(&dirs[0].0, CLUSTER_ROLE), Some(2));
     assert_eq!(cluster_counter(&dirs[1].0, CLUSTER_ROLE), Some(0));
     assert_eq!(cluster_counter(&dirs[2].0, CLUSTER_ROLE), Some(0));
 
-    // Doctor with the keys set as the members have them finds nothing wrong with them.
+    // Doctor with the keys set as the members have them finds nothing wrong with them,
+    // and explains the member.
     let output = cavalry()
         .args(["doctor", "--dir", &dirs[1].arg()])
         .env("CAVALRY_CLUSTER_MEMBERS", &members)
@@ -793,7 +836,14 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
         .output()
         .expect("doctor runs");
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(!text.contains("cluster-member"), "{text}");
+    assert!(!text.contains("FAIL cluster-member"), "{text}");
+    // And says what the member is, from its counters.
+    assert!(
+        text.contains("note cluster-member")
+            && text
+                .contains("this driver is cluster member 1, a follower in term 0, election closed"),
+        "{text}"
+    );
 
     // SIGTERM stops the member and then the driver, and the exit is clean.
     while let Some(run) = runs.0.pop() {
@@ -814,7 +864,13 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
             "{stderr}"
         );
         assert!(stderr.contains("docs/reference/counters.md"), "{stderr}");
-        assert!(!stderr.contains("`cavalry doctor` shows"), "{stderr}");
+        // And the command that reads them for the operator, which the test ran above.
+        assert!(
+            stderr.contains(
+                "`cavalry doctor` explains the member from them in its `cluster-member` note"
+            ),
+            "{stderr}"
+        );
         assert!(stderr.contains("closed;"), "{stderr}");
     }
 

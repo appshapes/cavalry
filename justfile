@@ -24,13 +24,18 @@ test *ARGS: test-scripts
 # The tests of the Python scripts that have them (ADR 0026): the release-notes email's
 # layout and its deterministic steps, against a made-up checkout and a fake GitHub API on
 # loopback, the latency gate's rule on made-up results (ADR 0029), and the udp pair's wait
-# for each other against a fake GitHub API and a fake clock (card 212). Standard library
-# only, no network.
+# for each other against a fake GitHub API and a fake clock (card 212), and the fixer
+# workflow's approval of the run GitHub held on its push, the step's own script against
+# a fake `gh` (card 215), and the list of what can move the bench, with the reading of a
+# change from its event against a fake GitHub API (ADR 0071). Standard library only, no
+# network.
 test-scripts:
     python3 scripts/release-notes-email-test.py
     python3 scripts/release-notes-test.py
     python3 scripts/bench-compare-test.py
+    python3 scripts/bench-needed-test.py
     python3 scripts/wait-for-partner-job-test.py
+    python3 scripts/claude-workflow-test.py
     python3 clients/generate-test.py
     python3 clients/lint-test.py
 
