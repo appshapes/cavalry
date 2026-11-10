@@ -29,7 +29,9 @@ use cavalry::{
 
 const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
 
-  run                      start a driver; Ctrl-C or SIGTERM stops it
+  run                      start a driver; Ctrl-C or SIGTERM stops it; with
+                           CAVALRY_CLUSTER_MEMBERS and CAVALRY_CLUSTER_MEMBER_ID set,
+                           the driver is that member of the cluster
   doctor                   explain the driver from its counters; exits 1 when a check
                            failed
   record <stream id>       record the live publication on that stream to the durable
@@ -74,8 +76,9 @@ const USAGE: &str = "usage: cavalry <command> [--dir <path>] [--log-dir <path>]
                     /var/lib/cavalry/log as root (docs/reference/config.md#logdir)
 
 Every configuration key is read from its environment variable, CAVALRY_DIR,
-CAVALRY_LOG_DIR and CAVALRY_CONDUCTOR_IDLE_STRATEGY in this version; a flag wins over
-its variable (docs/reference/config.md). The command console is not built yet; see
+CAVALRY_LOG_DIR, CAVALRY_CONDUCTOR_IDLE_STRATEGY, CAVALRY_CLUSTER_MEMBERS and
+CAVALRY_CLUSTER_MEMBER_ID in this version; a flag wins over its variable
+(docs/reference/config.md). The command console is not built yet; see
 crates/cavalry/README.md.";
 
 /// The channel `replay` plays to unless `--channel` names another.

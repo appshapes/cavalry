@@ -14,8 +14,15 @@ binary's `main`.
   and the ten-minute path's; `examples/quickstart.rs` is that path's program, and
   `just quickstart` runs it end to end; `examples/replay-check.rs` is the replay gate's
   program, which `just replay-check` runs.
+- `cavalry::cluster` is a cluster member's consensus module, re-exported from
+  `cavalry-raft`: `ConsensusModule` replicates the cluster's log across drivers and
+  commits it at a quorum, as a client of the driver beside it (ADR 0063).
 - `cargo install cavalry` gives the `cavalry` binary: `run` starts a driver and stops
-  it on Ctrl-C or SIGTERM, leaving the directory for `doctor`; `doctor` explains the
+  it on Ctrl-C or SIGTERM, leaving the directory for `doctor`; with
+  `CAVALRY_CLUSTER_MEMBERS`, the cluster's members string, and
+  `CAVALRY_CLUSTER_MEMBER_ID`, this host's id in it, the driver is that member of the
+  cluster: `run` starts the member's consensus module on a thread of its own, stops it
+  before the driver, and refuses one key without the other; `doctor` explains the
   driver from its counters and exits 0 when no check failed, listing every recording's
   two positions; `record <stream id>` records a stream's live publication to the durable
   log, `record --stop <id>` stops it (ADR 0025), and `record --truncate <id> --to <point>`,
