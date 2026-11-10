@@ -95,8 +95,12 @@ conformance:
 # its own records 100,000 hash-chained messages while a live subscriber prints them,
 # `cavalry replay` plays the recording twice from the start and once from an instant,
 # and the script fails unless the live lines and both replays hash the same and the
-# replay from the instant starts where the time index says. What CI runs on Linux and
-# macOS. docs/how-to/replay-a-recording.md is the page.
+# replay from the instant starts where the time index says. Then a cluster (ADR 0052,
+# feature 3): three members on the loopback replicate and commit 100,000 hash-chained
+# entries, a driver on each member's directories replays that member's recording, and
+# the script fails unless the three members' lines hash the same and their payloads
+# are the ones the leader was offered. What CI runs on Linux and macOS.
+# docs/how-to/replay-a-recording.md and docs/how-to/run-a-cluster.md are the pages.
 replay-check:
     bash scripts/replay-check.sh
 

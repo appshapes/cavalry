@@ -1975,6 +1975,25 @@ user-visible change, added in the same commit as the change. The format follows
   of the first kind and each had held the hosts for about 21 minutes a run
   ([ADR 0071](docs/decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md);
   [Run the bench](docs/how-to/run-the-bench.md), step 3; card 246).
+- A reviewer session that ends without a review can now be read from its run's log as
+  well as from its job summary. The `review pr` run's log holds the session's result,
+  the tool calls the settings denied and, on a miss, the session's last text, after
+  the line `## Reviewer session, attempt 1 of 2` or `attempt 2 of 2`, and
+  `gh run view <run id> --log` prints them; before, only the job summary had them,
+  and `gh` prints no job summary. Workflow commands are stopped around these lines,
+  so nothing the session wrote can act as one. The note the run leaves on the pull
+  request after a first miss gives the command with the run's own id
+  ([Ask the agent to make a change](docs/how-to/ask-the-agent.md), "No review
+  arrived"; card 247).
+- `just replay-check` covers a cluster. After the recording it always checked, three
+  members on the loopback, each a driver with its consensus module, replicate and
+  commit 100,000 entries whose payloads carry a hash chain; a driver started on each
+  member's directories replays that member's recording of the log; and the gate fails
+  unless the three members' lines, positions and bodies, hash the same and their
+  payloads are the ones the leader was offered, in order. `examples/cluster-replay-check.rs`
+  in `cavalry` is its program
+  ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md), feature 3;
+  [Run a cluster of three members](docs/how-to/run-a-cluster.md); card 227).
 - A client that connects while its driver is still starting now waits for it. A
   driver takes a few milliseconds to create its three files, and a client started in
   that time, a program run right after `cavalry run` or after `cavalry doctor` first
