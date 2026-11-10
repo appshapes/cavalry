@@ -1946,7 +1946,9 @@ user-visible change, added in the same commit as the change. The format follows
   follows, its term, its election's state and its append and commit positions. It
   warns when the member follows no leader (`cluster-no-leader`), saying from
   `CAVALRY_CLUSTER_MEMBERS` whether it is the appointed leader and what it waits for,
-  or which member is and on whose host to look next; when its elections fail
+  or which member is and on whose host to look next. It notes a member that has
+  taken its leader and joins its log, with the network path that needs
+  (`cluster-joining`). It warns when the member's elections fail
   (`cluster-joined-late`), because the leader's log does not reach it, which it names
   first with the two endpoints to check before a new cluster, or because it started
   late or lost its log; and when the leader has lost its quorum

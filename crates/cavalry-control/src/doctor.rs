@@ -1131,6 +1131,7 @@ fn election_state_name(code: i64) -> String {
 /// The cluster member this driver is, when it is one, from the counters its consensus
 /// module added (`spec/cluster.md`, "Counters"; ADR 0062): who it is and what it knows,
 /// a note (`cluster-member`); a member that follows no leader (`cluster-no-leader`); a
+/// member that has taken its leader and joins its log, a note (`cluster-joining`); a
 /// member whose elections fail, because its leader's log left it behind or never
 /// reached it (`cluster-joined-late`); an appointed leader that does not lead, or leads
 /// and does not close its election, its log behind a member's
@@ -1221,8 +1222,8 @@ fn cluster_checks(
     for member in &members {
         member_findings(member, cluster, findings);
     }
-    // The six of `member_findings`, and one for each of the member's counts.
-    6 + MEMBER_COUNTS.len()
+    // The seven of `member_findings`, and one for each of the member's counts.
+    7 + MEMBER_COUNTS.len()
 }
 
 /// What `cluster-no-leader` says of member `id`, its election in `state`. The appointed
@@ -1296,7 +1297,6 @@ fn joined_late_message(member: &MemberCounters, cluster: Option<&Cluster>) -> St
     let id = member.id;
     let failed = member.elections_failed;
     let mismatches = member.join_position_mismatches;
-    let members = MEMBERS_KEY.env;
     let remedy = "this version has no catch-up, so the cluster runs without this member. To \
                   have it back, start the cluster again as a new cluster, every member on a \
                   new log directory";
@@ -1309,41 +1309,106 @@ fn joined_late_message(member: &MemberCounters, cluster: Option<&Cluster>) -> St
         );
     }
     let timeout = LEADER_HEARTBEAT_TIMEOUT_NS / 1_000_000_000;
-    let known = cluster.filter(|cluster| cluster.ids().contains(&id));
-    let own_log = match known.and_then(|cluster| cluster.endpoints(id)) {
-        Some((_, log)) => format!("this member's log endpoint in {members}, {log},"),
-        None => format!("this member's log endpoint, the fourth field of its entry in {members},"),
-    };
-    let (leader_host, leader_consensus) = match known {
-        Some(cluster) if cluster.appointed_leader() != id => {
-            let leader = cluster.appointed_leader();
-            let consensus = cluster
-                .endpoints(leader)
-                .map_or("", |(consensus, _)| consensus);
-            (
-                format!("member {leader}'s host, the appointed leader's,"),
-                format!("member {leader}'s consensus endpoint, {consensus}"),
-            )
-        }
-        _ => (
-            "the appointed leader's host".to_string(),
-            format!(
-                "the appointed leader's consensus endpoint, the third field of its entry in \
-                 {members}"
-            ),
-        ),
-    };
+    let path = LogPath::of(id, cluster);
     format!(
         "member {id} cannot join its leader's log: {failed} of its elections failed, none of \
          them on an image that joined past its append position. Either the leader's log \
          does not reach this member, or this member started after the cluster's first \
          entry or lost what it held, and the counters do not tell the two apart. In the \
-         first case no image of the log arrived, over UDP, on {own_log} within the leader \
+         first case no image of the log arrived, over UDP, on {} within the leader \
          heartbeat timeout, {timeout} s; the leader then closed its election without this \
          member and appended, and every later election fails as a late start does. Check \
          the path first, since a new cluster leaves this member out the same way while it \
-         is closed: that {leader_host} reaches this member's log endpoint over UDP, and \
-         that this host reaches {leader_consensus}. With both open, {remedy}"
+         is closed: {}. With both open, {remedy}",
+        path.own_log,
+        path.check()
+    )
+}
+
+/// The path between member `id` and its leader that the member's election needs, as
+/// the members string names it: the leader's log to this member's log endpoint, and
+/// this member's consensus messages to the leader's consensus endpoint. In this version
+/// the leader is the appointed leader, the member with the lowest id.
+struct LogPath {
+    /// This member's log endpoint, followed by a comma.
+    own_log: String,
+    /// The leader, as a phrase: by its id with the members string, or by its place.
+    leader: String,
+    /// The leader's host, as a phrase.
+    leader_host: String,
+    /// The leader's consensus endpoint, as a phrase.
+    leader_consensus: String,
+}
+
+impl LogPath {
+    /// The path of member `id`, its endpoints named from `cluster` when it holds the
+    /// member, and by their field in the member's entry when it does not.
+    fn of(id: i32, cluster: Option<&Cluster>) -> LogPath {
+        let members = MEMBERS_KEY.env;
+        let known = cluster.filter(|cluster| cluster.ids().contains(&id));
+        let own_log = match known.and_then(|cluster| cluster.endpoints(id)) {
+            Some((_, log)) => format!("this member's log endpoint in {members}, {log},"),
+            None => {
+                format!("this member's log endpoint, the fourth field of its entry in {members},")
+            }
+        };
+        match known {
+            Some(cluster) if cluster.appointed_leader() != id => {
+                let leader = cluster.appointed_leader();
+                let consensus = cluster
+                    .endpoints(leader)
+                    .map_or("", |(consensus, _)| consensus);
+                LogPath {
+                    own_log,
+                    leader: format!("member {leader}, the appointed leader"),
+                    leader_host: format!("member {leader}'s host, the appointed leader's,"),
+                    leader_consensus: format!("member {leader}'s consensus endpoint, {consensus}"),
+                }
+            }
+            _ => LogPath {
+                own_log,
+                leader: "the appointed leader".to_string(),
+                leader_host: "the appointed leader's host".to_string(),
+                leader_consensus: format!(
+                    "the appointed leader's consensus endpoint, the third field of its entry \
+                     in {members}"
+                ),
+            },
+        }
+    }
+
+    /// What to check of the path: both of its directions.
+    fn check(&self) -> String {
+        format!(
+            "that {} reaches this member's log endpoint over UDP, and that this host reaches \
+             {}",
+            self.leader_host, self.leader_consensus
+        )
+    }
+}
+
+/// The election states, by their codes in `spec/cluster.md`, in which this version's
+/// member has taken a leader and joins its log before it closes: follower replay,
+/// follower log init, follower log await and follower ready. Each lasts at most the
+/// leader heartbeat timeout before the election fails.
+const JOINING_STATES: [i64; 4] = [10, 14, 15, 16];
+
+/// What `cluster-joining` says of member `id`, its election in `state`: the leader it
+/// has taken, what the steps left wait for, and the path they need, so that a member
+/// whose log port is closed is told so before its election fails.
+fn joining_message(id: i32, state: i64, cluster: Option<&Cluster>) -> String {
+    let timeout = LEADER_HEARTBEAT_TIMEOUT_NS / 1_000_000_000;
+    let path = LogPath::of(id, cluster);
+    format!(
+        "member {id} has taken its leader, {}, and joins its log: its election is in {}. \
+         An image of the leader's log must arrive, over UDP, on {} and this member's append \
+         position must reach the leader, each within the leader heartbeat timeout, \
+         {timeout} s. If not, the election fails and doctor reports cluster-joined-late; \
+         then check {}",
+        path.leader,
+        election_state_name(state),
+        path.own_log,
+        path.check()
     )
 }
 
@@ -1402,6 +1467,15 @@ fn member_findings(
             check: "cluster-joined-late",
             level: Level::Warn,
             message: joined_late_message(member, cluster),
+            doc: DOC_CLUSTER,
+        });
+    } else if !leads && JOINING_STATES.contains(&state) {
+        // A leader taken, and a step of at most 10 s left before the election closes or
+        // fails: not a member with no leader.
+        findings.push(Finding {
+            check: "cluster-joining",
+            level: Level::Note,
+            message: joining_message(id, state, cluster),
             doc: DOC_CLUSTER,
         });
     } else if !leads && !closed {
@@ -4942,7 +5016,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 9);
+        assert_eq!(checks, 10);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
@@ -4976,6 +5050,48 @@ mod tests {
             "{}",
             findings[1].message
         );
+
+        // A member that has taken its leader and joins its log, no election failed: not
+        // a member with no leader, and told what the steps left need, in every state of
+        // the join. A failed election before it is `cluster-joined-late` instead.
+        for state in JOINING_STATES {
+            let (_, findings) = cluster_findings(
+                &format!("cluster-joining-{state}"),
+                2,
+                &[
+                    (CLUSTER_ROLE, 0),
+                    (CLUSTER_ELECTION_STATE, state),
+                    (CLUSTER_LEADERSHIP_TERM_ID, 0),
+                ],
+            );
+            let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+            assert_eq!(
+                found,
+                ["cluster-member", "cluster-joining"],
+                "state {state}"
+            );
+            assert_eq!(findings[1].level, Level::Note);
+            assert!(
+                findings[1].message.starts_with(&format!(
+                    "member 2 has taken its leader, the appointed leader, and joins its log: \
+                     its election is in {}.",
+                    election_state_name(state)
+                )),
+                "{}",
+                findings[1].message
+            );
+        }
+        let (_, findings) = cluster_findings(
+            "cluster-joining-failed",
+            2,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 15),
+                (CLUSTER_ELECTIONS_FAILED, 1),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-joined-late"]);
 
         // A member whose elections fail, an image of the log among them that joined past
         // its append position: the log reaches it, and its log is behind. Left out, with
@@ -5091,6 +5207,26 @@ mod tests {
                  127.0.0.1:9001."
             ),
             "{message}"
+        );
+
+        // A member that joins its log, with the members string: the leader by its id, and
+        // the same path with its endpoints, before the election can fail.
+        let (_, findings) = cluster_findings_in(
+            "cluster-joining-named",
+            2,
+            Some(&cluster),
+            &[(CLUSTER_ROLE, 0), (CLUSTER_ELECTION_STATE, 15)],
+        );
+        assert_eq!(
+            findings[1].message,
+            "member 2 has taken its leader, member 0, the appointed leader, and joins its log: \
+             its election is in follower log await. An image of the leader's log must arrive, \
+             over UDP, on this member's log endpoint in CAVALRY_CLUSTER_MEMBERS, [::1]:9022, \
+             and this member's append position must reach the leader, each within the leader \
+             heartbeat timeout, 10 s. If not, the election fails and doctor reports \
+             cluster-joined-late; then check that member 0's host, the appointed leader's, \
+             reaches this member's log endpoint over UDP, and that this host reaches member \
+             0's consensus endpoint, 127.0.0.1:9001"
         );
 
         // An appointed leader that found members ahead: it will not lead, and says why.

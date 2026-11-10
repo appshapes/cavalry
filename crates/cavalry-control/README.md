@@ -29,7 +29,9 @@ is allowed here.
   driver runs: who the member is and what it knows, its role, term, election state,
   append position and commit position (`cluster-member`, a note); a member that
   follows no leader, told by the members string `examine_config` has whether it is
-  the appointed leader the others wait for (`cluster-no-leader`); a member whose
+  the appointed leader the others wait for (`cluster-no-leader`); a member that has
+  taken its leader and joins its log, with the path that needs (`cluster-joining`, a
+  note); a member whose
   elections fail, because its leader's log never reached it, a network path the
   message names first with its two endpoints, or because the log left it behind,
   which this version cannot bring back (`cluster-joined-late`); an appointed leader that does not lead, or leads and does

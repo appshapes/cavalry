@@ -122,6 +122,13 @@ committed once a quorum, two of three, has it on disk.
   host, and check that the other hosts reach this host's consensus port, 9001 in step
   1. `doctor` tells the two cases apart from `CAVALRY_CLUSTER_MEMBERS`; without it, the
   message describes both.
+- `note cluster-joining`: the member has taken its leader and joins the leader's log.
+  An image of the log must arrive on the member's `log` endpoint, and then its append
+  position must reach the leader, each within 10 s. Once both have, the election
+  closes, and the next `doctor` shows `election closed` and no `cluster-joining`. If
+  either takes longer, the election fails, and `doctor` reports `cluster-joined-late`.
+  The message names the network path the two steps need, the same path as the first
+  case of `cluster-joined-late` below.
 - `WARN cluster-joined-late`: the member's elections fail one after another, and the
   cluster runs without it. The message says how many failed, and how many of them on
   an image of the leader's log that joined past the member's append position.
