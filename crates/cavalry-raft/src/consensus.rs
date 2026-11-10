@@ -16,6 +16,13 @@ use cavalry_proto::cluster::{
     appointed_leader, canvass_position_action, commit_position, leader_ready, log_at_least,
     new_leadership_term_action, next_fields, quorum,
 };
+use cavalry_shm::counters::CounterId;
+use cavalry_shm::counters::generated::{
+    CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS,
+    CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES,
+    CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_QUORUM_LOSSES,
+    CLUSTER_LEADERSHIP_TERMS_IGNORED, CLUSTER_LOG_IMAGES_LOST, CLUSTER_TERMS_LED,
+};
 
 /// The cluster session id of a session message of no session: one the leader's own
 /// process appended (`spec/cluster.md`, "The appointed leader").
@@ -35,12 +42,11 @@ pub enum Role {
     Leader = 2,
 }
 
-// not a state machine: the election's states as the core holds them. Its machine is
-// registered in `counters.toml`, with the counters of [`Counts`] on its transitions, by
-// the consensus module, which stores those counters in the counters file and is this
-// crate's next change (ADR 0063); the core has no counters file to move one in.
+// state machine: cluster_election
 /// The states of the election a member of this version enters, each with the code
-/// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge.
+/// `spec/cluster.md` gives it, the value of the `cluster.election_state` gauge. Every
+/// move from one to another adds one to a count of [`Counts`], the counter
+/// `counters.toml` registers for it as the machine `cluster_election` (ADR 0067).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ElectionState {
@@ -277,7 +283,8 @@ impl core::fmt::Display for Refused {
 impl core::error::Error for Refused {}
 
 /// What a member has counted, each field the counter of `spec/cluster.md`, "Counters",
-/// with its name. The module stores them in the counters file; they only rise.
+/// with its name, registered in `counters.toml`. The module stores them in the
+/// counters file, by [`Counts::by_counter`]; they only rise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Counts {
     /// `cluster.elections`: an election begun, from init.
@@ -285,6 +292,12 @@ pub struct Counts {
     /// `cluster.elections_failed`: an election that failed in a state and began again
     /// at init.
     pub elections_failed: u64,
+    /// `cluster.elections_closed`: an election that closed, from leader ready or
+    /// follower ready (ADR 0067).
+    pub elections_closed: u64,
+    /// `cluster.election_steps`: a step of an election from one state to the next that
+    /// neither begins it, fails it, closes it nor makes the member a leader (ADR 0067).
+    pub election_steps: u64,
     /// `cluster.terms_led`: a term the member began to lead.
     pub terms_led: u64,
     /// `cluster.leader_quorum_losses`: a leader whose active members fell below a
@@ -305,6 +318,55 @@ pub struct Counts {
     /// `cluster.log_images_lost`: a follower whose image of the leader's log was no
     /// longer available, so that it began again at init.
     pub log_images_lost: u64,
+}
+
+impl Counts {
+    /// How many counts a member keeps: one counter of `counters.toml` each.
+    pub const LEN: usize = 11;
+
+    /// Each count with the id of its counter in `counters.toml`, the constant
+    /// `cavalry-shm` generates from it: what the consensus module stores, each as a
+    /// client counter keyed by the member's id (ADR 0062; ADR 0067).
+    ///
+    /// ```
+    /// use cavalry_raft::Counts;
+    /// use cavalry_shm::counters::generated::{CLUSTER_ELECTIONS, COUNTERS};
+    ///
+    /// let counts = Counts { elections: 3, ..Counts::default() };
+    /// let pairs = counts.by_counter();
+    /// assert!(pairs.contains(&(CLUSTER_ELECTIONS, 3)));
+    /// // Every one is a counter `counters.toml` registers.
+    /// for (id, _) in pairs {
+    ///     assert!(COUNTERS.iter().any(|def| def.id == id));
+    /// }
+    /// ```
+    pub const fn by_counter(&self) -> [(CounterId, u64); Counts::LEN] {
+        [
+            (CLUSTER_ELECTIONS, self.elections),
+            (CLUSTER_ELECTIONS_FAILED, self.elections_failed),
+            (CLUSTER_ELECTIONS_CLOSED, self.elections_closed),
+            (CLUSTER_ELECTION_STEPS, self.election_steps),
+            (CLUSTER_TERMS_LED, self.terms_led),
+            (CLUSTER_LEADER_QUORUM_LOSSES, self.leader_quorum_losses),
+            (
+                CLUSTER_APPOINTED_LEADER_BEHIND,
+                self.appointed_leader_behind,
+            ),
+            (
+                CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
+                self.leader_heartbeat_timeouts,
+            ),
+            (
+                CLUSTER_LEADERSHIP_TERMS_IGNORED,
+                self.leadership_terms_ignored,
+            ),
+            (
+                CLUSTER_JOIN_POSITION_MISMATCHES,
+                self.join_position_mismatches,
+            ),
+            (CLUSTER_LOG_IMAGES_LOST, self.log_images_lost),
+        ]
+    }
 }
 
 /// One more in a count, which stays at its highest value sooner than it wraps.
@@ -488,8 +550,8 @@ impl Consensus {
             ElectionState::Init => self.init(clock, io),
             ElectionState::Canvass => self.canvass(clock, io),
             ElectionState::LeaderLogReplication => self.leader_log_replication(clock, io),
-            ElectionState::LeaderReplay => Ok(self.enter(ElectionState::LeaderInit, clock)),
-            ElectionState::LeaderInit => Ok(self.enter(ElectionState::LeaderReady, clock)),
+            ElectionState::LeaderReplay => Ok(self.step(ElectionState::LeaderInit, clock)),
+            ElectionState::LeaderInit => Ok(self.step(ElectionState::LeaderReady, clock)),
             ElectionState::LeaderReady => self.leader_ready(clock, io),
             ElectionState::FollowerReplay => self.follower_replay(clock),
             ElectionState::FollowerLogInit => self.follower_log_init(clock, io),
@@ -620,7 +682,7 @@ impl Consensus {
                         self.log_session_id = log_session_id;
                         self.leader_log_position = log_position;
                         self.leader_word(clock, log_position, commit_position);
-                        self.enter(ElectionState::FollowerReplay, clock);
+                        self.step(ElectionState::FollowerReplay, clock);
                         Ok(())
                     }
                     // A truncation, a replication, a wait or a log the leader's does
@@ -715,10 +777,26 @@ impl Consensus {
         }
     }
 
+    /// Moves the election to `state`. Every caller counts the move, in the count
+    /// `counters.toml` registers for it (`cluster_election`).
     fn enter(&mut self, state: ElectionState, clock: Clock) -> usize {
         self.state = state;
         self.state_since_ns = clock.now_ns;
         1
+    }
+
+    /// A step of the election to `state`, the next on its way to closed, counted in
+    /// `cluster.election_steps`.
+    fn step(&mut self, state: ElectionState, clock: Clock) -> usize {
+        count(&mut self.counts.election_steps);
+        self.enter(state, clock)
+    }
+
+    /// The election closed, from leader ready or follower ready, counted in
+    /// `cluster.elections_closed`.
+    fn close(&mut self, clock: Clock) -> usize {
+        count(&mut self.counts.elections_closed);
+        self.enter(ElectionState::Closed, clock)
     }
 
     /// Whether this member has taken a leader: in a follower's states after canvass.
@@ -1005,7 +1083,7 @@ impl Consensus {
         )
         .quorum_position;
         if quorum_position >= self.append_position {
-            return Ok(self.enter(ElectionState::LeaderReplay, clock));
+            return Ok(self.step(ElectionState::LeaderReplay, clock));
         }
         Ok(work)
     }
@@ -1058,7 +1136,7 @@ impl Consensus {
         if !appended {
             return Ok(work);
         }
-        Ok(self.enter(ElectionState::Closed, clock))
+        Ok(self.close(clock))
     }
 
     /// The leader, its election closed: the commit position from the members' append
@@ -1093,7 +1171,7 @@ impl Consensus {
             self.fail(clock);
             return Ok(1);
         }
-        Ok(self.enter(ElectionState::FollowerLogInit, clock))
+        Ok(self.step(ElectionState::FollowerLogInit, clock))
     }
 
     /// State 14. The log subscription and its armed recording. No member of this
@@ -1101,14 +1179,14 @@ impl Consensus {
     fn follower_log_init<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         io.join_log()?;
         self.joined = true;
-        Ok(self.enter(ElectionState::FollowerLogAwait, clock))
+        Ok(self.step(ElectionState::FollowerLogAwait, clock))
     }
 
     /// State 15. The leader's image, which must join at this member's append position.
     fn follower_log_await<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         match io.log_image(self.log_session_id)? {
             Some(join_position) if join_position == self.append_position => {
-                Ok(self.enter(ElectionState::FollowerReady, clock))
+                Ok(self.step(ElectionState::FollowerReady, clock))
             }
             Some(_) => {
                 // Init leaves the log this image is on.
@@ -1147,7 +1225,7 @@ impl Consensus {
     fn follower_ready<I: Io>(&mut self, clock: Clock, io: &mut I) -> usize {
         if self.send_append_position(clock, io) {
             self.last_leader_word_ns = clock.now_ns;
-            return self.enter(ElectionState::Closed, clock);
+            return self.close(clock);
         }
         if clock.now_ns.saturating_sub(self.state_since_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS {
             self.fail(clock);

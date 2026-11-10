@@ -1846,3 +1846,12 @@ user-visible change, added in the same commit as the change. The format follows
   that runs the core over a driver follows
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
   card 227).
+- The election of a cluster member is a registered state machine, `cluster_election`,
+  and every move of it adds one to a counter: `counters.toml` has the eleven
+  `cluster.*` counters a member's core keeps, ids 110 to 120, among them two new ones,
+  `cluster.election_steps` and `cluster.elections_closed`, and
+  `cavalry_raft::Counts::by_counter` pairs each count with its counter's id for the
+  module to store. `docs/reference/counters.md` lists them and the machine's
+  transitions
+  ([ADR 0067](docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md);
+  card 227).

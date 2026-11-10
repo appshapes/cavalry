@@ -146,6 +146,7 @@ name = "cavalry-raft"
 version = "0.1.0"
 dependencies = [
  "cavalry-proto",
+ "cavalry-shm",
  "stats_alloc",
 ]
 

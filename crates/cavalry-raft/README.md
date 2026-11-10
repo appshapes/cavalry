@@ -16,6 +16,11 @@ commit path runs per message.
   reports a log ahead of its own, so a leader that lost its log directory never leads
   a second time. A member that could join only with a catch-up or a truncation, one
   that starts late, is left out and counted, never joined wrong.
+- Counts every move of the election. `ElectionState` is the state machine
+  `cluster_election` of `counters.toml`, and each of its transitions adds one to a
+  count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
+  count with its counter's id, for the module to store as a client counter (ADR 0067;
+  [the counters reference](../../docs/reference/counters.md)).
 - Does no I/O of its own: the core reaches the consensus stream, the log, its
   recording and its `terms` file through one trait, `Io`. `memory::Cluster` gives it
   that in memory, one to eight members in one process on a clock the caller steps,
@@ -87,6 +92,9 @@ assert_eq!(cluster.log(2), cluster.log(0));
   driver, in two layers, a core that does no I/O and the module that acts for it, and
   its leader is appointed, on the path `spec/cluster.md`, "The appointed leader",
   gives through the election's states.
+- [ADR 0067](../../docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md),
+  why the election's machine is registered with the core and what its two step
+  counters count.
 - [`spec/udp.md`](../../spec/udp.md), "The sender", for the multi-destination cast the
   log travels over, and [`spec/durable-log.md`](../../spec/durable-log.md) for the
   recording every member keeps of it.

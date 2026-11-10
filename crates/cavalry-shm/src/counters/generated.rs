@@ -335,6 +335,39 @@ pub const RECORDING_ARMED_FAILED: CounterId = CounterId(108);
 /// `cluster.commit_position`, a client gauge: The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_COMMIT_POSITION: CounterId = CounterId(109);
 
+/// `cluster.elections`, a client counter: Elections one cluster member began, from init: on starting, and each time it begins again after a failed or lost election (spec/cluster.md, Roles and the election). At most one more than cluster.elections_closed and cluster.elections_failed together, the one more being the election under way; key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_ELECTIONS: CounterId = CounterId(110);
+
+/// `cluster.terms_led`, a client counter: Terms one cluster member began to lead, on entering leader log replication: cluster.role going to leader (spec/cluster.md, The appointed leader); key and label as cluster.elections.
+pub const CLUSTER_TERMS_LED: CounterId = CounterId(111);
+
+/// `cluster.leader_quorum_losses`, a client counter: Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; the appointed leader stays the leader and its commit position stops until a quorum reports again (spec/cluster.md, The appointed leader); key and label as cluster.elections.
+pub const CLUSTER_LEADER_QUORUM_LOSSES: CounterId = CounterId(112);
+
+/// `cluster.appointed_leader_behind`, a client counter: Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election; the leader does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key and label as cluster.elections.
+pub const CLUSTER_APPOINTED_LEADER_BEHIND: CounterId = CounterId(113);
+
+/// `cluster.log_images_lost`, a client counter: Times one cluster follower's image of its leader's log was no longer available, so that it began its election again at init (spec/cluster.md, Roles and the election); key and label as cluster.elections.
+pub const CLUSTER_LOG_IMAGES_LOST: CounterId = CounterId(114);
+
+/// `cluster.elections_failed`, a client counter: Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s (spec/cluster.md, Roles and the election); key and label as cluster.elections.
+pub const CLUSTER_ELECTIONS_FAILED: CounterId = CounterId(115);
+
+/// `cluster.leader_heartbeat_timeouts`, a client counter: Times one cluster follower heard nothing from its leader for the leader heartbeat timeout, 10 s, and began its election again at init (spec/cluster.md, Roles and the election); key and label as cluster.elections.
+pub const CLUSTER_LEADER_HEARTBEAT_TIMEOUTS: CounterId = CounterId(116);
+
+/// `cluster.leadership_terms_ignored`, a client counter: New leadership term messages one cluster member ignored for their term: below its candidate term in canvass, or not the term it follows once it has taken a leader (spec/cluster.md, Messages during an election); key and label as cluster.elections.
+pub const CLUSTER_LEADERSHIP_TERMS_IGNORED: CounterId = CounterId(117);
+
+/// `cluster.join_position_mismatches`, a client counter: Images of the log that joined one cluster follower at a position other than its append position, so that it failed its election and left the image (spec/cluster.md, Roles and the election, state 15); key and label as cluster.elections.
+pub const CLUSTER_JOIN_POSITION_MISMATCHES: CounterId = CounterId(118);
+
+/// `cluster.election_steps`, a client counter: Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (spec/cluster.md, Counters; ADR 0067). An election that closes makes three on its leader and four on a follower; key and label as cluster.elections.
+pub const CLUSTER_ELECTION_STEPS: CounterId = CounterId(119);
+
+/// `cluster.elections_closed`, a client counter: Elections one cluster member closed: leader ready to closed, its term's first entry appended, or follower ready to closed, its append position sent to its leader (spec/cluster.md, Counters; ADR 0067); key and label as cluster.elections.
+pub const CLUSTER_ELECTIONS_CLOSED: CounterId = CounterId(120);
+
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
     CounterDef {
@@ -1216,5 +1249,93 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A cluster.commit_position that stays where it is while the member's recording.position moves is a commit that waits for a quorum: check that a majority of the members in the members string are running and that each reaches the others' consensus endpoints.",
+    },
+    CounterDef {
+        id: CLUSTER_ELECTIONS,
+        name: "cluster.elections",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Elections one cluster member began, from init: on starting, and each time it begins again after a failed or lost election (spec/cluster.md, Roles and the election). At most one more than cluster.elections_closed and cluster.elections_failed together, the one more being the election under way; key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "A cluster.elections that keeps rising is a member that keeps beginning again: read cluster.elections_failed, cluster.leader_heartbeat_timeouts and cluster.log_images_lost on the same member to see why each election ended.",
+    },
+    CounterDef {
+        id: CLUSTER_TERMS_LED,
+        name: "cluster.terms_led",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Terms one cluster member began to lead, on entering leader log replication: cluster.role going to leader (spec/cluster.md, The appointed leader); key and label as cluster.elections.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_LEADER_QUORUM_LOSSES,
+        name: "cluster.leader_quorum_losses",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times the active members of one cluster leader fell below a quorum, a member being active while its last report is younger than the leader heartbeat timeout, 10 s; the appointed leader stays the leader and its commit position stops until a quorum reports again (spec/cluster.md, The appointed leader); key and label as cluster.elections.",
+        doctor: "The leader cannot commit while fewer than a quorum of members report to it: check that a majority of the members in the members string are running and that each reaches the leader's consensus endpoint.",
+    },
+    CounterDef {
+        id: CLUSTER_APPOINTED_LEADER_BEHIND,
+        name: "cluster.appointed_leader_behind",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election; the leader does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key and label as cluster.elections.",
+        doctor: "The appointed leader, the member with the lowest id, holds less of the log than another member, as after it lost its log directory, and the cluster will not elect it: restore the leader's log directory, or start the cluster again on empty log directories; this version has no catch-up.",
+    },
+    CounterDef {
+        id: CLUSTER_LOG_IMAGES_LOST,
+        name: "cluster.log_images_lost",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster follower's image of its leader's log was no longer available, so that it began its election again at init (spec/cluster.md, Roles and the election); key and label as cluster.elections.",
+        doctor: "The follower lost the leader's log stream: check the network path from the leader's log endpoint to this member and the image counters of stream 100 on this member's driver.",
+    },
+    CounterDef {
+        id: CLUSTER_ELECTIONS_FAILED,
+        name: "cluster.elections_failed",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Elections one cluster member failed in a state and began again at init: a log it cannot join without a truncation, a replication or a catch-up, an image of the log that joined at another position, or a step that made no progress for the leader heartbeat timeout, 10 s (spec/cluster.md, Roles and the election); key and label as cluster.elections.",
+        doctor: "A member whose elections keep failing cannot join its leader's log as it stands: read cluster.join_position_mismatches on it; a member that started after the leader's first entry, or on a log of its own, needs the catch-up, which this version does not have, so start it on an empty log directory before the leader's first entry.",
+    },
+    CounterDef {
+        id: CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
+        name: "cluster.leader_heartbeat_timeouts",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Times one cluster follower heard nothing from its leader for the leader heartbeat timeout, 10 s, and began its election again at init (spec/cluster.md, Roles and the election); key and label as cluster.elections.",
+        doctor: "The follower stopped hearing its leader: check that the leader is running, that the leader's cluster.leader_quorum_losses did not rise, and that this member reaches the leader's consensus endpoint.",
+    },
+    CounterDef {
+        id: CLUSTER_LEADERSHIP_TERMS_IGNORED,
+        name: "cluster.leadership_terms_ignored",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "New leadership term messages one cluster member ignored for their term: below its candidate term in canvass, or not the term it follows once it has taken a leader (spec/cluster.md, Messages during an election); key and label as cluster.elections.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_JOIN_POSITION_MISMATCHES,
+        name: "cluster.join_position_mismatches",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Images of the log that joined one cluster follower at a position other than its append position, so that it failed its election and left the image (spec/cluster.md, Roles and the election, state 15); key and label as cluster.elections.",
+        doctor: "The member subscribed to the log after the leader had appended past its append position, and joining there would leave a hole in its log: start it on an empty log directory before the leader's first entry; this version has no catch-up.",
+    },
+    CounterDef {
+        id: CLUSTER_ELECTION_STEPS,
+        name: "cluster.election_steps",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (spec/cluster.md, Counters; ADR 0067). An election that closes makes three on its leader and four on a follower; key and label as cluster.elections.",
+        doctor: "",
+    },
+    CounterDef {
+        id: CLUSTER_ELECTIONS_CLOSED,
+        name: "cluster.elections_closed",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Elections one cluster member closed: leader ready to closed, its term's first entry appended, or follower ready to closed, its append position sent to its leader (spec/cluster.md, Counters; ADR 0067); key and label as cluster.elections.",
+        doctor: "A cluster.elections_closed that stays below cluster.elections minus cluster.elections_failed is an election still running: the member's cluster.election_state gauge (spec/cluster.md, Counters) is the state it waits in, and docs/reference/counters.md, State machines, cluster_election, names the counter of each way out of that state.",
     },
 ];

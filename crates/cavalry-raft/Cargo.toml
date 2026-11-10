@@ -26,6 +26,12 @@ allowed-dependencies = []
 # reader does with new leadership term, the appointed leader (ADR 0058; ADR 0063). A
 # workspace member.
 cavalry-proto = { path = "../cavalry-proto" }
+# The counter ids `counters.toml` generates, which `Counts::by_counter` pairs each count
+# with, so that every transition of the election names the counter it moves and `just
+# lint-counters` checks it (CLAUDE.md, invariant 4; ADR 0067). A workspace member, and
+# one the module reaches anyway through `cavalry-client` (ADR 0063). The core calls
+# none of its unsafe code.
+cavalry-shm = { path = "../cavalry-shm" }
 
 [dev-dependencies]
 # The counting allocator of the allocation test, so that the core's zero-allocation

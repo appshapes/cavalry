@@ -103,7 +103,11 @@ fn a_cluster_started_together_appoints_its_leader_replicates_and_commits() {
         let counts = member.counts();
         assert_eq!(counts.elections, 1);
         assert_eq!(counts.elections_failed, 0);
+        assert_eq!(counts.elections_closed, 1);
         assert_eq!(counts.terms_led, u64::from(id == 0));
+        // Leader log replication, replay and init on the leader; follower replay, log
+        // init, log await and ready on a follower (ADR 0067).
+        assert_eq!(counts.election_steps, if id == 0 { 3 } else { 4 });
     }
     // The leader stored the term it proposed before it led; a follower's raise on
     // following is in memory alone. Every member recorded term 0 at position 0 before
