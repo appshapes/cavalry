@@ -1882,3 +1882,16 @@ user-visible change, added in the same commit as the change. The format follows
   new cluster, every member on a new log directory
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
   card 227).
+- A subscription added right after a stream's last one was removed is no longer given
+  an image the driver is retiring. Removing the last subscription on a `cavalry:udp`
+  endpoint and stream starts the retire of its image, and until the receiver had
+  finished the driver still listed the image as live: a subscription added in that
+  moment was sent `available image` for it, the image's log was unlinked a duty cycle
+  later, and a client that had not opened the log yet closed with `corrupt`. A cluster
+  follower that leaves the log and joins it again adds its subscription in that
+  moment. The add now waits for the endpoint to close and binds it again, as an add
+  on a closing endpoint does, and is given the stream's next image at once; on an
+  endpoint that another stream's subscription keeps open it runs at once and is not
+  given the image being retired
+  ([ADR 0068](docs/decisions/0068-give-an-image-being-retired-to-no-new-subscription.md);
+  card 227).

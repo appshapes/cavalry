@@ -299,7 +299,7 @@ pub const IMAGE_UNSUBSCRIBED: CounterId = CounterId(96);
 /// `image.removed`, a static counter: Retired images whose log the conductor unlinked after unavailable image went to the subscriptions that remained and their counters were freed (spec/udp.md, The receiver, step 5).
 pub const IMAGE_REMOVED: CounterId = CounterId(97);
 
-/// `subscription.add_deferred`, a static counter: `add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049).
+/// `subscription.add_deferred`, a static counter: `add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068).
 pub const SUBSCRIPTION_ADD_DEFERRED: CounterId = CounterId(98);
 
 /// `subscription.add_deferred_timed_out`, a static counter: `add subscription` commands that waited the closing endpoint wait, 5 s, for a `cavalry:udp` channel's previous receive endpoint to close and were answered with code 4, with nothing registered; the close that came later ran nothing for them (spec/client-protocol.md, Commands, Liveness and timeouts; ADR 0049).
@@ -1177,7 +1177,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "subscription.add_deferred",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049).",
+        doc: "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068).",
         doctor: "",
     },
     CounterDef {

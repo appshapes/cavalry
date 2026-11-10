@@ -984,7 +984,7 @@ id = 98
 name = "subscription.add_deferred"
 kind = "counter"
 scope = "static"
-doc = "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint was still closing, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049)."
+doc = "`add subscription` commands on a `cavalry:udp` channel whose previous receive endpoint had lost its last subscription and had not yet closed, its images still being retired or its socket still with the receiver, held with nothing registered until the receiver closed it and then run as if they had just arrived (spec/client-protocol.md, Commands; ADR 0049; ADR 0068)."
 doctor = ""
 
 [[counter]]
