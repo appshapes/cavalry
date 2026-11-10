@@ -75,7 +75,9 @@ struct Followed {
     type_id: CounterId,
     /// The highest value read from the record while its key named this recording, or
     /// the stop position for a handle made after the stop: what a read returns when the
-    /// record is no longer the recording's and the stop has not arrived. Written by any
+    /// record is no longer the recording's and the stop has not arrived. For the
+    /// position counter this can be above the stop position, when the stop's own
+    /// writes failed and the driver announced the last sync (ADR 0064). Written by any
     /// thread that reads, with `fetch_max`, since two readers may finish out of order;
     /// nobody branches on it but the read that returns it.
     last: AtomicI64,
@@ -116,9 +118,9 @@ impl Followed {
 /// session recorded, and its two positions as the driver stores them
 /// (`spec/client-protocol.md`, "Events", `recording ready`). The client follows the
 /// stop of every recording it started while the handle lives: once the recording has
-/// stopped, both positions are the stop position, what the catalog holds, and no counter
-/// is read. A position is never another counter's value: each read checks that the
-/// record it loaded is still this recording's.
+/// stopped, both positions are the stop position, a position a sync made durable, and no
+/// counter is read. A position is never another counter's value: each read checks that
+/// the record it loaded is still this recording's.
 pub struct Recording {
     recording_id: i64,
     session_id: i32,
@@ -181,8 +183,10 @@ impl Recording {
     /// recording's counters once and a recording id is never reused. A record that is
     /// not, freed or another counter's by now, is a recording that has stopped, whose
     /// stop the conductor has not stored yet: the read returns the stop if it arrived
-    /// meanwhile, and otherwise the last value read from the recording's own record, at
-    /// or below the stop position, never another counter's value. The check is the
+    /// meanwhile, and otherwise the last value read from the recording's own record,
+    /// never another counter's value. That value is at or below the stop position, but
+    /// for the position counter of a stop whose own writes failed, which the driver
+    /// announces at the last sync (ADR 0064). The check is the
     /// counters file's reader protocol (`spec/counters-file.md`, "Metadata record"),
     /// with that protocol's own bound: it completes within the counter reuse timeout.
     fn live_or_stopped(&self, followed: &Followed) -> i64 {
@@ -222,7 +226,8 @@ impl Recording {
         self.stream_id
     }
 
-    /// The channel recorded, `cavalry:ipc` in this version.
+    /// The channel recorded, as the call that started or armed the recording named it:
+    /// `cavalry:ipc` or a `cavalry:udp` channel.
     pub fn channel(&self) -> &str {
         &self.channel
     }
@@ -231,25 +236,45 @@ impl Recording {
     /// files, what the operating system holds: the `recording.position` counter, read
     /// with an acquire load. Behind the publisher by at most the publication window,
     /// since the publisher's limit respects it. Once the recording has stopped, its
-    /// stop position.
+    /// [`stop_position`]. That is below a value this returned before the stop when the
+    /// stop's own writes or syncs failed, since the driver then announces the position
+    /// last synced (ADR 0064).
+    ///
+    /// [`stop_position`]: Recording::stop_position
     pub fn position(&self) -> i64 {
         self.live_or_stopped(&self.position)
     }
 
     /// The position up to which a sync has made the recording durable on disk: the
     /// `recording.synced_position` counter, at most a second behind [`position`]
-    /// (ADR 0025). Once the recording has stopped, its stop position, which the driver
-    /// synced before it said so.
+    /// (ADR 0025). Once the recording has stopped, its [`stop_position`], which a sync
+    /// that returned success covered before the driver said so: the stop's own sync,
+    /// or, when the stop's own writes or syncs failed or a sync of the recording failed
+    /// before it, the last sync that succeeded (ADR 0064, ADR 0065). It never moves
+    /// back.
     ///
     /// [`position`]: Recording::position
+    /// [`stop_position`]: Recording::stop_position
     pub fn synced_position(&self) -> i64 {
         self.live_or_stopped(&self.synced_position)
     }
 
-    /// Where the recording stopped, the catalog's stop position, once the driver has
-    /// said so with `recording stopped`: by a `stop recording` from any client, at its
-    /// publication's end of stream, or on a failure. `None` while it is live as far as
-    /// this client has read.
+    /// Where the recording stopped, once the driver has said so with `recording
+    /// stopped`: by a `stop recording` from any client, at its publication's end of
+    /// stream, or on a failure. `None` while it is live as far as this client has read.
+    ///
+    /// On every path the position is one that a sync which returned success covered
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0064, ADR 0065). Usually it is the
+    /// catalog's stop position, which the stop wrote and synced. A recording one of
+    /// whose syncs failed, on a failing disk, is stopped with no stop run, and a stop
+    /// whose own writes or syncs failed, on a full disk for instance, still stops the
+    /// recording; `recording.write_failed` counts either. Then this is the position the
+    /// last sync that succeeded covered, which can be below what [`position`] returned
+    /// before.
+    /// The catalog holds no stop for the recording until the driver's next start
+    /// rebuilds one from the files, at or above this position.
+    ///
+    /// [`position`]: Recording::position
     pub fn stop_position(&self) -> Option<i64> {
         self.stop.get()
     }

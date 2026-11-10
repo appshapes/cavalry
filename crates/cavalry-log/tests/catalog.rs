@@ -154,6 +154,76 @@ fn a_stop_is_read_back_by_the_reader() {
     assert_eq!(writer.get(id).expect("read"), Some(stopped));
 }
 
+/// The stop alone, which the driver's replayer asks for once a second for every replay
+/// that follows a live recording: what [`CatalogReader::get`] says of it, by the same
+/// checks, with no descriptor built (CLAUDE.md, invariant 2; the allocation gate is
+/// `cavalry-client`'s `replay_follow_allocations`).
+#[test]
+fn a_stop_position_is_what_get_says_of_the_stop() {
+    let dir = TestDir::new("stop-position");
+    let mut writer = CatalogWriter::open(dir.path(), NOW).expect("a new catalog");
+    let id = writer.add(&recording(1001)).expect("added");
+    let reader = CatalogReader::open(dir.path()).expect("the catalog opens");
+    for missing in [-1, 1, i64::MIN, i64::MAX] {
+        assert_eq!(
+            reason(reader.stop_position(missing)),
+            "unknown",
+            "{missing}"
+        );
+    }
+    // Live: no stop. The slot's bytes parse to the state and no position.
+    assert_eq!(reader.stop_position(id).expect("read"), None);
+    assert_eq!(
+        Descriptor::parse_stop(&read_slot(&dir, 0), 0).expect("parsed"),
+        Some((State::Valid, None))
+    );
+    // Stopped: the position the descriptor holds.
+    writer.stop(id, 4096, NOW + 1_000).expect("stopped");
+    assert_eq!(reader.stop_position(id).expect("read"), Some(4096));
+    let stopped = reader.get(id).expect("read").expect("a recording");
+    assert_eq!(
+        Descriptor::parse_stop(&read_slot(&dir, 0), 0).expect("parsed"),
+        Some((stopped.state(), Some(stopped.stop_position())))
+    );
+    // A second recording, live beside it, and an id read as another slot's is refused
+    // by the same check `get` makes.
+    let second = writer.add(&recording(1002)).expect("added");
+    assert_eq!(reader.stop_position(second).expect("read"), None);
+    assert!(Descriptor::parse_stop(&read_slot(&dir, 0), 1).is_err());
+    assert!(Descriptor::parse(&read_slot(&dir, 0), 1).is_err());
+
+    // Deleted: the slot is no recording to replay, whatever stop it holds.
+    writer.stop(second, 8192, NOW + 2_000).expect("stopped");
+    drop(writer);
+    dir.write_at(
+        &(State::Deleted as i32).to_le_bytes(),
+        CatalogHeader::slot_offset(1),
+    );
+    assert_eq!(reader.stop_position(second).expect("read"), None);
+    assert_eq!(
+        Descriptor::parse_stop(&read_slot(&dir, 1), 1).expect("parsed"),
+        Some((State::Deleted, Some(8192)))
+    );
+    // Empty: nothing after the state is read.
+    dir.write_at(&0i32.to_le_bytes(), CatalogHeader::slot_offset(1));
+    assert_eq!(reader.stop_position(second).expect("read"), None);
+    assert_eq!(
+        Descriptor::parse_stop(&read_slot(&dir, 1), 1).expect("parsed"),
+        None
+    );
+    // A stop torn by a crash is retried for 100 ms and then reported, as `get` does.
+    dir.write_at(&[0xDE, 0xAD, 0xBE, 0xEF], CatalogHeader::slot_offset(0) + 4);
+    let started = Instant::now();
+    let error = reader.stop_position(id).expect_err("a torn stop");
+    assert_eq!(error.reason(), "checksum");
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "retried for {:?}",
+        started.elapsed()
+    );
+    assert_eq!(reason(reader.get(id)), "checksum");
+}
+
 #[test]
 fn a_deleted_slot_reads_with_both_checksums() {
     let dir = TestDir::new("delete");

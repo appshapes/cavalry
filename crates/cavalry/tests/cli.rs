@@ -704,22 +704,42 @@ fn free_ports(count: usize) -> Vec<u16> {
         .collect()
 }
 
-/// The value of a member's cluster counter of `type_id` in the driver directory `dir`,
+/// The value of a member's cluster counter named `name` in the driver directory `dir`,
 /// read as `doctor` reads it, or `None` while the member has not added it.
-fn cluster_counter(dir: &Path, type_id: i32) -> Option<i64> {
+fn cluster_counter(dir: &Path, name: &str) -> Option<i64> {
     let client = Cavalry::connect_to(dir).ok()?;
     let counters = client.counters();
     let value = (0..counters.capacity()).find_map(|id| {
         let record = counters.record(id).ok()??;
-        (record.type_id() == type_id).then(|| counters.read(id).ok())?
+        // The label is the name, a space and the member id.
+        let named = record
+            .label()
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(' '));
+        named.then(|| counters.read(id).ok())?
     });
     client.close().ok()?;
     value
 }
 
-/// `cluster.role` and `cluster.election_state` in `counters.toml`.
-const CLUSTER_ROLE: i32 = 110;
-const CLUSTER_ELECTION_STATE: i32 = 111;
+/// The members a test started, each killed when the test ends before it stopped them:
+/// a failed assertion would otherwise leave three drivers running after the test.
+struct Runs(Vec<Child>);
+
+impl Drop for Runs {
+    fn drop(&mut self) {
+        for run in &mut self.0 {
+            let _ = run.kill();
+            let _ = run.wait();
+        }
+    }
+}
+
+/// `cluster.role` and `cluster.election_state` in `counters.toml`, by name: the
+/// consensus module labels each of its counters with the counter's name and its
+/// member id, and a name does not move when an id in that file does.
+const CLUSTER_ROLE: &str = "cluster.role";
+const CLUSTER_ELECTION_STATE: &str = "cluster.election_state";
 
 #[test]
 fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader() {
@@ -747,8 +767,8 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
             .spawn()
             .expect("run starts")
     };
-    let mut runs: Vec<Child> = (0..3).map(start).collect();
-    for (member, run) in runs.iter_mut().enumerate() {
+    let mut runs = Runs((0..3).map(start).collect());
+    for (member, run) in runs.0.iter_mut().enumerate() {
         wait_until_running(run, || {
             let mut c = cavalry();
             c.args(["doctor", "--dir", &dirs[member].arg()]);
@@ -784,7 +804,8 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
     );
 
     // SIGTERM stops the member and then the driver, and the exit is clean.
-    for (member, run) in runs.drain(..).enumerate().rev() {
+    while let Some(run) = runs.0.pop() {
+        let member = runs.0.len();
         let stderr = terminate(run);
         assert!(
             stderr.contains(&format!("cluster member {member} started")),
