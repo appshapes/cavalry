@@ -9,7 +9,8 @@ code (`cavalry/__init__.py`) gives the handles the forms a Python user expects. 
 `Client` is a context manager that closes itself; a `Publication` claims a slice of the
 log as a writable `memoryview` or offers `bytes`; a `Subscription` polls with a callable
 fragment handler that receives the body as a `memoryview` into the log and the frame's
-header; a `Recording` and a `Replay` wrap the driver's archive. Every message the
+header; a `Recording` and a `Replay` wrap the driver's archive; a `CommittedLog` is a
+service's read of a cluster's committed log beside a member (below). Every message the
 client sends or receives goes through one `extern "C"` call on the caller's thread, as
 the ABI's page promises (ADR 0046's boundary; ADR 0051). The package has no dependency:
 `ctypes` is in Python's standard library, and both CI runners carry Python 3 already.
@@ -21,13 +22,38 @@ library of another ABI version than the header the package was generated from ra
 library built from the same checkout, or run `just generate-clients` against the
 library's header (`spec/c-abi.md`, "Versions and what a reader rejects").
 
+### The committed log
+
+A service is a program beside a cluster member that applies the entries the cluster
+has committed (`docs/how-to/read-the-committed-log.md`). `client.committed_log(position)`
+opens the log of the member on the client's driver at a position, 0 or the
+`position()` an earlier run reached, and returns `None` while the driver hosts no
+member with a log, so a service started before its member asks again. `log.poll(handler,
+fragment_limit)` calls `handler(body, header, position)` for each committed entry, in
+order, none at or past the member's commit position, and returns the entry count;
+`position` is the entry's position in the log. `log.position()` is the position after
+the last entry delivered, the one a service keeps for its next start, and
+`log.commit_position()` the bound of the last poll. `log.is_ended` says that the member
+closed or left its log: once a poll then returns 0, close the log and open another
+from `log.position()`. `log.failed_at()` is `None` unless the driver's replay of the
+member's recording failed. `log.close()` stops the driver's replay and is idempotent;
+a log closed after its client is freed, and the driver ends the replay by itself.
+`log.member_id` and `log.recording_id` say whose log it is (`spec/c-abi.md`,
+"Functions", committed log; ADR 0068).
+
+The handler's exceptions go where a subscription's go ("The exception"): every entry
+the ABI delivers reaches the handler, and `poll` raises `HandlerError` once the ABI has
+returned. An entry whose handler call raised was delivered and is not delivered again,
+so a service that must apply every entry catches its own exceptions and stops there,
+with the entry's `position` in hand to open the log at again.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no `await`, no
   thread, no copy of a fragment into a new array for the handler. `clients/lint.py`
   reads the per-message functions, `try_claim`, `set_reserved_value`, `commit`,
-  `abort`, `offer`, `poll`, the trampoline and `Header.values` with the `Header`
-  properties that call it, for Python's forms of each (`threading`'s locks,
+  `abort`, `offer`, a subscription's and a committed log's `poll` and trampoline, and
+  `Header.values` with the `Header` properties that call it, for Python's forms of each (`threading`'s locks,
   `async def`, `await`, `raise`, and building `CavalryError`), in their own bodies and
   in every function of the package they call, such as `_check`; `just lint` fails on
   any of them. `Header.values()` is None when the ABI refuses the header's pointer,
@@ -142,8 +168,9 @@ checks each function's loader.
 Releasing the GIL lets two Python threads be inside the ABI at once, and the ABI runs
 one call on a handle at a time (`spec/c-abi.md`, "Threads"). A `Client` takes its own
 lock around every call on its handle, never on a message's path, so threads may share
-it. A `Publication`, `Subscription`, `Recording`, `Replay` or `Image` is used from one
-thread at a time; give each thread its own. `Client.add_destination` and
+it. A `Publication`, `Subscription`, `Recording`, `Replay`, `Image` or `CommittedLog`
+is used from one thread at a time; give each thread its own. A `CommittedLog`'s open
+and close are calls on the client and take its lock; its poll is not. `Client.add_destination` and
 `remove_destination` are calls on the client, not on the `Publication` they name: they
 may run beside that publication's `offer` or `try_claim` in another thread, but not
 beside its `close` (`spec/c-abi.md`, "Threads"; ADR 0057).

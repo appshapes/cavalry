@@ -179,6 +179,26 @@ class Package(unittest.TestCase):
         self.assertLess(zeroed, freed)
         self.assertLess(close.index("self._release()"), zeroed)
 
+    def test_the_committed_log_reads_the_position_in_its_trampoline_and_keeps_a_refused_close_open(self):
+        """The Python committed log (ADR 0068): the trampoline asks the header for the
+        entry's position while the pointer is the ABI's, before the handler runs; the open
+        returns None for the null handle of a driver with no member; and `close` drops its
+        handle only when the ABI freed it, which a call refused from inside the log's own
+        handler did not (spec/c-abi.md, "Calls during a claim or a poll")."""
+        code = gen.write_python(self.header)["cavalry/__init__.py"]
+        log = code.split("class CommittedLog:", 1)[1].split("\ndef abi_version", 1)[0]
+        trampoline = log.split("    def _on_fragment(self, clientd, buffer, length, header):\n", 1)[1].split("    def _keep", 1)[0]
+        self.assertIn("self._handler(body, self._header, self._abi.cavalry_committed_log_entry_position(header))", trampoline)
+        self.assertLess(trampoline.index("self._header._pointer = header"),
+                        trampoline.index("cavalry_committed_log_entry_position(header)"))
+        self.assertEqual(log.count("self._abi.cavalry_committed_log_poll("), 2)  # the nested refusal and the poll itself
+        close = log.split("    def close(self):\n", 1)[1]
+        self.assertIn("if error is None or error.code != _abi.CAVALRY_ERR_POLLING:\n            self._handle = None", close)
+        client = code.split("class Client:", 1)[1].split("\nclass ", 1)[0]
+        self.assertIn("return CommittedLog(self._abi, handle.value, self) if handle.value else None", client)
+        for name in ("cavalry_committed_log_poll", "cavalry_committed_log_entry_position"):
+            self.assertIn(name, gen.PER_MESSAGE)
+
     def test_offer_takes_bytes_and_refuses_a_str(self):
         """`c_void_p` took a `str` as its `wchar_t` buffer, so `offer("hello")` published
         `h\\0\\0\\0e`; the binding's `c_char_p` refuses it, and every other non-bytes form,

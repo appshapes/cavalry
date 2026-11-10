@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """The check `just lint` runs over the generated clients (clients/README.md; ADR 0046, the
 boundary's second part): the per-message functions a generator writes, the wrapper of each
-of the ABI's seven per-message functions (`crates/cavalry-ffi/README.md`: the claim, the
-reserved value, the commit and abort, the offer, the poll and the header's values) and the
-trampoline that calls the user's handler, hold no lock, no `await` and no raise, in the
-language's forms, and so does every function of the package they call. For Python those
+of the ABI's seven per-message functions of a publication and a subscription
+(`crates/cavalry-ffi/README.md`: the claim, the reserved value, the commit and abort, the
+offer, the poll and the header's values), the wrapper of the committed log's two, its poll
+and an entry's position, where a package has a committed log object, Python's so far (ADR
+0068), and the trampoline that calls the user's handler, hold no lock, no `await` and no
+raise, in the language's forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
 `raise`, and building one of the package's own exceptions. For JavaScript, read from
 `clients/node/index.js` without a parser, by a tokenizer that drops comments and strings
@@ -21,7 +23,8 @@ argument readers, which throw a TypeError or a RangeError for an argument the AB
 parameter cannot take, before the ABI is called. A call reaches the package's own functions by name: a
 module function, a class's `__init__` or `constructor`, a method of the same class
 through `self` or `this`, and any other method by its name in any class of the package.
-The one raise allowed is in `poll`, after the last line that calls the ABI, where the
+The one raise allowed is in `poll`, a subscription's or in Python a committed log's,
+after the last line that calls the ABI, where the
 user's handler's exception is raised once the poll has returned
 (clients/python/README.md; clients/node/README.md); a raise between two of its calls,
 such as the refused poll from inside a handler and the poll's own call, is not after the
@@ -89,6 +92,8 @@ RULES = {
             "Publication.offer",
             "Subscription.poll",
             "Subscription._on_fragment",
+            "CommittedLog.poll",
+            "CommittedLog._on_fragment",
             "Header.values",
             "Header.session_id",
             "Header.stream_id",
@@ -100,7 +105,8 @@ RULES = {
             "Header.version",
             "Header.reserved_value",
         ],
-        "raise_after": ("Subscription.poll", "cavalry_subscription_poll"),
+        "raise_after": [("Subscription.poll", "cavalry_subscription_poll"),
+                        ("CommittedLog.poll", "cavalry_committed_log_poll")],
     },
     # The Node client calls the ABI through its addon (clients/node/README.md): the addon's
     # `poll` is the one `cavalry_subscription_poll` call, and the header's fields are read
@@ -364,7 +370,9 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
     for name in rules["functions"]:
         if name not in found:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
-    allowed_in, abi_call = rules["raise_after"]
+    # Each poll and the ABI call after which it may raise: a subscription's, and since
+    # ABI version 2 a committed log's.
+    raise_after = dict(rules["raise_after"])
     for name in present:
         node = found[name]
         where = f"{language}: {name} ({os.path.relpath(path, ROOT)}:{node.lineno})"
@@ -372,7 +380,8 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
             findings.append(f"{where} is `async def`: a per-message function runs on the caller's thread and returns "
                             f"when the ABI returns, with no coroutine around it; {HELP}")
         abi_line = None
-        if name == allowed_in:  # the last line that calls the ABI: a raise between two of its calls is not after the poll
+        if name in raise_after:  # the last line that calls the ABI: a raise between two of its calls is not after the poll
+            abi_call = raise_after[name]
             for sub in ast.walk(node):
                 if isinstance(sub, ast.Attribute) and sub.attr == abi_call:
                     abi_line = sub.lineno if abi_line is None else max(abi_line, sub.lineno)
