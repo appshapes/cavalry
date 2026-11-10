@@ -1,4 +1,4 @@
-# Client protocol, version 7
+# Client protocol, version 8
 
 The client protocol is how a client and the driver on one host talk: the driver's
 directory, which a client opens to find the driver; the commands a client sends through
@@ -48,7 +48,11 @@ client (`spec/counters-file.md`, "`counters.toml`"; ADR 0062); every version 6
 encoding is unchanged, so a version 6 client's commands are version 7 commands, a
 version 6 driver answers the two commands with code 6, and a version 6 client closes
 on the first of the two events a version 7 driver sends, as the reserved-id rule
-below says.
+below says. Version 8 adds `sync recording`, the next of Cavalry's own type ids, 264,
+by which a client has the recorder sync what it has written of a recording without
+waiting for the recorder's sync once a second (ADR 0067); every version 7 encoding is
+unchanged, so a version 7 client's commands are version 8 commands, and a version 7
+driver answers the command with code 6.
 
 ## The driver directory
 
@@ -125,12 +129,13 @@ whose bytes or padding run past the message is `string`.
 | 261 (`0x0105`) | truncate recording | client id, correlation id, recording id, position |
 | 262 (`0x0106`) | purge segments | client id, correlation id, recording id, new start position |
 | 263 (`0x0107`) | purge recording | client id, correlation id, recording id |
+| 264 (`0x0108`) | sync recording | client id, correlation id, recording id |
 
 Type ids 1 to 255 (`0x01` to `0xFF`) are Aeron's: 12 to 255 are reserved for
 the commands Aeron's control protocol numbers, present and future, and a later version
 takes one with its feature under Aeron's number, as version 5 took 7 and 8 and version
 7 took 9 and 10. Type ids 257 to 511 (`0x0101` to
-`0x01FF`) are Cavalry's own, taken in order from 257, and 264 to 511 are reserved for
+`0x01FF`) are Cavalry's own, taken in order from 257, and 265 to 511 are reserved for
 later versions; 256, and 512 and above, lie outside both ranges and are reserved too. The
 driver answers any reserved id with an `error` event whose code is 6. Every command
 begins with the same 16 bytes:
@@ -154,6 +159,7 @@ Then, by command:
 | remove counter | 16 | 8 | registration id | i64 | 0 or more: the client's registration of the counter, the correlation id of its add counter command |
 | add destination, remove destination | 24 | 4 + n + pad | channel | string | the destination: `cavalry:udp?endpoint=<host>:<port>` and nothing else (`spec/udp.md`, "The channel URI"); `cavalry:ipc`, a control channel, one naming `interface`, `fc` or a position key, an endpoint the control address cannot send to (add destination) or any other string is answered with error code 1, a host that does not resolve with code 9 |
 | stop recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
+| sync recording | 16 | 8 | recording id | i64 | 0 or more: the recording id that `recording ready` carried |
 | start replay | 16 | 8 | recording id | i64 | 0 or more: a recording id that `recording ready` carried |
 | start replay | 24 | 8 | position | i64 | −1 for the recording's retained position, its start position until a purge moves it; else a multiple of 32 from the retained position to the extent |
 | start replay | 32 | 8 | length | i64 | −1 for everything up to the recording's extent when the replay starts; 0 or more bytes, a frame that begins within them played whole; 2^63 − 1 to follow a live recording until it stops |
@@ -385,10 +391,39 @@ What the driver does with each, after the checks of "What the driver rejects":
 - **stop recording.** The driver stops the recording at the position the recorder has
   written and answers `operation success` once the catalog's stop fields are written and
   synced (`spec/durable-log.md`, "The driver"); then every client gets `recording
-  stopped`. A recording id below 0, or at or past the next recording id, the number of
+  stopped`. A stop whose own writes or syncs fail is answered with `operation success`
+  all the same, once the failure is counted: the recording is stopped, and the
+  `recording stopped` that follows carries the position last synced, as the paragraph
+  on the driver's own stops below says (ADR 0064). A recording id below 0, or at or
+  past the next recording id, the number of
   slots the catalog holds, is error code 21; one below the next id that no live recording
   holds is already stopped, and the answer is `operation success` with nothing written,
   since a recording id is never reused.
+- **sync recording.** The driver hands the command to its recorder through the request
+  queue that carries a recording's start and stop. When the recorder takes the request,
+  it syncs what it has written of the recording, the segment file and the time index,
+  stores the position in `recording.synced_position`, and the driver answers
+  `operation success`; when nothing written is unsynced it makes no sync and the
+  answer is the same. The recorder's own sync is next due a second after this one. For
+  a live recording the answer means that everything the recorder had written when it
+  took the request is covered by a sync that returned success. It does not mean that
+  everything the client published before the command is covered, since the recorder
+  may not have written it yet: a client that needs a position reads
+  `recording.synced_position`, and sends the command again while that is behind; one
+  sync covers everything written since the last. A recording id below 0, or at or past
+  the next recording id, is error code 21. One below the next id that no live recording
+  holds has stopped, as has one the recorder stopped by itself before it took the
+  request: the answer is `operation success` with nothing done, and it means only that
+  nothing is left to sync, since what a stopped recording holds is what its `recording
+  stopped` said. The recorder's request queue full, or holding requests that are still
+  waiting for room in it, is error code 10, adding one to `driver.registry_full`, and
+  the client sends the command again. A sync that fails is error code 12, and the
+  recording is given up as the paragraph on the driver's own stops below says of a
+  recording one of whose syncs failed: `recording stopped` follows with the position
+  last synced. A command for a recording one of whose syncs has already failed, and
+  which the recorder has not yet given up, is answered with error code 12 and no sync
+  is made, since a sync is not asked a second time about bytes a sync has failed on
+  (ADR 0065, ADR 0067).
 - **start replay.** A replay channel that names a position key is error code 1 with
   the reason `position`, before its host is resolved and the replay is registered, so
   that one with a key and a host that does not resolve is code 1 and not 9, since the
@@ -603,10 +638,37 @@ registration, the two are the same number.
 The driver stops a recording by itself when its publication closes: at the end of stream
 position, once the recorder has written up to it; and when its image is retired, at the
 position `spec/udp.md`, "The receiver", step 5 names. It also stops a recording whose write
-failed, at the position written, adding one to `recording.write_failed`; and one whose
+failed, at the position written, and one whose sync failed, at the position last
+synced and with no stop run, as this paragraph says below, each adding one to
+`recording.write_failed`; and one whose
 block scan found a committed frame that fails a check of `spec/frame.md`, at that frame,
 adding one to `log_buffer.rejected_frame`, as a subscriber that found it would stop
-delivering, so the recording ends at the last frame that checked. Every stop, by command,
+delivering, so the recording ends at the last frame that checked. A stop is writes and
+syncs of its own: the time index's stop entry, the syncs of the segment file and the
+time index, the removal of a segment file wholly past the stop with its directory's
+sync, and the catalog's stop fields (`spec/durable-log.md`, "Time index" and
+"Descriptor"; ADR 0025). When one of them fails, the recording is stopped all the
+same: the recorder writes no more of it, the failure adds one to
+`recording.write_failed`, and the catalog slot is left live for
+the next open's recovery to rebuild its stop from the files. The stop position the
+driver then announces, and hands to the replayer, is the position the recorder had
+synced before the stop began, the value of `recording.synced_position`; every frame
+below it survives a power loss, so the stop recovery rebuilds is at or above it.
+`recording.position` keeps the position written (ADR 0064). A recording one of whose
+syncs failed, the recorder's sync once a second, the sync a `sync recording` asked
+for or the sync of a segment a write
+closes, is stopped the same way with no stop run at all: from the failure on the
+recorder writes and syncs nothing of it, in that duty cycle or a later one, and it
+makes none of the stop's writes or syncs, since a sync asked a second time about
+bytes a sync has failed on can return success and write nothing. The catalog slot is
+left live for the next open's recovery, and the stop position the driver announces,
+and hands to the replayer, is the position the last sync that returned success
+covered, the start position when none did (ADR 0065). A write that failed with no
+sync failing, a full disk's refusal of a block or of the next segment file, is
+followed by a stop that runs, at the position written. `recording.write_failed`
+counts a recording once, whichever of its writes, its syncs and its stop failed. So
+the position in `recording stopped` is on every path one that a sync which returned
+success covered. Every stop, by command,
 by close or by failure, adds one to `recording.stopped`, is announced to every client with
 `recording stopped`, and frees the recording's two counters after the counter reuse
 timeout; the log of a recorded publication or image is removed only once its recording is
@@ -681,7 +743,7 @@ answered with code 6 and keeps running.
 | recording ready | 20 | 4 | recording position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.position` counter, what the operating system holds |
 | recording ready | 24 | 4 | recording synced position counter id | i32 | 0 to the counters file's capacity − 1: the `recording.synced_position` counter, what a sync has made durable |
 | recording stopped | 0 | 8 | recording id | i64 | 0 or more |
-| recording stopped | 8 | 8 | stop position | i64 | 0 or more, a multiple of 32: the catalog's stop position |
+| recording stopped | 8 | 8 | stop position | i64 | 0 or more, a multiple of 32: the catalog's stop position; for a stop whose own writes or syncs failed, and for a recording given up after a sync of its own failed, the position the last sync that returned success covered ("Commands"; ADR 0064, ADR 0065) |
 | replay ready | 0 | 8 | correlation id | i64 | 0 or more: the start replay command's |
 | replay ready | 8 | 8 | replay session id | i64 | 0 or more: the command's correlation id, which names the replay's log and which `stop replay` names |
 | replay ready | 16 | 8 | recording id | i64 | 0 or more: the recording being played |
@@ -701,7 +763,12 @@ counter stops before the record can be allocated again. It sends `client timeout
 after it has removed a timed-out client's publications, subscriptions and counters, so that the
 client, if it is only slow, learns that it must attach again. It sends `recording stopped`
 after the catalog's stop fields are synced, so the position a client reads from the event
-is what the catalog holds. It sends `replay stopped` after the replayer has written its
+is what the catalog holds; for a stop whose own writes or syncs failed, and for a
+recording given up after a sync of its own failed, it sends it after the
+failure with the position the last sync that returned success covered, so the position a
+client reads from the event is one such a sync covered on every path (ADR 0064, ADR
+0065). It sends `replay stopped`
+after the replayer has written its
 last frame and the end of stream position is stored, so the position a client reads from
 the event is where the replay's images end. Every event goes to every client; a client acts on the ones
 whose correlation id, registration id or client id is its own and ignores the rest.
@@ -720,9 +787,9 @@ whose correlation id, registration id or client id is its own and ignores the re
 | 9 | unknown host | a `cavalry:udp` channel's host does not resolve; the message names it |
 | 10 | resource temporarily unavailable | a registry of "Sizes" is at capacity or the counters file has no free record; for an armed recording whose start found one so, a second answer under the arming command's correlation id |
 | 11 | generic error | anything else; the message says what |
-| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, or a retention command's file could not be removed, cut or extended; for an armed recording whose start found one so, a second answer under the arming command's correlation id |
+| 12 | storage space | the log file, or a recording's time index or segment file, could not be created or sized, a replay's or a truncate's segment file could not be opened or read, a retention command's file could not be removed, cut or extended, or a `sync recording`'s sync failed or found the recording's sync already failed; for an armed recording whose start found one so, a second answer under the arming command's correlation id |
 | 20 | no publication to record | start recording names a stream id and channel no live publication has, nor, over UDP, any image or subscription; or an armed recording was dropped, its stream's last subscription gone, answered under the arming command's correlation id |
-| 21 | unknown recording | stop recording, start replay or a retention command names a recording id the catalog does not hold as a valid recording |
+| 21 | unknown recording | stop recording, sync recording, start replay or a retention command names a recording id the catalog does not hold as a valid recording |
 | 22 | already recording | start recording names a stream whose live publications, and over UDP images, are all being recorded, the message naming the recording id; or, over UDP, one on which a recording is armed, which the message says |
 | 23 | position out of range | start replay names a position that is not a multiple of 32, below the recording's retained position or above its extent; truncate recording names one that is not a multiple of 32 from the retained position to the stop position or at which no frame begins; purge segments names one that is not a segment base above the retained position and at most the stop position; the message names the bounds |
 | 24 | recording busy | truncate recording, purge segments, purge recording or start replay names a recording that is live or stopping, that a replay is reading, or that a retention command is working on; the message says which and what to do |
@@ -745,6 +812,7 @@ values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 | publication unblock timeout | 15 s | the driver | `spec/log-buffer.md`, "Unblocking" |
 | publication linger | 5 s | the driver | `spec/log-buffer.md`, "Closing" |
 | counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`) |
+| recording sync interval | 1 s | the driver | how long after a recording's last sync, or its start, the recorder syncs it again when it has written bytes no sync covers; a `sync recording` syncs at once, and the interval then runs from that sync (ADR 0025, ADR 0067) |
 | replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber, or over `cavalry:udp` has not been connected as `spec/udp.md`, "The sender", defines it, for this long ends with reason 2: measured from the replay's start, from the moment its last subscriber went, or over `cavalry:udp` from the moment the connection timeout passed |
 | closing endpoint wait | 5 s | the driver | an `add subscription` that has waited this long for its channel's previous receive endpoint to close, measured from the moment the driver read it, is answered with code 4 and registers nothing ("Commands"); half the response timeout, so that the answer reaches the client before the client reports the add lost |
 

@@ -141,8 +141,9 @@ pub(crate) const REPLAYER_REQUESTS_PER_CYCLE: usize = 16;
 pub(crate) const REPLAYER_CATALOG_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The capacity of each queue between the conductor and the recorder, in requests or
-/// replies; a start or stop that finds the request queue full is answered with error
-/// code 10, and the recorder keeps a reply the reply queue has no room for until it has.
+/// replies; a start or a `sync recording` that finds the request queue full is answered
+/// with error code 10, a stop or an attach waits in the conductor for room, and the
+/// recorder keeps a reply the reply queue has no room for until it has.
 pub(crate) const RECORDER_QUEUE_CAPACITY: usize = 2 * MAX_RECORDINGS;
 
 /// The most bytes the recorder takes from a term in one block, 1 MiB (ADR 0025); the

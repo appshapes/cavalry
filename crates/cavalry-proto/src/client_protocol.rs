@@ -1,9 +1,9 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 7
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 8
 //! (ADR 0019; the recording commands and events are ADR 0025, the replay commands and
 //! events ADR 0030, the retention commands ADR 0031, the `cavalry:udp` channel, the
 //! channel status indicator id and error codes 4 and 9 ADR 0040, the destination
 //! commands ADR 0053, the armed recording and the position keys ADR 0059, a client's
-//! counter ADR 0062).
+//! counter ADR 0062, the sync of a recording on command ADR 0067).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -45,7 +45,7 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 7;
+pub const VERSION: i32 = 8;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
@@ -147,6 +147,9 @@ pub enum CommandType {
     PurgeSegments = 0x0106,
     /// Delete a stopped recording's files; its slot stays as state 3.
     PurgeRecording = 0x0107,
+    /// Sync what the recorder has written of a live recording now, without waiting
+    /// for its sync once a second (ADR 0067).
+    SyncRecording = 0x0108,
 }
 
 impl TryFrom<i32> for CommandType {
@@ -174,6 +177,7 @@ impl TryFrom<i32> for CommandType {
             0x0105 => Ok(CommandType::TruncateRecording),
             0x0106 => Ok(CommandType::PurgeSegments),
             0x0107 => Ok(CommandType::PurgeRecording),
+            0x0108 => Ok(CommandType::SyncRecording),
             found => Err(ProtocolError::Type { found }),
         }
     }
@@ -665,6 +669,17 @@ pub enum Command<'a> {
         /// The stopped recording to delete.
         recording_id: i64,
     },
+    /// Type 264 (`0x0108`): the recorder syncs what it has written of the recording
+    /// when it takes the request, and the driver answers `operation success` once the
+    /// sync has returned, or `error` with code 12 when it failed (ADR 0067).
+    SyncRecording {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; `operation success` or `error` names it.
+        correlation_id: i64,
+        /// The recording to sync, from `recording ready`.
+        recording_id: i64,
+    },
 }
 
 impl<'a> Command<'a> {
@@ -689,6 +704,7 @@ impl<'a> Command<'a> {
             Command::TruncateRecording { .. } => CommandType::TruncateRecording,
             Command::PurgeSegments { .. } => CommandType::PurgeSegments,
             Command::PurgeRecording { .. } => CommandType::PurgeRecording,
+            Command::SyncRecording { .. } => CommandType::SyncRecording,
         }
     }
 
@@ -712,7 +728,8 @@ impl<'a> Command<'a> {
             | Command::StopReplay { client_id, .. }
             | Command::TruncateRecording { client_id, .. }
             | Command::PurgeSegments { client_id, .. }
-            | Command::PurgeRecording { client_id, .. } => client_id,
+            | Command::PurgeRecording { client_id, .. }
+            | Command::SyncRecording { client_id, .. } => client_id,
         }
     }
 
@@ -736,7 +753,8 @@ impl<'a> Command<'a> {
             | Command::StopReplay { correlation_id, .. }
             | Command::TruncateRecording { correlation_id, .. }
             | Command::PurgeSegments { correlation_id, .. }
-            | Command::PurgeRecording { correlation_id, .. } => correlation_id,
+            | Command::PurgeRecording { correlation_id, .. }
+            | Command::SyncRecording { correlation_id, .. } => correlation_id,
         }
     }
 
@@ -866,6 +884,11 @@ impl<'a> Command<'a> {
                 correlation_id,
                 recording_id: cursor.i64()?,
             },
+            CommandType::SyncRecording => Command::SyncRecording {
+                client_id,
+                correlation_id,
+                recording_id: cursor.i64()?,
+            },
         };
         cursor.finish()?;
         Ok(command)
@@ -990,7 +1013,8 @@ impl<'a> Command<'a> {
                 out.i64(recording_id)?;
                 out.i64(new_start_position)
             }
-            Command::PurgeRecording { recording_id, .. } => out.i64(recording_id),
+            Command::PurgeRecording { recording_id, .. }
+            | Command::SyncRecording { recording_id, .. } => out.i64(recording_id),
             Command::ClientKeepalive { .. } | Command::ClientClose { .. } => Ok(()),
         }
     }

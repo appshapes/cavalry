@@ -117,7 +117,20 @@ and `client.purge_recording(id)?`, each with a position, since a program resolve
 instant through `cavalry::index::position_after` or `position_at` itself. Dropping the
 `Recording` stops nothing. After a stop, whichever client asked for it,
 `recording.stop_position()` is the position the recording stopped at, and `position()`
-and `synced_position()` return it too.
+and `synced_position()` return it too. That position is durable: the stop synced it, or,
+when the stop's own writes failed, the last sync before the stop covered it (see
+`recording-write-failed` below).
+
+A program that must know its messages are on the disk before it goes on, to
+acknowledge them for one, does not wait for the recorder's sync once a second. It
+waits until `recording.position()` has reached the position its last `offer` returned,
+calls `recording.sync(&mut client)?`, and then reads `recording.synced_position()`,
+which is at or past that position. The call returns when the recorder has synced what
+it had written; it syncs nothing the recorder had not written yet, which is why the
+program waits for `position()` first. `recording.request_sync(&mut client)?` asks for
+the same sync and returns at once, for a program that polls `synced_position()` in a
+loop of its own
+([ADR 0067](../decisions/0067-sync-a-recording-on-command-as-client-protocol-version-8.md)).
 
 ## How to verify it worked
 
@@ -154,9 +167,25 @@ and `synced_position()` return it too.
 - `error 12 (storage space)`: the time index or the first segment file could not be
   created; `doctor --log-dir` says what the directory is short of. The catalog slot is
   taken and stopped at its start.
-- `recording-write-failed` in `doctor`: a write failed and the recording stopped at the
-  position written; what was written is whole and replayable. Free space, or move the
-  log directory, and start the recording again.
+- `error 12 (storage space)` from `sync_recording` or `recording.sync`: the sync
+  failed, and the driver has given the recording up at the position last synced, as
+  `recording-write-failed` below describes; `recording.stop_position()` gives that
+  position. Check the disk the log directory is on, then start a new recording.
+- `error 6 (unknown command type)` from `sync_recording` or `recording.sync`: the
+  driver is older than this client and does not know the command; upgrade the driver.
+- `recording-write-failed` in `doctor`: a write or a sync of a recording failed, and
+  the recording stopped. After a write that the disk refused, it stopped at the
+  position written, and the recording is whole and replayable up to there. After a
+  sync that failed, or when the writes of the stop itself failed, it stopped at the
+  position last synced: `recording stopped` and `recording.stop_position()` give that
+  position, which can be below what `position()` returned before, since what was
+  written after the last sync that succeeded may not be on the disk, and the driver
+  tells no client of it and replays none of it. The catalog then lists the recording
+  as live until the driver's next start, which rebuilds its stop from the files, at
+  or above that position. Free space, or move the log directory, start the driver
+  again, and start the recording again
+  ([ADR 0064](../decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md),
+  [ADR 0065](../decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md)).
 - `driver failed (log-dir): log directory locked`: another driver holds the directory;
   stop it, or give this one its own with `--log-dir`.
 - `error 24 (recording busy)`: the recording is live, read by a replay, or under

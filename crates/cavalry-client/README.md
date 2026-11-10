@@ -35,12 +35,20 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   asks the driver to record the stream's live publication and returns a `Recording`
   whose `position()` and `synced_position()` read the recorder's two counters;
   `Cavalry::stop_recording(id)`, or `Recording::stop(&mut client)`, stops it from any
-  client. The recording is the driver's:
+  client. `Cavalry::sync_recording(id)`, or `Recording::sync(&mut client)`, has the
+  recorder sync what it has written of the recording at once, where its own sync runs
+  once a second, and returns when the sync has: a program that acknowledges what it
+  recorded waits for one sync, not for the next second. `Recording::request_sync(&mut
+  client)` asks for the same sync and does not wait for the answer, for a caller that
+  must not block; it allocates nothing (ADR 0067). The recording is the driver's:
   it outlives the client, and dropping the handle stops nothing (ADR 0025).
   The client follows the stop of each recording it started, whoever stopped it:
   `Recording::stop_position()` is `None` while the recording is live and its stop
   position after the driver's `recording stopped`, and from then on both positions are
-  that position. The driver frees a stopped recording's counters and gives their
+  that position. A sync that returned success covered it: the catalog's stop, or,
+  when the stop's own writes or syncs failed or a sync of the recording failed
+  before it, the position last synced (ADR 0064, ADR 0065). The
+  driver frees a stopped recording's counters and gives their
   records to other counters a second later, so each read checks that the record is
   still the recording's, and a position is never another counter's value. A client
   follows 1,024 recordings at most, the driver's own bound.

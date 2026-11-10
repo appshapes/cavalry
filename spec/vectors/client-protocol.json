@@ -1,6 +1,6 @@
 {
  "spec": "spec/client-protocol.md",
- "version": 7,
+ "version": 8,
  "generated_by": "spec/vectors/client-protocol.py",
  "vectors": [
   {
@@ -546,6 +546,30 @@
    }
   },
   {
+   "name": "sync-recording",
+   "region": "command",
+   "type": 264,
+   "bytes": "050000000000000018000000000000000000000000000000",
+   "fields": {
+    "client_id": 5,
+    "correlation_id": 24,
+    "recording_id": 0,
+    "name": "sync_recording"
+   }
+  },
+  {
+   "name": "sync-recording-extremes",
+   "region": "command",
+   "type": 264,
+   "bytes": "ffffffffffffff7fffffffffffffff7fffffffffffffff7f",
+   "fields": {
+    "client_id": 9223372036854775807,
+    "correlation_id": 9223372036854775807,
+    "recording_id": 9223372036854775807,
+    "name": "sync_recording"
+   }
+  },
+  {
    "name": "remove-destination-extremes",
    "region": "command",
    "type": 8,
@@ -1071,6 +1095,28 @@
    }
   },
   {
+   "name": "operation-success-sync",
+   "region": "event",
+   "type": 3844,
+   "bytes": "1800000000000000",
+   "fields": {
+    "correlation_id": 24,
+    "name": "operation_success"
+   }
+  },
+  {
+   "name": "error-sync-failed",
+   "region": "event",
+   "type": 3841,
+   "bytes": "18000000000000000c000000be000000612073796e63206f66207265636f7264696e672030206661696c65642c20736f20746865207265636f7264696e6720697320676976656e2075702061742074686520706f736974696f6e206c6173742073796e63656420616e64207265636f7264696e672073746f7070656420666f6c6c6f77733b20636865636b20746865206469736b20746865206c6f67206469726563746f7279206973206f6e2028636c69656e742d70726f746f636f6c2e6d642c204572726f7220636f646573290000",
+   "fields": {
+    "offending_correlation_id": 24,
+    "error_code": 12,
+    "error_message": "a sync of recording 0 failed, so the recording is given up at the position last synced and recording stopped follows; check the disk the log directory is on (client-protocol.md, Error codes)",
+    "name": "error"
+   }
+  },
+  {
    "name": "too-short-before-correlation-id",
    "region": "command",
    "type": 1,
@@ -1094,7 +1140,7 @@
   {
    "name": "unknown-type-cavalry-reserved",
    "region": "command",
-   "type": 264,
+   "type": 265,
    "bytes": "00000000000000000100000000000000",
    "error": "type"
   },
@@ -1208,6 +1254,13 @@
    "region": "command",
    "type": 10,
    "bytes": "03000000000000001500000000000000",
+   "error": "too-short"
+  },
+  {
+   "name": "sync-recording-too-short-no-recording-id",
+   "region": "command",
+   "type": 264,
+   "bytes": "05000000000000001800000000000000",
    "error": "too-short"
   },
   {
@@ -1390,6 +1443,13 @@
    "region": "command",
    "type": 10,
    "bytes": "03000000000000001500000000000000140000000000000000000000",
+   "error": "length"
+  },
+  {
+   "name": "sync-recording-length-trailing",
+   "region": "command",
+   "type": 264,
+   "bytes": "05000000000000001800000000000000000000000000000000000000",
    "error": "length"
   },
   {

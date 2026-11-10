@@ -44,10 +44,20 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   through a bounded queue and never touches the disk, the recorder takes blocks of
   committed frames from the publication's log buffer and writes them into the log
   directory's segment files with one positional write each, syncing once per second,
+  or at once when a client's `sync recording` asks through the same queue (ADR 0067),
   and its position, `recording.position`, bounds the publisher's limit, so that a slow
   disk back-pressures the publisher and never loses a byte (ADR 0025). The log
   directory is opened under a lock at start and recovered (`spec/durable-log.md`, "The
-  driver"); a second driver on it refuses to start.
+  driver"); a second driver on it refuses to start. A recording one of whose
+  syncs failed is given up with no stop run, since a sync asked again about bytes a
+  sync has failed on can return success and write nothing; a stop whose own writes or
+  syncs fail stops the recording all the same. Either is announced, in `recording
+  stopped` and to every replay that followed the recording, at the position the last
+  sync that returned success covered, never the position written, and its catalog
+  slot stays live for the next start's recovery. A write the disk refused with no
+  sync failing is followed by a stop that runs, at the position written.
+  `recording.write_failed` counts a recording once, whichever failed (ADR 0064, ADR
+  0065).
 - Plays a recording back on a third thread, the replayer, which idles with the same
   strategy while it holds a replay and parks until the conductor hands it a request
   while it holds none, so a driver that replays nothing wakes no CPU for it:

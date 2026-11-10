@@ -25,7 +25,8 @@ The durable log: recording and replay. Data plane.
   creates the time index and the first segment file; `recorder::RecordingWriter` writes
   each block of committed frames with one positional write, appends an index entry at
   most once per millisecond, rolls segments at their length, and syncs once per second
-  behind two positions, what is written and what is synced; `LogDir::stop` writes the
+  behind two positions, what is written and what is synced, or at once when its caller
+  was asked to (`RecordingWriter::sync_now`; ADR 0067); `LogDir::stop` writes the
   stop (ADR 0025). A roll allocates nothing while the log directory's path is at most
   337 bytes (`recorder::LOG_DIR_PATH_LIMIT`): the standard library opens a path on its
   stack only under 384 bytes, the longest segment name is 45, and the next segment's
@@ -35,7 +36,12 @@ The durable log: recording and replay. Data plane.
   stack-formatted segment name comes from one function); `cavalry doctor --log-dir`
   warns on a longer path. A roll that fails on a full disk
   is an `io` error and is retried at the next write, never a stuck writer. On any error
-  from `write`, the block was taken exactly when `position()` moved. The delete of a
+  from `write`, the block was taken exactly when `position()` moved. A sync that
+  fails is remembered: `RecordingWriter::sync_failed()` says so from then on,
+  `synced_position()` stays what the last sync that succeeded covered, and the caller
+  neither syncs the recording again nor stops it with `LogDir::stop`, which syncs,
+  since a sync asked a second time about bytes a sync has failed on can return
+  success and write nothing (ADR 0065). The delete of a
   stopped recording, state 3, is `CatalogWriter::delete`, which the driver's `purge
   recording` writes and counts in `recording.deleted` (ADR 0031); every transition
   the writer writes is one the driver counts.

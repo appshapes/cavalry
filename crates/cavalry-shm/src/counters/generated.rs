@@ -71,7 +71,7 @@ pub const RECORDING_STARTED: CounterId = CounterId(20);
 /// `recording.stopped`, a static counter: Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands).
 pub const RECORDING_STOPPED: CounterId = CounterId(21);
 
-/// `recording.write_failed`, a static counter: Writes or syncs the recorder could not make to a recording's segment file or time index, each of which stopped the recording at the position written (spec/client-protocol.md, Commands).
+/// `recording.write_failed`, a static counter: Recordings the recorder stopped because a write or a sync of theirs to the segment file or the time index failed, or because the writes or syncs of their stop did, each counted once. After a write that failed with no sync failing the recording stopped at the position written; after a sync that failed, or a stop that did, at the position last synced, its catalog slot left live for the next start's recovery (spec/client-protocol.md, Commands; ADR 0064; ADR 0065).
 pub const RECORDING_WRITE_FAILED: CounterId = CounterId(22);
 
 /// `recording.start_failed`, a static counter: Start recording commands refused with error code 12 because the recording's time index or first segment file could not be created in the log directory (spec/client-protocol.md, Commands). The recording's catalog slot may already be taken: a start that fails at its files leaves its slot valid, stopped at the start position, so the catalog's slots used are at most recording.started plus these plus the driver.registry_full refusals of a start.
@@ -563,8 +563,8 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "recording.write_failed",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Writes or syncs the recorder could not make to a recording's segment file or time index, each of which stopped the recording at the position written (spec/client-protocol.md, Commands).",
-        doctor: "The log directory's filesystem is full, read-only or failing: `cavalry doctor` names it. Free space, or move the log directory with `--log-dir`, then start the recording again; what was written up to the stop position is whole and replayable.",
+        doc: "Recordings the recorder stopped because a write or a sync of theirs to the segment file or the time index failed, or because the writes or syncs of their stop did, each counted once. After a write that failed with no sync failing the recording stopped at the position written; after a sync that failed, or a stop that did, at the position last synced, its catalog slot left live for the next start's recovery (spec/client-protocol.md, Commands; ADR 0064; ADR 0065).",
+        doctor: "The log directory's filesystem is full, read-only or failing: `cavalry doctor` names it. Free space, or move the log directory with `--log-dir`, start the driver again, then start the recording again; the recording is whole and replayable up to the stop position `recording stopped` gave.",
     },
     CounterDef {
         id: RECORDING_START_FAILED,
