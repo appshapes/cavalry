@@ -27,7 +27,8 @@ use cavalry_proto::cluster::{
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE, COUNTERS,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE,
+    COUNTERS,
 };
 
 use crate::consensus::{
@@ -213,6 +214,25 @@ struct Held {
     start: i64,
 }
 
+/// The image of the log on a follower's subscription, as the module noted it.
+#[derive(Clone, Copy)]
+enum LogImage {
+    /// No image has joined the subscription yet.
+    Awaited,
+    /// The first image that joined the subscription, noted after the poll that applied
+    /// it and before a frame of it was read.
+    Joined {
+        /// The id the driver gave the image, which tells it from a later image of the
+        /// same session.
+        correlation_id: i64,
+        session_id: i32,
+        join_position: i64,
+    },
+    /// The image noted is no longer available. No other image of the subscription is
+    /// noted or read until the member leaves the log, so that the core sees the loss.
+    Gone,
+}
+
 /// The core's [`Io`] over the client.
 struct ClientIo {
     client: Cavalry,
@@ -230,8 +250,8 @@ struct ClientIo {
     // A follower's log.
     log_subscription: Option<Subscription>,
     armed: Option<ArmedRecording>,
-    /// The session id and the join position of the image on the log subscription.
-    image: Option<(i32, i64)>,
+    /// The image on the log subscription and where it joined.
+    image: LogImage,
     held: Option<Held>,
     /// The end of the contiguous span the recordings this member has stopped hold.
     stopped_at: i64,
@@ -240,31 +260,66 @@ struct ClientIo {
 impl ClientIo {
     /// Takes the images the driver announced or withdrew on the log subscription, notes
     /// a new image's join position before a frame of it is read, hands over an armed
-    /// recording the driver has started, and reads past what has arrived, so that the
-    /// stream is not held back by a subscriber that stands still: the module acts on
-    /// no entry in this version, and the recording is the member's log.
+    /// recording the driver has started, and reads past what has arrived of the image
+    /// noted, so that the stream is not held back by a subscriber that stands still:
+    /// the module acts on no entry in this version, and the recording is the member's
+    /// log.
+    ///
+    /// An image is never read in the poll that applies it. The client's conductor runs
+    /// on a thread of its own and hands an image over whenever it has read the driver's
+    /// `available image`, between any two polls, and every poll applies what was handed
+    /// over before it reads. A poll that read every image would read up to
+    /// `LOG_POLL_LIMIT` frames of an image it had just applied, and the position
+    /// noted on the next cycle would be past the image's join: a join position mismatch
+    /// counted for a follower whose log had none, and a recording never counted, since
+    /// it would not begin where it was noted to. So the poll with a fragment limit of 0
+    /// applies and reads nothing, the image is noted after it, and the read is a bounded
+    /// poll of the noted session alone, which reads no image of another session that
+    /// the conductor hands over meanwhile. An image of the same session that the
+    /// conductor hands over in place of the noted one, which that read may read, is
+    /// never noted: the noted image is gone by the next cycle, and nothing is noted on
+    /// the subscription after it.
     fn observe_log(&mut self) -> Result<(), RaftError> {
         let Some(subscription) = self.log_subscription.as_mut() else {
             return Ok(());
         };
         subscription.poll(|_, _| {}, 0).map_err(RaftError::Poll)?;
-        self.image = match (self.image, subscription.images().first()) {
-            (Some((session_id, join)), Some(image)) if image.session_id() == session_id => {
-                Some((session_id, join))
+        self.image = match self.image {
+            LogImage::Awaited => subscription
+                .images()
+                .first()
+                .map_or(LogImage::Awaited, |image| LogImage::Joined {
+                    correlation_id: image.correlation_id(),
+                    session_id: image.session_id(),
+                    join_position: image.position(),
+                }),
+            LogImage::Joined { correlation_id, .. }
+                if subscription
+                    .images()
+                    .iter()
+                    .any(|image| image.correlation_id() == correlation_id) =>
+            {
+                self.image
             }
-            (_, Some(image)) => Some((image.session_id(), image.position())),
-            (_, None) => None,
+            LogImage::Joined { .. } | LogImage::Gone => LogImage::Gone,
+        };
+        let LogImage::Joined {
+            session_id,
+            join_position,
+            ..
+        } = self.image
+        else {
+            return Ok(());
         };
         subscription
-            .poll(|_, _| {}, LOG_POLL_LIMIT)
+            .bounded_poll(session_id, |_, _| {}, i64::MAX, LOG_POLL_LIMIT)
             .map_err(RaftError::Poll)?;
         if let Some(armed) = self.armed.as_mut()
-            && let Some((_, join)) = self.image
             && let Some(recording) = armed.poll()?
         {
             self.held = Some(Held {
                 recording,
-                start: join,
+                start: join_position,
             });
             self.armed = None;
         }
@@ -347,10 +402,14 @@ impl Io for ClientIo {
     }
 
     fn log_image(&mut self, session_id: i32) -> Result<Option<i64>, Self::Fault> {
-        Ok(self
-            .image
-            .filter(|&(session, _)| session == session_id)
-            .map(|(_, join)| join))
+        Ok(match self.image {
+            LogImage::Joined {
+                session_id: noted,
+                join_position,
+                ..
+            } if noted == session_id => Some(join_position),
+            _ => None,
+        })
     }
 
     fn leave_log(&mut self) -> Result<(), Self::Fault> {
@@ -370,7 +429,7 @@ impl Io for ClientIo {
         // The driver drops a recording still armed with the stream's last subscription.
         self.armed = None;
         self.log_subscription = None;
-        self.image = None;
+        self.image = LogImage::Awaited;
         Ok(())
     }
 
@@ -411,30 +470,47 @@ struct Stored {
 }
 
 impl Stored {
+    /// Adds the counter of type `id` for `member_id` and stores `value` in it at once,
+    /// so that the 0 a counter holds between its allocation and its first store is
+    /// never read as a value: term 0 is a real term, and recording 0 a real recording.
     fn add(
         client: &mut Cavalry,
         id: CounterId,
         name: &str,
         member_id: i32,
+        value: i64,
     ) -> Result<Self, ClientError> {
         let counter = client.add_counter(
             id.0,
             &member_id.to_le_bytes(),
             &format!("{name} {member_id}"),
         )?;
+        counter.store_release(value)?;
         Ok(Self {
             counter,
-            last: i64::MIN,
+            last: value,
         })
     }
 
     /// Stores `value` when it is not the value last stored: a release store, which a
-    /// reader of a position loads with acquire.
-    fn store(&mut self, value: i64) {
+    /// reader of a position loads with acquire. Whether the counter holds `value`
+    /// now: not when the client is closed, which stores nothing.
+    fn store(&mut self, value: i64) -> bool {
         if value != self.last && self.counter.store_release(value).is_ok() {
             self.last = value;
         }
+        self.last == value
     }
+}
+
+/// A count as a counter's value.
+fn count_value(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// The member's role as `cluster.role` holds it: 0 follower, 1 candidate, 2 leader.
+fn role_code(core: &Consensus) -> i64 {
+    i64::from(core.role() as u8)
 }
 
 /// The member's counters in the counters file (`spec/cluster.md`, "Counters").
@@ -443,6 +519,9 @@ struct Counters {
     election_state: Stored,
     leadership_term_id: Stored,
     append_position: Stored,
+    /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored
+    /// before it (`spec/cluster.md`, "The service").
+    log_recording_id: Stored,
     commit_position: Stored,
     /// The core's counts, one counter each, in the order of [`Counts::by_counter`]:
     /// [`Counts::LEN`] of them, added once when the module starts.
@@ -451,47 +530,78 @@ struct Counters {
 }
 
 impl Counters {
-    fn add(client: &mut Cavalry, member_id: i32) -> Result<Self, ClientError> {
-        let mut add = |id, name| Stored::add(client, id, name, member_id);
+    /// Adds the member's counters, each holding what `core` holds from its first
+    /// store, which follows its add at once. `cluster.log_recording_id` is added and
+    /// holds −1 before `cluster.commit_position` is added: a service reads the
+    /// recording id only of a member whose commit position it has found
+    /// (`spec/cluster.md`, "The service").
+    fn add(client: &mut Cavalry, member_id: i32, core: &Consensus) -> Result<Self, ClientError> {
+        let mut add = |id, name, value| Stored::add(client, id, name, member_id, value);
         Ok(Self {
-            role: add(CLUSTER_ROLE, "cluster.role")?,
-            election_state: add(CLUSTER_ELECTION_STATE, "cluster.election_state")?,
-            leadership_term_id: add(CLUSTER_LEADERSHIP_TERM_ID, "cluster.leadership_term_id")?,
-            append_position: add(CLUSTER_APPEND_POSITION, "cluster.append_position")?,
-            commit_position: add(CLUSTER_COMMIT_POSITION, "cluster.commit_position")?,
+            role: add(CLUSTER_ROLE, "cluster.role", role_code(core))?,
+            election_state: add(
+                CLUSTER_ELECTION_STATE,
+                "cluster.election_state",
+                i64::from(core.election_state().code()),
+            )?,
+            leadership_term_id: add(
+                CLUSTER_LEADERSHIP_TERM_ID,
+                "cluster.leadership_term_id",
+                core.leadership_term_id(),
+            )?,
+            append_position: add(
+                CLUSTER_APPEND_POSITION,
+                "cluster.append_position",
+                core.append_position(),
+            )?,
+            log_recording_id: add(
+                CLUSTER_LOG_RECORDING_ID,
+                "cluster.log_recording_id",
+                NO_RECORDING,
+            )?,
+            commit_position: add(
+                CLUSTER_COMMIT_POSITION,
+                "cluster.commit_position",
+                core.commit_position(),
+            )?,
             counts: {
                 // Each count's counter, by the id the core pairs it with and under the
                 // name `counters.toml` gives that id (ADR 0067). Every id of
                 // `by_counter` is an entry of that table, which its doctest checks,
                 // so the other name is never a label.
                 let mut counts = Vec::with_capacity(Counts::LEN);
-                for (id, _) in Counts::default().by_counter() {
+                for (id, value) in core.counts().by_counter() {
                     let name = COUNTERS
                         .iter()
                         .find(|entry| entry.id == id)
                         .map_or("cluster.count", |entry| entry.name);
-                    counts.push(add(id, name)?);
+                    counts.push(add(id, name, count_value(value))?);
                 }
                 counts
             },
-            messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected")?,
+            messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected", 0)?,
         })
     }
 
-    /// Stores what the core holds, each value only when it has moved.
-    fn store(&mut self, core: &Consensus, messages_rejected: u64) {
-        let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+    /// Stores what the core holds, each value only when it has moved, and
+    /// `log_recording_id`, the recording the member records the live log into or −1.
+    /// The recording id is stored before the commit position, and a commit position
+    /// only once the counter holds that id, so that no commit position is stored
+    /// beside a recording id that does not hold it (`spec/cluster.md`, "The service").
+    fn store(&mut self, core: &Consensus, messages_rejected: u64, log_recording_id: i64) {
         let counts: Counts = core.counts();
-        self.role.store(i64::from(core.role() as u8));
+        self.role.store(role_code(core));
         self.election_state
             .store(i64::from(core.election_state().code()));
         self.leadership_term_id.store(core.leadership_term_id());
         self.append_position.store(core.append_position());
-        self.commit_position.store(core.commit_position());
-        for (stored, (_, value)) in self.counts.iter_mut().zip(counts.by_counter()) {
-            stored.store(count(value));
+        if self.log_recording_id.store(log_recording_id) {
+            self.commit_position.store(core.commit_position());
         }
-        self.messages_rejected.store(count(messages_rejected));
+        for (stored, (_, value)) in self.counts.iter_mut().zip(counts.by_counter()) {
+            stored.store(count_value(value));
+        }
+        self.messages_rejected.store(count_value(messages_rejected));
     }
 }
 
@@ -563,7 +673,9 @@ impl ConsensusModule {
                 log_destination: endpoint_channel(&member.log),
             });
         }
-        let counters = Counters::add(&mut client, member_id)?;
+        // Each counter holds the core's value from its add: −1 for the term and the
+        // recording, before a duty cycle has run.
+        let counters = Counters::add(&mut client, member_id, &core)?;
         let started = Instant::now();
         Ok(Self {
             core,
@@ -583,7 +695,7 @@ impl ConsensusModule {
                 log_recording: None,
                 log_subscription: None,
                 armed: None,
-                image: None,
+                image: LogImage::Awaited,
                 held: None,
                 stopped_at: 0,
             },
@@ -636,7 +748,9 @@ impl ConsensusModule {
         }
         io.observe_log()?;
         let work = core.do_work(clock, io)?;
-        self.counters.store(&self.core, self.messages_rejected);
+        let log_recording_id = self.log_recording_id().unwrap_or(NO_RECORDING);
+        self.counters
+            .store(&self.core, self.messages_rejected, log_recording_id);
         Ok(read + work)
     }
 
@@ -694,7 +808,10 @@ impl ConsensusModule {
     }
 
     /// The id of this member's recording of the log, once it has one: the leader's of
-    /// its publication, a follower's of the leader's image.
+    /// its publication, a follower's of the leader's image; `None` before the first and
+    /// from when the member leaves the log until it has joined it again. Each duty
+    /// cycle stores it in `cluster.log_recording_id`, −1 for `None`, before the commit
+    /// position (`spec/cluster.md`, "The service").
     pub fn log_recording_id(&self) -> Option<i64> {
         self.io
             .log_recording

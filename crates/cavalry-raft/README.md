@@ -29,9 +29,13 @@ commit path runs per message.
   member as a destination and records it, or subscribes to the leader's log and arms
   the recording that holds it from its first frame, keeps the record of terms in the
   `terms` file of `log_dir`, and stores what it counts in the driver's counters file:
-  `cluster.role`, `cluster.election_state`, `cluster.commit_position` and the rest of
-  `spec/cluster.md`, "Counters". One thread calls `do_work()`; the leader's process
-  appends with `offer(payload)`, up to 1,344 bytes an entry.
+  `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
+  `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
+  `cluster.log_recording_id`, the recording that holds its log, which its service
+  replays, and the eleven counts of `Counts::by_counter`. The counters of sessions, of
+  the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
+  with those features. One thread calls `do_work()`; the leader's process appends
+  with `offer(payload)`, up to 1,344 bytes an entry.
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one
   process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
   member started again on an empty log directory to set: what the example below and
