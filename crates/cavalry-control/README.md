@@ -25,6 +25,16 @@ is allowed here.
   the members string (`cluster-members`, `cluster-member-id`). `doctor::examine_config`
   runs every check with the configuration the keys give, and the `cavalry doctor`
   command is that call behind a `main`.
+- Explains a cluster member from the counters its consensus module stores, while its
+  driver runs: who the member is and what it knows, its role, term, election state,
+  append position and commit position (`cluster-member`, a note); a member that
+  follows no leader (`cluster-no-leader`); a member its leader's log left behind,
+  which this version cannot bring back (`cluster-joined-late`); an appointed leader
+  that will not lead because its log is behind a member's (`cluster-leader-behind`);
+  a leader that lost its quorum (`cluster-quorum-lost`); and a commit position
+  behind the leader's own append position (`cluster-commit-waits`).
+  [Run a cluster of three members](../../docs/how-to/run-a-cluster.md#when-it-does-not-work)
+  says what an operator does about each.
 - May use `async` and an executor: nothing a message passes through lives here.
 
 In Aeron, this is AeronStat and hand-written tooling: the open project has no admin API
