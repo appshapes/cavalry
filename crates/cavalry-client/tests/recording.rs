@@ -237,7 +237,9 @@ fn a_stopped_recordings_handle_reads_its_stop_and_never_a_counter_given_away() {
     );
 
     // Past the reuse timeout the driver gives the freed records to the next counters
-    // it allocates: a second publication's and its recording's, which then move.
+    // it allocates, the lowest free record first (`CountersFile::allocate`): a second
+    // publication's and its recording's, which allocate at least the counters the stop
+    // freed, so both records are taken, whichever of the new counters takes each.
     std::thread::sleep(spec::COUNTER_REUSE_TIMEOUT + Duration::from_millis(200));
     let mut other = client
         .add_exclusive_publication("cavalry:ipc", 82)
@@ -259,20 +261,30 @@ fn a_stopped_recordings_handle_reads_its_stop_and_never_a_counter_given_away() {
         second.synced_position() == moved
     });
     assert_ne!(moved, after);
-    // The first recording's two records are other counters' now.
+    // The first recording's two records are allocated to other counters now: allocated
+    // again, not merely freed, and not the first recording's.
     let counters = client.counters();
     for (record, type_id) in [
         (position_record, RECORDING_POSITION.0),
         (synced_record, RECORDING_SYNCED_POSITION.0),
     ] {
-        let now = counters.record(record).expect("the record reads");
-        let still_the_first = now.is_some_and(|fields| {
-            fields.type_id() == type_id && fields.key()[..8] == 0i64.to_le_bytes()
-        });
-        assert!(!still_the_first, "record {record} was not given away");
+        let Some(now) = counters.record(record).expect("the record reads") else {
+            panic!("record {record} was freed and not allocated again");
+        };
+        assert!(
+            !(now.type_id() == type_id && now.key()[..8] == 0i64.to_le_bytes()),
+            "record {record} is still the first recording's"
+        );
         // What the handle read before it followed the stop: the record's value now,
         // another counter's, which is not where the first recording stopped.
-        assert_ne!(counters.read(record).ok(), Some(after));
+        let value = match counters.read(record) {
+            Ok(value) => value,
+            Err(error) => panic!("record {record} holds no counter: {error}"),
+        };
+        assert_ne!(
+            value, after,
+            "record {record} holds the first recording's stop"
+        );
     }
     // And the handle still says where its recording stopped, whatever they hold.
     assert_eq!(
