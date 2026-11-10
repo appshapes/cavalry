@@ -110,3 +110,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0063. Run the consensus module as a client of its driver, and lead by appointment through the election's states](decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md)
 - [0064. Announce a stop whose own writes failed at the position last synced](decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md)
 - [0065. Give up a recording whose sync failed, without a stop of its own](decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md)
+- [0066. Feed the committed log to a service through a replay of the member's recording](decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)

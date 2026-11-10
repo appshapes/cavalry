@@ -1815,3 +1815,19 @@ user-visible change, added in the same commit as the change. The format follows
   covered
   ([ADR 0065](docs/decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md);
   card 227).
+- The cluster protocol says how a service reads the committed log, and the client has
+  the poll it needs. A service is a client of its member's driver: it reads the
+  member's own recording of the log through a replay that follows the recording, on
+  the `cavalry:ipc` service log stream, 104, and polls it no further than the member's
+  commit position, so the path is the same on the leader and on a follower and a
+  service may start at any time, from any entry the recording its member names
+  holds. `spec/cluster.md`, "The service",
+  says so, with the member's new counter `cluster.log_recording_id` and the two
+  checks a service makes before it takes a commit position as its bound;
+  `spec/log-buffer.md`, "Reading", says what a bounded read is. The Rust client gains
+  `Subscription::bounded_poll(session_id, handler, limit_position, fragment_limit)`,
+  which reads one image and delivers no frame that begins at or past the limit, and
+  `cavalry-shm` the `TermReader::bounded_poll` under it. The reader of the committed
+  log and the counter follow
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
+  card 227).
