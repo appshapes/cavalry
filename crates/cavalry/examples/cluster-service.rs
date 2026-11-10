@@ -117,7 +117,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 .min(64),
             None => 64,
         };
-        let entries = log.poll(
+        let polled = log.poll(
             |entry, _, position| {
                 // An entry begins with the message header of `spec/cluster.md`,
                 // "Encoding": the template id is its second field, two bytes.
@@ -128,12 +128,36 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 println!("{position} template {template} {} bytes", entry.len());
             },
             limit,
-        )?;
+        );
+        let entries = match polled {
+            Ok(entries) => entries,
+            Err(fault) => {
+                // A closed client says why: the driver went, or it timed this client
+                // out, or the client could not keep up with the driver's events.
+                return Err(match client.closed() {
+                    Some(why) => format!("{fault}; the client closed: {}", why.reason()).into(),
+                    None => fault.into(),
+                });
+            }
+        };
         read += entries as u64;
         if args.entries.is_some_and(|wanted| read >= wanted) {
             break;
         }
         if entries == 0 {
+            if let Some(position) = log.failed_at() {
+                // The driver could not play the member's recording on from here.
+                return Err(format!(
+                    "the replay of member {}'s recording {} failed at position {position}: \
+                     --from was not the position of an entry, or the recording's files \
+                     are damaged; give --from a next position this program printed, or 0, \
+                     and run `cavalry doctor`, which names a damaged recording; see \
+                     docs/how-to/read-the-committed-log.md#when-it-does-not-work",
+                    log.member_id(),
+                    log.recording_id()
+                )
+                .into());
+            }
             if log.is_ended() {
                 // The member left its log or closed: nothing more comes from this
                 // handle. What was read stays read; the next run starts here.

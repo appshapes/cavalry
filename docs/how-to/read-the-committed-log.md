@@ -76,15 +76,15 @@ its services read what it appends in the same way.
 
 ## How to verify it worked
 
-- Steps 1 and 2 print the same entry line on every member.
-- `target/release/cavalry doctor --dir /tmp/cavalry-member-1 --log-dir
-  /tmp/cavalry-member-1-log`, with the member's two variables set as
+- Steps 1 and 2 print the same entry line on every member: the same position, the
+  same template id and the same length.
+- The service's last line gives a `commit position` and a `next position`. `cavalry
+  doctor` on the member's directory, with the member's two variables set as
   [Run a cluster of three members](run-a-cluster.md) sets them, prints the member's
-  `commit position`. A service's `commit position` line never shows a larger one, and
-  its `next position` is never past it.
-- While a service runs, the same `doctor` lists one replay on the driver. After the
-  service ends, the `replay.stopped` counter has grown by one, or `replay.ended` when
-  the member's log ended first.
+  own `commit position` in its `note cluster-member` line. The service's is the same
+  or smaller, never larger, and its `next position` is never past it.
+- A second run with `--from` and the `next position` of the first prints no entry the
+  first run printed.
 
 ## When it does not work
 
@@ -94,14 +94,25 @@ its services read what it appends in the same way.
   whose line says `election closed` has a log. `WARN cluster-no-leader` and `WARN
   cluster-joined-late` are explained in
   [Run a cluster of three members](run-a-cluster.md#when-it-does-not-work).
-- `error 23 (position out of range)`: `--from` is not where an entry begins, or it is
-  past what this member has recorded. Use a `next position` that a run on this member
-  printed, or 0.
+- `error 23 (position out of range)`: `--from` is past what this member has recorded.
+  The message gives the recording's extent. Use a `next position` that a run on this
+  member printed, or 0.
+- `poll refused (closed)` with `the client closed: corrupt`, right after the `reading
+  member` line: `--from` is a multiple of 32 at which no entry begins. The driver's
+  replay finds no frame there and ends at once, and in this version the client that
+  asked for it is closed with it and is not told why (card 241). `cavalry doctor` on
+  the member shows `replay.failed` grown by one. Use a `next position` that a run on
+  this member printed, or 0.
+- `--from needs a position, a multiple of 32 from 0`: the program refused the value
+  before it asked the driver.
 - `error 10 (resource temporarily unavailable)`: the driver already plays 64 replays.
   Each service holds one while it runs. Stop the services that are not needed.
 - `cluster-service: the member's log ended`: the member closed or left its log while
   the service read it. The service has read every committed entry up to the position
   in the message. Start it again with `--from` that position once the member runs.
+  When the member's driver stopped with it, as `cavalry run` stops both, the program's
+  last line is `client closed (driver-closed)` and it exits 1: the position in the
+  line before it still holds.
 - A service is given entries later than the cluster commits them, by up to a second:
   an entry reaches a service once the member's recorder has synced it, and the
   recorder syncs once a second. No entry is lost or reordered by the wait.

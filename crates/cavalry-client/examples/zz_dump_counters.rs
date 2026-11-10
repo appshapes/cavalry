@@ -6,7 +6,9 @@ fn main() {
     let dir = std::env::args().nth(1).expect("a driver directory");
     let reader = CountersReader::open(std::path::Path::new(&dir)).expect("the counters file opens");
     for id in 0..reader.capacity() {
-        let Some(record) = reader.record(id).ok().flatten() else { continue };
+        let Some(record) = reader.record(id).ok().flatten() else {
+            continue;
+        };
         let value = reader.read_acquire(id).unwrap_or(i64::MIN);
         if value == 0 {
             continue;

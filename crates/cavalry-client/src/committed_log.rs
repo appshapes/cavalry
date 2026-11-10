@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use cavalry_proto::client_protocol::FOLLOW_LENGTH;
+use cavalry_proto::client_protocol::{FOLLOW_LENGTH, ReplayStopReason};
 use cavalry_proto::cluster::SERVICE_LOG_STREAM_ID;
 use cavalry_proto::frame::DataFrameHeader;
 use cavalry_shm::counters::generated::{CLUSTER_COMMIT_POSITION, CLUSTER_LOG_RECORDING_ID};
@@ -284,6 +284,22 @@ impl CommittedLog {
         self.bound.lost || self.faulted || self.replay.ended().is_some()
     }
 
+    /// Where the driver's replay of the member's recording failed, when it did: a
+    /// segment file could not be read or a frame failed a check, after the frame that
+    /// ends at this position (`spec/client-protocol.md`, "Events", `replay stopped`,
+    /// reason 3). `None` for a log that is live or that ended because its member
+    /// closed or left the recording. A log opened at a position where no entry begins
+    /// ends so at once, at that position, with nothing delivered, since the bytes
+    /// there are no frame; a log that read entries before it failed is a recording
+    /// whose files are damaged, which `cavalry doctor` names. Either way no entry past
+    /// the position is delivered, and none is skipped.
+    pub fn failed_at(&self) -> Option<i64> {
+        match self.replay.ended() {
+            Some((position, Some(ReplayStopReason::Failed))) => Some(position),
+            _ => None,
+        }
+    }
+
     /// The id of the member whose log this is.
     pub fn member_id(&self) -> i32 {
         i32::from_le_bytes(self.bound.member)
@@ -320,6 +336,7 @@ impl std::fmt::Debug for CommittedLog {
             .field("position", &self.position)
             .field("commit_position", &self.bound.commit_position)
             .field("is_ended", &self.is_ended())
+            .field("failed_at", &self.failed_at())
             .finish()
     }
 }
