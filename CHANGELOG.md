@@ -1775,3 +1775,15 @@ user-visible change, added in the same commit as the change. The format follows
   covered
   ([ADR 0065](docs/decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md);
   card 227).
+- A client can have the recorder sync a recording at once. The recorder syncs a
+  recording once a second, so a program that acknowledges what it recorded, a cluster
+  member counting towards a commit for one, waited up to a second with nothing to do.
+  `Cavalry::sync_recording(id)` and `Recording::sync(&mut client)` send the new
+  `sync recording` command and return when the recorder has synced what it had
+  written; `Recording::request_sync(&mut client)` sends it and does not wait, and
+  allocates nothing. A sync that fails is error code 12, and the recording is given
+  up at the position last synced, as after any failed sync. The command is client
+  protocol version 8, type id 264; every version 7 encoding is unchanged, and a
+  version 7 driver answers it with error code 6
+  ([ADR 0067](docs/decisions/0067-sync-a-recording-on-command-as-client-protocol-version-8.md);
+  card 227).

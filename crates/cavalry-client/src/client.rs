@@ -724,6 +724,56 @@ impl Cavalry {
         }
     }
 
+    /// Has the driver's recorder sync what it has written of recording `recording_id`
+    /// now, without waiting for its sync once a second, and waits for the answer
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0067). `Ok` means that everything
+    /// the recorder had written when it took the request is covered by a sync that
+    /// returned success, and `recording.synced_position` says how far that is. It does
+    /// not mean that everything this client published before the call is covered: the
+    /// recorder may not have written it yet. A caller that needs a position compares
+    /// [`Recording::synced_position`] with it and calls again while that is behind;
+    /// one sync covers everything written since the last. A recording that has stopped
+    /// is `Ok` with nothing done, since nothing is left to sync.
+    ///
+    /// An id the catalog does not hold is [`ClientError::Refused`] with error code 21.
+    /// The recorder's request queue full is code 10: call again. A sync that failed is
+    /// code 12: the driver gives the recording up, `recording.write_failed` counts it,
+    /// and [`Recording::stop_position`] becomes the position the last sync that
+    /// succeeded covered (ADR 0065). A driver older than client protocol version 8
+    /// answers code 6.
+    ///
+    /// Each call that finds something unsynced costs the recorder one sync of the
+    /// segment file and one of the time index, on the thread that writes every
+    /// recording, so call it when there is something to acknowledge, not in a loop.
+    pub fn sync_recording(&mut self, recording_id: i64) -> Result<(), ClientError> {
+        let correlation_id = self.producer.next_correlation_id();
+        let command = Command::SyncRecording {
+            client_id: self.client_id,
+            correlation_id,
+            recording_id,
+        };
+        match self.request(&command, correlation_id, "sync recording")? {
+            Response::Success { .. } => Ok(()),
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to sync recording"),
+            }),
+        }
+    }
+
+    /// Sends `sync recording` for `recording_id` and returns without waiting for the
+    /// answer, which the conductor drops when it comes: [`Recording::request_sync`].
+    pub(crate) fn request_sync_recording(&mut self, recording_id: i64) -> Result<(), ClientError> {
+        if let Some(reason) = self.shared.closed() {
+            return Err(ClientError::Closed(reason));
+        }
+        let correlation_id = self.producer.next_correlation_id();
+        self.send(&Command::SyncRecording {
+            client_id: self.client_id,
+            correlation_id,
+            recording_id,
+        })
+    }
+
     /// Truncates stopped recording `recording_id` to `position`: the driver removes the
     /// segment files past it, cuts the one holding it so the bytes past the position are
     /// zero, cuts the time index to the entries at or before it, and writes the stop at

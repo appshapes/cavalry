@@ -121,6 +121,17 @@ and `synced_position()` return it too. That position is durable: the stop synced
 when the stop's own writes failed, the last sync before the stop covered it (see
 `recording-write-failed` below).
 
+A program that must know its messages are on the disk before it goes on, to
+acknowledge them for one, does not wait for the recorder's sync once a second. It
+waits until `recording.position()` has reached the position its last `offer` returned,
+calls `recording.sync(&mut client)?`, and then reads `recording.synced_position()`,
+which is at or past that position. The call returns when the recorder has synced what
+it had written; it syncs nothing the recorder had not written yet, which is why the
+program waits for `position()` first. `recording.request_sync(&mut client)?` asks for
+the same sync and returns at once, for a program that polls `synced_position()` in a
+loop of its own
+([ADR 0067](../decisions/0067-sync-a-recording-on-command-as-client-protocol-version-8.md)).
+
 ## How to verify it worked
 
 - `ls -l ~/.local/share/cavalry/log` lists `catalog`, `0-0.rec` and `0.idx`; the first
@@ -156,6 +167,12 @@ when the stop's own writes failed, the last sync before the stop covered it (see
 - `error 12 (storage space)`: the time index or the first segment file could not be
   created; `doctor --log-dir` says what the directory is short of. The catalog slot is
   taken and stopped at its start.
+- `error 12 (storage space)` from `sync_recording` or `recording.sync`: the sync
+  failed, and the driver has given the recording up at the position last synced, as
+  `recording-write-failed` below describes; `recording.stop_position()` gives that
+  position. Check the disk the log directory is on, then start a new recording.
+- `error 6 (unknown command type)` from `sync_recording` or `recording.sync`: the
+  driver is older than this client and does not know the command; upgrade the driver.
 - `recording-write-failed` in `doctor`: a write or a sync of a recording failed, and
   the recording stopped. After a write that the disk refused, it stopped at the
   position written, and the recording is whole and replayable up to there. After a

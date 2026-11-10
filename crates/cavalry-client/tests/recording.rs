@@ -174,6 +174,136 @@ fn a_recording_follows_the_publisher_and_stops_on_request() {
     assert!(!catalog.get(2).expect("reads").expect("the slot").is_live());
 }
 
+/// Offers `count` messages of 32 bytes to `publication` and returns the position after
+/// the last.
+fn offer(publication: &mut cavalry_client::Publication, count: u8) -> i64 {
+    let mut after = 0;
+    for i in 0..count {
+        wait("the offer goes through", || {
+            match publication.offer(&[i; 32]) {
+                Ok(position) => {
+                    after = position;
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+    }
+    after
+}
+
+/// `sync recording` through the client (`spec/client-protocol.md`, "Commands"; ADR
+/// 0067). Twenty rounds of ten messages: once the recorder has written a round,
+/// `Recording::sync` returns with the synced position at the position, with no wait
+/// after the call. The recorder's own sync runs once a second, so it could make a
+/// round or two pass by itself and never twenty in a row. Then the answers: an id the
+/// catalog does not hold is code 21, and a recording that has stopped is success with
+/// nothing done, through either call.
+#[test]
+fn a_sync_on_request_covers_what_the_recorder_has_written_when_it_returns() {
+    let dir = TestDir::new("sync");
+    let driver_dir = dir.path().join("driver");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut client = Cavalry::connect_to(&driver_dir).expect("connects");
+    let mut publication = client
+        .add_exclusive_publication("cavalry:ipc", 71)
+        .expect("a publication");
+    let recording = client
+        .start_recording("cavalry:ipc", 71)
+        .expect("a recording");
+    recording
+        .sync(&mut client)
+        .expect("nothing unsynced is success");
+    assert_eq!(recording.synced_position(), 0);
+
+    for round in 1..=20 {
+        let after = offer(&mut publication, 10);
+        assert_eq!(after, round * 10 * 64);
+        wait("recording.position follows the publisher", || {
+            recording.position() == after
+        });
+        recording.sync(&mut client).expect("syncs");
+        assert_eq!(
+            recording.synced_position(),
+            after,
+            "round {round}: the answer came before the sync covered what was written"
+        );
+    }
+
+    refused(client.sync_recording(9), ErrorCode::UnknownRecording);
+    refused(client.sync_recording(-1), ErrorCode::UnknownRecording);
+    recording.stop(&mut client).expect("stops");
+    wait("the handle reads the stop", || {
+        recording.stop_position().is_some()
+    });
+    recording
+        .sync(&mut client)
+        .expect("a stopped recording is success with nothing done");
+    client
+        .sync_recording(recording.recording_id())
+        .expect("by its id too");
+    recording
+        .request_sync(&mut client)
+        .expect("nothing is sent for a recording the handle has seen stop");
+    assert_eq!(recording.synced_position(), 20 * 10 * 64);
+    drop(publication);
+    client.close().expect("closes");
+    driver.close().expect("closes");
+}
+
+/// `Recording::request_sync` writes the command and does not wait, and the driver
+/// acts on it (ADR 0067). Two recordings, one that takes the messages and one that
+/// stays idle. In each of twenty rounds the first is asked to sync without waiting,
+/// and then the second is synced with the call that waits: the recorder handles its
+/// requests in the order the conductor handed them over, so when the second call
+/// returns, the first request has been handled, and the first recording's synced
+/// position is at its position. Nothing here waits on the clock, and the recorder's
+/// own sync, once a second, could not make twenty rounds in a row pass.
+#[test]
+fn a_sync_requested_without_waiting_is_handled_by_the_recorder_in_order() {
+    let dir = TestDir::new("request-sync");
+    let driver_dir = dir.path().join("driver");
+    let log_dir = dir.path().join("log");
+    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut client = Cavalry::connect_to(&driver_dir).expect("connects");
+    let mut publication = client
+        .add_exclusive_publication("cavalry:ipc", 71)
+        .expect("a publication");
+    let idle_publication = client
+        .add_exclusive_publication("cavalry:ipc", 72)
+        .expect("a second publication");
+    let recording = client
+        .start_recording("cavalry:ipc", 71)
+        .expect("a recording");
+    let idle = client
+        .start_recording("cavalry:ipc", 72)
+        .expect("a second recording");
+
+    for round in 1..=20 {
+        let after = offer(&mut publication, 10);
+        wait("recording.position follows the publisher", || {
+            recording.position() == after
+        });
+        recording
+            .request_sync(&mut client)
+            .expect("the command is written");
+        idle.sync(&mut client)
+            .expect("the request behind it is answered");
+        assert_eq!(
+            recording.synced_position(),
+            after,
+            "round {round}: the request without a wait was not handled"
+        );
+    }
+    assert_eq!(idle.synced_position(), 0, "nothing was published to it");
+
+    drop(publication);
+    drop(idle_publication);
+    client.close().expect("closes");
+    driver.close().expect("closes");
+}
+
 /// The record of the counters file that holds `type_id` for recording `recording_id`,
 /// whose key is the recording id (`spec/client-protocol.md`, "Counters").
 fn recording_counter(client: &Cavalry, type_id: i32, recording_id: i64) -> u32 {
