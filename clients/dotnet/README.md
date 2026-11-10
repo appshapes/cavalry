@@ -14,7 +14,8 @@ when it loads, before any other function; the rest is the client's own code. A
 `Client` closes with `Close()` or `using`; a `Publication` claims a slice of the log
 as a `Span<byte>` over it or offers a `ReadOnlySpan<byte>`; a `Subscription` polls
 with a `FragmentHandler` that receives the body as a `ReadOnlySpan<byte>` into the
-log and the frame's `Header`; a `Recording` and a `Replay` wrap the driver's archive.
+log and the frame's `Header`; a `Recording` and a `Replay` wrap the driver's archive; a
+`CommittedLog` is a service's read of a cluster's committed log beside a member (below).
 Every message the client sends or receives goes through one `extern "C"` call on the
 caller's thread, as the ABI's page promises (ADR 0046's boundary; ADR 0051). In Aeron,
 this is Aeron.NET's `Publication`, `Subscription` and `FragmentHandler`, which this
@@ -29,14 +30,40 @@ byte pointer, is passed as it is, copied nowhere (ADR 0046, the .NET client). Th
 cost is the .NET release: 7 brought `LibraryImport`, and this library takes 10, the
 long-term release that holds it.
 
+### The committed log
+
+A service is a program beside a cluster member that applies the entries the cluster
+has committed (`docs/how-to/read-the-committed-log.md`). `client.CommittedLog(position)`
+opens the log of the member on the client's driver at a position, 0 or the
+`Position()` an earlier run reached, and returns `null` while the driver hosts no
+member with a log, so a service started before its member asks again. `log.Poll(handler,
+fragmentLimit)` calls the `EntryHandler`, `handler(body, header, position)`, for each
+committed entry, in order, none at or past the member's commit position, and returns
+the entry count; `position` is the entry's position in the log. `log.Position()` is
+the position after the last entry delivered, the one a service keeps for its next
+start, and `log.CommitPosition()` the bound of the last poll. `log.IsEnded()` says that
+the member closed or left its log: once a poll then returns 0, close the log and open
+another from `log.Position()`. `log.FailedAt()` is `null` unless the driver's replay of
+the member's recording failed. `log.Close()`, or `using`, stops the driver's replay
+and is idempotent; a log closed after its client is freed, and the driver ends the
+replay by itself. `log.MemberId` and `log.RecordingId` say whose log it is
+(`spec/c-abi.md`, "Functions", committed log; ADR 0068).
+
+A committed log has an `UnmanagedCallersOnly` trampoline of its own, as a subscription
+has. A handler's exception goes where a subscription's goes ("The exception"): every
+entry the ABI delivers reaches the handler, and `Poll` throws `HandlerException` once
+the ABI has returned. An entry whose handler call threw was delivered and is not
+delivered again, so a service that must apply every entry catches its own exceptions
+and stops there, with the entry's `position` in hand to open the log at again.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no `lock`
   statement, no wait, no task, no thread, no copy of a fragment into a new array for
   the handler. `clients/lint.py` reads the per-message members of `Publication`,
-  `Subscription` and `Header`, the claim, its span, the reserved value, the commit,
-  the abort, the offer, the poll, the header's nine getters and the trampoline that
-  calls the handler, for C#'s forms of each: `lock`, `Monitor`, `Mutex`, `Semaphore`,
+  `Subscription`, `CommittedLog` and `Header`, the claim, its span, the reserved value,
+  the commit, the abort, the offer, each poll, the header's nine getters and each
+  trampoline that calls a handler, for C#'s forms of each: `lock`, `Monitor`, `Mutex`, `Semaphore`,
   `SpinLock` and the other waits of `System.Threading`, `async`, `await`, `Task`,
   `ValueTask`, `.Wait(`, `.Result`, `Thread.Sleep`, a thread started, `throw`, `new`,
   and an interpolated string. The one exception built on the path is the
@@ -160,7 +187,7 @@ compiler). An add, a command or a close waits on the driver for up to 10 s
 A `Client`'s methods hold the client's lock, a `System.Threading.Lock`, so threads may
 share one: an add, a command or a close holds it for its one ABI call, which the ABI
 serialises anyway, and the lock is never on a message's path. A `Publication`, a
-`Subscription` and its `Header` are used from one thread at a time, the ABI's rule
+`Subscription` or a `CommittedLog` and its `Header` are used from one thread at a time, the ABI's rule
 for every handle; a program with several threads gives each its own, as the Rust
 API's are used. `Client.AddDestination` and `RemoveDestination` are calls on the
 client, not on the `Publication` they name: they may run beside that publication's

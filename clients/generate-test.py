@@ -1142,8 +1142,9 @@ class JvmPackage(unittest.TestCase):
 class DotnetPackage(unittest.TestCase):
     """The .NET package, `clients/dotnet` (clients/dotnet/README.md; ADR 0046, card 209)."""
 
-    FILES = sorted(["Cavalry.csproj", "Abi.cs", "CavalryException.cs", "Client.cs", "FragmentHandler.cs", "HandlerException.cs",
-                    "Header.cs", "Image.cs", "Publication.cs", "Recording.cs", "Replay.cs", "Subscription.cs"])
+    FILES = sorted(["Cavalry.csproj", "Abi.cs", "CavalryException.cs", "Client.cs", "CommittedLog.cs", "FragmentHandler.cs",
+                    "HandlerException.cs", "Header.cs", "Image.cs", "Publication.cs", "Recording.cs", "Replay.cs",
+                    "Subscription.cs"])
 
     @classmethod
     def setUpClass(cls):
