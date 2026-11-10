@@ -115,10 +115,14 @@ branch locally; GitHub has already deleted it on origin.
   `failure` is the second miss, with what the session did in its job summary and in
   its log: `gh run view <run id> --log` prints the result, the denied tool calls and
   the session's last text after the line `## Reviewer session, attempt 2 of 2`. The
-  first miss is the `attempt 1` run for the same pull request listed before it, and
-  its log holds the same lines after `attempt 1 of 2`; that run reads `success` or
-  `cancelled` in the list, as its last job ended or was replaced by the second
-  attempt, and `gh run view <run id>` shows its `review` job as passed either way. A
+  first miss is the `attempt 1` run for the same pull request. It is listed below the
+  `failure` run, because the list is newest first. Its log holds the same lines after
+  the line `## Reviewer session, attempt 1 of 2` among the `review` job's lines: each
+  line of `gh run view --log` starts with its job's name, and the `retry` job's lines
+  hold that line again, in the script the runner prints before it runs it. That run
+  reads `success` or `cancelled` in the list, as its last job ended or was replaced by
+  the second attempt, and `gh run view <run id>` shows its `review` job as passed
+  either way. A
   run whose `review` job itself reads `cancelled` held no finished session: the review
   of a newer head took its place, or after sixty minutes it hit the job's timeout,
   which runs nothing again (card 213). Add the `review` label to the pull request to run it again. Pull requests from forks are not reviewed by the agent, only by a person.
