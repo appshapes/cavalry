@@ -14,7 +14,8 @@ use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refuse
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS,
-    CLUSTER_ELECTIONS_CLOSED, CLUSTER_ROLE, CLUSTER_TERMS_LED,
+    CLUSTER_ELECTIONS_CLOSED, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_ROLE,
+    CLUSTER_TERMS_LED,
 };
 
 struct TestDir(PathBuf);
@@ -132,6 +133,15 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
 
+    // Before a duty cycle has run, a member has no term and names no recording: the
+    // counters hold −1 from their add, never the 0 of their allocation, which is a
+    // term and a recording id.
+    for member in &members {
+        assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), -1);
+        assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), -1);
+        assert_eq!(counter(member, CLUSTER_COMMIT_POSITION.0), 0);
+    }
+
     run_until(&mut members, "every election closed", |members| {
         members
             .iter()
@@ -235,6 +245,13 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
     // reads it.
     for (index, member) in members.iter().enumerate() {
         assert_eq!(counter(member, CLUSTER_COMMIT_POSITION.0), end);
+        // The recording a service replays: the leader's of its publication, each
+        // follower's of the leader's image (`spec/cluster.md`, "The service").
+        assert_eq!(
+            Some(counter(member, CLUSTER_LOG_RECORDING_ID.0)),
+            member.module.log_recording_id()
+        );
+        assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), 0);
         assert_eq!(counter(member, CLUSTER_ELECTION_STATE.0), 17);
         assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 1);
         assert_eq!(

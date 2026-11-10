@@ -27,7 +27,8 @@ use cavalry_proto::cluster::{
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE, COUNTERS,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE,
+    COUNTERS,
 };
 
 use crate::consensus::{
@@ -469,30 +470,47 @@ struct Stored {
 }
 
 impl Stored {
+    /// Adds the counter of type `id` for `member_id` and stores `value` in it at once,
+    /// so that the 0 a counter holds between its allocation and its first store is
+    /// never read as a value: term 0 is a real term, and recording 0 a real recording.
     fn add(
         client: &mut Cavalry,
         id: CounterId,
         name: &str,
         member_id: i32,
+        value: i64,
     ) -> Result<Self, ClientError> {
         let counter = client.add_counter(
             id.0,
             &member_id.to_le_bytes(),
             &format!("{name} {member_id}"),
         )?;
+        counter.store_release(value)?;
         Ok(Self {
             counter,
-            last: i64::MIN,
+            last: value,
         })
     }
 
     /// Stores `value` when it is not the value last stored: a release store, which a
-    /// reader of a position loads with acquire.
-    fn store(&mut self, value: i64) {
+    /// reader of a position loads with acquire. Whether the counter holds `value`
+    /// now: not when the client is closed, which stores nothing.
+    fn store(&mut self, value: i64) -> bool {
         if value != self.last && self.counter.store_release(value).is_ok() {
             self.last = value;
         }
+        self.last == value
     }
+}
+
+/// A count as a counter's value.
+fn count_value(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// The member's role as `cluster.role` holds it: 0 follower, 1 candidate, 2 leader.
+fn role_code(core: &Consensus) -> i64 {
+    i64::from(core.role() as u8)
 }
 
 /// The member's counters in the counters file (`spec/cluster.md`, "Counters").
@@ -501,6 +519,9 @@ struct Counters {
     election_state: Stored,
     leadership_term_id: Stored,
     append_position: Stored,
+    /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored
+    /// before it (`spec/cluster.md`, "The service").
+    log_recording_id: Stored,
     commit_position: Stored,
     /// The core's counts, one counter each, in the order of [`Counts::by_counter`]:
     /// [`Counts::LEN`] of them, added once when the module starts.
@@ -509,47 +530,78 @@ struct Counters {
 }
 
 impl Counters {
-    fn add(client: &mut Cavalry, member_id: i32) -> Result<Self, ClientError> {
-        let mut add = |id, name| Stored::add(client, id, name, member_id);
+    /// Adds the member's counters, each holding what `core` holds from its first
+    /// store, which follows its add at once. `cluster.log_recording_id` is added and
+    /// holds −1 before `cluster.commit_position` is added: a service reads the
+    /// recording id only of a member whose commit position it has found
+    /// (`spec/cluster.md`, "The service").
+    fn add(client: &mut Cavalry, member_id: i32, core: &Consensus) -> Result<Self, ClientError> {
+        let mut add = |id, name, value| Stored::add(client, id, name, member_id, value);
         Ok(Self {
-            role: add(CLUSTER_ROLE, "cluster.role")?,
-            election_state: add(CLUSTER_ELECTION_STATE, "cluster.election_state")?,
-            leadership_term_id: add(CLUSTER_LEADERSHIP_TERM_ID, "cluster.leadership_term_id")?,
-            append_position: add(CLUSTER_APPEND_POSITION, "cluster.append_position")?,
-            commit_position: add(CLUSTER_COMMIT_POSITION, "cluster.commit_position")?,
+            role: add(CLUSTER_ROLE, "cluster.role", role_code(core))?,
+            election_state: add(
+                CLUSTER_ELECTION_STATE,
+                "cluster.election_state",
+                i64::from(core.election_state().code()),
+            )?,
+            leadership_term_id: add(
+                CLUSTER_LEADERSHIP_TERM_ID,
+                "cluster.leadership_term_id",
+                core.leadership_term_id(),
+            )?,
+            append_position: add(
+                CLUSTER_APPEND_POSITION,
+                "cluster.append_position",
+                core.append_position(),
+            )?,
+            log_recording_id: add(
+                CLUSTER_LOG_RECORDING_ID,
+                "cluster.log_recording_id",
+                NO_RECORDING,
+            )?,
+            commit_position: add(
+                CLUSTER_COMMIT_POSITION,
+                "cluster.commit_position",
+                core.commit_position(),
+            )?,
             counts: {
                 // Each count's counter, by the id the core pairs it with and under the
                 // name `counters.toml` gives that id (ADR 0067). Every id of
                 // `by_counter` is an entry of that table, which its doctest checks,
                 // so the other name is never a label.
                 let mut counts = Vec::with_capacity(Counts::LEN);
-                for (id, _) in Counts::default().by_counter() {
+                for (id, value) in core.counts().by_counter() {
                     let name = COUNTERS
                         .iter()
                         .find(|entry| entry.id == id)
                         .map_or("cluster.count", |entry| entry.name);
-                    counts.push(add(id, name)?);
+                    counts.push(add(id, name, count_value(value))?);
                 }
                 counts
             },
-            messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected")?,
+            messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected", 0)?,
         })
     }
 
-    /// Stores what the core holds, each value only when it has moved.
-    fn store(&mut self, core: &Consensus, messages_rejected: u64) {
-        let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+    /// Stores what the core holds, each value only when it has moved, and
+    /// `log_recording_id`, the recording the member records the live log into or −1.
+    /// The recording id is stored before the commit position, and a commit position
+    /// only once the counter holds that id, so that no commit position is stored
+    /// beside a recording id that does not hold it (`spec/cluster.md`, "The service").
+    fn store(&mut self, core: &Consensus, messages_rejected: u64, log_recording_id: i64) {
         let counts: Counts = core.counts();
-        self.role.store(i64::from(core.role() as u8));
+        self.role.store(role_code(core));
         self.election_state
             .store(i64::from(core.election_state().code()));
         self.leadership_term_id.store(core.leadership_term_id());
         self.append_position.store(core.append_position());
-        self.commit_position.store(core.commit_position());
-        for (stored, (_, value)) in self.counts.iter_mut().zip(counts.by_counter()) {
-            stored.store(count(value));
+        if self.log_recording_id.store(log_recording_id) {
+            self.commit_position.store(core.commit_position());
         }
-        self.messages_rejected.store(count(messages_rejected));
+        for (stored, (_, value)) in self.counts.iter_mut().zip(counts.by_counter()) {
+            stored.store(count_value(value));
+        }
+        self.messages_rejected.store(count_value(messages_rejected));
     }
 }
 
@@ -621,7 +673,9 @@ impl ConsensusModule {
                 log_destination: endpoint_channel(&member.log),
             });
         }
-        let counters = Counters::add(&mut client, member_id)?;
+        // Each counter holds the core's value from its add: −1 for the term and the
+        // recording, before a duty cycle has run.
+        let counters = Counters::add(&mut client, member_id, &core)?;
         let started = Instant::now();
         Ok(Self {
             core,
@@ -694,7 +748,9 @@ impl ConsensusModule {
         }
         io.observe_log()?;
         let work = core.do_work(clock, io)?;
-        self.counters.store(&self.core, self.messages_rejected);
+        let log_recording_id = self.log_recording_id().unwrap_or(NO_RECORDING);
+        self.counters
+            .store(&self.core, self.messages_rejected, log_recording_id);
         Ok(read + work)
     }
 
@@ -752,7 +808,10 @@ impl ConsensusModule {
     }
 
     /// The id of this member's recording of the log, once it has one: the leader's of
-    /// its publication, a follower's of the leader's image.
+    /// its publication, a follower's of the leader's image; `None` before the first and
+    /// from when the member leaves the log until it has joined it again. Each duty
+    /// cycle stores it in `cluster.log_recording_id`, −1 for `None`, before the commit
+    /// position (`spec/cluster.md`, "The service").
     pub fn log_recording_id(&self) -> Option<i64> {
         self.io
             .log_recording
