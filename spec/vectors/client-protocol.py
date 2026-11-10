@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Write spec/vectors/client-protocol.json: the test vectors for spec/client-protocol.md,
-version 6.
+version 7.
 
 This script is the spec's reference encoder, independent of the Rust code: it packs
 each command's and event's fields with the standard library and nothing else, so an
@@ -38,10 +38,15 @@ TRUNCATE_RECORDING, PURGE_SEGMENTS, PURGE_RECORDING = 0x0105, 0x0106, 0x0107
 # Version 6: no new encoding; start recording arms a recording on a subscription, and a
 # publication's channel may name the position keys of spec/udp.md, version 2 (ADR 0059).
 ADD_DESTINATION, REMOVE_DESTINATION = 7, 8
+# Version 7: a client's counter, under Aeron's ids (ADR 0062).
+ADD_COUNTER, REMOVE_COUNTER = 9, 10
+ON_COUNTER_READY, ON_UNAVAILABLE_COUNTER = 0x0F08, 0x0F09
+MAX_COUNTER_KEY, MAX_COUNTER_LABEL = 112, 124
 # The replay's conventions, Aeron's: NULL_POSITION, NULL_LENGTH and Long.MAX_VALUE.
 NULL_POSITION, NULL_LENGTH, FOLLOW_LENGTH = -1, -1, 2**63 - 1
 
-# The fields of each type, in order, with their encodings: "q" i64, "i" i32, "s" string.
+# The fields of each type, in order, with their encodings: "q" i64, "i" i32, "s" string,
+# "b" bytes, encoded as a string is and given in a vector's fields as hex.
 COMMANDS = {
     ADD_PUBLICATION: ("add_publication", (("client_id", "q"), ("correlation_id", "q"),
                                           ("stream_id", "i"), ("channel", "s"))),
@@ -75,6 +80,10 @@ COMMANDS = {
                                           ("registration_id", "q"), ("channel", "s"))),
     REMOVE_DESTINATION: ("remove_destination", (("client_id", "q"), ("correlation_id", "q"),
                                                 ("registration_id", "q"), ("channel", "s"))),
+    ADD_COUNTER: ("add_counter", (("client_id", "q"), ("correlation_id", "q"),
+                                  ("counter_type_id", "i"), ("key", "b"), ("label", "s"))),
+    REMOVE_COUNTER: ("remove_counter", (("client_id", "q"), ("correlation_id", "q"),
+                                        ("registration_id", "q"))),
 }
 EVENTS = {
     ON_ERROR: ("error", (("offending_correlation_id", "q"), ("error_code", "i"),
@@ -101,6 +110,8 @@ EVENTS = {
                                       ("log_file_name", "s"))),
     ON_SUBSCRIPTION_READY: ("subscription_ready", (("correlation_id", "q"),
                                                    ("channel_status_indicator_id", "i"))),
+    ON_COUNTER_READY: ("counter_ready", (("correlation_id", "q"), ("counter_id", "i"))),
+    ON_UNAVAILABLE_COUNTER: ("unavailable_counter", (("registration_id", "q"), ("counter_id", "i"))),
     ON_CLIENT_TIMEOUT: ("client_timeout", (("client_id", "q"),)),
     ON_RECORDING_READY: ("recording_ready", (("correlation_id", "q"), ("recording_id", "q"),
                                              ("session_id", "i"),
@@ -121,11 +132,21 @@ def encode_string(s):
     return struct.pack("<i", len(raw)) + raw + b"\0" * (-len(raw) % 4)
 
 
+def encode_bytes(raw):
+    """A bytes field: an i32 length, the bytes, and zero bytes to the next multiple of 4."""
+    return struct.pack("<i", len(raw)) + raw + b"\0" * (-len(raw) % 4)
+
+
 def encode(layout, fields):
     out = b""
     for name, kind in layout:
         value = fields[name]
-        out += encode_string(value) if kind == "s" else struct.pack("<" + kind, value)
+        if kind == "s":
+            out += encode_string(value)
+        elif kind == "b":
+            out += encode_bytes(bytes.fromhex(value))
+        else:
+            out += struct.pack("<" + kind, value)
     return out
 
 
@@ -153,6 +174,11 @@ def event(type_id, name, **fields):
 IPC = "cavalry:ipc"
 LOG = "publications/7.logbuffer"
 DESTINATION = "cavalry:udp?endpoint=10.0.0.3:40123"
+# A client counter keyed by a member id, 2, as an i32: the cluster's are the first
+# (ADR 0062). The type id is whatever `counters.toml` gives the counter; decoding does
+# not look at it.
+MEMBER_KEY = struct.pack("<i", 2).hex()
+COUNTER_LABEL = "cluster.commit_position 2"
 VECTORS = [
     # Commands, decoded to their fields; the fields encode to the same bytes.
     command(ADD_PUBLICATION, "add-publication", client_id=0, correlation_id=1,
@@ -226,6 +252,21 @@ VECTORS = [
             correlation_id=2**63 - 1, registration_id=2**63 - 1, channel="c" * MAX_STRING),
     command(REMOVE_DESTINATION, "remove-destination", client_id=3, correlation_id=19,
             registration_id=4, channel=DESTINATION),
+    # Version 7: a client's counter. The key and the label at their bounds, 112 and 124
+    # bytes, decode; one byte more is `counter`, below.
+    command(ADD_COUNTER, "add-counter", client_id=3, correlation_id=20, counter_type_id=109,
+            key=MEMBER_KEY, label=COUNTER_LABEL),
+    command(ADD_COUNTER, "add-counter-empty-key-and-label", client_id=3, correlation_id=20,
+            counter_type_id=109, key="", label=""),
+    command(ADD_COUNTER, "add-counter-key-and-label-at-their-bounds", client_id=3, correlation_id=20,
+            counter_type_id=109, key="ab" * MAX_COUNTER_KEY, label="l" * MAX_COUNTER_LABEL),
+    command(ADD_COUNTER, "add-counter-label-of-two-byte-characters", client_id=3, correlation_id=20,
+            counter_type_id=109, key=MEMBER_KEY, label="\u00e9" * (MAX_COUNTER_LABEL // 2)),
+    command(ADD_COUNTER, "add-counter-extremes", client_id=2**63 - 1, correlation_id=2**63 - 1,
+            counter_type_id=-(2**31), key="00ff", label=COUNTER_LABEL),
+    command(REMOVE_COUNTER, "remove-counter", client_id=3, correlation_id=21, registration_id=20),
+    command(REMOVE_COUNTER, "remove-counter-extremes", client_id=2**63 - 1, correlation_id=2**63 - 1,
+            registration_id=2**63 - 1),
     command(REMOVE_DESTINATION, "remove-destination-extremes", client_id=2**63 - 1,
             correlation_id=2**63 - 1, registration_id=2**63 - 1, channel="c" * MAX_STRING),
     # Events.
@@ -304,14 +345,24 @@ VECTORS = [
     event(ON_ERROR, "error-unknown-publication-for-destination", offending_correlation_id=18,
           error_code=3,
           error_message="registration 4 is not a publication of this client (client-protocol.md, Error codes)"),
+    # Version 7: a client's counter and its refusals.
+    event(ON_COUNTER_READY, "counter-ready", correlation_id=20, counter_id=97),
+    event(ON_COUNTER_READY, "counter-ready-extremes", correlation_id=2**63 - 1, counter_id=2**31 - 1),
+    event(ON_UNAVAILABLE_COUNTER, "unavailable-counter", registration_id=20, counter_id=97),
+    event(ON_UNAVAILABLE_COUNTER, "unavailable-counter-extremes", registration_id=2**63 - 1,
+          counter_id=2**31 - 1),
+    event(ON_OPERATION_SUCCESS, "operation-success-counter", correlation_id=21),
+    event(ON_ERROR, "error-unknown-counter", offending_correlation_id=21, error_code=5,
+          error_message="registration 20 is not a counter of this client (client-protocol.md, Error codes)"),
+    event(ON_ERROR, "error-counter-type-not-a-clients", offending_correlation_id=20, error_code=11,
+          error_message="counter type 19 is not one a client adds; add a counter whose scope is client in counters.toml (docs/reference/counters.md)"),
     # Invalid commands, by the reason a conforming implementation reports, in the order
     # the checks run.
     vector("command", ADD_PUBLICATION, "too-short-before-correlation-id", error="too-short",
            raw=struct.pack("<qi", 0, 1)),
-    # The reserved ids, one per range the page names: Aeron's gap, Aeron's ids past this
-    # version's, between the ranges, Cavalry's not yet taken, and above both.
-    vector("command", 9, "unknown-type-reserved", error="type",
-           raw=struct.pack("<qq", 0, 1)),
+    # The reserved ids, one per range the page names: Aeron's ids past this version's,
+    # between the ranges, Cavalry's not yet taken, and above both. Version 7 took 9 and
+    # 10, the gap the earlier versions left in Aeron's.
     vector("command", 12, "unknown-type-aeron-reserved", error="type",
            raw=struct.pack("<qq", 0, 1)),
     vector("command", 0x0100, "unknown-type-between", error="type",
@@ -344,6 +395,12 @@ VECTORS = [
            raw=struct.pack("<qqq", 3, 18, 4)),
     vector("command", REMOVE_DESTINATION, "remove-destination-too-short-no-registration-id",
            error="too-short", raw=struct.pack("<qq", 3, 19)),
+    vector("command", ADD_COUNTER, "add-counter-too-short-no-key", error="too-short",
+           raw=struct.pack("<qqi", 3, 20, 109)),
+    vector("command", ADD_COUNTER, "add-counter-too-short-no-label", error="too-short",
+           raw=struct.pack("<qqi", 3, 20, 109) + encode_bytes(bytes.fromhex(MEMBER_KEY))),
+    vector("command", REMOVE_COUNTER, "remove-counter-too-short-no-registration-id", error="too-short",
+           raw=struct.pack("<qq", 3, 21)),
     vector("command", ADD_PUBLICATION, "string-negative-length", error="string",
            raw=struct.pack("<qqii", 0, 1, 1001, -1)),
     vector("command", ADD_PUBLICATION, "string-over-4096", error="string",
@@ -358,6 +415,30 @@ VECTORS = [
            raw=struct.pack("<qqqqqii", 5, 13, 0, -1, -1, 2001, 11) + b"cavalry:ip"),
     vector("command", ADD_DESTINATION, "add-destination-string-runs-past-message", error="string",
            raw=struct.pack("<qqqi", 3, 18, 4, 11) + b"cavalry:ud"),
+    # A bytes field is checked as a string is.
+    vector("command", ADD_COUNTER, "add-counter-key-negative-length", error="string",
+           raw=struct.pack("<qqii", 3, 20, 109, -1)),
+    vector("command", ADD_COUNTER, "add-counter-key-runs-past-message", error="string",
+           raw=struct.pack("<qqii", 3, 20, 109, 4) + b"\x02\0"),
+    vector("command", ADD_COUNTER, "add-counter-label-runs-past-message", error="string",
+           raw=struct.pack("<qqi", 3, 20, 109) + encode_bytes(bytes.fromhex(MEMBER_KEY))
+           + struct.pack("<i", 25) + b"cluster.commit_position"),
+    # The counter's own bounds, checked after both fields are whole and before the length.
+    vector("command", ADD_COUNTER, "add-counter-key-over-112", error="counter",
+           raw=struct.pack("<qqi", 3, 20, 109) + encode_bytes(b"k" * (MAX_COUNTER_KEY + 1))
+           + encode_string(COUNTER_LABEL)),
+    vector("command", ADD_COUNTER, "add-counter-label-over-124", error="counter",
+           raw=struct.pack("<qqi", 3, 20, 109) + encode_bytes(bytes.fromhex(MEMBER_KEY))
+           + encode_string("l" * (MAX_COUNTER_LABEL + 1))),
+    vector("command", ADD_COUNTER, "add-counter-label-not-utf8", error="counter",
+           raw=struct.pack("<qqi", 3, 20, 109) + encode_bytes(bytes.fromhex(MEMBER_KEY))
+           + encode_bytes(b"cluster\xff")),
+    vector("command", ADD_COUNTER, "add-counter-order-string-before-counter", error="string",
+           raw=struct.pack("<qqi", 3, 20, 109) + encode_bytes(b"k" * (MAX_COUNTER_KEY + 1))
+           + struct.pack("<i", 25) + b"cluster.commit_position"),
+    vector("command", ADD_COUNTER, "add-counter-order-counter-before-length", error="counter",
+           raw=struct.pack("<qqi", 3, 20, 109) + encode_bytes(b"k" * (MAX_COUNTER_KEY + 1))
+           + encode_string(COUNTER_LABEL) + b"\0\0\0\0"),
     vector("command", ADD_PUBLICATION, "length-trailing-bytes", error="length",
            raw=encode(COMMANDS[ADD_PUBLICATION][1],
                       dict(client_id=0, correlation_id=1, stream_id=1001, channel=IPC)) + b"\0\0\0\0"),
@@ -380,10 +461,16 @@ VECTORS = [
     vector("command", REMOVE_DESTINATION, "remove-destination-length-trailing", error="length",
            raw=encode(COMMANDS[REMOVE_DESTINATION][1],
                       dict(client_id=3, correlation_id=19, registration_id=4, channel=DESTINATION)) + b"\0\0\0\0"),
+    vector("command", ADD_COUNTER, "add-counter-length-trailing", error="length",
+           raw=encode(COMMANDS[ADD_COUNTER][1],
+                      dict(client_id=3, correlation_id=20, counter_type_id=109, key=MEMBER_KEY,
+                           label=COUNTER_LABEL)) + b"\0\0\0\0"),
+    vector("command", REMOVE_COUNTER, "remove-counter-length-trailing", error="length",
+           raw=struct.pack("<qqqi", 3, 21, 20, 0)),
     # Invalid events, the same checks on the client's side.
     vector("event", ON_OPERATION_SUCCESS, "event-too-short", error="too-short",
            raw=struct.pack("<i", 3)),
-    vector("event", 0x0F08, "event-unknown-type", error="type", raw=struct.pack("<q", 3)),
+    vector("event", 0x0F0B, "event-unknown-type", error="type", raw=struct.pack("<q", 3)),
     vector("event", 0x1000, "event-unknown-type-between", error="type", raw=struct.pack("<q", 3)),
     vector("event", 0x1005, "event-unknown-type-cavalry-reserved", error="type",
            raw=struct.pack("<q", 3)),
@@ -400,6 +487,10 @@ VECTORS = [
            raw=struct.pack("<qqii", 13, 12288, 0, 0)),
     vector("event", ON_ERROR, "event-string-runs-past-message", error="string",
            raw=struct.pack("<qii", 4, 1, 8) + b"abc\0"),
+    vector("event", ON_COUNTER_READY, "event-counter-ready-too-short", error="too-short",
+           raw=struct.pack("<q", 20)),
+    vector("event", ON_UNAVAILABLE_COUNTER, "event-unavailable-counter-length-trailing", error="length",
+           raw=struct.pack("<qii", 20, 97, 0)),
     vector("event", ON_CLIENT_TIMEOUT, "event-length-trailing", error="length",
            raw=struct.pack("<qi", 5, 0)),
 ]
@@ -409,7 +500,7 @@ def main():
     out = Path(__file__).with_suffix(".json")
     names = [v["name"] for v in VECTORS]
     assert len(names) == len(set(names)), "vector names must be unique"
-    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 6,
+    out.write_text(json.dumps({"spec": "spec/client-protocol.md", "version": 7,
                                "generated_by": "spec/vectors/client-protocol.py",
                                "vectors": VECTORS}, indent=1) + "\n")
     print(f"wrote {out} ({len(VECTORS)} vectors)")

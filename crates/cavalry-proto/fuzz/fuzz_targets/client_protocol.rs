@@ -1,14 +1,14 @@
 //! The property tests/client_protocol_no_panic.rs checks on every commit, under
 //! libFuzzer for longer: under any type id, any bytes either decode to a command or an
 //! event that encodes to the same length and decodes again to the same value, or are
-//! rejected with one of the spec's four reasons, and nothing panics. The type id is
+//! rejected with one of the spec's five reasons, and nothing panics. The type id is
 //! the first four bytes of the input; the message is the rest.
 #![no_main]
 
 use cavalry_proto::client_protocol::{Command, Event};
 use libfuzzer_sys::fuzz_target;
 
-const REASONS: [&str; 4] = ["too-short", "type", "string", "length"];
+const REASONS: [&str; 5] = ["too-short", "type", "string", "counter", "length"];
 
 fuzz_target!(|data: &[u8]| {
     let Some((head, message)) = data.split_at_checked(4) else {

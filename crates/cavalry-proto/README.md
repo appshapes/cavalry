@@ -33,7 +33,9 @@ Wire types, zero-copy frames and version negotiation. Data plane.
 - Encodes and decodes the client protocol, `spec/client-protocol.md`: the commands a
   client sends the driver through the command ring and the events the driver answers
   with through the broadcast buffer, in `client_protocol`, with the spec's decoding
-  checks in the spec's order and strings borrowed from the message, never copied.
+  checks in the spec's order and strings borrowed from the message, never copied;
+  version 7 adds `add counter` and `remove counter` with their events, a key and a
+  label checked against a counters file record's bounds (ADR 0062).
 - Encodes and decodes the cluster protocol, `spec/cluster.md`: the messages of the
   log, consensus, ingress and egress streams and the snapshot marker under the 8-byte
   message header of schema 1, version 0, in `cluster`, with the spec's checks in the

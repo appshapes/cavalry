@@ -549,14 +549,51 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
     let mut client = Client::attach(dir.path());
 
-    // An unknown type, 9 in Aeron's reserved gap now that version 5 took 7 and 8
-    // (ADR 0053): code 6.
+    // An unknown type, 12, the first of Aeron's ids this version has not taken, now
+    // that version 5 took 7 and 8 (ADR 0053) and version 7 took 9 and 10 (ADR 0062):
+    // code 6.
     let unknown_type = client.correlation_id();
     let mut message = Vec::new();
     message.extend_from_slice(&client.id.to_le_bytes());
     message.extend_from_slice(&unknown_type.to_le_bytes());
-    client.send_raw(9, &message);
+    client.send_raw(12, &message);
     assert_eq!(client.wait_error(unknown_type).0, 6);
+
+    // The counter commands decode in version 7, and until the driver's registry of a
+    // client's counters lands (ADR 0062, the second of its three changes) the driver
+    // answers both with code 11 and a message that says so; it registers nothing.
+    for command in [
+        Command::AddCounter {
+            client_id: client.id,
+            correlation_id: client.correlation_id(),
+            type_id: 109,
+            key: &[2, 0, 0, 0],
+            label: b"cluster.commit_position 2",
+        },
+        Command::RemoveCounter {
+            client_id: client.id,
+            correlation_id: client.correlation_id(),
+            registration_id: 0,
+        },
+    ] {
+        client.send(&command);
+        let (code, text) = client.wait_error(command.correlation_id());
+        assert_eq!(code, 11, "{text}");
+        assert!(text.contains("ADR 0062"), "{text}");
+    }
+    // An add counter whose key is over its bound is refused when it is decoded, code 7.
+    let over = client.correlation_id();
+    let mut message = Vec::new();
+    message.extend_from_slice(&client.id.to_le_bytes());
+    message.extend_from_slice(&over.to_le_bytes());
+    message.extend_from_slice(&109i32.to_le_bytes());
+    message.extend_from_slice(&116i32.to_le_bytes());
+    message.extend_from_slice(&[7u8; 116]);
+    message.extend_from_slice(&0i32.to_le_bytes());
+    client.send_raw(CommandType::AddCounter as i32, &message);
+    let (code, text) = client.wait_error(over);
+    assert_eq!(code, 7);
+    assert!(text.contains("(counter)"), "{text}");
 
     // A cavalry:udp channel parses in version 4: a publication sends on one (ADR
     // 0041), a subscription receives on one (ADR 0042) and a replay plays on one (ADR
@@ -614,7 +651,7 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
 
     // A reserved type id is `type`, code 6, however long the record.
     let reserved = client.correlation_id();
-    client.send_raw(9, &over_long(reserved));
+    client.send_raw(12, &over_long(reserved));
     let (code, text) = client.wait_error(reserved);
     assert_eq!(code, 6);
     assert!(text.contains("(type)"), "{text}");
@@ -634,18 +671,21 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
         &client.id.to_le_bytes(),
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND) < 7 {
+    while counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND) < 8 {
         assert!(
             Instant::now() < deadline,
-            "rejected_command did not reach 7"
+            "rejected_command did not reach 8"
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 7);
-    // One more error than rejected commands less the two decoding refusals: the
+    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 8);
+    // Three more errors than rejected commands less the refusal with no answer: the
     // replay on a cavalry:udp channel is a well-formed command answered with code 21
-    // and counted in errors alone, as the retention refusals were before card 95.
-    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 7);
+    // and counted in errors alone, as the retention refusals were before card 95, and
+    // so are the two counter commands answered with code 11 until their registry
+    // lands (ADR 0062); the add counter over its key's bound is a decoding refusal,
+    // counted in both.
+    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 10);
     driver.close().expect("closes");
 }
 

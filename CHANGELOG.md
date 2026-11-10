@@ -1692,6 +1692,20 @@ user-visible change, added in the same commit as the change. The format follows
   `cavalry-client` and `cavalry-ffi` READMEs and `examples/quickstart.rs` said
   `not-connected` lasts until the subscription's image joins; they now say it lasts
   until the driver has made the image, which the subscription takes on a later poll.
+- `spec/client-protocol.md` version 7 adds a client's counter: `add counter` and
+  `remove counter`, Aeron's commands 9 and 10, answered with `counter ready` and
+  `unavailable counter`, Aeron's events 3848 and 3849, and error code 5, `unknown
+  counter`. A client adds a counter of a type `counters.toml` gives the new scope
+  `client`, with a key of at most 112 bytes and a label of at most 124, owns it and
+  alone writes its value; the driver frees it when the client removes it, closes or
+  is timed out, and holds at most 256. Every version 6 encoding is unchanged; a
+  version 6 client closes on the first of the two events, so an upgrade restarts
+  the clients before the driver. `cavalry-proto` reads and writes the two commands
+  and the two events over 28 new vectors, 143 in all, and the driver answers both
+  commands with code 11 until its registry lands, the second of the ADR's three
+  changes
+  ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
+  card 227).
 - The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
   appointed leader", the path the replicated log takes through the election's states
   until the election is built. The member with the lowest id leads; every other

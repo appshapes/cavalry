@@ -1,8 +1,9 @@
-//! The client protocol's commands and events: `spec/client-protocol.md`, version 6
+//! The client protocol's commands and events: `spec/client-protocol.md`, version 7
 //! (ADR 0019; the recording commands and events are ADR 0025, the replay commands and
 //! events ADR 0030, the retention commands ADR 0031, the `cavalry:udp` channel, the
 //! channel status indicator id and error codes 4 and 9 ADR 0040, the destination
-//! commands ADR 0053, the armed recording and the position keys ADR 0059).
+//! commands ADR 0053, the armed recording and the position keys ADR 0059, a client's
+//! counter ADR 0062).
 //!
 //! A [`Command`] is the message of a command ring record whose type is a
 //! [`CommandType`]; an [`Event`] is the message of a broadcast buffer record whose type
@@ -44,10 +45,17 @@
 use core::fmt;
 
 /// The version of `spec/client-protocol.md` this crate reads and writes.
-pub const VERSION: i32 = 6;
+pub const VERSION: i32 = 7;
 
 /// The longest string field, in bytes: `spec/client-protocol.md`, "Encoding".
 pub const MAX_STRING_LENGTH: usize = 4096;
+
+/// The longest key of an `add counter`, in bytes: the key of a counters file record
+/// (`spec/counters-file.md`, "Metadata record"; ADR 0062).
+pub const MAX_COUNTER_KEY_LENGTH: usize = 112;
+
+/// The longest label of an `add counter`, in bytes: the label of a counters file record.
+pub const MAX_COUNTER_LABEL_LENGTH: usize = 124;
 
 /// The bytes every command begins with: the client id and the correlation id.
 pub const CORRELATED_LENGTH: usize = 16;
@@ -106,6 +114,12 @@ pub enum CommandType {
     AddDestination = 7,
     /// Remove a destination from a publication's send endpoint.
     RemoveDestination = 8,
+    /// Add a counter of a type `counters.toml` gives a client, which the client then
+    /// owns and writes, under Aeron's number (`spec/client-protocol.md`, version 7;
+    /// ADR 0062).
+    AddCounter = 9,
+    /// Remove a counter the client added.
+    RemoveCounter = 10,
     /// Remove everything of the client's and forget it. No answer.
     ClientClose = 11,
     /// Record the live publication on a stream and channel to the durable log; the first
@@ -143,6 +157,8 @@ impl TryFrom<i32> for CommandType {
             6 => Ok(CommandType::ClientKeepalive),
             7 => Ok(CommandType::AddDestination),
             8 => Ok(CommandType::RemoveDestination),
+            9 => Ok(CommandType::AddCounter),
+            10 => Ok(CommandType::RemoveCounter),
             11 => Ok(CommandType::ClientClose),
             0x0101 => Ok(CommandType::StartRecording),
             0x0102 => Ok(CommandType::StopRecording),
@@ -175,6 +191,11 @@ pub enum EventType {
     ExclusivePublicationReady = 0x0F06,
     /// A subscription is registered.
     SubscriptionReady = 0x0F07,
+    /// A client's counter is registered and its record allocated (ADR 0062).
+    CounterReady = 0x0F08,
+    /// A client's counter is about to be freed: removed by its owner, or its owner
+    /// closed or timed out; sent to every client.
+    UnavailableCounter = 0x0F09,
     /// The driver timed a client out and removed everything of its.
     ClientTimeout = 0x0F0A,
     /// A recording is in the catalog with its files and its two counters; the first of
@@ -205,6 +226,8 @@ impl TryFrom<i32> for EventType {
             0x0F05 => Ok(EventType::UnavailableImage),
             0x0F06 => Ok(EventType::ExclusivePublicationReady),
             0x0F07 => Ok(EventType::SubscriptionReady),
+            0x0F08 => Ok(EventType::CounterReady),
+            0x0F09 => Ok(EventType::UnavailableCounter),
             0x0F0A => Ok(EventType::ClientTimeout),
             0x1001 => Ok(EventType::RecordingReady),
             0x1002 => Ok(EventType::RecordingStopped),
@@ -234,6 +257,9 @@ pub enum ErrorCode {
     /// A `cavalry:udp` endpoint's socket could not be opened, bound or connected; the
     /// message carries the operating system's reason and the endpoint (ADR 0040).
     ChannelEndpointError = 4,
+    /// Remove counter named a registration the driver does not know, or another
+    /// client's (ADR 0062).
+    UnknownCounter = 5,
     /// The record's type is not a command of this version.
     UnknownCommandType = 6,
     /// The message failed a decoding check after its first 16 bytes were read.
@@ -269,6 +295,7 @@ impl ErrorCode {
             2 => Some(ErrorCode::UnknownSubscription),
             3 => Some(ErrorCode::UnknownPublication),
             4 => Some(ErrorCode::ChannelEndpointError),
+            5 => Some(ErrorCode::UnknownCounter),
             6 => Some(ErrorCode::UnknownCommandType),
             7 => Some(ErrorCode::MalformedCommand),
             9 => Some(ErrorCode::UnknownHost),
@@ -349,6 +376,14 @@ pub enum ProtocolError {
         /// The bytes left for the string and its padding, after its length field.
         available: usize,
     },
+    /// An `add counter`'s key is longer than [`MAX_COUNTER_KEY_LENGTH`], or its label is
+    /// longer than [`MAX_COUNTER_LABEL_LENGTH`] or is not UTF-8.
+    Counter {
+        /// The key's length in bytes.
+        key: usize,
+        /// The label's length in bytes.
+        label: usize,
+    },
     /// The message is longer than its fields.
     Length {
         /// The message's length.
@@ -360,12 +395,13 @@ pub enum ProtocolError {
 
 impl ProtocolError {
     /// The reason's name in `spec/client-protocol.md`, "What the driver rejects":
-    /// `too-short`, `type`, `string` or `length`.
+    /// `too-short`, `type`, `string`, `counter` or `length`.
     pub const fn reason(self) -> &'static str {
         match self {
             ProtocolError::TooShort { .. } => "too-short",
             ProtocolError::Type { .. } => "type",
             ProtocolError::String { .. } => "string",
+            ProtocolError::Counter { .. } => "counter",
             ProtocolError::Length { .. } => "length",
         }
     }
@@ -401,6 +437,13 @@ impl fmt::Display for ProtocolError {
                 "message rejected (string): a string of length {length} with {available} \
                  bytes available, the bound is 0 to {MAX_STRING_LENGTH} inside the message; \
                  the record is corrupt or the writer does not conform; see {DOC}"
+            ),
+            ProtocolError::Counter { key, label } => write!(
+                f,
+                "message rejected (counter): a key of {key} bytes and a label of {label}, \
+                 the bounds are {MAX_COUNTER_KEY_LENGTH} and {MAX_COUNTER_LABEL_LENGTH} and \
+                 the label is UTF-8; shorten the one over its bound, or give a label that \
+                 is UTF-8; see {DOC}"
             ),
             ProtocolError::Length { given, expected } => write!(
                 f,
@@ -499,6 +542,31 @@ pub enum Command<'a> {
         registration_id: i64,
         /// The destination to remove, as it was added.
         channel: &'a [u8],
+    },
+    /// Type 9: a counter for the client to own (`spec/client-protocol.md`, version 7;
+    /// ADR 0062).
+    AddCounter {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id, which becomes the counter's registration id; the answer
+        /// names it.
+        correlation_id: i64,
+        /// The `id` of a counter to which `counters.toml` gives the scope `client`.
+        type_id: i32,
+        /// The counter's key, opaque, at most [`MAX_COUNTER_KEY_LENGTH`] bytes.
+        key: &'a [u8],
+        /// The counter's label, UTF-8, at most [`MAX_COUNTER_LABEL_LENGTH`] bytes.
+        label: &'a [u8],
+    },
+    /// Type 10.
+    RemoveCounter {
+        /// The client's id.
+        client_id: i64,
+        /// This command's id; the answer names it.
+        correlation_id: i64,
+        /// The client's registration of the counter: the correlation id of its add
+        /// command.
+        registration_id: i64,
     },
     /// Type 11. No answer.
     ClientClose {
@@ -604,6 +672,8 @@ impl<'a> Command<'a> {
             Command::ClientKeepalive { .. } => CommandType::ClientKeepalive,
             Command::AddDestination { .. } => CommandType::AddDestination,
             Command::RemoveDestination { .. } => CommandType::RemoveDestination,
+            Command::AddCounter { .. } => CommandType::AddCounter,
+            Command::RemoveCounter { .. } => CommandType::RemoveCounter,
             Command::ClientClose { .. } => CommandType::ClientClose,
             Command::StartRecording { .. } => CommandType::StartRecording,
             Command::StopRecording { .. } => CommandType::StopRecording,
@@ -626,6 +696,8 @@ impl<'a> Command<'a> {
             | Command::ClientKeepalive { client_id, .. }
             | Command::AddDestination { client_id, .. }
             | Command::RemoveDestination { client_id, .. }
+            | Command::AddCounter { client_id, .. }
+            | Command::RemoveCounter { client_id, .. }
             | Command::ClientClose { client_id, .. }
             | Command::StartRecording { client_id, .. }
             | Command::StopRecording { client_id, .. }
@@ -648,6 +720,8 @@ impl<'a> Command<'a> {
             | Command::ClientKeepalive { correlation_id, .. }
             | Command::AddDestination { correlation_id, .. }
             | Command::RemoveDestination { correlation_id, .. }
+            | Command::AddCounter { correlation_id, .. }
+            | Command::RemoveCounter { correlation_id, .. }
             | Command::ClientClose { correlation_id, .. }
             | Command::StartRecording { correlation_id, .. }
             | Command::StopRecording { correlation_id, .. }
@@ -663,7 +737,8 @@ impl<'a> Command<'a> {
     /// spec's checks in the spec's order: a message shorter than
     /// [`CORRELATED_LENGTH`] is `too-short` before the type is looked at, since there
     /// is no correlation id to answer; then the type; then the fields, each string's
-    /// bound, and the message's length against the fields'.
+    /// bound, an `add counter`'s key and label against their own bounds, and the
+    /// message's length against the fields'.
     pub fn parse(type_id: i32, message: &'a [u8]) -> Result<Self, ProtocolError> {
         if message.len() < CORRELATED_LENGTH {
             return Err(ProtocolError::TooShort {
@@ -720,6 +795,24 @@ impl<'a> Command<'a> {
                 registration_id: cursor.i64()?,
                 channel: cursor.string()?,
             },
+            CommandType::AddCounter => {
+                let type_id = cursor.i32()?;
+                let key = cursor.string()?;
+                let label = cursor.string()?;
+                check_counter(key, label)?;
+                Command::AddCounter {
+                    client_id,
+                    correlation_id,
+                    type_id,
+                    key,
+                    label,
+                }
+            }
+            CommandType::RemoveCounter => Command::RemoveCounter {
+                client_id,
+                correlation_id,
+                registration_id: cursor.i64()?,
+            },
             CommandType::ClientClose => Command::ClientClose {
                 client_id,
                 correlation_id,
@@ -772,7 +865,8 @@ impl<'a> Command<'a> {
     }
 
     /// The message's length in bytes, or [`ProtocolError::String`] when a string is
-    /// longer than [`MAX_STRING_LENGTH`].
+    /// longer than [`MAX_STRING_LENGTH`], or [`ProtocolError::Counter`] when an `add
+    /// counter`'s key or label is outside its bound.
     pub fn encoded_length(&self) -> Result<usize, ProtocolError> {
         let mut length = Measure(0);
         self.encode(&mut length)?;
@@ -780,9 +874,13 @@ impl<'a> Command<'a> {
     }
 
     /// Writes the message into the front of `buffer` and returns its length. Fails with
-    /// [`ProtocolError::String`] when a string is longer than [`MAX_STRING_LENGTH`] and
-    /// with [`ProtocolError::TooShort`] when `buffer` is shorter than the message;
-    /// nothing is written then.
+    /// [`ProtocolError::String`] when a string is longer than [`MAX_STRING_LENGTH`],
+    /// with [`ProtocolError::Counter`] when an `add counter`'s key or label is outside
+    /// its bound, and with [`ProtocolError::TooShort`] when `buffer` is shorter than the
+    /// message; nothing is written then. An `add counter`'s bounds are checked first,
+    /// so a key or a label longer than [`MAX_STRING_LENGTH`] is `counter` here, where
+    /// [`parse`](Self::parse), which reads each field before it checks the counter, calls
+    /// it `string`; both are a malformed command, code 7.
     pub fn write(&self, buffer: &mut [u8]) -> Result<usize, ProtocolError> {
         let needed = self.encoded_length()?;
         if buffer.len() < needed {
@@ -797,6 +895,10 @@ impl<'a> Command<'a> {
     }
 
     fn encode(&self, out: &mut impl Sink) -> Result<(), ProtocolError> {
+        if let Command::AddCounter { key, label, .. } = *self {
+            // Before a byte is written, so that a refused command writes nothing.
+            check_counter(key, label)?;
+        }
         out.i64(self.client_id())?;
         out.i64(self.correlation_id())?;
         match *self {
@@ -820,7 +922,20 @@ impl<'a> Command<'a> {
             }
             | Command::RemoveSubscription {
                 registration_id, ..
+            }
+            | Command::RemoveCounter {
+                registration_id, ..
             } => out.i64(registration_id),
+            Command::AddCounter {
+                type_id,
+                key,
+                label,
+                ..
+            } => {
+                out.i32(type_id)?;
+                out.string(key)?;
+                out.string(label)
+            }
             Command::AddDestination {
                 registration_id,
                 channel,
@@ -965,6 +1080,20 @@ pub enum Event<'a> {
         /// `cavalry:ipc` (ADR 0040).
         channel_status_indicator_id: i32,
     },
+    /// Type `0x0F08`: a client's counter is registered (ADR 0062).
+    CounterReady {
+        /// The add command's correlation id, the counter's registration id.
+        correlation_id: i64,
+        /// The record the driver allocated, whose value the client owns.
+        counter_id: i32,
+    },
+    /// Type `0x0F09`: a client's counter is about to be freed; sent to every client.
+    UnavailableCounter {
+        /// The counter's registration id, as `counter ready` named it.
+        registration_id: i64,
+        /// The record about to be freed.
+        counter_id: i32,
+    },
     /// Type `0x0F0A`: a client was timed out.
     ClientTimeout {
         /// The client the driver timed out.
@@ -1029,6 +1158,8 @@ impl<'a> Event<'a> {
             Event::UnavailableImage { .. } => EventType::UnavailableImage,
             Event::ExclusivePublicationReady { .. } => EventType::ExclusivePublicationReady,
             Event::SubscriptionReady { .. } => EventType::SubscriptionReady,
+            Event::CounterReady { .. } => EventType::CounterReady,
+            Event::UnavailableCounter { .. } => EventType::UnavailableCounter,
             Event::ClientTimeout { .. } => EventType::ClientTimeout,
             Event::RecordingReady { .. } => EventType::RecordingReady,
             Event::RecordingStopped { .. } => EventType::RecordingStopped,
@@ -1088,6 +1219,14 @@ impl<'a> Event<'a> {
             EventType::SubscriptionReady => Event::SubscriptionReady {
                 correlation_id: cursor.i64()?,
                 channel_status_indicator_id: cursor.i32()?,
+            },
+            EventType::CounterReady => Event::CounterReady {
+                correlation_id: cursor.i64()?,
+                counter_id: cursor.i32()?,
+            },
+            EventType::UnavailableCounter => Event::UnavailableCounter {
+                registration_id: cursor.i64()?,
+                counter_id: cursor.i32()?,
             },
             EventType::ClientTimeout => Event::ClientTimeout {
                 client_id: cursor.i64()?,
@@ -1206,6 +1345,20 @@ impl<'a> Event<'a> {
                 out.i64(correlation_id)?;
                 out.i32(channel_status_indicator_id)
             }
+            Event::CounterReady {
+                correlation_id,
+                counter_id,
+            } => {
+                out.i64(correlation_id)?;
+                out.i32(counter_id)
+            }
+            Event::UnavailableCounter {
+                registration_id,
+                counter_id,
+            } => {
+                out.i64(registration_id)?;
+                out.i32(counter_id)
+            }
             Event::UnavailableImage {
                 correlation_id,
                 subscriber_registration_id,
@@ -1264,6 +1417,22 @@ impl<'a> Event<'a> {
             }
         }
     }
+}
+
+/// The `counter` check of `spec/client-protocol.md`, "What the driver rejects": an `add
+/// counter`'s key and label against the bounds of a counters file record, and the
+/// label's UTF-8.
+fn check_counter(key: &[u8], label: &[u8]) -> Result<(), ProtocolError> {
+    if key.len() > MAX_COUNTER_KEY_LENGTH
+        || label.len() > MAX_COUNTER_LABEL_LENGTH
+        || core::str::from_utf8(label).is_err()
+    {
+        return Err(ProtocolError::Counter {
+            key: key.len(),
+            label: label.len(),
+        });
+    }
+    Ok(())
 }
 
 /// A string's length on the wire: its length field, its bytes and its padding to a
@@ -1464,6 +1633,43 @@ mod tests {
     }
 
     #[test]
+    fn an_add_counter_past_a_bound_is_refused_reading_and_before_writing() {
+        let key = [7u8; MAX_COUNTER_KEY_LENGTH + 1];
+        let label = [b'l'; MAX_COUNTER_LABEL_LENGTH + 1];
+        let add = |key, label| Command::AddCounter {
+            client_id: 3,
+            correlation_id: 20,
+            type_id: 109,
+            key,
+            label,
+        };
+        // At the bounds the command writes and reads back.
+        let whole = add(
+            &key[..MAX_COUNTER_KEY_LENGTH],
+            &label[..MAX_COUNTER_LABEL_LENGTH],
+        );
+        let mut buffer = [0xAAu8; 512];
+        let length = whole.write(&mut buffer).expect("at the bounds");
+        assert_eq!(length, 16 + 4 + (4 + 112) + (4 + 124));
+        let read = Command::parse(CommandType::AddCounter as i32, &buffer[..length]);
+        assert_eq!(read, Ok(whole));
+        // One byte past either, or a label that is not UTF-8, is `counter`, answered
+        // with code 7, and the writer writes nothing.
+        for refused in [
+            add(&key, b"cluster.commit_position 2"),
+            add(&[2, 0, 0, 0], &label),
+            add(&[2, 0, 0, 0], b"cluster\xFF"),
+        ] {
+            let mut untouched = [0xAAu8; 512];
+            let error = refused.write(&mut untouched).expect_err("past a bound");
+            assert_eq!(error.reason(), "counter");
+            assert_eq!(error.error_code(), Some(ErrorCode::MalformedCommand));
+            assert_eq!(refused.encoded_length(), Err(error));
+            assert!(untouched.iter().all(|byte| *byte == 0xAA));
+        }
+    }
+
+    #[test]
     fn the_error_code_follows_the_spec_order() {
         assert_eq!(
             ProtocolError::TooShort {
@@ -1504,8 +1710,18 @@ mod tests {
         );
         assert_eq!(
             ErrorCode::from_code(5),
+            Some(ErrorCode::UnknownCounter),
+            "version 7 takes Aeron's code 5"
+        );
+        assert_eq!(ErrorCode::UnknownCounter.code(), 5);
+        assert_eq!(
+            ErrorCode::from_code(8),
             None,
-            "Aeron's unknown counter, reserved"
+            "Aeron's not supported, reserved"
+        );
+        assert_eq!(
+            ProtocolError::Counter { key: 113, label: 0 }.error_code(),
+            Some(ErrorCode::MalformedCommand)
         );
         assert_eq!(ErrorCode::from_code(9), Some(ErrorCode::UnknownHost));
         assert_eq!(ErrorCode::UnknownHost.code(), 9);
@@ -1572,6 +1788,7 @@ mod tests {
                 length: -1,
                 available: 4,
             },
+            ProtocolError::Counter { key: 113, label: 0 },
             ProtocolError::Length {
                 given: 5,
                 expected: 4,
