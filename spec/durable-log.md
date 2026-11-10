@@ -226,12 +226,11 @@ valid entry's term is above every valid entry's before it and its base at least
 theirs, so the entries a reader takes are the member's terms in order; the term base
 log position of the first term a member records is the position of its log at the
 time, 0 for a cluster's first term. The reader takes entries in file order, skips an
-entry whose state is 3, and stops at the first entry whose state is 0, the file's end,
-or whose checksum fails with no entry or an empty entry after it, the torn tail of a
-crash, which the next write overwrites. An entry whose checksum fails with an entry
-that is not empty after it is not a torn tail: the writer syncs an entry's fields and
-checksum before it writes the state, so no crash leaves it, the file is damaged, and
-the reader refuses it with `checksum` and drops no term. The member's candidate term
+entry whose state is 3, and stops at the first entry whose state is 0, the file's end:
+the torn tail of a crash, which the next write overwrites. An entry whose state is 1
+or 3 and whose checksum fails is damage wherever it is, the last entry included: the
+writer syncs an entry's fields and checksum before it writes the state, so no crash
+leaves it, and the reader refuses the file with `checksum` and drops no term. The member's candidate term
 at its start is the higher of the stored candidate term and its log leadership term
 id, as "Roles and the election" of `spec/cluster.md` has init take it.
 
@@ -367,8 +366,11 @@ term id again. It raises the candidate term in one synced write, the other slot'
 value and checksum, before the vote or request vote that raises it is sent. A crash
 leaves at most one write torn, which the reader reads as the state before it: an
 empty entry, a valid entry not yet deleted, or the candidate term stored before the
-raise. The recovery pass of this section leaves the file alone: it names files by
-recording id, and `terms` is none.
+raise. At a member's start the module checks the file's length against the bound
+before it reads a byte of it, so that what it reads is bounded: a file over the bound
+is `length` whatever its header holds, and every other file gets the checks of "What
+a reader rejects" in their order. The recovery pass of this section leaves the file
+alone: it names files by recording id, and `terms` is none.
 
 ## What a reader rejects
 
@@ -444,7 +446,7 @@ An entry, with its index and the entry before it:
 | Check | Reported when |
 | --- | --- |
 | `state` | The state is not 0, 1 or 3. |
-| `checksum` | The state is 1 or 3 and the checksum does not match bytes 8 to 32. With no entry or an empty entry after it, the entry is the torn tail of a crash and the file ends here; with an entry that is not empty after it, the file is damaged and the reader refuses it. |
+| `checksum` | The state is 1 or 3 and the checksum does not match bytes 8 to 32: the file is damaged, since no crash leaves it, and the reader refuses it. |
 | `term` | The term is below 0, or not above the valid entry before it. |
 | `position` | The term base log position is below 0, not a multiple of 32, or below the valid entry's before it. |
 | `recording` | The recording id is below −1. |

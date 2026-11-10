@@ -51,10 +51,10 @@ entry's fields are written once, by its append, and only its state changes after
 The writer appends an entry by writing its checksum and fields and syncing, then its
 state, 1, and syncing; truncates by writing state 3 over each entry whose base is
 above the position and syncing; and a reader takes entries in file order, skipping
-state 3, stopping at the first entry whose state is 0, or whose checksum fails with
-no entry after it, the torn tail of a crash; a checksum that fails before another
-entry is damage the reader refuses, with no term dropped, since the append's order
-lets no crash leave it. The file holds at most 1048576 entries, the catalog's bound on recordings,
+state 3, stopping at the first entry whose state is 0, the empty entry a torn append
+leaves; a checksum that fails under a state of 1 or 3 is damage the reader refuses
+wherever the entry is, the last included, with no term dropped, since the append's
+order lets no crash leave it. The file holds at most 1048576 entries, the catalog's bound on recordings,
 and `cavalry doctor` warns from 90 percent of it; a member refuses to record a term
 past the bound with `terms full`, and the operator starts a new directory, as for the
 catalog. The recovery pass leaves the file alone: it names files by recording id, and
@@ -132,16 +132,17 @@ in any of the five languages.
   a short file or a zero magic, which a reader cannot tell from damage, so a member
   that crashed while it first started would wait for an operator. The catalog's
   header is written with its magic last for the same reason.
-- **A failing entry checksum always read as the torn tail.** Lost: invariant 1. The
-  append syncs an entry's fields and checksum before it writes the state, so a
-  failing checksum under a state of 1 or 3 with an entry after it is not a crash's
-  work. Ending the file there would drop every later term in silence, and the next
-  append would write over the damaged entry.
+- **A failing entry checksum read as the torn tail, always or when it is the last
+  entry's.** Lost: invariant 1. The append syncs an entry's fields and checksum before
+  it writes the state, so a failing checksum under a state of 1 or 3 is not a crash's
+  work, whatever follows the entry. Ending the file there would drop that term and
+  every later one in silence, a term the member may have reported append positions
+  in, and the next append would write over the damaged entry and give its positions
+  to the term before it.
 - **Setting a term's recording id in place once its recording exists.** Lost: the
   entry's one checksum covers the recording id, so a rewrite torn by a crash leaves a
-  valid state over a checksum that fails. A reader takes that entry for the torn tail
-  when it is the last and for damage when it is not, so a crash during the rewrite
-  would stop the member or drop the term. A second checksum over the recording id alone
+  valid state over a checksum that fails, which a reader takes for damage, so a crash
+  during the rewrite would stop the member until an operator acts. A second checksum over the recording id alone
   would make the rewrite safe, at the cost of a wider entry and a fifth write. Until
   the consensus module needs the id of a recording that starts after its term is
   recorded, a term recorded before its recording exists keeps −1. The module then
