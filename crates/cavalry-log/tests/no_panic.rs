@@ -8,6 +8,10 @@ use cavalry_log::layout::{
     CatalogHeader, DESCRIPTOR_LENGTH, Descriptor, ENTRY_LENGTH, HEADER_LENGTH, IndexEntry,
     IndexHeader, Recording, crc32, locate,
 };
+use cavalry_log::terms::{
+    self, ENTRY_LENGTH as TERMS_ENTRY_LENGTH, HEADER_LENGTH as TERMS_HEADER_LENGTH, MAX_ENTRIES,
+    TermsEntry, TermsHeader,
+};
 
 struct XorShift(u64);
 
@@ -26,7 +30,7 @@ impl XorShift {
     }
 }
 
-const REASONS: [&str; 19] = [
+const REASONS: [&str; 24] = [
     "too-short",
     "not-ready",
     "magic",
@@ -46,6 +50,11 @@ const REASONS: [&str; 19] = [
     "string",
     "order",
     "frame",
+    "entry-length",
+    "candidate",
+    "term",
+    "recording",
+    "terms-full",
 ];
 
 fn named(reason: &str) {
@@ -185,6 +194,83 @@ fn index_headers_and_entries_never_panic() {
                 &entry.encode()[..],
                 &entry_bytes[..ENTRY_LENGTH],
                 "an entry has no reserved bytes"
+            ),
+            Err(error) => named(error.reason()),
+        }
+    }
+}
+
+#[test]
+fn terms_headers_and_entries_never_panic() {
+    let mut random = XorShift(0xBF58_476D_1CE4_E5B9);
+    let bound = TERMS_HEADER_LENGTH as u64 + MAX_ENTRIES * TERMS_ENTRY_LENGTH as u64;
+    for round in 0..20_000 {
+        let length = if round % 4 == 0 {
+            (random.next() % 100) as usize
+        } else {
+            TERMS_HEADER_LENGTH
+        };
+        let mut bytes = random.bytes(length);
+        if round % 3 == 0 && bytes.len() >= 16 {
+            bytes[..8].copy_from_slice(b"CVLYTERM");
+            bytes[8..12].copy_from_slice(&0i32.to_le_bytes());
+            bytes[12..16].copy_from_slice(&(TERMS_ENTRY_LENGTH as i32).to_le_bytes());
+        }
+        // The candidate slots: both checksums right, one right, or neither.
+        if round % 2 == 0 && bytes.len() >= 28 {
+            let crc = crc32(&bytes[16..24]);
+            bytes[24..28].copy_from_slice(&crc.to_le_bytes());
+        }
+        if round % 3 != 1 && bytes.len() >= 44 {
+            let crc = crc32(&bytes[32..40]);
+            bytes[40..44].copy_from_slice(&crc.to_le_bytes());
+        }
+        // Lengths around the bound as well as well inside it.
+        let file_length = if round % 5 == 0 {
+            bound - 64 + random.next() % 128
+        } else {
+            random.next() % (TERMS_HEADER_LENGTH as u64 * 100)
+        };
+        match TermsHeader::parse(&bytes, file_length) {
+            Ok(header) => {
+                let again =
+                    TermsHeader::parse(&header.encode(), file_length).expect("encoded bytes parse");
+                assert_eq!(again, header);
+            }
+            Err(error) => named(error.reason()),
+        }
+        let entry_length = if round % 7 == 0 {
+            (random.next() % 40) as usize
+        } else {
+            TERMS_ENTRY_LENGTH
+        };
+        let mut entry_bytes = random.bytes(entry_length);
+        if round % 2 == 0 && entry_bytes.len() >= 4 {
+            let state = [terms::EMPTY, terms::VALID, terms::DELETED][(random.next() % 3) as usize];
+            entry_bytes[..4].copy_from_slice(&state.to_le_bytes());
+        }
+        if round % 3 == 0 && entry_bytes.len() == TERMS_ENTRY_LENGTH {
+            let crc = crc32(&entry_bytes[8..]);
+            entry_bytes[4..8].copy_from_slice(&crc.to_le_bytes());
+        }
+        let previous = (round % 4 != 0).then(|| TermsEntry {
+            state: terms::VALID,
+            leadership_term_id: (random.next() % 1_000) as i64,
+            term_base_log_position: ((random.next() % 1_000) as i64) * 32,
+            recording_id: (random.next() % 1_000) as i64 - 1,
+        });
+        match TermsEntry::parse(&entry_bytes, previous.as_ref()) {
+            Ok(entry) if entry.state == terms::EMPTY => {
+                // An empty entry's other bytes are not read, so its encoding is zeros
+                // that parse to the same empty entry.
+                let again = TermsEntry::parse(&entry.encode(), previous.as_ref())
+                    .expect("encoded bytes parse");
+                assert_eq!(again, entry);
+            }
+            Ok(entry) => assert_eq!(
+                &entry.encode()[..],
+                &entry_bytes[..TERMS_ENTRY_LENGTH],
+                "a valid or deleted entry has no reserved bytes"
             ),
             Err(error) => named(error.reason()),
         }

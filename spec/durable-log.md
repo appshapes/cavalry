@@ -1,4 +1,4 @@
-# The durable log, version 0
+# The durable log, version 2
 
 The on-disk record of a stream: what the driver writes when it records a publication,
 and what `cavalry replay` and `just replay-check` read back. A directory, the driver's
@@ -7,7 +7,13 @@ time index per recording. The catalog and the time index each start with a heade
 carries a magic and a version, and a reader rejects a version it does not know; a
 segment file has no header, and the catalog's version governs it. In Aeron, this is
 Archive's catalog and recording segments
-([glossary](../docs/glossary.md)). Decided in ADR 0024; the slice is ADR 0023.
+([glossary](../docs/glossary.md)). Decided in ADR 0024; the slice is ADR 0023. Version
+1 added the retained group a slot may hold (ADR 0031). Version 2 adds the terms file,
+a cluster member's record of the terms it has recorded and the candidate term it has
+stored, which `spec/cluster.md`, "The log", names and which the consensus module of
+`cavalry-raft` writes and reads (ADR 0060); a directory with no cluster member has no
+terms file, and a reader of version 1 ignores one, as it ignores every file it does
+not name.
 
 Integers are little-endian; offsets and lengths are in bytes; signed fields are two's
 complement; a timestamp is nanoseconds since the Unix epoch as an i64. A position is
@@ -21,6 +27,7 @@ from the start of the stream, a multiple of 32.
 | `catalog` | The header and one 1024-byte slot per recording; a recording's id is its slot's index. |
 | `<recording id>-<segment base position>.rec` | A segment of the recording: the log buffer's raw term bytes from the segment base position, frame headers and padding included. |
 | `<recording id>.idx` | The time index: one (timestamp, position) entry at the start of the recording and then at most once per millisecond while the position moves. |
+| `terms` | A cluster member's record of recorded terms and its candidate term ("Terms"); absent on a driver that is no member. |
 
 A recording id and a segment base position are written in decimal with no sign and no
 leading zeros. Nothing else lives in the directory; a reader ignores files it does not
@@ -172,6 +179,75 @@ the replay's rule, not the format's. The granularity of an instant is the record
 cadence, one millisecond. The index and the segments grow with the recording until
 retention removes them.
 
+## Terms
+
+A cluster member's record of the terms it has recorded, each with its term base log
+position and the recording of the term in this directory, and the candidate term it
+has stored, the highest term it has voted in or proposed (`spec/cluster.md`, "The
+log"). In Aeron, this is the recording log and the node state file, one file here
+(ADR 0060). The file is `terms` in the log directory: a 64-byte header, then 32-byte
+entries in the order they were written.
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 8 | magic | bytes | the bytes `43 56 4C 59 54 45 52 4D` (`CVLYTERM`), written last when the file is created; eight zero bytes until then |
+| 8 | 4 | version | i32 | 0 |
+| 12 | 4 | entry length | i32 | 32 |
+| 16 | 8 | candidate term, slot 0 | i64 | −1 for none, else 0 or more |
+| 24 | 4 | candidate checksum, slot 0 | u32 | the zlib CRC32 of bytes 16 to 24 |
+| 28 | 4 | reserved | bytes | written as 0, never read |
+| 32 | 8 | candidate term, slot 1 | i64 | −1 for none, else 0 or more |
+| 40 | 4 | candidate checksum, slot 1 | u32 | the zlib CRC32 of bytes 32 to 40 |
+| 44 | 20 | reserved | bytes | written as 0, never read |
+
+The candidate term is stored in two slots, so that a raise a crash tears reads as the
+candidate term stored before it. The stored candidate term is the higher of the slots
+whose checksum matches. A raise writes only the other slot, the one the stored
+candidate term is not read from, slot 1 when both slots hold it. A slot whose checksum
+does not match is the raise a crash tore, and it is not read. A crash tears at most one
+slot, so a file in which neither checksum matches is damaged, as is one in which a slot
+whose checksum matches holds a value below −1, and the reader refuses both with
+`candidate`.
+
+Entry i is at 64 + i × 32. A reader ignores bytes past the last whole entry, which a
+write cut short can leave; the next append writes over them.
+
+| Offset | Size | Field | Type | Bound |
+| --- | --- | --- | --- | --- |
+| 0 | 4 | state | i32 | 0, empty, the entry's other bytes are not read: the file's end when it is the last whole entry, and damage before it; 1, valid; 3, deleted, a term truncation dropped |
+| 4 | 4 | checksum | u32 | the zlib CRC32 of bytes 8 to 32 |
+| 8 | 8 | leadership term id | i64 | 0 or more, above every valid entry before it |
+| 16 | 8 | term base log position | i64 | 0 or more, a multiple of 32, at least every valid entry's before it |
+| 24 | 8 | recording id | i64 | the recording of this term in the catalog, or −1 for a term that has none when its entry is appended; written once, by the append |
+
+The file holds at most 1048576 entries, the catalog's bound on recordings; a member
+that would record a term past it refuses with `terms full`, and the operator starts a
+new directory, as for a full catalog; `cavalry doctor` warns from 90 percent of it. A
+valid entry's term is above every valid entry's before it and its base at least
+theirs, so the entries a reader takes are the member's terms in order; the term base
+log position of the first term a member records is the position of its log at the
+time, 0 for a cluster's first term. The reader takes entries in file order, skips an
+entry whose state is 3, and stops at an entry whose state is 0 when it is the file's
+last whole entry: the torn tail of a crash, which the next write overwrites. With one
+writer only the last entry can be empty, since an append writes entry i only after
+entry i − 1's state is synced. An empty entry before the last is damage, as an empty
+catalog slot before the last is, and the reader refuses the file with `state` and
+drops no term. An entry whose state is 1
+or 3 and whose checksum fails is damage wherever it is, the last entry included: the
+writer syncs an entry's fields and checksum before it writes the state, so no crash
+leaves it, and the reader refuses the file with `checksum` and drops no term. The
+state is an entry's commit word and lies outside its checksum on purpose, as a
+catalog slot's does, so that an append and a truncation each end in one write of four
+bytes. The cost is damage to a state that no check detects. A state damaged from 1 to
+3, or from 3 to 1, makes the reader take a term for truncated that was not, or the
+reverse. A state damaged from 1 to 0 in the file's last whole entry reads as the torn
+tail of a crash, since a torn append leaves the same bytes: the reader drops that
+term, the member's log leadership term id falls to the term before it, and the next
+append writes over the entry. A state damaged to 0 before the last entry is refused
+with `state`. The member's candidate term
+at its start is the higher of the stored candidate term and its log leadership term
+id, as "Roles and the election" of `spec/cluster.md` has init take it.
+
 ## The driver
 
 The driver is the directory's only writer; how it keeps a second driver out is its own
@@ -285,6 +361,31 @@ this version cannot tell a frame whose header survived but whose body did not fr
 whole one. A `start recording` whose channel is longer than 256 bytes or whose source
 identity is longer than 128 is refused with a named error before any slot is written.
 
+The consensus module is the terms file's only writer, from its own thread (ADR
+0060). It creates the file as the driver creates the catalog's header, before the
+member's first message: every field after the magic, both candidate slots at −1 under
+their checksums, and a sync, then the magic and a sync. A terms file shorter than its
+header, or whose magic is zero while it holds no whole entry and no slot whose
+checksum matches holds a candidate term of 0 or more, was torn while the module
+created it, and the module writes the header again; a zero magic over a whole entry
+or over such a slot is damage, since creation writes neither, and the member refuses
+to start with `not-ready`. The module appends an entry in two synced writes, before
+the member reports an append position for the term: the checksum and the fields,
+bytes 4 to 32, and a sync, then the state, 1, and a sync, so that a crash between the
+two leaves an empty entry. An entry's fields are written once, by its append, and
+only its state changes after it. The module truncates by writing state 3 over each
+valid entry whose term base log position is above the truncation position, from the
+last entry backwards, each write synced, before the member reports its log leadership
+term id again. It raises the candidate term in one synced write, the other slot's
+value and checksum, before the vote or request vote that raises it is sent. A crash
+leaves at most one write torn, which the reader reads as the state before it: an
+empty entry, a valid entry not yet deleted, or the candidate term stored before the
+raise. At a member's start the module checks the file's length against the bound
+before it reads a byte of it, so that what it reads is bounded: a file over the bound
+is `length` whatever its header holds, and every other file gets the checks of "What
+a reader rejects" in their order. The recovery pass of this section leaves the file
+alone: it names files by recording id, and `terms` is none.
+
 ## What a reader rejects
 
 A reader checks each file in the order its table gives and reports the first failure by
@@ -342,12 +443,38 @@ A segment file has no header and one check, `frame`: the frame header at a posit
 does not carry the position's term id and term offset and the descriptor's session id
 and stream id, or the position is past the end of its segment file.
 
+The terms file, with the file's length:
+
+| Check | Reported when |
+| --- | --- |
+| `too-short` | The file is shorter than 64 bytes. |
+| `not-ready` | The magic is eight zero bytes: the creator has not finished. |
+| `magic` | The magic is any other value than `CVLYTERM`. |
+| `version` | The version is not 0. |
+| `entry-length` | The entry length is not 32. |
+| `length` | The file holds more than 1048576 whole entries. |
+| `candidate` | Neither candidate checksum matches its slot, or a slot whose checksum matches holds a candidate term below −1: the file is damaged. One checksum that does not match is not a failure: that slot is the raise a crash tore, and the stored candidate term is the other slot's. |
+
+An entry, with its index and the entry before it:
+
+| Check | Reported when |
+| --- | --- |
+| `state` | The state is not 0, 1 or 3; or it is 0 and a whole entry follows it in the file: the file is damaged, since only the last whole entry can be empty. An entry vector holds one entry and so pins the first half alone. |
+| `checksum` | The state is 1 or 3 and the checksum does not match bytes 8 to 32: the file is damaged, since no crash leaves it, and the reader refuses it. |
+| `term` | The term is below 0, or not above the valid entry before it. |
+| `position` | The term base log position is below 0, not a multiple of 32, or below the valid entry's before it. |
+| `recording` | The recording id is below −1. |
+
 ## Vectors
 
 `spec/vectors/durable-log.json`, written by `spec/vectors/durable-log.py`: catalog header
 vectors with the file length the reader sees and the whole slots it holds, under version
 0 and version 1; descriptor vectors with the slot index, in both forms, a valid vector's
 `fields` naming its `form`, 0 or 1, and its retained position;
-index header and entry vectors, an entry vector with the entry before it; and position
+index header and entry vectors, an entry vector with the entry before it; terms
+header vectors with the file length, a valid vector's `fields` naming the candidate
+term each slot holds, `null` for a slot whose checksum does not match, and the stored
+candidate term, and terms entry vectors with the entry's index and
+the valid entry before it, under version 2; and position
 vectors, arithmetic, from a descriptor's fields and a position to the segment file name,
 the segment base position, the offset in the segment, the term id and the term offset.
