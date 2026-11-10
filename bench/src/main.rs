@@ -1236,12 +1236,12 @@ fn run_log(options: &Options, log_type: LogType, dir: &std::path::Path) -> Resul
 /// is the driver's, 64 MiB terms (`spec/client-protocol.md`,
 /// "Sizes"), so the warm-up is one rotation of that log, not of `--term-length`'s, for the
 /// same reason as the log rows': no measured message first-touches a page.
-fn bench_client(options: &Options, recorded: bool, purging: bool) -> Result<LogRun, String> {
-    let name = match (recorded, purging) {
-        (true, true) => "recorded_purging",
-        (true, false) => "recorded",
-        (false, _) => "client",
-    };
+fn bench_client(
+    options: &Options,
+    recorded: bool,
+    purging: bool,
+    name: &str,
+) -> Result<LogRun, String> {
     with_bench_dir(name, |dir| run_client(options, dir, recorded, purging))
 }
 
@@ -1328,33 +1328,80 @@ fn build_pile(log_dir: &std::path::Path, segments: u64) -> Result<Pile, String> 
 /// The purge of the pile, on a thread and a client of its own: one `purge segments`
 /// for every file, sent before the warm-up and answered once the replayer has removed
 /// the last file, so no command is admitted while the loop runs and nothing allocates
-/// for one (the replayer lists a command's files once, when it is admitted). Returns
-/// when the reply came.
-fn spawn_purger(
-    dir: &std::path::Path,
-    pile: &Pile,
-    housekeeping: Option<usize>,
-) -> Result<JoinHandle<Result<Instant, String>>, String> {
-    let dir = dir.to_path_buf();
-    let recording_id = pile.recording_id;
-    let position = pile.stop_position();
-    thread::Builder::new()
-        .name("bench-purger".into())
-        .spawn(move || {
-            pin_to(housekeeping)?;
-            let mut client = Cavalry::connect_to(&dir).map_err(|e| e.to_string())?;
-            client
-                .purge_segments(recording_id, position)
-                .map_err(|e| format!("purging the pile: {e}"))?;
-            let finished = Instant::now();
-            client.close().map_err(|e| e.to_string())?;
-            Ok(finished)
+/// for one (the replayer lists a command's files once, when it is admitted). The
+/// thread keeps its client open after the reply and closes it only once it is
+/// released, which the publisher does after its counting window: a client that closes
+/// sends the driver's conductor a command, and what the conductor does for a command
+/// allocates and would be counted (card 176).
+struct Purger {
+    thread: Option<JoinHandle<Result<(), String>>>,
+    release: Arc<AtomicBool>,
+}
+
+impl Purger {
+    fn spawn(
+        dir: &std::path::Path,
+        pile: &Pile,
+        housekeeping: Option<usize>,
+    ) -> Result<Self, String> {
+        let dir = dir.to_path_buf();
+        let recording_id = pile.recording_id;
+        let position = pile.stop_position();
+        let release = Arc::new(AtomicBool::new(false));
+        let released = Arc::clone(&release);
+        let thread = thread::Builder::new()
+            .name("bench-purger".into())
+            .spawn(move || {
+                pin_to(housekeeping)?;
+                let mut client = Cavalry::connect_to(&dir).map_err(|e| e.to_string())?;
+                let purged = client
+                    .purge_segments(recording_id, position)
+                    .map_err(|e| format!("purging the pile: {e}"));
+                while !released.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                client.close().map_err(|e| e.to_string())?;
+                purged.map(|_| ())
+            })
+            .map_err(|e| format!("spawning the purger: {e}"))?;
+        Ok(Self {
+            thread: Some(thread),
+            release,
         })
-        .map_err(|e| format!("spawning the purger: {e}"))
+    }
+
+    /// The purger's own error when its thread has ended, which before the release is
+    /// only ever a failure: a connect or a purge the driver refused.
+    fn failed(&mut self) -> Option<String> {
+        if !self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            return None;
+        }
+        self.finish().err()
+    }
+
+    /// Releases the thread, which closes its client, and waits for it: the purge's
+    /// own result, once the reply has come.
+    fn finish(&mut self) -> Result<(), String> {
+        self.release.store(true, Ordering::Release);
+        match self.thread.take().map(JoinHandle::join) {
+            Some(Ok(result)) => result,
+            Some(Err(_)) => Err("the purger thread panicked".to_string()),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Purger {
+    /// On an early return the thread is released and waited for here, while the driver
+    /// it talks to is still up: locals drop in reverse, and the driver is declared
+    /// before the purger.
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
 }
 
 /// The client rows, and with `recorded` the same rows while the driver's recorder writes
-/// the stream to the log directory under the bench directory (ADR 0025): the recorder is
+/// the stream to the log directory beside the bench directory (ADR 0025): the recorder is
 /// one more reader of the log, whose position the publisher's limit respects, and its
 /// writes run on the driver's recorder thread. Under `--pin` the driver's conductor has
 /// the third CPU to itself, and the recorder, the replayer, the sender, the receiver
@@ -1436,9 +1483,9 @@ fn run_client(
     };
     // The purge starts here, before the warm-up, and runs on the driver's replayer
     // through the loop; the counter says how much of the pile went during it.
-    let purger = pile
+    let mut purger = pile
         .as_ref()
-        .map(|pile| spawn_purger(dir, pile, housekeeping))
+        .map(|pile| Purger::spawn(dir, pile, housekeeping))
         .transpose()?;
     let counters = pile
         .as_ref()
@@ -1458,6 +1505,9 @@ fn run_client(
     if counters.is_some() {
         let deadline = Instant::now() + Duration::from_secs(60);
         while purged_at(&counters)? == 0 {
+            if let Some(message) = purger.as_mut().and_then(Purger::failed) {
+                return Err(message);
+            }
             if Instant::now() > deadline {
                 return Err("the purge removed no file of the pile in 60 s; see \
                             docs/how-to/run-the-bench.md#when-it-does-not-work"
@@ -1569,24 +1619,24 @@ fn run_client(
         }
     }
     let elapsed = start.elapsed();
-    let allocations = counting.as_ref().map_or(0, Counting::close);
-    let loop_ended = Instant::now();
+    // The counter at the loop's end, read before the window closes so that it is the
+    // loop's and not the close's: files of the pile still to go mean the purge outlasted
+    // the loop, exactly, where the reply's arrival would say so a duty cycle or two late.
     let purged_after = purged_at(&counters)? as u64;
+    let allocations = counting.as_ref().map_or(0, Counting::close);
     let (subscription, one_way) = match subscriber.join() {
         Ok(Ok(returned)) => returned,
         failed => return Err(subscriber_failure(failed)),
     };
-    // The purge's reply: the replayer has removed the last file. Whether that came
-    // after the loop ended is whether the purge outlasted it.
-    let purged = match (purger, pile) {
+    // The window is closed, so the purger may close its client; its result is the
+    // purge's own, the reply that the replayer has removed the last file.
+    let purged = match (purger.as_mut(), pile.as_ref()) {
         (Some(purger), Some(pile)) => {
-            let finished = purger
-                .join()
-                .map_err(|_| "the purger thread panicked".to_string())??;
+            purger.finish()?;
             Some(Purged {
                 during: purged_after.saturating_sub(purged_before),
                 pile: pile.segments,
-                outlasted: finished > loop_ended,
+                outlasted: purged_after < pile.segments,
             })
         }
         _ => None,
@@ -3184,7 +3234,7 @@ fn run_pass(options: &Options) -> Result<Pass, String> {
                 purging,
                 name,
             } => {
-                let run = bench_client(options, recorded, purging)
+                let run = bench_client(options, recorded, purging, name)
                     .map_err(|message| format!("the {name} benchmark failed: {message}"))?;
                 pass.insert_message_run(benchmark, name, options.body, run, options.messages);
             }
@@ -4085,6 +4135,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The recorded benchmark of [`Benchmark::ALL`], wherever it stands there.
+    fn recorded_benchmark() -> Benchmark {
+        *Benchmark::ALL
+            .iter()
+            .find(|benchmark| {
+                matches!(
+                    benchmark,
+                    Benchmark::Client {
+                        recorded: true,
+                        purging: false,
+                        ..
+                    }
+                )
+            })
+            .expect("the recorded benchmark")
+    }
+
     /// `--purging` adds the recorded rows with a purge running, right after the
     /// recorded rows, and the rows grow by its two.
     #[test]
@@ -4093,7 +4160,7 @@ mod tests {
         let options = options(&["--purging"]);
         let recorded = Benchmark::ALL
             .iter()
-            .position(|benchmark| matches!(benchmark, Benchmark::Client { recorded: true, .. }))
+            .position(|benchmark| *benchmark == recorded_benchmark())
             .expect("the recorded benchmark");
         let mut expected = Benchmark::ALL.to_vec();
         expected.insert(recorded + 1, Benchmark::PURGING);
@@ -4118,7 +4185,7 @@ mod tests {
         assert!(parsed(&["--only", "recorded_purging"]).is_err());
         assert_eq!(
             options(&["--only", "recorded", "--purging"]).benchmarks(),
-            vec![Benchmark::ALL[4], Benchmark::PURGING]
+            vec![recorded_benchmark(), Benchmark::PURGING]
         );
     }
 
@@ -4155,7 +4222,7 @@ mod tests {
             run(Some(purged)),
             10,
         );
-        pass.insert_message_run(Benchmark::ALL[4], "recorded", 32, run(None), 10);
+        pass.insert_message_run(recorded_benchmark(), "recorded", 32, run(None), 10);
         assert_eq!(
             pass.purged,
             BTreeMap::from([("recorded_purging".to_string(), purged)])
