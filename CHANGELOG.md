@@ -1717,6 +1717,23 @@ user-visible change, added in the same commit as the change. The format follows
   code 11 the driver answered both commands with is gone
   ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
+- The Rust client adds a counter: `Cavalry::add_counter(type_id, key, label)` returns a
+  `Counter` the client owns, whose value it alone writes, with `store_release` for a
+  position another process loads, `set`, `increment` and `add`; `cavalry doctor` and
+  every reader of the counters file see it under its label. The driver frees it when
+  the `Counter` is closed or dropped and when the client closes or is timed out, and a
+  `Counter` stores nothing once its client is closed. A key or a label past its bound
+  is refused before anything is sent. `cavalry` re-exports `Counter`
+  ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
+  card 227).
+- A replay that follows a live recording no longer allocates on the driver's replayer
+  thread. Once a second the replayer reads the recording's catalog slot to learn
+  whether it stopped, and each read built the descriptor's channel and source
+  identity as two strings: two allocations a second for every such replay, on a
+  thread that copies frames. The replayer now reads the stop alone, through
+  `CatalogReader::stop_position` in `cavalry-log`, which runs the checks `get` runs.
+  A new allocation gate, `cavalry-client`'s `replay_follow_allocations`, holds three
+  seconds of a following replay to no allocation at all (invariant 2; card 227).
 - The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
   appointed leader", the path the replicated log takes through the election's states
   until the election is built. Every member canvasses, and the member with the lowest
@@ -1750,15 +1767,6 @@ user-visible change, added in the same commit as the change. The format follows
   member started again on an empty log directory to set, which the crate's README
   example and its tests run. The module that runs the core over a driver follows
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
-  card 227).
-- The Rust client adds a counter: `Cavalry::add_counter(type_id, key, label)` returns a
-  `Counter` the client owns, whose value it alone writes, with `store_release` for a
-  position another process loads, `set`, `increment` and `add`; `cavalry doctor` and
-  every reader of the counters file see it under its label. The driver frees it when
-  the `Counter` is closed or dropped and when the client closes or is timed out, and a
-  `Counter` stores nothing once its client is closed. A key or a label past its bound
-  is refused before anything is sent. `cavalry` re-exports `Counter`
-  ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
 - A `Recording` follows its recording's stop. `Recording::stop_position()` says where
   the recording stopped once the driver has sent `recording stopped`, whichever

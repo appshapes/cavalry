@@ -777,6 +777,26 @@ impl Descriptor {
         Self::parse_inner(bytes, slot, true)
     }
 
+    /// What slot `slot`'s bytes say of the recording's stop, with every check of
+    /// [`parse`](Self::parse) run in the same order and nothing allocated: `None` for an
+    /// empty slot, else the slot's state and the stop position, `None` while the
+    /// recording is live. [`parse`](Self::parse) copies the channel and the source
+    /// identity into two strings; a reader that asks only whether a recording has
+    /// stopped, as the driver's replayer asks once a second for every replay that
+    /// follows a live recording, must not allocate for the answer (`CLAUDE.md`,
+    /// invariant 2).
+    pub fn parse_stop(
+        bytes: &[u8],
+        slot: i64,
+    ) -> Result<Option<(State, Option<i64>)>, LayoutError> {
+        Ok(
+            Self::parse_borrowed(bytes, slot, false)?.map(|(descriptor, ..)| {
+                let stop = (!descriptor.is_live()).then_some(descriptor.stop_position);
+                (descriptor.state, stop)
+            }),
+        )
+    }
+
     /// The form a slot's creation checksum holds under, by the two-range rule: version
     /// 1's ranges first, then version 0's; a healthy slot of either form holds under its
     /// own, and one that holds under neither is `checksum`. The one place the rule
@@ -808,6 +828,24 @@ impl Descriptor {
         slot: i64,
         tolerate_torn: bool,
     ) -> Result<Option<(Self, Torn)>, LayoutError> {
+        let Some((mut descriptor, torn, channel, source_identity)) =
+            Self::parse_borrowed(bytes, slot, tolerate_torn)?
+        else {
+            return Ok(None);
+        };
+        descriptor.channel = channel.to_string();
+        descriptor.source_identity = source_identity.to_string();
+        Ok(Some((descriptor, torn)))
+    }
+
+    /// The descriptor of `bytes` with every check run and its two strings left where
+    /// they are, borrowed: the descriptor's own are empty, which allocates nothing.
+    #[allow(clippy::type_complexity)]
+    fn parse_borrowed(
+        bytes: &[u8],
+        slot: i64,
+        tolerate_torn: bool,
+    ) -> Result<Option<(Self, Torn, &str, &str)>, LayoutError> {
         if bytes.len() < DESCRIPTOR_LENGTH {
             return Err(LayoutError::TooShort {
                 length: bytes.len() as u64,
@@ -835,7 +873,7 @@ impl Descriptor {
             stop: torn_stop,
             retained: torn_retained,
         };
-        let mut descriptor = Descriptor {
+        let descriptor = Descriptor {
             state,
             form,
             retained_position: match form {
@@ -866,13 +904,11 @@ impl Descriptor {
         {
             return Err(LayoutError::String);
         }
-        descriptor.channel = std::str::from_utf8(&bytes[84..84 + channel_length as usize])
-            .map_err(|_| LayoutError::String)?
-            .to_string();
-        descriptor.source_identity = std::str::from_utf8(&bytes[344..344 + source_length as usize])
-            .map_err(|_| LayoutError::String)?
-            .to_string();
-        Ok(Some((descriptor, torn)))
+        let channel = std::str::from_utf8(&bytes[84..84 + channel_length as usize])
+            .map_err(|_| LayoutError::String)?;
+        let source_identity = std::str::from_utf8(&bytes[344..344 + source_length as usize])
+            .map_err(|_| LayoutError::String)?;
+        Ok(Some((descriptor, torn, channel, source_identity)))
     }
 }
 
