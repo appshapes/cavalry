@@ -2344,9 +2344,9 @@ fn cluster_key_checks(
                 check: "cluster-member-id",
                 level: Level::Fail,
                 message: format!(
-                    "{} is set and {} is not, so `cavalry run` cannot tell which member this \
-                     host is and starts none: set {} to this host's id in the members \
-                     string, or unset {} for a driver in no cluster",
+                    "{} is set and {} is unset or -1, no member, so `cavalry run` cannot \
+                     tell which member this host is and starts none: set {} to this host's \
+                     id in the members string, or unset {} for a driver in no cluster",
                     MEMBERS_KEY.env, MEMBER_ID_KEY.env, MEMBER_ID_KEY.env, MEMBERS_KEY.env
                 ),
                 doc: MEMBER_ID_KEY.anchor,
@@ -4342,11 +4342,19 @@ mod tests {
         assert_eq!(checks, 2);
         assert!(findings.is_empty(), "{findings:?}");
 
-        // One key without the other, each named by the key that is missing.
+        // One key without the other, each named by the key that is missing; a member id
+        // of -1, its default, is no member, as `Config::from_vars` reads it.
         let (_, findings) = checked(Some(members), None);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].check, "cluster-member-id");
         assert_eq!(findings[0].level, Level::Fail);
+        assert!(
+            findings[0]
+                .message
+                .contains("CAVALRY_CLUSTER_MEMBER_ID is unset or -1, no member"),
+            "{}",
+            findings[0].message
+        );
         assert!(
             findings[0]
                 .message
