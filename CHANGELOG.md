@@ -1907,12 +1907,6 @@ user-visible change, added in the same commit as the change. The format follows
   and `crates/cavalry-client/tests/reallocation_counted.rs` holds the counting
   allocator to it ([Run the bench](docs/how-to/run-the-bench.md), "When it does not
   work"; card 211).
-  files without allocating, each file's name formatted on its stack as the recorder's
-  roll is, and `recording.segments_purged` moves one per file as a purge removes it
-  instead of by the whole count when the purge ends, so a running purge's progress reads
-  from the counter and a purge beside the bench's recorded rows adds nothing to the
-  allocation gate's count; `cavalry-log` shares the name formatting as
-  `layout::segment_file_name_into` (card 177).
 - `just bench --purging` runs the recorded rows a second time, as
   `claim_commit_<body>_recorded_purging` and `one_way_<body>_recorded_purging`, while
   one `purge segments` removes a stopped recording's sparse segment files on the
