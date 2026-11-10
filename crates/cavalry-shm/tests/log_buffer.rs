@@ -350,6 +350,118 @@ fn a_claim_commits_aborts_or_is_aborted_on_drop_and_the_reader_sees_it() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn a_bounded_poll_stops_before_the_first_frame_at_or_past_its_limit() {
+    // `spec/log-buffer.md`, "Reading": the bounded read (ADR 0065). Four frames of 64
+    // bytes at 0, 64, 128 and 192, the third aborted and so padding, and a fifth
+    // claimed at 256 and not committed.
+    let dir = Dir::new("bounded");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    let mut reader = log.reader(0).unwrap();
+    for (n, body) in [b"one..", b"two..", b"three", b"four."].iter().enumerate() {
+        let mut claim = appender.try_claim(5, unlimited()).unwrap();
+        claim.body().copy_from_slice(*body);
+        if n == 2 {
+            claim.abort();
+        } else {
+            claim.commit();
+        }
+    }
+    let open = appender.try_claim(5, unlimited()).unwrap();
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+    let mut poll = |reader: &mut cavalry_shm::log::TermReader, limit: i64, fragments: usize| {
+        let before = seen.len();
+        let poll = reader
+            .bounded_poll(limit, fragments, |body, _| seen.push(body.to_vec()))
+            .unwrap();
+        assert_eq!(poll.fragments, seen.len() - before);
+        assert_eq!(poll.position, reader.position());
+        (poll.fragments, poll.position, seen.last().cloned())
+    };
+
+    // A limit at or below the position reads nothing, and the position stays.
+    for limit in [i64::MIN, -1, 0] {
+        assert_eq!(poll(&mut reader, limit, 8), (0, 0, None));
+    }
+    // A limit inside a frame: the frame begins below it and is delivered whole.
+    assert_eq!(poll(&mut reader, 32, 8), (1, 64, Some(b"one..".to_vec())));
+    // A limit at a frame's first byte: that frame is not read.
+    assert_eq!(poll(&mut reader, 64, 8), (0, 64, Some(b"one..".to_vec())));
+    // One byte past it, and it is.
+    assert_eq!(poll(&mut reader, 65, 8), (1, 128, Some(b"two..".to_vec())));
+    // A padding frame below the limit is passed and delivers nothing.
+    assert_eq!(poll(&mut reader, 192, 8), (0, 192, Some(b"two..".to_vec())));
+    // A limit below the position never moves it back.
+    assert_eq!(poll(&mut reader, 64, 8), (0, 192, Some(b"two..".to_vec())));
+    // The largest limit reads what is committed and stops at the claim that is not.
+    assert_eq!(
+        poll(&mut reader, i64::MAX, 8),
+        (1, 256, Some(b"four.".to_vec()))
+    );
+    assert_eq!(
+        poll(&mut reader, i64::MAX, 8),
+        (0, 256, Some(b"four.".to_vec()))
+    );
+    drop(open);
+
+    // The fragment limit holds under a bound, and a bounded read from the start gives
+    // what a read with no bound gives.
+    let mut second = log.reader(0).unwrap();
+    assert_eq!(poll(&mut second, 1024, 1), (1, 64, Some(b"one..".to_vec())));
+    let mut bounded = Vec::new();
+    let mut third = log.reader(0).unwrap();
+    third
+        .bounded_poll(i64::MAX, 64, |body, _| bounded.push(body.to_vec()))
+        .unwrap();
+    let mut fourth = log.reader(0).unwrap();
+    assert_eq!(bounded, drain(&mut fourth));
+    assert_eq!(third.position(), fourth.position());
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_bounded_poll_stops_at_the_end_of_a_term_and_goes_on_in_the_next() {
+    // A limit past the term's end is the term's end for this read, as for a read with
+    // no bound; the next read is in the next term, and its limit is a position there.
+    let dir = Dir::new("bounded-term");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    let mut reader = log.reader(0).unwrap();
+    let body_len = 1000; // frame 1032, aligned 1056
+    let per_term = (T / 1056) as usize; // 62 frames, 65472 bytes, 64 left
+    for _ in 0..per_term {
+        appender.try_claim(body_len, unlimited()).unwrap().commit();
+    }
+    assert_eq!(
+        appender.try_claim(body_len, unlimited()).unwrap_err(),
+        ClaimError::AdminAction
+    );
+    for _ in 0..2 {
+        appender.try_claim(body_len, unlimited()).unwrap().commit();
+    }
+    let term = i64::from(T);
+
+    // A limit in the next term: this read ends at the term's end, past the padding.
+    let limit = term + 1056;
+    let poll = reader.bounded_poll(limit, 1024, |_, _| {}).unwrap();
+    assert_eq!((poll.fragments, poll.position), (per_term, term));
+    // The next read is bounded in the next term: one frame begins below the limit.
+    let poll = reader.bounded_poll(limit, 1024, |_, _| {}).unwrap();
+    assert_eq!((poll.fragments, poll.position), (1, term + 1056));
+    let poll = reader.bounded_poll(limit, 1024, |_, _| {}).unwrap();
+    assert_eq!((poll.fragments, poll.position), (0, term + 1056));
+    // A limit that is the term's end exactly reads to it and not into the next term.
+    let mut second = log.reader(0).unwrap();
+    let poll = second.bounded_poll(term, 1024, |_, _| {}).unwrap();
+    assert_eq!((poll.fragments, poll.position), (per_term, term));
+    let poll = second.bounded_poll(term, 1024, |_, _| {}).unwrap();
+    assert_eq!((poll.fragments, poll.position), (0, term));
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn an_offer_fragments_a_long_message_and_the_reader_reassembles_it() {
     let dir = Dir::new("offer");
     let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
