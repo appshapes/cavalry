@@ -1,6 +1,6 @@
 //! Every byte string, under every type id, either decodes to a message that encodes to
 //! the same length and decodes again to the same message, or is rejected with one of
-//! the spec's four reasons. Never a panic (invariant 2; CLAUDE.md gate 1, "frame
+//! the spec's five reasons. Never a panic (invariant 2; CLAUDE.md gate 1, "frame
 //! parsers are fuzzed"; ADR 0019). The bytes themselves need not round-trip: a string's
 //! padding is zero when written and not read, so a padding byte a mutation set is
 //! decoded past and written back as zero. This runs on every `just test`.
