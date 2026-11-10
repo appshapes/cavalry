@@ -416,7 +416,7 @@ Options:
                     file per duty cycle, from before the warm-up until past the measured
                     loop; the recording has as many files as the bench directory's file
                     system removes in about 2.5 s, measured before each run (8,192 at
-                    least, 2,000,000 at most); the lines under the table say how many
+                    least, 1,000,000 at most); the lines under the table say how many
                     files went during the loop and whether the purge outlasted it; the
                     rows are reported until a baseline holds them
   --help            this text
@@ -1264,9 +1264,11 @@ const PILE_PROBE: u64 = 4_096;
 /// The fewest files in a pile, for a file system slower than any measured.
 const PILE_LEAST: u64 = 8_192;
 /// The most files in a pile: on a memory-backed file system each file is an inode held
-/// in memory, about a kibibyte, so two million are about 2 GiB for the seconds the pile
-/// lives, and creating them takes about ten seconds.
-const PILE_MOST: u64 = 2_000_000;
+/// in memory, about a kibibyte, so a million are about 1 GiB for the seconds the pile
+/// lives, and a `/dev/shm` holds as many inodes as half the host's memory has pages:
+/// about two million on `grip`'s 16 GB, which a larger pile would run out of. A million
+/// last `/dev/shm` about 1.7 s at the rate above, three times a bench host's row.
+const PILE_MOST: u64 = 1_000_000;
 /// The pile's term length, the smallest the durable log admits: nothing reads its
 /// bytes, and a segment file is at least a term.
 const PILE_TERM_LENGTH: i32 = 64 * 1024;
@@ -4186,7 +4188,8 @@ mod tests {
         assert_eq!(pile_segments(0.0), PILE_LEAST);
         assert_eq!(pile_segments(f64::NAN), PILE_LEAST);
         assert_eq!(pile_segments(22_000.0), 55_000);
-        assert_eq!(pile_segments(590_000.0), 1_475_000);
+        assert_eq!(pile_segments(300_000.0), 750_000);
+        assert_eq!(pile_segments(590_000.0), PILE_MOST);
         assert_eq!(pile_segments(5_000_000.0), PILE_MOST);
         assert_eq!(pile_segments(f64::INFINITY), PILE_MOST);
     }

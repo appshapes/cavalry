@@ -67,13 +67,13 @@ shared runner is
    Evidence names). The recording is a pile the harness builds in the log directory
    before the driver opens it: sparse files, as many as the bench directory's file
    system removes in about 2.5 s, which the harness measures before each run by
-   creating and removing 4,096 of them, 8,192 files at least and 2,000,000 at most.
+   creating and removing 4,096 of them, 8,192 files at least and 1,000,000 at most.
    The rate is the file system's and differs by more than twenty times between the
    two kinds the harness runs on: through the replayer a laptop's disk removed about
    22,000 files a second and a Linux host's `/dev/shm` about 590,000, so the laptop's
-   pile was 87,885 files and the Linux host's the 2,000,000. One command removes the
+   pile was 87,885 files and the Linux host's the 1,000,000. One command removes the
    whole pile, so its reply must come inside the client's 10 s response timeout, and
-   on `/dev/shm` each file is an inode held in memory, about 2 GiB for the largest
+   on `/dev/shm` each file is an inode held in memory, about 1 GiB for the largest
    pile while it lives. The lines under the table say how many files went during the
    loop and whether the purge outlasted it, and the result carries both as
    `segments_purged`. The rows are reported until a baseline holds them.
@@ -854,7 +854,7 @@ shared runner is
   run the pile ran out before the measured loop ended, so part of that run's samples
   had no file work beside them. The row prints and is reported either way. The pile is
   sized to last about 2.5 s, so a row whose warm-up and loop take longer than that
-  outruns it: run it with fewer `--messages`. On a file system so fast that 2,000,000
+  outruns it: run it with fewer `--messages`. On a file system so fast that 1,000,000
   files last less than the row, the bound is `PILE_MOST` in `bench/src/main.rs`, a
   change to the harness and never a knob. When the pile runs out inside the loop the
   purge's reply is handled inside the counting window, so such a run can also fail
