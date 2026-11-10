@@ -30,8 +30,8 @@ is allowed here.
   append position and commit position (`cluster-member`, a note); a member that
   follows no leader (`cluster-no-leader`); a member its leader's log left behind,
   which this version cannot bring back (`cluster-joined-late`); an appointed leader
-  that will not lead because its log is behind a member's (`cluster-leader-behind`);
-  a leader that lost its quorum (`cluster-quorum-lost`); and a commit position
+  that does not lead, or leads and does not close its election, because its log is
+  behind a member's (`cluster-leader-behind`); a leader that lost its quorum (`cluster-quorum-lost`); and a commit position
   behind the leader's own append position (`cluster-commit-waits`).
   [Run a cluster of three members](../../docs/how-to/run-a-cluster.md#when-it-does-not-work)
   says what an operator does about each.

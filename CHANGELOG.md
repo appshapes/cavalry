@@ -1938,8 +1938,8 @@ user-visible change, added in the same commit as the change. The format follows
   warns when the member follows no leader (`cluster-no-leader`), when its elections
   fail because it started late or lost its log (`cluster-joined-late`), and when the
   leader has lost its quorum (`cluster-quorum-lost`); it fails when the appointed
-  leader found members ahead of its own log and so does not lead
-  (`cluster-leader-behind`); and it notes a commit position behind the leader's own
+  leader found members ahead of its own log and so does not lead, or leads and does
+  not close its election (`cluster-leader-behind`); and it notes a commit position behind the leader's own
   append position (`cluster-commit-waits`). Each names what to do. An armed recording
   that has started, which every follower has, is no longer reported: `recording.armed`
   warns only for recordings still waiting for their image. The new how-to,

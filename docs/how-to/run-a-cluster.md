@@ -114,10 +114,13 @@ committed once a quorum, two of three, has it on disk.
   cannot bring it up to the leader's log. The cluster runs without it. To have it
   back, start the cluster again as a new cluster.
 - `FAIL cluster-leader-behind`: this member is the appointed leader and other members
-  hold a log ahead of its own, so it does not lead. Its log directory was lost or
-  replaced while the others kept theirs; a container whose log directory is not on a
-  volume does this at every restart. Start the cluster again as a new cluster, and
-  keep the old log directories for what they hold.
+  hold a log ahead of its own. Found in canvass, it does not lead: the note says `a
+  follower`. Found in leader ready, it leads and does not close its election: the note
+  says `the leader` and `election leader ready`, and nothing of its term is appended
+  or committed. Either way its log directory was lost or replaced while the others
+  kept theirs; a container whose log directory is not on a volume does this at every
+  restart. Start the cluster again as a new cluster, and keep the old log directories
+  for what they hold.
 - `WARN cluster-quorum-lost`: the leader heard from fewer than two of three members
   within 10 s, and nothing was committed while that lasted. Check that two members run
   and that each reaches the leader's consensus endpoint.

@@ -1021,10 +1021,10 @@ fn election_state_name(code: i64) -> &'static str {
 /// module added (`spec/cluster.md`, "Counters"; ADR 0062): who it is and what it knows,
 /// a note (`cluster-member`); a member that follows no leader (`cluster-no-leader`); a
 /// member its leader's log left behind, which this version cannot bring back
-/// (`cluster-joined-late`); an appointed leader that will not lead, its log behind a
-/// member's (`cluster-leader-behind`); a leader that lost its quorum
-/// (`cluster-quorum-lost`); and a commit position behind the leader's own append
-/// position (`cluster-commit-waits`). A stopped driver's member is gone with its
+/// (`cluster-joined-late`); an appointed leader that does not lead, or leads and does
+/// not close its election, its log behind a member's (`cluster-leader-behind`); a
+/// leader that lost its quorum (`cluster-quorum-lost`); and a commit position behind
+/// the leader's own append position (`cluster-commit-waits`). A stopped driver's member is gone with its
 /// client, so the checks run while the driver runs, and only where a member is.
 fn cluster_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
     if !running {
@@ -1117,16 +1117,28 @@ fn member_findings(member: &MemberCounters, findings: &mut Vec<Finding>) {
         ),
         doc: DOC_CLUSTER,
     });
-    if member.appointed_leader_behind > 0 && !leads {
+    // The appointed leader counts a member ahead of it in canvass, where it then does not
+    // lead, and in leader ready, where it leads and does not close its election
+    // (`spec/cluster.md`, "The appointed leader"): either way its election stays open.
+    if member.appointed_leader_behind > 0 && !closed {
+        let stalled = if leads {
+            format!(
+                "so it leads term {term} and does not close its election, which stays in {}, \
+                 and appends and commits nothing of the term",
+                election_state_name(state)
+            )
+        } else {
+            "so it does not lead".to_string()
+        };
         findings.push(Finding {
             check: "cluster-leader-behind",
             level: Level::Fail,
             message: format!(
                 "member {id} is the cluster's appointed leader and found {} member(s) holding \
-                 a log ahead of its own, so it does not lead: its log directory was lost or \
-                 replaced while the others kept theirs. Start the cluster again as a new \
-                 cluster, every member on a new log directory, and keep the old directories \
-                 for what they hold",
+                 a log ahead of its own, {stalled}: its log directory was lost or replaced \
+                 while the others kept theirs. Start the cluster again as a new cluster, \
+                 every member on a new log directory, and keep the old directories for what \
+                 they hold",
                 member.appointed_leader_behind
             ),
             doc: DOC_CLUSTER,
@@ -4516,10 +4528,36 @@ mod tests {
         assert!(
             findings[1]
                 .message
-                .contains("found 2 member(s) holding a log ahead")
+                .contains("found 2 member(s) holding a log ahead of its own, so it does not lead:")
         );
 
-        // A leader that lost its quorum, with a commit position behind its own append.
+        // An appointed leader that leads and found a member ahead in leader ready: it
+        // does not close its election, and that is the same failure.
+        let (_, findings) = cluster_findings(
+            "cluster-behind-ready",
+            0,
+            &[
+                (CLUSTER_ROLE, 2),
+                (CLUSTER_ELECTION_STATE, 8),
+                (CLUSTER_LEADERSHIP_TERM_ID, 0),
+                (CLUSTER_APPOINTED_LEADER_BEHIND, 1),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-leader-behind"]);
+        assert_eq!(findings[1].level, Level::Fail);
+        assert!(
+            findings[1].message.contains(
+                "found 1 member(s) holding a log ahead of its own, so it leads term 0 and does \
+                 not close its election, which stays in leader ready"
+            ),
+            "{}",
+            findings[1].message
+        );
+
+        // A leader that lost its quorum, with a commit position behind its own append. A
+        // member it once found ahead is in the count, and its election closed since: no
+        // failure.
         let (_, findings) = cluster_findings(
             "cluster-leader",
             0,
@@ -4530,6 +4568,7 @@ mod tests {
                 (CLUSTER_APPEND_POSITION, 9600),
                 (CLUSTER_COMMIT_POSITION, 4800),
                 (CLUSTER_LEADER_QUORUM_LOSSES, 1),
+                (CLUSTER_APPOINTED_LEADER_BEHIND, 1),
             ],
         );
         let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
