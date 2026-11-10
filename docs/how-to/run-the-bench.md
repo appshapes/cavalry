@@ -561,6 +561,10 @@ shared runner is
   [ADR 0047](../decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md)
   the count left reallocations out, so a loop that grows a vector which already has a
   capacity fails the gate now where it passed before; size the vector at setup. The
+  crates' allocation tests count the same thing: each adds the `reallocations` of
+  `stats_alloc` to its `allocations` and fails on either, and
+  `crates/cavalry-client/tests/reallocation_counted.rs` shows a vector pushed past
+  its capacity counted that way (card 211). The
   harness's loops allocate on no path but their error returns, so the allocation is
   in the crates the row runs: `cavalry-shm` for a log row, `cavalry-client` and the
   driver's conductor for a client row, and the driver's sender and receiver as well

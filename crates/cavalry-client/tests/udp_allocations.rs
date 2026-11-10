@@ -1,8 +1,12 @@
 //! The allocation gate over the UDP send path (CLAUDE.md, invariant 2 and gate 2; ADR
 //! 0041): the publisher, the driver's five threads and a receiver by hand in this
-//! process, under the counting allocator the bench uses, with ten thousand messages
-//! crossing the loopback and no allocation at all. Alone in its binary, so that no other
-//! test's threads are counted (`cargo test` runs a binary's tests in parallel).
+//! process, under `stats_alloc`, with ten thousand messages crossing the loopback and
+//! no allocation and no reallocation at all. `stats_alloc` counts a `realloc`, a buffer
+//! grown past a capacity it already had, apart from an allocation, so the test adds the
+//! two: it counts what the bench's gate counts (ADR 0047; card 211), and
+//! `tests/reallocation_counted.rs` shows the sum sees a grown `Vec`. Alone in its
+//! binary, so that no other test's threads are counted (`cargo test` runs a binary's
+//! tests in parallel).
 
 use std::alloc::System;
 use std::net::{SocketAddr, UdpSocket};
@@ -251,7 +255,8 @@ fn status_message(setup: &SetupFrame, offset: i32, window: i32, flags: u8) -> St
 
 /// Nothing on the send path allocates (CLAUDE.md, invariant 2): with the publisher, the
 /// driver's five threads and the receiver in this process, ten thousand messages cross
-/// the loopback under the counting allocator with no allocation at all.
+/// the loopback under the counting allocator with no allocation and no reallocation at
+/// all.
 #[test]
 fn the_send_path_allocates_nothing_per_message() {
     let dir = TestDir::new("allocations");
@@ -274,8 +279,8 @@ fn the_send_path_allocates_nothing_per_message() {
 
     // Ten rounds of a thousand messages, each read once it is published and never more
     // than the receiver's buffer holds unread, with a status message after every round
-    // to keep the window open; nothing in the region allocates: not the publisher, not
-    // the conductor, not the sender's bursts, and not this receiver.
+    // to keep the window open; nothing in the region allocates or grows a buffer: not
+    // the publisher, not the conductor, not the sender's bursts, and not this receiver.
     let region = Region::new(GLOBAL);
     let mut offset = (100 * FRAME_LENGTH) as u32;
     for _ in 0..ROUNDS {
@@ -294,9 +299,10 @@ fn the_send_path_allocates_nothing_per_message() {
     std::thread::sleep(Duration::from_millis(150));
     let change = region.change();
     assert_eq!(
-        change.allocations,
+        change.allocations + change.reallocations,
         0,
-        "allocations on the send path over {} messages: {change:?}",
+        "the send path allocated or reallocated over {} messages: {change:?}; see \
+         .claude/rules/data-plane.md",
         ROUNDS * MESSAGES_PER_ROUND
     );
     publication.close().expect("closes");

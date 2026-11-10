@@ -27,15 +27,24 @@ cavalry-driver = { path = "../cavalry-driver" }
 cavalry-log = { path = "../cavalry-log" }
 # The counting allocator of the allocation tests, so a zero-allocation claim is a test
 # (CLAUDE.md, gate 2): the UDP tests count across the send and receive paths (ADR 0041),
-# and the purge allocation test across a purge's file work, allocations and
-# reallocations both (card 177). The bench counts with `tracking-allocator` since ADR
-# 0047. Dev only.
+# and the purge allocation test across a purge's file work (card 177). Every test adds
+# the allocator's `reallocations` to its `allocations`, which is what the bench counts
+# with `tracking-allocator` since ADR 0047; `tests/reallocation_counted.rs` holds the
+# allocator to it (card 211). Dev only.
 stats_alloc = "0.1"
 # The UDP tests' receiver by hand sets its socket's receive buffer and reads back what
 # the host gave, which `std::net::UdpSocket` cannot: it has no NAK, so what the sender
 # puts on the wire before the test reads it must fit the buffer (ADR 0041). The version
 # and features the driver already takes, so nothing new enters the lock. Dev only.
 nix = { version = "0.31", default-features = false, features = ["socket"] }
+
+# What the allocation tests count, held as a program with no test harness: a counting
+# region sees every thread of its process, and the harness's own thread allocates while
+# it starts and reports tests, so the checks run on the one thread of a plain `main`
+# (card 211). `cargo test` runs it with the others.
+[[test]]
+name = "reallocation_counted"
+harness = false
 
 # Inherits unsafe_code = "deny" (CLAUDE.md, "Unsafe").
 [lints]
