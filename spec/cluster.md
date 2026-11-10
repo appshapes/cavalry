@@ -887,6 +887,8 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.appointed_leader_behind` | a member an appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election: the leader does not lead, or does not close, while one reports so ("The appointed leader") |
 | `cluster.log_images_lost` | a follower whose image of its leader's log was no longer available, so that it held an election |
 | `cluster.elections_failed` | an election that failed in a state and began again at init |
+| `cluster.elections_closed` | an election that closed: leader ready to closed, the term's first entry appended, or follower ready to closed, the append position sent |
+| `cluster.election_steps` | a step of an election from one state to the next that neither begins it, fails it, closes it nor makes the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready |
 | `cluster.leader_heartbeat_timeouts` | a follower that held an election for want of a leader's heartbeat |
 | `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its own term |
 | `cluster.votes_for`, `cluster.votes_against` | a vote sent, by its value |
