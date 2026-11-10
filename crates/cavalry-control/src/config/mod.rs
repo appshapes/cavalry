@@ -39,6 +39,10 @@ pub enum Kind {
     Path,
     /// One of [`KeyDef::values`].
     Enum,
+    /// Any text.
+    String,
+    /// A whole number.
+    Integer,
 }
 
 /// One key of `config.toml`: its names, what it takes, and the text of its row on the
@@ -81,16 +85,28 @@ pub struct Config {
     pub log_dir: Option<PathBuf>,
     /// `conductor.idle.strategy`: what the conductor does on an idle duty cycle.
     pub conductor_idle_strategy: IdleStrategy,
+    /// `cluster.members`: the members string of the cluster this driver is a member
+    /// of, as it was set; `None` for no cluster. `doctor` checks it, and `cavalry run`
+    /// refuses a string the cluster protocol refuses (`spec/cluster.md`, "Members and
+    /// streams"; ADR 0060).
+    pub cluster_members: Option<String>,
+    /// `cluster.member.id`: this driver's member id in the members string; `None` for
+    /// no member, the key unset or set to −1, its default and Aeron's null value
+    /// (`spec/cluster.md`, "Values"; ADR 0060).
+    pub cluster_member_id: Option<i32>,
 }
 
 impl Default for Config {
     /// Every key at its default: the directory of [`Driver::default_dir`], the log
-    /// directory of [`Driver::default_log_dir`] and [`IdleStrategy::Backoff`].
+    /// directory of [`Driver::default_log_dir`], [`IdleStrategy::Backoff`] and no
+    /// cluster.
     fn default() -> Self {
         Self {
             dir: Driver::default_dir(),
             log_dir: Driver::default_log_dir(),
             conductor_idle_strategy: IdleStrategy::Backoff,
+            cluster_members: None,
+            cluster_member_id: None,
         }
     }
 }
@@ -124,6 +140,25 @@ impl Config {
                     key: &generated::CONDUCTOR_IDLE_STRATEGY,
                     value,
                 })?;
+        }
+        if let Some(value) = set(&generated::CLUSTER_MEMBERS) {
+            config.cluster_members = Some(value);
+        }
+        if let Some(value) = set(&generated::CLUSTER_MEMBER_ID) {
+            // A member id is 0 to 2147483647, and −1 is none (`spec/cluster.md`,
+            // "Values"): −1, the key's default (ADR 0060), reads as the key unset, so
+            // that a unit file may write the default out. Any other value is refused
+            // here, before anything starts.
+            config.cluster_member_id = match value.parse::<i32>() {
+                Ok(-1) => None,
+                Ok(id) if id >= 0 => Some(id),
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        key: &generated::CLUSTER_MEMBER_ID,
+                        value,
+                    });
+                }
+            };
         }
         Ok(config)
     }
@@ -167,17 +202,11 @@ impl fmt::Display for ConfigError {
                     "configuration refused (invalid): {} is `{value}`, which {} does not take; ",
                     key.env, key.name
                 )?;
-                if key.kind == Kind::Enum {
-                    write!(f, "set it to one of {}, ", key.values.join(", "))?;
-                } else {
-                    write!(
-                        f,
-                        "set it to a {}, ",
-                        match key.kind {
-                            Kind::Path => "path",
-                            Kind::Enum => "value",
-                        }
-                    )?;
+                match key.kind {
+                    Kind::Enum => write!(f, "set it to one of {}, ", key.values.join(", "))?,
+                    Kind::Path => f.write_str("set it to a path, ")?,
+                    Kind::String => f.write_str("set it to a string, ")?,
+                    Kind::Integer => write!(f, "set it to {}, ", integer_takes(key))?,
                 }
                 write!(
                     f,
@@ -190,6 +219,17 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+/// What an integer key takes, in the words of its refusal. The range is the key's own,
+/// as [`Config::from_vars`] reads it, and not its kind's: a later integer key names its
+/// own range here.
+fn integer_takes(key: &KeyDef) -> &'static str {
+    if key.name == generated::CLUSTER_MEMBER_ID.name {
+        "this host's member id, a whole number from 0 to 2147483647, or -1 for no member"
+    } else {
+        "a whole number"
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -296,6 +336,67 @@ mod tests {
             assert!(!envs.contains(&key.env), "{} twice", key.env);
             envs.push(key.env);
         }
-        assert_eq!(generated::KEYS.len(), 3);
+        assert_eq!(generated::KEYS.len(), 5);
+    }
+
+    #[test]
+    fn the_cluster_keys_are_read_and_a_member_id_that_is_no_id_is_refused() {
+        let config = Config::from_vars(table(&[])).expect("defaults");
+        assert_eq!(
+            (config.cluster_members, config.cluster_member_id),
+            (None, None)
+        );
+        let members = "0,a:1,a:2,a:3,a:4,a:5|1,b:1,b:2,b:3,b:4,b:5";
+        let config = Config::from_vars(table(&[
+            ("CAVALRY_CLUSTER_MEMBERS", members),
+            ("CAVALRY_CLUSTER_MEMBER_ID", "1"),
+        ]))
+        .expect("valid");
+        assert_eq!(config.cluster_members.as_deref(), Some(members));
+        assert_eq!(config.cluster_member_id, Some(1));
+        assert_eq!(generated::CLUSTER_MEMBERS.kind, Kind::String);
+        assert_eq!(generated::CLUSTER_MEMBER_ID.kind, Kind::Integer);
+        assert_eq!(generated::CLUSTER_MEMBERS.doctor, "cluster-members");
+        assert_eq!(generated::CLUSTER_MEMBER_ID.doctor, "cluster-member-id");
+
+        // −1, the key's documented default (config.toml; ADR 0060), is no member, as the
+        // key unset is: a unit file may write the default out.
+        assert!(generated::CLUSTER_MEMBER_ID.default.starts_with("-1,"));
+        let config =
+            Config::from_vars(table(&[("CAVALRY_CLUSTER_MEMBER_ID", "-1")])).expect("the default");
+        assert_eq!(config.cluster_member_id, None);
+        assert_eq!(config, Config::default());
+        let config = Config::from_vars(table(&[
+            ("CAVALRY_CLUSTER_MEMBERS", members),
+            ("CAVALRY_CLUSTER_MEMBER_ID", "-1"),
+        ]))
+        .expect("valid");
+        assert_eq!(config.cluster_member_id, None);
+        let config =
+            Config::from_vars(table(&[("CAVALRY_CLUSTER_MEMBER_ID", "0")])).expect("valid");
+        assert_eq!(config.cluster_member_id, Some(0));
+
+        for value in ["one", "-2", "-2147483648", "2147483648", "1.5"] {
+            let error = Config::from_vars(table(&[("CAVALRY_CLUSTER_MEMBER_ID", value)]))
+                .expect_err("refused");
+            assert_eq!(error.key().name, "cluster.member.id");
+            let text = error.to_string();
+            assert!(
+                text.contains(&format!("CAVALRY_CLUSTER_MEMBER_ID is `{value}`")),
+                "{text}"
+            );
+            assert!(
+                text.contains(
+                    "set it to this host's member id, a whole number from 0 to 2147483647, \
+                     or -1 for no member,"
+                ),
+                "{text}"
+            );
+            assert!(text.contains("default (-1, which is no member)"), "{text}");
+            assert!(
+                text.ends_with("docs/reference/config.md#clustermemberid"),
+                "{text}"
+            );
+        }
     }
 }

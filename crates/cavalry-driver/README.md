@@ -10,6 +10,13 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `cavalry-shm`, and it never sits in the message path as a broker. The directory
   protocol, the commands it reads and the events it answers with are
   `spec/client-protocol.md` (ADR 0019).
+- Chooses each publication's session id: the first is a random i32, drawn from the
+  operating system's randomness when the driver starts, and each next one is one
+  more, past any id a live publication of the stream holds (`spec/client-protocol.md`,
+  "Commands"). Random, and not the clock: two drivers started in one instant, a
+  cluster's members under one supervisor, must not send one stream under one session
+  id, since a receiver that hears both on an endpoint holds them as one session and
+  answers the first alone.
 - Runs the conductor on a dedicated thread with an idle strategy, what the thread does
   when it has no work: busy-spin, yield or backoff. Backoff is the default; `doctor`
   recommends busy-spin on isolated cores. On every duty cycle the conductor stores its
@@ -37,7 +44,7 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   through a bounded queue and never touches the disk, the recorder takes blocks of
   committed frames from the publication's log buffer and writes them into the log
   directory's segment files with one positional write each, syncing once per second,
-  or at once when a client's `sync recording` asks through the same queue (ADR 0067),
+  or at once when a client's `sync recording` asks through the same queue (ADR 0069),
   and its position, `recording.position`, bounds the publisher's limit, so that a slow
   disk back-pressures the publisher and never loses a byte (ADR 0025). The log
   directory is opened under a lock at start and recovered (`spec/durable-log.md`, "The
@@ -63,6 +70,11 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   ends at its end, no faster than the slowest subscriber's position plus the window
   and never past what the recorder has synced; a subscription on the replay stream
   reads it as any stream, and `replay stopped` says where it ended and why (ADR 0030).
+  A replay that follows a live recording allocates nothing while it runs: once a
+  second the replayer asks the catalog where the recording stopped, and it reads the
+  stop alone (`cavalry_log::catalog::CatalogReader::stop_position`), not the
+  descriptor with its two strings. `cavalry-client`'s `replay_follow_allocations`
+  test is the gate, over three seconds of such a replay.
 - Truncates, purges and deletes a stopped recording on command: `truncate recording`,
   `purge segments` and `purge recording` (`spec/client-protocol.md`, "Commands"; ADR
   0031). The conductor admits each into a registry of commands in progress, bounded at
@@ -128,11 +140,15 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   rules of `spec/udp.md`, "The receiver" (ADR 0040, ADR 0042): `add subscription` on
   `cavalry:udp?endpoint=<host>:<port>` resolves the host once, binds the channel's
   receive endpoint, one socket shared by the subscriptions on it, and hands the receiver
-  the socket and the stream wanted, and an add on a channel whose previous endpoint is
-  still closing waits for the receiver's close and then runs as it arrived, so a client
-  that removes and adds on one channel needs no retry, and one still waiting after the
-  closing endpoint wait, 5 s, a receiver starved that long, is code 4 with nothing
-  registered, counted in `subscription.add_deferred_timed_out` (ADR 0049); a setup
+  the socket and the stream wanted, and an add on a channel whose previous endpoint has
+  lost its last subscription and not yet closed, its images still being retired or
+  its socket still with the receiver, waits for the receiver's close and then runs as
+  it arrived, so a client that removes and adds on one channel needs no retry and is
+  given no image that is being retired, and one still waiting after the
+  closing endpoint wait, 5 s, a receiver starved that long or a retired image's
+  recording not yet stopped, its recorder behind, is code 4 with nothing registered,
+  the message naming both causes and what to do for each, counted in
+  `subscription.add_deferred_timed_out` (ADR 0049, ADR 0068); a setup
   frame for that stream goes back to the
   conductor, which creates the image, a log of type 2 under `images/` at the position
   the setup names with a registration id of its own, allocates its two counters and a

@@ -130,7 +130,7 @@ it had written; it syncs nothing the recorder had not written yet, which is why 
 program waits for `position()` first. `recording.request_sync(&mut client)?` asks for
 the same sync and returns at once, for a program that polls `synced_position()` in a
 loop of its own
-([ADR 0067](../decisions/0067-sync-a-recording-on-command-as-client-protocol-version-8.md)).
+([ADR 0069](../decisions/0069-sync-a-recording-on-command-as-client-protocol-version-8.md)).
 
 ## How to verify it worked
 

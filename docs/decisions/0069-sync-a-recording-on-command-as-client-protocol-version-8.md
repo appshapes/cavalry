@@ -1,4 +1,4 @@
-# 0067. Sync a recording on command, as client protocol version 8
+# 0069. Sync a recording on command, as client protocol version 8
 
 - **Status:** Accepted
 - **Date:** 2026-11-10

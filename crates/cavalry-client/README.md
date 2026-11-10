@@ -12,7 +12,11 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   place, commit it. Nothing is allocated per message, and a codec encodes straight into
   the claimed slice.
 - Delivers to the subscriber's fragment handler as a view into mapped memory, one image
-  per connected publisher.
+  per connected publisher. `Subscription::poll` reads every image in turn;
+  `Subscription::bounded_poll` reads one image, the one of a session, and no frame
+  that begins at or past a limit position, for a stream that may be read only as far
+  as something else has got, as a cluster's service reads its log no further than the
+  commit position (ADR 0066).
 - Returns back-pressure as a result code when the receiver window or the log buffer is
   full. The caller decides what to do; the driver never buffers more.
 - Says when its client is gone. Once the client is closed, by `close` or because the
@@ -36,7 +40,7 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   once a second, and returns when the sync has: a program that acknowledges what it
   recorded waits for one sync, not for the next second. `Recording::request_sync(&mut
   client)` asks for the same sync and does not wait for the answer, for a caller that
-  must not block; it allocates nothing (ADR 0067). The recording is the driver's:
+  must not block; it allocates nothing (ADR 0069). The recording is the driver's:
   it outlives the client, and dropping the handle stops nothing (ADR 0025).
   The client follows the stop of each recording it started, whoever stopped it:
   `Recording::stop_position()` is `None` while the recording is live and its stop

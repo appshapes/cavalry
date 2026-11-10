@@ -1726,6 +1726,46 @@ user-visible change, added in the same commit as the change. The format follows
   is refused before anything is sent. `cavalry` re-exports `Counter`
   ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
+- A driver's session ids start at a random i32, as `spec/client-protocol.md` has
+  always said. The first id came from the driver's clock, in steps of 256 ns, so two
+  drivers that read the same clock value as they started, the same microsecond where
+  the clock steps by one, chose the same session ids. When both then sent one stream to
+  one receive endpoint, as the members of a cluster started together send their
+  consensus streams, the receiver held the two publications as one session, answered
+  the first, and never answered the second: its publisher read `not connected` for as
+  long as it ran, and `cavalry doctor` reported `udp-publication-not-connected` on a
+  subscription that was there. On a macOS laptop, 2 of 42 starts of three members
+  together did this. The id is now drawn from the operating system's randomness (card
+  227).
+- A replay that follows a live recording no longer allocates on the driver's replayer
+  thread. Once a second the replayer reads the recording's catalog slot to learn
+  whether it stopped, and each read built the descriptor's channel and source
+  identity as two strings: two allocations a second for every such replay, on a
+  thread that copies frames. The replayer now reads the stop alone, through
+  `CatalogReader::stop_position` in `cavalry-log`, which runs the checks `get` runs.
+  A new allocation gate, `cavalry-client`'s `replay_follow_allocations`, holds three
+  seconds of a following replay to no allocation at all (invariant 2; card 227).
+- The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
+  appointed leader", the path the replicated log takes through the election's states
+  until the election is built. Every member canvasses, and the member with the lowest
+  id is the one that may lead: it leads where canvass would have it nominate, with no
+  ballot, and never while a member that reported holds a log ahead of its own, so a
+  leader that lost its log directory does not lead a second time. In leader ready it
+  waits for every member it has heard to join its log, for at most 10 s, before it appends the
+  term's first entry. A member that would need the catch-up or a truncation fails its
+  election and is counted; a leader below a quorum stays the leader and is counted; a
+  member leaves the live log when it begins an election, and a follower whose image of
+  the log is gone begins one; a member does not restart on a log that holds a term,
+  and a cluster is started again as a new cluster, every member on a new log
+  directory. A session message with cluster session id −1 is one the leader's own
+  process appended, of no session. `cavalry-proto` has the three rules,
+  `cluster::appointed_leader`, `cluster::appointed_canvass` and
+  `cluster::leader_ready`, with their vectors, and the Counters table names
+  `cluster.terms_led`, `cluster.appointed_leader_behind`,
+  `cluster.leader_quorum_losses` and `cluster.log_images_lost`. The consensus module is
+  a client of its driver, not a thread linked to the conductor by queues
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
 - A `Recording` follows its recording's stop. `Recording::stop_position()` says where
   the recording stopped once the driver has sent `recording stopped`, whichever
   client stopped it or whatever ended it, and `position()` and `synced_position()` are
@@ -1775,6 +1815,123 @@ user-visible change, added in the same commit as the change. The format follows
   covered
   ([ADR 0065](docs/decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md);
   card 227).
+- The cluster protocol says how a service reads the committed log, and the client has
+  the poll it needs. A service is a client of its member's driver: it reads the
+  member's own recording of the log through a replay that follows the recording, on
+  the `cavalry:ipc` service log stream, 104, and polls it no further than the member's
+  commit position, so the path is the same on the leader and on a follower and a
+  service may start at any time, from any entry the recording its member names
+  holds. `spec/cluster.md`, "The service",
+  says so, with the member's new counter `cluster.log_recording_id` and the two
+  checks a service makes before it takes a commit position as its bound;
+  `spec/log-buffer.md`, "Reading", says what a bounded read is. The Rust client gains
+  `Subscription::bounded_poll(session_id, handler, limit_position, fragment_limit)`,
+  which reads one image and delivers no frame that begins at or past the limit, and
+  `cavalry-shm` the `TermReader::bounded_poll` under it. The reader of the committed
+  log and the counter follow
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
+  card 227).
+- `cavalry-raft` has its first public items: the core of a cluster member.
+  `Consensus` is one member's state machine on the appointed leader's path of
+  `spec/cluster.md`: the leader canvasses, leads when no member's log is ahead of its
+  own, records its term, announces it, appends the term's first entry and commits what
+  a quorum has recorded; a follower canvasses, joins the leader's log at its append
+  position and reports that position as it rises. It does no I/O of its own: it
+  reaches the consensus stream, the log, its recording and its `terms` file through
+  the `Io` trait. `memory::Cluster` gives it that in memory, one to eight members in
+  one process on a clock the caller steps, with loss, delay up to 10 s, cuts, paused
+  syncs and a member started again on an empty log directory to set, which the
+  crate's README example and its tests run; its consensus stream holds at most 4,096
+  messages in flight and loses, and counts, one sent while it is full. The module
+  that runs the core over a driver follows
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
+- The election of a cluster member is a registered state machine, `cluster_election`,
+  and every move of it adds one to a counter: `counters.toml` has the eleven
+  `cluster.*` counters a member's core keeps, ids 110 to 120, among them two new ones,
+  `cluster.election_steps` and `cluster.elections_closed`, and
+  `cavalry_raft::Counts::by_counter` pairs each count with its counter's id for the
+  module to store. `docs/reference/counters.md` lists them and the machine's
+  transitions
+  ([ADR 0067](docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md);
+  card 227).
+- A cluster member runs over a driver: `cavalry_raft::ConsensusModule` is the consensus
+  module of the replicated log, a client of the driver in its directory. Three members
+  on three drivers appoint their leader, the followers arm their recordings before its
+  first frame, and an entry the leader's process offers is committed once a quorum has
+  synced it, with every member's recording holding the same bytes. The module stores
+  the member's role, election state, term, append position and commit position, the
+  recording that holds its log, and what it counts, as client counters in the
+  driver's counters file: the eleven counts of its core, from `Counts::by_counter`,
+  `cluster.commit_position`, and six counters this change registers in
+  `counters.toml`, ids 121 to 126, `cluster.role`, `cluster.election_state`,
+  `cluster.leadership_term_id`, `cluster.append_position`,
+  `cluster.messages_rejected` and `cluster.log_recording_id`, with the member's role
+  as the state machine `cluster_role`. `cluster.log_recording_id` names the
+  recording a service replays, −1 while the member records none, and is added
+  holding −1 before `cluster.commit_position` is added and stored before each
+  commit position, as `spec/cluster.md`, "The service", orders it
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)).
+  Every counter holds the member's value from its add: −1 for the term before the
+  first, never the 0 of its allocation. A follower that leaves the log holds its
+  recording until the driver has said where it stopped, and takes that stop as its
+  log's end. A stop that fails, or whose position the member has not read within
+  1 s (`stop-timeout`), is tried again on the next duty cycle and is never dropped.
+  A member does not start again on
+  a log directory that holds a term: the error says to start the cluster again as a
+  new cluster, every member on a new log directory
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
+- `cavalry run` starts a cluster member. Two configuration keys name the cluster,
+  `cluster.members`, the members string every member is given, and
+  `cluster.member.id`, this host's id in it, set as `CAVALRY_CLUSTER_MEMBERS` and
+  `CAVALRY_CLUSTER_MEMBER_ID`. With both set, `run` starts the member's consensus
+  module beside the driver, on a thread of its own with the conductor's idle strategy,
+  and stops it before the driver; with one set and not the other it starts nothing and
+  says which is missing. Its start line names the member's role and election state,
+  the counters labelled `cluster.role <id>` and `cluster.election_state <id>` in the
+  driver's `counters` file. `CAVALRY_CLUSTER_MEMBER_ID=-1`, the id's default written out,
+  is no member, the same as the variable unset. `cavalry doctor` checks both keys, `cluster-members` and
+  `cluster-member-id`: set together, a members string the protocol takes, an id the
+  string holds, and every endpoint a name that resolves. `cavalry::cluster` re-exports
+  `ConsensusModule` for a program that runs a member itself
+  ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
+  card 227).
+- The allocation tests of `cavalry-client` over the UDP send path and the UDP receive
+  path fail on a reallocation as well as on an allocation, which is what the bench's
+  gate has counted since
+  [ADR 0047](docs/decisions/0047-keep-the-first-allocations-backtrace-in-the-bench.md).
+  Before, a `Vec` or a `String` grown past a capacity it already had inside a test's
+  window was not counted, so the tests and the bench disagreed on what an allocation
+  is. `just lint` refuses an allocation test that reads one count without the other,
+  and `crates/cavalry-client/tests/reallocation_counted.rs` holds the counting
+  allocator to it ([Run the bench](docs/how-to/run-the-bench.md), "When it does not
+  work"; card 211).
+- The fixer's run finds the `ci` run GitHub held on its push when the listing by commit
+  leaves it out, by reading `ci.yml`'s own newest runs, and approves it; it reads the
+  branch's tip, so a pull request object that lags the push no longer hides the run.
+  When the head has no `ci` run the step can find after two minutes, on a pull request
+  that does not conflict with `master`, or a held run refuses the approval, the run now
+  fails and says what to run, where it printed `approved 0` and passed before, so a
+  fixer's push no longer goes without its gates in silence
+  ([Ask the agent to make a change](docs/how-to/ask-the-agent.md), "The fixer's push
+  has no gates"; card 215).
+- A subscription added right after a stream's last one was removed is no longer given
+  an image the driver is retiring. Removing the last subscription on a `cavalry:udp`
+  endpoint and stream starts the retire of its image, and until the receiver had
+  finished the driver still listed the image as live: a subscription added in that
+  moment was sent `available image` for it, the image's log was unlinked a duty cycle
+  later, and a client that had not opened the log yet closed with `corrupt`. A cluster
+  follower that leaves the log and joins it again adds its subscription in that
+  moment. The add now waits for the endpoint to close and binds it again, as an add
+  on a closing endpoint does, and is given the stream's next image at once; on an
+  endpoint that another stream's subscription keeps open it runs at once and is not
+  given the image being retired. An add that waits past 5 s is code 4 as before, and
+  its message and `cavalry doctor`'s `subscription.add_deferred_timed_out` finding now
+  name both causes and what to do for each: a recording of the image being retired
+  that has not yet stopped, its recorder behind, and a receiver thread starved of CPU
+  ([ADR 0068](docs/decisions/0068-give-an-image-being-retired-to-no-new-subscription.md);
+  card 227).
 - A client can have the recorder sync a recording at once. The recorder syncs a
   recording once a second, so a program that acknowledges what it recorded, a cluster
   member counting towards a commit for one, waited up to a second with nothing to do.
@@ -1785,5 +1942,5 @@ user-visible change, added in the same commit as the change. The format follows
   up at the position last synced, as after any failed sync. The command is client
   protocol version 8, type id 264; every version 7 encoding is unchanged, and a
   version 7 driver answers it with error code 6
-  ([ADR 0067](docs/decisions/0067-sync-a-recording-on-command-as-client-protocol-version-8.md);
+  ([ADR 0069](docs/decisions/0069-sync-a-recording-on-command-as-client-protocol-version-8.md);
   card 227).

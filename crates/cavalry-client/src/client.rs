@@ -726,7 +726,7 @@ impl Cavalry {
 
     /// Has the driver's recorder sync what it has written of recording `recording_id`
     /// now, without waiting for its sync once a second, and waits for the answer
-    /// (`spec/client-protocol.md`, "Commands"; ADR 0067). `Ok` means that everything
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0069). `Ok` means that everything
     /// the recorder had written when it took the request is covered by a sync that
     /// returned success, and `recording.synced_position` says how far that is. It does
     /// not mean that everything this client published before the call is covered: the

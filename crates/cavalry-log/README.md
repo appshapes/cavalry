@@ -16,13 +16,17 @@ The durable log: recording and replay. Data plane.
   slot after a retention command's file work failed is the same rules in two halves,
   `dir::repair_files` on the thread that has the files and `LogDir::apply_repair`, the
   one catalog write they end in, on the thread that owns the catalog, each reporting
-  what it did (ADR 0031).
+  what it did (ADR 0031). A reader of the catalog that asks only where a recording
+  stopped calls `catalog::CatalogReader::stop_position`: the checks of
+  `CatalogReader::get` and no descriptor built, so no allocation, which is what the
+  driver's replayer needs once a second for every replay that follows a live
+  recording (invariant 2).
 - Writes a recording for the driver: `LogDir::start` takes the catalog slot and
   creates the time index and the first segment file; `recorder::RecordingWriter` writes
   each block of committed frames with one positional write, appends an index entry at
   most once per millisecond, rolls segments at their length, and syncs once per second
   behind two positions, what is written and what is synced, or at once when its caller
-  was asked to (`RecordingWriter::sync_now`; ADR 0067); `LogDir::stop` writes the
+  was asked to (`RecordingWriter::sync_now`; ADR 0069); `LogDir::stop` writes the
   stop (ADR 0025). A roll allocates nothing while the log directory's path is at most
   337 bytes (`recorder::LOG_DIR_PATH_LIMIT`): the standard library opens a path on its
   stack only under 384 bytes, the longest segment name is 45, and the next segment's

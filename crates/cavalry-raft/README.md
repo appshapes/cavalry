@@ -5,15 +5,53 @@ commit path runs per message.
 
 ## What this does
 
-- Replicates a durable log across a cluster of drivers with Raft and feeds a
-  deterministic state machine from the committed log, so any member can be rebuilt by
-  replaying its log and a failover loses nothing that was committed.
-- Elects a leader in under a second and runs mixed versions during a rolling upgrade;
-  both are tested in CI with fault injection.
-- Includes standby members, which follow the log without voting and are ready to be
-  promoted, in the open core.
-- Lives under the data-plane rules as a whole, leader election and membership included,
-  until a recorded decision splits the control parts out.
+- Runs one cluster member's part of `spec/cluster.md`: `Consensus` is the state
+  machine of a member, its role, its election, its terms and the positions it knows.
+  The leader records its term, announces it, appends the term's first entry and commits
+  what a quorum has recorded; a follower canvasses, joins the leader's log at its
+  append position and reports that position as it rises.
+- Leads by appointment, until the election is built: the member with the lowest id is
+  the one member that may lead, and every other member follows it (`spec/cluster.md`,
+  "The appointed leader"; ADR 0063). It canvasses first and leads only when no member
+  reports a log ahead of its own, so a leader that lost its log directory never leads
+  a second time. A member that could join only with a catch-up or a truncation, one
+  that starts late, is left out and counted, never joined wrong.
+- Counts every move of the election. `ElectionState` is the state machine
+  `cluster_election` of `counters.toml`, and each of its transitions adds one to a
+  count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
+  count with its counter's id, for the module to store as a client counter (ADR 0067;
+  [the counters reference](../../docs/reference/counters.md)).
+- Does no I/O of its own in its core: `Consensus` reaches the consensus stream, the
+  log, its recording and its `terms` file through one trait, `Io`.
+- Runs a member over a driver: `ConsensusModule::start(dir, log_dir, members,
+  member_id)` is a client of the driver in `dir`. It sends the consensus messages on a
+  publication to each peer, adds the leader's log as a publication with every other
+  member as a destination and records it, or subscribes to the leader's log and arms
+  the recording that holds it from its first frame, keeps the record of terms in the
+  `terms` file of `log_dir`, and stores what it counts in the driver's counters file:
+  `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
+  `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
+  `cluster.log_recording_id`, the recording that holds its log, which its service
+  replays, and the eleven counts of `Counts::by_counter`. The counters of sessions, of
+  the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
+  with those features. One thread calls `do_work()`; the leader's process appends
+  with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
+  holds its recording until the driver has said where it stopped, and that stop is
+  where its log ends. A stop that the driver refuses or does not answer is a `client`
+  error, and a stop position not read within 1 s is a `stop-timeout` error. Either
+  way the member stays in init with the recording held, and the next `do_work()`
+  stops it again.
+- Runs the same core in memory: `memory::Cluster` is one to eight members in one
+  process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
+  member started again on an empty log directory to set: what the example below and
+  most of the crate's tests run. It is a test double and allocates; its consensus
+  stream holds at most 4,096 messages in flight and loses, and counts, one sent
+  while it is full, and its log holds every entry offered for the cluster's life.
+- To come, each with its card: `cavalry run` starting the module from two
+  configuration keys, the service's bounded poll and `doctor`'s checks (card 227), the
+  election and mixed versions in a rolling upgrade (card 228), the cluster client (card
+  229), snapshots and catch-up (card 230), and standby members, which follow the log
+  without voting, in the open core.
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).
@@ -31,11 +69,32 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 
 ## Example
 
-Not yet. This crate has no public item to show, and a crate README's example is also
-its doctest, so an example written now would invent an API.
-[ADR 0003](../../docs/decisions/0003-lay-out-the-workspace.md) records why the example
-rule is deferred for scaffold crates. The example arrives in the same commit as the
-first public item.
+Three members in one process, with no driver: the leader is appointed, the others join
+its log, and an entry is committed once a quorum has recorded it.
+
+```rust
+use cavalry_raft::memory::Cluster;
+use cavalry_raft::{ElectionState, Role};
+
+let mut cluster = Cluster::new(&[0, 1, 2])?;
+// One second of the cluster's clock: every member canvasses, the member with the
+// lowest id leads, the others join its log and report, and every election closes.
+cluster.run_ms(1_000);
+assert_eq!(cluster.role(0), Some(Role::Leader));
+assert_eq!(cluster.role(1), Some(Role::Follower));
+assert_eq!(cluster.election_state(2), Some(ElectionState::Closed));
+
+// The leader's own process appends an entry. It is committed when a quorum has
+// recorded it, and every member learns the commit position from the leader.
+let position = cluster.offer(b"hello")?;
+cluster.run_ms(1_000);
+assert_eq!(cluster.commit_position(0), Some(position));
+assert_eq!(cluster.commit_position(2), Some(position));
+// Every member's recording holds the same bytes.
+assert_eq!(cluster.log(1), cluster.log(0));
+assert_eq!(cluster.log(2), cluster.log(0));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ## What to read next
 
@@ -47,6 +106,14 @@ first public item.
   why the protocol is Aeron Cluster's field for field under a header of Cavalry's own,
   and [ADR 0052](../../docs/decisions/0052-build-raft-on-the-durable-log-fifth.md), the
   slice's eight features in order, of which this crate's are the third to the seventh.
+- [ADR 0063](../../docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md),
+  how this crate's first feature is built: the consensus module is a client of its
+  driver, in two layers, a core that does no I/O and the module that acts for it, and
+  its leader is appointed, on the path `spec/cluster.md`, "The appointed leader",
+  gives through the election's states.
+- [ADR 0067](../../docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md),
+  why the election's machine is registered with the core and what its two step
+  counters count.
 - [`spec/udp.md`](../../spec/udp.md), "The sender", for the multi-destination cast the
   log travels over, and [`spec/durable-log.md`](../../spec/durable-log.md) for the
   recording every member keeps of it.

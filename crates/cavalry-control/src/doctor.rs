@@ -21,13 +21,14 @@
 //! ```
 
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cavalry_driver::{IdleStrategy, spec};
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
+use cavalry_proto::cluster::{EMPTY_MEMBER, MAX_MEMBERS, parse_members};
 #[cfg(target_os = "linux")]
 use cavalry_proto::udp::DATAGRAMS_PER_BURST;
 use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
@@ -43,7 +44,9 @@ use cavalry_shm::counters::generated::{
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
+use crate::config::Config;
 use crate::config::generated::{
+    CLUSTER_MEMBER_ID as MEMBER_ID_KEY, CLUSTER_MEMBERS as MEMBERS_KEY,
     CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_KEY, DIR as DIR_KEY, LOG_DIR as LOG_DIR_KEY,
 };
 
@@ -2065,6 +2068,129 @@ fn host_checks(findings: &mut Vec<Finding>) -> usize {
     checks
 }
 
+/// [`examine_with`] for a configuration, with the checks of the keys that name a
+/// cluster: `cluster.members` and `cluster.member.id` set together, the members string
+/// one the cluster protocol takes, the member id one of the string's, and every
+/// endpoint of the string a name that resolves (`cluster-members`,
+/// `cluster-member-id`; ADR 0060). Neither key set is no cluster and no finding.
+pub fn examine_config(config: &Config) -> Report {
+    let mut report = examine_with(&config.dir, config.log_dir.as_deref());
+    let mut findings = std::mem::take(&mut report.findings);
+    let checks = report.checks
+        + cluster_key_checks(
+            config.cluster_members.as_deref(),
+            config.cluster_member_id,
+            &mut findings,
+        );
+    finish(&config.dir, findings, checks)
+}
+
+/// The checks of the `cluster.members` and `cluster.member.id` keys: what `cavalry run`
+/// would refuse or a member could not reach, said before the member is started. Returns
+/// how many checks ran: none for a driver that is in no cluster.
+fn cluster_key_checks(
+    members: Option<&str>,
+    member_id: Option<i32>,
+    findings: &mut Vec<Finding>,
+) -> usize {
+    let (members, member_id) = match (members, member_id) {
+        (None, None) => return 0,
+        (Some(_), None) => {
+            findings.push(Finding {
+                check: "cluster-member-id",
+                level: Level::Fail,
+                message: format!(
+                    "{} is set and {} is unset or -1, no member, so `cavalry run` cannot \
+                     tell which member this host is and starts none: set {} to this host's \
+                     id in the members string, or unset {} for a driver in no cluster",
+                    MEMBERS_KEY.env, MEMBER_ID_KEY.env, MEMBER_ID_KEY.env, MEMBERS_KEY.env
+                ),
+                doc: MEMBER_ID_KEY.anchor,
+            });
+            return 2;
+        }
+        (None, Some(id)) => {
+            findings.push(Finding {
+                check: "cluster-members",
+                level: Level::Fail,
+                message: format!(
+                    "{} is {id} and {} is not set, so there is no cluster for member {id} to \
+                     be in: set {} to the cluster's members string, the same on every \
+                     member, or unset {} for a driver in no cluster",
+                    MEMBER_ID_KEY.env, MEMBERS_KEY.env, MEMBERS_KEY.env, MEMBER_ID_KEY.env
+                ),
+                doc: MEMBERS_KEY.anchor,
+            });
+            return 2;
+        }
+        (Some(members), Some(member_id)) => (members, member_id),
+    };
+    let mut parsed = [EMPTY_MEMBER; MAX_MEMBERS];
+    let count = match parse_members(members.as_bytes(), &mut parsed, None) {
+        Ok(count) => count,
+        Err(error) => {
+            findings.push(Finding {
+                check: "cluster-members",
+                level: Level::Fail,
+                message: format!(
+                    "{} is refused ({}): {error}; write each member as \
+                     `id,ingress,consensus,log,catchup,archive`, an id from 0 and five \
+                     `host:port` endpoints, members separated by `|`, and give every member \
+                     the same string",
+                    MEMBERS_KEY.env,
+                    error.reason()
+                ),
+                doc: MEMBERS_KEY.anchor,
+            });
+            return 2;
+        }
+    };
+    let parsed = parsed.get(..count).unwrap_or(&[]);
+    if !parsed.iter().any(|member| member.id == member_id) {
+        let ids: Vec<String> = parsed.iter().map(|member| member.id.to_string()).collect();
+        findings.push(Finding {
+            check: "cluster-member-id",
+            level: Level::Fail,
+            message: format!(
+                "{} is {member_id}, which is not a member of {}, whose ids are {}: set it to \
+                 this host's id in the string",
+                MEMBER_ID_KEY.env,
+                MEMBERS_KEY.env,
+                ids.join(", ")
+            ),
+            doc: MEMBER_ID_KEY.anchor,
+        });
+    }
+    for member in parsed {
+        for (name, endpoint) in [
+            ("ingress", member.ingress),
+            ("consensus", member.consensus),
+            ("log", member.log),
+            ("catchup", member.catchup),
+            ("archive", member.archive),
+        ] {
+            let host = String::from_utf8_lossy(endpoint.host);
+            let resolved = (host.as_ref(), endpoint.port)
+                .to_socket_addrs()
+                .map(|mut addresses| addresses.next().is_some());
+            if !matches!(resolved, Ok(true)) {
+                findings.push(Finding {
+                    check: "cluster-members",
+                    level: Level::Fail,
+                    message: format!(
+                        "member {}'s {name} endpoint in {}, {host}:{}, resolves to no address \
+                         on this host: no member can reach it there; correct the host name in \
+                         the string on every member, or make the name resolve",
+                        member.id, MEMBERS_KEY.env, endpoint.port
+                    ),
+                    doc: MEMBERS_KEY.anchor,
+                });
+            }
+        }
+    }
+    2
+}
+
 fn finish(dir: &Path, mut findings: Vec<Finding>, checks: usize) -> Report {
     let rank = |level: Level| match level {
         Level::Fail => 0,
@@ -3920,5 +4046,80 @@ mod tests {
         let counted = interface_mtu_checks(&[], &mut findings);
         assert_eq!(counted, usize::from(cfg!(target_os = "linux")));
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn the_cluster_keys_are_checked_together_and_against_the_members_string() {
+        let checked = |members: Option<&str>, id: Option<i32>| {
+            let mut findings = Vec::new();
+            let checks = cluster_key_checks(members, id, &mut findings);
+            (checks, findings)
+        };
+        let members = "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004\
+                       |1,localhost:9010,localhost:9011,localhost:9012,localhost:9013,localhost:9014";
+
+        // No cluster: nothing to check, nothing found.
+        assert_eq!(checked(None, None).0, 0);
+        assert!(checked(None, None).1.is_empty());
+        // A cluster as it should be set.
+        let (checks, findings) = checked(Some(members), Some(1));
+        assert_eq!(checks, 2);
+        assert!(findings.is_empty(), "{findings:?}");
+
+        // One key without the other, each named by the key that is missing; a member id
+        // of -1, its default, is no member, as `Config::from_vars` reads it.
+        let (_, findings) = checked(Some(members), None);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "cluster-member-id");
+        assert_eq!(findings[0].level, Level::Fail);
+        assert!(
+            findings[0]
+                .message
+                .contains("CAVALRY_CLUSTER_MEMBER_ID is unset or -1, no member"),
+            "{}",
+            findings[0].message
+        );
+        assert!(
+            findings[0]
+                .message
+                .contains("set CAVALRY_CLUSTER_MEMBER_ID")
+        );
+        assert_eq!(findings[0].doc, "docs/reference/config.md#clustermemberid");
+        let (_, findings) = checked(None, Some(1));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "cluster-members");
+        assert!(findings[0].message.contains("set CAVALRY_CLUSTER_MEMBERS"));
+        assert_eq!(findings[0].doc, "docs/reference/config.md#clustermembers");
+
+        // A string the cluster protocol refuses, with its reason.
+        let (_, findings) = checked(Some("0,127.0.0.1:9000"), Some(0));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "cluster-members");
+        assert!(
+            findings[0].message.contains("members-grammar"),
+            "{}",
+            findings[0].message
+        );
+        // An id the string does not hold, with the ids it does.
+        let (_, findings) = checked(Some(members), Some(2));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].check, "cluster-member-id");
+        assert!(
+            findings[0].message.contains("whose ids are 0, 1"),
+            "{}",
+            findings[0].message
+        );
+        // An endpoint whose name resolves to nothing, named with its member and its part.
+        let unresolved = members.replace("localhost:9012", "no-such-host.invalid:9012");
+        let (_, findings) = checked(Some(&unresolved), Some(0));
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].check, "cluster-members");
+        assert!(
+            findings[0].message.contains(
+                "member 1's log endpoint in CAVALRY_CLUSTER_MEMBERS, no-such-host.invalid:9012"
+            ),
+            "{}",
+            findings[0].message
+        );
     }
 }

@@ -293,7 +293,7 @@ impl Recording {
 
     /// Has the recorder sync what it has written of this recording now, through
     /// `client`, and waits for the driver's answer: [`Cavalry::sync_recording`] with
-    /// [`recording_id`], and the same answers (ADR 0067). After `Ok`,
+    /// [`recording_id`], and the same answers (ADR 0069). After `Ok`,
     /// [`synced_position`] is at least what [`position`] returned before the call.
     ///
     /// [`recording_id`]: Recording::recording_id

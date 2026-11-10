@@ -19,3 +19,31 @@ workspace = true
 [package.metadata.cavalry]
 data_plane = true
 allowed-dependencies = []
+
+[dependencies]
+# The cluster protocol: the consensus messages and the log's entries the core reads and
+# writes, and the rules of `spec/cluster.md` it decides by, the commit position, what a
+# reader does with new leadership term, the appointed leader (ADR 0058; ADR 0063). A
+# workspace member.
+cavalry-proto = { path = "../cavalry-proto" }
+# The consensus module is a client of its driver (ADR 0063): its consensus messages,
+# its log and its counters go through the commands every program uses. A workspace
+# member.
+cavalry-client = { path = "../cavalry-client" }
+# The `terms` file, the member's record of terms and its candidate term
+# (spec/durable-log.md, "Terms"; ADR 0060). A workspace member.
+cavalry-log = { path = "../cavalry-log" }
+# The counter ids `counters.toml` generates, which `Counts::by_counter` pairs each count
+# with, so that every transition of the election names the counter it moves and `just
+# lint-counters` checks it (CLAUDE.md, invariant 4; ADR 0067). A workspace member, and
+# one the module reaches anyway through `cavalry-client` (ADR 0063). The core calls
+# none of its unsafe code.
+cavalry-shm = { path = "../cavalry-shm" }
+
+[dev-dependencies]
+# The counting allocator of the allocation test, so that the core's zero-allocation
+# claim is a test (CLAUDE.md, gate 2), as in `cavalry-client`. Dev only.
+stats_alloc = "0.1"
+# The module's tests run three drivers in the test process, one a member (ADR 0007).
+# Dev only.
+cavalry-driver = { path = "../cavalry-driver" }

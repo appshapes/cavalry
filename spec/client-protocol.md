@@ -50,7 +50,7 @@ version 6 driver answers the two commands with code 6, and a version 6 client cl
 on the first of the two events a version 7 driver sends, as the reserved-id rule
 below says. Version 8 adds `sync recording`, the next of Cavalry's own type ids, 264,
 by which a client has the recorder sync what it has written of a recording without
-waiting for the recorder's sync once a second (ADR 0067); every version 7 encoding is
+waiting for the recorder's sync once a second (ADR 0069); every version 7 encoding is
 unchanged, so a version 7 client's commands are version 8 commands, and a version 7
 driver answers the command with code 6.
 
@@ -306,7 +306,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   a request still waiting for room (ADR 0042), is error code 10, as it is for an `add
   publication`; a socket that cannot be opened or bound is code 4; a host that does
   not resolve is code 9. An add on a `cavalry:udp` channel whose previous receive
-  endpoint is still closing, its socket with the receiver, waits with nothing
+  endpoint has lost its last subscription and has not yet closed, its images still
+  being retired or its socket still with the receiver, waits with nothing
   registered and no event sent until the receiver has closed it, one receiver cycle
   while the receiver keeps up, and then runs as if it had just arrived, the first such
   add binding the endpoint again; waiting adds hold slots of the subscriptions
@@ -314,7 +315,7 @@ What the driver does with each, after the checks of "What the driver rejects":
   out first. An add still waiting once the closing endpoint wait of "Liveness and
   timeouts" has passed since the driver read it is code 4, the bind it would have
   made, with nothing registered, and the close that comes later runs nothing for it
-  (ADR 0049).
+  (ADR 0049; ADR 0068 for an endpoint whose images are still being retired).
 - **remove subscription.** The driver removes the subscription and every image it has,
   frees their position counters, and answers `operation success`; an image over UDP
   shared with other subscriptions on the endpoint and stream goes on with them, one the
@@ -423,7 +424,7 @@ What the driver does with each, after the checks of "What the driver rejects":
   last synced. A command for a recording one of whose syncs has already failed, and
   which the recorder has not yet given up, is answered with error code 12 and no sync
   is made, since a sync is not asked a second time about bytes a sync has failed on
-  (ADR 0065, ADR 0067).
+  (ADR 0065, ADR 0069).
 - **start replay.** A replay channel that names a position key is error code 1 with
   the reason `position`, before its host is resolved and the replay is registered, so
   that one with a key and a host that does not resolve is code 1 and not 9, since the
@@ -812,7 +813,7 @@ values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 | publication unblock timeout | 15 s | the driver | `spec/log-buffer.md`, "Unblocking" |
 | publication linger | 5 s | the driver | `spec/log-buffer.md`, "Closing" |
 | counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`) |
-| recording sync interval | 1 s | the driver | how long after a recording's last sync, or its start, the recorder syncs it again when it has written bytes no sync covers; a `sync recording` syncs at once, and the interval then runs from that sync (ADR 0025, ADR 0067) |
+| recording sync interval | 1 s | the driver | how long after a recording's last sync, or its start, the recorder syncs it again when it has written bytes no sync covers; a `sync recording` syncs at once, and the interval then runs from that sync (ADR 0025, ADR 0069) |
 | replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber, or over `cavalry:udp` has not been connected as `spec/udp.md`, "The sender", defines it, for this long ends with reason 2: measured from the replay's start, from the moment its last subscriber went, or over `cavalry:udp` from the moment the connection timeout passed |
 | closing endpoint wait | 5 s | the driver | an `add subscription` that has waited this long for its channel's previous receive endpoint to close, measured from the moment the driver read it, is answered with code 4 and registers nothing ("Commands"); half the response timeout, so that the answer reaches the client before the client reports the add lost |
 

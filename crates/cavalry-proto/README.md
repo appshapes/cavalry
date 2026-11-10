@@ -37,7 +37,7 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   version 7 adds `add counter` and `remove counter` with their events, a key and a
   label checked against a counters file record's bounds (ADR 0062), and version 8
   adds `sync recording`, by which a client has the recorder sync a recording without
-  waiting for its sync once a second (ADR 0067).
+  waiting for its sync once a second (ADR 0069).
 - Encodes and decodes the cluster protocol, `spec/cluster.md`: the messages of the
   log, consensus, ingress and egress streams and the snapshot marker under the 8-byte
   message header of schema 1, version 0, in `cluster`, with the spec's checks in the
@@ -51,7 +51,9 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   reader does with new leadership term and what a leader writes into it;
   `replication_stop` and `replication_record`, where a follower's log replication
   stops and the terms it records there; `replay_end`, where a leader's replay begins
-  and ends; and `entry_position`, the position after an entry. A log leadership term
+  and ends; `entry_position`, the position after an entry; and, until the election is
+  built, `appointed_leader`, the member that may lead, `appointed_canvass`, whether it
+  leads from canvass, and `leader_ready`, when it closes its election (ADR 0063). A log leadership term
   id given to any of them is the highest term in the member's record of recorded
   terms, not the term of its last entry. What a member does with a message is
   `cavalry-raft`'s.

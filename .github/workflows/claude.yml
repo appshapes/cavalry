@@ -488,7 +488,8 @@ jobs:
   # person would make: it deletes the runs held on the heads the fixer pushed before its
   # last (the first step says why a delete), disarms the merge an earlier approval armed
   # when the push moved past it, approves the last head's with
-  # `POST .../actions/runs/<id>/approve`, and adds the `review` label, all from the
+  # `POST .../actions/runs/<id>/approve`, failing when the push has no `ci` run it can
+  # find (card 215), and adds the `review` label, all from the
   # token-holding side of the boundary above: no agent runs here, nothing here reads
   # model output, and GH_ACTIONS_TOKEN stays out of the agent's job exactly as it does
   # for `open-pr`. It runs after the agent job on every pull-request-bound event and is a
@@ -671,6 +672,31 @@ jobs:
             echo "::warning::the reviewer approved ${tip} while this step was disarming, so the merge that approval armed is gone with the old one, and nothing arms it again on its own. Add the review label to #${PR_NUMBER} once this run ends: the fresh approval arms it (docs/how-to/ask-the-agent.md, \"The pull request is approved but not merged\")"
           fi
 
+      # The head's held runs are read two ways, because the first can leave one out. On
+      # 2026-11-05 the fixer's push bff0e77 on pull request 128 got a `ci` run,
+      # 42078271138, created at 17:48:53 and held with no jobs, and the listing by
+      # `head_sha` did not show it eleven minutes later, at 18:00, while
+      # `gh run list --workflow ci.yml` did: this step printed `runs on bff0e77: 0;
+      # approved 0`, no gate ran at that head, and the fourth review blocked on it (card
+      # 215). So while the `head_sha` listing has no `ci` run of the head, the step reads
+      # `ci.yml`'s own newest runs for one at that head, this repository's only (the
+      # owner's token must not touch an outsider's run, ADR 0005), and approves what is
+      # held there too. The head is the branch's tip from the git ref, as the first step
+      # reads it, because the pull request object can lag the push.
+      #
+      # It ends in a failure, not in `approved 0`, in the two cases that leave a head with
+      # no gates and nothing to mend it: a held run that refuses the approval, named by
+      # its id, and a head with no `ci` run in either listing after the two minutes on a
+      # pull request that does not conflict with `master`. Whoever pushed the head: a fix
+      # that an `@claude` comment asked for is a push like the reviewer's. A head with no
+      # run on a pull request that does conflict is not a failure: GitHub raises none
+      # there, and the loop mends that by itself, the reviewer blocking on the missing
+      # gates and the next fix run merging `master` in, so the step warns and goes on, at
+      # its second look. When GitHub has not said whether the pull request conflicts, the
+      # step warns and goes on too, since a stop there would stall the case that mends
+      # itself. A failure here skips the step below, so no review is spent on a head with
+      # no gates; the message names what a person runs.
+      # `scripts/claude-workflow-test.py` runs this step's script against a fake `gh`.
       - name: Approve the runs GitHub held on the fixer's push
         if: needs.agent.result == 'success'
         env:
@@ -679,31 +705,79 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
           set -euo pipefail
-          if ! head=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null); then
+          if ! IFS=$'\t' read -r head branch head_repo < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.sha, .head.ref, .head.repo.full_name] | @tsv' 2>/dev/null); then
             echo "#${PR_NUMBER} is not a pull request; nothing to approve"
             exit 0
           fi
+          # The branch's tip from the git ref, when the branch is this repository's: the pull
+          # request object can lag a push (pull request 106), and the run to approve is the one
+          # on what was pushed. A fork's branch is not a ref of this repository.
+          if [ "$head_repo" = "$GITHUB_REPOSITORY" ]; then
+            tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null || echo "$head")
+            if [ "$tip" != "$head" ]; then
+              echo "the pull request object names ${head} and ${branch} is at ${tip}; the head's runs are ${tip}'s"
+              head=$tip
+            fi
+          fi
+          by_hand="approve it by hand, gh api -X POST repos/${GITHUB_REPOSITORY}/actions/runs/<id>/approve, then add the review label to #${PR_NUMBER} (docs/how-to/ask-the-agent.md, \"The fixer's push has no gates\")"
           # The held runs appear within seconds of the push, which happened before this job
-          # started; poll for up to two minutes, approve whatever is held, and stop after one
-          # quiet poll once runs exist. Only the head's runs: a run held on an earlier head
-          # of the same cycle would test a superseded tree and queue on the single-tenant
-          # bench hosts, and the step above has deleted it.
-          approved=0; seen=0; quiet=0; deadline=$((SECONDS + 120))
-          while :; do
-            runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${head}&per_page=50" --jq '.workflow_runs[] | "\(.id) \(.status) \(.conclusion // "")"')
-            held=$(printf '%s\n' "$runs" | awk '$3 == "action_required" {print $1}')
-            for id in $held; do
-              gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null
+          # started: thirteen looks ten seconds apart, two minutes, approving whatever is held,
+          # and done after two quiet looks once the head's ci run is known. Only the head's
+          # runs: a run held on an earlier head of the same cycle would test a superseded tree
+          # and queue on the single-tenant bench hosts, and the step above has deleted it. Each
+          # line of a listing is `<id> <workflow file> <status> <conclusion>`, and what is held
+          # and what is ci's is chosen here in awk, not in a listing's filter.
+          row='"\(.id) \(.path) \(.status) \(.conclusion // "")"'
+          has_ci() { awk 'index($2, ".github/workflows/ci.yml") == 1 { found = 1 } END { exit !found }'; }
+          approved=0; done_ids=" "; extra=""; ci_seen=0; quiet=0; mergeable=unread
+          for look in 1 2 3 4 5 6 7 8 9 10 11 12 13; do
+            runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${head}&per_page=50" --jq ".workflow_runs[] | ${row}")
+            if [ "$ci_seen" = 0 ] && ! printf '%s\n' "$runs" | has_ci; then
+              # The second way to the head's ci run: ci.yml's newest runs with no filter on the
+              # listing, since a filter is what left the run out, narrowed here to the head.
+              extra=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?per_page=100" \
+                --jq ".workflow_runs[] | select(.head_sha == \"${head}\" and (.head_repository.full_name // \"\") == \"${GITHUB_REPOSITORY}\") | ${row}")
+              if [ -n "$extra" ]; then
+                echo "the head_sha listing leaves out ci's run on ${head}; ci.yml's own listing has it: ${extra}"
+              fi
+            fi
+            runs=$(printf '%s\n%s\n' "$runs" "$extra" | grep . || true)
+            if printf '%s\n' "$runs" | has_ci; then ci_seen=1; fi
+            fresh=0
+            for id in $(printf '%s\n' "$runs" | awk '$4 == "action_required" { print $1 }'); do
+              case "$done_ids" in *" ${id} "*) continue ;; esac
+              if ! gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" >/dev/null; then
+                echo "::error::run ${id}, held on the fixer's push ${head}, refused the approval (the line above), so its jobs do not run and no review is asked for. To go on: ${by_hand/<id>/${id}}"
+                exit 1
+              fi
+              done_ids="${done_ids}${id} "
               echo "approved run ${id} on ${head}"
-              approved=$((approved + 1))
+              approved=$((approved + 1)); fresh=1
             done
-            [ -n "$runs" ] && seen=1
-            if [ -n "$held" ]; then quiet=0; elif [ "$seen" = 1 ]; then quiet=$((quiet + 1)); fi
+            if [ "$fresh" = 1 ]; then quiet=0; elif [ "$ci_seen" = 1 ]; then quiet=$((quiet + 1)); fi
             [ "$quiet" -ge 2 ] && break
-            [ "$SECONDS" -ge "$deadline" ] && break
-            sleep 10
+            if [ "$ci_seen" = 0 ] && [ "$look" -ge 2 ] && [ "$mergeable" != "true" ]; then
+              # No ci run at the head by the second look. GitHub raises none on a pull request
+              # that conflicts with master, and the loop mends that by itself: the reviewer
+              # blocks on the missing gates and the next fix run merges master in.
+              mergeable=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.mergeable | tostring' 2>/dev/null || echo unread)
+              if [ "$mergeable" = "false" ]; then
+                echo "::warning::${head}, the head of #${PR_NUMBER}, has no ci run because the pull request conflicts with master, which raises none; the review asked for below blocks on the missing gates and the next fix run merges master in (docs/how-to/ask-the-agent.md, \"The pull request conflicts with master\")"
+                exit 0
+              fi
+            fi
+            [ "$look" = 13 ] || sleep 10
           done
           echo "runs on ${head}: $(printf '%s\n' "$runs" | grep -c . || true); approved ${approved}"
+          if [ "$ci_seen" = 1 ]; then
+            exit 0
+          fi
+          if [ "$mergeable" != "true" ]; then
+            echo "::warning::${head}, the head of #${PR_NUMBER}, has no ci run listed after two minutes, and whether the pull request conflicts with master, which raises none, could not be read (mergeable: ${mergeable}); the review asked for below blocks on the missing gates if there are none. Look: gh pr view ${PR_NUMBER} --json mergeable and gh run list --workflow ci.yml --branch ${branch} (docs/how-to/ask-the-agent.md, \"The fixer's push has no gates\")"
+            exit 0
+          fi
+          echo "::error::${head}, the head of #${PR_NUMBER}, has no ci run listed after two minutes, neither under its head_sha nor among ci.yml's newest 100 runs, and the pull request does not conflict with master, so no gate runs on it and no review is asked for. Look for the run GitHub holds: gh run list --workflow ci.yml --branch ${branch}; then ${by_hand}. If there is none, push to ${branch} to raise one"
+          exit 1
 
       # The owner's token adds the label, so the `labeled` event fires and the dispatcher
       # (dispatch-review.yml) takes the label off and starts the reviewer: the signal a
