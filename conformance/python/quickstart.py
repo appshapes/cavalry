@@ -219,15 +219,17 @@ def edges(client):
     def message(i):
         return i.to_bytes(8, "little") + bytes(BODY - 8)
 
+    # A subscription takes its image on a poll, once the client's conductor has handed it
+    # over, which is after the driver made it: a publication can accept an offer before
+    # the subscription holds the image, and a poll then delivers nothing (cards 223, 233
+    # and 235). So wait for the image first. Nothing is offered yet, so these polls deliver
+    # nothing, and the one poll of ten below reads every message.
     until = deadline()
-    while True:
-        subscription.poll(unexpected, 10)  # nothing is offered yet; the image joins on a poll
-        position = publication.offer(message(0))
-        if position >= 0:
-            break
-        if position in (cavalry.CLOSED, cavalry.MAX_POSITION_EXCEEDED, cavalry.ERROR) or time.monotonic() > until:
-            fail(f"{name}: the first offer returned {CODE_NAMES.get(position, position)} ({position})")
-    for i in range(1, 10):
+    while subscription.image_count() == 0:
+        subscription.poll(unexpected, 10)
+        if time.monotonic() > until:
+            fail(f"{name}: the subscription held no image after {WAIT_SECONDS:.0f} s")
+    for i in range(10):
         offer_or_fail(name, publication, message(i), i)
 
     def raises_on_3(body, header):

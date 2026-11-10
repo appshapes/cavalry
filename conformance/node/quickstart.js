@@ -271,17 +271,17 @@ function edges(client) {
   const seen = [];
   const unexpected = () => fail(`${name}: a fragment the test did not expect, after ${seen}`);
 
+  // A subscription takes its image on a poll, once the client's conductor has handed it
+  // over, which is after the driver made it: a publication can accept an offer before
+  // the subscription holds the image, and a poll then delivers nothing (cards 223, 233
+  // and 235). So wait for the image first. Nothing is offered yet, so these polls deliver
+  // nothing, and the one poll of ten below reads every message.
   let until = deadline();
-  for (;;) {
-    subscription.poll(unexpected, 10); // nothing is offered yet; the image joins on a poll
-    const position = publication.offer(message(0));
-    if (position >= 0) break;
-    if (position === cavalry.CLOSED || position === cavalry.MAX_POSITION_EXCEEDED || position === cavalry.ERROR
-        || Date.now() > until) {
-      fail(`${name}: the first offer returned ${codeName(position)} (${position})`);
-    }
+  while (subscription.imageCount() === 0) {
+    subscription.poll(unexpected, 10);
+    if (Date.now() > until) fail(`${name}: the subscription held no image after ${WAIT_MS / 1000} s`);
   }
-  for (let i = 1; i < 10; i++) offerOrFail(name, publication, message(i), i);
+  for (let i = 0; i < 10; i++) offerOrFail(name, publication, message(i), i);
 
   const throwsOn3 = (body) => {
     const index = indexOf(body);
