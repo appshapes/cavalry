@@ -32,7 +32,14 @@ The files come from the event (`GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`):
   `pulls/<number>/files`, every page. A renamed file counts under both of its names.
 - `push`: the files between the event's `before` and `after`, from
   `compare/<before>...<after>`, so that a push of several commits is read whole and
-  not from its last commit alone.
+  not from its last commit alone. And the commit before must have been measured:
+  the bench is skipped only when ci.yml has a run for `before` on the same branch,
+  by a push or by hand, that is completed with success. Runs of one branch go one at
+  a time with one waiting, and a newer push takes the waiting run's place, so a
+  commit under `crates/` whose run was replaced that way, or whose bench failed, has
+  no such run, and the push after it runs the bench over both, pages or not. A push
+  that was itself skipped passed that test, so the last run on the hosts before any
+  skipped push is green and nothing since could move the bench.
 - anything else, `workflow_dispatch` above all: the bench runs. That is how a
   baseline's processes, or a look at a host, are had at a tree whose last change was
   a page.
@@ -40,7 +47,8 @@ The files come from the event (`GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`):
 It answers "the bench runs" whenever it cannot list the change: a push with no commit
 before it, a comparison whose two commits have diverged, a listing as long as the API
 returns at most (3,000 files of a pull request, 300 of a comparison), a request the API
-refuses or does not answer. A skip needs every file read and every one on the list.
+refuses or does not answer. A skip needs every file read and every one on the list,
+and on a push a green run for the commit before.
 
 It prints what it read and why, writes `bench=true` or `bench=false` to
 `GITHUB_OUTPUT` when that is set, and exits 0 either way: the answer is the output,
@@ -196,8 +204,27 @@ def push_files(api, before, after):
     return names(files)
 
 
+def measured(api, before, ref):
+    """Whether ci.yml has a completed, successful run for `before` on the push's branch,
+    started by a push or by hand: the commit the push stands on was measured and passed,
+    by its own run on the hosts or, for a push that was skipped, by this same test."""
+    if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+        raise Unread("the push event names no branch")
+    branch = ref[len("refs/heads/"):]
+    listed = api.get(f"/actions/workflows/ci.yml/runs?head_sha={before}&per_page={PER_PAGE}")
+    runs = listed.get("workflow_runs") if isinstance(listed, dict) else None
+    if not isinstance(runs, list):
+        raise Unread("the runs of the commit before the push could not be listed")
+    return any(isinstance(run, dict) and run.get("head_branch") == branch
+               and run.get("event") in ("push", "workflow_dispatch")
+               and run.get("status") == "completed" and run.get("conclusion") == "success"
+               for run in runs)
+
+
 def changed_files(env):
-    """The files of the event's change, or Unread when the event is one this does not list."""
+    """(files, base): the files of the event's change, and for a push what `measured`
+    needs to ask whether the commit before it has a green run, else None. Unread when
+    the event is one this does not list."""
     event = env.get("GITHUB_EVENT_NAME", "")
     if event not in ("pull_request", "push"):
         raise Unread(f"the event is {event or 'not named'}, which runs the bench whatever changed")
@@ -211,8 +238,9 @@ def changed_files(env):
         number = payload.get("number") or (payload.get("pull_request") or {}).get("number")
         if not isinstance(number, int):
             raise Unread("the pull request event names no number")
-        return pull_request_files(api, number)
-    return push_files(api, payload.get("before"), payload.get("after"))
+        return pull_request_files(api, number), None
+    before = payload.get("before")
+    return push_files(api, before, payload.get("after")), (api, before, payload.get("ref"))
 
 
 def main(argv, env, out=print):
@@ -226,9 +254,16 @@ def main(argv, env, out=print):
         out("usage: bench-needed.py [--files <path>...]")
         return 2
     try:
-        runs, lines = decide(changed_files(env))
+        files, base = changed_files(env)
+        runs, lines = decide(files)
+        # Asked only when the files alone would skip the bench: a push that runs it
+        # measures the commit before it as well, whatever became of that commit's run.
+        if not runs and base is not None and not measured(*base):
+            raise Unread(f"the commit before the push, {base[1][:7]}, has no completed, successful run of "
+                         f"ci.yml on its branch: its run was replaced while it waited, failed or is not "
+                         f"there, so this run measures both")
     except Unread as why:
-        runs, lines = True, [f"the change could not be listed, so the bench runs: {why}"]
+        runs, lines = True, [f"the bench runs, since a skip needs every file read and the base measured: {why}"]
     for line in lines:
         out(f"bench-needed: {line}")
     answer = f"bench={'true' if runs else 'false'}"

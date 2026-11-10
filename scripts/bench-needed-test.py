@@ -207,6 +207,12 @@ class Event(unittest.TestCase):
     def compare(self, body, before=BEFORE, after=AFTER):
         self.api.routes[f"/repos/{REPO}/compare/{before}...{after}?per_page=100"] = body
 
+    def runs_of(self, sha, *runs):
+        """ci.yml's runs for `sha`: each run is (event, branch, status, conclusion)."""
+        self.api.routes[f"/repos/{REPO}/actions/workflows/ci.yml/runs?head_sha={sha}&per_page=100"] = {
+            "workflow_runs": [{"event": event, "head_branch": branch, "status": status, "conclusion": conclusion}
+                              for event, branch, status, conclusion in runs]}
+
 
 class PullRequest(Event):
     def test_a_pull_request_of_pages_alone_answers_false(self):
@@ -240,7 +246,7 @@ class PullRequest(Event):
         self.pull(3, *[full] * (needed.PULL_FILES_MOST // needed.PER_PAGE))
         answer, text = self.run_event("pull_request", {"number": 3})
         self.assertEqual(answer, "bench=true")
-        self.assertIn("could not be listed", text)
+        self.assertIn("as many as the API returns", text)
 
     def test_a_listing_the_api_refuses_runs_the_bench(self):
         self.api.routes[f"/repos/{REPO}/pulls/7/files?per_page=100&page=1"] = (403, {"message": "Forbidden"})
@@ -256,40 +262,97 @@ class PullRequest(Event):
         self.assertNotIn(FAKE_TOKEN, path)
 
 
+GREEN = ("push", "master", "completed", "success")
+PUSH = {"before": BEFORE, "after": AFTER, "ref": "refs/heads/master"}
+
+
 class Push(Event):
-    def test_a_push_of_pages_alone_answers_false(self):
+    def test_a_push_of_pages_alone_on_a_measured_commit_answers_false(self):
         self.compare({"status": "ahead", "files": files("docs/decisions/0061.md", "docs/SUMMARY.md")})
-        answer, _ = self.run_event("push", {"before": BEFORE, "after": AFTER})
+        self.runs_of(BEFORE, GREEN)
+        answer, _ = self.run_event("push", PUSH)
         self.assertEqual(answer, "bench=false")
 
     def test_a_push_of_several_commits_is_read_whole_from_before_to_after(self):
         # The last commit of the push changed a page; an earlier one changed a crate.
         self.compare({"status": "ahead", "ahead_by": 3,
                       "files": files("docs/glossary.md", "crates/cavalry-log/src/recorder.rs")})
-        answer, text = self.run_event("push", {"before": BEFORE, "after": AFTER})
+        self.runs_of(BEFORE, GREEN)
+        answer, text = self.run_event("push", PUSH)
         self.assertEqual(answer, "bench=true")
         self.assertEqual(self.api.paths(), [f"/repos/{REPO}/compare/{BEFORE}...{AFTER}"])
 
+    def test_pages_pushed_onto_a_commit_whose_run_was_replaced_while_it_waited_run_the_bench(self):
+        # Runs of one branch go one at a time with one waiting; a newer push takes the
+        # waiting run's place, and the replaced run reads cancelled. The commit before
+        # this push changed a crate and was never measured on this branch.
+        self.compare({"status": "ahead", "files": files("docs/glossary.md")})
+        self.runs_of(BEFORE, ("push", "master", "completed", "cancelled"))
+        answer, text = self.run_event("push", PUSH)
+        self.assertEqual(answer, "bench=true")
+        self.assertIn("has no completed, successful run", text)
+        self.assertIn(BEFORE[:7], text)
+
+    def test_pages_pushed_onto_a_commit_whose_bench_failed_run_the_bench(self):
+        self.compare({"status": "ahead", "files": files("CHANGELOG.md")})
+        self.runs_of(BEFORE, ("push", "master", "completed", "failure"))
+        answer, _ = self.run_event("push", PUSH)
+        self.assertEqual(answer, "bench=true")
+
+    def test_pages_pushed_onto_a_commit_with_no_run_or_one_still_running_run_the_bench(self):
+        self.compare({"status": "ahead", "files": files("CHANGELOG.md")})
+        for runs in ((), (("push", "master", "in_progress", None),), (("push", "master", "queued", None),)):
+            with self.subTest(runs=runs):
+                self.runs_of(BEFORE, *runs)
+                answer, _ = self.run_event("push", PUSH)
+                self.assertEqual(answer, "bench=true")
+
+    def test_a_green_run_of_the_commit_before_counts_only_on_this_branch_and_from_a_push_or_by_hand(self):
+        self.compare({"status": "ahead", "files": files("CHANGELOG.md")})
+        for run, answer in ((("pull_request", "master", "completed", "success"), "bench=true"),
+                            (("push", "another-branch", "completed", "success"), "bench=true"),
+                            (("workflow_dispatch", "master", "completed", "success"), "bench=false")):
+            with self.subTest(run=run):
+                self.runs_of(BEFORE, run)
+                self.assertEqual(self.run_event("push", PUSH)[0], answer)
+
+    def test_a_green_run_among_others_of_the_commit_before_is_enough(self):
+        self.compare({"status": "ahead", "files": files("CHANGELOG.md")})
+        self.runs_of(BEFORE, ("push", "master", "completed", "cancelled"), GREEN)
+        self.assertEqual(self.run_event("push", PUSH)[0], "bench=false")
+
+    def test_a_push_that_names_no_branch_or_whose_runs_cannot_be_listed_runs_the_bench(self):
+        self.compare({"status": "ahead", "files": files("CHANGELOG.md")})
+        self.runs_of(BEFORE, GREEN)
+        answer, _ = self.run_event("push", {"before": BEFORE, "after": AFTER, "ref": "refs/tags/v1"})
+        self.assertEqual(answer, "bench=true")
+        del self.api.routes[f"/repos/{REPO}/actions/workflows/ci.yml/runs?head_sha={BEFORE}&per_page=100"]
+        answer, text = self.run_event("push", PUSH)
+        self.assertEqual(answer, "bench=true")
+        self.assertIn("HTTP 404", text)
+
     def test_a_push_with_no_commit_before_it_runs_the_bench_and_asks_nothing(self):
-        answer, text = self.run_event("push", {"before": "0" * 40, "after": AFTER})
+        answer, text = self.run_event("push", {"before": "0" * 40, "after": AFTER, "ref": "refs/heads/master"})
         self.assertEqual(answer, "bench=true")
         self.assertIn("no commit before it", text)
         self.assertEqual(self.api.seen, [])
 
     def test_a_forced_push_runs_the_bench(self):
         self.compare({"status": "diverged", "files": files("docs/a.md")})
-        answer, text = self.run_event("push", {"before": BEFORE, "after": AFTER})
+        self.runs_of(BEFORE, GREEN)
+        answer, text = self.run_event("push", PUSH)
         self.assertEqual(answer, "bench=true")
         self.assertIn("diverged", text)
 
     def test_a_push_as_long_as_the_api_lists_runs_the_bench(self):
         self.compare({"status": "ahead",
                       "files": files(*[f"docs/page-{n}.md" for n in range(needed.COMPARE_FILES_MOST)])})
-        answer, _ = self.run_event("push", {"before": BEFORE, "after": AFTER})
+        self.runs_of(BEFORE, GREEN)
+        answer, _ = self.run_event("push", PUSH)
         self.assertEqual(answer, "bench=true")
 
     def test_a_comparison_the_api_does_not_have_runs_the_bench(self):
-        answer, text = self.run_event("push", {"before": BEFORE, "after": AFTER})
+        answer, text = self.run_event("push", PUSH)
         self.assertEqual(answer, "bench=true")
         self.assertIn("HTTP 404", text)
 
@@ -307,7 +370,7 @@ class Otherwise(Event):
             with self.subTest(env=env):
                 answer, text = self.run_event("pull_request", {"number": 1}, **env)
                 self.assertEqual(answer, "bench=true")
-                self.assertIn("could not be listed", text)
+                self.assertIn("the bench runs, since a skip needs", text)
 
     def test_files_on_the_command_line_decide_without_an_event(self):
         printed = []
@@ -365,6 +428,31 @@ class Workflow(unittest.TestCase):
             for step in rest:
                 with self.subTest(job, step=step.split("\n")[0][:50]):
                     self.assertRegex(step, r"\n        if: (env\.SKIP != 'true'|\$\{\{ [^}]*env\.SKIP != 'true'[^}]*\}\})\n")
+
+    def test_every_script_the_bench_path_names_is_on_the_side_that_runs_the_bench(self):
+        # `scripts/` is the one directory whose rule is "cannot move the bench" with the
+        # exceptions named, so a script the bench comes to run must be named: the bench
+        # jobs and the deciding job of ci.yml, the bench recipes of the justfile, and
+        # the host's check and set-up scripts.
+        named = set()
+        for job in ("changes", *self.BENCH):
+            named |= set(re.findall(r"scripts/[\w.-]+", self.jobs[job]))
+        justfile = (ROOT / "justfile").read_text(encoding="utf-8")
+        for recipe in ("bench", "bench-unchecked", "bench-compare"):
+            body = re.search(rf"(?m)^{recipe}(?: [^\n]*)?:[^\n]*\n((?:    [^\n]*\n)+)", justfile)
+            self.assertIsNotNone(body, recipe)
+            named |= set(re.findall(r"scripts/[\w.-]+", body.group(1)))
+        for script in sorted((ROOT / "bench" / "host").glob("*.sh")):
+            named |= set(re.findall(r"scripts/[\w.-]+", script.read_text(encoding="utf-8")))
+        self.assertIn("scripts/bench-needed.py", named)
+        self.assertIn("scripts/bench-compare.py", named)
+        self.assertIn("scripts/wait-for-partner-job.sh", named)
+        for path in sorted(named):
+            with self.subTest(path):
+                self.assertIn(path, needed.RUN, f"{path} is run on the bench path and a change to it would skip the bench")
+
+    def test_the_changes_job_may_read_the_run_of_the_commit_before_a_push(self):
+        self.assertRegex(self.jobs["changes"], r"\n      actions: read\b")
 
     def test_the_pair_still_waits_on_both_single_host_jobs_having_passed(self):
         for job in ("bench-udp", "bench-udp-peer"):

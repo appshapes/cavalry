@@ -50,7 +50,15 @@ crate's tests, examples and README are under `crates/` and run the bench for tha
 reason, not because they can move it. When no file of the change can move the
 bench, the four bench jobs keep their names, run on a hosted runner, print which
 files were read and why nothing runs, and pass in seconds, so the checks `master`
-requires still report and neither host is taken. A change the job cannot list, more
+requires still report and neither host is taken. A push has one more condition: the
+commit before it must have a completed, successful run of `ci.yml` on its branch,
+by a push or by hand. Runs of one branch go one at a time with one waiting, and a
+newer push takes the waiting run's place, so a commit under `crates/` whose run was
+replaced that way, or whose bench failed, has no such run, and the push after it
+runs the bench over both, pages or not. A push that was itself skipped passed that
+test, so the last run on the hosts before any skipped push is green and nothing
+since could move the bench: a red or unmeasured `master` is never turned green by a
+page. A change the job cannot list, more
 files than the API returns, a push with no commit before it, or a failed read, runs
 the bench. `workflow_dispatch` always runs it, which is how a baseline's processes
 or a look at a host are had at a tree whose last change was a page. The two gates
@@ -84,6 +92,12 @@ jobs run for every change, as before.
 - **Leave the jobs on the hosts and let their steps do nothing.** Lost: the job
   still waits in the host's queue for its turn, behind eleven-minute jobs, to do
   nothing.
+- **Decide a push from its own files alone.** The first draft of this decision. Lost
+  in its review: a push's run can be replaced while it waits, and a page pushed
+  after it would then report green for a commit under `crates/` that no run of
+  `master` ever measured; and a page pushed onto a commit whose bench failed would
+  turn `master`'s newest checks green. The question is whether the tree was
+  measured, so the push also asks it of the commit it stands on.
 
 ## Evidence
 
@@ -105,7 +119,10 @@ jobs run for every change, as before.
   among them. Of the five, this decision takes pull request 178 off the hosts, a
   script and two pages; the other four change a path that runs the bench.
 - `scripts/bench-needed-test.py` holds the list: each path named above on its side,
-  an unlisted path on the side that runs, and the cases the job cannot list.
+  an unlisted path on the side that runs, the cases the job cannot list, a push onto
+  a commit whose run was replaced, failed, is still running or is not there, and
+  that every script the bench jobs, the bench recipes and the host's check name is
+  on the side that runs.
 
 ## Consequences
 
@@ -116,10 +133,15 @@ the bench's runs keep one definition between them.
 
 Harder, and what it costs: every `master` run was also a sample of the hosts'
 health between baselines, and cards 168, 169, 198 and 219 read drift from them. With
-more than a quarter of the commits skipped the samples are fewer, never wrong. The list is one
-more thing to keep: a new top-level directory, or a script the bench jobs come to
-run, is on the side that runs until someone lists it, which is the safe side, and
-`just test` runs the script's tests.
+more than a quarter of the commits skipped the samples are fewer, never wrong. The
+bench jobs now wait for a job on a hosted runner to answer first, a minute or so,
+and for as long as hosted runners are unavailable; a failed answer runs the bench,
+and one that never starts holds the run as an unavailable gates runner already does.
+The list is one more thing to keep. A new top-level directory is on the side that
+runs until someone lists it, which is the safe side. `scripts/` is the one directory
+listed whole with its exceptions named, so the script's tests, which `just test`
+runs, fail when the bench jobs, the bench recipes or the host's scripts name a
+script that is not among the exceptions.
 
 It does not shorten a pull request whose change is under a crate's `src/`: the
 decision is over the whole pull request against its base, so each push of it runs

@@ -191,10 +191,18 @@ shared runner is
    change` and pass in seconds, and the `changes` job's log names each file with its
    reason. Every other file runs the bench as before: anything under `crates/` or
    `bench/`, a manifest or the lock, `counters.toml`, `config.toml`, the `justfile`,
-   `ci.yml`, and a path nobody listed. `python3 scripts/bench-needed.py --files
-   <path>...` prints the answer for the paths you give it. To run the bench at a
-   commit whose change it was skipped for, start the workflow by hand, which always
-   runs it: `gh workflow run ci.yml --ref <branch>`.
+   `ci.yml`, and a path nobody listed. A push to `master` has one more condition:
+   the commit before it must have a completed, successful run of its own on `master`.
+   Runs of one branch go one at a time with one waiting, and a newer push takes the
+   waiting run's place, so a commit whose run was replaced that way, or whose bench
+   failed, has none, and the push after it runs the bench over both, pages or not;
+   the `changes` job's log says `the commit before the push, <commit>, has no
+   completed, successful run`. `python3 scripts/bench-needed.py --files <path>...`
+   prints the answer for the paths you give it. To run the bench at a commit whose
+   change it was skipped for, start the workflow by hand, which always runs it:
+   `gh workflow run ci.yml --ref <branch>`. On `master` such a run takes the waiting
+   place like a push, so start it when `gh run list --branch master --workflow ci.yml`
+   shows none waiting, or the next push takes its place.
 
 4. To record a baseline for a machine, run `just bench` on it when it is idle and then
    `python3 scripts/bench-compare.py --update`, which writes the newest result's git,
@@ -423,8 +431,9 @@ shared runner is
    larger of the row's and the new process's, `p99_99_ns` the slowest run of both,
    still with no list, so the gate goes on comparing with `p99_99_ns`.
 
-5. Measure the link between the two bench hosts, which the `bench (udp)` job does on
-   every push with its peer job `bench (udp peer)`
+5. Measure the link between the two bench hosts, which the `bench (udp)` job does for
+   every push whose change can move the bench (step 3) with its peer job
+   `bench (udp peer)`
    ([ADR 0044](../decisions/0044-gate-udp-on-the-two-bench-hosts.md)). On `grip`, the
    peer, in one terminal:
 

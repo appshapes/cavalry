@@ -1921,8 +1921,9 @@ user-visible change, added in the same commit as the change. The format follows
   not to matter, pages, ADRs, spec pages, other workflows, scripts the bench does not
   run and the clients, the four bench checks keep their names and pass in seconds on a
   hosted runner; anything under `crates/` or `bench/`, a manifest, the `justfile`,
-  `ci.yml` or a path nobody listed runs the bench as before, and a run started by hand
-  always does. 22 of the last 80 commits were of the first kind and each had held the
-  hosts for about 21 minutes a run
+  `ci.yml` or a path nobody listed runs the bench as before, a run started by hand
+  always does, and so does a push onto a commit that has no green run of its own, so a
+  page never turns an unmeasured or red `master` green. 22 of the last 80 commits were
+  of the first kind and each had held the hosts for about 21 minutes a run
   ([ADR 0071](docs/decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md);
   [Run the bench](docs/how-to/run-the-bench.md), step 3; card 246).

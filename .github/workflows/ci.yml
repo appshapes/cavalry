@@ -52,8 +52,11 @@ jobs:
   # no instruction the harness runs, is not sent to them: scripts/bench-needed.py reads
   # the change's files, a pull request's against its base and a push's between the
   # event's before and after, and answers `bench=false` only when every file is on its
-  # list of paths known not to matter. Anything else is `bench=true`: a file nobody
-  # listed, a change it could not list, `workflow_dispatch`. The bench jobs below read
+  # list of paths known not to matter and, for a push, the commit before it has a
+  # completed, successful run of this workflow on its branch, so that a page pushed
+  # onto a commit whose run was replaced while it waited, or whose bench failed, runs
+  # the bench over both. Anything else is `bench=true`: a file nobody listed, a
+  # change it could not list, `workflow_dispatch`. The bench jobs below read
   # the answer as "run on the host" unless it is exactly `false`, and run when this job
   # failed too, so that no failure here can pass a change unmeasured.
   changes:
@@ -63,6 +66,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read       # the pull request's files
+      actions: read             # the run of the commit before a push
     outputs:
       bench: ${{ steps.decide.outputs.bench }}
     steps:
