@@ -213,6 +213,25 @@ struct Held {
     start: i64,
 }
 
+/// The image of the log on a follower's subscription, as the module noted it.
+#[derive(Clone, Copy)]
+enum LogImage {
+    /// No image has joined the subscription yet.
+    Awaited,
+    /// The first image that joined the subscription, noted after the poll that applied
+    /// it and before a frame of it was read.
+    Joined {
+        /// The id the driver gave the image, which tells it from a later image of the
+        /// same session.
+        correlation_id: i64,
+        session_id: i32,
+        join_position: i64,
+    },
+    /// The image noted is no longer available. No other image of the subscription is
+    /// noted or read until the member leaves the log, so that the core sees the loss.
+    Gone,
+}
+
 /// The core's [`Io`] over the client.
 struct ClientIo {
     client: Cavalry,
@@ -230,8 +249,8 @@ struct ClientIo {
     // A follower's log.
     log_subscription: Option<Subscription>,
     armed: Option<ArmedRecording>,
-    /// The session id and the join position of the image on the log subscription.
-    image: Option<(i32, i64)>,
+    /// The image on the log subscription and where it joined.
+    image: LogImage,
     held: Option<Held>,
     /// The end of the contiguous span the recordings this member has stopped hold.
     stopped_at: i64,
@@ -240,31 +259,66 @@ struct ClientIo {
 impl ClientIo {
     /// Takes the images the driver announced or withdrew on the log subscription, notes
     /// a new image's join position before a frame of it is read, hands over an armed
-    /// recording the driver has started, and reads past what has arrived, so that the
-    /// stream is not held back by a subscriber that stands still: the module acts on
-    /// no entry in this version, and the recording is the member's log.
+    /// recording the driver has started, and reads past what has arrived of the image
+    /// noted, so that the stream is not held back by a subscriber that stands still:
+    /// the module acts on no entry in this version, and the recording is the member's
+    /// log.
+    ///
+    /// An image is never read in the poll that applies it. The client's conductor runs
+    /// on a thread of its own and hands an image over whenever it has read the driver's
+    /// `available image`, between any two polls, and every poll applies what was handed
+    /// over before it reads. A poll that read every image would read up to
+    /// `LOG_POLL_LIMIT` frames of an image it had just applied, and the position
+    /// noted on the next cycle would be past the image's join: a join position mismatch
+    /// counted for a follower whose log had none, and a recording never counted, since
+    /// it would not begin where it was noted to. So the poll with a fragment limit of 0
+    /// applies and reads nothing, the image is noted after it, and the read is a bounded
+    /// poll of the noted session alone, which reads no image of another session that
+    /// the conductor hands over meanwhile. An image of the same session that the
+    /// conductor hands over in place of the noted one, which that read may read, is
+    /// never noted: the noted image is gone by the next cycle, and nothing is noted on
+    /// the subscription after it.
     fn observe_log(&mut self) -> Result<(), RaftError> {
         let Some(subscription) = self.log_subscription.as_mut() else {
             return Ok(());
         };
         subscription.poll(|_, _| {}, 0).map_err(RaftError::Poll)?;
-        self.image = match (self.image, subscription.images().first()) {
-            (Some((session_id, join)), Some(image)) if image.session_id() == session_id => {
-                Some((session_id, join))
+        self.image = match self.image {
+            LogImage::Awaited => subscription
+                .images()
+                .first()
+                .map_or(LogImage::Awaited, |image| LogImage::Joined {
+                    correlation_id: image.correlation_id(),
+                    session_id: image.session_id(),
+                    join_position: image.position(),
+                }),
+            LogImage::Joined { correlation_id, .. }
+                if subscription
+                    .images()
+                    .iter()
+                    .any(|image| image.correlation_id() == correlation_id) =>
+            {
+                self.image
             }
-            (_, Some(image)) => Some((image.session_id(), image.position())),
-            (_, None) => None,
+            LogImage::Joined { .. } | LogImage::Gone => LogImage::Gone,
+        };
+        let LogImage::Joined {
+            session_id,
+            join_position,
+            ..
+        } = self.image
+        else {
+            return Ok(());
         };
         subscription
-            .poll(|_, _| {}, LOG_POLL_LIMIT)
+            .bounded_poll(session_id, |_, _| {}, i64::MAX, LOG_POLL_LIMIT)
             .map_err(RaftError::Poll)?;
         if let Some(armed) = self.armed.as_mut()
-            && let Some((_, join)) = self.image
             && let Some(recording) = armed.poll()?
         {
             self.held = Some(Held {
                 recording,
-                start: join,
+                start: join_position,
             });
             self.armed = None;
         }
@@ -347,10 +401,14 @@ impl Io for ClientIo {
     }
 
     fn log_image(&mut self, session_id: i32) -> Result<Option<i64>, Self::Fault> {
-        Ok(self
-            .image
-            .filter(|&(session, _)| session == session_id)
-            .map(|(_, join)| join))
+        Ok(match self.image {
+            LogImage::Joined {
+                session_id: noted,
+                join_position,
+                ..
+            } if noted == session_id => Some(join_position),
+            _ => None,
+        })
     }
 
     fn leave_log(&mut self) -> Result<(), Self::Fault> {
@@ -370,7 +428,7 @@ impl Io for ClientIo {
         // The driver drops a recording still armed with the stream's last subscription.
         self.armed = None;
         self.log_subscription = None;
-        self.image = None;
+        self.image = LogImage::Awaited;
         Ok(())
     }
 
@@ -583,7 +641,7 @@ impl ConsensusModule {
                 log_recording: None,
                 log_subscription: None,
                 armed: None,
-                image: None,
+                image: LogImage::Awaited,
                 held: None,
                 stopped_at: 0,
             },
