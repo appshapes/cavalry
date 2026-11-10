@@ -47,6 +47,11 @@ first public item.
   why the protocol is Aeron Cluster's field for field under a header of Cavalry's own,
   and [ADR 0052](../../docs/decisions/0052-build-raft-on-the-durable-log-fifth.md), the
   slice's eight features in order, of which this crate's are the third to the seventh.
+- [ADR 0063](../../docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md),
+  how this crate's first feature is built: the consensus module is a client of its
+  driver, in two layers, a core that does no I/O and the module that acts for it, and
+  its leader is appointed, on the path `spec/cluster.md`, "The appointed leader",
+  gives through the election's states.
 - [`spec/udp.md`](../../spec/udp.md), "The sender", for the multi-destination cast the
   log travels over, and [`spec/durable-log.md`](../../spec/durable-log.md) for the
   recording every member keeps of it.
