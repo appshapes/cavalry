@@ -1897,3 +1897,10 @@ user-visible change, added in the same commit as the change. The format follows
   `ConsensusModule` for a program that runs a member itself
   ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
   card 227).
+- The fixer's run finds the `ci` run GitHub held on its push when the listing by commit
+  leaves it out, by reading `ci.yml`'s own newest runs, and approves it. When a push has
+  no `ci` run the step can find after two minutes, or a held run refuses the approval,
+  the run now fails and says what to run, where it printed `approved 0` and passed
+  before, so a fixer's push no longer goes without its gates in silence
+  ([Ask the agent to make a change](docs/how-to/ask-the-agent.md), "The fixer's push
+  has no gates"; card 215).

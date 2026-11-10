@@ -152,6 +152,16 @@ gh pr checks <number>
   the review of the agent's push"), so a `dispatch review` run appears within a minute
   of the run's end. Add `review` yourself only when a minute has passed and none has.
 
+- **A `claude` run failed in "Approve the runs GitHub held on the fixer's push".** The
+  fixer pushed and its push has no gates: the step found no `ci` run at the pushed
+  head, or the held run refused the approval, and the step that asks for the review
+  was skipped (card 215). The step's last line names the commands: `gh run list
+  --workflow ci.yml --branch <branch>`, `gh api -X POST
+  repos/{owner}/{repo}/actions/runs/<id>/approve` on the run that reads
+  `action_required`, then `gh pr edit <number> --add-label review`; with no held run,
+  a push of yours raises one and its review (`docs/how-to/ask-the-agent.md`, "The
+  fixer's push has no gates").
+
 - **"Autonomous fix cap reached".** The fourth changes-requested review ends the fixer's
   part (`claude.yml`, `MAX_ATTEMPTS: 3`). The pull request is the author's now: fix,
   step 2, step 4, push. A person's push raises its own `dispatch review` run.
