@@ -151,6 +151,13 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   length and MTU, and for the replay connect timeout it has a subscriber while its
   publication is connected, from the first status message without the send-setup flag
   until the connection timeout passes without one (ADR 0043).
+- Adds a counter for a client that asks with `add counter`: a record of the counters
+  file with the type id, the key and the label the client gave, its type one
+  `counters.toml` gives the scope `client`, answered with `counter ready`. The client
+  owns the counter and alone writes its value. The driver holds at most 256 of them,
+  frees one when its owner removes it, closes or is timed out, and tells every client
+  with `unavailable counter` before it does; another client's remove is code 5
+  (`spec/client-protocol.md`, "Commands"; ADR 0062).
 - Degrades under cgroup CPU throttling, shared-memory pressure or packet loss. It does
   not fall over, and every state transition increments a counter.
 

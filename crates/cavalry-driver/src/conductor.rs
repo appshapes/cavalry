@@ -41,6 +41,7 @@ use cavalry_shm::command_ring::{
     CommandRing, CommandRingError, Consumer, Producer as RingProducer,
     UnblockOutcome as RingUnblock,
 };
+use cavalry_shm::counters::generated::COUNTERS;
 use cavalry_shm::counters::generated::{
     CHANNEL_CLOSED, CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_OPENED, CHANNEL_PUBLICATIONS,
     CHANNEL_SOCKET_RCVBUF, CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CLIENT_PROTOCOL_ERRORS,
@@ -58,7 +59,7 @@ use cavalry_shm::counters::generated::{
     SENDER_FLOW_CONTROL_RECEIVERS, SENDER_LIMIT, SENDER_POSITION, SUBSCRIPTION_ADD_DEFERRED,
     SUBSCRIPTION_ADD_DEFERRED_TIMED_OUT, SUBSCRIPTION_ADD_DEFERRED_WAITING, SUBSCRIPTION_POSITION,
 };
-use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile};
+use cavalry_shm::counters::{Counter, CounterId, CountersError, CountersFile, Scope};
 use cavalry_shm::log::layout as log_layout;
 use cavalry_shm::log::{HeaderFields, LogBuffers, LogType, UnblockOutcome as LogUnblock};
 use cavalry_shm::spsc;
@@ -74,6 +75,9 @@ use crate::spec;
 
 /// The docs anchor an error event's message names.
 const ERRORS_DOC: &str = "docs/reference/client-protocol.md#error-codes";
+/// The docs anchor an `add counter` of a type that is not a client's names: the page
+/// that lists every counter with its scope.
+const COUNTERS_DOC: &str = "docs/reference/counters.md";
 
 /// How many commands one duty cycle reads before it turns to the publications.
 const COMMANDS_PER_CYCLE: usize = 16;
@@ -168,6 +172,16 @@ pub(crate) fn prepare_dir(dir: &Path) -> Result<(), DriverError> {
 struct Client {
     id: i64,
     last_seen: i64,
+}
+
+/// One counter a client added with `add counter` (`spec/client-protocol.md`,
+/// "Commands"; ADR 0062): what `remove counter` names, and what goes with its client.
+struct ClientCounter {
+    client_id: i64,
+    /// The add command's correlation id.
+    registration_id: i64,
+    /// The record the driver allocated; the client alone writes its value.
+    counter_id: u32,
 }
 
 /// One registration of a publication by a client: what `remove publication` names.
@@ -693,6 +707,8 @@ pub(crate) struct Conductor {
     transmitter: Transmitter,
     statics: Statics,
     clients: Vec<Client>,
+    /// The counters clients added, in the order they were added (ADR 0062).
+    client_counters: Vec<ClientCounter>,
     publications: Vec<Publication>,
     subscriptions: Vec<Subscription>,
     /// Adds waiting for a closing receive endpoint, in arrival order (ADR 0049).
@@ -809,6 +825,7 @@ impl Conductor {
             transmitter,
             statics,
             clients: Vec::with_capacity(spec::MAX_CLIENTS),
+            client_counters: Vec::with_capacity(spec::MAX_CLIENT_COUNTERS),
             // A replay's publication has no registration, so the publications sit
             // beside the registrations' bound.
             publications: Vec::with_capacity(
@@ -1180,20 +1197,136 @@ impl Conductor {
             } => {
                 self.change_destination(client_id, correlation_id, registration_id, channel, false);
             }
-            // The counter commands of version 7 decode, and their registry is the second
-            // of ADR 0062's three changes: until it lands the driver answers both with
-            // code 11 and registers nothing, as the CHANGELOG says.
-            Command::AddCounter { correlation_id, .. }
-            | Command::RemoveCounter { correlation_id, .. } => self.send_error(
+            Command::AddCounter {
+                client_id,
+                correlation_id,
+                type_id,
+                key,
+                label,
+            } => self.add_counter(client_id, correlation_id, type_id, key, label),
+            Command::RemoveCounter {
+                client_id,
+                correlation_id,
+                registration_id,
+            } => self.remove_counter(client_id, correlation_id, registration_id, now),
+        }
+    }
+
+    /// `add counter` (`spec/client-protocol.md`, "Commands"; ADR 0062): a counter of a
+    /// type `counters.toml` gives the scope `client`, registered under the command's
+    /// correlation id, allocated with the key and the label the client gave and answered
+    /// with `counter ready`. The client owns it and alone writes its value; the driver
+    /// compares it with none it holds. A type id that is not a client's is code 11 and
+    /// counts as a rejected command; the registry or the counters file at capacity is
+    /// code 10. The decoding has bounded the key and the label and checked the label's
+    /// UTF-8, so the checks here are answered and never met.
+    fn add_counter(
+        &mut self,
+        client_id: i64,
+        correlation_id: i64,
+        type_id: i32,
+        key: &[u8],
+        label: &[u8],
+    ) {
+        let is_a_clients = COUNTERS
+            .iter()
+            .any(|def| def.id.0 == type_id && def.scope == Scope::Client);
+        if !is_a_clients {
+            self.statics.rejected_command.increment();
+            self.send_error(
                 correlation_id,
                 ErrorCode::GenericError,
                 &format!(
-                    "this driver decodes add counter and remove counter and does not yet \
-                     register a client's counter (ADR 0062): nothing was added or removed; \
-                     run a driver that holds the client counters registry; see {ERRORS_DOC}"
+                    "counter type {type_id} is not one a client adds: add a counter whose \
+                     scope is client in counters.toml; see {COUNTERS_DOC}"
                 ),
-            ),
+            );
+            return;
         }
+        if self.client_counters.len() >= spec::MAX_CLIENT_COUNTERS {
+            self.statics.registry_full.increment();
+            self.send_error(
+                correlation_id,
+                ErrorCode::ResourceTemporarilyUnavailable,
+                &registry_full_message("client counters", spec::MAX_CLIENT_COUNTERS),
+            );
+            return;
+        }
+        let Ok(label) = core::str::from_utf8(label) else {
+            self.refuse_counter_fields(correlation_id, key.len(), label.len());
+            return;
+        };
+        match self.counters.allocate(CounterId(type_id), key, label) {
+            Ok(counter) => {
+                let counter_id = counter.id();
+                self.client_counters.push(ClientCounter {
+                    client_id,
+                    registration_id: correlation_id,
+                    counter_id,
+                });
+                self.send(&Event::CounterReady {
+                    correlation_id,
+                    counter_id: i32::try_from(counter_id).unwrap_or(i32::MAX),
+                });
+            }
+            Err(error @ CountersError::Full { .. }) => self.counters_full(correlation_id, &error),
+            Err(_) => self.refuse_counter_fields(correlation_id, key.len(), label.len()),
+        }
+    }
+
+    /// Answers an `add counter` whose key or label the counters file refused with code
+    /// 7, as the decoding's `counter` check does: the decoding refuses both first, so
+    /// this is answered and never met.
+    fn refuse_counter_fields(&mut self, correlation_id: i64, key: usize, label: usize) {
+        self.statics.rejected_command.increment();
+        let error = ProtocolError::Counter { key, label };
+        self.send_error(
+            correlation_id,
+            ErrorCode::MalformedCommand,
+            &format!("{error}"),
+        );
+    }
+
+    /// `remove counter` (`spec/client-protocol.md`, "Commands"; ADR 0062): the driver
+    /// forgets the client's registration, answers `operation success`, sends
+    /// `unavailable counter` and frees the record. A registration the driver does not
+    /// know, or another client's, is code 5.
+    fn remove_counter(
+        &mut self,
+        client_id: i64,
+        correlation_id: i64,
+        registration_id: i64,
+        now: i64,
+    ) {
+        let found = self.client_counters.iter().position(|counter| {
+            counter.registration_id == registration_id && counter.client_id == client_id
+        });
+        let Some(index) = found else {
+            self.send_error(
+                correlation_id,
+                ErrorCode::UnknownCounter,
+                &format!(
+                    "registration {registration_id} is not a counter of client {client_id}; \
+                     see {ERRORS_DOC}"
+                ),
+            );
+            return;
+        };
+        let counter = self.client_counters.remove(index);
+        self.send(&Event::OperationSuccess { correlation_id });
+        self.release_client_counter(&counter, now);
+    }
+
+    /// Tells every client that a client's counter is going, then frees its record, which
+    /// is not allocated again before the counter reuse timeout: a reader of the counter
+    /// stops at the event (`spec/client-protocol.md`, "Events").
+    fn release_client_counter(&mut self, counter: &ClientCounter, now: i64) {
+        self.send(&Event::UnavailableCounter {
+            registration_id: counter.registration_id,
+            counter_id: i32::try_from(counter.counter_id).unwrap_or(i32::MAX),
+        });
+        let reuse = now.saturating_add(spec::nanos(spec::COUNTER_REUSE_TIMEOUT));
+        let _ = self.counters.free(counter.counter_id, reuse);
     }
 
     /// `add destination` and `remove destination` (`spec/client-protocol.md`,
@@ -3542,10 +3675,19 @@ impl Conductor {
         }
     }
 
-    /// Client close and client timeout: every registration and subscription of the
-    /// client goes, as if removed, and the client is forgotten.
+    /// Client close and client timeout: every registration, subscription and counter of
+    /// the client goes, as if removed, a counter with its `unavailable counter` and no
+    /// `operation success`, and the client is forgotten.
     fn remove_client(&mut self, client_id: i64, now: i64) {
         self.clients.retain(|client| client.id != client_id);
+        while let Some(index) = self
+            .client_counters
+            .iter()
+            .position(|counter| counter.client_id == client_id)
+        {
+            let counter = self.client_counters.remove(index);
+            self.release_client_counter(&counter, now);
+        }
         // Its adds still waiting for a closing endpoint go with it (ADR 0049).
         self.pending_subscriptions
             .retain(|pending| pending.client_id != client_id);
