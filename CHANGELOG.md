@@ -1737,6 +1737,14 @@ user-visible change, added in the same commit as the change. The format follows
   subscription that was there. On a macOS laptop, 2 of 42 starts of three members
   together did this. The id is now drawn from the operating system's randomness (card
   227).
+- A replay that follows a live recording no longer allocates on the driver's replayer
+  thread. Once a second the replayer reads the recording's catalog slot to learn
+  whether it stopped, and each read built the descriptor's channel and source
+  identity as two strings: two allocations a second for every such replay, on a
+  thread that copies frames. The replayer now reads the stop alone, through
+  `CatalogReader::stop_position` in `cavalry-log`, which runs the checks `get` runs.
+  A new allocation gate, `cavalry-client`'s `replay_follow_allocations`, holds three
+  seconds of a following replay to no allocation at all (invariant 2; card 227).
 - The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
   appointed leader", the path the replicated log takes through the election's states
   until the election is built. Every member canvasses, and the member with the lowest

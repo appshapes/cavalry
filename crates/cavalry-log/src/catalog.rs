@@ -200,6 +200,26 @@ fn read_slot(file: &File, path: &Path, slot: u64) -> Result<Option<Descriptor>, 
     }
 }
 
+/// [`read_slot`] for a reader that asks only where a recording stopped: the same read
+/// and the same retry, and no descriptor built, so nothing is allocated.
+fn read_slot_stop(
+    file: &File,
+    path: &Path,
+    slot: u64,
+) -> Result<Option<(State, Option<i64>)>, CatalogError> {
+    let mut waited = Duration::ZERO;
+    loop {
+        let bytes = read_slot_bytes(file, path, slot)?;
+        match Descriptor::parse_stop(&bytes, slot as i64) {
+            Err(LayoutError::StopChecksum | LayoutError::RetainedChecksum) if waited < RETRY => {
+                std::thread::sleep(RETRY_STEP);
+                waited += RETRY_STEP;
+            }
+            other => return Ok(other?),
+        }
+    }
+}
+
 /// Whether the catalog's header was torn while the driver created it: the file is
 /// shorter than the header, or its magic is zero and it holds no whole slot, which the
 /// creation order allows since the header is synced before a slot is added
@@ -639,5 +659,23 @@ impl CatalogReader {
             return Err(CatalogError::Unknown { recording_id });
         }
         read_slot(&self.file, &self.path, recording_id as u64)
+    }
+
+    /// Where recording `recording_id` stopped: its stop position when the slot holds a
+    /// valid recording that has stopped, `None` when the recording is live, deleted or
+    /// the slot is empty. What [`get`](Self::get) says of the stop, by the same checks,
+    /// without the descriptor's two strings: the read allocates nothing, so the
+    /// driver's replayer may ask once a second for every replay that follows a live
+    /// recording (`CLAUDE.md`, invariant 2).
+    pub fn stop_position(&self, recording_id: i64) -> Result<Option<i64>, CatalogError> {
+        if recording_id < 0 || recording_id as u64 >= self.slots()? {
+            return Err(CatalogError::Unknown { recording_id });
+        }
+        Ok(
+            match read_slot_stop(&self.file, &self.path, recording_id as u64)? {
+                Some((State::Valid, stop)) => stop,
+                _ => None,
+            },
+        )
     }
 }

@@ -915,9 +915,11 @@ impl Replayer {
         if !due {
             return false;
         }
-        match self.catalog.get(replay.recording_id) {
-            Ok(Some(descriptor)) if descriptor.state() == State::Valid && !descriptor.is_live() => {
-                replay.extent = Extent::Final(descriptor.stop_position());
+        // The stop alone, read without the descriptor's strings: this runs once a
+        // second for every replay that follows a live recording, and allocates nothing.
+        match self.catalog.stop_position(replay.recording_id) {
+            Ok(Some(stop_position)) => {
+                replay.extent = Extent::Final(stop_position);
                 true
             }
             _ => {
