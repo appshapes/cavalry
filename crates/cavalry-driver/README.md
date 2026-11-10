@@ -69,6 +69,11 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   ends at its end, no faster than the slowest subscriber's position plus the window
   and never past what the recorder has synced; a subscription on the replay stream
   reads it as any stream, and `replay stopped` says where it ended and why (ADR 0030).
+  A replay that follows a live recording allocates nothing while it runs: once a
+  second the replayer asks the catalog where the recording stopped, and it reads the
+  stop alone (`cavalry_log::catalog::CatalogReader::stop_position`), not the
+  descriptor with its two strings. `cavalry-client`'s `replay_follow_allocations`
+  test is the gate, over three seconds of such a replay.
 - Truncates, purges and deletes a stopped recording on command: `truncate recording`,
   `purge segments` and `purge recording` (`spec/client-protocol.md`, "Commands"; ADR
   0031). The conductor admits each into a registry of commands in progress, bounded at
