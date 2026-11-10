@@ -9,7 +9,10 @@ the two crates where `unsafe` is permitted.
   fixed-size terms and a metadata page, and a position is a byte offset into the stream
   that increases across terms. `LogBuffers` creates and opens one, a `TermAppender`
   claims a frame in place and commits it with one release store, a `TermReader` reads
-  committed frames where its position says, or scans a `Block` of them with their
+  committed frames where its position says, to the end of what is committed or, with
+  `bounded_poll`, no further than a limit position
+  ([ADR 0065](../../docs/decisions/0065-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)),
+  or scans a `Block` of them with their
   headers for the recorder to write in one go
   ([ADR 0025](../../docs/decisions/0025-record-a-stream-in-the-driver.md)) or, from any
   position with `block_from`, for the driver's sender to put a burst or a retransmit on

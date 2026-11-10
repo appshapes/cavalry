@@ -10,7 +10,7 @@ use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, Offer, Publication, Subscription};
+use cavalry_client::{Cavalry, DataFrameHeader, Offer, Publication, Subscription};
 use cavalry_driver::Driver;
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 
@@ -79,24 +79,25 @@ fn offer(publication: &mut Publication, message: &[u8]) {
     }
 }
 
-/// Polls until `count` messages of this round have arrived, in order from `first`;
-/// nothing here allocates.
-fn drain(subscription: &mut Subscription, first: u64, count: u64) {
+/// Polls until `count` messages of this round have arrived, in order from `first`:
+/// with `Subscription::poll`, or, when `session` names the image, with the bounded
+/// poll of that image under the largest limit (ADR 0065). Nothing here allocates.
+fn drain(subscription: &mut Subscription, first: u64, count: u64, session: Option<i32>) {
     let deadline = Instant::now() + DEADLINE;
     let mut next = first;
     let end = first + count;
     while next < end {
-        let delivered = subscription
-            .poll(
-                |body, _| {
-                    let mut sequence = [0u8; 8];
-                    sequence.copy_from_slice(&body[..8]);
-                    assert_eq!(u64::from_le_bytes(sequence), next);
-                    next += 1;
-                },
-                64,
-            )
-            .expect("the poll reads");
+        let handler = |body: &[u8], _: &DataFrameHeader| {
+            let mut sequence = [0u8; 8];
+            sequence.copy_from_slice(&body[..8]);
+            assert_eq!(u64::from_le_bytes(sequence), next);
+            next += 1;
+        };
+        let delivered = match session {
+            None => subscription.poll(handler, 64),
+            Some(session) => subscription.bounded_poll(session, handler, i64::MAX, 64),
+        }
+        .expect("the poll reads");
         if delivered == 0 {
             assert!(
                 Instant::now() < deadline,
@@ -138,15 +139,17 @@ fn the_receive_path_allocates_nothing_per_message() {
         message[..8].copy_from_slice(&i.to_le_bytes());
         offer(&mut publication, &message);
     }
-    drain(&mut subscription, 0, MESSAGES_PER_ROUND);
+    drain(&mut subscription, 0, MESSAGES_PER_ROUND, None);
+    let session = subscription.images()[0].session_id();
     std::thread::sleep(Duration::from_millis(1200));
 
     // Ten rounds of a thousand, each drained before the next; nothing in the region
     // allocates: not the publisher, not the conductor, not the sender's bursts, not
-    // the receiver's polls, inserts, scans and status messages, and not the subscriber.
+    // the receiver's polls, inserts, scans and status messages, and not the subscriber,
+    // which reads every other round with the bounded poll.
     let region = Region::new(GLOBAL);
     let mut sequence = MESSAGES_PER_ROUND;
-    for _ in 0..ROUNDS {
+    for round in 0..ROUNDS {
         for _ in 0..MESSAGES_PER_ROUND {
             let mut message = [0u8; 32];
             message[..8].copy_from_slice(&sequence.to_le_bytes());
@@ -157,6 +160,7 @@ fn the_receive_path_allocates_nothing_per_message() {
             &mut subscription,
             sequence - MESSAGES_PER_ROUND,
             MESSAGES_PER_ROUND,
+            (round % 2 == 1).then_some(session),
         );
     }
     std::thread::sleep(Duration::from_millis(250));
