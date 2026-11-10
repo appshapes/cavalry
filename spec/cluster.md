@@ -664,8 +664,9 @@ no vote is taken: the member with the lowest id in the members string is the app
 leader, the `appointed-leader` vectors, and no other member leads. No member enters
 nominate, the ballot states or the replication and catch-up states, 2 to 4, 9 and 11
 to 13, and none sends request vote, vote, catch-up position or stop catch-up; one of
-those four that reaches a member is decoded and ignored. Every member goes from init
-to canvass and canvasses as the table says. A member that is not the appointed leader
+those four that reaches a member is decoded and ignored. Every member of a cluster of
+more than one goes from init to canvass and canvasses as the table says; a cluster of
+one member leads from init, as the table says. A member that is not the appointed leader
 stays in canvass, whatever has reported and whatever deadline has passed, until a new
 leadership term moves it on. The appointed leader, where canvass would send it to
 nominate, as a unanimous or a quorum candidate, goes to leader log replication
@@ -848,7 +849,7 @@ that a reader of a counters file knows which transition it saw.
 | members | at most 8; a ninth is `members-count` |
 | member id | 0 to 2147483647, unique |
 | leader heartbeat interval | 200 ms: how often the leader sends commit position with nothing to report, and new leadership term during an election |
-| leader heartbeat timeout | 10 s: a follower with nothing from its leader for this long holds an election; a member's append position older than this leaves it out of the quorum position, and a leader whose active members fall below a quorum holds an election, or stays the leader when it is appointed; and how long an appointed leader waits in leader ready for every member it heard in its canvass before it closes with a quorum ("The appointed leader"), in state 5 as outside one; the time a replication, a catch-up or a join may make no progress before the election fails |
+| leader heartbeat timeout | 10 s: a follower with nothing from its leader for this long holds an election; a member's append position older than this leaves it out of the quorum position, and a leader whose active members fall below a quorum holds an election, in state 5 as outside one, or stays the leader when it is appointed; the time a replication, a catch-up or a join may make no progress before the election fails; and how long an appointed leader waits in leader ready for every member it heard in its canvass before it closes with a quorum ("The appointed leader") |
 | election timeout | 1 s: how long a candidate waits for a quorum of votes, how long a voter waits for its candidate, and twice the longest random delay before a nomination |
 | election status interval | 100 ms: how often canvass position is sent |
 | startup canvass timeout | 60 s: how long a member that started with no term canvasses before a quorum candidate proceeds, the appointed leader among them ("The appointed leader"); at least twice the leader heartbeat timeout |
