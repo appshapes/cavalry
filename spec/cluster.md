@@ -656,8 +656,10 @@ reply from the service as possibly lost and sends it again when its service's ru
 allows, as Aeron's clients do.
 
 **The appointed leader.** Until the election is built (ADR 0060; ADR 0063; card 228),
-no member nominates itself and none asks for a vote: no member enters states 2 to 4,
-and none sends request vote or vote. The member with the lowest id in the members
+no member nominates itself and none asks for a vote: no member enters states 2 to 4
+or the replication and catch-up states 9 and 11 to 13, and none sends request vote,
+vote, catch-up position or stop catch-up; one of those four that reaches a member is
+decoded and ignored. The member with the lowest id in the members
 string is the leader, the `appointed-leader` vectors. From init it goes to leader log
 replication as leader of candidate term + 1, as a cluster of one member does, and
 passes states 5 to 8 as any leader. Every other member goes from init to canvass and
@@ -670,9 +672,11 @@ counts them, and with a quorum of them once the startup canvass timeout has pass
 since it entered leader log replication; the `leader-ready` vectors pin both. This
 version has neither the catch-up nor the truncation by which a member joins a log it
 does not already hold up to the leader's position, so a follower fails its election,
-counted in `cluster.elections_failed`, and goes back to canvass when its new
-leadership term gives any action but follower replay with no truncation, and when,
-after follower replay, its append position is behind the leader's log position; it
+counted in `cluster.elections_failed`, and goes back to canvass where the election's
+follower would truncate, replicate, wait or catch up: when its new leadership term
+asks for a truncation, a replication (state 9) or a wait for a later message, and
+when, after follower replay, its append position is behind the leader's log position
+(state 11); it
 canvasses until a version that has the catch-up, and the leader replicates to the
 others. A leader whose active members fall below a quorum stays the leader in the
 state it is in, leader log replication and leader ready among them, where the
