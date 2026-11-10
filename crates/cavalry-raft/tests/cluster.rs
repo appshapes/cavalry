@@ -1,8 +1,10 @@
 //! Three members over three drivers on the loopback: each a [`ConsensusModule`], a
 //! client of its own driver, with its log recorded into its own log directory (ADR
 //! 0060; ADR 0063). The appointed leader leads, the followers arm their recordings
-//! before its first frame, a thousand entries are committed at a quorum of synced
-//! positions, and the three recordings hold the same bytes.
+//! before its first frame, a hundred thousand entries are committed at a quorum of synced
+//! positions, and the three recordings hold the same bytes. A member is lost, a follower
+//! or the leader, and a follower leaves the log and joins it again: what a member that
+//! leaves the log holds as its log's end is where the recording it held stopped.
 
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
@@ -10,12 +12,14 @@ use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, CommittedLog};
 use cavalry_driver::Driver;
+use cavalry_log::catalog::CatalogReader;
 use cavalry_proto::cluster::{Message, Stream};
 use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
-    CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS, CLUSTER_ROLE,
-    CLUSTER_TERMS_LED,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
+    CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_ROLE, CLUSTER_TERMS_LED,
 };
 
 struct TestDir(PathBuf);
@@ -128,10 +132,19 @@ fn counter(member: &Member, type_id: i32) -> i64 {
 }
 
 #[test]
-fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
+fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_equal() {
     let dir = TestDir::new("replicate");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
+
+    // Before a duty cycle has run, a member has no term and names no recording: the
+    // counters hold −1 from their add, never the 0 of their allocation, which is a
+    // term and a recording id.
+    for member in &members {
+        assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), -1);
+        assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), -1);
+        assert_eq!(counter(member, CLUSTER_COMMIT_POSITION.0), 0);
+    }
 
     run_until(&mut members, "every election closed", |members| {
         members
@@ -156,9 +169,10 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
         Err(RaftError::PayloadTooLong { length: 1345 })
     ));
 
-    // A thousand entries from the leader's own process, a back-pressured offer made
-    // again once the members have run.
-    const ENTRIES: u32 = 1_000;
+    // A hundred thousand entries from the leader's own process, a back-pressured offer
+    // made again once the members have run, and the members run every hundred offers
+    // as they would between a program's own.
+    const ENTRIES: u32 = 100_000;
     for i in 0..ENTRIES {
         let payload = [i.to_le_bytes(), (!i).to_le_bytes()].concat();
         loop {
@@ -172,9 +186,14 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
                 Err(other) => panic!("{other}"),
             }
         }
+        if i % 100 == 99 {
+            for member in members.iter_mut() {
+                member.module.do_work().expect("the member's duty cycle");
+            }
+        }
     }
-    // The term event, 56 bytes in a frame of 96, and a thousand entries of 40 bytes,
-    // each in a frame of 96 (`spec/cluster.md`, "The log").
+    // The term event, 56 bytes in a frame of 96, and a hundred thousand entries of 40
+    // bytes, each in a frame of 96 (`spec/cluster.md`, "The log").
     let end = 96 + i64::from(ENTRIES) * 96;
     run_until(
         &mut members,
@@ -202,7 +221,7 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
         .collect();
     assert_eq!(recordings[1], recordings[0], "member 1's recording");
     assert_eq!(recordings[2], recordings[0], "member 2's recording");
-    // The first entry is the term's event and the last is the thousandth offer.
+    // The first entry is the term's event and the last is the hundred thousandth offer.
     let first = Message::parse(Stream::Log, &recordings[0][32..32 + 56]).expect("an entry");
     assert!(matches!(
         first,
@@ -230,6 +249,13 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
     // reads it.
     for (index, member) in members.iter().enumerate() {
         assert_eq!(counter(member, CLUSTER_COMMIT_POSITION.0), end);
+        // The recording a service replays: the leader's of its publication, each
+        // follower's of the leader's image (`spec/cluster.md`, "The service").
+        assert_eq!(
+            Some(counter(member, CLUSTER_LOG_RECORDING_ID.0)),
+            member.module.log_recording_id()
+        );
+        assert_eq!(counter(member, CLUSTER_LEADERSHIP_TERM_ID.0), 0);
         assert_eq!(counter(member, CLUSTER_ELECTION_STATE.0), 17);
         assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 1);
         assert_eq!(
@@ -237,6 +263,14 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
             if index == 0 { 2 } else { 0 }
         );
         assert_eq!(counter(member, CLUSTER_TERMS_LED.0), i64::from(index == 0));
+        // The two counts of ADR 0067 reach the file as the others do, through
+        // `Counts::by_counter`: one election closed, in three steps on the leader
+        // and four on a follower.
+        assert_eq!(counter(member, CLUSTER_ELECTIONS_CLOSED.0), 1);
+        assert_eq!(
+            counter(member, CLUSTER_ELECTION_STEPS.0),
+            if index == 0 { 3 } else { 4 }
+        );
     }
 
     // A member does not start again on the log it has: the refusal says why and what
@@ -327,6 +361,237 @@ fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
     assert_eq!(members[0].module.counts().leader_quorum_losses, 0);
     assert_eq!(members[1].module.counts().leader_heartbeat_timeouts, 0);
     assert_eq!(members[1].module.counts().log_images_lost, 0);
+
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+}
+
+/// The leader's host is lost once entries are committed: its module and its driver
+/// stop at once. Each follower finds its image of the log gone, or its leader silent
+/// for the leader heartbeat timeout, begins its election again at init and leaves the
+/// log, and canvasses with no appointed leader to answer it. The recording it held is
+/// stopped, by its own stop or by the driver's at the image's end, whichever came
+/// first, at the committed end: that is the append position it reports, and it names
+/// no recording in `cluster.log_recording_id`, since none records the live log
+/// (`spec/cluster.md`, "The service"). The next test is the one where the member's own
+/// stop alone ends its recording, and where the end it takes decides what it appends
+/// after.
+#[test]
+fn a_leader_lost_leaves_each_follower_at_the_end_its_recording_stopped() {
+    let dir = TestDir::new("leader-lost");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until(&mut members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    const ENTRIES: i64 = 100;
+    offer_entries(&mut members, ENTRIES);
+    // The term's event and a hundred entries, each in a frame of 96.
+    let end = 96 + ENTRIES * 96;
+    run_until(
+        &mut members,
+        "every member committed every entry",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
+        },
+    );
+    // Each follower holds the recording of the leader's image it armed, and names it.
+    let held: Vec<i64> = members[1..]
+        .iter()
+        .map(|member| {
+            let id = member
+                .module
+                .log_recording_id()
+                .expect("a follower's recording of the log");
+            assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), id);
+            id
+        })
+        .collect();
+
+    let leader = members.remove(0);
+    drop(leader.module);
+    leader.driver.close().expect("the driver closes");
+
+    run_until(
+        &mut members,
+        "each follower left the log and canvasses again",
+        |members| {
+            members.iter().all(|m| {
+                let counts = m.module.counts();
+                counts.log_images_lost + counts.leader_heartbeat_timeouts == 1
+                    && m.module.election_state() == ElectionState::Canvass
+            })
+        },
+    );
+    for (member, recording_id) in members.iter().zip(held) {
+        assert_eq!(member.module.role(), Role::Follower);
+        assert_eq!(member.module.counts().elections, 2);
+        assert_eq!(member.module.counts().elections_failed, 0);
+        assert_eq!(counter(member, CLUSTER_ELECTIONS.0), 2);
+        // Its log ends where its recording stopped, and its commit position stands.
+        assert_eq!(member.module.append_position(), end);
+        assert_eq!(counter(member, CLUSTER_APPEND_POSITION.0), end);
+        assert_eq!(member.module.commit_position(), end);
+        assert_eq!(counter(member, CLUSTER_COMMIT_POSITION.0), end);
+        // The recording it held is stopped at that end, and it names none now.
+        let catalog = CatalogReader::open(&member.log_dir).expect("the catalog opens");
+        assert_eq!(
+            catalog
+                .stop_position(recording_id)
+                .expect("the recording's slot is read"),
+            Some(end),
+            "member {}'s recording {recording_id}",
+            member.module.member_id()
+        );
+        assert_eq!(member.module.log_recording_id(), None);
+        assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), -1);
+    }
+
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+}
+
+/// A leave whose stop position was not read in time is an error that names the
+/// recording held, what the operator does next and where the leave is explained.
+/// No test here makes a stop fail on a running driver, which takes a seam the client
+/// and the driver do not have; this is the text such a leave returns.
+#[test]
+fn a_stop_timeout_says_what_to_do_next() {
+    let error = RaftError::StopTimeout { recording_id: 7 };
+    assert_eq!(error.reason(), "stop-timeout");
+    let text = error.to_string();
+    assert!(text.contains("recording 7"), "{text}");
+    assert!(text.contains("holding the recording"), "{text}");
+    assert!(text.contains("Call do_work again"), "{text}");
+    assert!(text.contains("cavalry doctor"), "{text}");
+    assert!(
+        text.contains("docs/reference/cluster.md#roles-and-the-election"),
+        "{text}"
+    );
+}
+
+/// Offers `count` entries on the leader, `members[0]`, each made again once every
+/// member has run while the log is back-pressured.
+fn offer_entries(members: &mut [Member], count: i64) {
+    for i in 0..count {
+        loop {
+            match members[0].module.offer(&i.to_le_bytes()) {
+                Ok(()) => break,
+                Err(RaftError::Offer(Refused::BackPressured)) => {
+                    for member in members.iter_mut() {
+                        member.module.do_work().expect("the member's duty cycle");
+                    }
+                }
+                Err(other) => panic!("{other}"),
+            }
+        }
+    }
+}
+
+/// The leader's module stands still for longer than the leader heartbeat timeout while
+/// its driver runs on, so that each follower's image of the log stays available and the
+/// stop of the recording it holds is its own `leave_log`'s alone. Each follower counts
+/// the timeout, leaves the log at the end its recording stopped at, and canvasses; the
+/// leader, running again, answers, and each follower joins the log again on a new
+/// recording whose image joins at that end. What the leader appends after is committed
+/// on all three: a follower's append position goes on from the stop of its first
+/// recording through its second, which begins where the member's log ends.
+#[test]
+fn a_follower_that_leaves_the_log_joins_it_again_where_its_recording_stopped() {
+    let dir = TestDir::new("join-again");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until(&mut members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    const ENTRIES: i64 = 10;
+    offer_entries(&mut members, ENTRIES);
+    let first = 96 + ENTRIES * 96;
+    run_until(&mut members, "the first entries committed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.commit_position() == first && m.module.append_position() == first)
+    });
+    let held: Vec<i64> = members[1..]
+        .iter()
+        .map(|m| m.module.log_recording_id().expect("a follower's recording"))
+        .collect();
+
+    // The leader's module stands still; its driver, and so its log's image on each
+    // follower, runs on.
+    run_until(
+        &mut members[1..],
+        "each follower timed out its silent leader and canvasses",
+        |members| {
+            members.iter().all(|m| {
+                m.module.counts().leader_heartbeat_timeouts == 1
+                    && m.module.election_state() == ElectionState::Canvass
+            })
+        },
+    );
+    for (member, recording_id) in members[1..].iter().zip(&held) {
+        assert_eq!(member.module.counts().log_images_lost, 0);
+        assert_eq!(member.module.log_recording_id(), None);
+        assert_eq!(counter(member, CLUSTER_LOG_RECORDING_ID.0), -1);
+        assert_eq!(member.module.append_position(), first);
+        let catalog = CatalogReader::open(&member.log_dir).expect("the catalog opens");
+        assert_eq!(
+            catalog
+                .stop_position(*recording_id)
+                .expect("the recording's slot is read"),
+            Some(first),
+            "member {}'s first recording",
+            member.module.member_id()
+        );
+    }
+
+    // The leader runs again and answers the followers' canvass; each joins the log on
+    // a new recording.
+    run_until(
+        &mut members,
+        "each follower joined the log again",
+        |members| {
+            members
+                .iter()
+                .all(|m| m.module.election_state() == ElectionState::Closed)
+                && members[1..]
+                    .iter()
+                    .zip(&held)
+                    .all(|(m, first)| m.module.log_recording_id().is_some_and(|id| id != *first))
+        },
+    );
+    offer_entries(&mut members, ENTRIES);
+    let second = first + ENTRIES * 96;
+    run_until(
+        &mut members,
+        "the entries after the join committed on all three",
+        |members| {
+            members.iter().all(|m| {
+                m.module.commit_position() == second && m.module.append_position() == second
+            })
+        },
+    );
+    for member in &members[1..] {
+        let counts = member.module.counts();
+        assert_eq!(counts.elections, 2);
+        assert_eq!(counts.elections_closed, 2);
+        assert_eq!(counts.join_position_mismatches, 0);
+        assert_eq!(counter(member, CLUSTER_APPEND_POSITION.0), second);
+        assert_eq!(
+            Some(counter(member, CLUSTER_LOG_RECORDING_ID.0)),
+            member.module.log_recording_id()
+        );
+    }
 
     for member in members {
         member.module.close().expect("the member closes");

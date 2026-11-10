@@ -26,12 +26,9 @@ use cavalry_proto::cluster::{
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
-    CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_FAILED,
-    CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
-    CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LEADERSHIP_TERMS_IGNORED,
-    CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_RECORDING_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE,
-    CLUSTER_TERMS_LED,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE,
+    COUNTERS,
 };
 
 use crate::consensus::{
@@ -90,11 +87,18 @@ pub enum RaftError {
     },
     /// The offer was refused by the member's state; offer again as the reason says.
     Offer(Refused),
+    /// A member leaving the log stopped the recording it held, and 1 s later had not
+    /// read where the recording stopped. It holds the recording still, in init, and the
+    /// next duty cycle stops it again and waits for its stop.
+    StopTimeout {
+        /// The recording held.
+        recording_id: i64,
+    },
 }
 
 impl RaftError {
     /// The reason's name: `members`, `member`, `restart`, `terms`, `client`, `poll`,
-    /// `unsupported`, `payload-too-long` or `offer`.
+    /// `unsupported`, `payload-too-long`, `offer` or `stop-timeout`.
     pub const fn reason(&self) -> &'static str {
         match self {
             RaftError::Members(_) => "members",
@@ -106,6 +110,7 @@ impl RaftError {
             RaftError::Unsupported { .. } => "unsupported",
             RaftError::PayloadTooLong { .. } => "payload-too-long",
             RaftError::Offer(_) => "offer",
+            RaftError::StopTimeout { .. } => "stop-timeout",
         }
     }
 }
@@ -144,6 +149,15 @@ impl core::fmt::Display for RaftError {
                  at most {MAX_PAYLOAD_LENGTH}; send it in parts of that length; see {DOC}"
             ),
             RaftError::Offer(refused) => write!(f, "{refused}"),
+            RaftError::StopTimeout { recording_id } => write!(
+                f,
+                "member stopped ({reason}): the member stopped recording {recording_id} as \
+                 it left the log, and 1 s later the driver had not said where it stopped, so \
+                 the member does not know where its log ends; it stays in init holding the \
+                 recording. Call do_work again, which stops it again and waits; if this \
+                 repeats, run `cavalry doctor`: the driver or this process is starved of CPU; \
+                 see {DOC}"
+            ),
         }
     }
 }
@@ -217,6 +231,25 @@ struct Held {
     start: i64,
 }
 
+/// The image of the log on a follower's subscription, as the module noted it.
+#[derive(Clone, Copy)]
+enum LogImage {
+    /// No image has joined the subscription yet.
+    Awaited,
+    /// The first image that joined the subscription, noted after the poll that applied
+    /// it and before a frame of it was read.
+    Joined {
+        /// The id the driver gave the image, which tells it from a later image of the
+        /// same session.
+        correlation_id: i64,
+        session_id: i32,
+        join_position: i64,
+    },
+    /// The image noted is no longer available. No other image of the subscription is
+    /// noted or read until the member leaves the log, so that the core sees the loss.
+    Gone,
+}
+
 /// The core's [`Io`] over the client.
 struct ClientIo {
     client: Cavalry,
@@ -234,8 +267,8 @@ struct ClientIo {
     // A follower's log.
     log_subscription: Option<Subscription>,
     armed: Option<ArmedRecording>,
-    /// The session id and the join position of the image on the log subscription.
-    image: Option<(i32, i64)>,
+    /// The image on the log subscription and where it joined.
+    image: LogImage,
     held: Option<Held>,
     /// The end of the contiguous span the recordings this member has stopped hold.
     stopped_at: i64,
@@ -244,31 +277,66 @@ struct ClientIo {
 impl ClientIo {
     /// Takes the images the driver announced or withdrew on the log subscription, notes
     /// a new image's join position before a frame of it is read, hands over an armed
-    /// recording the driver has started, and reads past what has arrived, so that the
-    /// stream is not held back by a subscriber that stands still: the module acts on
-    /// no entry in this version, and the recording is the member's log.
+    /// recording the driver has started, and reads past what has arrived of the image
+    /// noted, so that the stream is not held back by a subscriber that stands still:
+    /// the module acts on no entry in this version, and the recording is the member's
+    /// log.
+    ///
+    /// An image is never read in the poll that applies it. The client's conductor runs
+    /// on a thread of its own and hands an image over whenever it has read the driver's
+    /// `available image`, between any two polls, and every poll applies what was handed
+    /// over before it reads. A poll that read every image would read up to
+    /// `LOG_POLL_LIMIT` frames of an image it had just applied, and the position
+    /// noted on the next cycle would be past the image's join: a join position mismatch
+    /// counted for a follower whose log had none, and a recording never counted, since
+    /// it would not begin where it was noted to. So the poll with a fragment limit of 0
+    /// applies and reads nothing, the image is noted after it, and the read is a bounded
+    /// poll of the noted session alone, which reads no image of another session that
+    /// the conductor hands over meanwhile. An image of the same session that the
+    /// conductor hands over in place of the noted one, which that read may read, is
+    /// never noted: the noted image is gone by the next cycle, and nothing is noted on
+    /// the subscription after it.
     fn observe_log(&mut self) -> Result<(), RaftError> {
         let Some(subscription) = self.log_subscription.as_mut() else {
             return Ok(());
         };
         subscription.poll(|_, _| {}, 0).map_err(RaftError::Poll)?;
-        self.image = match (self.image, subscription.images().first()) {
-            (Some((session_id, join)), Some(image)) if image.session_id() == session_id => {
-                Some((session_id, join))
+        self.image = match self.image {
+            LogImage::Awaited => subscription
+                .images()
+                .first()
+                .map_or(LogImage::Awaited, |image| LogImage::Joined {
+                    correlation_id: image.correlation_id(),
+                    session_id: image.session_id(),
+                    join_position: image.position(),
+                }),
+            LogImage::Joined { correlation_id, .. }
+                if subscription
+                    .images()
+                    .iter()
+                    .any(|image| image.correlation_id() == correlation_id) =>
+            {
+                self.image
             }
-            (_, Some(image)) => Some((image.session_id(), image.position())),
-            (_, None) => None,
+            LogImage::Joined { .. } | LogImage::Gone => LogImage::Gone,
+        };
+        let LogImage::Joined {
+            session_id,
+            join_position,
+            ..
+        } = self.image
+        else {
+            return Ok(());
         };
         subscription
-            .poll(|_, _| {}, LOG_POLL_LIMIT)
+            .bounded_poll(session_id, |_, _| {}, i64::MAX, LOG_POLL_LIMIT)
             .map_err(RaftError::Poll)?;
         if let Some(armed) = self.armed.as_mut()
-            && let Some((_, join)) = self.image
             && let Some(recording) = armed.poll()?
         {
             self.held = Some(Held {
                 recording,
-                start: join,
+                start: join_position,
             });
             self.armed = None;
         }
@@ -351,30 +419,55 @@ impl Io for ClientIo {
     }
 
     fn log_image(&mut self, session_id: i32) -> Result<Option<i64>, Self::Fault> {
-        Ok(self
-            .image
-            .filter(|&(session, _)| session == session_id)
-            .map(|(_, join)| join))
+        Ok(match self.image {
+            LogImage::Joined {
+                session_id: noted,
+                join_position,
+                ..
+            } if noted == session_id => Some(join_position),
+            _ => None,
+        })
     }
 
+    /// Stops the recording held and takes its stop as the log's end, then drops the
+    /// subscription. The recording stays held until its stop has been read: a stop the
+    /// driver refused or did not answer, or a stop position not read within
+    /// `STOP_TIMEOUT`, returns with nothing else changed. The core then stays in init
+    /// with the log joined and calls again on the next cycle, which stops the recording
+    /// again, a success with nothing written for one already stopped, and waits again.
+    /// So a leave that fails never loses the recording whose stop is the log's end, and
+    /// it never takes a synced position short of the stop.
     fn leave_log(&mut self) -> Result<(), Self::Fault> {
-        if let Some(held) = self.held.take() {
+        if let Some(held) = self.held.as_ref() {
+            // A stop already read, the driver's at the image's end or this member's own
+            // on a cycle before, needs no command.
+            if held.recording.stop_position().is_none() {
+                self.client.stop_recording(held.recording.recording_id())?;
+            }
+            let deadline = Instant::now() + STOP_TIMEOUT;
+            let stop = loop {
+                if let Some(stop) = held.recording.stop_position() {
+                    break stop;
+                }
+                if Instant::now() >= deadline {
+                    return Err(RaftError::StopTimeout {
+                        recording_id: held.recording.recording_id(),
+                    });
+                }
+                std::thread::sleep(Duration::from_micros(50));
+            };
             // The recording's stop is where this member's log ends when the recording
             // began where the log ended before it; one that began past it is no part of
             // the member's contiguous log.
-            self.client.stop_recording(held.recording.recording_id())?;
-            let deadline = Instant::now() + STOP_TIMEOUT;
-            while held.recording.stop_position().is_none() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_micros(50));
-            }
             if held.start == self.stopped_at {
-                self.stopped_at = held.recording.synced_position();
+                self.stopped_at = stop;
             }
+            self.held = None;
         }
         // The driver drops a recording still armed with the stream's last subscription.
         self.armed = None;
         self.log_subscription = None;
-        self.image = None;
+        self.image = LogImage::Awaited;
         Ok(())
     }
 
@@ -415,30 +508,47 @@ struct Stored {
 }
 
 impl Stored {
+    /// Adds the counter of type `id` for `member_id` and stores `value` in it at once,
+    /// so that the 0 a counter holds between its allocation and its first store is
+    /// never read as a value: term 0 is a real term, and recording 0 a real recording.
     fn add(
         client: &mut Cavalry,
         id: CounterId,
         name: &str,
         member_id: i32,
+        value: i64,
     ) -> Result<Self, ClientError> {
         let counter = client.add_counter(
             id.0,
             &member_id.to_le_bytes(),
             &format!("{name} {member_id}"),
         )?;
+        counter.store_release(value)?;
         Ok(Self {
             counter,
-            last: i64::MIN,
+            last: value,
         })
     }
 
     /// Stores `value` when it is not the value last stored: a release store, which a
-    /// reader of a position loads with acquire.
-    fn store(&mut self, value: i64) {
+    /// reader of a position loads with acquire. Whether the counter holds `value`
+    /// now: not when the client is closed, which stores nothing.
+    fn store(&mut self, value: i64) -> bool {
         if value != self.last && self.counter.store_release(value).is_ok() {
             self.last = value;
         }
+        self.last == value
     }
+}
+
+/// A count as a counter's value.
+fn count_value(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// The member's role as `cluster.role` holds it: 0 follower, 1 candidate, 2 leader.
+fn role_code(core: &Consensus) -> i64 {
+    i64::from(core.role() as u8)
 }
 
 /// The member's counters in the counters file (`spec/cluster.md`, "Counters").
@@ -447,97 +557,89 @@ struct Counters {
     election_state: Stored,
     leadership_term_id: Stored,
     append_position: Stored,
-    commit_position: Stored,
-    elections: Stored,
-    elections_failed: Stored,
-    terms_led: Stored,
-    leader_quorum_losses: Stored,
-    leader_heartbeat_timeouts: Stored,
-    leadership_terms_ignored: Stored,
-    join_position_mismatches: Stored,
-    log_images_lost: Stored,
-    appointed_leader_behind: Stored,
-    messages_rejected: Stored,
+    /// `cluster.log_recording_id`, added before `cluster.commit_position` and stored
+    /// before it (`spec/cluster.md`, "The service").
     log_recording_id: Stored,
+    commit_position: Stored,
+    /// The core's counts, one counter each, in the order of [`Counts::by_counter`]:
+    /// [`Counts::LEN`] of them, added once when the module starts.
+    counts: Vec<Stored>,
+    messages_rejected: Stored,
 }
 
 impl Counters {
-    /// Adds the member's counters. `cluster.log_recording_id` is added first and −1
-    /// stored in it before `cluster.commit_position` is added: a service reads the
-    /// recording's id only of a member whose commit position it has found, so it never
-    /// reads the 0 a counter holds between its allocation and its first store
-    /// (`spec/cluster.md`, "The service"; ADR 0066).
-    fn add(client: &mut Cavalry, member_id: i32) -> Result<Self, ClientError> {
-        let log_recording_id = Stored::add(
-            client,
-            CLUSTER_LOG_RECORDING_ID,
-            "cluster.log_recording_id",
-            member_id,
-        )?;
-        log_recording_id.counter.store_release(NO_RECORDING)?;
-        let mut add = |id, name| Stored::add(client, id, name, member_id);
+    /// Adds the member's counters, each holding what `core` holds from its first
+    /// store, which follows its add at once. `cluster.log_recording_id` is added and
+    /// holds −1 before `cluster.commit_position` is added: a service reads the
+    /// recording id only of a member whose commit position it has found
+    /// (`spec/cluster.md`, "The service").
+    fn add(client: &mut Cavalry, member_id: i32, core: &Consensus) -> Result<Self, ClientError> {
+        let mut add = |id, name, value| Stored::add(client, id, name, member_id, value);
         Ok(Self {
-            log_recording_id,
-            role: add(CLUSTER_ROLE, "cluster.role")?,
-            election_state: add(CLUSTER_ELECTION_STATE, "cluster.election_state")?,
-            leadership_term_id: add(CLUSTER_LEADERSHIP_TERM_ID, "cluster.leadership_term_id")?,
-            append_position: add(CLUSTER_APPEND_POSITION, "cluster.append_position")?,
-            commit_position: add(CLUSTER_COMMIT_POSITION, "cluster.commit_position")?,
-            elections: add(CLUSTER_ELECTIONS, "cluster.elections")?,
-            elections_failed: add(CLUSTER_ELECTIONS_FAILED, "cluster.elections_failed")?,
-            terms_led: add(CLUSTER_TERMS_LED, "cluster.terms_led")?,
-            leader_quorum_losses: add(
-                CLUSTER_LEADER_QUORUM_LOSSES,
-                "cluster.leader_quorum_losses",
+            role: add(CLUSTER_ROLE, "cluster.role", role_code(core))?,
+            election_state: add(
+                CLUSTER_ELECTION_STATE,
+                "cluster.election_state",
+                i64::from(core.election_state().code()),
             )?,
-            leader_heartbeat_timeouts: add(
-                CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
-                "cluster.leader_heartbeat_timeouts",
+            leadership_term_id: add(
+                CLUSTER_LEADERSHIP_TERM_ID,
+                "cluster.leadership_term_id",
+                core.leadership_term_id(),
             )?,
-            leadership_terms_ignored: add(
-                CLUSTER_LEADERSHIP_TERMS_IGNORED,
-                "cluster.leadership_terms_ignored",
+            append_position: add(
+                CLUSTER_APPEND_POSITION,
+                "cluster.append_position",
+                core.append_position(),
             )?,
-            join_position_mismatches: add(
-                CLUSTER_JOIN_POSITION_MISMATCHES,
-                "cluster.join_position_mismatches",
+            log_recording_id: add(
+                CLUSTER_LOG_RECORDING_ID,
+                "cluster.log_recording_id",
+                NO_RECORDING,
             )?,
-            log_images_lost: add(CLUSTER_LOG_IMAGES_LOST, "cluster.log_images_lost")?,
-            appointed_leader_behind: add(
-                CLUSTER_APPOINTED_LEADER_BEHIND,
-                "cluster.appointed_leader_behind",
+            commit_position: add(
+                CLUSTER_COMMIT_POSITION,
+                "cluster.commit_position",
+                core.commit_position(),
             )?,
-            messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected")?,
+            counts: {
+                // Each count's counter, by the id the core pairs it with and under the
+                // name `counters.toml` gives that id (ADR 0067). Every id of
+                // `by_counter` is an entry of that table, which its doctest checks,
+                // so the other name is never a label.
+                let mut counts = Vec::with_capacity(Counts::LEN);
+                for (id, value) in core.counts().by_counter() {
+                    let name = COUNTERS
+                        .iter()
+                        .find(|entry| entry.id == id)
+                        .map_or("cluster.count", |entry| entry.name);
+                    counts.push(add(id, name, count_value(value))?);
+                }
+                counts
+            },
+            messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected", 0)?,
         })
     }
 
-    /// Stores what the core holds, and the id of the member's recording of the log,
-    /// each value only when it has moved.
+    /// Stores what the core holds, each value only when it has moved, and
+    /// `log_recording_id`, the recording the member records the live log into or −1.
+    /// The recording id is stored before the commit position, and a commit position
+    /// only once the counter holds that id, so that no commit position is stored
+    /// beside a recording id that does not hold it (`spec/cluster.md`, "The service").
     fn store(&mut self, core: &Consensus, messages_rejected: u64, log_recording_id: i64) {
-        self.log_recording_id.store(log_recording_id);
-        let count = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let counts: Counts = core.counts();
-        self.role.store(i64::from(core.role() as u8));
+        self.role.store(role_code(core));
         self.election_state
             .store(i64::from(core.election_state().code()));
         self.leadership_term_id.store(core.leadership_term_id());
         self.append_position.store(core.append_position());
-        self.commit_position.store(core.commit_position());
-        self.elections.store(count(counts.elections));
-        self.elections_failed.store(count(counts.elections_failed));
-        self.terms_led.store(count(counts.terms_led));
-        self.leader_quorum_losses
-            .store(count(counts.leader_quorum_losses));
-        self.leader_heartbeat_timeouts
-            .store(count(counts.leader_heartbeat_timeouts));
-        self.leadership_terms_ignored
-            .store(count(counts.leadership_terms_ignored));
-        self.join_position_mismatches
-            .store(count(counts.join_position_mismatches));
-        self.log_images_lost.store(count(counts.log_images_lost));
-        self.appointed_leader_behind
-            .store(count(counts.appointed_leader_behind));
-        self.messages_rejected.store(count(messages_rejected));
+        if self.log_recording_id.store(log_recording_id) {
+            self.commit_position.store(core.commit_position());
+        }
+        for (stored, (_, value)) in self.counts.iter_mut().zip(counts.by_counter()) {
+            stored.store(count_value(value));
+        }
+        self.messages_rejected.store(count_value(messages_rejected));
     }
 }
 
@@ -609,7 +711,9 @@ impl ConsensusModule {
                 log_destination: endpoint_channel(&member.log),
             });
         }
-        let counters = Counters::add(&mut client, member_id)?;
+        // Each counter holds the core's value from its add: −1 for the term and the
+        // recording, before a duty cycle has run.
+        let counters = Counters::add(&mut client, member_id, &core)?;
         let started = Instant::now();
         Ok(Self {
             core,
@@ -629,7 +733,7 @@ impl ConsensusModule {
                 log_recording: None,
                 log_subscription: None,
                 armed: None,
-                image: None,
+                image: LogImage::Awaited,
                 held: None,
                 stopped_at: 0,
             },
@@ -742,7 +846,12 @@ impl ConsensusModule {
     }
 
     /// The id of this member's recording of the log, once it has one: the leader's of
-    /// its publication, a follower's of the leader's image.
+    /// its publication, a follower's of the leader's image; `None` before the first and
+    /// from when the member has left the log, its recording's stop read, until it has
+    /// joined it again. A leave that failed holds the recording, named, while the next
+    /// cycle tries it again. Each duty
+    /// cycle stores it in `cluster.log_recording_id`, −1 for `None`, before the commit
+    /// position (`spec/cluster.md`, "The service").
     pub fn log_recording_id(&self) -> Option<i64> {
         self.io
             .log_recording

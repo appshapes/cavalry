@@ -16,6 +16,11 @@ commit path runs per message.
   reports a log ahead of its own, so a leader that lost its log directory never leads
   a second time. A member that could join only with a catch-up or a truncation, one
   that starts late, is left out and counted, never joined wrong.
+- Counts every move of the election. `ElectionState` is the state machine
+  `cluster_election` of `counters.toml`, and each of its transitions adds one to a
+  count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
+  count with its counter's id, for the module to store as a client counter (ADR 0067;
+  [the counters reference](../../docs/reference/counters.md)).
 - Does no I/O of its own in its core: `Consensus` reaches the consensus stream, the
   log, its recording and its `terms` file through one trait, `Io`.
 - Runs a member over a driver: `ConsensusModule::start(dir, log_dir, members,
@@ -24,9 +29,18 @@ commit path runs per message.
   member as a destination and records it, or subscribes to the leader's log and arms
   the recording that holds it from its first frame, keeps the record of terms in the
   `terms` file of `log_dir`, and stores what it counts in the driver's counters file:
-  `cluster.role`, `cluster.election_state`, `cluster.commit_position` and the rest of
-  `spec/cluster.md`, "Counters". One thread calls `do_work()`; the leader's process
-  appends with `offer(payload)`, up to 1,344 bytes an entry.
+  `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
+  `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
+  `cluster.log_recording_id`, the recording that holds its log, which its service
+  replays, and the eleven counts of `Counts::by_counter`. The counters of sessions, of
+  the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
+  with those features. One thread calls `do_work()`; the leader's process appends
+  with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
+  holds its recording until the driver has said where it stopped, and that stop is
+  where its log ends. A stop that the driver refuses or does not answer is a `client`
+  error, and a stop position not read within 1 s is a `stop-timeout` error. Either
+  way the member stays in init with the recording held, and the next `do_work()`
+  stops it again.
 - Tells a service where the log is: `cluster.log_recording_id` holds the id of the
   member's recording of the log, −1 while it has none, stored before the member's
   commit position exists and changed before a commit position the recording does not
@@ -34,10 +48,12 @@ commit path runs per message.
   recording and reads it no further than `cluster.commit_position`:
   `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
   0066).
-- Runs the same core in memory: `memory::Cluster` is several members in one process on
-  a clock the caller steps, with loss, delay, cuts, paused syncs and a member started
-  again on an empty log directory to set: what the example below and most of the
-  crate's tests run.
+- Runs the same core in memory: `memory::Cluster` is one to eight members in one
+  process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
+  member started again on an empty log directory to set: what the example below and
+  most of the crate's tests run. It is a test double and allocates; its consensus
+  stream holds at most 4,096 messages in flight and loses, and counts, one sent
+  while it is full, and its log holds every entry offered for the cluster's life.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), the election and mixed
   versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots
@@ -102,6 +118,9 @@ assert_eq!(cluster.log(2), cluster.log(0));
   driver, in two layers, a core that does no I/O and the module that acts for it, and
   its leader is appointed, on the path `spec/cluster.md`, "The appointed leader",
   gives through the election's states.
+- [ADR 0067](../../docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md),
+  why the election's machine is registered with the core and what its two step
+  counters count.
 - [`spec/udp.md`](../../spec/udp.md), "The sender", for the multi-destination cast the
   log travels over, and [`spec/durable-log.md`](../../spec/durable-log.md) for the
   recording every member keeps of it.

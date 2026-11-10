@@ -1737,21 +1737,6 @@ user-visible change, added in the same commit as the change. The format follows
   subscription that was there. On a macOS laptop, 2 of 42 starts of three members
   together did this. The id is now drawn from the operating system's randomness (card
   227).
-- The cluster protocol says how a service reads the committed log, and the client has
-  the poll it needs. A service is a client of its member's driver: it reads the
-  member's own recording of the log through a replay that follows the recording, on
-  the `cavalry:ipc` service log stream, 104, and polls it no further than the member's
-  commit position, so the path is the same on the leader and on a follower and a
-  service may start at any time, from any entry. `spec/cluster.md`, "The service",
-  says so, with the member's new counter `cluster.log_recording_id` and the two
-  checks a service makes before it takes a commit position as its bound;
-  `spec/log-buffer.md`, "Reading", says what a bounded read is. The Rust client gains
-  `Subscription::bounded_poll(session_id, handler, limit_position, fragment_limit)`,
-  which reads one image and delivers no frame that begins at or past the limit, and
-  `cavalry-shm` the `TermReader::bounded_poll` under it. The reader of the committed
-  log and the counter follow
-  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
-  card 227).
 - A replay that follows a live recording no longer allocates on the driver's replayer
   thread. Once a second the replayer reads the recording's catalog slot to learn
   whether it stopped, and each read built the descriptor's channel and source
@@ -1781,23 +1766,13 @@ user-visible change, added in the same commit as the change. The format follows
   a client of its driver, not a thread linked to the conductor by queues
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
   card 227).
-- `cavalry-raft` has its first public items: the core of a cluster member.
-  `Consensus` is one member's state machine on the appointed leader's path of
-  `spec/cluster.md`: the leader canvasses, leads when no member's log is ahead of its
-  own, records its term, announces it, appends the term's first entry and commits what
-  a quorum has recorded; a follower canvasses, joins the leader's log at its append
-  position and reports that position as it rises. It does no I/O of its own: it
-  reaches the consensus stream, the log, its recording and its `terms` file through
-  the `Io` trait. `memory::Cluster` gives it that in memory, several members in one
-  process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
-  member started again on an empty log directory to set, which the crate's README
-  example and its tests run. The module that runs the core over a driver follows
-  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
-  card 227).
 - A `Recording` follows its recording's stop. `Recording::stop_position()` says where
   the recording stopped once the driver has sent `recording stopped`, whichever
   client stopped it or whatever ended it, and `position()` and `synced_position()` are
-  that position from then on. Before this, a handle kept reading the two counters of
+  that position from then on. That position is durable: the catalog's stop, or the
+  position last synced when the stop's own writes failed
+  ([ADR 0064](docs/decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md)).
+  Before this, a handle kept reading the two counters of
   a stopped recording, which the driver frees at the stop and gives to other counters
   a second later, so a position could become another counter's value. Each read now
   checks that the record is still the recording's, by the recording id in its key, and
@@ -1816,15 +1791,93 @@ user-visible change, added in the same commit as the change. The format follows
   next version
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).
+- The driver announces a stop whose own writes or syncs failed at the position last
+  synced. A full disk can refuse the stop's index entry, its syncs or its catalog write.
+  The recording is still stopped, and `recording.write_failed` counts the failure.
+  `recording stopped` now carries the position the recorder had synced before the stop,
+  where it carried the position written, which no sync may have covered. So the stop
+  position a client reads is durable on every path, and the stop that recovery rebuilds
+  at the next open is at or above it. The `stop recording` command is still answered
+  with `operation success`
+  ([ADR 0064](docs/decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md);
+  card 227).
+- The driver gives up a recording one of whose syncs failed, and runs no stop for
+  it. Before, it ran the recording's stop, whose sync, asked about bytes a sync had
+  already failed on, can return success and write nothing: the catalog then held the
+  position written as the stop and `recording stopped` carried it, for bytes that may
+  not be on the disk. Now the recorder writes and syncs nothing more of such a
+  recording, `recording stopped` carries the position the last sync that succeeded
+  covered, and the catalog's slot stays live until the next start's recovery. A write
+  the disk refused with no sync failing is followed by a stop as before, at the
+  position written. `recording.write_failed` counts a recording once, whichever of
+  its writes, its syncs and its stop failed. With ADR 0064, the position a client
+  reads from `recording stopped` is on every path one a sync that returned success
+  covered
+  ([ADR 0065](docs/decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md);
+  card 227).
+- The cluster protocol says how a service reads the committed log, and the client has
+  the poll it needs. A service is a client of its member's driver: it reads the
+  member's own recording of the log through a replay that follows the recording, on
+  the `cavalry:ipc` service log stream, 104, and polls it no further than the member's
+  commit position, so the path is the same on the leader and on a follower and a
+  service may start at any time, from any entry the recording its member names
+  holds. `spec/cluster.md`, "The service",
+  says so, with the member's new counter `cluster.log_recording_id` and the two
+  checks a service makes before it takes a commit position as its bound;
+  `spec/log-buffer.md`, "Reading", says what a bounded read is. The Rust client gains
+  `Subscription::bounded_poll(session_id, handler, limit_position, fragment_limit)`,
+  which reads one image and delivers no frame that begins at or past the limit, and
+  `cavalry-shm` the `TermReader::bounded_poll` under it. The reader of the committed
+  log and the counter follow
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
+  card 227).
+- `cavalry-raft` has its first public items: the core of a cluster member.
+  `Consensus` is one member's state machine on the appointed leader's path of
+  `spec/cluster.md`: the leader canvasses, leads when no member's log is ahead of its
+  own, records its term, announces it, appends the term's first entry and commits what
+  a quorum has recorded; a follower canvasses, joins the leader's log at its append
+  position and reports that position as it rises. It does no I/O of its own: it
+  reaches the consensus stream, the log, its recording and its `terms` file through
+  the `Io` trait. `memory::Cluster` gives it that in memory, one to eight members in
+  one process on a clock the caller steps, with loss, delay up to 10 s, cuts, paused
+  syncs and a member started again on an empty log directory to set, which the
+  crate's README example and its tests run; its consensus stream holds at most 4,096
+  messages in flight and loses, and counts, one sent while it is full. The module
+  that runs the core over a driver follows
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
+- The election of a cluster member is a registered state machine, `cluster_election`,
+  and every move of it adds one to a counter: `counters.toml` has the eleven
+  `cluster.*` counters a member's core keeps, ids 110 to 120, among them two new ones,
+  `cluster.election_steps` and `cluster.elections_closed`, and
+  `cavalry_raft::Counts::by_counter` pairs each count with its counter's id for the
+  module to store. `docs/reference/counters.md` lists them and the machine's
+  transitions
+  ([ADR 0067](docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md);
+  card 227).
 - A cluster member runs over a driver: `cavalry_raft::ConsensusModule` is the consensus
   module of the replicated log, a client of the driver in its directory. Three members
   on three drivers appoint their leader, the followers arm their recordings before its
   first frame, and an entry the leader's process offers is committed once a quorum has
   synced it, with every member's recording holding the same bytes. The module stores
-  the member's role, election state, term, append position and commit position, and
-  what it counts, in 14 counters of the new scope `client` in the driver's counters
-  file, `cluster.role` to `cluster.messages_rejected`, and `counters.toml` registers the
-  member's role and its election as state machines. A member does not start again on
+  the member's role, election state, term, append position and commit position, the
+  recording that holds its log, and what it counts, as client counters in the
+  driver's counters file: the eleven counts of its core, from `Counts::by_counter`,
+  `cluster.commit_position`, and six counters this change registers in
+  `counters.toml`, ids 121 to 126, `cluster.role`, `cluster.election_state`,
+  `cluster.leadership_term_id`, `cluster.append_position`,
+  `cluster.messages_rejected` and `cluster.log_recording_id`, with the member's role
+  as the state machine `cluster_role`. `cluster.log_recording_id` names the
+  recording a service replays, −1 while the member records none, and is added
+  holding −1 before `cluster.commit_position` is added and stored before each
+  commit position, as `spec/cluster.md`, "The service", orders it
+  ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)).
+  Every counter holds the member's value from its add: −1 for the term before the
+  first, never the 0 of its allocation. A follower that leaves the log holds its
+  recording until the driver has said where it stopped, and takes that stop as its
+  log's end. A stop that fails, or whose position the member has not read within
+  1 s (`stop-timeout`), is tried again on the next duty cycle and is never dropped.
+  A member does not start again on
   a log directory that holds a term: the error says to start the cluster again as a
   new cluster, every member on a new log directory
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);

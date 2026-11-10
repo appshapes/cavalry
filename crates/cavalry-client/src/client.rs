@@ -704,9 +704,12 @@ impl Cavalry {
 
     /// Stops recording `recording_id`, whichever client started it: the driver writes the
     /// catalog's stop at the position written and answers once it is synced
-    /// (`spec/client-protocol.md`, "Commands"). A recording already stopped is success
-    /// with nothing written; an id the catalog does not hold is [`ClientError::Refused`]
-    /// with error code 21.
+    /// (`spec/client-protocol.md`, "Commands"). A stop whose own writes or syncs fail is
+    /// success too, since the recording is stopped all the same; the driver counts it in
+    /// `recording.write_failed` and announces the position last synced, which
+    /// [`Recording::stop_position`] returns (ADR 0064). A recording already stopped is
+    /// success with nothing written; an id the catalog does not hold is
+    /// [`ClientError::Refused`] with error code 21.
     pub fn stop_recording(&mut self, recording_id: i64) -> Result<(), ClientError> {
         let correlation_id = self.producer.next_correlation_id();
         let command = Command::StopRecording {

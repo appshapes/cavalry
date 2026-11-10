@@ -40,7 +40,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   The client follows the stop of each recording it started, whoever stopped it:
   `Recording::stop_position()` is `None` while the recording is live and its stop
   position after the driver's `recording stopped`, and from then on both positions are
-  that position. The driver frees a stopped recording's counters and gives their
+  that position. A sync that returned success covered it: the catalog's stop, or,
+  when the stop's own writes or syncs failed or a sync of the recording failed
+  before it, the position last synced (ADR 0064, ADR 0065). The
+  driver frees a stopped recording's counters and gives their
   records to other counters a second later, so each read checks that the record is
   still the recording's, and a position is never another counter's value. A client
   follows 1,024 recordings at most, the driver's own bound.

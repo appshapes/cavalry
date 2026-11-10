@@ -313,15 +313,17 @@ impl Conductor {
     }
 
     /// Drops the mappings the subscriptions retired and forgets a registration whose
-    /// subscription is gone, and a replay whose end is stored or whose handle is gone,
-    /// then admits the subscriptions and replays the user's thread added: the sweeps
-    /// first, so that one dropped before another was added leaves its place to it.
+    /// subscription is gone, a replay whose end is stored or whose handle is gone, and a
+    /// recording whose stop is stored or whose handle is gone, then admits the
+    /// subscriptions, replays and recordings the user's thread added: the sweeps first,
+    /// so that one dropped before another was added leaves its place to it.
     fn registrations(&mut self) -> usize {
         self.registry.sweep() + self.replays.sweep() + self.recordings.sweep() + self.admit()
     }
 
-    /// Admits every registration queued, each through [`Registry::admit`], and every
-    /// replay registration, each through [`ReplayRegistry::admit`].
+    /// Admits every registration queued, each through [`Registry::admit`], every replay
+    /// registration, each through [`ReplayRegistry::admit`], and every recording
+    /// registration, each through [`RecordingRegistry::admit`].
     fn admit(&mut self) -> usize {
         let mut work = 0;
         while let Some(registration) = self.registrations.poll() {
@@ -385,8 +387,9 @@ impl Conductor {
 
     /// Up to a batch of events; each closes the client when [`event`] says so, answers
     /// the command the user's thread waits on through the response queue when it is
-    /// that command's event, and is dropped otherwise; a lap or a corrupt buffer closes
-    /// the client too.
+    /// that command's event, goes to the subscription, replay or recording it names when
+    /// it is theirs, an armed recording's second answer among them, and is dropped
+    /// otherwise; a lap or a corrupt buffer closes the client too.
     ///
     /// The pending correlation id is loaded inside the handler, after the event is read,
     /// never before the receive. The user's thread stores it (release) before it writes
@@ -396,11 +399,12 @@ impl Conductor {
     /// receive could see [`NO_PENDING`] and drop the answer: a false `response-timeout`,
     /// with a registration left on the driver.
     ///
-    /// The same chain orders the registration queue: `add subscription` queues its
-    /// registration before it writes the command, so admitting the queue before an
-    /// answer or an image is handled finds every registration the driver could have
-    /// answered, and an image that follows its answer in one batch finds its
-    /// subscription.
+    /// The same chain orders the registration queues: `add subscription` and `start
+    /// recording` queue their registration before they write the command, so admitting
+    /// the queues before an answer or an image is handled finds every registration the
+    /// driver could have answered: an image that follows its answer in one batch finds
+    /// its subscription, and the `recording ready` that binds a recording to its id, or
+    /// the `operation success` that marks it armed, finds its registration.
     fn events(&mut self) -> Result<usize, Closed> {
         let mut received = 0;
         let client_id = self.client_id;
@@ -879,17 +883,23 @@ fn log_name(log_file_name: &[u8]) -> Option<(LogDirectory, i64)> {
 }
 
 /// What one event means to client `client_id` while it waits on the command with
-/// correlation id `pending` ([`NO_PENDING`] for none): `client timeout` with the client's
+/// correlation id `pending` ([`NO_PENDING`] for none), and while `awaits` accepts the
+/// correlation id of each armed `start recording` of this client whose second answer
+/// has not been read ([`RecordingRegistry::awaits`]): `client timeout` with the client's
 /// id closes it with [`Closed::ClientTimeout`]; an event that fails a decoding check,
 /// `too-short`, `type`, `string` or `length`, closes it with [`Closed::Corrupt`], since
 /// an event it cannot decode may be the one it needed (`spec/client-protocol.md`, "What
 /// the driver rejects"); `available image` and `unavailable image` are for the
-/// subscription they name, whatever is pending, and `replay stopped` is for the replay
-/// handle it names; `publication ready`, `exclusive publication ready`, `subscription
-/// ready`, `operation success`, `recording ready`, `replay ready` and `error` with the
-/// pending correlation id are the answer; every other event, `recording stopped` among
-/// them, leaves the client open and is nothing to it. An `available image` whose log
-/// file name is not the page's shape is `corrupt`.
+/// subscription they name, whatever is pending, `replay stopped` is for the replay
+/// handle it names, and `recording stopped` is for the recording handle it names; a
+/// `recording ready` or an `error` that names a correlation id `awaits` accepts is the
+/// second answer to an armed `start recording`, for that recording's handle, and is
+/// checked before the pending command's answer, since the image may arrive while the
+/// user's thread still names the arming command's id as pending; `publication ready`,
+/// `exclusive publication ready`, `subscription ready`, `operation success`, `counter
+/// ready`, `recording ready`, `replay ready` and `error` with the pending correlation id
+/// are the answer; every other event leaves the client open and is nothing to it. An
+/// `available image` whose log file name is not the page's shape is `corrupt`.
 fn event(
     client_id: i64,
     pending: i64,
