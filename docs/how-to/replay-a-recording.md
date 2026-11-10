@@ -157,7 +157,9 @@ its send endpoint stays open for the publication linger after it
   of 100,000 hash-chained messages with a padding frame a quarter of the way, the live
   subscriber's lines and two replays' lines hashed and compared, and a replay from an
   instant checked against the index, which a position summed over the lines would fail
-  past the padding (`scripts/replay-check.sh`).
+  past the padding (`scripts/replay-check.sh`). The same gate replays the recordings
+  of the three members of a cluster
+  ([Run a cluster of three members](run-a-cluster.md), "How to verify it worked").
 
 ## When it does not work
 

@@ -183,8 +183,15 @@ first five before the release.
    nothing. No message was lost. The five language runners now wait for the image
    first.
 4. **Card 197, issue 112.** The test that sends a stream through a lossy, reordering
-   path fails about one laptop run in five. It is the proof of the receive path's
-   delivery, so the card must say whether the test or the product is wrong.
+   path failed about one laptop run in five. It is the proof of the receive path's
+   delivery, so the card had to say whether the test or the product was wrong. Done
+   on 2026-11-10: the test was. Reproduced, it failed 16 runs of 100 beside a running
+   `just test` and 5 of 100 on a quieter laptop, and every failure was one assertion
+   at the end: a read of the counter `image.removed` made the moment the client saw
+   the image go. The conductor tells the client first and counts after it has
+   unlinked the image's log, so on a loaded machine the read could come first. Every
+   message arrived once and in order in every run. The test now waits for the
+   counter.
 5. **Card 159.** The soak week's close-out: the first and the last counters samples,
    and every `doctor` finding explained or carded.
 6. **Card 211.** The client's allocation tests did not count a reallocation. Done

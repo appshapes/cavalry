@@ -139,11 +139,15 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   rules of `spec/udp.md`, "The receiver" (ADR 0040, ADR 0042): `add subscription` on
   `cavalry:udp?endpoint=<host>:<port>` resolves the host once, binds the channel's
   receive endpoint, one socket shared by the subscriptions on it, and hands the receiver
-  the socket and the stream wanted, and an add on a channel whose previous endpoint is
-  still closing waits for the receiver's close and then runs as it arrived, so a client
-  that removes and adds on one channel needs no retry, and one still waiting after the
-  closing endpoint wait, 5 s, a receiver starved that long, is code 4 with nothing
-  registered, counted in `subscription.add_deferred_timed_out` (ADR 0049); a setup
+  the socket and the stream wanted, and an add on a channel whose previous endpoint has
+  lost its last subscription and not yet closed, its images still being retired or
+  its socket still with the receiver, waits for the receiver's close and then runs as
+  it arrived, so a client that removes and adds on one channel needs no retry and is
+  given no image that is being retired, and one still waiting after the
+  closing endpoint wait, 5 s, a receiver starved that long or a retired image's
+  recording not yet stopped, its recorder behind, is code 4 with nothing registered,
+  the message naming both causes and what to do for each, counted in
+  `subscription.add_deferred_timed_out` (ADR 0049, ADR 0068); a setup
   frame for that stream goes back to the
   conductor, which creates the image, a log of type 2 under `images/` at the position
   the setup names with a registration id of its own, allocates its two counters and a

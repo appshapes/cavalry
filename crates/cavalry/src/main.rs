@@ -829,13 +829,14 @@ fn start_member(
 ) -> Result<std::thread::JoinHandle<()>, String> {
     let mut module =
         ConsensusModule::start(dir, log_dir, members, id).map_err(|error| error.to_string())?;
-    // No command prints a member's counters yet, so the line names the file and the
-    // labels a client reads them by, not a command that would show nothing.
+    // Where the member's state is: the file and the labels a client reads the two
+    // counters by, and doctor's note, which explains the member from them.
     eprintln!(
         "cavalry run: cluster member {id} started: it follows or leads as \
          docs/reference/cluster.md#roles-and-the-election says; its role and its election \
          state are the counters labelled `cluster.role {id}` and `cluster.election_state \
-         {id}` in {}, as docs/reference/counters.md describes them",
+         {id}` in {}, as docs/reference/counters.md describes them, and `cavalry doctor` \
+         explains the member from them in its `cluster-member` note",
         dir.join("counters").display()
     );
     std::thread::Builder::new()
