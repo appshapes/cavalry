@@ -693,11 +693,38 @@ fn record_truncates_purges_and_deletes_a_stopped_recording() {
     driver.close().expect("closes");
 }
 
-/// Free loopback ports, each held until all are chosen so that none repeats.
+/// Loopback ports for a cluster's endpoints, from 20000 to 31999: below the range the
+/// operating system gives a socket bound to port 0, which starts at 32768 on Linux and
+/// at 49152 on macOS. A follower binds its `log` endpoint again when it leaves the log
+/// and joins it again (ADR 0068). While the endpoint is closed, a port from that range
+/// can be given to any socket bound to port 0: another test's socket in this process,
+/// or a member's send socket. The bind then fails with `Address already in use`, code
+/// 4, and the member's election never closes. Each port is free when it is chosen, and
+/// each is chosen once in this process. The process id picks where the choice starts,
+/// so that two test processes on one host start apart.
 fn free_ports(count: usize) -> Vec<u16> {
-    let sockets: Vec<std::net::UdpSocket> = (0..count)
-        .map(|_| std::net::UdpSocket::bind("127.0.0.1:0").expect("a loopback socket"))
-        .collect();
+    use std::sync::atomic::{AtomicU32, Ordering};
+    const FIRST: u32 = 20_000;
+    const SPAN: u32 = 12_000;
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let start = (std::process::id() % 60) * 200;
+    let mut sockets = Vec::with_capacity(count);
+    for _ in 0..SPAN {
+        if sockets.len() == count {
+            break;
+        }
+        let offset = (start + NEXT.fetch_add(1, Ordering::Relaxed)) % SPAN;
+        let port = u16::try_from(FIRST + offset).expect("below 32000");
+        if let Ok(socket) = std::net::UdpSocket::bind(("127.0.0.1", port)) {
+            sockets.push(socket);
+        }
+    }
+    assert_eq!(
+        sockets.len(),
+        count,
+        "free loopback ports from {FIRST} to {}",
+        FIRST + SPAN - 1
+    );
     sockets
         .iter()
         .map(|socket| socket.local_addr().expect("bound").port())
@@ -723,14 +750,19 @@ fn cluster_counter(dir: &Path, name: &str) -> Option<i64> {
 }
 
 /// The members a test started, each killed when the test ends before it stopped them:
-/// a failed assertion would otherwise leave three drivers running after the test.
+/// a failed assertion would otherwise leave three drivers running after the test. When
+/// the test failed, each member's standard error is printed with the failure, so that
+/// the reason a member gave, a duty cycle's error among them, is in the test's output.
 struct Runs(Vec<Child>);
 
 impl Drop for Runs {
     fn drop(&mut self) {
-        for run in &mut self.0 {
+        for (member, run) in self.0.iter_mut().enumerate() {
             let _ = run.kill();
             let _ = run.wait();
+            if std::thread::panicking() {
+                eprintln!("member {member}'s standard error:\n{}", stderr_of(run));
+            }
         }
     }
 }
