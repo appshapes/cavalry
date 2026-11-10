@@ -141,5 +141,10 @@ doctor](run-the-driver.md#when-it-does-not-work) explains each in full.
   not exist. The message names the endpoint. A message that says the previous receive
   endpoint has not closed in the 5 s the add waited, with **`WARN
   subscription.add_deferred_timed_out`** from `cavalry doctor` on the subscriber's
-  host, is a receiver thread starved of CPU: give the driver's threads CPU, then add
-  the subscription again.
+  host, has one of two causes. If a recording of the stream's image had not yet
+  stopped, the image's log is kept until the recorder has written up to where the
+  image stopped: a `recording.position` that does not move is a recorder behind a slow
+  or failing disk, so check `recording.write_failed` and the log directory's disk, or
+  stop the recording before removing the stream's last subscription. Otherwise it is
+  a receiver thread starved of CPU: give the driver's threads CPU. Then add the
+  subscription again.
