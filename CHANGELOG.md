@@ -1652,6 +1652,18 @@ user-visible change, added in the same commit as the change. The format follows
   the email covers, in place of `Cavalry: what's new, October 26 to November 1, 2026`,
   the shape Brigade's email uses too. A preview still starts with `[preview]`, and the
   email's own title still names the dates it covers (card 189).
+- The finish line for early testers is drawn: Cavalry is ready for an engineer outside
+  AppShapes when version 0.1.0 is published and six conditions hold, each proved by a
+  gate or a record: the five slices work, the binary and the five clients install from
+  their registries, no known defect lies about delivery, the frozen surfaces are named
+  and an upgrade across two published versions has run, a cluster of three has soaked
+  for a week, and the README says what is not built. The sixth slice is the first
+  release
+  ([ADR 0061](docs/decisions/0061-draw-the-finish-line-for-early-testers-at-the-first-release.md)).
+  A new page surveys the project from its first commit and gives the roadmap to that
+  line, with what waits on a person and an estimate
+  ([Where is Cavalry, and what is left before early testers?](docs/explanation/where-cavalry-is-and-what-is-left.md);
+  card 234).
 - `spec/client-protocol.md` version 7 adds a client's counter: `add counter` and
   `remove counter`, Aeron's commands 9 and 10, answered with `counter ready` and
   `unavailable counter`, Aeron's events 3848 and 3849, and error code 5, `unknown
