@@ -153,9 +153,9 @@ gh pr checks <number>
   of the run's end. Add `review` yourself only when a minute has passed and none has.
 
 - **A `claude` run failed in "Approve the runs GitHub held on the fixer's push".** The
-  fixer pushed and its push has no gates: the step found no `ci` run at the pushed
-  head, or the held run refused the approval, and the step that asks for the review
-  was skipped (card 215). The step's last line names the commands: `gh run list
+  fixer pushed and its push has no gates: the step found no `ci` run at the branch's
+  tip on a pull request that does not conflict, or the held run refused the approval,
+  and the step that asks for the review was skipped (card 215). The step's last line names the commands: `gh run list
   --workflow ci.yml --branch <branch>`, `gh api -X POST
   repos/{owner}/{repo}/actions/runs/<id>/approve` on the run that reads
   `action_required`, then `gh pr edit <number> --add-label review`; with no held run,
