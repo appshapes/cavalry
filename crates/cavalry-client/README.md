@@ -33,6 +33,26 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   `Cavalry::stop_recording(id)`, or `Recording::stop(&mut client)`, stops it from any
   client. The recording is the driver's:
   it outlives the client, and dropping the handle stops nothing (ADR 0025).
+  The client follows the stop of each recording it started, whoever stopped it:
+  `Recording::stop_position()` is `None` while the recording is live and its stop
+  position after the driver's `recording stopped`, and from then on both positions are
+  that position. A sync that returned success covered it: the catalog's stop, or,
+  when the stop's own writes or syncs failed or a sync of the recording failed
+  before it, the position last synced (ADR 0064, ADR 0065). The
+  driver frees a stopped recording's counters and gives their
+  records to other counters a second later, so each read checks that the record is
+  still the recording's, and a position is never another counter's value. A client
+  follows 1,024 recordings at most, the driver's own bound.
+- Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
+  `cavalry:udp` stream with a subscription and no publication or image yet, returns
+  an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the
+  driver has started it with the stream's next image, at the image's join position, so
+  that every frame of the image is recorded (ADR 0059). This is the order a cluster
+  follower needs: subscribe, arm, then the leader's first frame. The driver drops an
+  armed recording when the stream's last subscription goes, and `poll()` then returns
+  its error, code 20. `Cavalry::start_recording` on such a stream returns
+  `ClientError::RecordingArmed`, reason `recording-armed`, and holds nothing, while
+  the driver keeps the armed recording.
   `Cavalry::truncate_recording(id, position)`, `purge_segments(id, segment_base)` and
   `purge_recording(id)` cut, purge and delete a stopped recording; a live one, one a
   replay reads or one under another of the three is refused with code 24 (ADR 0031).
