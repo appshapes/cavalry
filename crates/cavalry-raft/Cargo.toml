@@ -33,8 +33,11 @@ cavalry-client = { path = "../cavalry-client" }
 # The `terms` file, the member's record of terms and its candidate term
 # (spec/durable-log.md, "Terms"; ADR 0060). A workspace member.
 cavalry-log = { path = "../cavalry-log" }
-# The ids of the cluster's counters, generated from counters.toml (ADR 0012). A
-# workspace member.
+# The counter ids `counters.toml` generates, which `Counts::by_counter` pairs each count
+# with, so that every transition of the election names the counter it moves and `just
+# lint-counters` checks it (CLAUDE.md, invariant 4; ADR 0067). A workspace member, and
+# one the module reaches anyway through `cavalry-client` (ADR 0063). The core calls
+# none of its unsafe code.
 cavalry-shm = { path = "../cavalry-shm" }
 
 [dev-dependencies]

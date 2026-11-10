@@ -1838,11 +1838,22 @@ user-visible change, added in the same commit as the change. The format follows
   a quorum has recorded; a follower canvasses, joins the leader's log at its append
   position and reports that position as it rises. It does no I/O of its own: it
   reaches the consensus stream, the log, its recording and its `terms` file through
-  the `Io` trait. `memory::Cluster` gives it that in memory, several members in one
-  process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
-  member started again on an empty log directory to set, which the crate's README
-  example and its tests run. The module that runs the core over a driver follows
+  the `Io` trait. `memory::Cluster` gives it that in memory, one to eight members in
+  one process on a clock the caller steps, with loss, delay up to 10 s, cuts, paused
+  syncs and a member started again on an empty log directory to set, which the
+  crate's README example and its tests run; its consensus stream holds at most 4,096
+  messages in flight and loses, and counts, one sent while it is full. The module
+  that runs the core over a driver follows
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
+- The election of a cluster member is a registered state machine, `cluster_election`,
+  and every move of it adds one to a counter: `counters.toml` has the eleven
+  `cluster.*` counters a member's core keeps, ids 110 to 120, among them two new ones,
+  `cluster.election_steps` and `cluster.elections_closed`, and
+  `cavalry_raft::Counts::by_counter` pairs each count with its counter's id for the
+  module to store. `docs/reference/counters.md` lists them and the machine's
+  transitions
+  ([ADR 0067](docs/decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md);
   card 227).
 - A cluster member runs over a driver: `cavalry_raft::ConsensusModule` is the consensus
   module of the replicated log, a client of the driver in its directory. Three members
@@ -1850,9 +1861,12 @@ user-visible change, added in the same commit as the change. The format follows
   first frame, and an entry the leader's process offers is committed once a quorum has
   synced it, with every member's recording holding the same bytes. The module stores
   the member's role, election state, term, append position and commit position, and
-  what it counts, in 14 counters of the new scope `client` in the driver's counters
-  file, `cluster.role` to `cluster.messages_rejected`, and `counters.toml` registers the
-  member's role and its election as state machines. A member does not start again on
+  what it counts, as client counters in the driver's counters file: the eleven
+  counts of its core, from `Counts::by_counter`, `cluster.commit_position`, and five
+  counters this change registers in `counters.toml`, ids 121 to 125,
+  `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
+  `cluster.append_position` and `cluster.messages_rejected`, with the member's role
+  as the state machine `cluster_role`. A member does not start again on
   a log directory that holds a term: the error says to start the cluster again as a
   new cluster, every member on a new log directory
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);

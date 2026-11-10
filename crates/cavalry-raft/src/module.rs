@@ -26,11 +26,8 @@ use cavalry_proto::cluster::{
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
-    CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_FAILED,
-    CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
-    CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LEADERSHIP_TERMS_IGNORED,
-    CLUSTER_LOG_IMAGES_LOST, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE, CLUSTER_TERMS_LED,
+    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
+    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE, COUNTERS,
 };
 
 use crate::consensus::{
@@ -447,15 +444,9 @@ struct Counters {
     leadership_term_id: Stored,
     append_position: Stored,
     commit_position: Stored,
-    elections: Stored,
-    elections_failed: Stored,
-    terms_led: Stored,
-    leader_quorum_losses: Stored,
-    leader_heartbeat_timeouts: Stored,
-    leadership_terms_ignored: Stored,
-    join_position_mismatches: Stored,
-    log_images_lost: Stored,
-    appointed_leader_behind: Stored,
+    /// The core's counts, one counter each, in the order of [`Counts::by_counter`]:
+    /// [`Counts::LEN`] of them, added once when the module starts.
+    counts: Vec<Stored>,
     messages_rejected: Stored,
 }
 
@@ -468,30 +459,21 @@ impl Counters {
             leadership_term_id: add(CLUSTER_LEADERSHIP_TERM_ID, "cluster.leadership_term_id")?,
             append_position: add(CLUSTER_APPEND_POSITION, "cluster.append_position")?,
             commit_position: add(CLUSTER_COMMIT_POSITION, "cluster.commit_position")?,
-            elections: add(CLUSTER_ELECTIONS, "cluster.elections")?,
-            elections_failed: add(CLUSTER_ELECTIONS_FAILED, "cluster.elections_failed")?,
-            terms_led: add(CLUSTER_TERMS_LED, "cluster.terms_led")?,
-            leader_quorum_losses: add(
-                CLUSTER_LEADER_QUORUM_LOSSES,
-                "cluster.leader_quorum_losses",
-            )?,
-            leader_heartbeat_timeouts: add(
-                CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
-                "cluster.leader_heartbeat_timeouts",
-            )?,
-            leadership_terms_ignored: add(
-                CLUSTER_LEADERSHIP_TERMS_IGNORED,
-                "cluster.leadership_terms_ignored",
-            )?,
-            join_position_mismatches: add(
-                CLUSTER_JOIN_POSITION_MISMATCHES,
-                "cluster.join_position_mismatches",
-            )?,
-            log_images_lost: add(CLUSTER_LOG_IMAGES_LOST, "cluster.log_images_lost")?,
-            appointed_leader_behind: add(
-                CLUSTER_APPOINTED_LEADER_BEHIND,
-                "cluster.appointed_leader_behind",
-            )?,
+            counts: {
+                // Each count's counter, by the id the core pairs it with and under the
+                // name `counters.toml` gives that id (ADR 0067). Every id of
+                // `by_counter` is an entry of that table, which its doctest checks,
+                // so the other name is never a label.
+                let mut counts = Vec::with_capacity(Counts::LEN);
+                for (id, _) in Counts::default().by_counter() {
+                    let name = COUNTERS
+                        .iter()
+                        .find(|entry| entry.id == id)
+                        .map_or("cluster.count", |entry| entry.name);
+                    counts.push(add(id, name)?);
+                }
+                counts
+            },
             messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected")?,
         })
     }
@@ -506,20 +488,9 @@ impl Counters {
         self.leadership_term_id.store(core.leadership_term_id());
         self.append_position.store(core.append_position());
         self.commit_position.store(core.commit_position());
-        self.elections.store(count(counts.elections));
-        self.elections_failed.store(count(counts.elections_failed));
-        self.terms_led.store(count(counts.terms_led));
-        self.leader_quorum_losses
-            .store(count(counts.leader_quorum_losses));
-        self.leader_heartbeat_timeouts
-            .store(count(counts.leader_heartbeat_timeouts));
-        self.leadership_terms_ignored
-            .store(count(counts.leadership_terms_ignored));
-        self.join_position_mismatches
-            .store(count(counts.join_position_mismatches));
-        self.log_images_lost.store(count(counts.log_images_lost));
-        self.appointed_leader_behind
-            .store(count(counts.appointed_leader_behind));
+        for (stored, (_, value)) in self.counts.iter_mut().zip(counts.by_counter()) {
+            stored.store(count(value));
+        }
         self.messages_rejected.store(count(messages_rejected));
     }
 }

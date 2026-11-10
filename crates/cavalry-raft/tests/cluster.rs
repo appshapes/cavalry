@@ -13,8 +13,8 @@ use cavalry_proto::cluster::{Message, Stream};
 use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
-    CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS, CLUSTER_ROLE,
-    CLUSTER_TERMS_LED,
+    CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE, CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS,
+    CLUSTER_ELECTIONS_CLOSED, CLUSTER_ROLE, CLUSTER_TERMS_LED,
 };
 
 struct TestDir(PathBuf);
@@ -242,6 +242,14 @@ fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_e
             if index == 0 { 2 } else { 0 }
         );
         assert_eq!(counter(member, CLUSTER_TERMS_LED.0), i64::from(index == 0));
+        // The two counts of ADR 0067 reach the file as the others do, through
+        // `Counts::by_counter`: one election closed, in three steps on the leader
+        // and four on a follower.
+        assert_eq!(counter(member, CLUSTER_ELECTIONS_CLOSED.0), 1);
+        assert_eq!(
+            counter(member, CLUSTER_ELECTION_STEPS.0),
+            if index == 0 { 3 } else { 4 }
+        );
     }
 
     // A member does not start again on the log it has: the refusal says why and what
