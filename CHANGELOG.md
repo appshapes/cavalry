@@ -1838,9 +1838,11 @@ user-visible change, added in the same commit as the change. The format follows
   a quorum has recorded; a follower canvasses, joins the leader's log at its append
   position and reports that position as it rises. It does no I/O of its own: it
   reaches the consensus stream, the log, its recording and its `terms` file through
-  the `Io` trait. `memory::Cluster` gives it that in memory, several members in one
-  process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
-  member started again on an empty log directory to set, which the crate's README
-  example and its tests run. The module that runs the core over a driver follows
+  the `Io` trait. `memory::Cluster` gives it that in memory, one to eight members in
+  one process on a clock the caller steps, with loss, delay up to 10 s, cuts, paused
+  syncs and a member started again on an empty log directory to set, which the
+  crate's README example and its tests run; its consensus stream holds at most 4,096
+  messages in flight and loses, and counts, one sent while it is full. The module
+  that runs the core over a driver follows
   ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
   card 227).

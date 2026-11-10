@@ -18,10 +18,12 @@ commit path runs per message.
   that starts late, is left out and counted, never joined wrong.
 - Does no I/O of its own: the core reaches the consensus stream, the log, its
   recording and its `terms` file through one trait, `Io`. `memory::Cluster` gives it
-  that in memory, three members in one process on a clock the caller steps, with
-  loss, delay, cuts and paused syncs to set: what the example below and the crate's
-  tests run. The module that gives it the same over a driver, as a client of it, is
-  this crate's next change.
+  that in memory, one to eight members in one process on a clock the caller steps,
+  with loss, delay, cuts and paused syncs to set: what the example below and the
+  crate's tests run. It is a test double and allocates; its consensus stream holds
+  at most 4,096 messages in flight and loses, and counts, one sent while it is full,
+  and its log holds every entry offered for the cluster's life. The module that gives
+  the core the same over a driver, as a client of it, is this crate's next change.
 - To come, each with its card: the module over the client and `cavalry run` (card
   227), the election and mixed versions in a rolling upgrade (card 228), the cluster
   client (card 229), snapshots and catch-up (card 230), and standby members, which

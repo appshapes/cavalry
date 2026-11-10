@@ -5,7 +5,7 @@
 //! checks, at every step, that nothing uncommitted is called committed.
 
 use cavalry_proto::cluster::{MAX_MEMBERS, Message, Stream, TimeUnit, quorum};
-use cavalry_raft::memory::Cluster;
+use cavalry_raft::memory::{Cluster, IN_FLIGHT_CAPACITY, MAX_DELAY_MS};
 use cavalry_raft::{Consensus, ElectionState, MembersRefused, NO_SESSION, Refused, Role};
 
 /// What must hold after every step (invariant 1): the leader's commit position is at
@@ -617,6 +617,57 @@ fn lost_and_late_consensus_messages_change_no_outcome() {
         assert_eq!(counts.elections_failed, 0, "member {id}");
         assert_eq!(counts.leader_heartbeat_timeouts, 0, "member {id}");
     }
+}
+
+/// The consensus stream in memory is bounded (invariant 3). Eight members whose messages
+/// are up to two seconds late, with an entry offered every millisecond, send more than
+/// the queue holds, about seven messages a millisecond for a second on average: it holds `IN_FLIGHT_CAPACITY` and never more, what is sent while it is
+/// full is lost and counted, and since every consensus message is sent again at its
+/// interval, every member learns the last commit position once delivery is prompt
+/// again, with no election failed. A delay past `MAX_DELAY_MS` is held to it.
+#[test]
+fn the_consensus_stream_in_memory_holds_its_bound_and_loses_what_it_cannot_hold() {
+    let ids: Vec<i32> = (0..8).collect();
+    let mut cluster = Cluster::new(&ids).expect("eight members");
+    let mut safety = Safety::new(&ids);
+    safety.run(&mut cluster, 1_000);
+    assert_eq!(cluster.full_queue_losses(), 0);
+    assert_eq!(cluster.set_delivery(0, 2_000), 2_000);
+    let mut last = 0;
+    let mut fullest = 0;
+    for i in 0..3_000u32 {
+        last = cluster.offer(&i.to_le_bytes()).expect("the leader appends");
+        safety.run(&mut cluster, 1);
+        assert!(cluster.in_flight() <= IN_FLIGHT_CAPACITY, "{cluster:?}");
+        fullest = fullest.max(cluster.in_flight());
+    }
+    assert_eq!(fullest, IN_FLIGHT_CAPACITY);
+    let lost = cluster.full_queue_losses();
+    assert!(lost > 0);
+
+    assert_eq!(cluster.set_delivery(0, 0), 0);
+    safety.run(&mut cluster, 3_000);
+    assert!(cluster.in_flight() < IN_FLIGHT_CAPACITY);
+    assert_eq!(
+        cluster.full_queue_losses(),
+        lost,
+        "prompt delivery loses nothing"
+    );
+    for &id in &ids {
+        assert_eq!(cluster.commit_position(id), Some(last), "member {id}");
+        assert_eq!(
+            cluster.election_state(id),
+            Some(ElectionState::Closed),
+            "member {id}"
+        );
+        assert_eq!(cluster.counts(id).expect("a member").elections_failed, 0);
+    }
+
+    // A delay that would overflow the clock's sum is held to the leader heartbeat
+    // timeout, and the cluster runs on.
+    assert_eq!(cluster.set_delivery(0, u64::MAX), MAX_DELAY_MS);
+    safety.run(&mut cluster, 100);
+    assert!(cluster.in_flight() <= IN_FLIGHT_CAPACITY);
 }
 
 /// What an offer is refused for, each with what to do next.
