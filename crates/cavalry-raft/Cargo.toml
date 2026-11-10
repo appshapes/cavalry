@@ -47,3 +47,14 @@ stats_alloc = "0.1"
 # The module's tests run three drivers in the test process, one a member (ADR 0007).
 # Dev only.
 cavalry-driver = { path = "../cavalry-driver" }
+
+# The core's allocation test, held as a program with no test harness: a counting region
+# sees every thread of its process, and the harness's own thread allocates on its way
+# to waiting for the test it has just started, which this test's window, open a few
+# microseconds after its thread starts, could catch, and did once in CI. The check
+# runs on the one thread of a plain `main`, as `cavalry-client`'s
+# `reallocation_counted` does (card 211). `cargo test` runs it with the others,
+# whatever filter it is given.
+[[test]]
+name = "allocations"
+harness = false
