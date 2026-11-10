@@ -300,7 +300,8 @@ What the driver does with each, after the checks of "What the driver rejects":
   a request still waiting for room (ADR 0042), is error code 10, as it is for an `add
   publication`; a socket that cannot be opened or bound is code 4; a host that does
   not resolve is code 9. An add on a `cavalry:udp` channel whose previous receive
-  endpoint is still closing, its socket with the receiver, waits with nothing
+  endpoint has lost its last subscription and has not yet closed, its images still
+  being retired or its socket still with the receiver, waits with nothing
   registered and no event sent until the receiver has closed it, one receiver cycle
   while the receiver keeps up, and then runs as if it had just arrived, the first such
   add binding the endpoint again; waiting adds hold slots of the subscriptions
@@ -308,7 +309,7 @@ What the driver does with each, after the checks of "What the driver rejects":
   out first. An add still waiting once the closing endpoint wait of "Liveness and
   timeouts" has passed since the driver read it is code 4, the bind it would have
   made, with nothing registered, and the close that comes later runs nothing for it
-  (ADR 0049).
+  (ADR 0049; ADR 0068 for an endpoint whose images are still being retired).
 - **remove subscription.** The driver removes the subscription and every image it has,
   frees their position counters, and answers `operation success`; an image over UDP
   shared with other subscriptions on the endpoint and stream goes on with them, one the

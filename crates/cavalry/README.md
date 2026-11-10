@@ -125,7 +125,8 @@ cavalry doctor: /tmp/cavalry-readme-4242, checks run: 14
   [Replay a recording](../../docs/how-to/replay-a-recording.md), the how-tos for
   `record` and `replay`, and [`spec/client-protocol.md`](../../spec/client-protocol.md),
   the directory, the commands and the events it keeps.
-- [Configuration](../../docs/reference/config.md), the two keys and how one is set, and
+- [Configuration](../../docs/reference/config.md), every key with its environment
+  variable and its doctor check, and how one is set, and
   [ADR 0020](../../docs/decisions/0020-configure-by-environment-variable.md), why by
   environment variable.
 - [`cavalry-driver`](../cavalry-driver/README.md), the driver behind `run`, and
