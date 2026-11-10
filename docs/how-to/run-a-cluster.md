@@ -19,7 +19,11 @@ committed once a quorum, two of three, has it on disk.
   log directory of its own. On three hosts the steps are the same with each host's
   address in place of `127.0.0.1`.
 - Five free UDP ports for each member. The steps use 9000 to 9004, 9010 to 9014 and
-  9020 to 9024.
+  9020 to 9024. On several hosts, each member's five ports must also be reachable over
+  UDP from every other member's host: open them in each host's firewall and in any
+  cloud security group between the hosts. A member whose `log` port the leader's host
+  cannot reach is left out of the cluster, and `doctor` reports it as
+  `cluster-joined-late`.
 - Log directories that hold no cluster yet. A member does not start again on a log
   directory that holds a term of an earlier run: this version has neither the election
   nor the catch-up that a restart needs.
@@ -118,10 +122,25 @@ committed once a quorum, two of three, has it on disk.
   host, and check that the other hosts reach this host's consensus port, 9001 in step
   1. `doctor` tells the two cases apart from `CAVALRY_CLUSTER_MEMBERS`; without it, the
   message describes both.
-- `WARN cluster-joined-late`: the member's elections fail one after another. It
-  started after the cluster's first entry, or lost what it held, and this version
-  cannot bring it up to the leader's log. The cluster runs without it. To have it
-  back, start the cluster again as a new cluster.
+- `WARN cluster-joined-late`: the member's elections fail one after another, and the
+  cluster runs without it. The message says how many failed, and how many of them on
+  an image of the leader's log that joined past the member's append position.
+  - With none on such an image, there are two causes, and the counters do not tell
+    them apart. The first is the network: the leader's log does not reach the member.
+    No image of the log arrived on the member's `log` endpoint, the fourth field of
+    its entry in `CAVALRY_CLUSTER_MEMBERS`, within 10 s. The leader then closed its
+    election with the other two and appended, and every later election of this member
+    fails. The second is a member that started after the cluster's first entry, or
+    lost what it held. Check the network first, because a new cluster leaves the
+    member out again while the path is closed. The leader's host must reach the
+    member's `log` endpoint over UDP, 9022 for member 2 in step 1. The member's host
+    must reach the leader's `consensus` endpoint, 9001 in step 1. With
+    `CAVALRY_CLUSTER_MEMBERS` set, the message names both endpoints. Open the path,
+    then start the cluster again as a new cluster.
+  - With one or more on such an image, the leader's log reaches the member, and the
+    member's log is behind it: it started late or lost what it held. This version
+    cannot bring it up to the leader's log. To have it back, start the cluster again
+    as a new cluster.
 - `FAIL cluster-leader-behind`: this member is the appointed leader and other members
   hold a log ahead of its own. Found in canvass, it does not lead: the note says `a
   follower`. Found in leader ready, it leads and does not close its election: the note
