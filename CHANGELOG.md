@@ -1680,3 +1680,15 @@ user-visible change, added in the same commit as the change. The format follows
   and the service's bounded poll
   ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
   card 227).
+- The five language runners' handler round no longer fails about one CI run in
+  several with "it saw []". The round offered ten messages and polled once; a
+  publication can accept an offer before the subscription holds its image, which it
+  takes on a poll after the client's conductor hands it over, so that one poll could
+  deliver nothing. No message was lost: the ten arrived on a later poll, once and in
+  order. The runners now poll until `image_count` is above 0 before the ten offers,
+  and `Subscription::poll`'s and `cavalry_subscription_poll`'s documentation says
+  what a caller sees and what to do (cards 223, 233 and 235). The
+  [publish and subscribe tutorial](docs/tutorials/publish-and-subscribe.md), the
+  `cavalry-client` and `cavalry-ffi` READMEs and `examples/quickstart.rs` said
+  `not-connected` lasts until the subscription's image joins; they now say it lasts
+  until the driver has made the image, which the subscription takes on a later poll.

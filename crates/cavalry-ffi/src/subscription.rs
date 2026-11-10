@@ -199,6 +199,13 @@ fn polling(function: &str) {
 /// `clientd`, up to `fragment_limit` fragments; returns the fragments delivered, or
 /// −1 with the fault as the error and in `cavalry_subscription_fault`.
 ///
+/// Images the driver announced since the last poll join first. An image joins once
+/// the client's conductor has handed it over, which is after the driver made it, so a
+/// publication can accept a claim or an offer before the subscription holds the image:
+/// a poll then delivers 0, and the frames arrive on a later poll, from the image's join
+/// position, none lost. A caller that needs the image first polls until
+/// `cavalry_subscription_image_count` is above 0.
+///
 /// # Safety
 ///
 /// `subscription` is null or a live handle not in use by another call; `handler` is
