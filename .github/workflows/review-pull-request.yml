@@ -246,6 +246,10 @@ jobs:
       # denied, and on a miss the session's final text, which the action discards, so
       # the second attempt can be read against the first. Bounded excerpts, on a page as
       # public as the log; the full output stays out (`show_full_output` is off above).
+      # The same lines go to this step's log, because a session reads a run with `gh`,
+      # which prints a log and no job summary: on 2026-11-10 a first session in three
+      # ended with no review and a second in six, and not one of the twenty-one could be
+      # read from a session (card 247).
       - name: Verify a review was submitted
         id: verify
         if: steps.pr.outputs.proceed == 'true'
@@ -301,14 +305,14 @@ jobs:
             else
               echo "- No execution file; the Review step's outcome was '$REVIEW_OUTCOME'."
             fi
-          } >> "$GITHUB_STEP_SUMMARY" || echo "::warning::The job summary could not be written"
+          } | tee -a "$GITHUB_STEP_SUMMARY" || echo "::warning::The job summary could not be written"
           if [ -z "$reviews" ]; then
             if [ "$ATTEMPT" = "1" ]; then
-              echo "::warning::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt 1 of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did); the retry job dispatches attempt 2"
+              echo "::warning::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt 1 of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary and this step's log say what the session did); the retry job dispatches attempt 2"
               echo "reviewed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt $ATTEMPT of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary says what the session did): add the review label to the pull request to run it again (docs/how-to/ask-the-agent.md, \"When it does not work\")"
+            echo "::error::Reviewer session ended without submitting a formal review at head $HEAD_SHA on attempt $ATTEMPT of 2 (none newer than the ${REVIEWS_BEFORE:-0} at this head before the run; the Review step's outcome was '$REVIEW_OUTCOME'; the job summary and this step's log say what the session did): add the review label to the pull request to run it again (docs/how-to/ask-the-agent.md, \"When it does not work\")"
             exit 1
           fi
           echo "reviewed=true" >> "$GITHUB_OUTPUT"
@@ -353,7 +357,7 @@ jobs:
             echo "::notice::pull request $PR_NUMBER moved from $HEAD_SHA to $head_now; the run dispatched for the new head reviews it"
             exit 0
           fi
-          gh pr comment "$PR_NUMBER" --body "The reviewer session for $HEAD_SHA ended without submitting a review ($RUN_URL; its job summary says what the session did). Running it once more. If the second run ends the same way, its \`review pr\` run fails on the Actions tab: add the \`review\` label to this pull request to run it again (\`docs/how-to/ask-the-agent.md\`, \"When it does not work\")."
+          gh pr comment "$PR_NUMBER" --body "The reviewer session for $HEAD_SHA ended without submitting a review ($RUN_URL; its job summary says what the session did, and \`gh run view <run id> --log\` prints the same lines under \"Reviewer session, attempt\"). Running it once more. If the second run ends the same way, its \`review pr\` run fails on the Actions tab: add the \`review\` label to this pull request to run it again (\`docs/how-to/ask-the-agent.md\`, \"When it does not work\")."
           # Last on purpose: the new run joins this pull request's concurrency group and
           # cancels this one, so nothing may follow the dispatch.
           gh workflow run review-pull-request.yml --ref "$REF" \
