@@ -429,15 +429,16 @@ def appointed_leader(ids):
     return {"leader": min(ids)}
 
 
-def leader_ready(count, counted, startup_timeout_passed):
+def leader_ready(count, counted, deadline_passed):
     """spec/cluster.md, "The appointed leader": in leader ready the appointed leader closes its
     election at once when every member counts for its term at its log position, itself among
-    them, and with a quorum of them once the startup canvass timeout has passed since it
-    entered leader log replication. `counted` is how many members count, as "The commit
-    position" counts them."""
+    them, and with a quorum of them once its deadline has passed, the leader heartbeat timeout
+    after it entered leader ready. `counted` is how many members count: those whose last
+    report is for the leader's term, at its log position, and younger than the leader
+    heartbeat timeout."""
     if count >= 1 and counted >= count:
         return {"closes": True, "unanimous": True}
-    if startup_timeout_passed and counted >= quorum(count):
+    if deadline_passed and counted >= quorum(count):
         return {"closes": True, "unanimous": False}
     return {"closes": False, "unanimous": False}
 
@@ -823,19 +824,31 @@ VECTORS += [
     arithmetic("appointed-leader-of-eight", "appointed-leader", {"members": [10, 11, 12, 13, 14, 15, 16, 9]},
                appointed_leader([10, 11, 12, 13, 14, 15, 16, 9])),
     arithmetic("leader-ready-every-member", "leader-ready",
-               {"members": 3, "counted": 3, "startup_timeout_passed": False}, leader_ready(3, 3, False)),
-    arithmetic("leader-ready-quorum-before-the-timeout-waits", "leader-ready",
-               {"members": 3, "counted": 2, "startup_timeout_passed": False}, leader_ready(3, 2, False)),
-    arithmetic("leader-ready-quorum-at-the-timeout", "leader-ready",
-               {"members": 3, "counted": 2, "startup_timeout_passed": True}, leader_ready(3, 2, True)),
-    arithmetic("leader-ready-alone-at-the-timeout-waits", "leader-ready",
-               {"members": 3, "counted": 1, "startup_timeout_passed": True}, leader_ready(3, 1, True)),
+               {"members": 3, "counted": 3, "deadline_passed": False}, leader_ready(3, 3, False)),
+    arithmetic("leader-ready-quorum-before-the-deadline-waits", "leader-ready",
+               {"members": 3, "counted": 2, "deadline_passed": False}, leader_ready(3, 2, False)),
+    arithmetic("leader-ready-quorum-at-the-deadline", "leader-ready",
+               {"members": 3, "counted": 2, "deadline_passed": True}, leader_ready(3, 2, True)),
+    arithmetic("leader-ready-alone-at-the-deadline-waits", "leader-ready",
+               {"members": 3, "counted": 1, "deadline_passed": True}, leader_ready(3, 1, True)),
     arithmetic("leader-ready-of-one", "leader-ready",
-               {"members": 1, "counted": 1, "startup_timeout_passed": False}, leader_ready(1, 1, False)),
-    arithmetic("leader-ready-five-short-of-quorum-at-the-timeout", "leader-ready",
-               {"members": 5, "counted": 2, "startup_timeout_passed": True}, leader_ready(5, 2, True)),
-    arithmetic("leader-ready-five-quorum-at-the-timeout", "leader-ready",
-               {"members": 5, "counted": 3, "startup_timeout_passed": True}, leader_ready(5, 3, True)),
+               {"members": 1, "counted": 1, "deadline_passed": False}, leader_ready(1, 1, False)),
+    arithmetic("leader-ready-five-short-of-quorum-at-the-deadline", "leader-ready",
+               {"members": 5, "counted": 2, "deadline_passed": True}, leader_ready(5, 2, True)),
+    arithmetic("leader-ready-five-quorum-at-the-deadline", "leader-ready",
+               {"members": 5, "counted": 3, "deadline_passed": True}, leader_ready(5, 3, True)),
+    # The appointed leader that started again on an empty log directory, among members that
+    # hold a term it no longer has: every report is of a log ahead of its own, so it is no
+    # candidate, at once or at any deadline, and never leads ("The appointed leader").
+    arithmetic("candidate-empty-log-among-members-with-a-term", "candidate",
+               {"members": 3, "reports": [[NULL, 0], [0, 4096], [0, 4096]], "own": [NULL, 0],
+                "deadline_passed": True}, {"nominate": False, "unanimous": False}),
+    arithmetic("candidate-empty-log-one-member-ahead-one-silent", "candidate",
+               {"members": 3, "reports": [[NULL, 0], [0, 4096], None], "own": [NULL, 0],
+                "deadline_passed": True}, {"nominate": False, "unanimous": False}),
+    arithmetic("candidate-empty-log-one-member-level-one-silent", "candidate",
+               {"members": 3, "reports": [[NULL, 0], [NULL, 0], None], "own": [NULL, 0],
+                "deadline_passed": True}, {"nominate": True, "unanimous": False}),
 ]
 
 assert ballot(3, 3, [{"member": 0, "vote": True, "term": 3}, {"member": 1, "vote": True, "term": 3}], True) == {"leader": True, "unanimous": False}

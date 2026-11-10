@@ -580,9 +580,9 @@ fn arithmetic_vector(name: &str, vector: &Value) {
             let LeaderReady { closes, unanimous } = leader_ready(
                 usize::try_from(int(inputs, "members")).expect("members"),
                 usize::try_from(int(inputs, "counted")).expect("counted"),
-                inputs["startup_timeout_passed"]
+                inputs["deadline_passed"]
                     .as_bool()
-                    .expect("startup_timeout_passed"),
+                    .expect("deadline_passed"),
             );
             json!({"closes": closes, "unanimous": unanimous})
         }

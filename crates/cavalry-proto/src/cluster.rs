@@ -2329,8 +2329,10 @@ pub fn candidate(
 
 /// The appointed leader among the members with these ids (`spec/cluster.md`, "The
 /// appointed leader"): the member with the lowest id, whatever order the members string
-/// gives them in; −1 for no member. Until the election is built, this member leads and
-/// every other follows it.
+/// gives them in. Until the election is built, this member alone may lead, once
+/// [`candidate`] makes it one, and every other follows it. An empty list, which no
+/// members string gives since `members-grammar` refuses an empty string, is −1 here,
+/// a value the page gives nothing for.
 pub fn appointed_leader(member_ids: &[i32]) -> i32 {
     member_ids.iter().copied().min().unwrap_or(-1)
 }
@@ -2346,16 +2348,13 @@ pub struct LeaderReady {
 
 /// An appointed leader's close of its election in leader ready, among `members`
 /// members of which `counted` count for its term at its log position, itself among
-/// them, as [`commit_position`] counts a member (`spec/cluster.md`, "The appointed
-/// leader"): at once when every member counts, and with a quorum of them once the
-/// startup canvass timeout has passed since it entered leader log replication. The two
-/// cases are [`candidate`]'s, a canvassing member's at a cold start, which an appointed
-/// leader never is.
-pub const fn leader_ready(
-    members: usize,
-    counted: usize,
-    startup_timeout_passed: bool,
-) -> LeaderReady {
+/// them: those whose last report is for the leader's term, at that position, and
+/// younger than the leader heartbeat timeout (`spec/cluster.md`, "The appointed
+/// leader"). It closes at once when every member counts, and with a quorum of them
+/// once its deadline has passed, the leader heartbeat timeout after it entered leader
+/// ready: more than the election's leader waits for, since no member of this version
+/// catches up with a term whose first entry it missed.
+pub const fn leader_ready(members: usize, counted: usize, deadline_passed: bool) -> LeaderReady {
     if members >= 1 && counted >= members {
         return LeaderReady {
             closes: true,
@@ -2363,7 +2362,7 @@ pub const fn leader_ready(
         };
     }
     LeaderReady {
-        closes: startup_timeout_passed && counted >= quorum(members),
+        closes: deadline_passed && counted >= quorum(members),
         unanimous: false,
     }
 }

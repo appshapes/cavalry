@@ -484,7 +484,11 @@ count. The leader sends commit position to every follower when it rises and, as 
 heartbeat, when the leader heartbeat interval has passed since the last. A follower
 that has had no commit position or new leadership term from its leader for the leader
 heartbeat timeout holds an election; a leader whose active members fall below a quorum
-holds one too.
+holds one too, counted in `cluster.quorum_lost`. A follower whose image of its leader's
+log is no longer available (`spec/client-protocol.md`, "Events", unavailable image)
+holds one as well, counted in `cluster.log_images_lost`: it can append nothing more
+from an image it does not have, and the image it joins after is checked where it
+joins (state 15).
 
 **Logs compared.** One log is at least another when its log leadership term id, the
 highest term in its record, is higher, or equal with a log position at least the other's: the
@@ -499,7 +503,7 @@ counter ("Counters").
 
 | Code | State | What the member does, and what moves it on |
 | --- | --- | --- |
-| 0 | init | consolidates its log: stops any replay or catch-up, takes the higher of its stored candidate term and its leadership term as its candidate term. A cluster of one member goes to leader log replication as leader of candidate term + 1; every other member goes to canvass |
+| 0 | init | consolidates its log: stops any replay or catch-up and leaves the live log, removing its subscription on its `log` endpoint and so stopping its recording of the leader's image there, so that the image it joins next is a new one whose join position state 15 checks; takes the higher of its stored candidate term and its leadership term as its candidate term. A cluster of one member goes to leader log replication as leader of candidate term + 1; every other member goes to canvass |
 | 1 | canvass | as a follower, sends canvass position to every other member every election status interval; moves to nominate at once when every member has reported and no member's log is ahead of its own, a unanimous candidate, or when the canvass deadline has passed and the members that have reported with a log not ahead of its own, itself among them, make a quorum, a quorum candidate ("Logs compared"; the arithmetic vectors pin both). The deadline is the leader heartbeat timeout after the last word from a leader, or the startup canvass timeout after the state began when the member started with no term. A member that receives a request vote for a term above its candidate term while canvassing votes for it, when the candidate's log is at least its own, and goes to follower ballot, as "Messages during an election" says; one that receives new leadership term for a term at least its candidate term goes to follower replay or follower log replication as that message's rules say |
 | 2 | nominate | waits a random delay up to half the election timeout, sending canvass position every election status interval, then takes candidate term + 1 as its candidate term, stores it before it sends anything, records its vote for itself and goes to candidate ballot |
 | 3 | candidate ballot | as a candidate, sends request vote to every member it has not sent one to; becomes leader of the candidate term, going to leader log replication, when every member has voted for it for that term, or when the election timeout has passed and a quorum has, no member having voted against for that term, a vote for an older candidate term of its own counting for nothing ("Messages during an election"); goes back to canvass when the election timeout has passed and it has not become leader, short of a quorum or with a vote against, so that every member canvasses again at once. A request vote from another candidate for a higher term is answered as "Messages during an election" says: for, moving it to follower ballot, when that candidate's log is at least its own; against, taking the term, when that candidate's log is behind, after which it holds no vote for its candidate term, its own included, and goes back to canvass at the election timeout |
@@ -656,42 +660,57 @@ reply from the service as possibly lost and sends it again when its service's ru
 allows, as Aeron's clients do.
 
 **The appointed leader.** Until the election is built (ADR 0060; ADR 0063; card 228),
-no member nominates itself and none asks for a vote: no member enters states 2 to 4
-or the replication and catch-up states 9 and 11 to 13, and none sends request vote,
-vote, catch-up position or stop catch-up; one of those four that reaches a member is
-decoded and ignored. The member with the lowest id in the members
-string is the leader, the `appointed-leader` vectors. From init it goes to leader log
-replication as leader of candidate term + 1, as a cluster of one member does, and
-passes states 5 to 8 as any leader. Every other member goes from init to canvass and
-stays there, whatever has reported and whatever deadline has passed, until a new
-leadership term moves it on. In leader ready the appointed leader waits as a
-canvassing member waits at a cold start, since it never canvassed: it appends the new
-leadership term event and closes its election at once when every member, itself among
-them, counts for its term at its log position, counted as "The commit position"
-counts them, and with a quorum of them once the startup canvass timeout has passed
-since it entered leader log replication; the `leader-ready` vectors pin both. This
+no vote is taken: the member with the lowest id in the members string is the appointed
+leader, the `appointed-leader` vectors, and no other member leads. No member enters
+nominate, the ballot states or the replication and catch-up states, 2 to 4, 9 and 11
+to 13, and none sends request vote, vote, catch-up position or stop catch-up; one of
+those four that reaches a member is decoded and ignored. Every member goes from init
+to canvass and canvasses as the table says. A member that is not the appointed leader
+stays in canvass, whatever has reported and whatever deadline has passed, until a new
+leadership term moves it on. The appointed leader, where canvass would send it to
+nominate, as a unanimous or a quorum candidate, goes to leader log replication
+instead, as leader of candidate term + 1, which it stores first as nominate does. So
+it leads only when no member that reported has a log ahead of its own ("Logs
+compared"; the `candidate` vectors): an appointed leader whose log is behind a
+member's, one that started again on an empty log directory, canvasses and never
+leads, and commits nothing by the positions of a log it does not hold. In Aeron, this
+is the appointed leader of `aeron.cluster.appointed.leader.id`, which goes on from
+canvass through nominate and a ballot the other members vote in; this version takes
+no vote, a departure card 228 ends (ADR 0063). It passes states 5 to 7 as any leader.
+In leader ready it waits for more than a quorum, since no member of this version can
+catch up with a term whose first entry it missed: it appends the new leadership term
+event and closes its election at once when every member, itself among them, counts
+for its term at its log position, its last report being for the leader's term, at
+that position and no other, and younger than the leader heartbeat timeout; and with a
+quorum of them once the leader heartbeat timeout has passed since it entered leader
+ready, a member that has not joined its log by then being one that is not active. The
+`leader-ready` vectors pin both. This
 version has neither the catch-up nor the truncation by which a member joins a log it
 does not already hold up to the leader's position, so a follower fails its election,
 counted in `cluster.elections_failed`, and goes back to canvass where the election's
 follower would truncate, replicate, wait or catch up: when its new leadership term
 asks for a truncation, a replication (state 9) or a wait for a later message, and
 when, after follower replay, its append position is behind the leader's log position
-(state 11); it
-canvasses until a version that has the catch-up, and the leader replicates to the
-others. A leader whose active members fall below a quorum stays the leader in the
-state it is in, leader log replication and leader ready among them, where the
+(state 11); it canvasses until a version that has the catch-up, one round every
+election status interval, and the leader replicates to the others. A leader whose
+active members fall below a quorum, counted in `cluster.quorum_lost`, stays the leader
+in the state it is in, leader log replication and leader ready among them, where the
 election's leader fails its election: no election can replace it, its quorum position
-is 0, and its commit position stays where it was ("The commit position"). A follower
-that has had no commit position or new leadership term from its leader for the leader
-heartbeat timeout counts `cluster.leader_heartbeat_timeouts` and begins again at
-init, as any follower does. A member starts with a record that holds no term and a
-candidate term of −1; one whose record holds either does not start, and says why,
-since a restarted member needs the election to settle its term and the catch-up or
-the truncation to settle its log. Before the sessions of "Sessions" exist, the
-leader's own process appends for itself: once its election has closed it may append a
-session message whose cluster session id is −1, no session's, with its term, the
-cluster's time and a payload of its own, which a service reads as any session message
-and answers to no session.
+is 0, and its commit position stays where it was ("The commit position"); and it
+holds no election on a term above its own in a message, which no member of this
+version holds. A follower that has had no commit position or new leadership term from
+its leader for the leader heartbeat timeout counts `cluster.leader_heartbeat_timeouts`
+and begins again at init, as any follower does, and so does one whose image of the
+leader's log is gone ("The commit position"). A member starts with a record that holds
+no term and a candidate term of −1; one whose record holds either does not start, and
+says why and what to do: a restarted member needs the election to settle its term and
+the catch-up or the truncation to settle its log, so until those exist a cluster is
+started again as a new cluster, every member on a new log directory, never one member
+alone on a new one. Before the sessions of "Sessions" exist, the leader's own process
+appends for itself: once its election has closed it may append a session message
+whose cluster session id is −1, no session's, with its term, the cluster's time and a
+payload of its own, which a service reads as any session message and answers to no
+session.
 
 ## Sessions
 
@@ -792,6 +811,8 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.append_position` | a gauge: the member's append position |
 | `cluster.elections` | an election begun, from init |
 | `cluster.terms_led` | a term the member began to lead, on entering leader log replication: `cluster.role` going to leader |
+| `cluster.quorum_lost` | a leader whose active members fell below a quorum, once each time they fall: the election's leader holds an election, the appointed leader stays the leader and its commit position stops ("The appointed leader") |
+| `cluster.log_images_lost` | a follower whose image of its leader's log was no longer available, so that it held an election |
 | `cluster.elections_failed` | an election that failed in a state and began again at init |
 | `cluster.leader_heartbeat_timeouts` | a follower that held an election for want of a leader's heartbeat |
 | `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its own term |
@@ -818,10 +839,10 @@ that a reader of a counters file knows which transition it saw.
 | members | at most 8; a ninth is `members-count` |
 | member id | 0 to 2147483647, unique |
 | leader heartbeat interval | 200 ms: how often the leader sends commit position with nothing to report, and new leadership term during an election |
-| leader heartbeat timeout | 10 s: a follower with nothing from its leader for this long holds an election; a member's append position older than this leaves it out of the quorum position, and a leader whose active members fall below a quorum holds an election, in state 5 as outside one; the time a replication, a catch-up or a join may make no progress before the election fails |
+| leader heartbeat timeout | 10 s: a follower with nothing from its leader for this long holds an election; a member's append position older than this leaves it out of the quorum position, and a leader whose active members fall below a quorum holds an election, or stays the leader when it is appointed; and how long an appointed leader waits in leader ready for every member before it closes with a quorum ("The appointed leader"), in state 5 as outside one; the time a replication, a catch-up or a join may make no progress before the election fails |
 | election timeout | 1 s: how long a candidate waits for a quorum of votes, how long a voter waits for its candidate, and twice the longest random delay before a nomination |
 | election status interval | 100 ms: how often canvass position is sent |
-| startup canvass timeout | 60 s: how long a member that started with no term canvasses before a quorum candidate proceeds; at least twice the leader heartbeat timeout |
+| startup canvass timeout | 60 s: how long a member that started with no term canvasses before a quorum candidate proceeds, the appointed leader among them ("The appointed leader"); at least twice the leader heartbeat timeout |
 | session timeout | 10 s: a session with nothing from its client for this long is closed with the reason timeout |
 | keepalive interval | 500 ms: how often a client sends session keepalive when it has sent nothing else, `spec/client-protocol.md`'s keepalive interval |
 | session connect timeout | 5 s: how long a client waits for the session event answering its connect |
@@ -902,9 +923,8 @@ encoder. Each vector has a `kind`:
   term and base; the position after an entry from the position it begins at, its
   length and the MTU length; which member is the appointed leader, from the members'
   ids; whether an appointed leader in leader ready closes its election, with every
-  member or with a quorum at the startup canvass timeout, from the member count, how
-  many members count for its term at its log position and whether the timeout has
-  passed.
+  member or with a quorum at its deadline, from the member count, how many members
+  count for its term at its log position and whether the deadline has passed.
 
 A conforming implementation decodes every valid vector to its fields, encodes those
 fields to the same bytes, parses every members string, computes every arithmetic

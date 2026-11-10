@@ -3468,7 +3468,7 @@
       "inputs": {
         "members": 3,
         "counted": 3,
-        "startup_timeout_passed": false
+        "deadline_passed": false
       },
       "fields": {
         "closes": true,
@@ -3477,12 +3477,12 @@
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-quorum-before-the-timeout-waits",
+      "name": "leader-ready-quorum-before-the-deadline-waits",
       "rule": "leader-ready",
       "inputs": {
         "members": 3,
         "counted": 2,
-        "startup_timeout_passed": false
+        "deadline_passed": false
       },
       "fields": {
         "closes": false,
@@ -3491,12 +3491,12 @@
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-quorum-at-the-timeout",
+      "name": "leader-ready-quorum-at-the-deadline",
       "rule": "leader-ready",
       "inputs": {
         "members": 3,
         "counted": 2,
-        "startup_timeout_passed": true
+        "deadline_passed": true
       },
       "fields": {
         "closes": true,
@@ -3505,12 +3505,12 @@
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-alone-at-the-timeout-waits",
+      "name": "leader-ready-alone-at-the-deadline-waits",
       "rule": "leader-ready",
       "inputs": {
         "members": 3,
         "counted": 1,
-        "startup_timeout_passed": true
+        "deadline_passed": true
       },
       "fields": {
         "closes": false,
@@ -3524,7 +3524,7 @@
       "inputs": {
         "members": 1,
         "counted": 1,
-        "startup_timeout_passed": false
+        "deadline_passed": false
       },
       "fields": {
         "closes": true,
@@ -3533,12 +3533,12 @@
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-five-short-of-quorum-at-the-timeout",
+      "name": "leader-ready-five-short-of-quorum-at-the-deadline",
       "rule": "leader-ready",
       "inputs": {
         "members": 5,
         "counted": 2,
-        "startup_timeout_passed": true
+        "deadline_passed": true
       },
       "fields": {
         "closes": false,
@@ -3547,15 +3547,102 @@
     },
     {
       "kind": "arithmetic",
-      "name": "leader-ready-five-quorum-at-the-timeout",
+      "name": "leader-ready-five-quorum-at-the-deadline",
       "rule": "leader-ready",
       "inputs": {
         "members": 5,
         "counted": 3,
-        "startup_timeout_passed": true
+        "deadline_passed": true
       },
       "fields": {
         "closes": true,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-empty-log-among-members-with-a-term",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            0,
+            4096
+          ],
+          [
+            0,
+            4096
+          ]
+        ],
+        "own": [
+          -1,
+          0
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-empty-log-one-member-ahead-one-silent",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            0,
+            4096
+          ],
+          null
+        ],
+        "own": [
+          -1,
+          0
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": false,
+        "unanimous": false
+      }
+    },
+    {
+      "kind": "arithmetic",
+      "name": "candidate-empty-log-one-member-level-one-silent",
+      "rule": "candidate",
+      "inputs": {
+        "members": 3,
+        "reports": [
+          [
+            -1,
+            0
+          ],
+          [
+            -1,
+            0
+          ],
+          null
+        ],
+        "own": [
+          -1,
+          0
+        ],
+        "deadline_passed": true
+      },
+      "fields": {
+        "nominate": true,
         "unanimous": false
       }
     }
