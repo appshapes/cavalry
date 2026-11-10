@@ -38,8 +38,9 @@ public final class Abi {
     }
 
     public static final String DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public static final int ABI_VERSION = 1; // CAVALRY_ABI_VERSION
+    public static final int ABI_VERSION = 2; // CAVALRY_ABI_VERSION
     public static final int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
+    public static final int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public static final int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
     public static final int NULL_LENGTH = -1; // CAVALRY_NULL_LENGTH
     public static final long FOLLOW_LENGTH = Long.MAX_VALUE; // CAVALRY_FOLLOW_LENGTH
@@ -91,6 +92,7 @@ public final class Abi {
     public static final int ERR_ABI_VERSION = 135; // CAVALRY_ERR_ABI_VERSION
     public static final int ERR_NOT_UTF8 = 136; // CAVALRY_ERR_NOT_UTF8
     public static final int ERR_EMPTY_DIR = 137; // CAVALRY_ERR_EMPTY_DIR
+    public static final int ERR_NO_POSITION = 138; // CAVALRY_ERR_NO_POSITION
     public static final int CLOSED_BY_USER = 1; // CAVALRY_CLOSED_BY_USER
     public static final int CLOSED_DRIVER_CLOSED = 2; // CAVALRY_CLOSED_DRIVER_CLOSED
     public static final int CLOSED_DRIVER_TIMEOUT = 3; // CAVALRY_CLOSED_DRIVER_TIMEOUT
@@ -109,6 +111,14 @@ public final class Abi {
     public static final int FRAME_TYPE_PAD = 0; // CAVALRY_FRAME_TYPE_PAD
     public static final int FRAME_TYPE_DATA = 1; // CAVALRY_FRAME_TYPE_DATA
 
+    static final StructLayout cavalry_fault_t = MemoryLayout.structLayout(
+        JAVA_INT.withName("code"),
+        JAVA_INT.withName("session_id"),
+        JAVA_LONG.withName("position"));
+    static final StructLayout cavalry_committed_log_constants_t = MemoryLayout.structLayout(
+        JAVA_LONG.withName("recording_id"),
+        JAVA_INT.withName("member_id"),
+        MemoryLayout.paddingLayout(4));
     static final StructLayout cavalry_buffer_claim_t = MemoryLayout.structLayout(
         ADDRESS.withName("data"),
         JAVA_LONG.withName("length"),
@@ -135,10 +145,6 @@ public final class Abi {
         JAVA_LONG.withName("start_position"),
         JAVA_INT.withName("session_id"),
         JAVA_INT.withName("stream_id"));
-    static final StructLayout cavalry_fault_t = MemoryLayout.structLayout(
-        JAVA_INT.withName("code"),
-        JAVA_INT.withName("session_id"),
-        JAVA_LONG.withName("position"));
     static final StructLayout cavalry_image_constants_t = MemoryLayout.structLayout(
         ADDRESS.withName("source_identity"),
         JAVA_LONG.withName("correlation_id"),
@@ -163,6 +169,11 @@ public final class Abi {
         JAVA_INT.withName("stream_id"),
         MemoryLayout.paddingLayout(4));
 
+    static final long cavalry_fault_t_code = 0;
+    static final long cavalry_fault_t_session_id = 4;
+    static final long cavalry_fault_t_position = 8;
+    static final long cavalry_committed_log_constants_t_recording_id = 0;
+    static final long cavalry_committed_log_constants_t_member_id = 8;
     static final long cavalry_buffer_claim_t_data = 0;
     static final long cavalry_buffer_claim_t_length = 8;
     static final long cavalry_buffer_claim_t_position_after = 16;
@@ -184,9 +195,6 @@ public final class Abi {
     static final long cavalry_replay_constants_t_start_position = 24;
     static final long cavalry_replay_constants_t_session_id = 32;
     static final long cavalry_replay_constants_t_stream_id = 36;
-    static final long cavalry_fault_t_code = 0;
-    static final long cavalry_fault_t_session_id = 4;
-    static final long cavalry_fault_t_position = 8;
     static final long cavalry_image_constants_t_source_identity = 0;
     static final long cavalry_image_constants_t_correlation_id = 8;
     static final long cavalry_image_constants_t_position_bits_to_shift = 16;
@@ -229,6 +237,16 @@ public final class Abi {
     static final MethodHandle cavalry_purge_recording;
     static final MethodHandle cavalry_start_replay;
     static final MethodHandle cavalry_stop_replay;
+    static final MethodHandle cavalry_committed_log;
+    static final MethodHandle cavalry_committed_log_poll;
+    static final MethodHandle cavalry_committed_log_entry_position;
+    static final MethodHandle cavalry_committed_log_fault;
+    static final MethodHandle cavalry_committed_log_position;
+    static final MethodHandle cavalry_committed_log_commit_position;
+    static final MethodHandle cavalry_committed_log_is_ended;
+    static final MethodHandle cavalry_committed_log_failed_at;
+    static final MethodHandle cavalry_committed_log_constants;
+    static final MethodHandle cavalry_committed_log_close;
     static final MethodHandle cavalry_context_init_v;
     static final MethodHandle cavalry_context_set_dir;
     static final MethodHandle cavalry_context_get_dir;
@@ -305,6 +323,16 @@ public final class Abi {
         cavalry_purge_recording = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_purge_recording"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
         cavalry_start_replay = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_start_replay"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, ADDRESS));
         cavalry_stop_replay = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_stop_replay"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_LONG));
+        cavalry_committed_log = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG));
+        cavalry_committed_log_poll = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_poll"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
+        cavalry_committed_log_entry_position = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_entry_position"), FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+        cavalry_committed_log_fault = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_fault"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
+        cavalry_committed_log_position = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_position"), FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+        cavalry_committed_log_commit_position = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_commit_position"), FunctionDescriptor.of(JAVA_LONG, ADDRESS));
+        cavalry_committed_log_is_ended = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_is_ended"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS));
+        cavalry_committed_log_failed_at = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_failed_at"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS, ADDRESS));
+        cavalry_committed_log_constants = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_constants"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
+        cavalry_committed_log_close = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_close"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_context_init_v = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_context_init_v"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
         cavalry_context_set_dir = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_context_set_dir"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_context_get_dir = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_context_get_dir"), FunctionDescriptor.of(ADDRESS, ADDRESS));

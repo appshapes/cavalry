@@ -1,6 +1,6 @@
 {
   "spec": "spec/c-abi.md",
-  "version": 1,
+  "version": 2,
   "generated_by": "spec/vectors/c-abi.py; do not edit by hand",
   "opaque_types": [
     "cavalry_context_t",
@@ -10,6 +10,7 @@
     "cavalry_image_t",
     "cavalry_recording_t",
     "cavalry_replay_t",
+    "cavalry_committed_log_t",
     "cavalry_header_t"
   ],
   "structs": {
@@ -197,6 +198,16 @@
       [
         "int32_t",
         "stream_id"
+      ]
+    ],
+    "cavalry_committed_log_constants_t": [
+      [
+        "int64_t",
+        "recording_id"
+      ],
+      [
+        "int32_t",
+        "member_id"
       ]
     ]
   },
@@ -943,6 +954,142 @@
       ]
     },
     {
+      "name": "cavalry_committed_log",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_committed_log_t **",
+          "log"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ],
+        [
+          "int64_t",
+          "position"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_poll",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_committed_log_t *",
+          "log"
+        ],
+        [
+          "cavalry_fragment_handler_t",
+          "handler"
+        ],
+        [
+          "void *",
+          "clientd"
+        ],
+        [
+          "size_t",
+          "fragment_limit"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_entry_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_header_t *",
+          "header"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_fault",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_committed_log_t *",
+          "log"
+        ],
+        [
+          "cavalry_fault_t *",
+          "fault"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_committed_log_t *",
+          "log"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_commit_position",
+      "returns": "int64_t",
+      "params": [
+        [
+          "const cavalry_committed_log_t *",
+          "log"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_is_ended",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_committed_log_t *",
+          "log"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_failed_at",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_committed_log_t *",
+          "log"
+        ],
+        [
+          "int64_t *",
+          "position"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_constants",
+      "returns": "int",
+      "params": [
+        [
+          "const cavalry_committed_log_t *",
+          "log"
+        ],
+        [
+          "cavalry_committed_log_constants_t *",
+          "constants"
+        ]
+      ]
+    },
+    {
+      "name": "cavalry_committed_log_close",
+      "returns": "int",
+      "params": [
+        [
+          "cavalry_committed_log_t *",
+          "log"
+        ],
+        [
+          "cavalry_t *",
+          "client"
+        ]
+      ]
+    },
+    {
       "name": "cavalry_errcode",
       "returns": "int",
       "params": []
@@ -979,9 +1126,10 @@
     }
   ],
   "defines": {
-    "CAVALRY_ABI_VERSION": 1,
+    "CAVALRY_ABI_VERSION": 2,
     "CAVALRY_DIR_ENV": "CAVALRY_DIR",
     "CAVALRY_MAX_IMAGES": 256,
+    "CAVALRY_SERVICE_LOG_STREAM_ID": 104,
     "CAVALRY_NULL_POSITION": -1,
     "CAVALRY_NULL_LENGTH": -1,
     "CAVALRY_FOLLOW_LENGTH": 9223372036854775807,
@@ -1033,6 +1181,7 @@
     "CAVALRY_ERR_ABI_VERSION": 135,
     "CAVALRY_ERR_NOT_UTF8": 136,
     "CAVALRY_ERR_EMPTY_DIR": 137,
+    "CAVALRY_ERR_NO_POSITION": 138,
     "CAVALRY_CLOSED_BY_USER": 1,
     "CAVALRY_CLOSED_DRIVER_CLOSED": 2,
     "CAVALRY_CLOSED_DRIVER_TIMEOUT": 3,

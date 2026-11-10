@@ -38,8 +38,9 @@ import (
 // The header's constants, as the ABI names them (spec/c-abi.md), in Go's casing.
 const (
 	DirEnv                            = "CAVALRY_DIR" // CAVALRY_DIR_ENV
-	ABIVersion                        = 1             // CAVALRY_ABI_VERSION
+	ABIVersion                        = 2             // CAVALRY_ABI_VERSION
 	MaxImages                         = 256           // CAVALRY_MAX_IMAGES
+	ServiceLogStreamID                = 104           // CAVALRY_SERVICE_LOG_STREAM_ID
 	NullPosition                      = -1            // CAVALRY_NULL_POSITION
 	NullLength                        = -1            // CAVALRY_NULL_LENGTH
 	FollowLength                      = math.MaxInt64 // CAVALRY_FOLLOW_LENGTH
@@ -91,6 +92,7 @@ const (
 	ErrABIVersion                     = 135           // CAVALRY_ERR_ABI_VERSION
 	ErrNotUTF8                        = 136           // CAVALRY_ERR_NOT_UTF8
 	ErrEmptyDir                       = 137           // CAVALRY_ERR_EMPTY_DIR
+	ErrNoPosition                     = 138           // CAVALRY_ERR_NO_POSITION
 	ClosedByUser                      = 1             // CAVALRY_CLOSED_BY_USER
 	ClosedDriverClosed                = 2             // CAVALRY_CLOSED_DRIVER_CLOSED
 	ClosedDriverTimeout               = 3             // CAVALRY_CLOSED_DRIVER_TIMEOUT

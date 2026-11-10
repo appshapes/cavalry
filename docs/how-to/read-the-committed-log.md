@@ -74,6 +74,16 @@ its services read what it appends in the same way.
    `log.is_ended()` says that the member closed or left its log: when a poll then
    returns 0, open the log again from `log.position()`.
 
+   A program in C does the same through `cavalry.h`
+   ([`spec/c-abi.md`, "Functions", committed log](../reference/c-abi.md#functions)).
+   `cavalry_committed_log(&log, client, position)` returns 0 and leaves `log` null
+   while the driver has no member with a log yet. `cavalry_committed_log_poll(log,
+   handler, clientd, fragment_limit)` hands each committed entry to the fragment
+   handler, and inside the handler `cavalry_committed_log_entry_position(header)` is
+   the entry's position. `cavalry_committed_log_position(log)` is the next position,
+   `cavalry_committed_log_is_ended(log)` says that the member closed or left its log,
+   and `cavalry_committed_log_close(log, client)` ends the read.
+
 ## How to verify it worked
 
 - Steps 1 and 2 print the same entry line on every member: the same position, the

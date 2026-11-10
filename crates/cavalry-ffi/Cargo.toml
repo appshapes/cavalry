@@ -24,6 +24,9 @@ cavalry-proto = { path = "../cavalry-proto" }
 [dev-dependencies]
 # The tests and the README's doctest run a driver in the process (ADR 0007).
 cavalry-driver = { path = "../cavalry-driver" }
+# The committed log's test runs three cluster members in the process, as
+# cavalry-raft's own cluster test does (ADR 0068).
+cavalry-raft = { path = "../cavalry-raft" }
 # The allocation test counts across every per-message function, allocations and
 # reallocations both, as cavalry-client's tests do (CLAUDE.md, gate 2; ADR 0051).
 stats_alloc = "0.1"

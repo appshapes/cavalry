@@ -3,6 +3,7 @@
 
 mod client;
 mod codes;
+mod committed_log;
 mod context;
 mod error;
 mod handle;
@@ -16,6 +17,7 @@ mod version;
 
 pub use client::*;
 pub use codes::*;
+pub use committed_log::*;
 pub use context::*;
 pub use error::{cavalry_errcode, cavalry_errmsg};
 pub use publication::*;
@@ -39,4 +41,5 @@ const _: () = {
     assert_send::<cavalry_client::Subscription>();
     assert_send::<cavalry_recording_t>();
     assert_send::<cavalry_replay_t>();
+    assert_send::<cavalry_committed_log_t>();
 };

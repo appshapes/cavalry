@@ -114,3 +114,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0067. Sync a recording on command, as client protocol version 8](decisions/0067-sync-a-recording-on-command-as-client-protocol-version-8.md)
 - [0063. Run the consensus module as a client of its driver, and lead by appointment through the election's states](decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md)
 - [0066. Feed the committed log to a service through a replay of the member's recording](decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)
+- [0068. Take the C ABI to version 2 with the committed log](decisions/0068-take-the-c-abi-to-version-2-with-the-committed-log.md)

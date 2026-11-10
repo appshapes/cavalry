@@ -9,6 +9,7 @@ export const constants: {
   CAVALRY_DIR_ENV: string;
   CAVALRY_ABI_VERSION: number;
   CAVALRY_MAX_IMAGES: number;
+  CAVALRY_SERVICE_LOG_STREAM_ID: number;
   CAVALRY_NULL_POSITION: number;
   CAVALRY_NULL_LENGTH: number;
   CAVALRY_FOLLOW_LENGTH: bigint;
@@ -60,6 +61,7 @@ export const constants: {
   CAVALRY_ERR_ABI_VERSION: number;
   CAVALRY_ERR_NOT_UTF8: number;
   CAVALRY_ERR_EMPTY_DIR: number;
+  CAVALRY_ERR_NO_POSITION: number;
   CAVALRY_CLOSED_BY_USER: number;
   CAVALRY_CLOSED_DRIVER_CLOSED: number;
   CAVALRY_CLOSED_DRIVER_TIMEOUT: number;

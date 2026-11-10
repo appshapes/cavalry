@@ -125,6 +125,10 @@ def c_arg(param, header, index: int, lines: list, struct_names: set, opaque: set
     raise SystemExit(f"generate_node: no marshalling for {t!r}")
 
 
+# The functions that take the C fragment handler.
+HANDLER_FUNCTIONS = ("cavalry_subscription_poll", "cavalry_committed_log_poll")
+
+
 def c_return(fn, header, call: str, outs: list, lines: list, opaque: set) -> None:
     ret = " ".join(fn.ret.split())
     if ret == "int" or ret == "int32_t":
@@ -176,7 +180,11 @@ def write_addon(header) -> str:
     out.append("#include <string.h>")
     out.append('#include "cavalry.h"')
     out.append("")
-    functions = [fn for fn in header.functions if fn.name != "cavalry_subscription_poll"]
+    # The two polls take the C fragment handler, which no generic marshalling makes: the
+    # subscription's is `poll` below, written by hand, and the committed log's has none
+    # in this package yet, so the addon does not bind it (spec/c-abi.md, version 2; ADR
+    # 0068).
+    functions = [fn for fn in header.functions if fn.name not in HANDLER_FUNCTIONS]
     wrappers = []
     for fn in functions:
         lines = [f"static napi_value fn_{fn.name}(napi_env env, napi_callback_info info) {{"]

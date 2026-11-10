@@ -21,12 +21,18 @@
  `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
  with its own.
  */
-#define CAVALRY_ABI_VERSION 1
+#define CAVALRY_ABI_VERSION 2
 
 /*
  The images a subscription holds at most.
  */
 #define CAVALRY_MAX_IMAGES 256
+
+/*
+ The `cavalry:ipc` stream a committed log's replay is played into
+ (`spec/cluster.md`, "Members and streams").
+ */
+#define CAVALRY_SERVICE_LOG_STREAM_ID 104
 
 /*
  No position: a replay from the recording's start, a fault without one.
@@ -289,6 +295,12 @@
 #define CAVALRY_ERR_EMPTY_DIR 137
 
 /*
+ `cavalry_committed_log_entry_position` on a header that carries no position: one a
+ subscription's poll handed its handler.
+ */
+#define CAVALRY_ERR_NO_POSITION 138
+
+/*
  Why a client closed: `cavalry_close` was called.
  */
 #define CAVALRY_CLOSED_BY_USER 1
@@ -374,6 +386,12 @@
 #define CAVALRY_FRAME_TYPE_DATA 1
 
 /*
+ A committed log; made by `cavalry_committed_log`, freed by
+ `cavalry_committed_log_close`.
+ */
+typedef struct cavalry_committed_log_t cavalry_committed_log_t;
+
+/*
  The directory a client will attach to; made by `cavalry_context_init`, freed by
  `cavalry_context_close`.
  */
@@ -418,6 +436,48 @@ typedef struct cavalry_subscription_t cavalry_subscription_t;
  A client; made by `cavalry_init`, freed by `cavalry_close`.
  */
 typedef struct cavalry_t cavalry_t;
+
+/*
+ The C fragment handler: the body as a view into the log and the frame's header,
+ both valid for the call.
+ */
+typedef void (*cavalry_fragment_handler_t)(void *clientd,
+                                           const uint8_t *buffer,
+                                           size_t length,
+                                           const cavalry_header_t *header);
+
+/*
+ What the subscription's last poll stopped on; 0 when it returned a count.
+ */
+typedef struct {
+  /*
+   `CAVALRY_ERR_FAULT_IMAGE`, `_IMAGES_FULL`, `_CLOSED`, or 0.
+   */
+  int32_t code;
+  /*
+   The image's session id for 120 and 121, else 0.
+   */
+  int32_t session_id;
+  /*
+   The reader's position when the check failed, for 120, else
+   `CAVALRY_NULL_POSITION`.
+   */
+  int64_t position;
+} cavalry_fault_t;
+
+/*
+ A committed log's constants.
+ */
+typedef struct {
+  /*
+   The id of the member's recording of the log that the handle replays.
+   */
+  int64_t recording_id;
+  /*
+   The id of the member whose log this is.
+   */
+  int32_t member_id;
+} cavalry_committed_log_constants_t;
 
 /*
  The struct `cavalry_publication_try_claim` fills: the body to write, then
@@ -527,34 +587,6 @@ typedef struct {
    */
   int32_t stream_id;
 } cavalry_replay_constants_t;
-
-/*
- The C fragment handler: the body as a view into the log and the frame's header,
- both valid for the call.
- */
-typedef void (*cavalry_fragment_handler_t)(void *clientd,
-                                           const uint8_t *buffer,
-                                           size_t length,
-                                           const cavalry_header_t *header);
-
-/*
- What the subscription's last poll stopped on; 0 when it returned a count.
- */
-typedef struct {
-  /*
-   `CAVALRY_ERR_FAULT_IMAGE`, `_IMAGES_FULL`, `_CLOSED`, or 0.
-   */
-  int32_t code;
-  /*
-   The image's session id for 120 and 121, else 0.
-   */
-  int32_t session_id;
-  /*
-   The reader's position when the check failed, for 120, else
-   `CAVALRY_NULL_POSITION`.
-   */
-  int64_t position;
-} cavalry_fault_t;
 
 /*
  An image's constants, the strings valid for the handle's life.
@@ -869,6 +901,130 @@ int cavalry_start_replay(cavalry_replay_t **replay,
  */
 int cavalry_stop_replay(cavalry_t *client,
                         int64_t replay_session_id);
+
+/*
+ Opens the committed log of the cluster member on `client`'s driver at `position`,
+ as the Rust `Cavalry::committed_log` does: 0 with `*log` the handle; 0 with `*log`
+ null and no error set while the driver hosts no member that has a recording of its
+ log; −1 with the error and `*log` null when the driver refuses or the client fails.
+
+ # Safety
+
+ `log` is null or writable; `client` is null or a live client handle not in use by
+ another call.
+ */
+int cavalry_committed_log(cavalry_committed_log_t **log,
+                          cavalry_t *client,
+                          int64_t position);
+
+/*
+ Hands `handler` up to `fragment_limit` entries that begin below the member's commit
+ position, each as its bytes and its frame's header, with `clientd`; returns the
+ entries delivered, or −1 with the fault as the error and in
+ `cavalry_committed_log_fault`. The header carries the entry's position, which
+ `cavalry_committed_log_entry_position` returns from inside the handler.
+
+ # Safety
+
+ `log` is null or a live handle not in use by another call; `handler` is null or a
+ function that returns, without unwinding or a `longjmp`, and holds the rules of
+ "Calls during a claim or a poll".
+ */
+int cavalry_committed_log_poll(cavalry_committed_log_t *log,
+                               cavalry_fragment_handler_t handler,
+                               void *clientd,
+                               size_t fragment_limit);
+
+/*
+ The position in the log at which the entry begins whose header
+ `cavalry_committed_log_poll` handed its handler; −1 with `CAVALRY_ERR_NO_POSITION`
+ for a header from `cavalry_subscription_poll`, which carries none.
+
+ # Safety
+
+ `header` is null or the header a poll handed the handler, during that call.
+ */
+int64_t cavalry_committed_log_entry_position(const cavalry_header_t *header);
+
+/*
+ Fills `fault` with what the last poll stopped on.
+
+ # Safety
+
+ `log` is null or a live handle; `fault` is null or writable.
+ */
+int cavalry_committed_log_fault(const cavalry_committed_log_t *log,
+                                cavalry_fault_t *fault);
+
+/*
+ The position after the last entry delivered, or the position the log was opened at
+ before the first.
+
+ # Safety
+
+ `log` is null or a live handle not in use by another call.
+ */
+int64_t cavalry_committed_log_position(const cavalry_committed_log_t *log);
+
+/*
+ The bound of the last poll: the highest commit position taken from the member's
+ counter, 0 before the first poll.
+
+ # Safety
+
+ `log` is null or a live handle not in use by another call.
+ */
+int64_t cavalry_committed_log_commit_position(const cavalry_committed_log_t *log);
+
+/*
+ Whether the handle has come to its end.
+
+ # Safety
+
+ `log` is null or a live handle not in use by another call.
+ */
+bool cavalry_committed_log_is_ended(const cavalry_committed_log_t *log);
+
+/*
+ Whether the driver's replay of the member's recording failed; when it did, the
+ position after the last frame it played is written through `position`. A null
+ `position` is refused as any null required pointer is, with `CAVALRY_ERR_NULL` and
+ `false`.
+
+ # Safety
+
+ `log` is null or a live handle not in use by another call; `position` is null or
+ writable.
+ */
+bool cavalry_committed_log_failed_at(const cavalry_committed_log_t *log,
+                                     int64_t *position);
+
+/*
+ Fills `constants` from the handle's copy.
+
+ # Safety
+
+ `log` is null or a live handle; `constants` is null or writable.
+ */
+int cavalry_committed_log_constants(const cavalry_committed_log_t *log,
+                                    cavalry_committed_log_constants_t *constants);
+
+/*
+ Stops the replay if it has not ended, closes the subscription and frees the
+ handle. With a null `client` it closes the subscription and frees the handle
+ alone, and returns 0: the driver ends the replay by itself once the replay connect
+ timeout has passed with no subscriber, which is how a log is closed after its
+ client's `cavalry_close`. The handle is freed whatever the function returns, with
+ one exception: a call from inside the log's own handler is refused with
+ `CAVALRY_ERR_POLLING` and frees nothing.
+
+ # Safety
+
+ `log` is null or a live handle, closed once; `client` is null or a live client
+ handle not in use by another call.
+ */
+int cavalry_committed_log_close(cavalry_committed_log_t *log,
+                                cavalry_t *client);
 
 /*
  Makes a context whose directory is `CAVALRY_DIR` when set and not empty, else the

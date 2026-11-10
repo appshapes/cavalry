@@ -320,9 +320,11 @@ fn ten_entries_each_appended_once_the_last_was_committed_do_not_wait_a_second_ea
     );
     // A quorum committed each entry; the member outside it syncs the entry a moment
     // later, and its append position follows.
-    run_until(&mut members, "every member recorded every entry", |members| {
-        members.iter().all(|m| m.module.append_position() == end)
-    });
+    run_until(
+        &mut members,
+        "every member recorded every entry",
+        |members| members.iter().all(|m| m.module.append_position() == end),
+    );
 }
 
 /// A follower's host is lost while the cluster runs: its module and its driver stop

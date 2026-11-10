@@ -119,6 +119,15 @@ static void on_fragment(void *clientd, const uint8_t *buffer, size_t length,
     }
     if (r->next == 0) {
         r->session_id = values.frame.session_id;
+        /* A subscription's header carries no position: the committed log's function
+         * says so with its own code and never returns a number (spec/c-abi.md, "A
+         * frame's position"). */
+        if (cavalry_committed_log_entry_position(header) != -1 ||
+            cavalry_errcode() != CAVALRY_ERR_NO_POSITION) {
+            fprintf(stderr, "conformance/c: %s: a subscription's header gave an entry position\n",
+                    r->name);
+            exit(1);
+        }
     } else if (values.frame.session_id != r->session_id) {
         fprintf(stderr, "conformance/c: %s: the session id changed mid-stream\n", r->name);
         exit(1);
@@ -441,6 +450,18 @@ int main(void) {
     CHECK(cavalry_replay_close(replay));
     CHECK(cavalry_subscription_close(replay_sub));
     CHECK(cavalry_subscription_close(ipc_sub));
+
+    /* 5. The committed log (spec/c-abi.md, version 2). This driver hosts no cluster
+     * member, so the open is 0 with a null handle: an answer, not a failure. The read
+     * of a log beside a member is cavalry-ffi's own test, tests/committed_log.rs. */
+    cavalry_committed_log_t *committed = (cavalry_committed_log_t *) client;
+    CHECK(cavalry_committed_log(&committed, client, 0));
+    if (committed != NULL) {
+        fprintf(stderr, "conformance/c: a driver that hosts no cluster member gave a committed log\n");
+        return 1;
+    }
+    printf("conformance/c: no committed log on a driver that hosts no cluster member, and no "
+           "entry position in a subscription's header\n");
     CHECK(cavalry_close(client));
     CHECK(cavalry_context_close(context));
     printf("conformance/c: ok\n");

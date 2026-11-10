@@ -45,6 +45,8 @@ PER_MESSAGE = (
     "cavalry_publication_offer",
     "cavalry_subscription_poll",
     "cavalry_header_values",
+    "cavalry_committed_log_poll",
+    "cavalry_committed_log_entry_position",
 )
 
 

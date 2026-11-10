@@ -14,8 +14,9 @@ from ctypes import (CFUNCTYPE, POINTER, Structure, c_bool, c_char_p, c_int, c_in
 # The defines, the header's constants (spec/c-abi.md, "Constants", "Result codes",
 # "Error codes").
 CAVALRY_DIR_ENV = "CAVALRY_DIR"
-CAVALRY_ABI_VERSION = 1
+CAVALRY_ABI_VERSION = 2
 CAVALRY_MAX_IMAGES = 256
+CAVALRY_SERVICE_LOG_STREAM_ID = 104
 CAVALRY_NULL_POSITION = -1
 CAVALRY_NULL_LENGTH = -1
 CAVALRY_FOLLOW_LENGTH = (1 << 63) - 1
@@ -67,6 +68,7 @@ CAVALRY_ERR_POLLING = 134
 CAVALRY_ERR_ABI_VERSION = 135
 CAVALRY_ERR_NOT_UTF8 = 136
 CAVALRY_ERR_EMPTY_DIR = 137
+CAVALRY_ERR_NO_POSITION = 138
 CAVALRY_CLOSED_BY_USER = 1
 CAVALRY_CLOSED_DRIVER_CLOSED = 2
 CAVALRY_CLOSED_DRIVER_TIMEOUT = 3
@@ -87,6 +89,7 @@ CAVALRY_FRAME_TYPE_DATA = 1
 
 # The opaque handle types, each a `c_void_p` here: the ABI hands out a pointer the client
 # keeps and passes back, and never reads through.
+cavalry_committed_log_t = c_void_p
 cavalry_context_t = c_void_p
 cavalry_header_t = c_void_p
 cavalry_image_t = c_void_p
@@ -95,6 +98,25 @@ cavalry_recording_t = c_void_p
 cavalry_replay_t = c_void_p
 cavalry_subscription_t = c_void_p
 cavalry_t = c_void_p
+
+class cavalry_fault_t(Structure):
+    """`cavalry_fault_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills."""
+
+    _fields_ = [
+        ("code", c_int32),
+        ("session_id", c_int32),
+        ("position", c_int64),
+    ]
+
+
+class cavalry_committed_log_constants_t(Structure):
+    """`cavalry_committed_log_constants_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills."""
+
+    _fields_ = [
+        ("recording_id", c_int64),
+        ("member_id", c_int32),
+    ]
+
 
 class cavalry_buffer_claim_t(Structure):
     """`cavalry_buffer_claim_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills."""
@@ -142,16 +164,6 @@ class cavalry_replay_constants_t(Structure):
         ("start_position", c_int64),
         ("session_id", c_int32),
         ("stream_id", c_int32),
-    ]
-
-
-class cavalry_fault_t(Structure):
-    """`cavalry_fault_t` of spec/c-abi.md, "Structs": the caller's copy the ABI fills."""
-
-    _fields_ = [
-        ("code", c_int32),
-        ("session_id", c_int32),
-        ("position", c_int64),
     ]
 
 
@@ -224,6 +236,16 @@ FUNCTIONS = {
     "cavalry_purge_recording": (c_int, [c_void_p, c_int64]),
     "cavalry_start_replay": (c_int, [POINTER(c_void_p), c_void_p, c_int64, c_int64, c_int64, c_int32, c_char_p]),
     "cavalry_stop_replay": (c_int, [c_void_p, c_int64]),
+    "cavalry_committed_log": (c_int, [POINTER(c_void_p), c_void_p, c_int64]),
+    "cavalry_committed_log_poll": (c_int, [c_void_p, cavalry_fragment_handler_t, c_void_p, c_size_t]),
+    "cavalry_committed_log_entry_position": (c_int64, [c_void_p]),
+    "cavalry_committed_log_fault": (c_int, [c_void_p, POINTER(cavalry_fault_t)]),
+    "cavalry_committed_log_position": (c_int64, [c_void_p]),
+    "cavalry_committed_log_commit_position": (c_int64, [c_void_p]),
+    "cavalry_committed_log_is_ended": (c_bool, [c_void_p]),
+    "cavalry_committed_log_failed_at": (c_bool, [c_void_p, POINTER(c_int64)]),
+    "cavalry_committed_log_constants": (c_int, [c_void_p, POINTER(cavalry_committed_log_constants_t)]),
+    "cavalry_committed_log_close": (c_int, [c_void_p, c_void_p]),
     "cavalry_context_init_v": (c_int, [POINTER(c_void_p), c_int]),
     "cavalry_context_set_dir": (c_int, [c_void_p, c_char_p]),
     "cavalry_context_get_dir": (c_char_p, [c_void_p]),
@@ -277,6 +299,8 @@ PER_MESSAGE = (
     "cavalry_publication_offer",
     "cavalry_subscription_poll",
     "cavalry_header_values",
+    "cavalry_committed_log_poll",
+    "cavalry_committed_log_entry_position",
 )
 
 

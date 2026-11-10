@@ -5,10 +5,15 @@ The `extern "C"` ABI and its cbindgen header. Data plane, and the other crate wh
 
 ## What this does
 
-- Exposes the client API as a C ABI, `spec/c-abi.md` version 0, declared by the
+- Exposes the client API as a C ABI, `spec/c-abi.md` version 2, declared by the
   committed header `include/cavalry.h`, so one Rust core serves every language. The
   thin clients under `clients/` for Python, Node, Go, the JVM and .NET are generated
   over it and released together.
+- Feeds a cluster's committed log to a service in C: `cavalry_committed_log` opens the
+  log of the member on the client's driver, `cavalry_committed_log_poll` hands the
+  fragment handler the entries a quorum has committed and none past the commit
+  position, and `cavalry_committed_log_entry_position` gives the handler each entry's
+  position in the log (`spec/cluster.md`, "The service"; ADR 0068).
 - Carries every non-Rust client's messages: a claim, a commit, an offer and a poll
   cross this boundary per message, which is why it is on the data plane.
 - Is the one surface frozen between releases. Rust-to-Rust integration goes through
@@ -44,8 +49,9 @@ the only implementation and the C ABI is a thin layer over it
   functions a message passes through: `cavalry_publication_try_claim`,
   `cavalry_publication_offer`, `cavalry_buffer_claim_commit`,
   `cavalry_buffer_claim_abort`, `cavalry_buffer_claim_set_reserved_value`,
-  `cavalry_subscription_poll` and `cavalry_header_values`. The thread-local error is a
-  fixed buffer, and `tests/allocations.rs` counts across all seven.
+  `cavalry_subscription_poll`, `cavalry_header_values`, `cavalry_committed_log_poll`
+  and `cavalry_committed_log_entry_position`. The thread-local error is a fixed
+  buffer, and `tests/allocations.rs` counts across all nine.
 
 ## Where the data plane ends
 

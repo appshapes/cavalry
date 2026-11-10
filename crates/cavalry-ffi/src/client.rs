@@ -162,6 +162,18 @@ pub unsafe extern "C" fn cavalry_dir(client: *const cavalry_t) -> *const c_char 
     unsafe { (*client).dir_c.as_ptr() }
 }
 
+/// The client a handle wraps, for a function of another handle that sends commands
+/// through it: a committed log's open and close.
+///
+/// # Safety
+///
+/// `client` is a live client handle not in use by another call ("Threads"), so the
+/// exclusive reference is the only one for the call it is made for.
+pub(crate) unsafe fn cavalry_mut<'a>(client: *mut cavalry_t) -> &'a mut Cavalry {
+    // SAFETY: the caller's convention above.
+    unsafe { &mut (*client).client }
+}
+
 /// Reads the three arguments every add takes, or sets the error and returns `None`.
 ///
 /// # Safety

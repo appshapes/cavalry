@@ -68,7 +68,12 @@ pub struct cavalry_image_t {
 
 /// The frame header a poll hands the fragment handler, valid for the call.
 pub struct cavalry_header_t {
-    header: DataFrameHeader,
+    pub(crate) header: DataFrameHeader,
+    /// The position in its stream at which the frame begins, when the poll that made
+    /// the header knows it: a committed log's poll does, and a subscription's does
+    /// not and writes `CAVALRY_NULL_POSITION` (`spec/c-abi.md`, "A frame's position";
+    /// ADR 0068).
+    pub(crate) position: i64,
 }
 
 /// The data frame header's fields, in the order and the types of `spec/frame.md`.
@@ -152,11 +157,31 @@ pub type cavalry_fragment_handler_t = Option<
     ),
 >;
 
-const NO_FAULT: cavalry_fault_t = cavalry_fault_t {
+pub(crate) const NO_FAULT: cavalry_fault_t = cavalry_fault_t {
     code: 0,
     session_id: 0,
     position: CAVALRY_NULL_POSITION,
 };
+
+/// The fault a poll stopped on, as the struct `cavalry_subscription_fault` and
+/// `cavalry_committed_log_fault` fill, with the thread's error set to it.
+pub(crate) fn fault_struct(fault: &cavalry_client::Fault) -> cavalry_fault_t {
+    let code = error::set_fault(fault);
+    let (session_id, position) = match *fault {
+        cavalry_client::Fault::Image {
+            session_id,
+            position,
+            ..
+        } => (session_id, position),
+        cavalry_client::Fault::ImagesFull { session_id } => (session_id, CAVALRY_NULL_POSITION),
+        cavalry_client::Fault::Closed => (0, CAVALRY_NULL_POSITION),
+    };
+    cavalry_fault_t {
+        code,
+        session_id,
+        position,
+    }
+}
 
 pub(crate) fn subscription_handle(subscription: Subscription) -> *mut cavalry_subscription_t {
     handle::give(cavalry_subscription_t {
@@ -241,7 +266,10 @@ pub unsafe extern "C" fn cavalry_subscription_poll(
         let inner = &mut *ptr::addr_of_mut!((*subscription).subscription);
         let result = inner.poll(
             |body, header| {
-                let view = cavalry_header_t { header: *header };
+                let view = cavalry_header_t {
+                    header: *header,
+                    position: CAVALRY_NULL_POSITION,
+                };
                 // The caller's handler, by the convention above, inside the enclosing
                 // unsafe block; the body and the header are valid for the call.
                 handler(clientd, body.as_ptr(), body.len(), &view);
@@ -258,26 +286,9 @@ pub unsafe extern "C" fn cavalry_subscription_poll(
             delivered as c_int
         }
         Err(fault) => {
-            let code = error::set_fault(&fault);
-            let (session_id, position) = match fault {
-                cavalry_client::Fault::Image {
-                    session_id,
-                    position,
-                    ..
-                } => (session_id, position),
-                cavalry_client::Fault::ImagesFull { session_id } => {
-                    (session_id, CAVALRY_NULL_POSITION)
-                }
-                cavalry_client::Fault::Closed => (0, CAVALRY_NULL_POSITION),
-            };
+            let fault = fault_struct(&fault);
             // SAFETY: the fault field alone.
-            unsafe {
-                ptr::addr_of_mut!((*subscription).fault).write(cavalry_fault_t {
-                    code,
-                    session_id,
-                    position,
-                })
-            };
+            unsafe { ptr::addr_of_mut!((*subscription).fault).write(fault) };
             -1
         }
     }

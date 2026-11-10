@@ -122,6 +122,7 @@ dependencies = [
  "cavalry-client",
  "cavalry-driver",
  "cavalry-proto",
+ "cavalry-raft",
  "serde_json",
  "stats_alloc",
 ]

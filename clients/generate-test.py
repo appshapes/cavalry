@@ -112,7 +112,7 @@ class Parse(unittest.TestCase):
         expected = {fn["name"]: (flat(fn["returns"]), [(flat(t), n) for t, n in fn["params"]])
                     for fn in self.vectors["functions"]}
         self.assertEqual(parsed, expected)
-        self.assertEqual(len(self.header.functions), 60)
+        self.assertEqual(len(self.header.functions), 70)
 
     def test_the_defines_are_the_vectors(self):
         parsed = {name: gen.python_value(value) for name, value in self.header.defines if name != "CAVALRY_H"}
@@ -152,7 +152,7 @@ class Package(unittest.TestCase):
         self.assertIn("cavalry_fragment_handler_t = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t, c_void_p)", abi)
 
     def test_the_per_message_functions_are_the_allocation_tests_and_load_through_pydll(self):
-        """The seven functions `crates/cavalry-ffi/tests/allocations.rs` counts are the ones
+        """The nine functions `crates/cavalry-ffi/tests/allocations.rs` counts are the ones
         the binding keeps the GIL held across; every other function releases it, so an add
         that waits on the driver does not stop the process's other threads."""
         with open(os.path.join(gen.ROOT, "crates", "cavalry-ffi", "tests", "allocations.rs"), encoding="utf-8") as f:
@@ -547,12 +547,15 @@ class NodePackage(unittest.TestCase):
 
     def test_the_addon_wraps_every_function_and_the_poll_is_its_own(self):
         """One N-API function per ABI function, registered under the ABI's name, except the
-        poll: the addon's `poll` makes the one `cavalry_subscription_poll` call with its
-        trampoline, and the header's fields are read through `headerField`."""
+        two that take the C fragment handler: the addon's `poll` makes the one
+        `cavalry_subscription_poll` call with its trampoline, and the header's fields are
+        read through `headerField`; `cavalry_committed_log_poll` is not bound in this
+        package yet (ADR 0068)."""
         addon = gen_node.write_node(self.header)["src/addon.c"]
+        self.assertEqual(gen_node.HANDLER_FUNCTIONS, ("cavalry_subscription_poll", "cavalry_committed_log_poll"))
         for fn in self.header.functions:
-            if fn.name == "cavalry_subscription_poll":
-                self.assertNotIn("fn_cavalry_subscription_poll", addon)
+            if fn.name in gen_node.HANDLER_FUNCTIONS:
+                self.assertNotIn(f"fn_{fn.name}", addon)
                 continue
             self.assertIn(f"static napi_value fn_{fn.name}(napi_env env, napi_callback_info info)", addon)
             self.assertIn(f'{{ "{fn.name}", NULL, fn_{fn.name}, NULL, NULL, NULL, napi_default, NULL }},', addon)

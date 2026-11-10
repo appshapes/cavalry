@@ -15,13 +15,14 @@
 const path = require("path");
 const addon = require(path.join(__dirname, "build", "Release", "cavalry_addon.node"));
 
-const ABI_VERSION = 1;
+const ABI_VERSION = 2;
 
 /** The header's constants, as the ABI names them (spec/c-abi.md). */
 const constants = {
   CAVALRY_DIR_ENV: "CAVALRY_DIR",
-  CAVALRY_ABI_VERSION: 1,
+  CAVALRY_ABI_VERSION: 2,
   CAVALRY_MAX_IMAGES: 256,
+  CAVALRY_SERVICE_LOG_STREAM_ID: 104,
   CAVALRY_NULL_POSITION: -1,
   CAVALRY_NULL_LENGTH: -1,
   CAVALRY_FOLLOW_LENGTH: 9223372036854775807n,
@@ -73,6 +74,7 @@ const constants = {
   CAVALRY_ERR_ABI_VERSION: 135,
   CAVALRY_ERR_NOT_UTF8: 136,
   CAVALRY_ERR_EMPTY_DIR: 137,
+  CAVALRY_ERR_NO_POSITION: 138,
   CAVALRY_CLOSED_BY_USER: 1,
   CAVALRY_CLOSED_DRIVER_CLOSED: 2,
   CAVALRY_CLOSED_DRIVER_TIMEOUT: 3,
@@ -104,6 +106,36 @@ const NULL_POSITION = constants.CAVALRY_NULL_POSITION;
 
 /** The structs' sizes and field offsets, as C lays them out on the 64-bit targets. */
 const LAYOUT = {
+  "cavalry_fault_t": {
+    "size": 16,
+    "fields": {
+      "code": {
+        "offset": 0,
+        "kind": "int32_t"
+      },
+      "session_id": {
+        "offset": 4,
+        "kind": "int32_t"
+      },
+      "position": {
+        "offset": 8,
+        "kind": "int64_t"
+      }
+    }
+  },
+  "cavalry_committed_log_constants_t": {
+    "size": 16,
+    "fields": {
+      "recording_id": {
+        "offset": 0,
+        "kind": "int64_t"
+      },
+      "member_id": {
+        "offset": 8,
+        "kind": "int32_t"
+      }
+    }
+  },
   "cavalry_buffer_claim_t": {
     "size": 32,
     "fields": {
@@ -205,23 +237,6 @@ const LAYOUT = {
       "stream_id": {
         "offset": 36,
         "kind": "int32_t"
-      }
-    }
-  },
-  "cavalry_fault_t": {
-    "size": 16,
-    "fields": {
-      "code": {
-        "offset": 0,
-        "kind": "int32_t"
-      },
-      "session_id": {
-        "offset": 4,
-        "kind": "int32_t"
-      },
-      "position": {
-        "offset": 8,
-        "kind": "int64_t"
       }
     }
   },

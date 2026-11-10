@@ -21,7 +21,7 @@ import threading
 from . import _abi
 from ._abi import *  # noqa: F401,F403  the header's constants, as the ABI names them
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 
 # The result codes a message path returns instead of raising (spec/c-abi.md, "Result
 # codes"), under the names Aeron's C client uses without the prefix.
