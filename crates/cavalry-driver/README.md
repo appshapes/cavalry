@@ -10,6 +10,13 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   `cavalry-shm`, and it never sits in the message path as a broker. The directory
   protocol, the commands it reads and the events it answers with are
   `spec/client-protocol.md` (ADR 0019).
+- Chooses each publication's session id: the first is a random i32, drawn from the
+  operating system's randomness when the driver starts, and each next one is one
+  more, past any id a live publication of the stream holds (`spec/client-protocol.md`,
+  "Commands"). Random, and not the clock: two drivers started in one instant, a
+  cluster's members under one supervisor, must not send one stream under one session
+  id, since a receiver that hears both on an endpoint holds them as one session and
+  answers the first alone.
 - Runs the conductor on a dedicated thread with an idle strategy, what the thread does
   when it has no work: busy-spin, yield or backoff. Backoff is the default; `doctor`
   recommends busy-spin on isolated cores. On every duty cycle the conductor stores its
@@ -53,6 +60,11 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   ends at its end, no faster than the slowest subscriber's position plus the window
   and never past what the recorder has synced; a subscription on the replay stream
   reads it as any stream, and `replay stopped` says where it ended and why (ADR 0030).
+  A replay that follows a live recording allocates nothing while it runs: once a
+  second the replayer asks the catalog where the recording stopped, and it reads the
+  stop alone (`cavalry_log::catalog::CatalogReader::stop_position`), not the
+  descriptor with its two strings. `cavalry-client`'s `replay_follow_allocations`
+  test is the gate, over three seconds of such a replay.
 - Truncates, purges and deletes a stopped recording on command: `truncate recording`,
   `purge segments` and `purge recording` (`spec/client-protocol.md`, "Commands"; ADR
   0031). The conductor admits each into a registry of commands in progress, bounded at

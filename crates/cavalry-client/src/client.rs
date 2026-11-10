@@ -21,6 +21,7 @@ use crate::conductor::{
     REGISTRATION_QUEUE, REPLAY_QUEUE, RESPONSE_QUEUE, RESPONSE_TIMEOUT, ReplayRegistration, Shared,
     nanos, now_nanos,
 };
+use crate::counter::Counter;
 use crate::error::{ClientError, Closed};
 use crate::publication::Publication;
 use crate::recording::Recording;
@@ -46,6 +47,9 @@ pub struct Cavalry {
     producer: Producer,
     ring: CommandRing,
     counters: CountersReader,
+    /// The counters file mapped writable, for the counters this client adds and owns;
+    /// opened at the first [`Cavalry::add_counter`] (ADR 0062).
+    counters_writer: Option<CountersWriter>,
     responses: spsc::Consumer<Response>,
     registrations: spsc::Producer<Registration>,
     replay_registrations: spsc::Producer<ReplayRegistration>,
@@ -159,6 +163,7 @@ impl Cavalry {
             producer,
             ring,
             counters,
+            counters_writer: None,
             responses,
             registrations,
             replay_registrations,
@@ -494,6 +499,103 @@ impl Cavalry {
             Response::Success { .. } => Ok(()),
             other => Err(ClientError::Driver {
                 what: format!("{other:?} in answer to {name}"),
+            }),
+        }
+    }
+
+    /// Adds a counter this client owns: the driver allocates a record of its counters
+    /// file with `type_id`, `key` and `label`, and the [`Counter`] returned is the one
+    /// writer of its value (`spec/client-protocol.md`, "Commands"; ADR 0062). Waits for
+    /// `counter ready` up to the response timeout.
+    ///
+    /// `type_id` is the `id` of a counter to which `counters.toml` gives the scope
+    /// `client` (`docs/reference/counters.md`), `key` is what that entry's `doc` says
+    /// its key is, at most 112 bytes, and `label` is the entry's name, a space and the
+    /// key's text, at most 124 bytes. `cavalry doctor` and any reader of the counters
+    /// file see the counter under that label. The driver frees it when the [`Counter`]
+    /// is closed or dropped and when this client closes or is timed out.
+    ///
+    /// A key or a label past its bound is [`ClientError::Protocol`], and nothing is
+    /// sent. Refused with [`ClientError::Refused`]: code 11 for a type id that is not a
+    /// client's; code 10 when the driver holds 256 client counters, or its counters
+    /// file has no free record.
+    ///
+    /// ```
+    /// use cavalry_client::Cavalry;
+    /// use cavalry_shm::counters::generated::CLUSTER_COMMIT_POSITION;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let dir = std::env::temp_dir().join(format!("cavalry-doc-counter-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # let driver = cavalry_driver::Driver::start(&dir, dir.join("log"))?;
+    /// let mut client = Cavalry::connect_to(&dir)?;
+    /// // A cluster member's commit position, keyed by its member id, 2.
+    /// let member_id: i32 = 2;
+    /// let counter = client.add_counter(
+    ///     CLUSTER_COMMIT_POSITION.0,
+    ///     &member_id.to_le_bytes(),
+    ///     "cluster.commit_position 2",
+    /// )?;
+    /// counter.store_release(4096)?;
+    /// // Any reader of the counters file sees it, by the record `counter ready` named.
+    /// assert_eq!(client.counters().read(counter.id())?, 4096);
+    /// counter.close();
+    /// # client.close()?;
+    /// # driver.close()?;
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_counter(
+        &mut self,
+        type_id: i32,
+        key: &[u8],
+        label: &str,
+    ) -> Result<Counter, ClientError> {
+        // Everything that can fail on this side fails before the command is sent, so
+        // that the driver never holds a counter this client has no handle on.
+        if self.counters_writer.is_none() {
+            self.counters_writer = Some(CountersWriter::open(&self.dir)?);
+        }
+        let producer = self.ring.producer(DRIVER_TIMEOUT)?;
+        let correlation_id = self.producer.next_correlation_id();
+        let command = Command::AddCounter {
+            client_id: self.client_id,
+            correlation_id,
+            type_id,
+            key,
+            label: label.as_bytes(),
+        };
+        match self.request(&command, correlation_id, "add counter")? {
+            Response::CounterReady { counter_id, .. } => {
+                let cell = u32::try_from(counter_id)
+                    .ok()
+                    .zip(self.counters_writer.as_ref())
+                    .and_then(|(id, writer)| writer.counter(id).ok());
+                let Some(cell) = cell else {
+                    // The driver named a record this client cannot write: give the
+                    // counter back, so the registry does not keep it until the close.
+                    let remove = Command::RemoveCounter {
+                        client_id: self.client_id,
+                        correlation_id: self.producer.next_correlation_id(),
+                        registration_id: correlation_id,
+                    };
+                    let _ = self.send(&remove);
+                    return Err(ClientError::Driver {
+                        what: format!("counter ready with counter id {counter_id}"),
+                    });
+                };
+                Ok(Counter::new(
+                    cell,
+                    Arc::clone(&self.shared),
+                    producer,
+                    self.client_id,
+                    correlation_id,
+                    type_id,
+                ))
+            }
+            other => Err(ClientError::Driver {
+                what: format!("{other:?} in answer to add counter"),
             }),
         }
     }

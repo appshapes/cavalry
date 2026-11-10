@@ -3,6 +3,7 @@
 
 mod client;
 mod conductor;
+mod counter;
 mod error;
 mod publication;
 mod recording;
@@ -16,6 +17,7 @@ pub use cavalry_proto::client_protocol::{
 pub use cavalry_proto::frame::{DataFrameHeader, Flags, FrameType};
 pub use cavalry_shm::log::{BufferClaim, Positions};
 pub use client::{Cavalry, DIR_ENV};
+pub use counter::Counter;
 pub use error::{ClientError, Closed};
 pub use publication::{Offer, Publication};
 pub use recording::Recording;

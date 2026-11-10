@@ -694,7 +694,7 @@ position and no other, and younger than the leader heartbeat timeout; a canvass
 position counts for no member here, whatever term it names, since its sender has not
 joined. With a quorum of the members counting, the leader closes once the leader
 heartbeat timeout has passed since it entered leader ready, a member it heard that has
-not joined its log by then being one that is not active. It closes with no fewer than a quorum, and not while the last report of any
+not joined its log by then being one the leader closes without. It closes with no fewer than a quorum, and not while the last report of any
 member holds a log ahead of its own, a member that holds the history and was silent
 through the canvass; the `leader-ready` vectors pin the rule. Each member the
 appointed leader finds ahead, in canvass or in leader ready, is counted once in an
