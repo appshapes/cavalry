@@ -412,6 +412,12 @@ struct UdpImage {
     /// record, freed when the receiver says the reader went.
     subscriptions: Vec<(i64, u32)>,
     state: ImageState,
+    /// Its last subscription was removed: the receiver has been asked to drop the
+    /// image's last reader and retires the image when it does (`spec/udp.md`, "The
+    /// receiver", step 5). Until its reply the image is listed here as live, with a
+    /// log that is unlinked when the reply comes, so it is given to no subscription
+    /// and no recording that arrives meanwhile (ADR 0068).
+    leaving: bool,
 }
 
 /// One image: a subscription's view of one publication, with the position counter the
@@ -2725,9 +2731,13 @@ impl Conductor {
     /// for its channel's previous receive endpoint to close with code 4, the bind it
     /// would have made, and counts it; nothing is registered, and the close that comes
     /// later runs nothing for it (`spec/client-protocol.md`, "Commands", "Liveness and
-    /// timeouts"; ADR 0049). The receiver falls that far behind when its thread is
-    /// starved, under cgroup CPU throttling, or when the endpoint's remove waits behind a
-    /// full request queue. Returns how many it answered.
+    /// timeouts"; ADR 0049). The endpoint stays open that long for one of two causes,
+    /// and the message names both with what to do for each: its images are still being
+    /// retired, a retired image's log kept until its recording has written up to where
+    /// the image stopped, a recorder behind a slow or failing disk (ADR 0068); or the
+    /// receiver is behind, its thread starved under cgroup CPU throttling, or the
+    /// endpoint's remove or an image's retire waiting behind a full request queue.
+    /// Returns how many it answered.
     fn time_out_pending_subscriptions(&mut self, now: i64) -> usize {
         let wait = spec::nanos(spec::CLOSING_ENDPOINT_WAIT);
         let waited = |pending: &PendingSubscription| now.saturating_sub(pending.arrived) >= wait;
@@ -2750,10 +2760,16 @@ impl Conductor {
                 ErrorCode::ChannelEndpointError,
                 &format!(
                     "the channel's endpoint {}: the previous receive endpoint on it has not \
-                     closed in the {} s this add waited, its socket still with the receiver, \
-                     so a new one cannot be bound; the driver's receiver thread is behind, \
-                     starved of CPU or busy: give the driver's threads the CPU they need, then \
-                     add the subscription again; see {ERRORS_DOC}",
+                     closed in the {} s this add waited, its images still being retired or \
+                     its socket still with the receiver, so a new one cannot be bound; if a \
+                     recording of one of its images has not yet stopped, the image's log is \
+                     kept until the recorder has written up to where the image stopped and \
+                     the recorder is behind, on a slow or failing disk: check \
+                     recording.write_failed and the log directory's disk with `cavalry \
+                     doctor`, or stop the recording before removing the stream's last \
+                     subscription; otherwise the driver's receiver thread is behind, starved \
+                     of CPU or busy: give the driver's threads the CPU they need; then add \
+                     the subscription again; see {ERRORS_DOC}",
                     pending.endpoint,
                     spec::CLOSING_ENDPOINT_WAIT.as_secs()
                 ),
@@ -2809,10 +2825,23 @@ impl Conductor {
         let Some((endpoint, interface)) = self.resolve_channel(correlation_id, &channel) else {
             return;
         };
+        // An endpoint its last subscription has left closes once its images are
+        // retired (`spec/udp.md`, "The receiver"): it is closing from that removal,
+        // though it is active here until the receiver has said the images went. An
+        // add in between must neither join an image being retired nor keep the
+        // endpoint, on which the stream's session would sit out a cool-down: it waits
+        // for the close as an add on a closing endpoint does (ADR 0068).
+        let leaving = self.receive_endpoints.iter().any(|entry| {
+            entry.endpoint == endpoint
+                && entry.interface == interface
+                && entry.state == ChannelState::Active
+                && entry.subscription_count == 0
+        });
         let open = self.receive_endpoints.iter().position(|entry| {
             entry.endpoint == endpoint
                 && entry.interface == interface
                 && entry.state == ChannelState::Active
+                && entry.subscription_count > 0
         });
         // The channel's previous endpoint, closed with its last subscription and image,
         // still holds the socket while the receiver drops it, so the bind below would
@@ -2824,11 +2853,12 @@ impl Conductor {
         // endpoint wait, after which `time_out_pending_subscriptions` answers it with
         // code 4 inside the client's response timeout (ADR 0049).
         if open.is_none()
-            && self.receive_endpoints.iter().any(|entry| {
-                entry.endpoint == endpoint
-                    && entry.interface == interface
-                    && entry.state == ChannelState::Closing
-            })
+            && (leaving
+                || self.receive_endpoints.iter().any(|entry| {
+                    entry.endpoint == endpoint
+                        && entry.interface == interface
+                        && entry.state == ChannelState::Closing
+                }))
         {
             self.pending_subscriptions.push(PendingSubscription {
                 client_id,
@@ -2854,6 +2884,7 @@ impl Conductor {
                         image.endpoint_id == endpoint_id
                             && image.stream_id == stream_id
                             && image.state == ImageState::Live
+                            && !image.leaving
                     })
                     .count()
             }
@@ -3006,7 +3037,8 @@ impl Conductor {
             channel_status_indicator_id: status_id,
         });
         // The images already live on the endpoint and stream: the subscription joins
-        // each at its rebuild position.
+        // each at its rebuild position. One its last subscription has left is being
+        // retired, and is not joined (ADR 0068).
         let live: Vec<usize> = self
             .udp_images
             .iter()
@@ -3015,6 +3047,7 @@ impl Conductor {
                 image.endpoint_id == endpoint_id
                     && image.stream_id == stream_id
                     && image.state == ImageState::Live
+                    && !image.leaving
             })
             .map(|(index, _)| index)
             .collect();
@@ -3385,6 +3418,7 @@ impl Conductor {
             source_identity: source_identity.clone(),
             subscriptions: pairs,
             state: ImageState::Live,
+            leaving: false,
         });
         let entry = &mut self.receive_endpoints[endpoint_index];
         entry.image_count += 1;
@@ -3630,6 +3664,27 @@ impl Conductor {
     fn drop_subscription(&mut self, index: usize, now: i64) {
         let subscription = self.subscriptions.swap_remove(index);
         if let Some(endpoint_id) = subscription.endpoint {
+            // The images this was the last subscription to read: the receiver retires
+            // each on the request below, and until it has said so they are given to
+            // nothing that arrives (ADR 0068). A reader whose removal is still on its
+            // way back is of a subscription already gone from the registry.
+            for image in &mut self.udp_images {
+                if image.endpoint_id == endpoint_id
+                    && image.stream_id == subscription.stream_id
+                    && image.state == ImageState::Live
+                    && image
+                        .subscriptions
+                        .iter()
+                        .any(|(id, _)| *id == subscription.registration_id)
+                    && !image.subscriptions.iter().any(|(id, _)| {
+                        self.subscriptions
+                            .iter()
+                            .any(|held| held.registration_id == *id)
+                    })
+                {
+                    image.leaving = true;
+                }
+            }
             self.receiver_request(receiver::Request::RemoveInterest {
                 endpoint_id,
                 stream_id: subscription.stream_id,
@@ -4313,6 +4368,7 @@ impl Conductor {
                 .filter(|image| {
                     image.stream_id == stream_id
                         && image.state == ImageState::Live
+                        && !image.leaving
                         && receive_endpoints.contains(&image.endpoint_id)
                 })
                 .map(|image| (image.registration_id, true)),
@@ -14454,6 +14510,139 @@ mod receiving {
         assert_eq!(h.counter(CHANNEL_CLOSED), 1);
     }
 
+    /// What the events not yet read say about subscription `id`, read in one pass
+    /// since any reader drains them all: the codes of the errors under its
+    /// correlation id, the images made available to it and the images made
+    /// unavailable to it.
+    fn events_about(h: &mut Harness, id: i64) -> (Vec<i32>, Vec<i64>, Vec<i64>) {
+        let (mut errors, mut available, mut unavailable) = (Vec::new(), Vec::new(), Vec::new());
+        for (type_id, message) in drained_events(h) {
+            match Event::parse(type_id, &message) {
+                Ok(Event::Error {
+                    offending_correlation_id,
+                    error_code,
+                    ..
+                }) if offending_correlation_id == id => errors.push(error_code),
+                Ok(Event::AvailableImage {
+                    correlation_id,
+                    subscriber_registration_id,
+                    ..
+                }) if subscriber_registration_id == id => available.push(correlation_id),
+                Ok(Event::UnavailableImage {
+                    correlation_id,
+                    subscriber_registration_id,
+                    ..
+                }) if subscriber_registration_id == id => unavailable.push(correlation_id),
+                _ => {}
+            }
+        }
+        (errors, available, unavailable)
+    }
+
+    /// An add that arrives while the image the stream's last subscription left is still
+    /// being retired waits as one on a closing endpoint does (ADR 0068). The receiver
+    /// has not yet said the image is retired, so the conductor still lists it as live
+    /// and its endpoint as active: the add is given no image and registers nothing, and
+    /// it runs once the endpoint has closed, binding it again. The stream's next setup
+    /// then gives the new subscription an image of its own, with no cool-down to sit
+    /// out. Before, the add joined the image being retired, whose log was unlinked when
+    /// the receiver's reply came: a subscriber that had not opened the log yet read the
+    /// missing file as corruption and closed its client.
+    #[test]
+    fn an_add_while_the_last_subscriptions_image_is_being_retired_waits_for_the_close() {
+        let mut h = Harness::new("udp-resubscribe-retiring");
+        let (sender, image_id, _position) = subscribe_and_connect(&mut h, 2);
+        let port = h.conductor.receive_endpoints[0].endpoint.port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        let now = h.now;
+        h.conductor.remove_subscription(1, 3, 2, now);
+        // The receiver has not run: the image is listed, live, and holds the endpoint.
+        assert_eq!(h.conductor.udp_images.len(), 1);
+        assert_eq!(h.conductor.udp_images[0].state, ImageState::Live);
+        assert!(h.conductor.udp_images[0].leaving);
+        assert_eq!(h.conductor.receive_endpoints[0].state, ChannelState::Active);
+        h.conductor
+            .add_subscription(1, 4, STREAM, channel.as_bytes());
+        assert_eq!(
+            events_about(&mut h, 4),
+            (vec![], vec![], vec![]),
+            "no error, and the image being retired is not handed over"
+        );
+        assert!(h.conductor.subscriptions.is_empty(), "nothing registered");
+        assert_eq!(h.conductor.pending_subscriptions.len(), 1);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED), 1);
+        // The image is retired, the endpoint closes, and the add runs: bound again.
+        assert!(h.cycle_until(|h| h.conductor.subscriptions.len() == 1));
+        assert!(h.conductor.pending_subscriptions.is_empty());
+        assert_eq!(h.counter(IMAGE_UNSUBSCRIBED), 1);
+        assert_eq!(h.counter(IMAGE_REMOVED), 1);
+        assert_eq!(h.counter(CHANNEL_CLOSED), 1);
+        assert_eq!(h.counter(CHANNEL_OPENED), 2);
+        assert!(h.conductor.udp_images.is_empty());
+        assert_eq!(
+            events_about(&mut h, 4),
+            (vec![], vec![], vec![]),
+            "it was never told of the image retired"
+        );
+        // The stream's next setup: an image of its own for the new subscription.
+        sender.send_setup(SESSION, 0);
+        assert!(
+            h.cycle_until(|h| h.conductor.udp_images.len() == 1),
+            "the setup frame created a new image"
+        );
+        h.cycle();
+        let (joined, _, _, _) = last_available_image(&mut h, 4).expect("an available image");
+        assert_ne!(joined, image_id, "a new image, not the one retired");
+        drop(sender);
+    }
+
+    /// The same window on an endpoint that another stream's subscription keeps open.
+    /// The add runs at once, since the endpoint is not closing, and is not given the
+    /// image being retired. The image is retired as unsubscribed with no event to the
+    /// new subscription, which was never told of it. The stream's next image comes
+    /// after its session's cool-down, as `spec/udp.md` says of a subscription added
+    /// back on an endpoint that stays open (ADR 0068).
+    #[test]
+    fn an_add_on_an_endpoint_another_stream_keeps_is_not_given_the_image_being_retired() {
+        let mut h = Harness::new("udp-resubscribe-kept");
+        let (sender, _image_id, _position) = subscribe_and_connect(&mut h, 2);
+        let port = h.conductor.receive_endpoints[0].endpoint.port();
+        let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
+        h.conductor
+            .add_subscription(1, 5, STREAM + 1, channel.as_bytes());
+        assert_eq!(h.last_error(5), None);
+        h.cycle();
+        let now = h.now;
+        h.conductor.remove_subscription(1, 6, 2, now);
+        assert_eq!(h.conductor.udp_images.len(), 1);
+        assert!(h.conductor.udp_images[0].leaving);
+        h.conductor
+            .add_subscription(1, 7, STREAM, channel.as_bytes());
+        assert_eq!(
+            events_about(&mut h, 7),
+            (vec![], vec![], vec![]),
+            "no error, and the image being retired is not handed over"
+        );
+        assert!(
+            h.conductor.pending_subscriptions.is_empty(),
+            "the endpoint is not closing"
+        );
+        assert_eq!(h.conductor.subscriptions.len(), 2);
+        assert!(h.cycle_until(|h| h.counter(IMAGE_REMOVED) == 1));
+        assert_eq!(h.counter(IMAGE_UNSUBSCRIBED), 1);
+        assert!(h.conductor.udp_images.is_empty());
+        assert_eq!(
+            events_about(&mut h, 7),
+            (vec![], vec![], vec![]),
+            "it was never told of the image retired"
+        );
+        assert_eq!(h.conductor.receive_endpoints.len(), 1);
+        assert_eq!(h.conductor.receive_endpoints[0].state, ChannelState::Active);
+        assert_eq!(h.counter(CHANNEL_CLOSED), 0);
+        assert_eq!(h.counter(SUBSCRIPTION_ADD_DEFERRED), 0);
+        drop(sender);
+    }
+
     /// A waiting add holds a slot of the subscriptions registry, so the registry fills
     /// with waiting adds as with registered ones and one more is code 10 (invariant
     /// 3); and the waiting adds go with a client that closes before the endpoint has
@@ -14541,6 +14730,18 @@ mod receiving {
         assert_eq!(code, 4, "{message}");
         assert!(message.contains(&format!("127.0.0.1:{port}")), "{message}");
         assert!(message.contains("has not closed in the 5 s"), "{message}");
+        // Both causes, each with what to do (ADR 0068): a recording of an image being
+        // retired that has not yet stopped, and the receiver behind.
+        assert!(
+            message.contains("its images still being retired"),
+            "{message}"
+        );
+        assert!(message.contains("the recorder is behind"), "{message}");
+        assert!(
+            message.contains("stop the recording before removing"),
+            "{message}"
+        );
+        assert!(message.contains("receiver thread is behind"), "{message}");
         assert!(message.contains("add the subscription again"), "{message}");
         assert!(h.conductor.pending_subscriptions.is_empty());
         assert!(h.conductor.subscriptions.is_empty(), "nothing registered");
