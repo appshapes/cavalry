@@ -811,6 +811,18 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
             stderr.contains(&format!("cluster member {member} started")),
             "{stderr}"
         );
+        // The start line names the two counters by the labels this test read them by,
+        // in the file it read them from, and no command that does not show them.
+        assert!(
+            stderr.contains(&format!(
+                "the counters labelled `{CLUSTER_ROLE} {member}` and \
+                 `{CLUSTER_ELECTION_STATE} {member}` in {}",
+                dirs[member].0.join("counters").display()
+            )),
+            "{stderr}"
+        );
+        assert!(stderr.contains("docs/reference/counters.md"), "{stderr}");
+        assert!(!stderr.contains("`cavalry doctor` shows"), "{stderr}");
         assert!(stderr.contains("closed;"), "{stderr}");
     }
 
@@ -875,4 +887,53 @@ fn one_cluster_key_without_the_other_stops_run_and_fails_doctor() {
         stderr.contains("CAVALRY_CLUSTER_MEMBER_ID is `two`"),
         "{stderr}"
     );
+    assert!(stderr.contains("or -1 for no member"), "{stderr}");
+    assert!(!dir.0.exists(), "nothing was started");
+}
+
+#[test]
+fn a_member_id_of_minus_one_written_out_is_no_member() {
+    // The id's default, -1, written into a unit file, is no member: without a members
+    // string `run` starts a driver in no cluster, as with the key unset.
+    let dir = TestDir::new("cluster-no-member");
+    let log_dir = TestDir::new("cluster-no-member-log");
+    let mut run = cavalry()
+        .args(["run", "--dir", &dir.arg(), "--log-dir", &log_dir.arg()])
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "-1")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run starts");
+    let text = wait_until_running(&mut run, || {
+        let mut c = cavalry();
+        c.args(["doctor", "--dir", &dir.arg(), "--log-dir", &log_dir.arg()])
+            .env("CAVALRY_CLUSTER_MEMBER_ID", "-1");
+        c
+    });
+    assert!(!text.contains("cluster-member"), "{text}");
+    let stderr = terminate(run);
+    assert!(!stderr.contains("cluster member"), "{stderr}");
+    assert!(stderr.contains("closed;"), "{stderr}");
+
+    // With a members string, -1 is the id left out, and `run` says so before anything
+    // starts.
+    let other = TestDir::new("cluster-no-member-other");
+    let output = cavalry()
+        .args(["run", "--dir", &other.arg(), "--log-dir", &log_dir.arg()])
+        .env(
+            "CAVALRY_CLUSTER_MEMBERS",
+            "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004",
+        )
+        .env("CAVALRY_CLUSTER_MEMBER_ID", "-1")
+        .output()
+        .expect("runs");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "CAVALRY_CLUSTER_MEMBERS is set and CAVALRY_CLUSTER_MEMBER_ID is unset or -1, no \
+             member"
+        ),
+        "{stderr}"
+    );
+    assert!(!other.0.exists(), "nothing was started");
 }
