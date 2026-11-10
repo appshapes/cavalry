@@ -1,9 +1,13 @@
 //! The allocation gate over the UDP receive path (CLAUDE.md, invariant 2 and gate 2; ADR
 //! 0042): a publisher and a subscriber on one driver's `cavalry:udp` loopback, the
-//! driver's five threads in this process, under the counting allocator the bench uses,
-//! with ten thousand messages crossing the wire into an image and out to the subscriber
-//! and no allocation at all. Alone in its binary, so that no other test's threads are
-//! counted (`cargo test` runs a binary's tests in parallel).
+//! driver's five threads in this process, under `stats_alloc`, with ten thousand
+//! messages crossing the wire into an image and out to the subscriber and no allocation
+//! and no reallocation at all. `stats_alloc` counts a `realloc`, a buffer grown past a
+//! capacity it already had, apart from an allocation, so the test adds the two: it
+//! counts what the bench's gate counts (ADR 0047; card 211), and
+//! `tests/reallocation_counted.rs` shows the sum sees a `Vec` that grows. Alone in its
+//! binary, so that no other test's threads are counted (`cargo test` runs a binary's
+//! tests in parallel).
 
 use std::alloc::System;
 use std::net::UdpSocket;
@@ -111,7 +115,7 @@ fn drain(subscription: &mut Subscription, first: u64, count: u64, session: Optio
 /// Nothing on the receive path allocates (CLAUDE.md, invariant 2): with the publisher,
 /// the driver's five threads and the subscriber in this process, ten thousand messages
 /// cross the loopback into an image under the counting allocator with no allocation
-/// at all.
+/// and no reallocation at all.
 #[test]
 fn the_receive_path_allocates_nothing_per_message() {
     let dir = TestDir::new("allocations");
@@ -144,9 +148,9 @@ fn the_receive_path_allocates_nothing_per_message() {
     std::thread::sleep(Duration::from_millis(1200));
 
     // Ten rounds of a thousand, each drained before the next; nothing in the region
-    // allocates: not the publisher, not the conductor, not the sender's bursts, not
-    // the receiver's polls, inserts, scans and status messages, and not the subscriber,
-    // which reads every other round with the bounded poll.
+    // allocates or grows a buffer: not the publisher, not the conductor, not the
+    // sender's bursts, not the receiver's polls, inserts, scans and status messages,
+    // and not the subscriber, which reads every other round with the bounded poll.
     let region = Region::new(GLOBAL);
     let mut sequence = MESSAGES_PER_ROUND;
     for round in 0..ROUNDS {
@@ -166,9 +170,10 @@ fn the_receive_path_allocates_nothing_per_message() {
     std::thread::sleep(Duration::from_millis(250));
     let change = region.change();
     assert_eq!(
-        change.allocations,
+        change.allocations + change.reallocations,
         0,
-        "allocations on the receive path over {} messages: {change:?}",
+        "the receive path allocated or reallocated over {} messages: {change:?}; see \
+         docs/how-to/run-the-bench.md, \"When it does not work\"",
         ROUNDS as u64 * MESSAGES_PER_ROUND
     );
     publication.close().expect("closes");
