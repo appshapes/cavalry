@@ -1888,7 +1888,8 @@ user-visible change, added in the same commit as the change. The format follows
   `CAVALRY_CLUSTER_MEMBER_ID`. With both set, `run` starts the member's consensus
   module beside the driver, on a thread of its own with the conductor's idle strategy,
   and stops it before the driver; with one set and not the other it starts nothing and
-  says which is missing. `cavalry doctor` checks both keys, `cluster-members` and
+  says which is missing. `CAVALRY_CLUSTER_MEMBER_ID=-1`, the id's default written out,
+  is no member, the same as the variable unset. `cavalry doctor` checks both keys, `cluster-members` and
   `cluster-member-id`: set together, a members string the protocol takes, an id the
   string holds, and every endpoint a name that resolves. `cavalry::cluster` re-exports
   `ConsensusModule` for a program that runs a member itself

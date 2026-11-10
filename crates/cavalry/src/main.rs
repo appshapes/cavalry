@@ -686,16 +686,25 @@ fn run(config: &Config) -> ExitCode {
         (None, None) => None,
         (Some(members), Some(id)) => Some((members.as_str(), id)),
         (members, _) => {
-            let (set, unset) = if members.is_some() {
-                ("CAVALRY_CLUSTER_MEMBERS", "CAVALRY_CLUSTER_MEMBER_ID")
+            // A member id of -1, its default, is read as unset (`Config::from_vars`).
+            let (set, unset, missing) = if members.is_some() {
+                (
+                    "CAVALRY_CLUSTER_MEMBERS",
+                    "CAVALRY_CLUSTER_MEMBER_ID",
+                    "is unset or -1, no member",
+                )
             } else {
-                ("CAVALRY_CLUSTER_MEMBER_ID", "CAVALRY_CLUSTER_MEMBERS")
+                (
+                    "CAVALRY_CLUSTER_MEMBER_ID",
+                    "CAVALRY_CLUSTER_MEMBERS",
+                    "is not",
+                )
             };
             eprintln!(
-                "cavalry run: {set} is set and {unset} is not, so the driver did not start: a \
-                 cluster member needs both, the cluster's members string and this host's id \
-                 in it; set {unset}, or unset {set} for a driver in no cluster; `cavalry \
-                 doctor` checks both; see docs/reference/config.md#clustermembers"
+                "cavalry run: {set} is set and {unset} {missing}, so the driver did not \
+                 start: a cluster member needs both, the cluster's members string and this \
+                 host's id in it; set {unset}, or unset {set} for a driver in no cluster; \
+                 `cavalry doctor` checks both; see docs/reference/config.md#clustermembers"
             );
             return ExitCode::FAILURE;
         }
