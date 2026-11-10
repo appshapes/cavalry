@@ -1774,3 +1774,16 @@ user-visible change, added in the same commit as the change. The format follows
   next version
   ([ADR 0059](docs/decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md);
   card 227).
+- A cluster member runs over a driver: `cavalry_raft::ConsensusModule` is the consensus
+  module of the replicated log, a client of the driver in its directory. Three members
+  on three drivers appoint their leader, the followers arm their recordings before its
+  first frame, and an entry the leader's process offers is committed once a quorum has
+  synced it, with every member's recording holding the same bytes. The module stores
+  the member's role, election state, term, append position and commit position, and
+  what it counts, in 14 counters of the new scope `client` in the driver's counters
+  file, `cluster.role` to `cluster.messages_rejected`, and `counters.toml` registers the
+  member's role and its election as state machines. A member does not start again on
+  a log directory that holds a term: the error says to start the cluster again as a
+  new cluster, every member on a new log directory
+  ([ADR 0063](docs/decisions/0063-run-the-consensus-module-as-a-client-and-lead-by-appointment.md);
+  card 227).
