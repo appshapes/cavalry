@@ -12,9 +12,9 @@
 use cavalry_proto::cluster::{
     CanvassAction, CanvassTerms, ELECTION_STATUS_INTERVAL_NS, LEADER_HEARTBEAT_INTERVAL_NS,
     LEADER_HEARTBEAT_TIMEOUT_NS, LogReport, MAX_MEMBERS, MemberPosition, Message, PROTOCOL_VERSION,
-    STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TimeUnit, appointed_leader, candidate,
-    canvass_position_action, commit_position, leader_ready, new_leadership_term_action,
-    next_fields, quorum,
+    STARTUP_CANVASS_TIMEOUT_NS, TermAction, TermFields, TimeUnit, appointed_canvass,
+    appointed_leader, canvass_position_action, commit_position, leader_ready, log_at_least,
+    new_leadership_term_action, next_fields, quorum,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -256,9 +256,13 @@ pub struct Counts {
     pub elections_failed: u64,
     /// `cluster.terms_led`: a term the member began to lead.
     pub terms_led: u64,
-    /// `cluster.quorum_lost`: a leader whose active members fell below a quorum; the
-    /// appointed leader stays the leader, and its commit position stops.
-    pub quorum_lost: u64,
+    /// `cluster.leader_quorum_losses`: a leader whose active members fell below a
+    /// quorum; the appointed leader stays the leader, and its commit position stops.
+    pub leader_quorum_losses: u64,
+    /// `cluster.appointed_leader_behind`: a member the appointed leader found holding a
+    /// log ahead of its own, in canvass or in leader ready, once for each such member
+    /// in an election.
+    pub appointed_leader_behind: u64,
     /// `cluster.leader_heartbeat_timeouts`: a follower that began again at init for
     /// want of its leader's heartbeat.
     pub leader_heartbeat_timeouts: u64,
@@ -287,6 +291,8 @@ struct Peer {
     /// The log leadership term id the report carried, −1 for none.
     term: i64,
     at_ns: u64,
+    /// Whether this election has counted the member as ahead of the appointed leader.
+    ahead_counted: bool,
 }
 
 /// One cluster member's consensus state: its role, its election, its terms and the
@@ -316,6 +322,9 @@ pub struct Consensus {
     log: Option<Log>,
     /// Whether a quorum of members was active at the leader's last cycle.
     quorate: bool,
+    /// How many members the leader heard in its canvass, itself among them: the ones
+    /// leader ready waits for.
+    heard: usize,
     last_heartbeat_ns: Option<u64>,
     last_commit_sent: i64,
     // A follower's part.
@@ -344,6 +353,7 @@ impl Consensus {
             position: 0,
             term: -1,
             at_ns: 0,
+            ahead_counted: false,
         }; MAX_MEMBERS];
         let mut own = None;
         for (index, (&id, peer)) in member_ids.iter().zip(peers.iter_mut()).enumerate() {
@@ -375,6 +385,7 @@ impl Consensus {
             counts: Counts::default(),
             log: None,
             quorate: true,
+            heard: 0,
             last_heartbeat_ns: None,
             last_commit_sent: -1,
             leader_log_position: 0,
@@ -636,6 +647,7 @@ impl Consensus {
             position: 0,
             term: -1,
             at_ns: 0,
+            ahead_counted: false,
         })
     }
 
@@ -704,6 +716,7 @@ impl Consensus {
         self.candidate_term = self.candidate_term.max(self.log_term);
         for peer in self.peers.iter_mut().take(self.count) {
             peer.reported = false;
+            peer.ahead_counted = false;
         }
         // The canvass interval runs on from the last election: a member whose
         // elections fail one after another, one that cannot join without the
@@ -714,11 +727,11 @@ impl Consensus {
     }
 
     /// State 1. Canvass position to every other member, every election status
-    /// interval. The appointed leader leads once canvass's rule makes it a candidate:
-    /// every member has reported and none has a log ahead of its own, or the startup
-    /// canvass timeout has passed and those that reported with a log not ahead of its
-    /// own, itself among them, make a quorum. So an appointed leader whose log is
-    /// behind a member's, one that lost its log directory, never leads.
+    /// interval. The appointed leader leads once canvass's rule makes it a candidate,
+    /// every member having reported, or a quorum at the startup canvass timeout, and
+    /// no member that has reported holds a log ahead of its own, whatever the deadline.
+    /// So an appointed leader whose log is behind a member's, one that lost its log
+    /// directory, never leads, and each member ahead of it is counted.
     fn canvass<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let mut work = 0;
         if Self::due(self.last_canvass_ns, ELECTION_STATUS_INTERVAL_NS, clock) {
@@ -759,7 +772,8 @@ impl Consensus {
         // startup canvass timeout after the state began.
         let deadline_passed =
             clock.now_ns.saturating_sub(self.state_since_ns) >= STARTUP_CANVASS_TIMEOUT_NS;
-        if !candidate(self.count, &reports, own, deadline_passed).nominate {
+        self.count_ahead(own);
+        if !appointed_canvass(self.count, &reports, own, deadline_passed).leads {
             return Ok(work);
         }
         // Where an elected member would nominate itself: the term it proposes is
@@ -776,7 +790,34 @@ impl Consensus {
         count(&mut self.counts.terms_led);
         self.role = Role::Leader;
         self.quorate = true;
+        self.heard = reports.iter().flatten().count();
         Ok(self.enter(ElectionState::LeaderLogReplication, clock))
+    }
+
+    /// Counts each member whose last report holds a log ahead of `own`, the appointed
+    /// leader's, once in an election, and returns how many there are now: such a member
+    /// holds a history the leader lost, and the leader neither leads nor closes its
+    /// election while one reports so.
+    fn count_ahead(&mut self, own: LogReport) -> usize {
+        let mut ahead = 0;
+        let mut newly = 0;
+        for (index, peer) in self.peers.iter_mut().take(self.count).enumerate() {
+            if index == self.own
+                || !peer.reported
+                || log_at_least(own.term, own.position, peer.term, peer.position)
+            {
+                continue;
+            }
+            ahead += 1;
+            if !peer.ahead_counted {
+                peer.ahead_counted = true;
+                newly += 1;
+            }
+        }
+        for _ in 0..newly {
+            count(&mut self.counts.appointed_leader_behind);
+        }
+        ahead
     }
 
     /// Counts the leader's loss of its quorum, once each time its active members, those
@@ -794,7 +835,7 @@ impl Consensus {
             .count();
         let quorate = active >= quorum(self.count);
         if self.quorate && !quorate {
-            count(&mut self.counts.quorum_lost);
+            count(&mut self.counts.leader_quorum_losses);
         }
         self.quorate = quorate;
     }
@@ -913,9 +954,10 @@ impl Consensus {
         Ok(work)
     }
 
-    /// State 8. The heartbeat until every member counts for the term at the leader's
-    /// log position, or a quorum once the leader heartbeat timeout has passed in this
-    /// state, then the term's first entry, the new leadership term event.
+    /// State 8. The heartbeat until every member the leader heard in its canvass counts
+    /// for the term at the leader's log position, or a quorum once the leader heartbeat
+    /// timeout has passed in this state, and no member's last report holds a log ahead
+    /// of the leader's; then the term's first entry, the new leadership term event.
     fn leader_ready<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         self.report_own(clock);
         let work = self.announce(clock, io);
@@ -934,7 +976,11 @@ impl Consensus {
             .count();
         let deadline_passed =
             clock.now_ns.saturating_sub(self.state_since_ns) >= LEADER_HEARTBEAT_TIMEOUT_NS;
-        if !leader_ready(self.count, counted, deadline_passed).closes {
+        let ahead = self.count_ahead(LogReport {
+            term: self.term,
+            position: self.append_position,
+        });
+        if !leader_ready(self.count, self.heard, counted, ahead, deadline_passed) {
             return Ok(work);
         }
         let Some(log) = self.log else {

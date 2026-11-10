@@ -205,12 +205,12 @@ fn eight_members_replicate_and_a_ninth_is_refused() {
 }
 
 /// A cold start with a member missing. The appointed leader canvasses for the startup
-/// canvass timeout, 60 s, before it leads with a quorum, and waits in leader ready for
-/// every member for the leader heartbeat timeout, 10 s, before it closes with one. The
-/// member that comes after the term's first entry cannot join without the catch-up: it
-/// is counted and left out, and the two go on committing.
+/// canvass timeout, 60 s, before it leads with a quorum, and closes its election once
+/// the member it heard in its canvass has joined its log. The member that comes after
+/// the term's first entry cannot join without the catch-up: it is counted and left
+/// out, and the two go on committing.
 #[test]
-fn the_leader_waits_for_every_member_then_leads_with_a_quorum_and_a_late_member_stays_out() {
+fn the_leader_canvasses_for_a_missing_member_then_leads_with_a_quorum_and_it_stays_out() {
     let ids = [0, 1, 2];
     let mut cluster = Cluster::new(&ids).expect("three members");
     let mut safety = Safety::new(&ids);
@@ -225,22 +225,17 @@ fn the_leader_waits_for_every_member_then_leads_with_a_quorum_and_a_late_member_
         "nothing proposed yet"
     );
     assert_eq!(cluster.offer(b"early"), Err(Refused::Election));
-
-    // The startup canvass timeout: a quorum candidate leads. The follower joins its
-    // log, and the leader waits in leader ready for the member that has not.
-    safety.run(&mut cluster, 1_100);
-    assert_eq!(cluster.role(0), Some(Role::Leader));
-    assert_eq!(cluster.election_state(0), Some(ElectionState::LeaderReady));
-    assert_eq!(cluster.election_state(1), Some(ElectionState::Closed));
-    assert_eq!(cluster.offer(b"early"), Err(Refused::Election));
     assert!(
         cluster.log(0).is_empty(),
         "no entry before the election closes"
     );
 
-    // The leader heartbeat timeout in leader ready: it closes with its quorum.
-    safety.run(&mut cluster, 10_000);
+    // The startup canvass timeout: a quorum candidate leads, the member it heard joins
+    // its log, and it closes with the two.
+    safety.run(&mut cluster, 1_100);
+    assert_eq!(cluster.role(0), Some(Role::Leader));
     assert_eq!(cluster.election_state(0), Some(ElectionState::Closed));
+    assert_eq!(cluster.election_state(1), Some(ElectionState::Closed));
     let first = cluster.offer(b"two of three").expect("the leader appends");
     safety.run(&mut cluster, 500);
     assert_eq!(cluster.commit_position(0), Some(first));
@@ -269,6 +264,62 @@ fn the_leader_waits_for_every_member_then_leads_with_a_quorum_and_a_late_member_
     assert!(cluster.log(2).is_empty());
 }
 
+/// Leader ready waits for the members the canvass heard, not for the first quorum of
+/// them. Of five members four are there: the leader leads with them at the startup
+/// canvass timeout and appends the term's first entry only once all four have joined
+/// its log, so that none of the four misses it. And a member that canvassed and then
+/// stopped before it joined is waited for no longer than the leader heartbeat timeout,
+/// 10 s, after which the leader closes with its quorum.
+#[test]
+fn leader_ready_waits_for_every_member_the_canvass_heard_for_the_heartbeat_timeout() {
+    let ids = [0, 1, 2, 3, 4];
+    let mut cluster = Cluster::new(&ids).expect("five members");
+    let mut safety = Safety::new(&ids);
+    cluster.halt(4);
+    safety.run(&mut cluster, 61_000);
+    for id in [0, 1, 2, 3] {
+        assert_eq!(
+            cluster.election_state(id),
+            Some(ElectionState::Closed),
+            "member {id}"
+        );
+    }
+    let entry = cluster.offer(b"four of five").expect("the leader appends");
+    safety.run(&mut cluster, 500);
+    for id in [0, 1, 2, 3] {
+        assert_eq!(
+            cluster.append_position(id),
+            Some(entry),
+            "member {id} holds the log"
+        );
+        assert_eq!(cluster.counts(id).expect("a member").elections_failed, 0);
+    }
+
+    // Three members, all there for the canvass; one stops as the leader begins to lead.
+    let ids = [0, 1, 2];
+    let mut cluster = Cluster::new(&ids).expect("three members");
+    let mut safety = Safety::new(&ids);
+    let mut steps = 0;
+    while cluster.role(0) != Some(Role::Leader) {
+        safety.run(&mut cluster, 1);
+        steps += 1;
+        assert!(steps < 1_000, "the leader did not lead");
+    }
+    cluster.halt(2);
+    safety.run(&mut cluster, 9_000);
+    assert_eq!(cluster.election_state(0), Some(ElectionState::LeaderReady));
+    assert_eq!(cluster.offer(b"early"), Err(Refused::Election));
+    assert!(
+        cluster.log(0).is_empty(),
+        "no entry while it waits for the member it heard"
+    );
+    safety.run(&mut cluster, 1_500);
+    assert_eq!(cluster.election_state(0), Some(ElectionState::Closed));
+    let entry = cluster.offer(b"two of three").expect("the leader appends");
+    safety.run(&mut cluster, 500);
+    assert_eq!(cluster.commit_position(1), Some(entry));
+}
+
 /// A member that passes follower replay on the leader's last word and then finds the
 /// leader's image somewhere else: the leader had appended what it had not yet synced,
 /// so its announced log position was behind its publication. The image joins past the
@@ -283,7 +334,7 @@ fn an_image_that_joins_past_the_append_position_is_counted_and_left() {
     // The leader's recorder never syncs: its append position stays 0 while its
     // publication moves on.
     cluster.pause_sync(0);
-    safety.run(&mut cluster, 71_000);
+    safety.run(&mut cluster, 61_000);
     assert_eq!(cluster.election_state(0), Some(ElectionState::Closed));
     assert_eq!(cluster.append_position(0), Some(0));
     assert!(!cluster.log(0).is_empty(), "the term event is appended");
@@ -332,7 +383,12 @@ fn a_leader_that_lost_its_log_directory_never_leads_again() {
         Some((vec![], -1)),
         "it proposed no term"
     );
-    assert_eq!(cluster.counts(0).expect("a member").terms_led, 0);
+    let counts = cluster.counts(0).expect("a member");
+    assert_eq!(counts.terms_led, 0);
+    assert_eq!(
+        counts.appointed_leader_behind, 2,
+        "each follower ahead, counted once"
+    );
     assert!(cluster.log(0).is_empty());
     assert_eq!(cluster.offer(b"again"), Err(Refused::Election));
     for (id, log) in [1, 2].into_iter().zip(&logs) {
@@ -417,7 +473,10 @@ fn a_leader_below_a_quorum_stays_and_stops_committing_and_level_followers_rejoin
     assert_eq!(cluster.role(0), Some(Role::Leader));
     assert_eq!(cluster.election_state(0), Some(ElectionState::Closed));
     assert_eq!(cluster.commit_position(0), Some(before));
-    assert_eq!(cluster.counts(0).expect("the leader").quorum_lost, 1);
+    assert_eq!(
+        cluster.counts(0).expect("the leader").leader_quorum_losses,
+        1
+    );
     for id in [1, 2] {
         let counts = cluster.counts(id).expect("a member");
         assert_eq!(counts.leader_heartbeat_timeouts, 1, "member {id}");
@@ -445,7 +504,10 @@ fn a_leader_below_a_quorum_stays_and_stops_committing_and_level_followers_rejoin
         assert_eq!(cluster.commit_position(id), Some(after));
     }
     // The quorum came back and was lost once: a second loss would be counted again.
-    assert_eq!(cluster.counts(0).expect("the leader").quorum_lost, 1);
+    assert_eq!(
+        cluster.counts(0).expect("the leader").leader_quorum_losses,
+        1
+    );
 }
 
 /// The same loss of a quorum with the leader appending through it: what it appended

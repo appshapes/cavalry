@@ -181,6 +181,11 @@ fn an_appointed_leader_whose_log_is_behind_a_members_never_leads() {
     assert_eq!(leader.leadership_term_id(), -1);
     assert_eq!(leader.counts().terms_led, 0);
     assert_eq!(
+        leader.counts().appointed_leader_behind,
+        2,
+        "each once, not each report"
+    );
+    assert_eq!(
         io.count(|c| !matches!(
             c,
             Call::Send {
@@ -191,8 +196,26 @@ fn an_appointed_leader_whose_log_is_behind_a_members_never_leads() {
         0
     );
 
-    // One member ahead and one silent is no quorum of logs not ahead, at any deadline;
-    // one member level and one silent is, once the deadline has passed.
+    // Where an elected candidate would lead with a quorum and truncate the member
+    // ahead, the appointed leader does not: one member level and one ahead is no
+    // leader at any deadline.
+    let mut io = Stub::new();
+    let mut leader = Consensus::new(&[0, 1, 2], 0).expect("a member");
+    for ms in (1..=120_000u64).step_by(100) {
+        leader
+            .on_message(at(ms), &canvass_position(1, -1, 0), &mut io)
+            .expect("no fault");
+        leader
+            .on_message(at(ms), &canvass_position(2, 0, 4096), &mut io)
+            .expect("no fault");
+        leader.do_work(at(ms), &mut io).expect("no fault");
+    }
+    assert_eq!(leader.election_state(), ElectionState::Canvass);
+    assert_eq!(leader.counts().appointed_leader_behind, 1);
+    assert_eq!(leader.counts().terms_led, 0);
+
+    // One member level and one silent is a quorum with none ahead, once the deadline
+    // has passed and not before.
     let mut io = Stub::new();
     let mut leader = Consensus::new(&[0, 1, 2], 0).expect("a member");
     for ms in (1..=59_901u64).step_by(100) {
@@ -209,6 +232,26 @@ fn an_appointed_leader_whose_log_is_behind_a_members_never_leads() {
     leader.do_work(at(60_002), &mut io).expect("no fault");
     assert_eq!(leader.election_state(), ElectionState::LeaderLogReplication);
     assert_eq!(leader.role(), Role::Leader);
+
+    // In leader ready a member that was silent through the canvass and now reports a
+    // log ahead of the leader's keeps the election open, whatever the deadline, and is
+    // counted: it holds a history the leader does not.
+    for ms in 60_003..=60_010u64 {
+        leader.do_work(at(ms), &mut io).expect("no fault");
+    }
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    for ms in (60_100..=80_000u64).step_by(100) {
+        leader
+            .on_message(at(ms), &append_position(1, 0), &mut io)
+            .expect("no fault");
+        leader
+            .on_message(at(ms), &canvass_position(2, 0, 4096), &mut io)
+            .expect("no fault");
+        leader.do_work(at(ms), &mut io).expect("no fault");
+    }
+    assert_eq!(leader.election_state(), ElectionState::LeaderReady);
+    assert_eq!(leader.counts().appointed_leader_behind, 1);
+    assert_eq!(io.count(|c| matches!(c, Call::Append(_))), 0);
 }
 
 /// A follower records the leader's term before it reports a position for it, joins
