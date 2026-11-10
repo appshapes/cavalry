@@ -109,7 +109,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(cavalry_add_publication(&mut publication, client, channel.as_ptr(), 1001), 0);
 
         // Publish by claim and commit: write in place, nothing copied, nothing allocated.
-        // Until the subscription's image joins, the driver answers not connected.
+        // Until the driver has made the subscription's image, it answers not connected.
+        // The subscription takes the image on a later poll, so a poll right after the
+        // first accepted claim can deliver nothing; nothing is lost, and the loop below
+        // polls until the message arrives. `cavalry_subscription_poll` says how to wait
+        // for the image.
         let mut claim = std::mem::zeroed::<cavalry_buffer_claim_t>();
         let mut received: Vec<(Vec<u8>, i32)> = Vec::new();
         loop {

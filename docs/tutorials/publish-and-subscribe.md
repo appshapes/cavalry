@@ -60,11 +60,16 @@ it connects with `Cavalry::connect()`, adds a subscription and a publication on 
 message and writes it in place, and polls the subscription, which hands each message to
 a closure as a view into the shared log; then it stops the recording once the recorder
 has written up to the publication's position, since a stop stops at what the recorder
-has written so far. Until the subscription's image joins, the claim is refused with
-`not-connected`; a full window is `back-pressured`; the program polls and tries again,
-which is what every refusal means. The recording is the driver's: its recorder thread
-wrote every committed frame to the log directory, `cavalry/log` under `$XDG_DATA_HOME`
-when that variable is set and `~/.local/share/cavalry/log` otherwise
+has written so far. Until the driver has made the subscription's image, the claim is
+refused with `not-connected`; a full window is `back-pressured`; the program polls and
+tries again, which is what every refusal means. The subscription takes the image later,
+on a poll, so a poll right after the first accepted claim can deliver nothing. Nothing
+is lost: the image starts at the position the driver gave it, before that claim, and a
+later poll delivers the message. The program polls in a loop, so it does not notice;
+[`Subscription::poll`](../../crates/cavalry-client/src/subscription.rs) says what to do
+when a program must have the image first. The recording is the driver's: its recorder
+thread wrote every committed frame to the log directory, `cavalry/log` under
+`$XDG_DATA_HOME` when that variable is set and `~/.local/share/cavalry/log` otherwise
 ([`log.dir`](../reference/config.md#logdir)), and it outlived the program. The
 recording id is 0 on a fresh log directory; a directory that holds earlier recordings
 gives the next id, which is the one the program printed.

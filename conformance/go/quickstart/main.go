@@ -332,19 +332,19 @@ func edges(client *cavalry.Client) {
 			publication.Err(), subscription.Err())
 	}
 
+	// A subscription takes its image on a poll, once the client's conductor has handed it
+	// over, which is after the driver made it: a publication can accept an offer before
+	// the subscription holds the image, and a poll then delivers nothing (cards 223, 233
+	// and 235). So wait for the image first. Nothing is offered yet, so these polls deliver
+	// nothing, and the one poll of ten below reads every message.
 	until := deadline()
-	for {
-		must(subscription.Poll(unexpected, 10)) // nothing is offered yet; the image joins on a poll
-		position := publication.Offer(message(0))
-		if position >= 0 {
-			break
-		}
-		if position == cavalry.PublicationClosed || position == cavalry.PublicationMaxPositionExceeded ||
-			position == cavalry.PublicationError || time.Now().After(until) {
-			fail("%s: the first offer returned %s (%d)", name, codeName(position), position)
+	for subscription.ImageCount() == 0 {
+		must(subscription.Poll(unexpected, 10))
+		if time.Now().After(until) {
+			fail("%s: the subscription held no image after %v", name, wait)
 		}
 	}
-	for i := 1; i < 10; i++ {
+	for i := 0; i < 10; i++ {
 		offerOrFail(name, publication, message(i), i)
 	}
 
