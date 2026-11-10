@@ -109,3 +109,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0062. Add a client's counter with Aeron's counter commands, as client protocol version 7](decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md)
 - [0064. Announce a stop whose own writes failed at the position last synced](decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md)
 - [0065. Give up a recording whose sync failed, without a stop of its own](decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md)
+- [0067. Sync a recording on command, as client protocol version 8](decisions/0067-sync-a-recording-on-command-as-client-protocol-version-8.md)

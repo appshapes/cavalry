@@ -7,7 +7,8 @@
 //! recorder reads its clock once, handles a bounded number of requests, visits every
 //! live recording, takes one block of whole committed frames with
 //! [`TermReader::block`], writes it with one positional write, stores the recording's
-//! position with a release store, syncs once per second, and stops a recording whose
+//! position with a release store, syncs once per second, or at once when a `sync
+//! recording` command asks (ADR 0067), and stops a recording whose
 //! publication reached its end of stream, whose write failed, or whose block scan found
 //! a frame that fails a check. A block is taken exactly when the writer's position moved,
 //! `cavalry-log`'s rule, so a failed write leaves the reader where it was. Nothing here
@@ -94,6 +95,14 @@ pub(crate) enum Request {
         /// The `stop recording` command's correlation id, when a command asked.
         correlation_id: Option<i64>,
     },
+    /// Sync what the recorder has written of a recording now, a `sync recording`
+    /// command's request (ADR 0067); answered with [`Reply::SyncDone`].
+    Sync {
+        /// The recording.
+        recording_id: i64,
+        /// The command's correlation id, which the reply carries back.
+        correlation_id: i64,
+    },
     /// A retention command's catalog write, one slot and a sync, on the thread that owns
     /// the catalog writer (ADR 0031); answered with [`Reply::CatalogDone`].
     Catalog {
@@ -143,6 +152,25 @@ pub(crate) enum StartFailure {
     Files(String),
 }
 
+/// What a `sync recording` request came to (`spec/client-protocol.md`, "Commands"; ADR
+/// 0067).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SyncOutcome {
+    /// Everything the recorder had written of the recording when it took the request
+    /// is covered by a sync that returned success: this request's, or an earlier one
+    /// when nothing was unsynced. Or the recorder no longer holds the recording, which
+    /// has stopped, and there is nothing to sync: `operation success` either way.
+    Done,
+    /// The sync failed, with the error's text: error code 12. The recording is marked
+    /// as one whose sync failed and is given up on the recorder's next visit with room
+    /// for the reply (ADR 0065).
+    Failed(String),
+    /// A sync of the recording had failed before and the recorder has not yet given
+    /// it up; no sync was made, since a sync is not asked a second time about bytes a
+    /// sync has failed on: error code 12.
+    AlreadyFailed,
+}
+
 /// What the recorder answers.
 pub(crate) enum Reply {
     /// The catalog slot is valid and synced, and the time index and the first segment
@@ -188,6 +216,15 @@ pub(crate) enum Reply {
         /// The command's correlation id, when a command asked.
         correlation_id: Option<i64>,
     },
+    /// A `sync recording` request was handled.
+    SyncDone {
+        /// The command's correlation id.
+        correlation_id: i64,
+        /// The recording the command named.
+        recording_id: i64,
+        /// What the request came to.
+        outcome: SyncOutcome,
+    },
     /// A retention command's catalog write is done, or failed with the message.
     CatalogDone {
         /// The command.
@@ -215,8 +252,9 @@ struct Live {
     bytes: Option<Counter>,
     /// The segment count last stored in `bytes`.
     segments_stored: i64,
-    /// A sync of this recording failed: the periodic one, or the one a write makes of
-    /// a segment it closes. Nothing more of it is written or synced, and it is given
+    /// A sync of this recording failed: the periodic one, one a `sync recording`
+    /// asked for, or the one a write makes of a segment it closes. Nothing more of it
+    /// is written or synced, and it is given
     /// up, with no stop run, as soon as there is room for the reply: a sync asked
     /// again about bytes a sync has failed on can return success and write nothing
     /// (ADR 0065).
@@ -399,6 +437,17 @@ impl Recorder {
                     repaired,
                 });
             }
+            Request::Sync {
+                recording_id,
+                correlation_id,
+            } => {
+                let outcome = self.sync_now(recording_id, now);
+                self.pending.push_back(Reply::SyncDone {
+                    correlation_id,
+                    recording_id,
+                    outcome,
+                });
+            }
             Request::Stop {
                 recording_id,
                 correlation_id,
@@ -414,6 +463,37 @@ impl Recorder {
                     .pending
                     .push_back(Reply::StopIgnored { correlation_id }),
             },
+        }
+    }
+
+    /// A `sync recording` request (ADR 0067): syncs what is written of the live
+    /// recording `recording_id` and not yet synced, and stores the synced position. A
+    /// recording the recorder no longer holds has stopped, and nothing is done. One
+    /// whose sync has already failed is not synced again (ADR 0065). A sync that fails
+    /// here marks the recording as the periodic sync's failure does in `record`, which
+    /// gives it up on its next visit with room for the reply.
+    fn sync_now(&mut self, recording_id: i64, now: i64) -> SyncOutcome {
+        let Some(live) = self
+            .live
+            .iter_mut()
+            .find(|live| live.recording_id == recording_id)
+        else {
+            return SyncOutcome::Done;
+        };
+        if live.sync_failed {
+            return SyncOutcome::AlreadyFailed;
+        }
+        match live.writer.sync_now(now) {
+            Ok(synced) => {
+                if synced && let Some(counter) = &live.synced {
+                    counter.store_release(live.writer.synced_position());
+                }
+                SyncOutcome::Done
+            }
+            Err(error) => {
+                live.sync_failed = true;
+                SyncOutcome::Failed(error.to_string())
+            }
         }
     }
 

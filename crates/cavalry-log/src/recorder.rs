@@ -21,7 +21,8 @@ use crate::layout::{
 const DOC: &str = "docs/reference/durable-log.md#the-driver";
 
 /// How often the recorder syncs a recording's segment and index: once per second while
-/// it has unsynced bytes (ADR 0025). Nanoseconds.
+/// it has unsynced bytes, the recording sync interval of `spec/client-protocol.md`,
+/// "Liveness and timeouts" (ADR 0025). Nanoseconds.
 pub const SYNC_INTERVAL: i64 = 1_000_000_000;
 
 /// The standard library's stack buffer for a path handed to the operating system: a
@@ -433,6 +434,22 @@ impl RecordingWriter {
     /// Returns whether it synced.
     pub fn sync(&mut self, now: i64) -> Result<bool, RecorderError> {
         if !self.unsynced || now - self.last_sync_timestamp < SYNC_INTERVAL {
+            return Ok(false);
+        }
+        self.sync_files()?;
+        self.last_sync_timestamp = now;
+        Ok(true)
+    }
+
+    /// Syncs the segment and the index now, whatever time has passed since the last
+    /// sync, when there are unsynced bytes, and moves the synced position up to the
+    /// position: the sync a `sync recording` command asks for
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0067). Returns whether it synced;
+    /// with nothing unsynced it makes no sync. The periodic [`sync`](Self::sync) is
+    /// next due a second after this one. Not to be called once
+    /// [`sync_failed`](Self::sync_failed) is true, as that says.
+    pub fn sync_now(&mut self, now: i64) -> Result<bool, RecorderError> {
+        if !self.unsynced {
             return Ok(false);
         }
         self.sync_files()?;

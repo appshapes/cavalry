@@ -37,6 +37,7 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   through a bounded queue and never touches the disk, the recorder takes blocks of
   committed frames from the publication's log buffer and writes them into the log
   directory's segment files with one positional write each, syncing once per second,
+  or at once when a client's `sync recording` asks through the same queue (ADR 0067),
   and its position, `recording.position`, bounds the publisher's limit, so that a slow
   disk back-pressures the publisher and never loses a byte (ADR 0025). The log
   directory is opened under a lock at start and recovered (`spec/durable-log.md`, "The
