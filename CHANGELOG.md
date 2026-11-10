@@ -1706,6 +1706,17 @@ user-visible change, added in the same commit as the change. The format follows
   changes
   ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
   card 227).
+- The driver adds and frees a client's counter: `add counter` allocates a record of
+  the counters file with the type id, key and label the client gave and answers
+  `counter ready`; `remove counter` answers `operation success`, then `unavailable
+  counter` to every client, and frees the record; a client that closes or is timed
+  out loses its counters the same way. The driver holds at most 256, refuses a type
+  that is not a client's with code 11 and another client's remove with code 5.
+  `counters.toml` gains the scope `client` and its first counter,
+  `cluster.commit_position`, which a cluster member's consensus module will add; the
+  code 11 the driver answered both commands with is gone
+  ([ADR 0062](docs/decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md);
+  card 227).
 - The cluster protocol says how an appointed leader leads: `spec/cluster.md` gains "The
   appointed leader", the path the replicated log takes through the election's states
   until the election is built. Every member canvasses, and the member with the lowest

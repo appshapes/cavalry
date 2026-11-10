@@ -20,9 +20,10 @@ use cavalry_shm::command_ring::{CommandRing, Producer};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLIENT_PROTOCOL_ERRORS, CLIENT_PROTOCOL_REJECTED_COMMAND, CLIENT_TIMED_OUT,
-    CONDUCTOR_IDLE_STRATEGY, DRIVER_REGISTRY_FULL, PUBLICATION_POSITION, RECORDING_INDEX_REWRITTEN,
-    RECORDING_RECOVERED, RECORDING_STARTED, RECORDING_STOPPED, REPLAY_ENDED, REPLAY_START_FAILED,
-    REPLAY_STARTED, REPLAY_STOPPED,
+    CLUSTER_COMMIT_POSITION, CONDUCTOR_IDLE_STRATEGY, COUNTERS_ALLOCATED, COUNTERS_FREED,
+    DRIVER_REGISTRY_FULL, PUBLICATION_POSITION, RECORDING_INDEX_REWRITTEN, RECORDING_RECOVERED,
+    RECORDING_STARTED, RECORDING_STOPPED, REPLAY_ENDED, REPLAY_START_FAILED, REPLAY_STARTED,
+    REPLAY_STOPPED,
 };
 use cavalry_shm::log::LogBuffers;
 
@@ -559,28 +560,33 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
     client.send_raw(12, &message);
     assert_eq!(client.wait_error(unknown_type).0, 6);
 
-    // The counter commands decode in version 7, and until the driver's registry of a
-    // client's counters lands (ADR 0062, the second of its three changes) the driver
-    // answers both with code 11 and a message that says so; it registers nothing.
-    for command in [
-        Command::AddCounter {
-            client_id: client.id,
-            correlation_id: client.correlation_id(),
-            type_id: 109,
-            key: &[2, 0, 0, 0],
-            label: b"cluster.commit_position 2",
-        },
-        Command::RemoveCounter {
-            client_id: client.id,
-            correlation_id: client.correlation_id(),
-            registration_id: 0,
-        },
-    ] {
-        client.send(&command);
-        let (code, text) = client.wait_error(command.correlation_id());
-        assert_eq!(code, 11, "{text}");
-        assert!(text.contains("ADR 0062"), "{text}");
-    }
+    // An add counter of a type `counters.toml` does not give a client, a static
+    // counter's, an instance counter's and one the file does not hold, is code 11 with
+    // the page that lists the ones a client adds, and counts as a rejected command (ADR
+    // 0062); here the driver's own `driver.registry_full`.
+    let not_a_clients = client.correlation_id();
+    client.send(&Command::AddCounter {
+        client_id: client.id,
+        correlation_id: not_a_clients,
+        type_id: DRIVER_REGISTRY_FULL.0,
+        key: &[2, 0, 0, 0],
+        label: b"driver.registry_full",
+    });
+    let (code, text) = client.wait_error(not_a_clients);
+    assert_eq!(code, 11, "{text}");
+    assert!(text.contains("is not one a client adds"), "{text}");
+    assert!(text.contains("docs/reference/counters.md"), "{text}");
+    // A remove counter of a registration the driver does not hold is code 5, counted
+    // in errors alone, as the other unknown registrations are.
+    let unknown_counter = client.correlation_id();
+    client.send(&Command::RemoveCounter {
+        client_id: client.id,
+        correlation_id: unknown_counter,
+        registration_id: 0,
+    });
+    let (code, text) = client.wait_error(unknown_counter);
+    assert_eq!(code, 5, "{text}");
+    assert!(text.contains("is not a counter of client"), "{text}");
     // An add counter whose key is over its bound is refused when it is decoded, code 7.
     let over = client.correlation_id();
     let mut message = Vec::new();
@@ -671,20 +677,20 @@ fn refused_commands_get_the_spec_error_codes_and_count() {
         &client.id.to_le_bytes(),
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    while counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND) < 8 {
+    while counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND) < 9 {
         assert!(
             Instant::now() < deadline,
-            "rejected_command did not reach 8"
+            "rejected_command did not reach 9"
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 8);
-    // Three more errors than rejected commands less the refusal with no answer: the
+    assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_REJECTED_COMMAND), 9);
+    // Two more errors than rejected commands less the refusal with no answer: the
     // replay on a cavalry:udp channel is a well-formed command answered with code 21
     // and counted in errors alone, as the retention refusals were before card 95, and
-    // so are the two counter commands answered with code 11 until their registry
-    // lands (ADR 0062); the add counter over its key's bound is a decoding refusal,
-    // counted in both.
+    // so is the remove counter of an unknown registration, code 5; the add counter of
+    // a type that is not a client's and the one over its key's bound are counted in
+    // both (ADR 0062).
     assert_eq!(counter(dir.path(), CLIENT_PROTOCOL_ERRORS), 10);
     driver.close().expect("closes");
 }
@@ -782,6 +788,201 @@ fn a_removed_publication_lingers_then_its_images_go_and_its_log_is_removed() {
     driver.close().expect("closes");
 }
 
+/// A client counter keyed by a member id, as the consensus module adds its commit
+/// position (ADR 0062): the registration id and the counter id `counter ready` carries.
+fn add_counter(client: &mut Client, member_id: i32) -> (i64, i32) {
+    let correlation_id = client.correlation_id();
+    let label = format!("cluster.commit_position {member_id}");
+    client.send(&Command::AddCounter {
+        client_id: client.id,
+        correlation_id,
+        type_id: CLUSTER_COMMIT_POSITION.0,
+        key: &member_id.to_le_bytes(),
+        label: label.as_bytes(),
+    });
+    let counter_id = client.wait(Duration::from_secs(5), |event| match *event {
+        Event::CounterReady {
+            correlation_id: id,
+            counter_id,
+        } if id == correlation_id => Some(counter_id),
+        Event::Error {
+            offending_correlation_id,
+            error_code,
+            error_message,
+        } if offending_correlation_id == correlation_id => panic!(
+            "add counter refused with {error_code}: {}",
+            String::from_utf8_lossy(error_message)
+        ),
+        _ => None,
+    });
+    (correlation_id, counter_id)
+}
+
+/// The type id, key and label of the allocated record `counter_id`, or `None` when the
+/// record holds no counter.
+fn client_counter_record(dir: &Path, counter_id: i32) -> Option<(i32, Vec<u8>, String)> {
+    let reader = CountersReader::open(dir).expect("the counters file opens");
+    let id = u32::try_from(counter_id).expect("a counter id");
+    reader.record(id).expect("the record reads").map(|record| {
+        (
+            record.type_id(),
+            record.key().to_vec(),
+            record.label().to_owned(),
+        )
+    })
+}
+
+#[test]
+fn a_clients_counter_is_allocated_as_it_asked_owned_by_it_and_freed_at_its_remove() {
+    let dir = TestDir::new("client-counter");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
+    let mut owner = Client::attach(dir.path());
+    let mut other = Client::attach(dir.path());
+    let allocated = counter(dir.path(), COUNTERS_ALLOCATED);
+
+    let (registration_id, counter_id) = add_counter(&mut owner, 2);
+    // The record is the one the client asked for: its type id, its key with zero bytes
+    // after it, its label; the value starts at 0 and is the client's to write.
+    let (type_id, key, label) =
+        client_counter_record(dir.path(), counter_id).expect("the record is allocated");
+    assert_eq!(type_id, CLUSTER_COMMIT_POSITION.0);
+    assert_eq!(key[..4], 2i32.to_le_bytes());
+    assert!(key[4..].iter().all(|byte| *byte == 0), "{key:?}");
+    assert_eq!(label, "cluster.commit_position 2");
+    assert_eq!(counter(dir.path(), COUNTERS_ALLOCATED), allocated + 1);
+    wait_value(dir.path(), counter_id, 0);
+    poison_counter(dir.path(), counter_id, 4096);
+    wait_value(dir.path(), counter_id, 4096);
+    // The driver compares a counter with none it holds: the same type id and key again
+    // is a second counter.
+    let (second_registration, second_id) = add_counter(&mut owner, 2);
+    assert_ne!(second_id, counter_id);
+    assert_ne!(second_registration, registration_id);
+
+    // Only its owner removes it: another client's remove, and a remove of a
+    // registration nobody holds, are code 5, and the counter stays.
+    for (client, named) in [(&mut other, registration_id), (&mut owner, i64::MAX)] {
+        let correlation_id = client.correlation_id();
+        client.send(&Command::RemoveCounter {
+            client_id: client.id,
+            correlation_id,
+            registration_id: named,
+        });
+        let (code, text) = client.wait_error(correlation_id);
+        assert_eq!(code, 5, "{text}");
+        assert!(text.contains("is not a counter of client"), "{text}");
+    }
+    assert!(client_counter_record(dir.path(), counter_id).is_some());
+
+    // The owner's remove: operation success, then unavailable counter to every client,
+    // and the record is no counter any more.
+    let freed = counter(dir.path(), COUNTERS_FREED);
+    let remove = owner.correlation_id();
+    owner.send(&Command::RemoveCounter {
+        client_id: owner.id,
+        correlation_id: remove,
+        registration_id,
+    });
+    let mut order = Vec::new();
+    owner.wait(Duration::from_secs(5), |event| match *event {
+        Event::OperationSuccess { correlation_id } if correlation_id == remove => {
+            order.push("operation success");
+            None
+        }
+        Event::UnavailableCounter {
+            registration_id: id,
+            counter_id: record,
+        } if id == registration_id => {
+            assert_eq!(record, counter_id);
+            order.push("unavailable counter");
+            Some(())
+        }
+        _ => None,
+    });
+    assert_eq!(order, ["operation success", "unavailable counter"]);
+    let told = other.wait(Duration::from_secs(5), |event| match *event {
+        Event::UnavailableCounter {
+            registration_id: id,
+            counter_id,
+        } if id == registration_id => Some(counter_id),
+        _ => None,
+    });
+    assert_eq!(told, counter_id, "every client is told");
+    assert_eq!(
+        wait_counter(dir.path(), COUNTERS_FREED, freed + 1),
+        freed + 1
+    );
+    assert!(client_counter_record(dir.path(), counter_id).is_none());
+    // A second remove of the same registration finds nothing.
+    let again = owner.correlation_id();
+    owner.send(&Command::RemoveCounter {
+        client_id: owner.id,
+        correlation_id: again,
+        registration_id,
+    });
+    assert_eq!(owner.wait_error(again).0, 5);
+
+    // A client that closes loses its counters as it loses its publications: the other
+    // counter is announced gone, with no operation success, and freed.
+    owner.send(&Command::ClientClose {
+        client_id: owner.id,
+        correlation_id: owner.correlation_id(),
+    });
+    let told = other.wait(Duration::from_secs(5), |event| match *event {
+        Event::UnavailableCounter {
+            registration_id: id,
+            counter_id,
+        } if id == second_registration => Some(counter_id),
+        _ => None,
+    });
+    assert_eq!(told, second_id);
+    assert_eq!(
+        wait_counter(dir.path(), COUNTERS_FREED, freed + 2),
+        freed + 2
+    );
+    assert!(client_counter_record(dir.path(), second_id).is_none());
+    assert_eq!(counter(dir.path(), COUNTERS_ALLOCATED), allocated);
+    driver.close().expect("closes");
+}
+
+#[test]
+fn the_client_counters_registry_is_bounded_and_says_so() {
+    let dir = TestDir::new("client-counters-full");
+    let driver = Driver::start(dir.path(), dir.path().join("log")).expect("starts");
+    let mut client = Client::attach(dir.path());
+    let (first, _) = add_counter(&mut client, 0);
+    for member_id in 1..spec::MAX_CLIENT_COUNTERS {
+        add_counter(&mut client, i32::try_from(member_id).expect("a member id"));
+    }
+    // The 257th is code 10, names the registry and registers nothing.
+    let one_too_many = client.correlation_id();
+    client.send(&Command::AddCounter {
+        client_id: client.id,
+        correlation_id: one_too_many,
+        type_id: CLUSTER_COMMIT_POSITION.0,
+        key: &256i32.to_le_bytes(),
+        label: b"cluster.commit_position 256",
+    });
+    let (code, message) = client.wait_error(one_too_many);
+    assert_eq!(code, 10, "{message}");
+    assert!(message.contains("client counters registry"), "{message}");
+    assert_eq!(counter(dir.path(), DRIVER_REGISTRY_FULL), 1);
+    // A counter removed makes room for one more.
+    let remove = client.correlation_id();
+    client.send(&Command::RemoveCounter {
+        client_id: client.id,
+        correlation_id: remove,
+        registration_id: first,
+    });
+    client.wait(Duration::from_secs(5), |event| match *event {
+        Event::OperationSuccess { correlation_id } if correlation_id == remove => Some(()),
+        _ => None,
+    });
+    add_counter(&mut client, 256);
+    assert_eq!(counter(dir.path(), DRIVER_REGISTRY_FULL), 1);
+    driver.close().expect("closes");
+}
+
 #[test]
 fn a_silent_client_is_timed_out_and_told() {
     let dir = TestDir::new("timeout");
@@ -789,17 +990,30 @@ fn a_silent_client_is_timed_out_and_told() {
     let mut client = Client::attach(dir.path());
     let (_, registration_id, _, _, log_file_name) = client.add_publication(9, false);
     assert!(dir.path().join(&log_file_name).is_file());
+    let (counter_registration, counter_id) = add_counter(&mut client, 2);
     // Nothing for longer than the client liveness timeout.
     let client_id = client.id;
+    let mut gone = Vec::new();
     let timed_out = client.wait(
         spec::CLIENT_LIVENESS_TIMEOUT + Duration::from_secs(5),
         |event| match *event {
+            Event::UnavailableCounter {
+                registration_id,
+                counter_id,
+            } => {
+                gone.push((registration_id, counter_id));
+                None
+            }
             Event::ClientTimeout { client_id: id } if id == client_id => Some(id),
             _ => None,
         },
     );
     assert_eq!(timed_out, client_id);
     assert_eq!(counter(dir.path(), CLIENT_TIMED_OUT), 1);
+    // Its counter went with it, announced before the client timeout, and its record is
+    // no counter any more (ADR 0062).
+    assert_eq!(gone, vec![(counter_registration, counter_id)]);
+    assert!(client_counter_record(dir.path(), counter_id).is_none());
     // Its publication closed with it: the log goes once the linger has passed.
     let deadline = Instant::now() + spec::PUBLICATION_LINGER + Duration::from_secs(5);
     while dir
