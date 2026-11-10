@@ -28,7 +28,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cavalry_driver::{IdleStrategy, spec};
 use cavalry_log::catalog::CatalogReader;
 use cavalry_log::layout::{Descriptor, State as SlotState, locate};
-use cavalry_proto::cluster::{EMPTY_MEMBER, MAX_MEMBERS, parse_members};
+use cavalry_proto::cluster::{
+    EMPTY_MEMBER, MAX_MEMBERS, STARTUP_CANVASS_TIMEOUT_NS, appointed_leader, parse_members, quorum,
+};
 #[cfg(target_os = "linux")]
 use cavalry_proto::udp::DATAGRAMS_PER_BURST;
 use cavalry_proto::udp::{LINGER, MTU_LENGTH_DEFAULT, SOCKET_RCVBUF_LENGTH};
@@ -298,6 +300,13 @@ pub fn examine(dir: &Path) -> Report {
 /// its filesystem, live by its gauge or stopped by its descriptor
 /// (`recording-over-half`, ADR 0031).
 pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
+    examine_in(dir, log_dir, None)
+}
+
+/// [`examine_with`], and with `cluster` what the members string says of the cluster the
+/// driver's member is in, so that a member with no leader is told whether it is the one
+/// that leads ([`examine_config`]).
+fn examine_in(dir: &Path, log_dir: Option<&Path>, cluster: Option<&Cluster>) -> Report {
     let mut findings = Vec::new();
     let mut checks = 0;
     if let Some(log_dir) = log_dir {
@@ -414,7 +423,7 @@ pub fn examine_with(dir: &Path, log_dir: Option<&Path>) -> Report {
         }
     };
 
-    checks += counters_checks(dir, running, log_dir, &mut findings);
+    checks += counters_checks(dir, running, log_dir, cluster, &mut findings);
     checks += host_checks(&mut findings);
     finish(dir, findings, checks)
 }
@@ -849,6 +858,7 @@ fn counters_checks(
     dir: &Path,
     running: bool,
     log_dir: Option<&Path>,
+    cluster: Option<&Cluster>,
     findings: &mut Vec<Finding>,
 ) -> usize {
     let reader = match CountersReader::open(dir) {
@@ -977,7 +987,7 @@ fn counters_checks(
     }
     checks += recording_checks(&reader, log_dir, findings);
     checks += udp_checks(&reader, running, findings);
-    checks += cluster_checks(&reader, running, findings);
+    checks += cluster_checks(&reader, running, cluster, findings);
     checks
 }
 
@@ -997,6 +1007,38 @@ struct MemberCounters {
     join_position_mismatches: i64,
     leader_quorum_losses: i64,
     appointed_leader_behind: i64,
+}
+
+/// What the members string doctor was given says of the cluster: its members' ids, so
+/// that doctor knows whether the driver's member is in it, and the appointed leader
+/// among them (`spec/cluster.md`, "The appointed leader").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Cluster {
+    ids: [i32; MAX_MEMBERS],
+    count: usize,
+}
+
+impl Cluster {
+    /// The cluster of a members string, or none when there is no string or the cluster
+    /// protocol refuses it, which `cluster-members` reports.
+    fn of(members: Option<&str>) -> Option<Cluster> {
+        let mut parsed = [EMPTY_MEMBER; MAX_MEMBERS];
+        let count = parse_members(members?.as_bytes(), &mut parsed, None).ok()?;
+        let mut ids = [0; MAX_MEMBERS];
+        for (id, member) in ids.iter_mut().zip(parsed.iter().take(count)) {
+            *id = member.id;
+        }
+        Some(Cluster { ids, count })
+    }
+
+    fn ids(&self) -> &[i32] {
+        self.ids.get(..self.count).unwrap_or(&[])
+    }
+
+    /// The member with the lowest id, the one that leads in this version.
+    fn appointed_leader(&self) -> i32 {
+        appointed_leader(self.ids())
+    }
 }
 
 /// The name of an election state's code, as `spec/cluster.md` names it.
@@ -1024,9 +1066,16 @@ fn election_state_name(code: i64) -> &'static str {
 /// (`cluster-joined-late`); an appointed leader that does not lead, or leads and does
 /// not close its election, its log behind a member's (`cluster-leader-behind`); a
 /// leader that lost its quorum (`cluster-quorum-lost`); and a commit position behind
-/// the leader's own append position (`cluster-commit-waits`). A stopped driver's member is gone with its
-/// client, so the checks run while the driver runs, and only where a member is.
-fn cluster_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
+/// the leader's own append position (`cluster-commit-waits`). A stopped driver's member
+/// is gone with its client, so the checks run while the driver runs, and only where a
+/// member is. With `cluster`, from the members string doctor was given, a member with no
+/// leader is told whether it is the appointed leader.
+fn cluster_checks(
+    reader: &CountersReader,
+    running: bool,
+    cluster: Option<&Cluster>,
+    findings: &mut Vec<Finding>,
+) -> usize {
     if !running {
         return 0;
     }
@@ -1092,13 +1141,72 @@ fn cluster_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Fin
     }
     members.sort_by_key(|member| member.id);
     for member in &members {
-        member_findings(member, findings);
+        member_findings(member, cluster, findings);
     }
     6
 }
 
+/// What `cluster-no-leader` says of member `id`, its election in `state`. The appointed
+/// leader canvasses as a follower until it leads (`spec/cluster.md`, "The appointed
+/// leader"), so a member with no leader may be the one the others wait for: with the
+/// members string, doctor says which it is and where to look next; without it, both.
+fn no_leader_message(id: i32, state: i64, cluster: Option<&Cluster>) -> String {
+    let startup = STARTUP_CANVASS_TIMEOUT_NS / 1_000_000_000;
+    let members = MEMBERS_KEY.env;
+    let waits_for = |quorum: &str| {
+        format!(
+            "it leads once every other member's canvass position has reached it, or once \
+             {quorum} has, itself among them, after the {startup} s startup canvass timeout"
+        )
+    };
+    let other_hosts = format!(
+        "a member it has not heard is not running, or its canvass positions do not reach \
+         this member's consensus endpoint in {members}: run doctor on each other member's \
+         host and check that it reaches that endpoint"
+    );
+    let leader_away = format!(
+        "is not running, is not reached on the consensus endpoints, or waits up to {startup} \
+         s for a member that has not started"
+    );
+    match cluster.filter(|cluster| cluster.ids().contains(&id)) {
+        Some(cluster) if cluster.appointed_leader() == id => format!(
+            "member {id} is the appointed leader, the member with the lowest id in {members}, \
+             and leads no term yet: its election is in {}, and {}; {other_hosts}",
+            election_state_name(state),
+            waits_for(&format!(
+                "a quorum, {} of {},",
+                quorum(cluster.count),
+                cluster.count
+            ))
+        ),
+        Some(cluster) => {
+            let leader = cluster.appointed_leader();
+            format!(
+                "member {id} follows no leader: its election is in {}. The appointed leader, \
+                 member {leader}, the member with the lowest id in {members}, {leader_away}; \
+                 run doctor on member {leader}'s host",
+                election_state_name(state)
+            )
+        }
+        None => format!(
+            "member {id} follows no leader: its election is in {}. The appointed leader is \
+             the member with the lowest id in {members}, which doctor was not given with \
+             this member in it; set it and {} as `cavalry run` has them, and doctor says \
+             which member that is. If it is another member, it {leader_away}: run doctor on \
+             its host. If it is this member, {}; {other_hosts}",
+            election_state_name(state),
+            MEMBER_ID_KEY.env,
+            waits_for("a quorum")
+        ),
+    }
+}
+
 /// The findings of one cluster member's counters.
-fn member_findings(member: &MemberCounters, findings: &mut Vec<Finding>) {
+fn member_findings(
+    member: &MemberCounters,
+    cluster: Option<&Cluster>,
+    findings: &mut Vec<Finding>,
+) {
     let id = member.id;
     let leads = member.role == Some(2);
     let state = member.election_state.unwrap_or(0);
@@ -1161,14 +1269,7 @@ fn member_findings(member: &MemberCounters, findings: &mut Vec<Finding>) {
         findings.push(Finding {
             check: "cluster-no-leader",
             level: Level::Warn,
-            message: format!(
-                "member {id} follows no leader: its election is in {}. The appointed leader, \
-                 the member with the lowest id in {}, is not running, is not reached on the \
-                 consensus endpoints, or waits up to 60 s for a member that has not started; \
-                 run doctor on that member's host",
-                election_state_name(state),
-                MEMBERS_KEY.env
-            ),
+            message: no_leader_message(id, state, cluster),
             doc: DOC_CLUSTER,
         });
     }
@@ -2328,9 +2429,12 @@ fn host_checks(findings: &mut Vec<Finding>) -> usize {
 /// cluster: `cluster.members` and `cluster.member.id` set together, the members string
 /// one the cluster protocol takes, the member id one of the string's, and every
 /// endpoint of the string a name that resolves (`cluster-members`,
-/// `cluster-member-id`; ADR 0060). Neither key set is no cluster and no finding.
+/// `cluster-member-id`; ADR 0060). Neither key set is no cluster and no finding. A
+/// members string the protocol takes also names the appointed leader to the checks of
+/// the driver's member, so that `cluster-no-leader` says whether it is this member.
 pub fn examine_config(config: &Config) -> Report {
-    let mut report = examine_with(&config.dir, config.log_dir.as_deref());
+    let cluster = Cluster::of(config.cluster_members.as_deref());
+    let mut report = examine_in(&config.dir, config.log_dir.as_deref(), cluster.as_ref());
     let mut findings = std::mem::take(&mut report.findings);
     let checks = report.checks
         + cluster_key_checks(
@@ -4424,11 +4528,102 @@ mod tests {
     }
 
     fn cluster_findings(test: &str, id: i32, values: &[(CounterId, i64)]) -> (usize, Vec<Finding>) {
+        cluster_findings_in(test, id, None, values)
+    }
+
+    /// [`cluster_findings`] with the cluster doctor was given a members string for.
+    fn cluster_findings_in(
+        test: &str,
+        id: i32,
+        cluster: Option<&Cluster>,
+        values: &[(CounterId, i64)],
+    ) -> (usize, Vec<Finding>) {
         let dir = TestDir::new(test);
         let reader = member_file(&dir, id, values);
         let mut findings = Vec::new();
-        let checks = cluster_checks(&reader, true, &mut findings);
+        let checks = cluster_checks(&reader, true, cluster, &mut findings);
         (checks, findings)
+    }
+
+    /// The appointed leader canvasses as a follower until it leads, so a member with no
+    /// leader is told whether it is the one the others wait for, and where to look next.
+    #[test]
+    fn a_member_with_no_leader_is_told_whether_it_is_the_appointed_leader() {
+        let members = "0,127.0.0.1:9000,127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003,127.0.0.1:9004\
+                       |1,127.0.0.1:9010,127.0.0.1:9011,127.0.0.1:9012,127.0.0.1:9013,127.0.0.1:9014\
+                       |2,127.0.0.1:9020,127.0.0.1:9021,127.0.0.1:9022,127.0.0.1:9023,127.0.0.1:9024";
+        let cluster = Cluster::of(Some(members)).expect("the members string parses");
+        assert_eq!(cluster.ids(), [0, 1, 2]);
+        assert_eq!(cluster.appointed_leader(), 0);
+        assert_eq!(Cluster::of(Some("0,nonsense")), None);
+        assert_eq!(Cluster::of(None), None);
+        let canvass = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 1),
+            (CLUSTER_LEADERSHIP_TERM_ID, -1),
+        ];
+        let no_leader = |test: &str, id: i32, cluster: Option<&Cluster>| {
+            let (_, findings) = cluster_findings_in(test, id, cluster, &canvass);
+            let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+            assert_eq!(found, ["cluster-member", "cluster-no-leader"]);
+            assert_eq!(findings[1].level, Level::Warn);
+            findings[1].message.clone()
+        };
+
+        // The member with the lowest id: what it waits for, and the other members' hosts.
+        let message = no_leader("no-leader-appointed", 0, Some(&cluster));
+        assert!(
+            message.starts_with(
+                "member 0 is the appointed leader, the member with the lowest id in \
+                 CAVALRY_CLUSTER_MEMBERS, and leads no term yet: its election is in canvass, \
+                 and it leads once every other member's canvass position has reached it, or \
+                 once a quorum, 2 of 3, has, itself among them, after the 60 s startup \
+                 canvass timeout"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "run doctor on each other member's host and check that it reaches that endpoint"
+            ),
+            "{message}"
+        );
+        assert!(!message.contains("member 0's host"), "{message}");
+
+        // Another member: the appointed leader by its id, and its host.
+        let message = no_leader("no-leader-follower", 2, Some(&cluster));
+        assert!(
+            message.contains(
+                "member 2 follows no leader: its election is in canvass. The appointed \
+                 leader, member 0, the member with the lowest id in CAVALRY_CLUSTER_MEMBERS, \
+                 is not running"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("run doctor on member 0's host"),
+            "{message}"
+        );
+
+        // No members string, or one this member is not in: both cases, and how to tell.
+        for (test, cluster) in [
+            ("no-leader-unknown", None),
+            ("no-leader-other", Some(&cluster)),
+        ] {
+            let message = no_leader(test, if cluster.is_some() { 7 } else { 0 }, cluster);
+            assert!(message.contains("which doctor was not given"), "{message}");
+            assert!(
+                message.contains("If it is another member, it is not running"),
+                "{message}"
+            );
+            assert!(
+                message.contains(
+                    "If it is this member, it leads once every other member's canvass \
+                     position has reached it, or once a quorum has"
+                ),
+                "{message}"
+            );
+        }
     }
 
     #[test]
@@ -4437,7 +4632,7 @@ mod tests {
         let dir = TestDir::new("cluster-none");
         let reader = member_file(&dir, 0, &[]);
         let mut findings = Vec::new();
-        assert_eq!(cluster_checks(&reader, true, &mut findings), 0);
+        assert_eq!(cluster_checks(&reader, true, None, &mut findings), 0);
         assert!(findings.is_empty());
         let follower = [
             (CLUSTER_ROLE, 0),
@@ -4448,7 +4643,7 @@ mod tests {
         ];
         let dir = TestDir::new("cluster-stopped");
         let reader = member_file(&dir, 1, &follower);
-        assert_eq!(cluster_checks(&reader, false, &mut findings), 0);
+        assert_eq!(cluster_checks(&reader, false, None, &mut findings), 0);
         assert!(findings.is_empty());
 
         // A follower that follows: the note alone, with who it is and what it knows.

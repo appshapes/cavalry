@@ -1935,7 +1935,9 @@ user-visible change, added in the same commit as the change. The format follows
 - `cavalry doctor` explains a cluster member from its counters. On a driver that is a
   member it prints `cluster-member`, a note with the member's id, whether it leads or
   follows, its term, its election's state and its append and commit positions. It
-  warns when the member follows no leader (`cluster-no-leader`), when its elections
+  warns when the member follows no leader (`cluster-no-leader`), saying from
+  `CAVALRY_CLUSTER_MEMBERS` whether it is the appointed leader and what it waits for,
+  or which member is and on whose host to look next; when its elections
   fail because it started late or lost its log (`cluster-joined-late`), and when the
   leader has lost its quorum (`cluster-quorum-lost`); it fails when the appointed
   leader found members ahead of its own log and so does not lead, or leads and does

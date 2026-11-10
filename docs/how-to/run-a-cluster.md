@@ -106,9 +106,18 @@ committed once a quorum, two of three, has it on disk.
   cluster again as a new cluster: stop every member, give every member a new log
   directory, and start them together. A new log directory on one member alone joins
   nothing.
-- `WARN cluster-no-leader`: the member is in canvass and has no leader to follow. The
-  appointed leader is not running, its consensus endpoint is not reached from this
-  host, or it still waits for a member. Run `doctor` on the leader's host.
+- `WARN cluster-no-leader` on a member that is not the appointed leader: the member is
+  in canvass and has no leader to follow. The appointed leader is not running, its
+  consensus endpoint is not reached from this host, or it still waits for a member.
+  The message names the appointed leader's id; run `doctor` on that member's host.
+- `WARN cluster-no-leader` on the appointed leader, whose message begins `member 0 is
+  the appointed leader`: it does not lead yet. It leads once every other member's
+  canvass position has reached it, or, after the 60 s startup canvass timeout, once
+  two of three have, itself among them. A member it has not heard is not running, or
+  cannot reach this member's consensus endpoint. Run `doctor` on each other member's
+  host, and check that the other hosts reach this host's consensus port, 9001 in step
+  1. `doctor` tells the two cases apart from `CAVALRY_CLUSTER_MEMBERS`; without it, the
+  message describes both.
 - `WARN cluster-joined-late`: the member's elections fail one after another. It
   started after the cluster's first entry, or lost what it held, and this version
   cannot bring it up to the leader's log. The cluster runs without it. To have it
