@@ -1932,3 +1932,12 @@ user-visible change, added in the same commit as the change. The format follows
   that has not yet stopped, its recorder behind, and a receiver thread starved of CPU
   ([ADR 0068](docs/decisions/0068-give-an-image-being-retired-to-no-new-subscription.md);
   card 227).
+- The soak samples its processes: each minute `scripts/soak.sh` adds one line for the
+  driver and one for the soak program to `samples/processes-<start>.txt`, one file
+  for each run, with the process's
+  resident memory, its three parts on Linux (heap and stacks, files on a disk, files
+  on a tmpfs, which is where the driver's mappings are), its virtual size, its
+  threads and its open descriptors, so that a week shows a course and not one
+  reading. [Set up a soak host](docs/how-to/set-up-a-soak-host.md), steps 5 and 6,
+  says what a line holds and how to tell growth from the mappings a driver brings
+  into RAM when it starts (card 240).
