@@ -215,6 +215,16 @@ struct Live {
     bytes: Option<Counter>,
     /// The segment count last stored in `bytes`.
     segments_stored: i64,
+    /// A sync of this recording failed: the periodic one, or the one a write makes of
+    /// a segment it closes. Nothing more of it is written or synced, and it is given
+    /// up, with no stop run, as soon as there is room for the reply: a sync asked
+    /// again about bytes a sync has failed on can return success and write nothing
+    /// (ADR 0065).
+    sync_failed: bool,
+    /// A write of this recording failed with no sync failing, a full disk's refusal
+    /// for one: the recording is stopped at the position written, as ADR 0025 has it,
+    /// and counted here once whether or not its stop then succeeds.
+    write_failed: bool,
 }
 
 /// What one visit to a live recording did.
@@ -442,6 +452,8 @@ impl Recorder {
                 self.live.push(Live {
                     bytes: None,
                     segments_stored: 0,
+                    sync_failed: false,
+                    write_failed: false,
                     recording_id,
                     publication_id,
                     reader: start.reader,
@@ -468,10 +480,18 @@ impl Recorder {
     }
 
     /// One visit to the live recording at `index`: a block if one is committed, a sync
-    /// if one is due, a stop if the stream ended or a write failed. With `may_stop`
-    /// false a stop waits for the next cycle, since there is no room for its reply.
+    /// if one is due, a stop if the stream ended or a write failed, and the recording
+    /// given up if a sync of its own failed. With `may_stop` false a stop waits for the
+    /// next cycle, since there is no room for its reply; a recording whose sync failed
+    /// waits too, and is neither written nor synced again while it does.
     fn record(&mut self, index: usize, now: i64, may_stop: bool) -> Step {
         let live = &mut self.live[index];
+        if live.sync_failed {
+            if !may_stop {
+                return Step::Idle;
+            }
+            return self.stop_at(index, now, None);
+        }
         let mut worked = false;
         // A committed frame that fails a check of spec/frame.md fails the whole scan,
         // so the frames before it are taken one at a time until it is the next frame;
@@ -526,10 +546,14 @@ impl Recorder {
                 worked = true;
             }
             if written.is_err() {
+                // A write that failed in the sync of the segment it closed is a sync
+                // that failed; any other is tried again next cycle when there is no
+                // room for the stop's reply now.
+                live.sync_failed = live.writer.sync_failed();
                 if !may_stop {
                     return Step::Idle;
                 }
-                self.write_failed.increment();
+                live.write_failed = true;
                 return self.stop_at(index, now, None);
             }
         }
@@ -542,10 +566,10 @@ impl Recorder {
             }
             Ok(false) => {}
             Err(_) => {
+                live.sync_failed = true;
                 if !may_stop {
                     return Step::Idle;
                 }
-                self.write_failed.increment();
                 return self.stop_at(index, now, None);
             }
         }
@@ -555,19 +579,38 @@ impl Recorder {
     /// Stops the recording at `index` at the position written: the stop entry, the
     /// syncs, the removal of a segment wholly past the stop and the catalog's stop
     /// fields (`LogDir::stop`). The reply carries the catalog's stop position, which
-    /// the stop synced. A stop whose own writes or syncs fail still stops the
-    /// recording: it counts `recording.write_failed`, leaves the slot live for the next
-    /// open's recovery, and the reply carries the position the last sync before the
-    /// stop made durable, read before `LogDir::stop` takes the writer. Recovery's stop
-    /// is never below that position (`spec/client-protocol.md`, "Commands"; ADR 0064).
-    /// The position counter keeps the position written, what the operating system
-    /// holds, and the synced counter the last sync.
+    /// the stop synced. A recording whose write failed with no sync failing is stopped
+    /// so too (ADR 0025).
+    ///
+    /// Two stops announce the position last synced instead, read from the writer
+    /// before anything else is done with it, and leave the slot live for the next
+    /// open's recovery, whose stop is never below that position
+    /// (`spec/client-protocol.md`, "Commands"). A stop whose own writes or syncs fail
+    /// (ADR 0064). And the stop of a recording one of whose syncs already failed, for
+    /// which `LogDir::stop` is not called at all: its syncs would run on files whose
+    /// writeback has failed, where a second sync can return success and write
+    /// nothing, and the catalog would then hold a stop over bytes that are not on the
+    /// disk (ADR 0065). The position counter keeps the position written, what the
+    /// operating system holds, and the synced counter the last sync.
+    ///
+    /// `recording.write_failed` counts the recording once, whichever of its writes,
+    /// its syncs and its stop failed.
     fn stop_at(&mut self, index: usize, now: i64, correlation_id: Option<i64>) -> Step {
         let live = self.live.swap_remove(index);
         let synced_before = live.writer.synced_position();
-        let stop_position = match self.log.stop(live.writer, now) {
-            Ok(descriptor) => {
-                let stopped = descriptor.stop_position();
+        let stopped = if live.sync_failed {
+            None
+        } else {
+            self.log
+                .stop(live.writer, now)
+                .ok()
+                .map(|descriptor| descriptor.stop_position())
+        };
+        if live.sync_failed || live.write_failed || stopped.is_none() {
+            self.write_failed.increment();
+        }
+        let stop_position = match stopped {
+            Some(stopped) => {
                 if let Some(synced) = &live.synced {
                     synced.store_release(stopped);
                 }
@@ -576,10 +619,7 @@ impl Recorder {
                 }
                 stopped
             }
-            Err(_) => {
-                self.write_failed.increment();
-                synced_before
-            }
+            None => synced_before,
         };
         // During duty cycles a stop happens only with room for its reply; only the
         // shutdown loop finds none, after the conductor has stopped reading.
@@ -592,6 +632,21 @@ impl Recorder {
             });
         }
         Step::Stopped
+    }
+
+    /// Marks the live recording `recording_id` as one whose sync failed, as the two
+    /// failure branches of `record` mark it: a test cannot make an `fdatasync` on the
+    /// recorder's own descriptors fail, so it takes the branch's effect from here and
+    /// lets the recorder's next visit do the rest.
+    #[cfg(test)]
+    pub(crate) fn fail_sync(&mut self, recording_id: i64) {
+        if let Some(live) = self
+            .live
+            .iter_mut()
+            .find(|live| live.recording_id == recording_id)
+        {
+            live.sync_failed = true;
+        }
     }
 
     /// How many replies wait for room in the reply queue.

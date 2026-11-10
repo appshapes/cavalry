@@ -1761,3 +1761,17 @@ user-visible change, added in the same commit as the change. The format follows
   with `operation success`
   ([ADR 0064](docs/decisions/0064-announce-a-failed-stop-at-the-position-last-synced.md);
   card 227).
+- The driver gives up a recording one of whose syncs failed, and runs no stop for
+  it. Before, it ran the recording's stop, whose sync, asked about bytes a sync had
+  already failed on, can return success and write nothing: the catalog then held the
+  position written as the stop and `recording stopped` carried it, for bytes that may
+  not be on the disk. Now the recorder writes and syncs nothing more of such a
+  recording, `recording stopped` carries the position the last sync that succeeded
+  covered, and the catalog's slot stays live until the next start's recovery. A write
+  the disk refused with no sync failing is followed by a stop as before, at the
+  position written. `recording.write_failed` counts a recording once, whichever of
+  its writes, its syncs and its stop failed. With ADR 0064, the position a client
+  reads from `recording stopped` is on every path one a sync that returned success
+  covered
+  ([ADR 0065](docs/decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md);
+  card 227).

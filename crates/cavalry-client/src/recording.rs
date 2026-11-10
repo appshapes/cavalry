@@ -226,7 +226,8 @@ impl Recording {
         self.stream_id
     }
 
-    /// The channel recorded, `cavalry:ipc` in this version.
+    /// The channel recorded, as the call that started or armed the recording named it:
+    /// `cavalry:ipc` or a `cavalry:udp` channel.
     pub fn channel(&self) -> &str {
         &self.channel
     }
@@ -247,9 +248,10 @@ impl Recording {
     /// The position up to which a sync has made the recording durable on disk: the
     /// `recording.synced_position` counter, at most a second behind [`position`]
     /// (ADR 0025). Once the recording has stopped, its [`stop_position`], which a sync
-    /// made durable before the driver said so: the stop's own sync, or, when the stop's
-    /// own writes or syncs failed, the last sync before the stop (ADR 0064). It never
-    /// moves back.
+    /// that returned success covered before the driver said so: the stop's own sync,
+    /// or, when the stop's own writes or syncs failed or a sync of the recording failed
+    /// before it, the last sync that succeeded (ADR 0064, ADR 0065). It never moves
+    /// back.
     ///
     /// [`position`]: Recording::position
     /// [`stop_position`]: Recording::stop_position
@@ -261,13 +263,18 @@ impl Recording {
     /// stopped`: by a `stop recording` from any client, at its publication's end of
     /// stream, or on a failure. `None` while it is live as far as this client has read.
     ///
-    /// The position is durable on every path (`spec/client-protocol.md`, "Commands";
-    /// ADR 0064). Usually it is the catalog's stop position, which the stop wrote and
-    /// synced. A stop whose own writes or syncs failed, on a full disk for instance,
-    /// still stops the recording, and `recording.write_failed` counts it. Then this is
-    /// the position the recorder had synced before the stop. The catalog holds no stop
-    /// for the recording until the driver's next start rebuilds one from the files, at
-    /// or above this position.
+    /// On every path the position is one that a sync which returned success covered
+    /// (`spec/client-protocol.md`, "Commands"; ADR 0064, ADR 0065). Usually it is the
+    /// catalog's stop position, which the stop wrote and synced. A recording one of
+    /// whose syncs failed, on a failing disk, is stopped with no stop run, and a stop
+    /// whose own writes or syncs failed, on a full disk for instance, still stops the
+    /// recording; `recording.write_failed` counts either. Then this is the position the
+    /// last sync that succeeded covered, which can be below what [`position`] returned
+    /// before.
+    /// The catalog holds no stop for the recording until the driver's next start
+    /// rebuilds one from the files, at or above this position.
+    ///
+    /// [`position`]: Recording::position
     pub fn stop_position(&self) -> Option<i64> {
         self.stop.get()
     }
