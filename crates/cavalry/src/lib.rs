@@ -9,14 +9,11 @@ pub use cavalry_client::{
 pub use cavalry_driver::{Driver, DriverError, DriverThread, IdleStrategy, ThreadStart, spec};
 pub use cavalry_log::index;
 
-/// A cluster member: the consensus module that replicates the cluster's log across
-/// drivers and commits it at a quorum, a client of the driver beside it (ADR 0063).
-/// `cavalry run` starts one when `cluster.members` and `cluster.member.id` are set.
-pub mod cluster {
-    pub use cavalry_raft::{
-        ConsensusModule, Counts, ElectionState, MAX_PAYLOAD_LENGTH, RaftError, Refused, Role,
-    };
-}
+/// A cluster member: `cavalry-raft`, whose `ConsensusModule` replicates the cluster's
+/// log across drivers and commits it at a quorum, a client of the driver beside it
+/// (ADR 0063). `cavalry run` starts one when `cluster.members` and `cluster.member.id`
+/// are set.
+pub use cavalry_raft as cluster;
 
 #[cfg(feature = "cli")]
 pub use cavalry_control::{config, doctor};
