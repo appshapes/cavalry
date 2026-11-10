@@ -796,8 +796,8 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
         "{stderr}"
     );
     assert!(stderr.contains("closed;"), "{stderr}");
-    for member in 0..3 {
-        let _ = std::fs::remove_dir_all(format!("{}-log", dirs[member].arg()));
+    for dir in &dirs {
+        let _ = std::fs::remove_dir_all(format!("{}-log", dir.arg()));
     }
 }
 
