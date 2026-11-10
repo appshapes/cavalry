@@ -1165,7 +1165,6 @@ kind = "gauge"
 scope = "client"
 doc = "The commit position one cluster member knows: the position the leader has found a quorum has appended, which never falls; an entry at or below it is committed and a service reads nothing above it (spec/cluster.md, The log). The member's consensus module adds the counter and stores the value with a release store; a service loads it with an acquire load before it polls the log; key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "A cluster.commit_position that stays where it is while the member's recording.position moves is a commit that waits for a quorum: check that a majority of the members in the members string are running and that each reaches the others' consensus endpoints."
-<<<<<<< HEAD
 
 [[counter]]
 id = 110
@@ -1361,5 +1360,3 @@ machine = "cluster_election"
 from = "closed"
 to = "init"
 counter = "cluster.log_images_lost"
-=======
->>>>>>> 227-consensus-core
