@@ -217,11 +217,26 @@ impl CommittedLog {
     {
         // Another session on the stream is read past and dropped. One that fails a
         // check is removed by that read; it is not this log, so it is no fault here.
-        if let Err(Fault::Closed) = self
+        // A fault of this log's own session is: its image could not join, and nothing
+        // of the log will be delivered through this handle.
+        match self
             .subscription
             .discard_others(self.session_id, DISCARD_LIMIT)
         {
-            return Err(Fault::Closed);
+            Ok(_) => {}
+            Err(Fault::Closed) => return Err(Fault::Closed),
+            Err(fault) => {
+                let session = match fault {
+                    Fault::Image { session_id, .. } | Fault::ImagesFull { session_id } => {
+                        Some(session_id)
+                    }
+                    Fault::Closed => None,
+                };
+                if session == Some(self.session_id) {
+                    self.faulted = true;
+                    return Err(fault);
+                }
+            }
         }
         let positions = match self.positions {
             Some(positions) => positions,
