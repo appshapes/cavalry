@@ -974,8 +974,9 @@ class JvmPackage(unittest.TestCase):
 
     BASE = JVM_BASE
     FILES = sorted(JVM_BASE + name for name in (
-        "Abi.java", "CavalryException.java", "Client.java", "FragmentHandler.java", "HandlerException.java",
-        "Header.java", "Image.java", "Publication.java", "Recording.java", "Replay.java", "Subscription.java"))
+        "Abi.java", "CavalryException.java", "Client.java", "CommittedLog.java", "EntryHandler.java",
+        "FragmentHandler.java", "HandlerException.java", "Header.java", "Image.java", "Publication.java",
+        "Recording.java", "Replay.java", "Subscription.java"))
 
     @classmethod
     def setUpClass(cls):

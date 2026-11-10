@@ -14,7 +14,8 @@ client's own code. A `Client` closes with `close()` or `try`-with-resources; a
 `Publication` claims a slice of the log as a `MemorySegment` over it or offers a
 `MemorySegment`; a `Subscription` polls with a `FragmentHandler` that receives the
 body as a `MemorySegment` into the log and the frame's `Header`; a `Recording` and a
-`Replay` wrap the driver's archive. Every message the client sends or receives goes
+`Replay` wrap the driver's archive; a `CommittedLog` is a service's read of a cluster's
+committed log beside a member (below). Every message the client sends or receives goes
 through one `extern "C"` call on the caller's thread, as the ABI's page promises
 (ADR 0046's boundary; ADR 0051). In Aeron, this is the Java client's `Publication`,
 `Subscription` and `FragmentHandler`, which this one copies in shape: the handler
@@ -28,14 +29,41 @@ from Java alone, at run time, so the library is `javac` and `java` and nothing e
 cost is the Java release: 22 brought the API, and this library takes 25, the
 long-term release that holds it.
 
+### The committed log
+
+A service is a program beside a cluster member that applies the entries the cluster
+has committed (`docs/how-to/read-the-committed-log.md`). `client.committedLog(position)`
+opens the log of the member on the client's driver at a position, 0 or the
+`position()` an earlier run reached, and returns `null` while the driver hosts no
+member with a log, so a service started before its member asks again. `log.poll(handler,
+fragmentLimit)` calls the `EntryHandler`, `handler.onEntry(body, header, position)`,
+for each committed entry, in order, none at or past the member's commit position, and
+returns the entry count; `position` is the entry's position in the log.
+`log.position()` is the position after the last entry delivered, the one a service
+keeps for its next start, and `log.commitPosition()` the bound of the last poll.
+`log.isEnded()` says that the member closed or left its log: once a poll then returns
+0, close the log and open another from `log.position()`. `log.failedAt()` is empty
+unless the driver's replay of the member's recording failed. `log.close()`, or
+`try`-with-resources, stops the driver's replay and is idempotent; a log closed after
+its client is freed, and the driver ends the replay by itself. `log.memberId()` and
+`log.recordingId()` say whose log it is (`spec/c-abi.md`, "Functions", committed log;
+ADR 0068).
+
+A committed log has an upcall stub of its own, as a subscription has. A handler's
+exception goes where a subscription's goes ("The exception"): every entry the ABI
+delivers reaches the handler, and `poll` throws `HandlerException` once the ABI has
+returned. An entry whose handler call threw was delivered and is not delivered again,
+so a service that must apply every entry catches its own exceptions and stops there,
+with the entry's `position` in hand to open the log at again.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no `synchronized`
   block, no wait, no future, no thread, no copy of a fragment into a new array for the
   handler. `clients/lint.py` reads the per-message methods of `Publication`,
-  `Subscription` and `Header`, the claim, the reserved value, the commit, the abort,
-  the offer, the poll, the header's nine getters and the upcall that calls the
-  handler, for Java's forms of each: `synchronized`, as a modifier or a block, the lock
+  `Subscription`, `CommittedLog` and `Header`, the claim, the reserved value, the
+  commit, the abort, the offer, each poll, the header's nine getters and each upcall
+  that calls a handler, for Java's forms of each: `synchronized`, as a modifier or a block, the lock
   classes of `java.util.concurrent` and a lock taken on any receiver (`.lock(`,
   `.tryLock(`, `.acquire(`), a blocking wait (`wait`, `join`, `await`, `park`, `sleep`,
   `take`), a future or an executor, a thread started, `throw` and `new`. The one
@@ -178,7 +206,7 @@ the thread blocks in the call.
 A `Client`'s methods are `synchronized`, so threads may share one: an add, a command
 or a close holds the client's lock for its one ABI call, which the ABI serialises
 anyway, and the lock is never on a message's path. A `Publication`, a `Subscription`
-and its `Header` are used from one thread at a time, the ABI's rule for every handle;
+or a `CommittedLog` and its `Header` are used from one thread at a time, the ABI's rule for every handle;
 a program with several threads gives each its own, as the Rust API's are used.
 `Client.addDestination` and `removeDestination` are calls on the client, not on the
 `Publication` they name: they may run beside that publication's `offer` or `tryClaim`

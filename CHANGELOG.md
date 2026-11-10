@@ -1983,3 +1983,14 @@ user-visible change, added in the same commit as the change. The format follows
   members and reads its log
   ([ADR 0068](docs/decisions/0068-take-the-c-abi-to-version-2-with-the-committed-log.md);
   card 227).
+- The JVM client reads a cluster's committed log. `client.committedLog(position)`
+  returns a `CommittedLog`, or `null` while the driver hosts no cluster member with a
+  log; `log.poll(handler, fragmentLimit)` calls the `EntryHandler`,
+  `handler.onEntry(body, header, position)`, for each entry a quorum has committed,
+  none past the commit position; `log.position()` is where a service opens the log
+  again. A handler's exception is thrown after the poll as `HandlerException`, as a
+  subscription's is, and its entry is not delivered again. The JVM runner starts a
+  cluster of three members and reads its log. With this, a service can be written in
+  each of the five clients' languages
+  ([ADR 0068](docs/decisions/0068-take-the-c-abi-to-version-2-with-the-committed-log.md);
+  card 227).
