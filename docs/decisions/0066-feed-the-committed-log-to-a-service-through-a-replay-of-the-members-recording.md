@@ -39,8 +39,8 @@ The durable log already gives the other path. A replay with a length of 2^63 −
 follows a live recording: it "reads up to the synced position and waits for it to
 move", and it ends at the recording's stop position when the recording stops
 (`spec/client-protocol.md`, "Commands"), which is a position a sync covered whatever
-ended the recording (ADR 0064). Every member records the log, the leader its
-publication and each follower the leader's image, at the same positions.
+ended the recording (ADR 0064, ADR 0065). Every member records the log, the leader
+its publication and each follower the leader's image, at the same positions.
 
 ## Decision
 
@@ -198,7 +198,8 @@ than one sync, or when a service needs the log sooner than its member's disk has
 ## References
 
 - ADR 0052, feature 3; ADR 0060; ADR 0063; ADR 0036 (a recording's counters after
-  its stop); ADR 0064 (the position a stop that failed is announced at).
+  its stop); ADR 0064 (the position a stop that failed is announced at); ADR 0065
+  (a recording one of whose syncs failed is given up at the position last synced).
 - `spec/cluster.md`, "The service" and "Counters"; `spec/log-buffer.md`, "Reading";
   `spec/client-protocol.md`, "Commands", start replay.
 - Aeron: `Image.boundedPoll`, `BoundedLogAdapter`, `ClusteredServiceContainer`.
