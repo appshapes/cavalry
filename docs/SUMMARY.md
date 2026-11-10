@@ -113,3 +113,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0065. Give up a recording whose sync failed, without a stop of its own](decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md)
 - [0066. Feed the committed log to a service through a replay of the member's recording](decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md)
 - [0067. Register the election's state machine with its core, and count each of its steps](decisions/0067-register-the-elections-state-machine-with-its-core-and-count-each-step.md)
+- [0068. Give an image being retired to no new subscription, and hold an add until its endpoint has closed](decisions/0068-give-an-image-being-retired-to-no-new-subscription.md)

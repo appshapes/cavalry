@@ -477,7 +477,11 @@ receiver id is a random i64 chosen when it starts. On a datagram from a source a
    a subscription its client removed (`spec/client-protocol.md`, "Commands"), and the
    sender, hearing no status message for the connection timeout, disconnects its
    publication, so that the publisher reads `not connected` as it does over
-   `cavalry:ipc` when the last subscriber goes. An image with no activity for the image
+   `cavalry:ipc` when the last subscriber goes. From the removal of its last
+   subscription an image is being retired, whether or not the receiver has finished:
+   it is given to no subscription added on its endpoint and stream meanwhile, and no
+   recording starts on it, since its log goes when the retire is done (ADR 0068). An
+   image with no activity for the image
    liveness timeout is retired too: a data datagram that is accepted, and a heartbeat
    at or above the last status message's position less a term, count as activity; an
    under-run and an over-run do not; so a sender that pauses its data while
@@ -532,7 +536,13 @@ An endpoint has a life of its own, so the two registries of "Values" have a rele
 receive endpoint is bound by the first `add subscription` on its resolved channel and
 closes when its last subscription is removed and its last image retired; a send
 endpoint is opened by the first `add publication` on its resolved channel and closes
-when its last publication's linger ends. Closing is `channel.status` 2: the socket is
+when its last publication's linger ends. Between the removal of its last subscription
+and its close a receive endpoint takes no subscription, though it stays active while
+the receiver retires its images: an `add subscription` on its channel then waits for
+the close, as one that meets the endpoint closing does (`spec/client-protocol.md`,
+"Commands"; ADR 0049, ADR 0068), and binds the endpoint again, so that it is given no
+image that is being retired and its stream's session sits out no cool-down. Closing
+is `channel.status` 2: the socket is
 closed, the endpoint's five counters are freed after the counter reuse timeout
 (`spec/client-protocol.md`, "Liveness and timeouts"), and the registry slot is returned,
 so a driver that has seen more than 64 distinct endpoints over its life refuses none
