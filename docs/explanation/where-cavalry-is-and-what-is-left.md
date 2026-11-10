@@ -30,7 +30,7 @@ which Cavalry is ready for early testers; it is also what this project means by 
   surfaces are named and an upgrade across two published versions has run, a cluster
   has run for a week, and the README says what is not built.
 - **What is left.** Three pieces of work: the rest of the fifth slice, six cards; the
-  debts a tester would meet, seven items; and a sixth slice, the first release, which
+  debts a tester would meet, six items; and a sixth slice, the first release, which
   ends with a week of soak on a release candidate.
 - **When.** An estimate, not a gate: five to seven weeks from 2026-11-09, so 0.1.0
   between about 2026-12-14 and 2026-12-28. One of those weeks is the soak and cannot
@@ -187,9 +187,10 @@ first five before the release.
 6. **Card 211.** The client's allocation tests do not count a reallocation.
    Recommended before the release, since the release repeats the claim the tests
    make.
-7. **Not on the path.** Cards 177, 198 and 219 are the bench harness's and the bench
-   hosts'. Cards 212 and 215 are the review loop's. They cost the project time, not
-   a tester.
+
+Five more open cards are debts too, but not a tester's, so they are not on the path
+to the line. Cards 177, 198 and 219 are the bench harness's and the bench hosts'.
+Cards 212 and 215 are the review loop's. They cost the project time, not a tester.
 
 ### 3. The sixth slice: the first release
 
