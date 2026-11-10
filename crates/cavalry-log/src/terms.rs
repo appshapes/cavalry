@@ -7,7 +7,8 @@
 //! [`TermsFile::truncate_above`] before it reports its log leadership term id again,
 //! and [`TermsFile::set_candidate_term`] before the vote or request vote that raises
 //! the candidate term is sent; each write syncs before it returns. A reader takes the
-//! entries in file order, skips a deleted one and stops at the empty entry a crash left:
+//! entries in file order, skips a deleted one and stops at the empty last entry a crash
+//! left, an empty entry before the last being damage:
 //! [`TermsHeader::parse`] and [`TermsEntry::parse`] are the checks of "What a reader
 //! rejects", in order, which the vectors of `spec/vectors/durable-log.json` pin.
 //!
@@ -118,6 +119,13 @@ pub enum TermsError {
         /// The index of the entry whose checksum does not match.
         index: u64,
     },
+    /// An entry of the file is empty and a whole entry follows it. With one writer only
+    /// the last whole entry can be empty, the torn tail of a crash, so the file is
+    /// damaged: it is left as it was, and no term is dropped. The `state` check.
+    EmptyBeforeLast {
+        /// The index of the empty entry.
+        index: u64,
+    },
     /// An entry's term is below 0 or not above the valid entry before it.
     Term {
         /// The term found.
@@ -161,7 +169,7 @@ impl TermsError {
             TermsError::EntryLength { .. } => "entry-length",
             TermsError::Candidate => "candidate",
             TermsError::Length { .. } => "length",
-            TermsError::State { .. } => "state",
+            TermsError::State { .. } | TermsError::EmptyBeforeLast { .. } => "state",
             TermsError::Checksum | TermsError::Damaged { .. } => "checksum",
             TermsError::Term { .. } => "term",
             TermsError::Position { .. } => "position",
@@ -267,6 +275,14 @@ impl std::fmt::Display for TermsError {
                  this and the file is damaged; it was left as it was and no term was \
                  dropped: restore it from the member's last good copy, or start a new log \
                  directory for this member; see {DOC}"
+            ),
+            TermsError::EmptyBeforeLast { index } => write!(
+                f,
+                "terms file rejected (state): entry {index} is empty and an entry follows it. \
+                 The writer appends an entry only after the one before it is whole, so only \
+                 the last entry can be empty and the file is damaged; it was left as it was \
+                 and no term was dropped: restore it from the member's last good copy, or \
+                 start a new log directory for this member; see {DOC}"
             ),
             TermsError::Term { found } => write!(
                 f,
@@ -585,14 +601,15 @@ impl TermsFile {
         file.sync_all().map_err(io("sync"))
     }
 
-    /// Opens the file in `dir`, reading its header and every entry up to the empty one a
-    /// torn append left, which the next write overwrites, and creates the file when
-    /// there is none. A file
+    /// Opens the file in `dir`, reading its header and every entry up to an empty last
+    /// one, which a torn append left and the next write overwrites, and creates the file
+    /// when there is none. A file
     /// a crash tore while it was created, shorter than its header or with a zero magic
     /// over no term and no vote, is written again; a zero magic over a term or a vote is
     /// [`TermsError::NotReady`]. A candidate slot whose checksum does not match is the
     /// raise a crash tore, and the candidate term is the other slot's. An entry whose
-    /// checksum fails is [`TermsError::Damaged`], the last entry's too. The
+    /// checksum fails is [`TermsError::Damaged`], the last entry's too, and an empty
+    /// entry with a whole entry after it is [`TermsError::EmptyBeforeLast`]. The
     /// file's length is checked against the bound before a byte is read, and the entries
     /// are read 128 at a time into a fixed buffer, so that what the reader holds is
     /// bounded by [`MAX_ENTRIES`] whatever is on disk.
@@ -659,6 +676,14 @@ impl TermsFile {
                     Err(error) => return Err(error),
                 };
                 if entry.state == EMPTY {
+                    // The file's end only as its last whole entry, the torn tail of a
+                    // crash. An append writes an entry only after the one before it is
+                    // whole, so an empty entry with a whole entry after it is damage,
+                    // and the terms after it are not dropped.
+                    let empty = index + offset as u64;
+                    if empty + 1 < whole {
+                        return Err(TermsError::EmptyBeforeLast { index: empty });
+                    }
                     break 'read;
                 }
                 if entry.state == VALID {
@@ -880,16 +905,6 @@ mod tests {
         .encode();
         torn[..4].copy_from_slice(&EMPTY.to_le_bytes());
         bytes.extend_from_slice(&torn);
-        // A third entry whose checksum is wrong, behind the empty one: never read.
-        let mut bad = TermsEntry {
-            state: VALID,
-            leadership_term_id: 4,
-            term_base_log_position: 8192,
-            recording_id: 2,
-        }
-        .encode();
-        bad[4] ^= 0xFF;
-        bytes.extend_from_slice(&bad);
         // The created file's first raise wrote slot 1, so the raise to 9 writes slot 0.
         // A crash tears it: the term is written and its checksum is not.
         assert_eq!(read_slots(&bytes), [Some(NO_CANDIDATE_TERM), Some(7)]);
@@ -1062,6 +1077,50 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_entry_before_the_last_is_damage_and_the_file_is_left_as_it_was() {
+        let dir = dir("empty-before-last");
+        let mut file = TermsFile::create(&dir).expect("created");
+        file.append(2, 0, 0).expect("appended");
+        file.append(3, 4096, 1).expect("appended");
+        file.append(4, 8192, 2).expect("appended");
+        drop(file);
+        let path = TermsFile::path_in(&dir);
+        let mut bytes = std::fs::read(&path).expect("read");
+        // Entry 1's state reads 0, which no checksum covers, and entry 2 follows it. The
+        // writer appended entry 2 only after entry 1 was whole, so this is no torn tail:
+        // the member may have reported append positions in terms 3 and 4.
+        bytes[HEADER_LENGTH + ENTRY_LENGTH..][..4].copy_from_slice(&EMPTY.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("written");
+        let refused = TermsFile::open(&dir).expect_err("damage");
+        assert_eq!(refused.reason(), "state");
+        assert!(
+            matches!(refused, TermsError::EmptyBeforeLast { index: 1 }),
+            "{refused:?}"
+        );
+        let message = refused.to_string();
+        assert!(message.contains("damaged"), "{message}");
+        assert!(message.contains("restore it"), "{message}");
+        assert_eq!(
+            std::fs::read(&path).expect("read"),
+            bytes,
+            "terms 3 and 4 are still in the file, and nothing was written over them"
+        );
+        // The same entry empty as the file's last whole entry is the torn tail of a
+        // crash: the file opens, and the next append takes the entry's place.
+        bytes.truncate(HEADER_LENGTH + 2 * ENTRY_LENGTH);
+        std::fs::write(&path, &bytes).expect("written");
+        let mut file = TermsFile::open(&dir).expect("a torn tail opens");
+        assert_eq!(file.log_leadership_term_id(), 2);
+        file.append(5, 4096, 3)
+            .expect("appended over the torn tail");
+        drop(file);
+        let file = TermsFile::open(&dir).expect("opened");
+        let terms: Vec<i64> = file.terms().map(|entry| entry.leadership_term_id).collect();
+        assert_eq!(terms, vec![2, 5]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_last_entry_whose_checksum_fails_is_damage_and_the_file_is_left_as_it_was() {
         let dir = dir("damaged-tail");
         let mut file = TermsFile::create(&dir).expect("created");
@@ -1161,6 +1220,18 @@ mod tests {
         assert_eq!(file.log_leadership_term_id(), 298);
         assert_eq!(file.candidate_term(), 3);
         drop(file);
+        // An empty entry at the end of the reader's first buffer, its follower in the
+        // second: damage, found though the entry after it is in another read.
+        let mut holed = bytes.clone();
+        holed[HEADER_LENGTH + (READ_ENTRIES - 1) * ENTRY_LENGTH..][..4]
+            .copy_from_slice(&EMPTY.to_le_bytes());
+        std::fs::write(TermsFile::path_in(&dir), &holed).expect("written");
+        let refused = TermsFile::open(&dir).expect_err("damage");
+        let hole = READ_ENTRIES as u64 - 1;
+        assert!(
+            matches!(refused, TermsError::EmptyBeforeLast { index } if index == hole),
+            "{refused:?}"
+        );
         // A checksum that fails in the reader's second buffer is damage, with its index
         // in the file and not in the buffer.
         bytes[HEADER_LENGTH + (READ_ENTRIES + 72) * ENTRY_LENGTH + 4] ^= 0xFF;

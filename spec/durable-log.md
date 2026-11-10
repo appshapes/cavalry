@@ -213,7 +213,7 @@ Entry i is at 64 + i × 32.
 
 | Offset | Size | Field | Type | Bound |
 | --- | --- | --- | --- | --- |
-| 0 | 4 | state | i32 | 0, empty, the entry's other bytes are not read and the file ends here; 1, valid; 3, deleted, a term truncation dropped |
+| 0 | 4 | state | i32 | 0, empty, the entry's other bytes are not read: the file's end when it is the last whole entry, and damage before it; 1, valid; 3, deleted, a term truncation dropped |
 | 4 | 4 | checksum | u32 | the zlib CRC32 of bytes 8 to 32 |
 | 8 | 8 | leadership term id | i64 | 0 or more, above every valid entry before it |
 | 16 | 8 | term base log position | i64 | 0 or more, a multiple of 32, at least every valid entry's before it |
@@ -226,11 +226,19 @@ valid entry's term is above every valid entry's before it and its base at least
 theirs, so the entries a reader takes are the member's terms in order; the term base
 log position of the first term a member records is the position of its log at the
 time, 0 for a cluster's first term. The reader takes entries in file order, skips an
-entry whose state is 3, and stops at the first entry whose state is 0, the file's end:
-the torn tail of a crash, which the next write overwrites. An entry whose state is 1
+entry whose state is 3, and stops at an entry whose state is 0 when it is the file's
+last whole entry: the torn tail of a crash, which the next write overwrites. With one
+writer only the last entry can be empty, since an append writes entry i only after
+entry i − 1's state is synced. An empty entry before the last is damage, as an empty
+catalog slot before the last is, and the reader refuses the file with `state` and
+drops no term. An entry whose state is 1
 or 3 and whose checksum fails is damage wherever it is, the last entry included: the
 writer syncs an entry's fields and checksum before it writes the state, so no crash
-leaves it, and the reader refuses the file with `checksum` and drops no term. The member's candidate term
+leaves it, and the reader refuses the file with `checksum` and drops no term. The
+state is an entry's commit word and lies outside its checksum on purpose, as a
+catalog slot's does, so that an append and a truncation each end in one write of four
+bytes. The cost is that a state damaged from 1 to 3, or from 3 to 1, is not detected:
+the reader can then take a term for truncated that was not, or the reverse. The member's candidate term
 at its start is the higher of the stored candidate term and its log leadership term
 id, as "Roles and the election" of `spec/cluster.md` has init take it.
 
@@ -445,7 +453,7 @@ An entry, with its index and the entry before it:
 
 | Check | Reported when |
 | --- | --- |
-| `state` | The state is not 0, 1 or 3. |
+| `state` | The state is not 0, 1 or 3; or it is 0 and a whole entry follows it in the file: the file is damaged, since only the last whole entry can be empty. An entry vector holds one entry and so pins the first half alone. |
 | `checksum` | The state is 1 or 3 and the checksum does not match bytes 8 to 32: the file is damaged, since no crash leaves it, and the reader refuses it. |
 | `term` | The term is below 0, or not above the valid entry before it. |
 | `position` | The term base log position is below 0, not a multiple of 32, or below the valid entry's before it. |

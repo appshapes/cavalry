@@ -51,8 +51,10 @@ entry's fields are written once, by its append, and only its state changes after
 The writer appends an entry by writing its checksum and fields and syncing, then its
 state, 1, and syncing; truncates by writing state 3 over each entry whose base is
 above the position and syncing; and a reader takes entries in file order, skipping
-state 3, stopping at the first entry whose state is 0, the empty entry a torn append
-leaves; a checksum that fails under a state of 1 or 3 is damage the reader refuses
+state 3, stopping at an entry whose state is 0 when it is the file's last whole entry,
+the empty entry a torn append leaves; an empty entry before the last is damage the
+reader refuses, since one writer leaves only the last entry empty; and a checksum
+that fails under a state of 1 or 3 is damage the reader refuses
 wherever the entry is, the last included, with no term dropped, since the append's
 order lets no crash leave it. The file holds at most 1048576 entries, the catalog's bound on recordings,
 and `cavalry doctor` warns from 90 percent of it; a member refuses to record a term
@@ -139,6 +141,18 @@ in any of the five languages.
   every later one in silence, a term the member may have reported append positions
   in, and the next append would write over the damaged entry and give its positions
   to the term before it.
+- **The first empty entry read as the file's end wherever it is.** Lost: invariant 1.
+  An append writes an entry only after the one before it is whole, so a crash leaves
+  only the last whole entry empty, as the catalog's rule for an empty slot has it. An
+  entry's state is outside its checksum, so one damaged bit can make a valid entry
+  read as empty; a reader that stopped there would drop that term and every term
+  after it in silence, and the next append would leave the later entries behind it,
+  to be read again at the start after.
+- **An entry's state under its checksum.** Lost: an append and a truncation each end
+  in one write of four bytes, the state, which is what makes a crash during either
+  read as the state before it; a checksum over the state would be a second write that
+  a crash could separate from the first. The cost is a state damaged from 1 to 3, or
+  from 3 to 1, that no check detects, and the page says so.
 - **Setting a term's recording id in place once its recording exists.** Lost: the
   entry's one checksum covers the recording id, so a rewrite torn by a crash leaves a
   valid state over a checksum that fails, which a reader takes for damage, so a crash

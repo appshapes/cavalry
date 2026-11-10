@@ -1659,9 +1659,9 @@ user-visible change, added in the same commit as the change. The format follows
   candidate term has two slots under a checksum each, so a member that crashes while
   it stores a vote restarts with the vote stored before, never with none; the file is
   created with its magic last, so a creation a crash tore is written again; and a
-  checksum that fails in an entry, the last one's too, or in both candidate slots, is
-  refused as damage with what to do, the file left as it was and no term dropped; ADR
-  0060 decides the replicated log's shape
+  checksum that fails in an entry, the last one's too, or in both candidate slots, and
+  an empty entry before the last, are refused as damage with what to do, the file left
+  as it was and no term dropped; ADR 0060 decides the replicated log's shape
   for card 227: the consensus channel one publication per peer, a member's append
   position its recording's synced position, the leader appointed by the members
   string's order until card 228, the keys `cluster.members` and `cluster.member.id`,
