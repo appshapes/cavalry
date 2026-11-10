@@ -915,9 +915,11 @@ impl Consensus {
             .iter()
             .take(self.count)
             .filter(|peer| {
+                // At the leader's log position and no other: a position past it is of
+                // entries this leader's log does not hold.
                 peer.reported
                     && peer.term == self.term
-                    && peer.position >= self.append_position
+                    && peer.position == self.append_position
                     && clock.now_ns.saturating_sub(peer.at_ns) < LEADER_HEARTBEAT_TIMEOUT_NS
             })
             .count();

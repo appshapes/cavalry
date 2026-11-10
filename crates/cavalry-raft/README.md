@@ -11,9 +11,11 @@ commit path runs per message.
   what a quorum has recorded; a follower canvasses, joins the leader's log at its
   append position and reports that position as it rises.
 - Leads by appointment, until the election is built: the member with the lowest id is
-  the leader, and every other member follows it (`spec/cluster.md`, "The appointed
-  leader"; ADR 0063). A member that could join only with a catch-up or a truncation,
-  one that starts late or holds a log, is refused and counted, never joined wrong.
+  the one member that may lead, and every other member follows it (`spec/cluster.md`,
+  "The appointed leader"; ADR 0063). It canvasses first and leads only when no member
+  reports a log ahead of its own, so a leader that lost its log directory never leads
+  a second time. A member that could join only with a catch-up or a truncation, one
+  that starts late, is left out and counted, never joined wrong.
 - Does no I/O of its own: the core reaches the consensus stream, the log, its
   recording and its `terms` file through one trait, `Io`. `memory::Cluster` gives it
   that in memory, three members in one process on a clock the caller steps, with
@@ -49,8 +51,8 @@ use cavalry_raft::memory::Cluster;
 use cavalry_raft::{ElectionState, Role};
 
 let mut cluster = Cluster::new(&[0, 1, 2])?;
-// One second of the cluster's clock: the member with the lowest id leads, the others
-// canvass, join its log and report, and every election closes.
+// One second of the cluster's clock: every member canvasses, the member with the
+// lowest id leads, the others join its log and report, and every election closes.
 cluster.run_ms(1_000);
 assert_eq!(cluster.role(0), Some(Role::Leader));
 assert_eq!(cluster.role(1), Some(Role::Follower));
