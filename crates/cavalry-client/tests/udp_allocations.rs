@@ -4,7 +4,7 @@
 //! no allocation and no reallocation at all. `stats_alloc` counts a `realloc`, a buffer
 //! grown past a capacity it already had, apart from an allocation, so the test adds the
 //! two: it counts what the bench's gate counts (ADR 0047; card 211), and
-//! `tests/reallocation_counted.rs` shows the sum sees a grown `Vec`. Alone in its
+//! `tests/reallocation_counted.rs` shows the sum sees a `Vec` that grows. Alone in its
 //! binary, so that no other test's threads are counted (`cargo test` runs a binary's
 //! tests in parallel).
 
@@ -302,7 +302,7 @@ fn the_send_path_allocates_nothing_per_message() {
         change.allocations + change.reallocations,
         0,
         "the send path allocated or reallocated over {} messages: {change:?}; see \
-         .claude/rules/data-plane.md",
+         docs/how-to/run-the-bench.md, \"When it does not work\"",
         ROUNDS * MESSAGES_PER_ROUND
     );
     publication.close().expect("closes");
