@@ -1775,3 +1775,9 @@ user-visible change, added in the same commit as the change. The format follows
   covered
   ([ADR 0065](docs/decisions/0065-give-up-a-recording-whose-sync-failed-without-a-stop.md);
   card 227).
+- `cavalry doctor`'s `recording-write-failed` finding says where such a recording
+  stopped: at the position written after a write the disk refused, and at the position
+  last synced, with no stop in the catalog until the driver starts again, after a sync
+  or a stop that failed. It said "at the position written" for all of them. The
+  `recording.stopped` counter's description names a failed sync among the stops
+  (ADR 0064, ADR 0065; card 227).

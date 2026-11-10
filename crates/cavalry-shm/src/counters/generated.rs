@@ -68,7 +68,7 @@ pub const COUNTERS_FREED: CounterId = CounterId(19);
 /// `recording.started`, a static counter: Recordings the driver started: a catalog slot taken, the time index and the first segment file created, the two position counters allocated and recording ready sent (spec/client-protocol.md, Commands).
 pub const RECORDING_STARTED: CounterId = CounterId(20);
 
-/// `recording.stopped`, a static counter: Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands).
+/// `recording.stopped`, a static counter: Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write, a failed sync or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands).
 pub const RECORDING_STOPPED: CounterId = CounterId(21);
 
 /// `recording.write_failed`, a static counter: Recordings the recorder stopped because a write or a sync of theirs to the segment file or the time index failed, or because the writes or syncs of their stop did, each counted once. After a write that failed with no sync failing the recording stopped at the position written; after a sync that failed, or a stop that did, at the position last synced, its catalog slot left live for the next start's recovery (spec/client-protocol.md, Commands; ADR 0064; ADR 0065).
@@ -510,7 +510,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "recording.stopped",
         kind: Kind::Counter,
         scope: Scope::Static,
-        doc: "Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands).",
+        doc: "Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write, a failed sync or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands).",
         doctor: "",
     },
     CounterDef {

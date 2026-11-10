@@ -189,7 +189,7 @@ id = 21
 name = "recording.stopped"
 kind = "counter"
 scope = "static"
-doc = "Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands)."
+doc = "Recordings the driver stopped, by stop recording, at a publication's end of stream, or after a failed write, a failed sync or a frame that failed its check; each sent recording stopped with the stop position (spec/client-protocol.md, Commands)."
 doctor = ""
 
 [[counter]]
