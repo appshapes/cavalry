@@ -1807,3 +1807,16 @@ user-visible change, added in the same commit as the change. The format follows
   `ConsensusModule` for a program that runs a member itself
   ([ADR 0060](docs/decisions/0060-replicate-the-log-with-an-appointed-leader.md);
   card 227).
+- `cavalry doctor` explains a cluster member from its counters. On a driver that is a
+  member it prints `cluster-member`, a note with the member's id, whether it leads or
+  follows, its term, its election's state and its append and commit positions. It
+  warns when the member follows no leader (`cluster-no-leader`), when its elections
+  fail because it started late or lost its log (`cluster-joined-late`), and when the
+  leader has lost its quorum (`cluster-quorum-lost`); it fails when the appointed
+  leader found members ahead of its own log and so does not lead
+  (`cluster-leader-behind`); and it notes a commit position behind the leader's own
+  append position (`cluster-commit-waits`). Each names what to do. An armed recording
+  that has started, which every follower has, is no longer reported: `recording.armed`
+  warns only for recordings still waiting for their image. The new how-to,
+  [Run a cluster of three members](docs/how-to/run-a-cluster.md), starts three members
+  on one host and reads each finding (card 227).

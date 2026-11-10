@@ -37,10 +37,16 @@ use cavalry_shm::counters::generated::{
     CHANNEL_DESTINATIONS, CHANNEL_IMAGES, CHANNEL_PUBLICATIONS, CHANNEL_SOCKET_RCVBUF,
     CHANNEL_SOCKET_SNDBUF, CHANNEL_STATUS, CONDUCTOR_IDLE_STRATEGY as IDLE_STRATEGY_COUNTER,
     COUNTERS, COUNTERS_ALLOCATED, COUNTERS_ALLOCATION_FAILED, IMAGE_CREATED, IMAGE_ENDED,
-    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_POSITION, RECORDING_BYTES,
+    IMAGE_HWM_POSITION, IMAGE_REBUILD_POSITION, PUBLICATION_POSITION, RECORDING_ARMED,
+    RECORDING_ARMED_DROPPED, RECORDING_ARMED_FAILED, RECORDING_ARMED_STARTED, RECORDING_BYTES,
     RECORDING_INVALIDATED, RECORDING_POSITION, RECORDING_SYNCED_POSITION, RECORDING_WRITE_FAILED,
     SENDER_FLOW_CONTROL_RECEIVERS, SENDER_FLOW_CONTROL_RECEIVERS_FULL,
     SENDER_FLOW_CONTROL_RECEIVERS_TIMED_OUT, SENDER_LIMIT,
+};
+use cavalry_shm::counters::generated::{
+    CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
+    CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES,
+    CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_ROLE,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -919,6 +925,7 @@ fn counters_checks(
             && def.id != COUNTERS_ALLOCATION_FAILED
             && def.id != RECORDING_WRITE_FAILED
             && def.id != RECORDING_INVALIDATED
+            && def.id != RECORDING_ARMED
     }) {
         checks += 1;
         let Some(value) = read(def.name, def.id, findings) else {
@@ -929,6 +936,32 @@ fn counters_checks(
                 check: def.name,
                 level: Level::Warn,
                 message: format!("{} is {value}: {}", def.name, def.doctor),
+                doc: DOC_COUNTERS,
+            });
+        }
+    }
+    // An armed recording that started, failed or was dropped is armed no more: the
+    // counter's own sentence compares the four, so the check does, and a recording a
+    // cluster's follower armed and its leader's image started is nothing to report.
+    checks += 1;
+    let armed = [
+        read("recording.armed", RECORDING_ARMED, findings),
+        read("recording.armed_started", RECORDING_ARMED_STARTED, findings),
+        read("recording.armed_failed", RECORDING_ARMED_FAILED, findings),
+        read("recording.armed_dropped", RECORDING_ARMED_DROPPED, findings),
+    ];
+    if let [Some(armed), Some(started), Some(failed), Some(dropped)] = armed {
+        let waiting = armed - started - failed - dropped;
+        if waiting > 0 {
+            findings.push(Finding {
+                check: "recording.armed",
+                level: Level::Warn,
+                message: format!(
+                    "{waiting} armed recording(s) wait for an image: recording.armed is {armed} \
+                     and {started} started, {failed} failed and {dropped} were dropped; check \
+                     the publisher and the channel, and that the subscription's endpoint is \
+                     the one the publication sends to"
+                ),
                 doc: DOC_COUNTERS,
             });
         }
@@ -944,7 +977,211 @@ fn counters_checks(
     }
     checks += recording_checks(&reader, log_dir, findings);
     checks += udp_checks(&reader, running, findings);
+    checks += cluster_checks(&reader, running, findings);
     checks
+}
+
+const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
+
+/// One cluster member as its counters show it (`spec/cluster.md`, "Counters"): what its
+/// consensus module stored, by the member id in each counter's key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MemberCounters {
+    id: i32,
+    role: Option<i64>,
+    election_state: Option<i64>,
+    term: Option<i64>,
+    append_position: Option<i64>,
+    commit_position: Option<i64>,
+    elections_failed: i64,
+    join_position_mismatches: i64,
+    leader_quorum_losses: i64,
+    appointed_leader_behind: i64,
+}
+
+/// The name of an election state's code, as `spec/cluster.md` names it.
+fn election_state_name(code: i64) -> &'static str {
+    match code {
+        0 => "init",
+        1 => "canvass",
+        5 => "leader log replication",
+        6 => "leader replay",
+        7 => "leader init",
+        8 => "leader ready",
+        10 => "follower replay",
+        14 => "follower log init",
+        15 => "follower log await",
+        16 => "follower ready",
+        17 => "closed",
+        _ => "a state this doctor does not know",
+    }
+}
+
+/// The cluster member this driver is, when it is one, from the counters its consensus
+/// module added (`spec/cluster.md`, "Counters"; ADR 0062): who it is and what it knows,
+/// a note (`cluster-member`); a member that follows no leader (`cluster-no-leader`); a
+/// member its leader's log left behind, which this version cannot bring back
+/// (`cluster-joined-late`); an appointed leader that will not lead, its log behind a
+/// member's (`cluster-leader-behind`); a leader that lost its quorum
+/// (`cluster-quorum-lost`); and a commit position behind the leader's own append
+/// position (`cluster-commit-waits`). A stopped driver's member is gone with its
+/// client, so the checks run while the driver runs, and only where a member is.
+fn cluster_checks(reader: &CountersReader, running: bool, findings: &mut Vec<Finding>) -> usize {
+    if !running {
+        return 0;
+    }
+    let mut members: Vec<MemberCounters> = Vec::new();
+    for id in 0..reader.capacity() {
+        let Some(fields) = reader.record(id).ok().flatten() else {
+            continue;
+        };
+        let type_id = fields.type_id();
+        if !(CLUSTER_COMMIT_POSITION.0..=CLUSTER_APPOINTED_LEADER_BEHIND.0).contains(&type_id) {
+            continue;
+        }
+        let Ok(value) = reader.read_acquire(id) else {
+            continue;
+        };
+        let mut key = [0u8; 4];
+        if let Some(head) = fields.key().get(..4) {
+            key.copy_from_slice(head);
+        }
+        let member_id = i32::from_le_bytes(key);
+        let index = match members.iter().position(|member| member.id == member_id) {
+            Some(index) => index,
+            None => {
+                members.push(MemberCounters {
+                    id: member_id,
+                    ..MemberCounters::default()
+                });
+                members.len() - 1
+            }
+        };
+        let Some(member) = members.get_mut(index) else {
+            continue;
+        };
+        if type_id == CLUSTER_ROLE.0 {
+            member.role = Some(value);
+        } else if type_id == CLUSTER_ELECTION_STATE.0 {
+            member.election_state = Some(value);
+        } else if type_id == CLUSTER_LEADERSHIP_TERM_ID.0 {
+            member.term = Some(value);
+        } else if type_id == CLUSTER_APPEND_POSITION.0 {
+            member.append_position = Some(value);
+        } else if type_id == CLUSTER_COMMIT_POSITION.0 {
+            member.commit_position = Some(value);
+        } else if type_id == CLUSTER_ELECTIONS_FAILED.0 {
+            member.elections_failed = value;
+        } else if type_id == CLUSTER_JOIN_POSITION_MISMATCHES.0 {
+            member.join_position_mismatches = value;
+        } else if type_id == CLUSTER_LEADER_QUORUM_LOSSES.0 {
+            member.leader_quorum_losses = value;
+        } else if type_id == CLUSTER_APPOINTED_LEADER_BEHIND.0 {
+            member.appointed_leader_behind = value;
+        }
+    }
+    if members.is_empty() {
+        return 0;
+    }
+    members.sort_by_key(|member| member.id);
+    for member in &members {
+        member_findings(member, findings);
+    }
+    6
+}
+
+/// The findings of one cluster member's counters.
+fn member_findings(member: &MemberCounters, findings: &mut Vec<Finding>) {
+    let id = member.id;
+    let leads = member.role == Some(2);
+    let state = member.election_state.unwrap_or(0);
+    let closed = state == 17;
+    let term = member.term.unwrap_or(-1);
+    let append = member.append_position.unwrap_or(0);
+    let commit = member.commit_position.unwrap_or(0);
+    findings.push(Finding {
+        check: "cluster-member",
+        level: Level::Note,
+        message: format!(
+            "this driver is cluster member {id}, {} in term {term}, election {}: append \
+             position {append}, commit position {commit}",
+            if leads { "the leader" } else { "a follower" },
+            election_state_name(state)
+        ),
+        doc: DOC_CLUSTER,
+    });
+    if member.appointed_leader_behind > 0 && !leads {
+        findings.push(Finding {
+            check: "cluster-leader-behind",
+            level: Level::Fail,
+            message: format!(
+                "member {id} is the cluster's appointed leader and found {} member(s) holding \
+                 a log ahead of its own, so it does not lead: its log directory was lost or \
+                 replaced while the others kept theirs. Start the cluster again as a new \
+                 cluster, every member on a new log directory, and keep the old directories \
+                 for what they hold",
+                member.appointed_leader_behind
+            ),
+            doc: DOC_CLUSTER,
+        });
+    } else if !leads && !closed && member.elections_failed + member.join_position_mismatches > 0 {
+        findings.push(Finding {
+            check: "cluster-joined-late",
+            level: Level::Warn,
+            message: format!(
+                "member {id} cannot join its leader's log: {} of its elections failed, {} of \
+                 them on an image that joined past its append position. It started after \
+                 the cluster's first entry, or lost what it held, and this version has no \
+                 catch-up: the cluster runs without it. To have it back, start the cluster \
+                 again as a new cluster, every member on a new log directory",
+                member.elections_failed, member.join_position_mismatches
+            ),
+            doc: DOC_CLUSTER,
+        });
+    } else if !leads && !closed {
+        findings.push(Finding {
+            check: "cluster-no-leader",
+            level: Level::Warn,
+            message: format!(
+                "member {id} follows no leader: its election is in {}. The appointed leader, \
+                 the member with the lowest id in {}, is not running, is not reached on the \
+                 consensus endpoints, or waits up to 60 s for a member that has not started; \
+                 run doctor on that member's host",
+                election_state_name(state),
+                MEMBERS_KEY.env
+            ),
+            doc: DOC_CLUSTER,
+        });
+    }
+    if leads && member.leader_quorum_losses > 0 {
+        findings.push(Finding {
+            check: "cluster-quorum-lost",
+            level: Level::Warn,
+            message: format!(
+                "the leader, member {id}, has lost its quorum {} time(s): fewer than a \
+                 majority of the members reported within 10 s, and nothing is committed \
+                 while that lasts. Check that a majority of the members in {} run and reach \
+                 this member's consensus endpoint",
+                member.leader_quorum_losses, MEMBERS_KEY.env
+            ),
+            doc: DOC_CLUSTER,
+        });
+    }
+    if leads && closed && commit < append {
+        findings.push(Finding {
+            check: "cluster-commit-waits",
+            level: Level::Note,
+            message: format!(
+                "the leader, member {id}, has appended to position {append} and a quorum has \
+                 recorded to {commit}: {} bytes wait for a quorum. A member's recorder syncs \
+                 once a second, so up to a second of entries waits at any moment; if the \
+                 commit position stays while the append position moves, a quorum of members \
+                 is not reporting: run doctor on each member's host",
+                append - commit
+            ),
+            doc: DOC_CLUSTER,
+        });
+    }
 }
 
 /// One endpoint, send or receive, as the counters file shows it: the `channel.status`
@@ -3299,6 +3536,38 @@ mod tests {
         );
     }
 
+    /// A recording that was armed and then started, which every follower of a cluster
+    /// has, is nothing to report; one still armed is, with how many wait.
+    #[test]
+    fn an_armed_recording_is_reported_only_while_it_waits() {
+        let dir = TestDir::new("armed");
+        let counters = CountersFile::create(&dir.0, 256).expect("counters");
+        let ring = CommandRing::create(&dir.0, 4096).expect("ring");
+        let _consumer = ring.consumer(Duration::from_secs(10)).expect("consumer");
+        let bump = |id: CounterId| counters.counter(id.record()).expect("static").increment();
+        bump(RECORDING_ARMED);
+        bump(RECORDING_ARMED_STARTED);
+        let report = examine(&dir.0);
+        assert!(
+            !report.to_string().contains("recording.armed"),
+            "armed and started is no finding: {report}"
+        );
+        bump(RECORDING_ARMED);
+        bump(RECORDING_ARMED);
+        bump(RECORDING_ARMED_DROPPED);
+        let report = examine(&dir.0);
+        let found = finding(&report, "recording.armed");
+        assert_eq!(found.level, Level::Warn);
+        assert!(
+            found.message.starts_with(
+                "1 armed recording(s) wait for an image: recording.armed is 3 and 1 started, 0 \
+                 failed and 1 were dropped"
+            ),
+            "{}",
+            found.message
+        );
+    }
+
     #[test]
     fn a_counter_the_driver_does_not_have_is_a_note_and_a_corrupt_file_fails() {
         let dir = TestDir::new("older");
@@ -4113,5 +4382,155 @@ mod tests {
             "{}",
             findings[0].message
         );
+    }
+
+    /// A counters file with one cluster member's counters, each set as given.
+    fn member_file(dir: &TestDir, id: i32, values: &[(CounterId, i64)]) -> CountersReader {
+        let mut file = CountersFile::create(&dir.0, 1024).expect("the counters file");
+        for (type_id, value) in values {
+            let counter = file
+                .allocate(*type_id, &id.to_le_bytes(), &format!("cluster {id}"))
+                .expect("a counter");
+            counter.set(*value);
+        }
+        CountersReader::open(&dir.0).expect("opens")
+    }
+
+    fn cluster_findings(test: &str, id: i32, values: &[(CounterId, i64)]) -> (usize, Vec<Finding>) {
+        let dir = TestDir::new(test);
+        let reader = member_file(&dir, id, values);
+        let mut findings = Vec::new();
+        let checks = cluster_checks(&reader, true, &mut findings);
+        (checks, findings)
+    }
+
+    #[test]
+    fn a_cluster_member_is_explained_from_its_counters() {
+        // No member: no check, nothing found. A stopped driver's: the same.
+        let dir = TestDir::new("cluster-none");
+        let reader = member_file(&dir, 0, &[]);
+        let mut findings = Vec::new();
+        assert_eq!(cluster_checks(&reader, true, &mut findings), 0);
+        assert!(findings.is_empty());
+        let follower = [
+            (CLUSTER_ROLE, 0),
+            (CLUSTER_ELECTION_STATE, 17),
+            (CLUSTER_LEADERSHIP_TERM_ID, 0),
+            (CLUSTER_APPEND_POSITION, 4096),
+            (CLUSTER_COMMIT_POSITION, 4096),
+        ];
+        let dir = TestDir::new("cluster-stopped");
+        let reader = member_file(&dir, 1, &follower);
+        assert_eq!(cluster_checks(&reader, false, &mut findings), 0);
+        assert!(findings.is_empty());
+
+        // A follower that follows: the note alone, with who it is and what it knows.
+        let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
+        assert_eq!(checks, 6);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].check, "cluster-member");
+        assert_eq!(findings[0].level, Level::Note);
+        assert!(
+            findings[0].message.contains(
+                "cluster member 1, a follower in term 0, election closed: append position \
+                 4096, commit position 4096"
+            ),
+            "{}",
+            findings[0].message
+        );
+        assert_eq!(
+            findings[0].doc,
+            "docs/how-to/run-a-cluster.md#when-it-does-not-work"
+        );
+
+        // A member in canvass with no failure behind it: no leader yet.
+        let (_, findings) = cluster_findings(
+            "cluster-no-leader",
+            2,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 1),
+                (CLUSTER_LEADERSHIP_TERM_ID, -1),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-no-leader"]);
+        assert!(
+            findings[1].message.contains("election is in canvass"),
+            "{}",
+            findings[1].message
+        );
+
+        // A member whose elections fail: left out, with the remedy.
+        let (_, findings) = cluster_findings(
+            "cluster-late",
+            2,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 1),
+                (CLUSTER_ELECTIONS_FAILED, 40),
+                (CLUSTER_JOIN_POSITION_MISMATCHES, 3),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-joined-late"]);
+        assert!(
+            findings[1]
+                .message
+                .contains("40 of its elections failed, 3 of them")
+        );
+        assert!(
+            findings[1]
+                .message
+                .contains("every member on a new log directory")
+        );
+
+        // An appointed leader that found members ahead: it will not lead, and says why.
+        let (_, findings) = cluster_findings(
+            "cluster-behind",
+            0,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 1),
+                (CLUSTER_APPOINTED_LEADER_BEHIND, 2),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(found, ["cluster-member", "cluster-leader-behind"]);
+        assert_eq!(findings[1].level, Level::Fail);
+        assert!(
+            findings[1]
+                .message
+                .contains("found 2 member(s) holding a log ahead")
+        );
+
+        // A leader that lost its quorum, with a commit position behind its own append.
+        let (_, findings) = cluster_findings(
+            "cluster-leader",
+            0,
+            &[
+                (CLUSTER_ROLE, 2),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 0),
+                (CLUSTER_APPEND_POSITION, 9600),
+                (CLUSTER_COMMIT_POSITION, 4800),
+                (CLUSTER_LEADER_QUORUM_LOSSES, 1),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(
+            found,
+            [
+                "cluster-member",
+                "cluster-quorum-lost",
+                "cluster-commit-waits"
+            ]
+        );
+        assert!(
+            findings[0]
+                .message
+                .contains("the leader in term 0, election closed")
+        );
+        assert!(findings[2].message.contains("4800 bytes wait for a quorum"));
     }
 }
