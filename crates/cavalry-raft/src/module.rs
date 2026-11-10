@@ -26,11 +26,11 @@ use cavalry_proto::cluster::{
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
-    CLUSTER_APPOINTED_LEADER_BEHIND,
-    CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS,
-    CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
-    CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LEADERSHIP_TERMS_IGNORED, CLUSTER_LOG_IMAGES_LOST,
-    CLUSTER_MESSAGES_REJECTED, CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_ROLE, CLUSTER_TERMS_LED,
+    CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
+    CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_FAILED,
+    CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
+    CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LEADERSHIP_TERMS_IGNORED,
+    CLUSTER_LOG_IMAGES_LOST, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE, CLUSTER_TERMS_LED,
 };
 
 use crate::consensus::{
@@ -471,7 +471,10 @@ impl Counters {
             elections: add(CLUSTER_ELECTIONS, "cluster.elections")?,
             elections_failed: add(CLUSTER_ELECTIONS_FAILED, "cluster.elections_failed")?,
             terms_led: add(CLUSTER_TERMS_LED, "cluster.terms_led")?,
-            leader_quorum_losses: add(CLUSTER_LEADER_QUORUM_LOSSES, "cluster.leader_quorum_losses")?,
+            leader_quorum_losses: add(
+                CLUSTER_LEADER_QUORUM_LOSSES,
+                "cluster.leader_quorum_losses",
+            )?,
             leader_heartbeat_timeouts: add(
                 CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
                 "cluster.leader_heartbeat_timeouts",
@@ -506,7 +509,8 @@ impl Counters {
         self.elections.store(count(counts.elections));
         self.elections_failed.store(count(counts.elections_failed));
         self.terms_led.store(count(counts.terms_led));
-        self.leader_quorum_losses.store(count(counts.leader_quorum_losses));
+        self.leader_quorum_losses
+            .store(count(counts.leader_quorum_losses));
         self.leader_heartbeat_timeouts
             .store(count(counts.leader_heartbeat_timeouts));
         self.leadership_terms_ignored
