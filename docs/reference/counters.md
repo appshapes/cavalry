@@ -126,6 +126,12 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 118 | `cluster.join_position_mismatches` | counter | client | Images of the log that joined one cluster follower at a position other than its append position, so that it failed its election and left the image (spec/cluster.md, Roles and the election, state 15); key and label as cluster.elections. | The member subscribed to the log after the leader had appended past its append position, and joining there would leave a hole in its log: start it on an empty log directory before the leader's first entry; this version has no catch-up. |
 | 119 | `cluster.election_steps` | counter | client | Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (spec/cluster.md, Counters; ADR 0067). An election that closes makes three on its leader and four on a follower; key and label as cluster.elections. |  |
 | 120 | `cluster.elections_closed` | counter | client | Elections one cluster member closed: leader ready to closed, its term's first entry appended, or follower ready to closed, its append position sent to its leader (spec/cluster.md, Counters; ADR 0067); key and label as cluster.elections. | A cluster.elections_closed that stays below cluster.elections minus cluster.elections_failed is an election still running: the member's cluster.election_state gauge (spec/cluster.md, Counters) is the state it waits in, and docs/reference/counters.md, State machines, cluster_election, names the counter of each way out of that state. |
+| 121 | `cluster.role` | gauge | client | One cluster member's role: 0 follower, 1 candidate, 2 leader (spec/cluster.md, Counters). The member's consensus module adds the counter and stores it; key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 122 | `cluster.election_state` | gauge | client | The state of one cluster member's election, the code spec/cluster.md, Roles and the election, gives it, 17 when no election runs; key: member id (i32), little-endian; label text: the member id in decimal. | A member that stays at 1, canvass, has found no leader it can follow: the appointed leader is not running, cannot be reached on the consensus endpoints, or holds a log behind this member's. A leader that stays at 8, leader ready, waits for a member that has not joined its log, for at most 10 s. |
+| 123 | `cluster.leadership_term_id` | gauge | client | The term one cluster member leads or follows, -1 before the first; key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 124 | `cluster.append_position` | gauge | client | One cluster member's append position: the end of the contiguous span its recordings of the log hold, as a sync has made it durable (spec/cluster.md, The log; ADR 0060); key: member id (i32), little-endian; label text: the member id in decimal. | An append position behind the leader's on one member is a recorder whose disk syncs slowly, or a member the log no longer reaches: compare its recording.synced_position and its cluster.election_state. |
+| 125 | `cluster.messages_rejected` | counter | client | Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal. | A member sends consensus messages this member cannot read: check that every member runs the same version. |
+| 126 | `cluster.log_recording_id` | gauge | client | The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal. | A cluster.log_recording_id that stays at -1 on a member whose cluster.election_state is 17, its election closed, is a follower whose recording of the leader's image never started, so that its cluster.append_position does not move: its driver's recording.armed_failed counts the failure and names the counter of the step that failed. A member in an election holds -1 until it has joined the log. |
 
 ## State machines
 
@@ -216,6 +222,14 @@ States: `initializing`, `active`, `closing`, `errored`.
 | --- | --- | --- |
 | `initializing` | `active` | `channel.opened` |
 | `active` | `closing` | `channel.closed` |
+
+### `cluster_role`
+
+States: `follower`, `candidate`, `leader`.
+
+| From | To | Counter |
+| --- | --- | --- |
+| `follower` | `leader` | `cluster.terms_led` |
 
 ### `cluster_election`
 

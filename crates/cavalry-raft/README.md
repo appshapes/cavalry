@@ -21,18 +21,37 @@ commit path runs per message.
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
   count with its counter's id, for the module to store as a client counter (ADR 0067;
   [the counters reference](../../docs/reference/counters.md)).
-- Does no I/O of its own: the core reaches the consensus stream, the log, its
-  recording and its `terms` file through one trait, `Io`. `memory::Cluster` gives it
-  that in memory, one to eight members in one process on a clock the caller steps,
-  with loss, delay, cuts and paused syncs to set: what the example below and the
-  crate's tests run. It is a test double and allocates; its consensus stream holds
-  at most 4,096 messages in flight and loses, and counts, one sent while it is full,
-  and its log holds every entry offered for the cluster's life. The module that gives
-  the core the same over a driver, as a client of it, is this crate's next change.
-- To come, each with its card: the module over the client and `cavalry run` (card
-  227), the election and mixed versions in a rolling upgrade (card 228), the cluster
-  client (card 229), snapshots and catch-up (card 230), and standby members, which
-  follow the log without voting, in the open core.
+- Does no I/O of its own in its core: `Consensus` reaches the consensus stream, the
+  log, its recording and its `terms` file through one trait, `Io`.
+- Runs a member over a driver: `ConsensusModule::start(dir, log_dir, members,
+  member_id)` is a client of the driver in `dir`. It sends the consensus messages on a
+  publication to each peer, adds the leader's log as a publication with every other
+  member as a destination and records it, or subscribes to the leader's log and arms
+  the recording that holds it from its first frame, keeps the record of terms in the
+  `terms` file of `log_dir`, and stores what it counts in the driver's counters file:
+  `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
+  `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
+  `cluster.log_recording_id`, the recording that holds its log, which its service
+  replays, and the eleven counts of `Counts::by_counter`. The counters of sessions, of
+  the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
+  with those features. One thread calls `do_work()`; the leader's process appends
+  with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
+  holds its recording until the driver has said where it stopped, and that stop is
+  where its log ends. A stop that the driver refuses or does not answer is a `client`
+  error, and a stop position not read within 1 s is a `stop-timeout` error. Either
+  way the member stays in init with the recording held, and the next `do_work()`
+  stops it again.
+- Runs the same core in memory: `memory::Cluster` is one to eight members in one
+  process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
+  member started again on an empty log directory to set: what the example below and
+  most of the crate's tests run. It is a test double and allocates; its consensus
+  stream holds at most 4,096 messages in flight and loses, and counts, one sent
+  while it is full, and its log holds every entry offered for the cluster's life.
+- To come, each with its card: `cavalry run` starting the module from two
+  configuration keys, the service's bounded poll and `doctor`'s checks (card 227), the
+  election and mixed versions in a rolling upgrade (card 228), the cluster client (card
+  229), snapshots and catch-up (card 230), and standby members, which follow the log
+  without voting, in the open core.
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).
