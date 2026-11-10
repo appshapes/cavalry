@@ -105,4 +105,5 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0058. Specify the cluster protocol, version 0, from Aeron Cluster's codecs](decisions/0058-specify-the-cluster-protocol-from-aerons-codecs.md)
 - [0059. Create a publication at a position and arm a recording on a subscription](decisions/0059-create-a-publication-at-a-position-and-arm-a-recording.md)
 - [0061. Draw the finish line for early testers at the first release, after the fifth slice](decisions/0061-draw-the-finish-line-for-early-testers-at-the-first-release.md)
+- [0060. Replicate the log with an appointed leader, a term record and a per-peer consensus channel](decisions/0060-replicate-the-log-with-an-appointed-leader.md)
 - [0062. Add a client's counter with Aeron's counter commands, as client protocol version 7](decisions/0062-add-a-clients-counter-with-aerons-counter-commands.md)

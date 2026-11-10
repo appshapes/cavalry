@@ -93,6 +93,58 @@ def encode_descriptor(d, body_checksum=None, stop_checksum=None, retained_checks
     return struct.pack("<iI", d["state"], stop_crc) + stop + struct.pack("<I", body_crc) + creation
 
 
+TERMS_MAGIC = b"CVLYTERM"
+TERMS_HEADER_LENGTH = 64
+TERMS_ENTRY_LENGTH = 32
+# magic, version, entry length, then the two candidate slots, each a term, its checksum and reserved bytes
+TERMS_HEADER = struct.Struct("<8siiqI4sqI20s")
+TERMS_ENTRY = struct.Struct("<iIqqq")  # state, checksum, leadership term id, term base log position, recording id
+
+
+def candidate_checksum(candidate_term):
+    """A candidate slot's checksum: the zlib CRC32 of the candidate term's eight bytes."""
+    return zlib.crc32(struct.pack("<q", candidate_term)) & 0xFFFFFFFF
+
+
+def terms_header(slots=(-1, -1), version=0, entry_length=TERMS_ENTRY_LENGTH, magic=TERMS_MAGIC, checksums=(None, None)):
+    """The terms file's header (spec/durable-log.md, "Terms"): the two candidate slots, each
+    under the zlib CRC32 of its eight bytes unless a checksum is given. `written` is what
+    the encoder packs; the fields a reader decodes are the candidate term each slot holds,
+    None for a slot whose checksum does not match, and the stored candidate term, the
+    higher of the slots that hold one."""
+    sums = [candidate_checksum(term) if given is None else given for term, given in zip(slots, checksums)]
+    held = [term if checksum == candidate_checksum(term) else None for term, checksum in zip(slots, sums)]
+    stored = max((term for term in held if term is not None), default=None)
+    return {"magic": magic.hex(), "version": version, "entry_length": entry_length,
+            "candidate_terms": held, "candidate_term": stored,
+            "written": {"candidate_terms": list(slots), "candidate_checksums": sums}}
+
+
+def terms_header_fields(h):
+    """The fields of a valid terms header vector: what a reader decodes, less what the
+    encoder alone needs."""
+    return {name: value for name, value in h.items() if name != "written"}
+
+
+def encode_terms_header(h):
+    terms, sums = h["written"]["candidate_terms"], h["written"]["candidate_checksums"]
+    return TERMS_HEADER.pack(bytes.fromhex(h["magic"]), h["version"], h["entry_length"], terms[0], sums[0], b"",
+                             terms[1], sums[1], b"")
+
+
+def terms_entry(leadership_term_id, term_base_log_position, recording_id=-1, state=VALID, checksum=None):
+    """One entry of the terms file: the checksum is the zlib CRC32 of bytes 8 to 32 unless given."""
+    if checksum is None:
+        checksum = zlib.crc32(struct.pack("<qqq", leadership_term_id, term_base_log_position, recording_id)) & 0xFFFFFFFF
+    return {"state": state, "checksum": checksum, "leadership_term_id": leadership_term_id,
+            "term_base_log_position": term_base_log_position, "recording_id": recording_id}
+
+
+def encode_terms_entry(e):
+    return TERMS_ENTRY.pack(e["state"], e["checksum"], e["leadership_term_id"], e["term_base_log_position"],
+                            e["recording_id"])
+
+
 def index_header(recording_id=0, version=0, magic=INDEX_MAGIC):
     return {"magic": magic.hex(), "version": version, "recording_id": recording_id}
 
@@ -256,7 +308,68 @@ def main():
     late = descriptor(start_position=64 * 1024 * 1024 + 4096)
     vectors.append(position_vector("position-start-inside-second-term", late, late["start_position"]))
     vectors.append(position_vector("position-second-segment-of-late-start", late, 64 * 1024 * 1024 + 128 * 1024 * 1024 + 64))
-    doc = {"spec": "durable-log", "version": 1, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
+    # Terms file (version 2): the header with the file length, then entries with their
+    # index and the valid entry before them, each rejection in the order the checks run.
+    # A created file holds -1 in both slots; its first raise, to 4, writes slot 1; the
+    # next, to 6, writes slot 0, the slot the stored candidate term is not read from.
+    two = TERMS_HEADER_LENGTH + 2 * TERMS_ENTRY_LENGTH
+    over = TERMS_HEADER_LENGTH + (1048576 + 1) * TERMS_ENTRY_LENGTH
+
+    def valid_terms_header(name, h, file_length=two):
+        vectors.append(valid(name, "terms-header", encode_terms_header(h), terms_header_fields(h), file_length=file_length))
+
+    def invalid_terms_header(name, error, raw, file_length=two):
+        vectors.append(invalid(name, "terms-header", error, raw, file_length=file_length))
+
+    th = terms_header(slots=(-1, 4))
+    valid_terms_header("terms-header", th)
+    valid_terms_header("terms-header-no-candidate", terms_header(), file_length=TERMS_HEADER_LENGTH)
+    valid_terms_header("terms-header-higher-in-slot-0", terms_header(slots=(6, 4)))
+    # A raise torn by a crash: the slot's value written and its checksum not. The stored
+    # candidate term is the other slot's, the one stored before the raise.
+    valid_terms_header("terms-header-slot-0-torn", terms_header(slots=(6, 4), checksums=(candidate_checksum(-1), None)))
+    valid_terms_header("terms-header-slot-1-torn", terms_header(slots=(6, 9), checksums=(None, candidate_checksum(4))))
+    invalid_terms_header("terms-too-short", "too-short", encode_terms_header(th)[:40], file_length=40)
+    invalid_terms_header("terms-not-ready", "not-ready", encode_terms_header(terms_header(magic=bytes(8))),
+                         file_length=TERMS_HEADER_LENGTH)
+    invalid_terms_header("terms-magic", "magic", encode_terms_header(terms_header(magic=b"CVLYTIDX")))
+    invalid_terms_header("terms-version", "version", encode_terms_header(terms_header(version=1)))
+    invalid_terms_header("terms-entry-length", "entry-length", encode_terms_header(terms_header(entry_length=64)))
+    invalid_terms_header("terms-length", "length", encode_terms_header(th), file_length=over)
+    neither = terms_header(slots=(6, 4), checksums=(0, 0))
+    invalid_terms_header("terms-candidate-neither-checksum", "candidate", encode_terms_header(neither))
+    invalid_terms_header("terms-candidate-below-none", "candidate", encode_terms_header(terms_header(slots=(-5, 4))))
+    invalid_terms_header("terms-order-magic-before-version", "magic",
+                         encode_terms_header(terms_header(magic=b"CVLYTIDX", version=1)))
+    invalid_terms_header("terms-order-length-before-candidate", "length", encode_terms_header(neither), file_length=over)
+    first = terms_entry(2, 0, 0)
+    vectors.append(valid("terms-entry-first", "terms-entry", encode_terms_entry(first), first, index=0, previous=None))
+    second = terms_entry(3, 4096, 1)
+    vectors.append(valid("terms-entry-after-another", "terms-entry", encode_terms_entry(second), second, index=1,
+                         previous=first))
+    deleted = terms_entry(4, 8192, -1, state=DELETED)
+    vectors.append(valid("terms-entry-deleted", "terms-entry", encode_terms_entry(deleted), deleted, index=2,
+                         previous=second))
+    empty = terms_entry(0, 0, 0, state=EMPTY, checksum=0)
+    vectors.append(valid("terms-entry-empty-ends-the-file", "terms-entry", encode_terms_entry(empty), empty, index=2,
+                         previous=second))
+    vectors.append(invalid("terms-entry-state", "terms-entry", "state", encode_terms_entry(terms_entry(3, 4096, 1, state=2)),
+                           index=1, previous=first))
+    vectors.append(invalid("terms-entry-checksum", "terms-entry", "checksum",
+                           encode_terms_entry(terms_entry(3, 4096, 1, checksum=1)), index=1, previous=first))
+    vectors.append(invalid("terms-entry-term-negative", "terms-entry", "term", encode_terms_entry(terms_entry(-1, 0, 0)),
+                           index=0, previous=None))
+    vectors.append(invalid("terms-entry-term-not-above", "terms-entry", "term", encode_terms_entry(terms_entry(2, 4096, 1)),
+                           index=1, previous=first))
+    vectors.append(invalid("terms-entry-position-not-aligned", "terms-entry", "position",
+                           encode_terms_entry(terms_entry(3, 100, 1)), index=1, previous=first))
+    vectors.append(invalid("terms-entry-position-below", "terms-entry", "position",
+                           encode_terms_entry(terms_entry(4, 0, 1)), index=2, previous=second))
+    vectors.append(invalid("terms-entry-recording", "terms-entry", "recording",
+                           encode_terms_entry(terms_entry(3, 4096, -2)), index=1, previous=first))
+    vectors.append(invalid("terms-entry-order-state-before-term", "terms-entry", "state",
+                           encode_terms_entry(terms_entry(-1, 0, 0, state=2)), index=0, previous=None))
+    doc = {"spec": "durable-log", "version": 2, "generated_by": "spec/vectors/durable-log.py", "vectors": vectors}
     out = Path(__file__).resolve().parent / "durable-log.json"
     out.write_text(json.dumps(doc, indent=2) + "\n")
     print(f"durable-log.py: wrote {len(vectors)} vectors to {out}")
