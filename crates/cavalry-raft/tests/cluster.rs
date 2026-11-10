@@ -1,7 +1,7 @@
 //! Three members over three drivers on the loopback: each a [`ConsensusModule`], a
 //! client of its own driver, with its log recorded into its own log directory (ADR
 //! 0060; ADR 0063). The appointed leader leads, the followers arm their recordings
-//! before its first frame, a thousand entries are committed at a quorum of synced
+//! before its first frame, a hundred thousand entries are committed at a quorum of synced
 //! positions, and the three recordings hold the same bytes.
 
 use std::net::UdpSocket;
@@ -127,7 +127,7 @@ fn counter(member: &Member, type_id: i32) -> i64 {
 }
 
 #[test]
-fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
+fn three_members_replicate_a_hundred_thousand_entries_and_their_recordings_are_equal() {
     let dir = TestDir::new("replicate");
     let members_string = members_string();
     let mut members = start(dir.path(), &members_string);
@@ -155,9 +155,10 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
         Err(RaftError::PayloadTooLong { length: 1345 })
     ));
 
-    // A thousand entries from the leader's own process, a back-pressured offer made
-    // again once the members have run.
-    const ENTRIES: u32 = 1_000;
+    // A hundred thousand entries from the leader's own process, a back-pressured offer
+    // made again once the members have run, and the members run every hundred offers
+    // as they would between a program's own.
+    const ENTRIES: u32 = 100_000;
     for i in 0..ENTRIES {
         let payload = [i.to_le_bytes(), (!i).to_le_bytes()].concat();
         loop {
@@ -171,9 +172,14 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
                 Err(other) => panic!("{other}"),
             }
         }
+        if i % 100 == 99 {
+            for member in members.iter_mut() {
+                member.module.do_work().expect("the member's duty cycle");
+            }
+        }
     }
-    // The term event, 56 bytes in a frame of 96, and a thousand entries of 40 bytes,
-    // each in a frame of 96 (`spec/cluster.md`, "The log").
+    // The term event, 56 bytes in a frame of 96, and a hundred thousand entries of 40
+    // bytes, each in a frame of 96 (`spec/cluster.md`, "The log").
     let end = 96 + i64::from(ENTRIES) * 96;
     run_until(
         &mut members,
@@ -201,7 +207,7 @@ fn three_members_replicate_a_thousand_entries_and_their_recordings_are_equal() {
         .collect();
     assert_eq!(recordings[1], recordings[0], "member 1's recording");
     assert_eq!(recordings[2], recordings[0], "member 2's recording");
-    // The first entry is the term's event and the last is the thousandth offer.
+    // The first entry is the term's event and the last is the hundred thousandth offer.
     let first = Message::parse(Stream::Log, &recordings[0][32..32 + 56]).expect("an entry");
     assert!(matches!(
         first,
