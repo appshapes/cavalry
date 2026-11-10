@@ -12427,6 +12427,132 @@ mod replay {
         );
         assert_eq!(rebuilt, 1280);
     }
+
+    /// The same failure with no room for the stop's reply (invariant 1; ADR 0065). The
+    /// recorder's pending replies are at their bound when the sync fails, so the
+    /// recording cannot be stopped yet, and it waits for room. While it waits it is
+    /// neither written nor synced again, whatever is committed and however long it
+    /// lasts: before this decision the recorder synced it again in the next cycle,
+    /// that sync returned success, and `recording.synced_position` moved over the
+    /// bytes the first sync had failed on. Ten frames are synced, 640 bytes, and ten
+    /// more written and not synced, 1,280; the replies are filled with the conductor
+    /// taking none; the recording is marked as a failed sync marks it; ten more frames
+    /// are committed and more than a sync interval passes over several of the
+    /// recorder's duty cycles. The position stays 1,280 and the synced position 640,
+    /// the recording is still the recorder's, and nothing is counted. Once the
+    /// conductor takes replies the recording is given up: `recording stopped` carries
+    /// 640, and the catalog holds no stop.
+    #[test]
+    fn a_recording_whose_sync_failed_is_not_synced_again_while_it_waits_for_room() {
+        use crate::recorder::{PENDING_REPLIES, Request};
+
+        let (mut h, mut appender) = recorded("recording-sync-failed-no-room");
+        offer(&mut h, &mut appender, 0, 10);
+        sync(&mut h);
+        let position = h.conductor.recordings[0]
+            .position
+            .clone()
+            .expect("attached");
+        let synced = h.conductor.recordings[0].synced.clone().expect("attached");
+        assert_eq!(synced.load_acquire(), 640, "ten frames synced");
+        let written = offer(&mut h, &mut appender, 10, 10);
+        for _ in 0..20 {
+            h.cycle();
+        }
+        assert_eq!(written, 1280);
+        assert_eq!(position.load_acquire(), 1280, "written");
+        assert_eq!(synced.load_acquire(), 640, "not synced");
+        let _ = events(&mut h);
+
+        // Stops of ids no recording holds, each answered, until the recorder's pending
+        // replies are at their bound: the recorder's duty cycle alone runs, so the
+        // conductor takes none, and the clock stands still, so no sync falls due.
+        let fill = |h: &mut Harness| {
+            while h
+                .conductor
+                .recorder
+                .requests
+                .offer(Request::Stop {
+                    recording_id: 1_000_000,
+                    correlation_id: None,
+                })
+                .is_ok()
+            {}
+        };
+        for _ in 0..10_000 {
+            if h.recorder.pending_replies() >= PENDING_REPLIES {
+                break;
+            }
+            fill(&mut h);
+            h.recorder.duty_cycle(h.now);
+        }
+        assert_eq!(h.recorder.pending_replies(), PENDING_REPLIES);
+        assert_eq!(
+            synced.load_acquire(),
+            640,
+            "no sync while the replies filled"
+        );
+
+        // The failure, ten frames more, and more than a sync interval over several
+        // duty cycles with no room for the stop's reply.
+        h.recorder.fail_sync(0);
+        offer(&mut h, &mut appender, 20, 10);
+        for _ in 0..8 {
+            h.now += SECOND;
+            h.recorder.duty_cycle(h.now);
+        }
+        assert_eq!(position.load_acquire(), 1280, "not written while it waits");
+        assert_eq!(
+            synced.load_acquire(),
+            640,
+            "not synced again while it waits"
+        );
+        assert_eq!(h.recorder.live_recordings(), 1, "not stopped yet");
+        assert_eq!(h.recorder.pending_replies(), PENDING_REPLIES);
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_WRITE_FAILED),
+            0
+        );
+        assert_eq!(h.counter(RECORDING_STOPPED), 0);
+
+        // The conductor takes replies again, and the recording is given up.
+        for _ in 0..10_000 {
+            if h.conductor.recordings.is_empty() {
+                break;
+            }
+            h.cycle();
+        }
+        assert!(
+            h.conductor.recordings.is_empty(),
+            "the recording was given up"
+        );
+        let stopped: Vec<(i64, i64)> = events(&mut h)
+            .iter()
+            .filter_map(|(type_id, message)| match Event::parse(*type_id, message) {
+                Ok(Event::RecordingStopped {
+                    recording_id,
+                    stop_position,
+                }) => Some((recording_id, stop_position)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stopped, vec![(0, 640)], "the position last synced");
+        assert_eq!(
+            h.counter(cavalry_shm::counters::generated::RECORDING_WRITE_FAILED),
+            1
+        );
+        assert_eq!(h.counter(RECORDING_STOPPED), 1);
+        assert_eq!(position.load_acquire(), 1280);
+        assert_eq!(synced.load_acquire(), 640);
+        assert_eq!(h.recorder.live_recordings(), 0);
+        let slot = cavalry_log::catalog::CatalogReader::open(&h.log_dir)
+            .expect("the catalog opens")
+            .get(0)
+            .expect("the slot reads")
+            .expect("the slot holds the recording");
+        assert!(slot.is_live(), "the catalog holds no stop: {slot:?}");
+        drop(appender);
+    }
 }
 
 #[cfg(test)]

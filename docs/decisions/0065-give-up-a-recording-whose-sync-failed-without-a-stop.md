@@ -119,6 +119,14 @@ second time about bytes a sync has failed on.
   committed after the failure are not written; the catalog's slot reads live; and the
   next open's recovery rebuilds the stop at 1,280, at or above 640. With the stop run
   as before, the test fails with `left: [(0, 1280)] right: [(0, 640)]`.
+- `conductor::replay::a_recording_whose_sync_failed_is_not_synced_again_while_it_waits_for_room`:
+  the same 640 and 1,280, with the recorder's pending replies at their bound when
+  the recording is marked. Ten more frames are committed and eight seconds pass over
+  eight of the recorder's duty cycles: the position stays 1,280, the synced position
+  640, the recording is still the recorder's and nothing is counted. Once the
+  conductor takes replies, `recording stopped` carries 640 and the slot reads live.
+  With the marked recording visited as before while it waits, the test fails with
+  `left: 1920 right: 1280`.
 - `conductor::recording::a_publisher_faster_than_the_recorder_is_back_pressured_and_nothing_is_lost`,
   unchanged: a roll that cannot create the next segment file stops the recording at
   the segment's end, in the catalog, counted once.

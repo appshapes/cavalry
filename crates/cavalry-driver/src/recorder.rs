@@ -274,8 +274,10 @@ impl Recorder {
     }
 
     /// The recorder's loop: duty cycles until `stop`, then every live recording is
-    /// stopped at the position written, so the catalog holds a clean stop and the next
-    /// open repairs nothing.
+    /// stopped: at the position written, with a clean stop in the catalog that the next
+    /// open has nothing to repair, except a recording one of whose syncs failed or
+    /// whose stop's own writes or syncs fail, which is announced at the position last
+    /// synced and whose slot the next open repairs (ADR 0064, ADR 0065).
     pub(crate) fn run(mut self, stop: &AtomicBool) {
         while !stop.load(Ordering::Acquire) {
             let now = now_nanos();
