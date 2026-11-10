@@ -1055,21 +1055,40 @@ impl Cluster {
     }
 }
 
-/// The name of an election state's code, as `spec/cluster.md` names it.
-fn election_state_name(code: i64) -> &'static str {
-    match code {
-        0 => "init",
-        1 => "canvass",
-        5 => "leader log replication",
-        6 => "leader replay",
-        7 => "leader init",
-        8 => "leader ready",
-        10 => "follower replay",
-        14 => "follower log init",
-        15 => "follower log await",
-        16 => "follower ready",
-        17 => "closed",
-        _ => "a state this doctor does not know",
+/// The election states of `spec/cluster.md`, "Roles and the election", by their code:
+/// every state of the table, those this version's members never enter (2 to 4, 9 and
+/// 11 to 13, "The appointed leader") among them, so that a driver newer than this
+/// doctor, or a member with the election, is named.
+const ELECTION_STATES: [&str; 18] = [
+    "init",
+    "canvass",
+    "nominate",
+    "candidate ballot",
+    "follower ballot",
+    "leader log replication",
+    "leader replay",
+    "leader init",
+    "leader ready",
+    "follower log replication",
+    "follower replay",
+    "follower catch-up init",
+    "follower catch-up await",
+    "follower catch-up",
+    "follower log init",
+    "follower log await",
+    "follower ready",
+    "closed",
+];
+
+/// The name of an election state's code, as `spec/cluster.md` names it, or the code
+/// itself for one the table does not hold.
+fn election_state_name(code: i64) -> String {
+    match usize::try_from(code)
+        .ok()
+        .and_then(|index| ELECTION_STATES.get(index))
+    {
+        Some(name) => (*name).to_string(),
+        None => format!("state {code}, one this doctor does not know"),
     }
 }
 
@@ -4659,6 +4678,74 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    /// Every code of the spec's table of election states has the table's name, and a
+    /// code it does not hold, as from a newer driver, is printed as its number.
+    #[test]
+    fn every_election_state_of_the_spec_is_named() {
+        let spec = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/cluster.md"),
+        )
+        .expect("spec/cluster.md");
+        let table: Vec<(i64, String)> = spec
+            .lines()
+            .skip_while(|line| !line.starts_with("| Code | State |"))
+            .skip(2)
+            .take_while(|line| line.starts_with('|'))
+            .map(|line| {
+                let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+                (cells[1].parse().expect("a code"), cells[2].to_string())
+            })
+            .collect();
+        assert_eq!(table.len(), ELECTION_STATES.len(), "{table:?}");
+        for (code, name) in &table {
+            assert_eq!(&election_state_name(*code), name, "code {code}");
+        }
+        for code in [-1, 18, 99] {
+            assert_eq!(
+                election_state_name(code),
+                format!("state {code}, one this doctor does not know")
+            );
+        }
+
+        // The note and the finding name a state this version's members never enter,
+        // and a state the table does not hold by its code.
+        let (_, findings) = cluster_findings(
+            "cluster-catch-up",
+            1,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 13),
+                (CLUSTER_LEADERSHIP_TERM_ID, 2),
+            ],
+        );
+        assert!(
+            findings[0]
+                .message
+                .contains("a follower in term 2, election follower catch-up:"),
+            "{}",
+            findings[0].message
+        );
+        let (_, findings) = cluster_findings(
+            "cluster-unknown-state",
+            1,
+            &[(CLUSTER_ROLE, 0), (CLUSTER_ELECTION_STATE, 23)],
+        );
+        assert!(
+            findings[0]
+                .message
+                .contains("election state 23, one this doctor does not know: append position"),
+            "{}",
+            findings[0].message
+        );
+        assert!(
+            findings[1]
+                .message
+                .contains("its election is in state 23, one this doctor does not know."),
+            "{}",
+            findings[1].message
+        );
     }
 
     /// The member's counts with a doctor sentence of their own are reported by their
