@@ -1173,10 +1173,12 @@ fn member_findings(member: &MemberCounters, findings: &mut Vec<Finding>) {
             level: Level::Note,
             message: format!(
                 "the leader, member {id}, has appended to position {append} and a quorum has \
-                 recorded to {commit}: {} bytes wait for a quorum. A member's recorder syncs \
-                 once a second, so up to a second of entries waits at any moment; if the \
+                 recorded to {commit}: {} bytes wait for a quorum. Each member asks its \
+                 recorder to sync an entry as soon as it is written, so what waits at any \
+                 moment is what was appended since the syncs now running began; if the \
                  commit position stays while the append position moves, a quorum of members \
-                 is not reporting: run doctor on each member's host",
+                 is not reporting or their disks are not syncing: run doctor on each \
+                 member's host",
                 append - commit
             ),
             doc: DOC_CLUSTER,
