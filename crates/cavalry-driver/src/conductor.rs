@@ -777,6 +777,8 @@ pub(crate) struct Conductor {
     correlation: RingProducer,
     /// Registrations across every publication: the publications registry's fill.
     registration_count: usize,
+    /// The session id the next publication takes: random at the start
+    /// ([`first_session_id`]), one more for each publication.
     next_session_id: i32,
     last_heartbeat: i64,
     ring_corrupt: bool,
@@ -856,9 +858,7 @@ impl Conductor {
             receiver_thread: None,
             correlation,
             registration_count: 0,
-            next_session_id: i32::from_le_bytes(
-                (now >> 8).to_le_bytes()[..4].try_into().unwrap_or([0; 4]),
-            ),
+            next_session_id: first_session_id(now),
             last_heartbeat: now,
             ring_corrupt: false,
             pending: (0..COMMANDS_PER_CYCLE).map(|_| Pending::new()).collect(),
@@ -6531,6 +6531,19 @@ fn sender_queue_full_message() -> String {
     )
 }
 
+/// The session id this driver's first publication takes: a random i32, as
+/// `spec/client-protocol.md`, "Commands", says ("it starts at a random i32"), drawn
+/// through the standard library's `RandomState`, whose keys come from the operating
+/// system, hashing the clock; no dependency. Random and not the clock alone: two
+/// drivers started in one instant, a cluster's members under one supervisor, would
+/// take the same ids from a clock, and a receiver that hears two publications of one
+/// stream under one session id on an endpoint holds them as one session, so the second
+/// is never answered (`spec/udp.md`, "The receiver", step 1).
+fn first_session_id(now: i64) -> i32 {
+    use std::hash::{BuildHasher, RandomState};
+    RandomState::new().hash_one(now) as i32
+}
+
 fn position_key(correlation_id: i64, session_id: i32, stream_id: i32) -> [u8; 16] {
     let mut key = [0u8; 16];
     key[..8].copy_from_slice(&correlation_id.to_le_bytes());
@@ -6578,6 +6591,21 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// `spec/client-protocol.md`, "Commands": a driver's session ids start at a random
+    /// i32. The first id came from the clock alone, so two drivers started in one
+    /// instant took the same ids, and a receiver that heard one stream from both held
+    /// them as one session and never answered the second. One clock value now gives a
+    /// different id at every draw; sixteen draws of an i32 repeat one in 36 million
+    /// runs.
+    #[test]
+    fn the_first_session_id_is_random_and_not_the_clock() {
+        let now = now_nanos();
+        let mut ids: Vec<i32> = (0..16).map(|_| first_session_id(now)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 16, "one instant gave the same id twice: {ids:?}");
     }
 
     /// ADR 0022: the conductor loads a publication's producer position at most once per
@@ -7051,6 +7079,22 @@ mod recording {
             std::thread::sleep(Duration::from_millis(1));
         }
         setup
+    }
+
+    /// Two conductors made one after the other, as two drivers a supervisor starts
+    /// together are, do not start at the same session id, and each goes on by one.
+    #[test]
+    fn two_conductors_start_at_different_session_ids() {
+        let mut first = Harness::new("session-id-first");
+        let mut second = Harness::new("session-id-second");
+        let (a, b) = (
+            first.conductor.next_session_id,
+            second.conductor.next_session_id,
+        );
+        assert_ne!(a, b);
+        assert_eq!(first.conductor.advance_session_id(7), a);
+        assert_eq!(first.conductor.advance_session_id(7), a.wrapping_add(1));
+        assert_eq!(second.conductor.advance_session_id(7), b);
     }
 
     /// `add publication` on a `cavalry:udp` channel opens the endpoint with its five

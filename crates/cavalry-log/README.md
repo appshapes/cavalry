@@ -16,7 +16,11 @@ The durable log: recording and replay. Data plane.
   slot after a retention command's file work failed is the same rules in two halves,
   `dir::repair_files` on the thread that has the files and `LogDir::apply_repair`, the
   one catalog write they end in, on the thread that owns the catalog, each reporting
-  what it did (ADR 0031).
+  what it did (ADR 0031). A reader of the catalog that asks only where a recording
+  stopped calls `catalog::CatalogReader::stop_position`: the checks of
+  `CatalogReader::get` and no descriptor built, so no allocation, which is what the
+  driver's replayer needs once a second for every replay that follows a live
+  recording (invariant 2).
 - Writes a recording for the driver: `LogDir::start` takes the catalog slot and
   creates the time index and the first segment file; `recorder::RecordingWriter` writes
   each block of committed frames with one positional write, appends an index entry at
