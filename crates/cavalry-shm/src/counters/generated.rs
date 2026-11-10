@@ -356,8 +356,8 @@ pub const CLUSTER_ELECTIONS_FAILED: CounterId = CounterId(115);
 /// `cluster.terms_led`, a client counter: Terms one cluster member began to lead, on entering leader log replication (spec/cluster.md, Counters); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_TERMS_LED: CounterId = CounterId(116);
 
-/// `cluster.quorum_lost`, a client counter: Times the active members of the leader fell below a quorum: the appointed leader stays the leader and its commit position stops (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal.
-pub const CLUSTER_QUORUM_LOST: CounterId = CounterId(117);
+/// `cluster.leader_quorum_losses`, a client counter: Times the active members of the leader fell below a quorum: the appointed leader stays the leader and its commit position stops (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_LEADER_QUORUM_LOSSES: CounterId = CounterId(117);
 
 /// `cluster.leader_heartbeat_timeouts`, a client counter: Times one follower began again at init because its leader sent no commit position and no new leadership term for the leader heartbeat timeout, 10 s (spec/cluster.md, Roles and the election); key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LEADER_HEARTBEAT_TIMEOUTS: CounterId = CounterId(118);
@@ -373,6 +373,9 @@ pub const CLUSTER_LOG_IMAGES_LOST: CounterId = CounterId(121);
 
 /// `cluster.messages_rejected`, a client counter: Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_MESSAGES_REJECTED: CounterId = CounterId(122);
+
+/// `cluster.appointed_leader_behind`, a client counter: Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election: it does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal.
+pub const CLUSTER_APPOINTED_LEADER_BEHIND: CounterId = CounterId(123);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -1313,8 +1316,8 @@ pub const COUNTERS: &[CounterDef] = &[
         doctor: "",
     },
     CounterDef {
-        id: CLUSTER_QUORUM_LOST,
-        name: "cluster.quorum_lost",
+        id: CLUSTER_LEADER_QUORUM_LOSSES,
+        name: "cluster.leader_quorum_losses",
         kind: Kind::Counter,
         scope: Scope::Client,
         doc: "Times the active members of the leader fell below a quorum: the appointed leader stays the leader and its commit position stops (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal.",
@@ -1359,5 +1362,13 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A member sends consensus messages this member cannot read: check that every member runs the same version.",
+    },
+    CounterDef {
+        id: CLUSTER_APPOINTED_LEADER_BEHIND,
+        name: "cluster.appointed_leader_behind",
+        kind: Kind::Counter,
+        scope: Scope::Client,
+        doc: "Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election: it does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal.",
+        doctor: "The appointed leader's log directory was lost or replaced while other members kept theirs: it will not lead. Start the cluster again as a new cluster, every member on a new log directory, and keep the old directories for what they hold.",
     },
 ];

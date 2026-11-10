@@ -323,7 +323,7 @@ fn a_follower_lost_leaves_a_quorum_that_goes_on_committing() {
         |members| members.iter().all(|m| m.module.commit_position() == end),
     );
     assert_eq!(members[0].module.role(), Role::Leader);
-    assert_eq!(members[0].module.counts().quorum_lost, 0);
+    assert_eq!(members[0].module.counts().leader_quorum_losses, 0);
     assert_eq!(members[1].module.counts().leader_heartbeat_timeouts, 0);
     assert_eq!(members[1].module.counts().log_images_lost, 0);
 

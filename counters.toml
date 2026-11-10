@@ -1224,7 +1224,7 @@ doctor = ""
 
 [[counter]]
 id = 117
-name = "cluster.quorum_lost"
+name = "cluster.leader_quorum_losses"
 kind = "counter"
 scope = "client"
 doc = "Times the active members of the leader fell below a quorum: the appointed leader stays the leader and its commit position stops (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal."
@@ -1269,6 +1269,14 @@ kind = "counter"
 scope = "client"
 doc = "Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "A member sends consensus messages this member cannot read: check that every member runs the same version."
+
+[[counter]]
+id = 123
+name = "cluster.appointed_leader_behind"
+kind = "counter"
+scope = "client"
+doc = "Members the appointed leader found holding a log ahead of its own, in canvass or in leader ready, once for each such member in an election: it does not lead, or does not close its election, while one reports so (spec/cluster.md, The appointed leader); key: member id (i32), little-endian; label text: the member id in decimal."
+doctor = "The appointed leader's log directory was lost or replaced while other members kept theirs: it will not lead. Start the cluster again as a new cluster, every member on a new log directory, and keep the old directories for what they hold."
 
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
 # 3). In this version a follower becomes the leader by appointment and no member is a

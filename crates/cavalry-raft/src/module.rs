@@ -26,10 +26,11 @@ use cavalry_proto::cluster::{
 };
 use cavalry_shm::counters::CounterId;
 use cavalry_shm::counters::generated::{
+    CLUSTER_APPOINTED_LEADER_BEHIND,
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS,
     CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LEADERSHIP_TERMS_IGNORED, CLUSTER_LOG_IMAGES_LOST,
-    CLUSTER_MESSAGES_REJECTED, CLUSTER_QUORUM_LOST, CLUSTER_ROLE, CLUSTER_TERMS_LED,
+    CLUSTER_MESSAGES_REJECTED, CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_ROLE, CLUSTER_TERMS_LED,
 };
 
 use crate::consensus::{
@@ -449,11 +450,12 @@ struct Counters {
     elections: Stored,
     elections_failed: Stored,
     terms_led: Stored,
-    quorum_lost: Stored,
+    leader_quorum_losses: Stored,
     leader_heartbeat_timeouts: Stored,
     leadership_terms_ignored: Stored,
     join_position_mismatches: Stored,
     log_images_lost: Stored,
+    appointed_leader_behind: Stored,
     messages_rejected: Stored,
 }
 
@@ -469,7 +471,7 @@ impl Counters {
             elections: add(CLUSTER_ELECTIONS, "cluster.elections")?,
             elections_failed: add(CLUSTER_ELECTIONS_FAILED, "cluster.elections_failed")?,
             terms_led: add(CLUSTER_TERMS_LED, "cluster.terms_led")?,
-            quorum_lost: add(CLUSTER_QUORUM_LOST, "cluster.quorum_lost")?,
+            leader_quorum_losses: add(CLUSTER_LEADER_QUORUM_LOSSES, "cluster.leader_quorum_losses")?,
             leader_heartbeat_timeouts: add(
                 CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
                 "cluster.leader_heartbeat_timeouts",
@@ -483,6 +485,10 @@ impl Counters {
                 "cluster.join_position_mismatches",
             )?,
             log_images_lost: add(CLUSTER_LOG_IMAGES_LOST, "cluster.log_images_lost")?,
+            appointed_leader_behind: add(
+                CLUSTER_APPOINTED_LEADER_BEHIND,
+                "cluster.appointed_leader_behind",
+            )?,
             messages_rejected: add(CLUSTER_MESSAGES_REJECTED, "cluster.messages_rejected")?,
         })
     }
@@ -500,7 +506,7 @@ impl Counters {
         self.elections.store(count(counts.elections));
         self.elections_failed.store(count(counts.elections_failed));
         self.terms_led.store(count(counts.terms_led));
-        self.quorum_lost.store(count(counts.quorum_lost));
+        self.leader_quorum_losses.store(count(counts.leader_quorum_losses));
         self.leader_heartbeat_timeouts
             .store(count(counts.leader_heartbeat_timeouts));
         self.leadership_terms_ignored
@@ -508,6 +514,8 @@ impl Counters {
         self.join_position_mismatches
             .store(count(counts.join_position_mismatches));
         self.log_images_lost.store(count(counts.log_images_lost));
+        self.appointed_leader_behind
+            .store(count(counts.appointed_leader_behind));
         self.messages_rejected.store(count(messages_rejected));
     }
 }
