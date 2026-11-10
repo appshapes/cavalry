@@ -412,11 +412,13 @@ Options:
                     a NAME that no row's name contains is an error listing the rows
   --purging         run the recorded rows again as claim_commit_<body>_recorded_purging and
                     one_way_<body>_recorded_purging, with one `purge segments` of a stopped
-                    recording of --messages/50 sparse segment files (8,192 at least,
-                    100,000 at most) running on the driver's replayer, one file per duty
-                    cycle, from before the warm-up until past the measured loop; the lines
-                    under the table say how many files went during the loop and whether the
-                    purge outlasted it; the rows are reported until a baseline holds them
+                    recording's sparse segment files running on the driver's replayer, one
+                    file per duty cycle, from before the warm-up until past the measured
+                    loop; the recording has as many files as the bench directory's file
+                    system removes in about 2.5 s, measured before each run (8,192 at
+                    least, 2,000,000 at most); the lines under the table say how many
+                    files went during the loop and whether the purge outlasted it; the
+                    rows are reported until a baseline holds them
   --help            this text
 
 Exit code 1 when a measured loop allocated, or a benchmark could not run.";
@@ -1245,17 +1247,26 @@ fn bench_client(
     with_bench_dir(name, |dir| run_client(options, dir, recorded, purging))
 }
 
-/// The messages per segment file of the pile `--purging` purges: a file every 50
-/// messages, so a 5,000,000-message row on a bench host, about a quarter of a second,
-/// has 100,000 files to remove at one per replayer duty cycle, more than the loop
-/// outlasts at the tens of microseconds an unlink takes.
-const PILE_MESSAGES_PER_SEGMENT: u64 = 50;
-/// The fewest files in a pile, for a short run.
+/// How long the purge of a pile is sized to last, in seconds. The pile has as many
+/// files as the bench directory's file system removes in this long, by a probe made
+/// before the pile is built ([`removal_rate`]), because the rate is the file system's
+/// and no one number of files serves two of them: a laptop's disk removed about
+/// 22,000 sparse files a second through the replayer and a Linux host's `/dev/shm`
+/// about 590,000 (card 177), so a pile that lasts the laptop five seconds is gone from
+/// `/dev/shm` before the warm-up ends. The purge must outlast the warm-up and the
+/// measured loop, about half a second for 5,000,000 messages on a bench host, and one
+/// `purge segments` removes the whole pile, so its reply must come inside the client's
+/// 10 s response timeout: the replayer removes a file per duty cycle and never faster
+/// than the probe, which leaves it up to four times slower before the timeout.
+const PILE_SECONDS: f64 = 2.5;
+/// The sparse files the probe creates and removes to measure the rate.
+const PILE_PROBE: u64 = 4_096;
+/// The fewest files in a pile, for a file system slower than any measured.
 const PILE_LEAST: u64 = 8_192;
-/// The most files in a pile: one `purge segments` removes them all, and its reply must
-/// come inside the client's 10 s response timeout, which this many unlinks does at
-/// 15,000 a second, the laptop's rate; a bench host's is higher.
-const PILE_MOST: u64 = 100_000;
+/// The most files in a pile: on a memory-backed file system each file is an inode held
+/// in memory, about a kibibyte, so two million are about 2 GiB for the seconds the pile
+/// lives, and creating them takes about ten seconds.
+const PILE_MOST: u64 = 2_000_000;
 /// The pile's term length, the smallest the durable log admits: nothing reads its
 /// bytes, and a segment file is at least a term.
 const PILE_TERM_LENGTH: i32 = 64 * 1024;
@@ -1273,6 +1284,37 @@ impl Pile {
     fn stop_position(&self) -> i64 {
         self.segment_length.saturating_mul(self.segments as i64)
     }
+}
+
+/// The sparse files a second the file system that will hold `log_dir` removes: the
+/// probe creates [`PILE_PROBE`] files of a segment's length beside it, never written,
+/// as the pile's are, and times their removal alone. The replayer removes the pile's
+/// files with the same call, one per duty cycle, so this is the most it can do.
+fn removal_rate(log_dir: &std::path::Path) -> Result<f64, String> {
+    let probe = log_dir.with_extension("probe");
+    let _ = std::fs::remove_dir_all(&probe);
+    std::fs::create_dir_all(&probe).map_err(|e| format!("creating {}: {e}", probe.display()))?;
+    let length = SEGMENT_FILE_LENGTH as u64;
+    let paths: Vec<PathBuf> = (0..PILE_PROBE).map(|k| probe.join(k.to_string())).collect();
+    for path in &paths {
+        std::fs::File::create(path)
+            .and_then(|file| file.set_len(length))
+            .map_err(|e| format!("creating the probe's {}: {e}", path.display()))?;
+    }
+    let started = Instant::now();
+    for path in &paths {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("removing the probe's {}: {e}", path.display()))?;
+    }
+    let seconds = started.elapsed().as_secs_f64();
+    let _ = std::fs::remove_dir_all(&probe);
+    Ok(PILE_PROBE as f64 / seconds.max(f64::EPSILON))
+}
+
+/// The files of a pile for a file system that removes `rate` files a second: what it
+/// removes in [`PILE_SECONDS`], within [`PILE_LEAST`] and [`PILE_MOST`].
+fn pile_segments(rate: f64) -> u64 {
+    ((rate * PILE_SECONDS) as u64).clamp(PILE_LEAST, PILE_MOST)
 }
 
 /// Builds a pile of `segments` segment files in `log_dir` before any driver opens it: a
@@ -1456,8 +1498,10 @@ fn run_client(
     // pile is built there before the driver opens it. `with_bench_dir` removes both.
     let log_dir = dir.with_extension("log");
     let pile = if purging {
-        let segments = (options.messages / PILE_MESSAGES_PER_SEGMENT).clamp(PILE_LEAST, PILE_MOST);
-        Some(build_pile(&log_dir, segments)?)
+        Some(build_pile(
+            &log_dir,
+            pile_segments(removal_rate(&log_dir)?),
+        )?)
     } else {
         None
     };
@@ -4133,6 +4177,30 @@ mod tests {
         drop(writer);
         drop(log);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pile is what the file system removes in the pile's seconds, within its
+    /// bounds: the laptop's and the Linux host's measured rates, and both ends.
+    #[test]
+    fn a_pile_is_sized_by_the_removal_rate_within_its_bounds() {
+        assert_eq!(pile_segments(0.0), PILE_LEAST);
+        assert_eq!(pile_segments(f64::NAN), PILE_LEAST);
+        assert_eq!(pile_segments(22_000.0), 55_000);
+        assert_eq!(pile_segments(590_000.0), 1_475_000);
+        assert_eq!(pile_segments(5_000_000.0), PILE_MOST);
+        assert_eq!(pile_segments(f64::INFINITY), PILE_MOST);
+    }
+
+    /// The probe measures a rate above zero, in a directory of its own beside the log
+    /// directory, and leaves neither it nor the log directory behind.
+    #[test]
+    fn the_probe_measures_a_removal_rate_and_leaves_nothing_behind() {
+        let log_dir =
+            std::env::temp_dir().join(format!("cavalry-bench-probe-{}.log", std::process::id()));
+        let rate = removal_rate(&log_dir).expect("the probe");
+        assert!(rate.is_finite() && rate > 0.0, "{rate}");
+        assert!(!log_dir.with_extension("probe").exists());
+        assert!(!log_dir.exists());
     }
 
     /// The recorded benchmark of [`Benchmark::ALL`], wherever it stands there.

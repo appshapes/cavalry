@@ -1911,8 +1911,9 @@ user-visible change, added in the same commit as the change. The format follows
   `claim_commit_<body>_recorded_purging` and `one_way_<body>_recorded_purging`, while
   one `purge segments` removes a stopped recording's sparse segment files on the
   driver's replayer, one file per duty cycle, from before the warm-up until past the
-  measured loop, the measurement ADR 0031's Evidence named; the pile is a file every 50
-  messages, the lines under the table say how many went during the loop and whether the
+  measured loop, the measurement ADR 0031's Evidence named; the pile has as many files
+  as the bench directory's file system removes in about 2.5 s, measured before each
+  run, the lines under the table say how many went during the loop and whether the
   purge outlasted it, and the rows are reported until a baseline holds them. The client
   rows' log directory now sits beside the bench directory, as `cavalry-client`'s
   doctest places it ([Run the bench](docs/how-to/run-the-bench.md); card 177).

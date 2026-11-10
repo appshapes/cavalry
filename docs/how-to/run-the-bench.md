@@ -65,9 +65,16 @@ shared runner is
    loop (card 177; what
    [ADR 0031](../decisions/0031-truncate-purge-and-delete-a-stopped-recording.md)'s
    Evidence names). The recording is a pile the harness builds in the log directory
-   before the driver opens it, a sparse file every 50 messages of `--messages`, 8,192
-   files at least and 100,000 at most, so one command's reply comes inside the client's
-   10 s response timeout; the lines under the table say how many files went during the
+   before the driver opens it: sparse files, as many as the bench directory's file
+   system removes in about 2.5 s, which the harness measures before each run by
+   creating and removing 4,096 of them, 8,192 files at least and 2,000,000 at most.
+   The rate is the file system's and differs by more than twenty times between the
+   two kinds the harness runs on: through the replayer a laptop's disk removed about
+   22,000 files a second and a Linux host's `/dev/shm` about 590,000, so the laptop's
+   pile was 87,885 files and the Linux host's the 2,000,000. One command removes the
+   whole pile, so its reply must come inside the client's 10 s response timeout, and
+   on `/dev/shm` each file is an inode held in memory, about 2 GiB for the largest
+   pile while it lives. The lines under the table say how many files went during the
    loop and whether the purge outlasted it, and the result carries both as
    `segments_purged`. The rows are reported until a baseline holds them.
 
@@ -838,13 +845,18 @@ shared runner is
   system's temporary directory and at least two cores; the error names what it could
   not do.
 - `the recorded_purging benchmark failed: the purge removed no file of the pile in 60 s`:
-  the replayer admitted the purge but removed nothing in a minute. The pile is
-  `--messages`/50 files, so a smaller run has a smaller pile; a replayer that removes
-  nothing of a pile of 8,192 is stuck, which is a driver bug under invariant 3: keep
-  the run's first line and report it.
+  the replayer admitted the purge but removed nothing in a minute. Listing the largest
+  pile takes the replayer a few seconds and no more; a replayer that removes nothing in
+  sixty is stuck, which is a driver bug under invariant 3: keep the run's first line
+  and report it. A purge the driver refused, or a purger that could not connect, is
+  not this line: the benchmark fails with the refusal's own message.
 - `the purge did not outlast the loop in every run` under the table: in at least one
   run the pile ran out before the measured loop ended, so part of that run's samples
-  had no file work beside them. The row prints and is reported either way. A host that
-  removes a file in less than the time the row takes to publish 50 messages needs a
-  larger pile, which is `PILE_MESSAGES_PER_SEGMENT` in `bench/src/main.rs`, a change to
-  the harness and never a knob.
+  had no file work beside them. The row prints and is reported either way. The pile is
+  sized to last about 2.5 s, so a row whose warm-up and loop take longer than that
+  outruns it: run it with fewer `--messages`. On a file system so fast that 2,000,000
+  files last less than the row, the bound is `PILE_MOST` in `bench/src/main.rs`, a
+  change to the harness and never a knob. When the pile runs out inside the loop the
+  purge's reply is handled inside the counting window, so such a run can also fail
+  with `allocations per message` above 0, the conductor's answer to the command and
+  not the path's.
