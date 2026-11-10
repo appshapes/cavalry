@@ -8,6 +8,14 @@
 # and the replay from the instant must start at the position the index gives, which a
 # position summed over the lines would miss past the padding. A byte out of place or a
 # message missing anywhere fails it.
+#
+# Then the same for a cluster (ADR 0052, feature 3; ADR 0063): three members on the
+# loopback, each a driver with its consensus module, replicate 100,000 hash-chained
+# entries from the leader, appointed by the lowest member id, and commit them at a
+# quorum; a driver started again on each member's directories replays that member's
+# recording of the log; the three members' lines must hash the same, positions and
+# bodies, and the payloads in them must be the payloads the leader was offered, in
+# order. An entry missing, repeated, out of order or changed on any member fails it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -19,22 +27,27 @@ export CAVALRY_DIR="${base%/}/cavalry-replay-check-$$"
 # its driver directory and never under the user's home.
 export XDG_DATA_HOME="${CAVALRY_DIR}-data"
 work="${CAVALRY_DIR}-out"
-rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME" "$work"
+# The three members' driver directories and log directories, made by the program.
+cluster="${CAVALRY_DIR}-cluster"
+# A member is started by these two keys (docs/how-to/run-a-cluster.md); the drivers
+# this script starts are no members, whatever the caller's environment holds.
+unset CAVALRY_CLUSTER_MEMBERS CAVALRY_CLUSTER_MEMBER_ID
+rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME" "$work" "$cluster"
 mkdir -p "$work"
 cleanup() {
     if [ -n "${driver_pid:-}" ] && kill -0 "$driver_pid" 2>/dev/null; then
         kill -TERM "$driver_pid" 2>/dev/null || true
         wait "$driver_pid" 2>/dev/null || true
     fi
-    rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME" "$work"
+    rm -rf "$CAVALRY_DIR" "$XDG_DATA_HOME" "$work" "$cluster"
 }
 trap cleanup EXIT
 
 step() { printf '\nreplay-check: %s\n' "$1"; }
 digest() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
-step "1. build the binary and the program"
-cargo build --release -p cavalry --bin cavalry --example replay-check
+step "1. build the binary and the two programs"
+cargo build --release -p cavalry --bin cavalry --example replay-check --example cluster-replay-check
 
 cavalry=target/release/cavalry
 step "2. cavalry run, in the background, on $CAVALRY_DIR"
@@ -88,4 +101,49 @@ kill -TERM "$driver_pid"
 wait "$driver_pid"
 driver_pid=""
 
-printf '\nreplay-check: three equal hashes, %s s\n' "$(( $(date +%s) - started ))"
+step "7. three cluster members replicate 100,000 hash-chained entries and commit them"
+target/release/examples/cluster-replay-check --messages 100000 --dir "$cluster" > "$work/offered.txt" 2> "$work/cluster.txt" || {
+    cat "$work/cluster.txt" >&2; echo "replay-check: the cluster did not replicate and commit the entries" >&2; exit 1; }
+cat "$work/cluster.txt"
+cluster_end=$(sed -n 's/^end=\([0-9]*\) .*/\1/p' "$work/cluster.txt")
+entries=$(sed -n 's/.* entries=\([0-9]*\) .*/\1/p' "$work/cluster.txt")
+lines=$(wc -l < "$work/offered.txt" | tr -d ' ')
+[ "$lines" = 100000 ] || { echo "replay-check: the leader was offered $lines entries, not 100000" >&2; exit 1; }
+[ "$entries" = 100001 ] || { echo "replay-check: the log holds $entries entries, not the term's first and 100000" >&2; exit 1; }
+
+step "8. replay each member's recording through a driver on its directories, and hash the three"
+for member in 0 1 2; do
+    line=$(grep "^member=$member " "$work/cluster.txt")
+    dir=$(printf '%s\n' "$line" | sed -n 's/.* dir=\([^ ]*\) .*/\1/p')
+    log_dir=$(printf '%s\n' "$line" | sed -n 's/.* log_dir=\([^ ]*\) .*/\1/p')
+    recording=$(printf '%s\n' "$line" | sed -n 's/.* recording=\([0-9]*\)$/\1/p')
+    "$cavalry" run --dir "$dir" --log-dir "$log_dir" &
+    driver_pid=$!
+    for _ in $(seq 1 100); do
+        if "$cavalry" doctor --dir "$dir" --log-dir "$log_dir" >/dev/null 2>&1; then break; fi
+        sleep 0.1
+    done
+    "$cavalry" doctor --dir "$dir" --log-dir "$log_dir" | grep -q 'is running' || {
+        echo "replay-check: member $member's driver did not report running" >&2; exit 1; }
+    "$cavalry" replay --dir "$dir" --log-dir "$log_dir" --recording "$recording" --from 0 > "$work/member$member.txt"
+    tail -1 "$work/member$member.txt"
+    grep -q "ended at position $cluster_end: $entries messages from position 0" "$work/member$member.txt" || {
+        echo "replay-check: member $member's replay did not end at $cluster_end with $entries messages" >&2; exit 1; }
+    sed '$d' "$work/member$member.txt" > "$work/member$member.body"
+    kill -TERM "$driver_pid"
+    wait "$driver_pid"
+    driver_pid=""
+done
+zero=$(digest "$work/member0.body"); one=$(digest "$work/member1.body"); two=$(digest "$work/member2.body")
+printf 'member 0 %s\nmember 1 %s\nmember 2 %s\n' "$zero" "$one" "$two"
+[ "$zero" = "$one" ] && [ "$one" = "$two" ] || { echo "replay-check: the three members' hashes differ" >&2; exit 1; }
+
+step "9. the payloads of the replayed entries are the payloads the leader was offered"
+# A line is the entry's position and its body in hex; the payload is the body's last 16
+# bytes, 32 characters. The first line is the term's first entry, which no one offered.
+sed -e '1d' -e 's/.*\(.\{32\}\)$/\1/' "$work/member0.body" > "$work/replayed.txt"
+offered=$(digest "$work/offered.txt"); replayed=$(digest "$work/replayed.txt")
+printf 'offered  %s\nreplayed %s\n' "$offered" "$replayed"
+[ "$offered" = "$replayed" ] || { echo "replay-check: the replayed payloads are not the offered ones" >&2; exit 1; }
+
+printf '\nreplay-check: three equal hashes of one recording, three equal hashes of three members, %s s\n' "$(( $(date +%s) - started ))"

@@ -1985,3 +1985,12 @@ user-visible change, added in the same commit as the change. The format follows
   request after a first miss gives the command with the run's own id
   ([Ask the agent to make a change](docs/how-to/ask-the-agent.md), "No review
   arrived"; card 247).
+- `just replay-check` covers a cluster. After the recording it always checked, three
+  members on the loopback, each a driver with its consensus module, replicate and
+  commit 100,000 entries whose payloads carry a hash chain; a driver started on each
+  member's directories replays that member's recording of the log; and the gate fails
+  unless the three members' lines, positions and bodies, hash the same and their
+  payloads are the ones the leader was offered, in order. `examples/cluster-replay-check.rs`
+  in `cavalry` is its program
+  ([ADR 0052](docs/decisions/0052-build-raft-on-the-durable-log-fifth.md), feature 3;
+  [Run a cluster of three members](docs/how-to/run-a-cluster.md); card 227).
