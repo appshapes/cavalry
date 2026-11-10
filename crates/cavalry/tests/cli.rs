@@ -777,10 +777,35 @@ fn run_with_the_cluster_keys_starts_a_member_and_three_of_them_appoint_a_leader(
     }
     // Every member's election closes, state 17, the member with the lowest id leading,
     // role 2, and the others following, role 0: read from each driver's counters file.
-    wait("every member's election closed", || {
-        dirs.iter()
-            .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
-    });
+    // A wait that fails says what each member was doing, from the same counters and
+    // from what its `run` wrote: a duty cycle that fails is said there once for each
+    // different error, and the test's own message could not tell a member that never
+    // bound an endpoint from one whose leader closed without it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !dirs
+        .iter()
+        .all(|dir| cluster_counter(&dir.0, CLUSTER_ELECTION_STATE) == Some(17))
+    {
+        if Instant::now() >= deadline {
+            let mut report = vec![format!("the members string: {members}")];
+            for (member, dir) in dirs.iter().enumerate() {
+                report.push(format!(
+                    "member {member}: {CLUSTER_ELECTION_STATE} {:?}, {CLUSTER_ROLE} {:?}",
+                    cluster_counter(&dir.0, CLUSTER_ELECTION_STATE),
+                    cluster_counter(&dir.0, CLUSTER_ROLE)
+                ));
+            }
+            while let Some(run) = runs.0.pop() {
+                let member = runs.0.len();
+                report.push(format!("member {member}'s run wrote:\n{}", terminate(run)));
+            }
+            panic!(
+                "every member's election closed within 10 s\n{}",
+                report.join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(cluster_counter(&dirs[0].0, CLUSTER_ROLE), Some(2));
     assert_eq!(cluster_counter(&dirs[1].0, CLUSTER_ROLE), Some(0));
     assert_eq!(cluster_counter(&dirs[2].0, CLUSTER_ROLE), Some(0));
