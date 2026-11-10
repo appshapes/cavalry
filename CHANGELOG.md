@@ -1937,13 +1937,17 @@ user-visible change, added in the same commit as the change. The format follows
   follows, its term, its election's state and its append and commit positions. It
   warns when the member follows no leader (`cluster-no-leader`), saying from
   `CAVALRY_CLUSTER_MEMBERS` whether it is the appointed leader and what it waits for,
-  or which member is and on whose host to look next; when its elections
-  fail because it started late or lost its log (`cluster-joined-late`), and when the
-  leader has lost its quorum (`cluster-quorum-lost`); it fails when the appointed
-  leader found members ahead of its own log and so does not lead, or leads and does
-  not close its election (`cluster-leader-behind`); and it notes a commit position behind the leader's own
-  append position (`cluster-commit-waits`). Each names what to do. An armed recording
-  that has started, which every follower has, is no longer reported: `recording.armed`
-  warns only for recordings still waiting for their image. The new how-to,
+  or which member is and on whose host to look next; when its elections fail because
+  it started late or lost its log (`cluster-joined-late`); and when the leader has
+  lost its quorum (`cluster-quorum-lost`). It fails when the appointed leader found
+  members ahead of its own log and so does not lead, or leads and does not close its
+  election (`cluster-leader-behind`), and it notes a commit position behind the
+  leader's own append position (`cluster-commit-waits`). It warns too, with the
+  counter's own advice, when the member rejected consensus messages, as from a member
+  of another version (`cluster.messages_rejected`), stopped hearing its leader
+  (`cluster.leader_heartbeat_timeouts`) or lost the leader's log stream
+  (`cluster.log_images_lost`). Each names what to do. An armed recording that has
+  started, which every follower has, is no longer reported: `recording.armed` warns
+  only for recordings still waiting for their image. The new how-to,
   [Run a cluster of three members](docs/how-to/run-a-cluster.md), starts three members
   on one host and reads each finding (card 227).

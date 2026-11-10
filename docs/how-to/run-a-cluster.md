@@ -133,6 +133,18 @@ committed once a quorum, two of three, has it on disk.
 - `WARN cluster-quorum-lost`: the leader heard from fewer than two of three members
   within 10 s, and nothing was committed while that lasted. Check that two members run
   and that each reaches the leader's consensus endpoint.
+- `WARN cluster.messages_rejected`: the member rejected consensus messages it cannot
+  read, and acted on none of them. Another member sends them from another version of
+  Cavalry, as during an upgrade, and the member may canvass with no leader for as long
+  as that lasts. Run `cavalry --version` on every member's host and start every member
+  on the same version.
+- `WARN cluster.leader_heartbeat_timeouts`: the follower heard nothing from its leader
+  for 10 s and began its election again. Check that the leader runs, that `doctor` on
+  the leader's host shows no `cluster-quorum-lost`, and that this host reaches the
+  leader's consensus endpoint.
+- `WARN cluster.log_images_lost`: the follower lost its image of the leader's log
+  stream and began its election again. Check the network path from the leader's log
+  endpoint to this host, and the image counters of stream 100 on this member's driver.
 - `note cluster-commit-waits`: the leader has appended more than a quorum has
   recorded. Up to a second of entries waits at any moment, since a recorder syncs once
   a second. If the commit position stays where it is while the append position moves,

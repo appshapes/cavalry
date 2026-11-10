@@ -48,7 +48,8 @@ use cavalry_shm::counters::generated::{
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_APPOINTED_LEADER_BEHIND, CLUSTER_COMMIT_POSITION,
     CLUSTER_ELECTION_STATE, CLUSTER_ELECTIONS_FAILED, CLUSTER_JOIN_POSITION_MISMATCHES,
-    CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_ROLE,
+    CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADERSHIP_TERM_ID,
+    CLUSTER_LOG_IMAGES_LOST, CLUSTER_MESSAGES_REJECTED, CLUSTER_ROLE,
 };
 use cavalry_shm::counters::{CounterId, CountersError, CountersReader, Scope};
 
@@ -993,6 +994,17 @@ fn counters_checks(
 
 const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 
+/// A member's counts that no check below reads with the others and whose `counters.toml`
+/// doctor sentence says what to do when they are above 0: each is reported by its name
+/// with that sentence, as a static counter is (`counters_checks`), since a client
+/// counter is not in that loop. A peer of another version shows in the first, a leader
+/// gone silent in the second, the leader's log stream lost in the third.
+const MEMBER_COUNTS: [CounterId; 3] = [
+    CLUSTER_MESSAGES_REJECTED,
+    CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
+    CLUSTER_LOG_IMAGES_LOST,
+];
+
 /// One cluster member as its counters show it (`spec/cluster.md`, "Counters"): what its
 /// consensus module stored, by the member id in each counter's key.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1007,6 +1019,8 @@ struct MemberCounters {
     join_position_mismatches: i64,
     leader_quorum_losses: i64,
     appointed_leader_behind: i64,
+    /// The values of [`MEMBER_COUNTS`], in its order.
+    counts: [i64; MEMBER_COUNTS.len()],
 }
 
 /// What the members string doctor was given says of the cluster: its members' ids, so
@@ -1066,8 +1080,9 @@ fn election_state_name(code: i64) -> &'static str {
 /// (`cluster-joined-late`); an appointed leader that does not lead, or leads and does
 /// not close its election, its log behind a member's (`cluster-leader-behind`); a
 /// leader that lost its quorum (`cluster-quorum-lost`); and a commit position behind
-/// the leader's own append position (`cluster-commit-waits`). A stopped driver's member
-/// is gone with its client, so the checks run while the driver runs, and only where a
+/// the leader's own append position (`cluster-commit-waits`); and each of
+/// [`MEMBER_COUNTS`] above 0, by its counter's name with its doctor sentence, consensus
+/// messages rejected among them. A stopped driver's member is gone with its client, so the checks run while the driver runs, and only where a
 /// member is. With `cluster`, from the members string doctor was given, a member with no
 /// leader is told whether it is the appointed leader.
 fn cluster_checks(
@@ -1134,6 +1149,12 @@ fn cluster_checks(
             member.leader_quorum_losses = value;
         } else if type_id == CLUSTER_APPOINTED_LEADER_BEHIND.0 {
             member.appointed_leader_behind = value;
+        } else if let Some(count) = MEMBER_COUNTS
+            .iter()
+            .position(|counter| counter.0 == type_id)
+            .and_then(|index| member.counts.get_mut(index))
+        {
+            *count = value;
         }
     }
     if members.is_empty() {
@@ -1143,7 +1164,8 @@ fn cluster_checks(
     for member in &members {
         member_findings(member, cluster, findings);
     }
-    6
+    // The six of `member_findings`, and one for each of the member's counts.
+    6 + MEMBER_COUNTS.len()
 }
 
 /// What `cluster-no-leader` says of member `id`, its election in `state`. The appointed
@@ -1301,6 +1323,19 @@ fn member_findings(
             ),
             doc: DOC_CLUSTER,
         });
+    }
+    for (counter, value) in MEMBER_COUNTS.iter().zip(member.counts) {
+        let Some(def) = COUNTERS.iter().find(|def| def.id == *counter) else {
+            continue;
+        };
+        if value > 0 {
+            findings.push(Finding {
+                check: def.name,
+                level: Level::Warn,
+                message: format!("member {id}'s {} is {value}: {}", def.name, def.doctor),
+                doc: DOC_CLUSTER,
+            });
+        }
     }
 }
 
@@ -4626,6 +4661,80 @@ mod tests {
         }
     }
 
+    /// The member's counts with a doctor sentence of their own are reported by their
+    /// name and that sentence when above 0: a peer of another version, whose consensus
+    /// messages the member rejects, beside the `cluster-no-leader` it causes; a follower
+    /// that lost its leader's heartbeat and its log image, its election closed again.
+    #[test]
+    fn a_member_count_with_a_doctor_sentence_is_reported_with_it() {
+        let (_, findings) = cluster_findings(
+            "cluster-rejected",
+            1,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 1),
+                (CLUSTER_LEADERSHIP_TERM_ID, -1),
+                (CLUSTER_MESSAGES_REJECTED, 12),
+                (CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, 0),
+                (CLUSTER_LOG_IMAGES_LOST, 0),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(
+            found,
+            [
+                "cluster-member",
+                "cluster-no-leader",
+                "cluster.messages_rejected"
+            ]
+        );
+        let rejected = &findings[2];
+        assert_eq!(rejected.level, Level::Warn);
+        assert_eq!(
+            rejected.message,
+            "member 1's cluster.messages_rejected is 12: A member sends consensus messages \
+             this member cannot read: check that every member runs the same version."
+        );
+        assert_eq!(rejected.doc, DOC_CLUSTER);
+
+        let (_, findings) = cluster_findings(
+            "cluster-heartbeat",
+            2,
+            &[
+                (CLUSTER_ROLE, 0),
+                (CLUSTER_ELECTION_STATE, 17),
+                (CLUSTER_LEADERSHIP_TERM_ID, 0),
+                (CLUSTER_LEADER_HEARTBEAT_TIMEOUTS, 1),
+                (CLUSTER_LOG_IMAGES_LOST, 2),
+            ],
+        );
+        let found: Vec<&str> = findings.iter().map(|finding| finding.check).collect();
+        assert_eq!(
+            found,
+            [
+                "cluster-member",
+                "cluster.leader_heartbeat_timeouts",
+                "cluster.log_images_lost"
+            ]
+        );
+        assert!(
+            findings[1].message.starts_with(
+                "member 2's cluster.leader_heartbeat_timeouts is 1: The follower stopped \
+                 hearing its leader"
+            ),
+            "{}",
+            findings[1].message
+        );
+        assert!(
+            findings[2].message.starts_with(
+                "member 2's cluster.log_images_lost is 2: The follower lost the leader's log \
+                 stream"
+            ),
+            "{}",
+            findings[2].message
+        );
+    }
+
     #[test]
     fn a_cluster_member_is_explained_from_its_counters() {
         // No member: no check, nothing found. A stopped driver's: the same.
@@ -4648,7 +4757,7 @@ mod tests {
 
         // A follower that follows: the note alone, with who it is and what it knows.
         let (checks, findings) = cluster_findings("cluster-follower", 1, &follower);
-        assert_eq!(checks, 6);
+        assert_eq!(checks, 9);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].check, "cluster-member");
         assert_eq!(findings[0].level, Level::Note);
