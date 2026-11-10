@@ -41,7 +41,7 @@ In Aeron, this is the media driver ([glossary](../glossary.md)).
    driver a member of a cluster: `CAVALRY_CLUSTER_MEMBERS` and
    `CAVALRY_CLUSTER_MEMBER_ID` ([`cluster.members`](../reference/config.md#clustermembers));
    [Run a cluster of three members](run-a-cluster.md) is the page for that, and for
-   the `cluster-*` lines `doctor` prints on such a driver.
+   the `cluster-*` and `cluster.*` lines `doctor` prints on such a driver.
    [The configuration reference](../reference/config.md) lists every key, what it does
    and why its default is not always right. Recording a stream is
    [its own page](record-a-stream.md).

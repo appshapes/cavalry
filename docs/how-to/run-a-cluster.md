@@ -67,11 +67,11 @@ committed once a quorum, two of three, has it on disk.
    CAVALRY_CLUSTER_MEMBER_ID=0 target/release/cavalry doctor --dir /tmp/cavalry-member-0 --log-dir /tmp/cavalry-member-0-log
    ```
 
-   You will see `note cluster-member  this driver is cluster member 0, the leader in
-   term 0, election closed: append position 96, commit position 96`. For members 1 and
-   2, with their own id and directories in the command, the line says `a follower in
-   term 0, election closed`, with the same two positions once their recorders have
-   synced, which they do once a second.
+   You will see a line that begins `note cluster-member` and says `this driver is
+   cluster member 0, the leader in term 0, election closed: append position 96,
+   commit position 96`. For members 1 and 2, with their own id and directories in the
+   command, the line says `a follower in term 0, election closed`, with the same two
+   positions once their recorders have synced, which they do once a second.
 
 5. Stop a member with Ctrl-C or SIGTERM. It prints `cavalry run: stopping` and
    `cavalry run: closed`. The other two are a quorum and go on.
@@ -80,7 +80,7 @@ committed once a quorum, two of three, has it on disk.
 
 - `cavalry doctor` on each member's directory, with the member's two variables set as
   in step 4, prints one `note cluster-member` line and no `WARN` or `FAIL` line whose
-  check begins `cluster-`.
+  check begins `cluster-` or `cluster.`.
 - Exactly one member says `the leader`, the member with the lowest id.
 - Every member reports `election closed` and the same `commit position`.
 - `ls /tmp/cavalry-member-1-log` lists `terms`, the member's record of the terms it

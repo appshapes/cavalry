@@ -994,9 +994,9 @@ fn counters_checks(
 
 const DOC_CLUSTER: &str = "docs/how-to/run-a-cluster.md#when-it-does-not-work";
 
-/// A member's counts that no check below reads with the others and whose `counters.toml`
-/// doctor sentence says what to do when they are above 0: each is reported by its name
-/// with that sentence, as a static counter is (`counters_checks`), since a client
+/// A member's counts that no other check of a member reads, each with a `counters.toml`
+/// doctor sentence that says what to do when it is above 0: each is reported by its
+/// name with that sentence, as a static counter is (`counters_checks`), since a client
 /// counter is not in that loop. A peer of another version shows in the first, a leader
 /// gone silent in the second, the leader's log stream lost in the third.
 const MEMBER_COUNTS: [CounterId; 3] = [
