@@ -2376,13 +2376,16 @@ pub fn appointed_canvass(
 }
 
 /// Whether an appointed leader in leader ready closes its election, among `members`
-/// members of which it heard `heard` in its canvass, itself among them, `counted`
-/// count for its term at its log position, and `ahead` last reported a log ahead of
-/// its own (`spec/cluster.md`, "The appointed leader"): at once when every member it
-/// heard counts, and with a quorum once its deadline has passed, the leader heartbeat
-/// timeout after it entered leader ready; never with fewer than a quorum, and never
-/// while a member is ahead. A member counts when its last report is for the leader's
-/// term, at the leader's log position, and younger than the leader heartbeat timeout.
+/// members of which it has heard `heard`, itself among them, `counted` count for its
+/// term at its log position, and `ahead` last reported a log ahead of its own
+/// (`spec/cluster.md`, "The appointed leader"): at once when every member it has heard
+/// counts, and with a quorum once its deadline has passed, the leader heartbeat timeout
+/// after it entered leader ready; never with fewer than a quorum, and never while a
+/// member is ahead. A member is heard once the leader has had a canvass position or an
+/// append position from it since its canvass began. A member counts when its last
+/// report is an append position for the leader's term, at the leader's log position,
+/// and younger than the leader heartbeat timeout, so every member that counts is one
+/// heard, and `counted >= heard` is every member heard counting.
 pub const fn leader_ready(
     members: usize,
     heard: usize,
