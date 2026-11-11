@@ -368,7 +368,7 @@ static napi_value fn_registerSubscription(napi_env env, napi_callback_info info)
 
 /* registerCommittedLog(header): a committed log's state, a subscription's state whose
  * trampoline hands the handler a third argument, the entry's position in the log
- * (spec/c-abi.md, "A frame's position"; ADR 0068). */
+ * (spec/c-abi.md, "A frame's position"; ADR 0070). */
 static napi_value fn_registerCommittedLog(napi_env env, napi_callback_info info) {
   return register_state(env, info, true);
 }

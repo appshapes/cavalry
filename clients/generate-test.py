@@ -688,7 +688,7 @@ class NodePackage(unittest.TestCase):
                       "napi_get_reference_value napi_get_undefined napi_call_function napi_get_typedarray_info "
                       "napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
         # A committed log's entry asks for one thing more, the number its position is handed
-        # to the handler as (ADR 0068).
+        # to the handler as (ADR 0070).
         self.assertIn("an entry whose handler returns calls: napi_open_handle_scope napi_create_external_buffer "
                       "napi_get_reference_value napi_get_undefined napi_create_int64 napi_call_function "
                       "napi_get_typedarray_info napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
