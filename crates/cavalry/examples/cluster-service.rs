@@ -149,12 +149,29 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         // once every one of them has been delivered.
         if log.is_ended() {
             if let Some(position) = log.failed_at() {
-                // The driver could not play the member's recording on from here.
+                // The driver could not play the member's recording on from there. What
+                // this program read ends at the handle's position, which is below the
+                // failure when the driver withdrew the failed replay before this
+                // program had read it, and is where the next run starts.
+                let next = log.position();
+                let again = if read > 0 {
+                    format!(
+                        "this program read every entry below position {next} and none \
+                         from it on; start it again with --from {next}"
+                    )
+                } else {
+                    format!(
+                        "this program read no entry: --from {} was not the position of an \
+                         entry, or the recording is damaged there; give --from a next \
+                         position an earlier run printed, or 0",
+                        args.from
+                    )
+                };
                 return Err(format!(
                     "the replay of member {}'s recording {} failed at position {position}: \
-                     --from was not the position of an entry, or the recording's files \
-                     are damaged; give --from a next position this program printed, or 0, \
-                     and run `cavalry doctor`, which names a damaged recording; see \
+                     a segment file of the recording could not be read or a frame in it \
+                     failed a check; {again}; run `cavalry doctor`, which names a damaged \
+                     recording; see \
                      docs/how-to/read-the-committed-log.md#when-it-does-not-work",
                     log.member_id(),
                     log.recording_id()

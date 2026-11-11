@@ -124,16 +124,23 @@ its services read what it appends in the same way.
 - `cluster-service: the replay of member 1's recording 0 failed at position ...`, and
   the program exits 1: the driver could not play the member's recording past that
   position, because a segment file of the recording could not be read or a frame in
-  it failed a check. The service has read every entry below the position and none
-  from it on. The member is still running and goes on committing, so those entries
+  it failed a check. The message goes on with a second position, the `--from` to
+  start again with: the service has read every entry below that one and none from it
+  on. It is the failed position when the service had read all that the replay played.
+  It is lower when the driver withdrew the failed replay, 5 s after it ended, before
+  the service had read it, as the entry on a withdrawn replay below says. The member
+  is still running and goes on committing, so the entries the service was not given
   are not lost to the cluster: this service has not read them. `cavalry doctor` on
   the member's directory warns of `replay.failed`, says to check the log directory's
   disk first, and names the recording when its entry in the catalog is invalid. In
-  your own program, `log.failed_at()` returns that position. Start the service again
-  with `--from` a `next position` it printed, or 0. If the replay fails at the same
-  position again, the recording is damaged there: read the entries from it on on
-  another member, one that has not left the log, whose recording begins at 0. A
-  `--from` at which no entry begins fails the replay too, but in this version the
+  your own program, `log.failed_at()` returns the failed position and
+  `log.position()` the one to start again from. Start the service again with the
+  `--from` value the message gives. If the replay fails at the same position again,
+  the recording is damaged there: read the entries from it on on another member, one
+  that has not left the log, whose recording begins at 0. When the message says the
+  program read no entry, `--from` was not the position of an entry, or the recording
+  is damaged at that position: use a `next position` an earlier run printed, or 0. A
+  `--from` at which no entry begins fails the replay so, but in this version the
   client is closed before it can say so: that is the entry above this one.
 - `--from needs a position, a multiple of 32 from 0`: the program refused the value
   before it asked the driver.
