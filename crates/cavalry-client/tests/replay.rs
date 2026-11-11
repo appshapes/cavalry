@@ -578,16 +578,22 @@ fn start_replay_errors_carry_the_drivers_codes() {
         ),
         ErrorCode::InvalidChannel,
     );
-    match client.start_replay(0, 100, NULL_LENGTH, 2075, "cavalry:ipc") {
-        Err(ClientError::Refused { message, .. }) => {
+    // The driver's message ends with the page and section that explains it, and so
+    // does the error's own text, which names it that once.
+    const SECTION: &str = "docs/reference/client-protocol.md#error-codes";
+    let error = client
+        .start_replay(0, 100, NULL_LENGTH, 2075, "cavalry:ipc")
+        .expect_err("a start inside a frame");
+    match &error {
+        ClientError::Refused { message, .. } => {
             assert!(message.contains("from 0 to 256"), "{message}");
-            assert!(
-                message.ends_with("docs/reference/client-protocol.md#error-codes"),
-                "{message}"
-            );
+            assert!(message.ends_with(SECTION), "{message}");
         }
         other => panic!("{other:?}"),
     }
+    let text = error.to_string();
+    assert!(text.ends_with(SECTION), "{text}");
+    assert_eq!(text.matches(SECTION).count(), 1, "{text}");
     client.close().expect("closes");
     driver.close().expect("closes");
 }

@@ -259,11 +259,21 @@ impl fmt::Display for ClientError {
                 code,
                 raw_code,
                 message,
-            } => write!(
-                f,
-                "command refused ({reason}, error code {raw_code}{}): {message}; see {DOC_ERRORS}",
-                code.map_or(String::new(), |code| format!(", {code:?}"))
-            ),
+            } => {
+                write!(
+                    f,
+                    "command refused ({reason}, error code {raw_code}{}): {message}",
+                    code.map_or(String::new(), |code| format!(", {code:?}"))
+                )?;
+                // The driver's message ends with the page and section that explains it,
+                // so the section is named once, and last. A message that ends otherwise,
+                // as one from a driver of another version may, gets this page's.
+                if ends_with_its_section(message) {
+                    Ok(())
+                } else {
+                    write!(f, "; see {DOC_ERRORS}")
+                }
+            }
             ClientError::SubscriptionsFull { limit } => write!(
                 f,
                 "command refused ({reason}): this client holds {limit} subscriptions, the \
@@ -335,6 +345,15 @@ impl std::error::Error for ClientError {
     }
 }
 
+/// Whether a driver's error message ends with the page and section that explains it,
+/// as the spec has every one of them end (`spec/client-protocol.md`, "Events", error
+/// message): its last words are `see` and a path under `docs/`, with nothing after.
+fn ends_with_its_section(message: &str) -> bool {
+    message.rsplit_once("see ").is_some_and(|(_, section)| {
+        section.starts_with("docs/") && !section.contains(char::is_whitespace)
+    })
+}
+
 impl From<CommandRingError> for ClientError {
     fn from(error: CommandRingError) -> Self {
         ClientError::CommandRing(error)
@@ -362,5 +381,53 @@ impl From<ProtocolError> for ClientError {
 impl From<LogError> for ClientError {
     fn from(error: LogError) -> Self {
         ClientError::Log(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refused command's text names one page and section, and ends with it: the
+    /// driver's own where its message ends with one, whichever page that is, and this
+    /// client's where it does not, a section in the middle of a message included.
+    #[test]
+    fn a_refused_command_ends_with_one_docs_section() {
+        let text = |message: &str| {
+            ClientError::Refused {
+                code: None,
+                raw_code: 99,
+                message: message.to_string(),
+            }
+            .to_string()
+        };
+        let refused = "command refused (refused, error code 99): stream 7 is refused";
+        // The driver's message ends with this client's section: nothing is added.
+        assert_eq!(
+            text(&format!("stream 7 is refused; see {DOC_ERRORS}")),
+            format!("{refused}; see {DOC_ERRORS}")
+        );
+        // It ends with another page: that page explains it, and nothing is added.
+        assert_eq!(
+            text("stream 7 is refused; see docs/reference/counters.md"),
+            format!("{refused}; see docs/reference/counters.md")
+        );
+        // It names no section: this client's is added.
+        assert_eq!(
+            text("stream 7 is refused"),
+            format!("{refused}; see {DOC_ERRORS}")
+        );
+        // It names one and goes on: the text still ends with a section.
+        assert_eq!(
+            text(&format!(
+                "stream 7 is refused; see {DOC_ERRORS}; the disk said no"
+            )),
+            format!("{refused}; see {DOC_ERRORS}; the disk said no; see {DOC_ERRORS}")
+        );
+        // `see` with no page after it is no section.
+        assert_eq!(
+            text("stream 7 is refused; see the log"),
+            format!("{refused}; see the log; see {DOC_ERRORS}")
+        );
     }
 }
