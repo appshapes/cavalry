@@ -97,12 +97,16 @@ export class CavalryError extends Error {
   abiMessage: string;
 }
 
-/** A fragment of a poll did not reach the handler cleanly: the handler threw on `raised` of
- * them, `undelivered` never reached it, and `cause` is the first of these. */
+/** A fragment of a poll, or an entry of a committed log's when `committedLog` is true, did not
+ * reach the handler cleanly: the handler threw on `raised` of them, `undelivered` never reached
+ * it, and `cause` is the first of these. `fragments` is the poll's result, -1 when the poll
+ * also stopped on a fault, which the `fault()` of the object that was polled reads until its
+ * next poll. */
 export class HandlerError extends Error {
   fragments: number;
   raised: number;
   undelivered: number;
+  committedLog: boolean;
 }
 
 /** The body as a Buffer into the log, valid for the call, and the frame's header. */

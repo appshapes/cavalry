@@ -125,23 +125,41 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s: %s (error %d)", e.Fn, e.Message, e.Code)
 }
 
-// HandlerError is the fragment handler panicked during a poll: Fragments is the count
-// the poll returned once the ABI was done, Raised how many handler calls panicked, and
-// Cause the first panic's value, kept as it was panicked.
+// HandlerError is the handler panicked during a poll, a subscription's fragment handler
+// or, when CommittedLog is true, a committed log's entry handler: Fragments is the count
+// the poll returned once the ABI was done, of fragments or of entries, or -1 when the
+// poll also stopped on a fault, which the Err and the Fault of what was polled read;
+// Raised how many handler calls panicked, and Cause the first panic's value, kept as it
+// was panicked.
 type HandlerError struct {
-	Fragments int
-	Raised    int
-	Cause     any
+	Fragments    int
+	Raised       int
+	Cause        any
+	CommittedLog bool
 }
 
 func (e *HandlerError) Error() string {
+	one, many := "fragment", "fragments"
 	delivered := fmt.Sprintf("the %d fragment(s) this poll delivered", e.Fragments)
-	if e.Fragments < 0 {
-		delivered = "the fragments this poll delivered before it stopped on a fault, which Subscription.Fault reads"
+	fault := "the fragments this poll delivered before it stopped on a fault, which Subscription.Fault reads"
+	if e.CommittedLog {
+		// The fault of a committed log's own image is reported by one poll (README, "The
+		// committed log").
+		one, many = "entry", "entries"
+		delivered = fmt.Sprintf("the %d entries this poll delivered", e.Fragments)
+		if e.Fragments == 1 {
+			delivered = "the 1 entry this poll delivered"
+		}
+		fault = "the entries this poll delivered before it stopped on a fault, which this CommittedLog's Fault " +
+			"reads until its next poll and its Err until its next failure, and nothing reports after that, so read " +
+			"it and keep it before polling again"
 	}
-	return fmt.Sprintf("the fragment handler panicked on %d of %s; every fragment reached the handler once, in "+
+	if e.Fragments < 0 {
+		delivered = fault
+	}
+	return fmt.Sprintf("the %s handler panicked on %d of %s; every %s reached the handler once, in "+
 		"order. Fix the handler: its first panic's value, %v, is this error's Cause; polling again does not deliver "+
-		"these fragments again. See clients/go/README.md#the-panic", e.Raised, delivered, e.Cause)
+		"these %s again. See clients/go/README.md#the-panic", one, e.Raised, delivered, one, e.Cause, many)
 }
 
 // Unwrap returns the Cause when it is an error, for errors.Is and errors.As.
@@ -889,10 +907,11 @@ func (s *Subscription) Close() error {
 // CommittedLog is a service's read of a cluster's committed log, beside the member on the
 // client's driver: Poll calls the handler for each entry a quorum has committed, in order
 // and none at or past the member's commit position, with the entry's position in the log,
-// and returns the count, with a *HandlerError when a handler call panicked, once the ABI
-// has returned; the entry was delivered and is not delivered again. Position is the
-// position after the last entry delivered: where a service opens the log again. Err is
-// the last poll that failed.
+// and returns the count, or the ABI's -1 when the poll stopped on a fault, with a
+// *HandlerError when a handler call panicked, once the ABI has returned; the entry was
+// delivered and is not delivered again. Position is the position after the last entry
+// delivered: where a service opens the log again. Err is the last poll that failed.
+// IsEnded says when to stop reading and what tells a whole end from a short one.
 type CommittedLog struct {
 	handle *C.cavalry_committed_log_t
 	client *Client
@@ -907,7 +926,14 @@ type CommittedLog struct {
 // Poll delivers up to fragmentLimit entries to handler: one ABI call, the count it
 // returned (or -1, with Err saying why: a fault, which Fault reads, or ErrPolling for a
 // poll from inside a handler of this log, which the ABI refuses and which touches
-// nothing here), and a *HandlerError when a handler call panicked.
+// nothing here), and a *HandlerError when a handler call panicked. The error it returns
+// is a handler's panic alone: a poll that stopped on a fault returns -1 and a nil error,
+// so check the count. An Err whose Code is ErrFaultImage or ErrFaultImagesFull is the one
+// report that the replay's image failed a check or could not join: the log is ended
+// short of its entries, the next poll returns 0 and clears Fault, and Err keeps the
+// failure only until the log's next one, so keep this answer (IsEnded). An entry whose
+// handler call panicked was delivered and is not delivered again: Position is past it,
+// and past every entry this poll delivered after it.
 func (l *CommittedLog) Poll(handler EntryHandler, fragmentLimit int) (int, error) {
 	s := l.state
 	if s.polling {
@@ -925,14 +951,18 @@ func (l *CommittedLog) Poll(handler EntryHandler, fragmentLimit int) (int, error
 	}
 	first := s.first
 	s.first = nil
-	return count, &HandlerError{Fragments: count, Raised: s.raised, Cause: first}
+	return count, &HandlerError{Fragments: count, Raised: s.raised, Cause: first, CommittedLog: true}
 }
 
-// Err is the failure of this log's last poll that returned -1, as Subscription.Err.
+// Err is the failure of this log's last poll that returned -1, as Subscription.Err: an
+// *Error with the ABI function, code and message, kept until the log's next failure; nil
+// before the first. Its Code is ErrFaultImage, ErrFaultImagesFull or ErrFaultClosed for a
+// poll that stopped on a fault.
 func (l *CommittedLog) Err() error { return keptError(&l.state.err) }
 
-// Fault is what the last poll stopped on: the code (0 for none), the session and the
-// position.
+// Fault is what the last poll stopped on: the code, the session and the position; the
+// code is 0 when the last poll returned a count. A poll that returns a count clears it,
+// so read it after a poll that returned -1 and before the next.
 func (l *CommittedLog) Fault() (code int32, sessionID int32, position int64, err error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -954,16 +984,26 @@ func (l *CommittedLog) CommitPosition() int64 {
 }
 
 // IsEnded is whether this log has come to its end: no poll will deliver another entry.
-// Stop reading when it is true, not when a poll returns 0. Then read FailedAt and
-// WithdrawnAt: the log delivered every entry it was owed only when both are false. In
-// every case what it delivered ends at Position, where a service opens the log again.
+// Stop reading when it is true, not when a poll returns 0. The log delivered every entry
+// it was owed only when three things hold: FailedAt is false, WithdrawnAt is false, and
+// no Poll of this log returned -1 with the fault of the log's own image, an Err whose
+// Code is ErrFaultImage when the image failed a check or ErrFaultImagesFull when it could
+// not join. That fault is reported once, by the poll that meets it: Fault answers it only
+// until the next poll, which returns 0 and clears it, Err only until the log's next
+// failure, and both reports are false for such a log. So a service keeps that poll's
+// answer, since nothing reports it later. In every case what the log delivered ends at
+// Position, where a service opens the log again.
 func (l *CommittedLog) IsEnded() bool { return bool(C.cavalry_committed_log_is_ended(l.handle)) }
 
 // FailedAt is the position after the last frame the driver's replay of the member's
 // recording played before it failed, and true; or 0 and false for a log that is live or
 // that ended because its member closed or left the recording. No entry from that
-// position on is delivered. Read it once IsEnded is true: the entries below it may still
-// be on their way before.
+// position on is delivered. The entries below it may still be on their way when this
+// first is true, so read it once IsEnded is true. They have all been delivered by then
+// unless the driver withdrew the replay first, which it does 5 s after a replay ends, one
+// that failed included: WithdrawnAt is then true with a position below this one, and the
+// entries from there on, those below this position among them, were not delivered
+// either. What the log delivered ends at Position.
 func (l *CommittedLog) FailedAt() (int64, bool) {
 	var position C.int64_t
 	if !bool(C.cavalry_committed_log_failed_at(l.handle, &position)) {
@@ -977,7 +1017,8 @@ func (l *CommittedLog) FailedAt() (int64, bool) {
 // 0 and false. The driver keeps a replay 5 s after it ends and then withdraws it, read
 // or not: a service that did not poll for that long after its member closed or left the
 // log, or whose handler took that long, ends so. The entries from that position on were
-// played and not delivered. Read it once IsEnded is true.
+// played and not delivered. A replay that failed is withdrawn in the same way: FailedAt
+// is then true too, and this position is the lower. Read it once IsEnded is true.
 func (l *CommittedLog) WithdrawnAt() (int64, bool) {
 	var position C.int64_t
 	if !bool(C.cavalry_committed_log_withdrawn_at(l.handle, &position)) {
@@ -988,8 +1029,13 @@ func (l *CommittedLog) WithdrawnAt() (int64, bool) {
 
 // Close stops the replay through the client and frees the handle and the log's slot in
 // the table; idempotent. After the client's own Close it frees the handle alone, and the
-// driver ends the replay by itself. From inside a handler of this log's own poll the ABI
-// refuses the close with ErrPolling, and the log stays open.
+// driver ends the replay by itself. The handle and the slot are freed whatever the ABI
+// answers. When the ABI could not stop the replay, through a client that the driver or a
+// timeout closed or within the response timeout, Close returns the *Error after it has
+// freed them: the log is closed, a second Close returns nil, and the driver ends the
+// replay by itself. The one exception is a close from inside a handler of this log's own
+// poll, which the ABI refuses: Close returns the *Error with ErrPolling, and the log
+// stays open.
 func (l *CommittedLog) Close() error {
 	if l.handle == nil {
 		return nil

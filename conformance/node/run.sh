@@ -57,40 +57,42 @@ node --expose-gc conformance/node/quickstart.js
 echo "conformance/node: run clients/node/README.md's example"
 node conformance/node/readme.js
 
-# The committed log: three members of one cluster, each with five free loopback ports,
-# its own driver directory and its own log directory, started together as
+# The committed log: three members of one cluster, each with five loopback ports, its own
+# driver directory and its own log directory, started together as
 # docs/how-to/run-a-cluster.md starts them (conformance/python/run.sh is the shape). A
 # member's output goes to a file beside its directories, printed if the cluster does not
-# form.
+# form or the round fails.
+#
+# The fifteen ports are counted out of 10000 to 19999, never bound to be chosen, as
+# `loopback_ports` in crates/cavalry/tests/cli.rs counts its own: a port found by binding
+# to port 0 is one of those the kernel gives each driver's own send sockets, so another
+# member could be given it before its owner binds it. The shell's process id picks where
+# the count starts, through that function's hash, so each runner starts elsewhere.
 echo "conformance/node: cavalry run, three cluster members, in the background, under $cluster"
 mkdir -p "$cluster"
-CAVALRY_CLUSTER_MEMBERS=$(node -e '
-const dgram = require("dgram");
-const sockets = [];
-const ports = [];
-const next = () => {
-  if (ports.length === 15) {
-    for (const s of sockets) s.close();
-    const members = [0, 1, 2].map((m) => m + "," + ports.slice(m * 5, m * 5 + 5).map((p) => "127.0.0.1:" + p).join(","));
-    console.log(members.join("|"));
-    return;
-  }
-  const s = dgram.createSocket("udp4");
-  sockets.push(s);
-  s.bind(0, "127.0.0.1", () => { ports.push(s.address().port); next(); });
-};
-next();
-')
+start=$(( ($$ * 2654435761) % 10000 ))
+CAVALRY_CLUSTER_MEMBERS=""
+for id in 0 1 2; do
+    member="$id"
+    for i in 0 1 2 3 4; do
+        member="$member,127.0.0.1:$(( 10000 + (start + id * 5 + i) % 10000 ))"
+    done
+    CAVALRY_CLUSTER_MEMBERS="${CAVALRY_CLUSTER_MEMBERS:+$CAVALRY_CLUSTER_MEMBERS|}$member"
+done
 export CAVALRY_CLUSTER_MEMBERS
 for id in 0 1 2; do
     CAVALRY_CLUSTER_MEMBER_ID=$id target/release/cavalry run --dir "$cluster/member-$id" \
         --log-dir "$cluster/member-$id-log" >"$cluster/member-$id.out" 2>&1 &
     member_pids="$member_pids $!"
 done
+# Doctor's whole output first, then the match, as above: doctor exits 1 on any failed
+# finding, and a `grep -q` that ends at its match can fail doctor's write, so under
+# pipefail a pipe of the two could fail for a cluster whose election had closed.
 formed=""
 for _ in $(seq 1 600); do
-    if CAVALRY_CLUSTER_MEMBER_ID=1 target/release/cavalry doctor --dir "$cluster/member-1" \
-        --log-dir "$cluster/member-1-log" 2>/dev/null | grep -q 'election closed'; then formed=yes; break; fi
+    election=$(CAVALRY_CLUSTER_MEMBER_ID=1 target/release/cavalry doctor --dir "$cluster/member-1" \
+        --log-dir "$cluster/member-1-log" 2>/dev/null || true)
+    if grep -q 'election closed' <<<"$election"; then formed=yes; break; fi
     sleep 0.1
 done
 [ -n "$formed" ] || {
@@ -100,4 +102,8 @@ done
 }
 
 echo "conformance/node: run committed_log.js beside member 1"
-node conformance/node/committed_log.js "$cluster/member-1" 1
+node conformance/node/committed_log.js "$cluster/member-1" 1 || {
+    echo "conformance/node: committed_log.js failed beside member 1; the members said:" >&2
+    cat "$cluster"/member-*.out >&2 || true
+    exit 1
+}
