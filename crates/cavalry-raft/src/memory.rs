@@ -446,7 +446,19 @@ impl Io for MemberIo<'_> {
         base_above(record.into_iter().flatten().copied(), position)
     }
 
-    fn start_replay(&mut self, member: i32, position: i64, end: i64) -> Result<bool, Self::Fault> {
+    fn start_replay(
+        &mut self,
+        member: i32,
+        position: i64,
+        end: Option<i64>,
+    ) -> Result<bool, Self::Fault> {
+        // A catch-up's replay, with no end, follows a leader's log as it grows. This
+        // cluster does not play one yet: no member in it asks for a catch-up until
+        // the member's side is built (ADR 0087), and a leader answers such a
+        // position as one whose recordings do not hold it.
+        let Some(end) = end else {
+            return Ok(false);
+        };
         let Some(to) = self.world.disks.iter().position(|disk| disk.id == member) else {
             return Ok(false);
         };

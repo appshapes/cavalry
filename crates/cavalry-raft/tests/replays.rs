@@ -53,7 +53,7 @@ fn started(io: &Stub) -> Vec<(i32, i64, i64)> {
         .iter()
         .flatten()
         .filter_map(|call| match *call {
-            Call::StartReplay(member, position, end) => Some((member, position, end)),
+            Call::StartReplay(member, position, Some(end)) => Some((member, position, end)),
             _ => None,
         })
         .collect()
@@ -120,15 +120,15 @@ fn a_replay_ends_where_the_arithmetic_of_the_page_ends_it() {
     }
 }
 
-/// What starts nothing: a position at or above the leader's term base, which is a
-/// catch-up within its term and not a replication; a position below 0; a message for
-/// a term that is not the leader's; one from an id that is no other member's. None is
-/// counted.
+/// What starts nothing: a position above the leader's own append position, which the
+/// leader does not hold; a position below 0; a message for a term that is not the
+/// leader's; one from an id that is no other member's. None is counted. A position
+/// from the leader's term base to its append position is a catch-up within its term,
+/// which `tests/catchups.rs` has.
 #[test]
-fn a_catch_up_position_that_is_no_replication_of_this_leaders_starts_nothing() {
+fn a_catch_up_position_that_is_no_request_of_this_leaders_starts_nothing() {
     let (mut leader, mut io, ms) = leader();
     for message in [
-        catchup_position(2, 2, 96),
         catchup_position(2, 2, 128),
         catchup_position(2, 2, -1),
         catchup_position(2, 1, 32),
@@ -139,8 +139,9 @@ fn a_catch_up_position_that_is_no_replication_of_this_leaders_starts_nothing() {
         read(&mut leader, &mut io, ms, &message);
     }
     work(&mut leader, &mut io, ms + 1);
-    assert_eq!(started(&io), vec![]);
+    assert_eq!(io.count(|call| matches!(call, Call::StartReplay(..))), 0);
     assert_eq!(leader.counts().log_replications, 0);
+    assert_eq!(leader.counts().catchups, 0);
 }
 
 /// The appointed leader serves no replay: no member beside it replicates.
