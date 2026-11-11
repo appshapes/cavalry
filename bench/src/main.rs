@@ -1376,7 +1376,8 @@ fn build_pile(log_dir: &std::path::Path, segments: u64) -> Result<Pile, String> 
 /// thread keeps its client open after the reply and closes it only once it is
 /// released, which the publisher does after its counting window: a client that closes
 /// sends the driver's conductor a command, and what the conductor does for a command
-/// allocates and would be counted (card 176).
+/// allocates and would be counted (card 176). A purge that failed ends the thread at
+/// once, so that its message is the run's and not a wait's timeout.
 struct Purger {
     thread: Option<JoinHandle<Result<(), String>>>,
     release: Arc<AtomicBool>,
@@ -1398,14 +1399,18 @@ impl Purger {
             .spawn(move || {
                 pin_to(housekeeping)?;
                 let mut client = Cavalry::connect_to(&dir).map_err(|e| e.to_string())?;
-                let purged = client
+                // A purge that failed, refused or unanswered, ends the thread here and
+                // not at the release, its client closing as it drops: before the loop
+                // `failed` then has the refusal's own message while the run waits for
+                // the first file, and inside it `finish` has it after the loop, so the
+                // run fails with it and never reports the window that close was in.
+                client
                     .purge_segments(recording_id, position)
-                    .map_err(|e| format!("purging the pile: {e}"));
+                    .map_err(|e| format!("purging the pile: {e}"))?;
                 while !released.load(Ordering::Acquire) {
                     thread::sleep(Duration::from_millis(1));
                 }
-                client.close().map_err(|e| e.to_string())?;
-                purged.map(|_| ())
+                client.close().map_err(|e| e.to_string())
             })
             .map_err(|e| format!("spawning the purger: {e}"))?;
         Ok(Self {
@@ -1415,7 +1420,7 @@ impl Purger {
     }
 
     /// The purger's own error when its thread has ended, which before the release is
-    /// only ever a failure: a connect or a purge the driver refused.
+    /// only ever a failure: a connect, or a purge the driver refused or did not answer.
     fn failed(&mut self) -> Option<String> {
         if !self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
             return None;
@@ -4204,6 +4209,47 @@ mod tests {
         assert!(rate.is_finite() && rate > 0.0, "{rate}");
         assert!(!log_dir.with_extension("probe").exists());
         assert!(!log_dir.exists());
+    }
+
+    /// A purge the driver refuses ends the purger at once: while the run waits for the
+    /// first file, `failed` has the refusal's own code and message, and not nothing
+    /// until the release, which would have the run report a stuck replayer after a
+    /// minute. A recording the catalog does not hold is code 21.
+    #[test]
+    fn a_purge_the_driver_refuses_is_the_purgers_failure_at_once() {
+        let dir =
+            std::env::temp_dir().join(format!("cavalry-bench-refused-{}", std::process::id()));
+        let log_dir = dir.with_extension("log");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
+        let driver = Driver::start(&dir, &log_dir).expect("the driver");
+        // The log directory is new, so its catalog holds no recording 7.
+        let pile = Pile {
+            recording_id: 7,
+            segments: 1,
+            segment_length: i64::from(SEGMENT_FILE_LENGTH),
+        };
+        let mut purger = Purger::spawn(&dir, &pile, None).expect("the purger");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let message = loop {
+            if let Some(message) = purger.failed() {
+                break message;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the refused purge is not the purger's failure after 5 s"
+            );
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert!(
+            message.starts_with("purging the pile: command refused"),
+            "{message}"
+        );
+        assert!(message.contains("error code 21"), "{message}");
+        drop(purger);
+        drop(driver);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
     }
 
     /// The recorded benchmark of [`Benchmark::ALL`], wherever it stands there.
