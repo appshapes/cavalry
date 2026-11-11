@@ -169,13 +169,19 @@ impl Cluster {
         }
     }
 
-    /// Runs the members until every one has committed up to `position`.
+    /// Runs the members until every one has committed up to `position` and recorded
+    /// up to it. A commit needs a quorum alone, and since each member asks for its
+    /// sync a quorum is quick: the leader and one follower commit an entry while the
+    /// other follower has yet to record it, or to name its recording at all. A service
+    /// reads through its own member's recording, and nothing runs a member here but
+    /// this loop, so a test that opens a log waits for the recording it will read:
+    /// without that the open answers a null handle, no log yet, or refuses a position
+    /// past the recording's extent.
     fn commit(&mut self, position: i64) {
-        self.run_until("every member committed", |cluster| {
-            cluster
-                .members
-                .iter()
-                .all(|(_, module, _)| module.commit_position() == position)
+        self.run_until("every member committed and recorded", |cluster| {
+            cluster.members.iter().all(|(_, module, _)| {
+                module.commit_position() == position && module.append_position() == position
+            })
         });
     }
 }
