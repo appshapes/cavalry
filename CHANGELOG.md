@@ -2015,11 +2015,13 @@ user-visible change, added in the same commit as the change. The format follows
   order, each once, with its position; `position()` is where to open the log again,
   `commit_position()` the bound of the last read, and `is_ended()` says that no poll
   will deliver another entry, so a service stops on it and not on a poll of 0. Once it
-  is ended, `withdrawn_at()` is `None` when every entry below the last bound has been
-  delivered. It is the position the undelivered entries begin at when the driver
-  withdrew the replay's image unread, 5 s after the replay ended, from a service that
-  had stopped polling. The same call serves the leader's service and a follower's,
-  and a service may start before, with or after its member. The service finds the recording to replay in its member's
+  is ended, `failed_at()` and `withdrawn_at()` are both `None` when every entry below
+  the last bound has been delivered. `failed_at()` is the position the driver's replay
+  of the recording failed at, and `withdrawn_at()` the position the undelivered
+  entries begin at when the driver withdrew the replay's image unread, 5 s after the
+  replay ended, from a service that had stopped polling. The same call serves the
+  leader's service and a follower's, and a service may start before, with or after
+  its member. The service finds the recording to replay in its member's
   `cluster.log_recording_id` counter, which the consensus module already keeps, and
   takes a commit position as its bound only while that counter still names the
   recording it replays, so a record the driver gave to another counter, or a later

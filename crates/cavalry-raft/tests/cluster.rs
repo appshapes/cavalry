@@ -1117,13 +1117,12 @@ fn a_service_whose_image_was_withdrawn_unread_is_told_where_its_entries_stop() {
         "the image went at the linger's end, not at its end of stream: {:?}",
         closed.elapsed()
     );
-    // The client's conductor hands the event to the subscription on its next duty
-    // cycle; a poll before that would read on from the image's log, which the client
-    // still maps, so the service waits a little longer before it polls again.
-    std::thread::sleep(Duration::from_millis(200));
-
-    // The polls apply the withdrawal: the handle is ended short of its bound, says
-    // where, and delivers nothing more.
+    // The client's conductor hands the event to the subscription on a later duty
+    // cycle, and a poll that read frames before then would read on from the image's
+    // log, which the client still maps. A poll with a fragment limit of 0 applies the
+    // events the subscription has and reads no frame, so the service waits for the
+    // withdrawal with such polls, however long the conductor takes: the handle is
+    // ended short of its bound, says where, and delivers nothing more.
     let BehindItsBound { log, read, end, .. } = &mut service;
     let end = *end;
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1132,7 +1131,8 @@ fn a_service_whose_image_was_withdrawn_unread_is_told_where_its_entries_stop() {
             Instant::now() < deadline,
             "the service's log ended: {log:?}"
         );
-        poll_log_at_most(log, read, 1);
+        assert_eq!(poll_log_at_most(log, read, 0), 0);
+        std::thread::sleep(Duration::from_millis(1));
     }
     let position = log.position();
     assert!(position < end, "{log:?}");

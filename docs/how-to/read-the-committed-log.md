@@ -71,13 +71,16 @@ its services read what it appends in the same way.
    calls it again after a pause. `log.poll(handler, fragment_limit)` hands each
    committed entry to the handler with its position and returns how many it read.
    `log.position()` is the next position, the one to keep for the next start.
-   `log.is_ended()` says that no poll of this handle will deliver another entry: the
-   member closed or left its log, and the handle has delivered every committed entry
-   it may read, unless `log.withdrawn_at()` names a position. Stop reading when
-   `log.is_ended()` returns true, not when a poll returns 0. Then read
-   `log.withdrawn_at()`: `None` means every entry was delivered, and a position means
-   that the entries from that position on were not delivered (see "When it does not
-   work", below). Either way, open the log again from `log.position()`. A poll can return 0
+   `log.is_ended()` says that no poll of this handle will deliver another entry. Stop
+   reading when it returns true, not when a poll returns 0. Then read two things, each
+   `None` or a position. `log.failed_at()`: a position means the driver could not play
+   the member's recording past it, and the entries from it on were not delivered,
+   though the member may have committed them. `log.withdrawn_at()`: a position means
+   the driver withdrew the replay before the service had read it, and the entries
+   from that position on were not delivered. When both are `None`, the member closed
+   or left its log and the handle delivered every committed entry it may read. "When
+   it does not work", below, has an entry for each of the two that are not `None`. In
+   every case `log.position()` is where to open the log again. A poll can return 0
    while committed entries are still on their way: the service reads only what the
    member's recorder has synced, and the recorder syncs once a second. Keep polling
    until `log.is_ended()` is true: when the member closes or leaves the log, the
@@ -118,6 +121,20 @@ its services read what it appends in the same way.
   asked for it is closed with it and is not told why (card 241). `cavalry doctor` on
   the member shows `replay.failed` grown by one. Use a `next position` that a run on
   this member printed, or 0.
+- `cluster-service: the replay of member 1's recording 0 failed at position ...`, and
+  the program exits 1: the driver could not play the member's recording past that
+  position, because a segment file of the recording could not be read or a frame in
+  it failed a check. The service has read every entry below the position and none
+  from it on. The member is still running and goes on committing, so those entries
+  are not lost to the cluster: this service has not read them. `cavalry doctor` on
+  the member's directory warns of `replay.failed`, says to check the log directory's
+  disk first, and names the recording when its entry in the catalog is invalid. In
+  your own program, `log.failed_at()` returns that position. Start the service again
+  with `--from` a `next position` it printed, or 0. If the replay fails at the same
+  position again, the recording is damaged there: read the entries from it on on
+  another member, one that has not left the log, whose recording begins at 0. A
+  `--from` at which no entry begins fails the replay too, but in this version the
+  client is closed before it can say so: that is the entry above this one.
 - `--from needs a position, a multiple of 32 from 0`: the program refused the value
   before it asked the driver.
 - `error 10 (resource temporarily unavailable)`: the driver already plays 64 replays.

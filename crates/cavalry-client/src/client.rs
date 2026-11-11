@@ -1260,7 +1260,10 @@ impl Cavalry {
     /// at a position the member's next recording does not hold. It keeps polling until
     /// then: the driver withdraws the replay's image 5 s after the replay ends, read or
     /// not, and a handle whose image went before it was read is ended short, which
-    /// [`CommittedLog::withdrawn_at`] says.
+    /// [`CommittedLog::withdrawn_at`] says. A handle is ended short too when the
+    /// driver's replay of the recording failed, which [`CommittedLog::failed_at`]
+    /// says. A service reads both once the handle is ended, and has been given every
+    /// entry it was owed only when both are `None`.
     ///
     /// ```
     /// use cavalry_client::{Cavalry, CommittedLog};
@@ -1286,8 +1289,23 @@ impl Cavalry {
     ///         )?;
     ///         if log.is_ended() {
     ///             let next = log.position();
+    ///             let failed = log.failed_at();
     ///             let withdrawn = log.withdrawn_at();
     ///             log.close(client)?;
+    ///             if let Some(failed) = failed {
+    ///                 // The driver could not play the member's recording on from
+    ///                 // `failed`: the entries from there on were not delivered,
+    ///                 // though the member may have committed them.
+    ///                 return Err(format!(
+    ///                     "the replay of the member's recording failed at position \
+    ///                      {failed}: the log was not opened at the position of an entry, \
+    ///                      or the recording's files are damaged; run `cavalry doctor`, \
+    ///                      which names a damaged recording, and open the log again from \
+    ///                      position {next} if this handle read entries, or from 0; see \
+    ///                      docs/how-to/read-the-committed-log.md#when-it-does-not-work"
+    ///                 )
+    ///                 .into());
+    ///             }
     ///             if let Some(unread) = withdrawn {
     ///                 // The driver withdrew the replay's image before it was read: the
     ///                 // entries from `unread` on were not delivered.
@@ -1298,8 +1316,8 @@ impl Cavalry {
     ///                 )
     ///                 .into());
     ///             }
-    ///             // The member closed or left its log, and every entry below the last
-    ///             // commit position the handle took has been delivered.
+    ///             // Neither: the member closed or left its log, and every entry below
+    ///             // the last commit position the handle took has been delivered.
     ///             return Ok(next);
     ///         }
     ///         if entries == 0 {

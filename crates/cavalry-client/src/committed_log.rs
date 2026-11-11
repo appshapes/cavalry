@@ -161,6 +161,16 @@ impl Bound {
 /// [is ended](Self::is_ended), and the service opens the log again from
 /// [`position`](Self::position).
 ///
+/// Two ends are short of that, and each has its own report, read once the handle is
+/// ended. An ended handle has delivered every entry it was owed only when both are
+/// `None`.
+///
+/// The driver's replay of the recording can fail: a segment file it cannot read, or a
+/// frame that fails a check. The replay ends there, with the member still running and
+/// its commit position above it, and the handle is ended once it has delivered what
+/// the replay played. [`failed_at`](Self::failed_at) is the position the replay
+/// failed at, and the entries from it on were not delivered.
+///
 /// The driver keeps the replay's image for the publication linger, 5 s, after the
 /// replay ends, and then withdraws it, read or not (`spec/client-protocol.md`,
 /// "Events"). A service that has not read the entries below its bound by then is ended
@@ -345,13 +355,20 @@ impl CommittedLog {
     /// That is so once the polls have read the replay's image to
     /// [`commit_position`](Self::commit_position) after the member stopped naming the
     /// recording this handle replays, or its counters went; once the replay has ended,
-    /// its recording stopped, and the image has been read to where the replay ended;
-    /// once the replay's image failed a check; or once the driver has withdrawn the
-    /// image. An ended handle whose image passed every check and was not withdrawn
-    /// short, [`withdrawn_at`](Self::withdrawn_at) `None`, has delivered every entry
-    /// below the bound it took, or below the recording's stop when that is lower: open
-    /// the log again from [`position`](Self::position) when the member names a
-    /// recording again.
+    /// because its recording stopped or because the driver could not play the
+    /// recording on, and the image has been read to where the replay ended; once the
+    /// replay's image failed a check; or once the driver has withdrawn the image.
+    ///
+    /// What an ended handle has delivered is said by two reports, read after this
+    /// returns true. With [`failed_at`](Self::failed_at) and
+    /// [`withdrawn_at`](Self::withdrawn_at) both `None`, and an image that passed
+    /// every check, it has delivered every entry below the bound it took, or below the
+    /// recording's stop when that is lower: open the log again from
+    /// [`position`](Self::position) when the member names a recording again. With
+    /// `failed_at` a position, the driver's replay failed there: the handle has
+    /// delivered the entries below it and none from it on, though the member is still
+    /// running and may have committed more. With `withdrawn_at` a position, the
+    /// entries from it on were played and not delivered.
     ///
     /// Until then a poll that returns 0 says only that nothing below the bound has
     /// arrived yet. A replay plays no further than what the member's recorder has
