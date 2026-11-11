@@ -355,7 +355,8 @@ class Package(unittest.TestCase):
 # recorded by name, and the one at index `fail_at` returns napi_generic_failure. `main` runs
 # one fragment with no failure to learn its calls, then the same fragment with each of them
 # failing in turn, for a handler that returns and one that throws, and checks what the
-# state kept; it prints each finding and the clean run's calls, and exits 1 on a finding.
+# state kept, and after a fragment the handler never saw, what the next one of the same poll
+# does; it prints each finding and the clean run's calls, and exits 1 on a finding.
 TRAMPOLINE_HARNESS = r'''#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -371,13 +372,43 @@ typedef enum { napi_ok = 0, napi_generic_failure = 9, napi_pending_exception = 1
 typedef enum { napi_uint8_array = 1 } napi_typedarray_type;
 typedef void (*napi_finalize)(napi_env env, void *data, void *hint);
 
+#define NAPI_AUTO_LENGTH SIZE_MAX
+
 static const char *calls[64];
 static int ncalls, fail_at = -1;
 static const napi_status fail_with = napi_generic_failure;
 static bool handler_throws, pending;
 static int handler_ran, scopes_open, buffers_live;
-static char handles[8];
+static size_t handler_argc;
+static int64_t position_made;
+static char handles[12];
 #define HANDLE(i) ((void *) &handles[i])
+#define NULL_VALUE HANDLE(9)
+#define TUPLE HANDLE(10)
+#define ERROR_VALUE HANDLE(11)
+
+/* What report and failure_error make: each number a value of its own that reads back, the
+ * text of the last string, the named properties set and the tuple's elements. */
+static int64_t numbers[64];
+static int nnumbers;
+static char text_made[1024];
+static const char *named[16];
+static napi_value named_values[16];
+static int nnamed;
+static napi_value tuple_elements[8];
+
+static napi_value number(int64_t n) {
+  int i = nnumbers < 64 ? nnumbers++ : 63;
+  numbers[i] = n;
+  return (napi_value) &numbers[i];
+}
+static bool is_number(napi_value v) {
+  return (uintptr_t) v >= (uintptr_t) &numbers[0] && (uintptr_t) v < (uintptr_t) &numbers[64];
+}
+static napi_value property(const char *name) {
+  for (int i = 0; i < nnamed; i++) if (strcmp(named[i], name) == 0) return named_values[i];
+  return NULL;
+}
 
 static napi_status step(const char *name) {
   int at = ncalls;
@@ -416,8 +447,68 @@ napi_status napi_create_reference(napi_env env, napi_value value, uint32_t count
   return s;
 }
 napi_status napi_set_element(napi_env env, napi_value object, uint32_t index, napi_value value) {
-  (void) env; (void) object; (void) index; (void) value;
+  (void) env;
+  if (object == TUPLE && index < 8) tuple_elements[index] = value;
   return step("napi_set_element");
+}
+napi_status napi_get_element(napi_env env, napi_value object, uint32_t index, napi_value *result) {
+  (void) env; (void) object; (void) index;
+  napi_status s = step("napi_get_element");
+  if (s == napi_ok) *result = HANDLE(6);
+  return s;
+}
+napi_status napi_create_array_with_length(napi_env env, size_t length, napi_value *result) {
+  (void) env; (void) length;
+  napi_status s = step("napi_create_array_with_length");
+  if (s == napi_ok) *result = TUPLE;
+  return s;
+}
+napi_status napi_create_string_utf8(napi_env env, const char *str, size_t length, napi_value *result) {
+  (void) env; (void) length;
+  napi_status s = step("napi_create_string_utf8");
+  if (s == napi_ok) { snprintf(text_made, sizeof text_made, "%s", str); *result = HANDLE(3); }
+  return s;
+}
+napi_status napi_create_error(napi_env env, napi_value code, napi_value msg, napi_value *result) {
+  (void) env; (void) code; (void) msg;
+  napi_status s = step("napi_create_error");
+  if (s == napi_ok) *result = ERROR_VALUE;
+  return s;
+}
+napi_status napi_set_named_property(napi_env env, napi_value object, const char *utf8name, napi_value value) {
+  (void) env;
+  if (object == ERROR_VALUE && nnamed < 16) { named[nnamed] = utf8name; named_values[nnamed++] = value; }
+  return step("napi_set_named_property");
+}
+napi_status napi_create_int32(napi_env env, int32_t value, napi_value *result) {
+  (void) env;
+  napi_status s = step("napi_create_int32");
+  if (s == napi_ok) *result = number(value);
+  return s;
+}
+napi_status napi_create_bigint_int64(napi_env env, int64_t value, napi_value *result) {
+  (void) env;
+  napi_status s = step("napi_create_bigint_int64");
+  if (s == napi_ok) *result = number(value);
+  return s;
+}
+napi_status napi_get_boolean(napi_env env, bool value, napi_value *result) {
+  (void) env; (void) value;
+  napi_status s = step("napi_get_boolean");
+  if (s == napi_ok) *result = HANDLE(4);
+  return s;
+}
+napi_status napi_get_null(napi_env env, napi_value *result) {
+  (void) env;
+  napi_status s = step("napi_get_null");
+  if (s == napi_ok) *result = NULL_VALUE;
+  return s;
+}
+napi_status napi_create_external(napi_env env, void *data, napi_finalize cb, void *hint, napi_value *result) {
+  (void) env; (void) data; (void) cb; (void) hint;
+  napi_status s = step("napi_create_external");
+  if (s == napi_ok) *result = HANDLE(3);
+  return s;
 }
 napi_status napi_get_undefined(napi_env env, napi_value *result) {
   (void) env;
@@ -427,10 +518,11 @@ napi_status napi_get_undefined(napi_env env, napi_value *result) {
 }
 napi_status napi_call_function(napi_env env, napi_value recv, napi_value func, size_t argc, const napi_value *argv,
                                napi_value *result) {
-  (void) env; (void) recv; (void) func; (void) argc; (void) argv;
+  (void) env; (void) recv; (void) func; (void) argv;
   napi_status s = step("napi_call_function");
   if (s != napi_ok) return s;
   handler_ran++;
+  handler_argc = argc;
   if (handler_throws) { pending = true; return napi_pending_exception; }
   *result = HANDLE(5);
   return napi_ok;
@@ -460,6 +552,17 @@ napi_status napi_detach_arraybuffer(napi_env env, napi_value arraybuffer) {
   if (s == napi_ok) buffers_live--;
   return s;
 }
+napi_status napi_create_int64(napi_env env, int64_t value, napi_value *result) {
+  (void) env;
+  napi_status s = step("napi_create_int64");
+  if (s == napi_ok) { *result = number(value); position_made = value; }
+  return s;
+}
+/* The position the ABI gives for the header: 960 for the frame every run hands over, 1056 for
+ * the later entry of the same poll that the run after a kept failure hands over. */
+int64_t cavalry_committed_log_entry_position(const cavalry_header_t *header) {
+  return header == (const cavalry_header_t *) HANDLE(1) ? 960 : 1056;
+}
 int cavalry_header_values(const cavalry_header_t *header, cavalry_header_values_t *values) {
   (void) header;
   memset(values, 0, sizeof *values);
@@ -475,23 +578,33 @@ static int failures;
 
 static void reset(int at, bool throws) {
   ncalls = 0; fail_at = at; handler_throws = throws; pending = false;
-  handler_ran = 0; scopes_open = 0; buffers_live = 0;
+  handler_ran = 0; scopes_open = 0; buffers_live = 0; handler_argc = 0; position_made = -1;
+  nnumbers = 0; nnamed = 0; text_made[0] = '\0'; memset(tuple_elements, 0, sizeof tuple_elements);
 }
 
 static void fragment(subscription_state_t *s) {
   trampoline(s, (const uint8_t *) "body", 4, (const cavalry_header_t *) HANDLE(1));
 }
 
-static void one(int at, bool throws) {
+static void one(int at, bool throws, bool positions) {
   subscription_state_t s;
   memset(&s, 0, sizeof s);
   s.env = (napi_env) HANDLE(0);
+  s.positions = positions;
   reset(at, throws);
   fragment(&s);
   const char *failed = at < ncalls ? calls[at] : NULL;
-  char where[160];
-  snprintf(where, sizeof where, "with %s failing (call %d), the handler %s", failed ? failed : "no call", at,
+  char where[200];
+  snprintf(where, sizeof where, "%s, with %s failing (call %d), the handler %s",
+           positions ? "a committed log's entry" : "a subscription's fragment", failed ? failed : "no call", at,
            throws ? "throwing" : "returning");
+  /* A committed log's handler is handed three arguments, the third the position the ABI gave
+   * for the header; a subscription's two, with no position asked for. */
+  if (handler_ran) {
+    EXPECT(handler_argc == (positions ? 3u : 2u), "%s: the handler was handed %u argument(s)", where,
+           (unsigned) handler_argc);
+    EXPECT(position_made == (positions ? 960 : -1), "%s: the position made was %lld", where, (long long) position_made);
+  }
   if (handler_ran && !throws) {
     EXPECT(s.raised == 0 && s.undelivered == 0 && s.first == FIRST_NONE,
            "%s: the handler returned, yet the fragment was counted (raised %u, undelivered %u)", where,
@@ -509,24 +622,59 @@ static void one(int at, bool throws) {
            (int) fail_with);
     EXPECT(s.failed_frame && s.failed_session_id == 7 && s.failed_term_offset == 4096,
            "%s: the failure kept does not name the frame's session and term offset", where);
+    /* A committed log's failure names its entry by the position the ABI gave. */
+    if (positions) EXPECT(s.failed_position == 960, "%s: the failure kept names position %lld, not 960", where,
+                          (long long) s.failed_position);
+  }
+  /* An entry the handler never saw is where a service opens the log again: the position the
+   * ABI gave for it is kept. */
+  if (positions && s.undelivered != 0) {
+    EXPECT(s.undelivered_at == 960, "%s: the first undelivered entry is kept at position %lld, not 960", where,
+           (long long) s.undelivered_at);
   }
   EXPECT(scopes_open == 0, "%s: %d handle scope(s) left open", where, scopes_open);
   if (failed == NULL || (strcmp(failed, "napi_get_typedarray_info") != 0 && strcmp(failed, "napi_detach_arraybuffer") != 0)) {
     EXPECT(buffers_live == 0, "%s: %d body Buffer(s) left attached", where, buffers_live);
   }
+  /* A committed log hands its handler no entry of the poll after one the handler never saw,
+   * so that a service never applies an entry after a gap: the next entry of the same poll
+   * makes no N-API call, does not reach the handler, and is counted as undelivered, with the
+   * first entry's position and failure still the ones kept. A subscription's next fragment
+   * still reaches the handler. */
+  if (s.undelivered != 0) {
+    uint32_t undelivered = s.undelivered;
+    const char *kept = s.failed;
+    reset(-1, false);
+    trampoline(&s, (const uint8_t *) "next", 4, (const cavalry_header_t *) HANDLE(2));
+    if (positions) {
+      EXPECT(handler_ran == 0 && ncalls == 0, "%s, then a later entry of the same poll: the handler ran %d time(s) "
+             "and %d N-API call(s) were made", where, handler_ran, ncalls);
+      EXPECT(s.undelivered == undelivered + 1, "%s, then a later entry of the same poll: undelivered is %u, not %u",
+             where, (unsigned) s.undelivered, (unsigned) (undelivered + 1));
+      EXPECT(s.undelivered_at == 960, "%s, then a later entry at 1056: the first undelivered entry is kept at %lld",
+             where, (long long) s.undelivered_at);
+      EXPECT(s.failed == kept, "%s, then a later entry of the same poll: the failure kept changed", where);
+    } else {
+      EXPECT(handler_ran == 1 && s.undelivered == undelivered, "%s, then a later fragment of the same poll: the "
+             "handler ran %d time(s), undelivered is %u", where, handler_ran, (unsigned) s.undelivered);
+    }
+  }
 }
 
 int main(void) {
-  for (int throws = 0; throws < 2; throws++) {
-    subscription_state_t s;
-    memset(&s, 0, sizeof s);
-    reset(-1, throws);
-    fragment(&s);
-    int n = ncalls;
-    printf("a fragment whose handler %s calls:", throws ? "throws" : "returns");
-    for (int i = 0; i < n; i++) printf(" %s", calls[i]);
-    printf("\n");
-    for (int at = 0; at <= n; at++) one(at, throws);
+  for (int positions = 0; positions < 2; positions++) {
+    for (int throws = 0; throws < 2; throws++) {
+      subscription_state_t s;
+      memset(&s, 0, sizeof s);
+      s.positions = positions;
+      reset(-1, throws);
+      fragment(&s);
+      int n = ncalls;
+      printf("%s whose handler %s calls:", positions ? "an entry" : "a fragment", throws ? "throws" : "returns");
+      for (int i = 0; i < n; i++) printf(" %s", calls[i]);
+      printf("\n");
+      for (int at = 0; at <= n; at++) one(at, throws, positions);
+    }
   }
   /* The first failure of a poll stays its cause: a later fragment's throw is counted only. */
   subscription_state_t s;
@@ -539,7 +687,48 @@ int main(void) {
          strstr(s.failed, "napi_open_handle_scope") != NULL,
          "a fragment kept from the handler, then one whose handler threw: undelivered %u, raised %u, and the cause "
          "is not the first failure", (unsigned) s.undelivered, (unsigned) s.raised);
-  (void) status_names;
+  /* What poll reports when the runtime kept the poll's first entry from the handler, the body's
+   * Buffer refused, and the poll had one more after it. A committed log's report gives the
+   * first such entry's position, where the service opens the log again, as the tuple's fifth
+   * element; its cause names the entry by that position, as its `position` property too, and
+   * says to open the log again there. A subscription's has null there, no `position`, and says
+   * polling again does not deliver the fragment. */
+  for (int positions = 0; positions < 2; positions++) {
+    const char *where = positions ? "a committed log's report" : "a subscription's report";
+    memset(&s, 0, sizeof s);
+    s.env = (napi_env) HANDLE(0);
+    s.positions = positions;
+    reset(1, false);
+    fragment(&s);
+    reset(-1, false);
+    trampoline(&s, (const uint8_t *) "next", 4, (const cavalry_header_t *) HANDLE(2));
+    reset(-1, false);
+    napi_value tuple = report(s.env, &s, 2);
+    napi_value at = tuple_elements[4], count = tuple_elements[3], position = property("position");
+    printf("%s's cause: %s\n", where, text_made);
+    EXPECT(tuple == TUPLE && tuple_elements[2] == ERROR_VALUE, "%s: no tuple with the failure's Error as its cause",
+           where);
+    EXPECT(is_number(count) && *(int64_t *) count == (positions ? 2 : 1), "%s: undelivered is not %d", where,
+           positions ? 2 : 1);
+    if (positions) {
+      EXPECT(is_number(at) && *(int64_t *) at == 960, "%s: undeliveredAt is not the first entry's position, 960", where);
+      EXPECT(position != NULL && is_number(position) && *(int64_t *) position == 960,
+             "%s: the cause's position property is not 960", where);
+      EXPECT(strstr(text_made, "for the entry at position 960, of session 7 at term offset 4096") != NULL,
+             "%s: the cause does not name the entry by its position", where);
+      EXPECT(strstr(text_made, "close the log and open a new one at position 960") != NULL,
+             "%s: the cause does not say where to open the log again", where);
+    } else {
+      EXPECT(at == NULL_VALUE, "%s: undeliveredAt is not null", where);
+      EXPECT(position == NULL, "%s: the cause has a position property", where);
+      EXPECT(strstr(text_made, "for the fragment of session 7 at term offset 4096") != NULL &&
+             strstr(text_made, "The ABI consumed the fragment, so polling again does not deliver it") != NULL,
+             "%s: the cause does not name the fragment or say that polling again does not deliver it", where);
+    }
+    EXPECT(strstr(text_made, "See clients/node/README.md#the-exception") != NULL, "%s: the cause names no anchor", where);
+    EXPECT(s.first == FIRST_NONE && s.raised == 0 && s.undelivered == 0, "%s: the state was not cleared", where);
+  }
+  (void) make_bool; (void) make_string; (void) make_external; (void) make_bigint64;
   printf("%d failure(s)\n", failures);
   return failures != 0;
 }
@@ -591,11 +780,12 @@ class NodePackage(unittest.TestCase):
     def test_the_addon_wraps_every_function_and_the_poll_is_its_own(self):
         """One N-API function per ABI function, registered under the ABI's name, except the
         two that take the C fragment handler: the addon's `poll` makes the one
-        `cavalry_subscription_poll` call with its trampoline, and the header's fields are
-        read through `headerField`; `cavalry_committed_log_poll` is not bound in this
-        package yet (ADR 0070)."""
+        `cavalry_subscription_poll` call with its trampoline and its `committedLogPoll` the
+        one `cavalry_committed_log_poll` call with the same trampoline (ADR 0070), and the
+        header's fields are read through `headerField`."""
         addon = gen_node.write_node(self.header)["src/addon.c"]
         self.assertEqual(gen_node.HANDLER_FUNCTIONS, ("cavalry_subscription_poll", "cavalry_committed_log_poll"))
+        self.assertEqual(addon.count("cavalry_committed_log_poll("), 2)  # the nested refusal and the poll itself
         for fn in self.header.functions:
             if fn.name in gen_node.HANDLER_FUNCTIONS:
                 self.assertNotIn(f"fn_{fn.name}", addon)
@@ -603,7 +793,8 @@ class NodePackage(unittest.TestCase):
             self.assertIn(f"static napi_value fn_{fn.name}(napi_env env, napi_callback_info info)", addon)
             self.assertIn(f'{{ "{fn.name}", NULL, fn_{fn.name}, NULL, NULL, NULL, napi_default, NULL }},', addon)
         self.assertEqual(addon.count("cavalry_subscription_poll("), 2)  # the nested refusal and the poll itself
-        for own in ("registerSubscription", "poll", "headerField", "view", "detach", "stringAt", "buffersHeld"):
+        for own in ("registerSubscription", "poll", "registerCommittedLog", "committedLogPoll", "headerField", "view",
+                    "detach", "stringAt", "buffersHeld"):
             self.assertIn(f'{{ "{own}", NULL, fn_{own}, NULL, NULL, NULL, napi_default, NULL }},', addon)
         self.assertIn("cavalry_header_values(s->current, &s->values)", addon)
 
@@ -632,12 +823,31 @@ class NodePackage(unittest.TestCase):
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which subscription.fault() reads", body)
         self.assertIn("Fix the handler: its first exception, ${describe(cause)}, is this error's cause", body)
-        self.assertIn("never reached the fragment handler", body)
+        self.assertIn('const one = committedLog ? "entry" : "fragment";', body)
+        self.assertIn("never reached the ${one} handler", body)
         self.assertIn("The first failure, ${describe(cause)}, is this ` +\n      `error's cause and says what to do.", body)
         self.assertIn("super(`${what} See clients/node/README.md#the-exception`, { cause });", body)
+        # A committed log's poll names its own fault() and its entries: the fault of the
+        # log's image is reported once, so the message must not send the reader to a
+        # subscription's (clients/node/README.md, "The committed log").
+        self.assertIn("which this CommittedLog's fault() reads \" +\n      \"until its next poll and nothing reports "
+                      "after that, so read it and keep it before polling again", body)
+        log = files["index.js"].split("class CommittedLog {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("throw new HandlerError(result[0], result[1], result[2], result[3], true, result[4]);", log)
+        subscription = files["index.js"].split("class Subscription {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("throw new HandlerError(result[0], result[1], result[2], result[3]);", subscription)
+        # A committed log's entry the runtime kept from the handler, and every later entry of
+        # that poll, did not reach it: the message says where to open the log again, and
+        # `undeliveredAt` is that position (clients/node/README.md, "The committed log").
+        self.assertIn("close this log and open a new one at position ${undeliveredAt}", body)
+        self.assertIn("this.undeliveredAt = undeliveredAt;", body)
         failure = files["src/addon.c"].split("static napi_value failure_error(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("run the client on a Node built", failure)
-        self.assertIn("polling again does not deliver it. See clients/node/README.md#the-exception", failure)
+        self.assertIn('"The ABI consumed the %s, so polling again does not deliver it", one);', failure)
+        self.assertIn("close the log and open a new one at position %lld", failure)
+        self.assertIn('the entry at position %lld, of session %d at term offset %d', failure)
+        self.assertIn('napi_set_named_property(env, error, "position", make_int64(env, s->failed_position));', failure)
+        self.assertIn('%s. %s. See "\n           "clients/node/README.md#the-exception"', failure)
         with open(os.path.join(gen.ROOT, "clients", "node", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}
@@ -646,25 +856,37 @@ class NodePackage(unittest.TestCase):
     def test_the_trampoline_counts_and_reports_every_fragment_the_handler_did_not_see(self):
         """Invariant 1: the ABI has consumed a fragment before the trampoline runs, so a
         fragment the handler does not see, because N-API refused a step of the call, is
-        counted and its failure kept for poll to report, never dropped. The generated
+        counted and its failure kept for poll to report, never dropped; a committed log's
+        entry is held to the same, with the step that makes its position. The generated
         trampoline and its helpers are compiled with the runner's `cc` against
         TRAMPOLINE_HARNESS, a stand-in for N-API that fails each call of a fragment in turn,
         for a handler that returns and one that throws: a fragment the handler returned from
         is counted nowhere, every other is counted once, in `raised` or `undelivered`, with
         the first failure naming the call that failed, its status and the frame; every handle
         scope opened is closed and every body made is detached; and a later fragment does not
-        replace the poll's first failure."""
+        replace the poll's first failure. A committed log's entry the handler never saw keeps
+        the position the ABI gave for it, 960 in the stand-in, and a later entry of the same
+        poll makes no N-API call and does not reach the handler, so that a service never
+        applies an entry after a gap; a subscription's later fragment still reaches it. The
+        harness compiles the addon's `failure_error` and `report` too: a committed log's poll
+        reports that first position, and its cause names the entry by its position, as its
+        `position` property too, and says to open the log again there."""
         cc = shutil.which("cc")
         if cc is None:
             self.skipTest("no C compiler on PATH; the Node client's install needs one, and both CI runners have it")
         addon = gen_node.write_node(self.header)["src/addon.c"]
+        code = lint.blank(addon)
+        # The value makers report uses, then the trampoline and its helpers, then the Error a
+        # poll reports and the tuple it returns.
+        makers = addon.index("static napi_value make_int32(")
         start = addon.index("/* N-API's statuses by number")
-        brace = addon.index("{", addon.index("static void trampoline("))
-        end = lint.block_end(lint.blank(addon), brace)
+        end = lint.block_end(code, addon.index("{", addon.index("static void trampoline(")))
+        error_start = addon.index("static napi_value failure_error(")
+        error_end = lint.block_end(code, addon.index("{", addon.index("static napi_value report(")))
         with tempfile.TemporaryDirectory() as tmp:
             source = os.path.join(tmp, "harness.c")
             with open(source, "w", encoding="utf-8") as f:
-                f.write(TRAMPOLINE_HARNESS.replace("@TRAMPOLINE@", addon[start:end]))
+                f.write(TRAMPOLINE_HARNESS.replace("@TRAMPOLINE@", addon[makers:end] + "\n\n" + addon[error_start:error_end]))
             binary = os.path.join(tmp, "harness")
             include = os.path.join(gen.ROOT, "crates", "cavalry-ffi", "include")
             built = subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-I", include, source, "-o", binary],
@@ -677,6 +899,27 @@ class NodePackage(unittest.TestCase):
         self.assertIn("a fragment whose handler returns calls: napi_open_handle_scope napi_create_external_buffer "
                       "napi_get_reference_value napi_get_undefined napi_call_function napi_get_typedarray_info "
                       "napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
+        # A committed log's entry asks for one thing more, the number its position is handed
+        # to the handler as (ADR 0070).
+        self.assertIn("an entry whose handler returns calls: napi_open_handle_scope napi_create_external_buffer "
+                      "napi_get_reference_value napi_get_undefined napi_create_int64 napi_call_function "
+                      "napi_get_typedarray_info napi_detach_arraybuffer napi_close_handle_scope\n", ran.stdout)
+        # The cause a service reads when the runtime kept an entry from the handler: the entry
+        # by its position, and the position to open the log again at, which is the first such
+        # entry's (clients/node/README.md, "The committed log").
+        self.assertIn("a committed log's report's cause: the addon could not make the body's Buffer "
+                      "(napi_create_external_buffer) for the entry at position 960, of session 7 at term offset 4096: "
+                      "N-API status 9, napi_generic_failure; the runtime refused a call the addon makes for every "
+                      "fragment: call poll on the thread that made the client, on a Node that package.json's engines "
+                      "admits. The ABI consumed the entry, and the handler was handed no entry of this poll from "
+                      "position 960 on: close the log and open a new one at position 960. See "
+                      "clients/node/README.md#the-exception\n", ran.stdout)
+        self.assertIn("a subscription's report's cause: the addon could not make the body's Buffer "
+                      "(napi_create_external_buffer) for the fragment of session 7 at term offset 4096: N-API status 9, "
+                      "napi_generic_failure; the runtime refused a call the addon makes for every fragment: call poll "
+                      "on the thread that made the client, on a Node that package.json's engines admits. The ABI "
+                      "consumed the fragment, so polling again does not deliver it. See "
+                      "clients/node/README.md#the-exception\n", ran.stdout)
         self.assertIn("0 failure(s)", ran.stdout)
 
     def test_every_struct_argument_is_checked_for_its_size_and_alignment(self):

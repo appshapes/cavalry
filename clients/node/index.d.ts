@@ -97,16 +97,28 @@ export class CavalryError extends Error {
   abiMessage: string;
 }
 
-/** A fragment of a poll did not reach the handler cleanly: the handler threw on `raised` of
- * them, `undelivered` never reached it, and `cause` is the first of these. */
+/** A fragment of a poll, or an entry of a committed log's when `committedLog` is true, did not
+ * reach the handler cleanly: the handler threw on `raised` of them, `undelivered` never reached
+ * it, and `cause` is the first of these. `fragments` is the poll's result, -1 when the poll
+ * also stopped on a fault, which the `fault()` of the object that was polled reads until its
+ * next poll. `undeliveredAt` is a committed log's position of the poll's first entry that
+ * never reached the handler, after which the handler was handed no entry of the poll, and
+ * where the service opens the log again; null when every entry reached it, and for a
+ * subscription. */
 export class HandlerError extends Error {
   fragments: number;
   raised: number;
   undelivered: number;
+  committedLog: boolean;
+  undeliveredAt: number | null;
 }
 
 /** The body as a Buffer into the log, valid for the call, and the frame's header. */
 export type FragmentHandler = (body: Buffer, header: Header) => void;
+
+/** A committed log's entry: the body and the header as a fragment's, and the entry's position
+ * in the log. */
+export type EntryHandler = (body: Buffer, header: Header, position: number) => void;
 
 export class Client {
   constructor(dir?: string | null);
@@ -127,6 +139,7 @@ export class Client {
   purgeRecording(recordingId: number): void;
   startReplay(recordingId: number, position: number, length: number, replayStreamId: number, channel: string): Replay;
   stopReplay(replaySessionId: number): void;
+  committedLog(position: number): CommittedLog | null;
   [Symbol.dispose](): void;
 }
 
@@ -187,6 +200,19 @@ export class Subscription {
   images(): Image[];
   readonly isConnected: boolean;
   readonly isClosed: boolean;
+  close(): void;
+}
+
+export class CommittedLog {
+  readonly recordingId: number;
+  readonly memberId: number;
+  poll(handler: EntryHandler, fragmentLimit: number): number;
+  fault(): { code: number; sessionId: number; position: number };
+  position(): number;
+  commitPosition(): number;
+  readonly isEnded: boolean;
+  failedAt(): number | null;
+  withdrawnAt(): number | null;
   close(): void;
 }
 

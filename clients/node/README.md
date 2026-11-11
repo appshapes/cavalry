@@ -10,7 +10,8 @@ the ABI function for function, and the client's own code (`index.js`, typed by
 with `close()` or `using`; a `Publication` claims a slice of the log as a `Buffer`
 over it or offers a `Buffer`; a `Subscription` polls with a fragment handler function
 that receives the body as a `Buffer` into the log and the frame's header; a
-`Recording` and a `Replay` wrap the driver's archive. Every message the client sends or
+`Recording` and a `Replay` wrap the driver's archive; a `CommittedLog` is a service's
+read of a cluster's committed log beside a member (below). Every message the client sends or
 receives goes through one `extern "C"` call on the caller's thread, as the ABI's page
 promises (ADR 0046's boundary; ADR 0051). The package has no runtime dependency: N-API
 is part of Node, and `npm install` in `clients/node` builds the addon with the
@@ -23,14 +24,96 @@ the Rust crates is not an option, since it would go round the header (ADR 0046,
 Alternatives). The cost of the choice is a C compiler at install, which `node-gyp`
 needs and both CI runners and the ten-minute path's machines have.
 
+### The committed log
+
+A service is a program beside a cluster member that applies the entries the cluster
+has committed (`docs/how-to/read-the-committed-log.md`). `client.committedLog(position)`
+opens the log of the member on the client's driver at a position, 0 or the
+`position()` an earlier run reached, and returns `null` while the driver hosts no
+member with a log, so a service started before its member asks again. `log.poll(handler,
+fragmentLimit)` calls `handler(body, header, position)` for each committed entry, in
+order, none at or past the member's commit position; `position` is the entry's
+position in the log, a number. It returns the entry count, or −1 when the ABI's poll
+stopped on a fault, which `log.fault()` gives as `{ code, sessionId, position }` until
+the next poll. `log.position()` is the position after the last entry delivered, the
+one a service keeps for its next start, and `log.commitPosition()` the bound of the
+last poll. `log.isEnded` says that no poll will deliver another entry: stop reading
+when it is true, not when a poll returns 0, then close the log and open another from
+`log.position()`. `log.close()` stops the driver's replay, and a second close does
+nothing; a log closed after its client is freed, and the driver ends the replay by
+itself. When the ABI could not stop the replay, `log.close()` throws `CavalryError`
+after it has freed the log, and a second close does nothing. `log.memberId` and
+`log.recordingId` say whose log it is (`spec/c-abi.md`, "Functions", committed log;
+ADR 0070).
+
+An ended log delivered every committed entry it may read only when three things hold:
+
+- `log.failedAt()` is `null`. A position is where the driver's replay of the member's
+  recording failed, and no entry from it on was delivered.
+- `log.withdrawnAt()` is `null`. A position is where the entries begin that the log
+  was not given, because the driver withdrew the replay, 5 s after it ended, before
+  the service had read it.
+- No `log.poll` returned −1 with the fault of the log's own image: a `log.fault()`
+  code of `CAVALRY_ERR_FAULT_IMAGE`, the replay's image failed a check, or of
+  `CAVALRY_ERR_FAULT_IMAGES_FULL`, the image could not join.
+
+Read the two reports once `log.isEnded` is true. The driver withdraws a replay that
+failed as it does any other, so both can be positions: `log.withdrawnAt()` is then the
+lower, and the entries from it on, those below `log.failedAt()` among them, were not
+delivered. The fault of the image is reported once. The poll that meets it returns −1,
+`log.fault()` answers it only until the next poll, the next poll returns 0 and clears
+it, and both reports are `null` for such a log. So a service keeps that −1 and its
+fault when it gets them: nothing reports them later, and without them this end reads
+as a whole one. In every case what the log delivered ends at `log.position()`.
+
+The addon reads a committed log through the trampoline a subscription's poll uses,
+with one step more for each entry: the number its position is handed to the handler
+as. A handler's exception goes where a subscription's goes ("The exception"): the
+poll goes on handing the handler its later entries, and `poll` throws `HandlerError`
+once the ABI has returned, with the poll's result as its `fragments`, the −1 of a
+fault included. An entry whose handler call threw was delivered and is not delivered
+again: `log.position()` is past it, and past every entry the same poll delivered after
+it. A handler cannot stop a poll: the ABI goes on handing it entries up to the
+fragment limit.
+
+The runtime can also keep an entry from the handler, when N-API refuses a step of the
+call ("The exception"). The ABI has consumed that entry, so it was not delivered. The
+addon then hands the handler no later entry of the same poll either, so that a
+service never applies an entry after one it did not see. `poll` throws `HandlerError`
+with `undelivered` counting these entries and `undeliveredAt` the position of the
+first. When no handler call of the poll threw before that entry, the `cause` is the
+addon's `Error` for it, which names it by its position, its `position` property too.
+`log.position()` is past them all, so polling the same log again does not deliver
+them. `undeliveredAt` is `null` when every entry reached the handler.
+
+So a service that must apply every entry, in order, does this:
+
+1. The handler catches its own exceptions. When it cannot apply an entry, it keeps
+   that entry's `position` and sets a flag.
+2. While the flag is set the handler applies nothing and returns at once, for the rest
+   of that poll: the poll still hands it the entries after the one that failed.
+3. The service catches `HandlerError` from `log.poll`. Its `undeliveredAt`, when it is
+   not `null`, is where the entries begin that the handler was not handed.
+4. After the poll, when the handler kept a position or `undeliveredAt` is a position,
+   the service closes the log and opens a new one at the position the handler kept,
+   or, when it kept none, at `undeliveredAt`. A position the handler kept is always
+   the lower, since no entry from `undeliveredAt` on reached the handler.
+
+With entries at 0, 96 and 192 and a failure at 96, opening again at `log.position()`
+would lose the entry at 96, and applying 192 before opening again at 96 would apply
+192 twice. When the runtime kept the entry at 96 from the handler, `undeliveredAt` is
+96, the handler was not handed 192 either, and the service opens the log again at 96.
+A `fragmentLimit` of 1 is the simple form: a poll then delivers at most one entry, and
+the service decides after each.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no `await`, no
   promise, no copy of a fragment into a new array for the handler. `clients/lint.py`
   reads the per-message functions of `index.js` for JavaScript's forms of each
   (`async`, `await`, `Promise`, `.then`, `throw`, `Atomics.wait`), and those of
-  `src/addon.c`, the trampoline, the Buffers' finalizer, `poll`, `headerField`, `view`,
-  `detach` and the wrappers of the claim, the reserved value, the commit, the abort
+  `src/addon.c`, the trampoline, the Buffers' finalizer, `poll`, `committedLogPoll`,
+  `headerField`, `view`, `detach` and the wrappers of the claim, the reserved value, the commit, the abort
   and the offer, for C's (`pthread_mutex_*`, `pthread_rwlock_*`, `mtx_*`,
   `uv_mutex_*`, `uv_rwlock_*`, `napi_*threadsafe_function*`, and `napi_throw*` and
   `napi_fatal_*` outside the argument readers). `just lint` fails on any of them, in
@@ -42,16 +125,27 @@ needs and both CI runners and the ten-minute path's machines have.
   keeps every later fragment of that poll reaching the handler, a fragment the runtime
   keeps from the handler is counted, and `poll` throws a `HandlerError` once the ABI
   has returned, with the first exception or failure as its `cause` and the counts, the
-  one throw the per-message path allows.
+  one throw the per-message path allows. Never hand a committed log's handler an entry
+  after one the runtime kept from it: the rest of that poll is counted too, and
+  `HandlerError.undeliveredAt` is where the service opens the log again.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
-  returns, so `close()` forgets the handle once the ABI's close has returned. The one
-  exception is a subscription's close from inside a handler of its own poll, which the
-  ABI refuses with `CAVALRY_ERR_POLLING`, leaving the subscription open
-  (`spec/c-abi.md`, "Calls during a claim or a poll"). `close()` then throws
-  `CavalryError` and keeps the handle, so the subscription can be polled and closed
-  after the poll. The close zeroes the claim struct too, so `commit`, `abort` and `setReservedValue` after it answer -1 with
+  returns, so `close()` forgets the handle once the ABI's close has returned. There
+  are two exceptions: a subscription's close from inside a handler of its own poll,
+  and a committed log's close from inside a handler of its own poll. The ABI refuses
+  each with `CAVALRY_ERR_POLLING` and leaves the handle open (`spec/c-abi.md`, "Calls
+  during a claim or a poll"). `close()` then throws `CavalryError` and keeps the
+  handle, so the subscription or the log can be polled and closed after the poll. The close zeroes the claim struct too, so `commit`, `abort` and `setReservedValue` after it answer -1 with
   `CAVALRY_ERR_NO_CLAIM` and the ABI reads no freed handle through the struct's
   `publication` (`spec/c-abi.md`, "Which claim a struct names").
+- Never read a refusal as an answer. A `poll` from inside a handler of the same
+  subscription returns −1 with `CAVALRY_ERR_POLLING`, and the poll in progress goes
+  on. A committed log's handler is held to the same rule. From inside it, a `poll` of
+  the same log, `log.position()` and `log.commitPosition()` return −1, `log.isEnded`
+  is `false`, `log.failedAt()` and `log.withdrawnAt()` are `null`, and `log.fault()`
+  and `log.close()` throw `CavalryError`, each with `CAVALRY_ERR_POLLING`, and the
+  log stays open. The `false` and the two `null` are refusals there, not answers:
+  read the three after the poll has returned. The handler has each entry's own
+  `position`.
 - Never edit a generated file by hand: `just lint` regenerates the package and fails
   when the committed files differ.
 
@@ -137,7 +231,10 @@ body's bytes with `napi_create_external_buffer`, no copy, takes the subscription
 `Header` object from the reference it keeps, reads `undefined` for the handler's
 `this`, and calls the handler through `napi_call_function`. Then it detaches the
 `Buffer`'s `ArrayBuffer` (`napi_get_typedarray_info`, `napi_detach_arraybuffer`), so
-that a kept body reads as empty, and closes the scope.
+that a kept body reads as empty, and closes the scope. For a committed log's entry it
+makes a ninth, `napi_create_int64`, for the number the entry's position is handed to
+the handler as, and it asks the ABI for that position with one call of its own per
+entry, `cavalry_committed_log_entry_position`.
 
 What Node does for those calls, per received message, as Node v24.x's source has it
 (`src/js_native_api_v8.cc`, `src/node_api.cc`, `src/node_buffer.cc`, `src/env-inl.h`):
@@ -158,13 +255,22 @@ What Node does for those calls, per received message, as Node v24.x's source has
 - When the event loop next turns, Node runs the queued callback. The callback calls
   the addon's finalizer, `buffer_freed`, and frees the `CallbackInfo`, the
   `BufferFinalizer` and itself ("The runtime's queue").
+- For a committed log's entry, the position: `napi_create_int64` is
+  `v8::Number::New(isolate, (double) value)`. V8 keeps a small integer in the handle
+  scope's slot and not on its heap: one below 2^31 on Node's own builds, which do not
+  compress V8's pointers, and one below 2^30 on a build that does. From there on it
+  makes a `HeapNumber` on V8's heap, freed by a collection. So once a log passes
+  2 GiB, each entry makes one more object on V8's heap, the number its position is
+  handed to the handler as.
 
 So a received message costs, on the runtime's side, at least five native
 allocations, two mutex lock and unlock pairs, and a share of one `write` system call
-per turn of the event loop. The mutexes are contended only when another thread queues
-work for the same environment at the same moment. None of this is code Cavalry
-writes; ADR 0046 leaves it outside the per-message rules, and this README records it.
-The addon's own share is one counter increment per `Buffer`, for `buffersHeld`.
+per turn of the event loop, and a committed log's entry at a position of 2^31 or more
+one object more on V8's heap. The mutexes are contended only when another thread
+queues work for the same environment at the same moment. None of this is code
+Cavalry writes; ADR 0046 leaves it outside the per-message rules, and this README
+records it. The addon's own share is one counter increment per `Buffer`, for
+`buffersHeld`.
 
 The `Header`'s getters each call the addon's `headerField`, which reads
 `cavalry_header_values` once per fragment, on the first getter, into the one
@@ -270,8 +376,12 @@ The trampoline sees the handler's exception as N-API's pending exception
 calling the handler for every later fragment of the poll, so that no fragment is
 consumed unseen; `poll` throws `HandlerError` once the ABI has returned, with
 `fragments`, `raised`, the first exception as its `cause`, and a message that says
-what to do. A value that is not an `Error`, a string or a number, is kept as thrown,
-and stays the first when an `Error` follows it in the same poll. The trampoline keeps
+what to do. `fragments` is the poll's result: the count, or −1 when the poll also
+stopped on a fault, which `fault()` reads. A committed log's `HandlerError` has
+`committedLog` true and speaks of entries, and when `fragments` is −1 it names
+`log.fault()`, to read before the next poll ("The committed log"). A value that is
+not an `Error`, a string or a number, is kept as thrown, and stays the first when an
+`Error` follows it in the same poll. The trampoline keeps
 the first exception as element 0 of a holder object the subscription makes once, when
 it is added, and clears the element when the poll returns. A reference to the value
 itself would not do: at the N-API version the addon builds against, 8,
@@ -290,9 +400,24 @@ N-API call, its status, and the frame's session id and term offset, read through
 status and the frame and says what to do, with `napiStatus`, `sessionId` and
 `termOffset` as its properties. The `cause` is the poll's first failure or first
 exception, whichever came first, and `raised` and `undelivered` count every one.
+
+A committed log's poll differs in one way, because a service applies its entries in
+order. Once the runtime has kept an entry from the handler, the trampoline hands the
+handler no later entry of that poll. It counts each of them in `undelivered` and makes
+no N-API call for them. The trampoline keeps the first such entry's position, which
+`cavalry_committed_log_entry_position` gives without N-API, and `HandlerError` reports
+it as `undeliveredAt`. A committed log's `Error` for a failure names its entry by
+position, as its `position` property too, and when an entry of the poll did not reach
+the handler its message says to close the log and open a new one at `undeliveredAt`
+("The committed log").
+
 `clients/generate-test.py` compiles the generated trampoline against a stand-in for
 N-API that fails each of its calls in turn, and checks that every fragment the handler
-did not return from is counted once, with the first failure kept.
+did not return from is counted once, with the first failure kept. For a committed log
+it checks that the position kept is the one the ABI gave, and that a later entry of
+the same poll makes no N-API call and does not reach the handler. It compiles the
+addon's `failure_error` and `report` too, and checks the position each reports and the
+cause's message.
 
 ## What to read next
 

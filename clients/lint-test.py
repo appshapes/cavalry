@@ -304,6 +304,16 @@ class Clients(unittest.TestCase):
         self.assertIn("Subscription.poll", finding)
         self.assertIn("throws", finding)
 
+    def test_the_committed_logs_throw_after_its_addon_call_passes_and_before_it_fails(self):
+        """The committed log's `poll` in the Node client is held as the subscription's is."""
+        self.assertEqual(lint.findings(self.tmp), [])
+        self.edit_node("    const result = addon.committedLogPoll(this._state, this.handle, handler, fragmentLimit);\n",
+                       "    if (handler === null) throw new TypeError(\"a handler\");\n"
+                       "    const result = addon.committedLogPoll(this._state, this.handle, handler, fragmentLimit);\n")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("CommittedLog.poll", finding)
+        self.assertIn("throws", finding)
+
     def test_building_handler_error_before_the_polls_addon_call_fails(self):
         self.edit_node("    const result = addon.poll(this._state, this.handle, handler, fragmentLimit);\n",
                        "    const early = new HandlerError(0, 0, null);\n"
@@ -363,6 +373,12 @@ class Clients(unittest.TestCase):
         self.add_to_addon("fn_poll", "mtx_lock(&lock);")
         [finding] = lint.findings(self.tmp)
         self.assertIn("node: fn_poll (", finding)
+        self.assertIn("calls C11's `mtx_*`", finding)
+
+    def test_a_c11_mtx_in_the_committed_logs_poll_fails(self):
+        self.add_to_addon("fn_committedLogPoll", "mtx_lock(&lock);")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("node: fn_committedLogPoll (", finding)
         self.assertIn("calls C11's `mtx_*`", finding)
 
     def test_a_uv_mutex_in_a_helper_the_trampoline_calls_fails(self):

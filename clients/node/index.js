@@ -350,19 +350,39 @@ class CavalryError extends Error {
 }
 
 class HandlerError extends Error {
-  /** A fragment of a poll did not reach the handler cleanly: `fragments` is the count the poll
-   * returned once the ABI was done, `raised` how many handler calls threw, `undelivered` how
-   * many fragments the handler never saw because the runtime refused a step of the call, and
-   * `cause` the first of these, the handler's exception as thrown or an Error naming the N-API
-   * call that failed. The ABI consumed every one of the poll's fragments. */
-  constructor(fragments, raised, cause, undelivered = 0) {
-    const delivered = fragments >= 0 ? `the ${fragments} fragment(s) this poll delivered` :
+  /** A fragment of a poll did not reach the handler cleanly, or an entry of a committed log's
+   * poll when `committedLog` is true: `fragments` is the count the poll returned once the ABI
+   * was done, of fragments or of entries, or -1 when the poll also stopped on a fault, which
+   * the `fault()` of the object that was polled reads until its next poll; `raised` how many
+   * handler calls threw, `undelivered` how many fragments the handler never saw because the
+   * runtime refused a step of the call, and `cause` the first of these, the handler's
+   * exception as thrown or an Error naming the N-API call that failed. The ABI consumed every
+   * one of the poll's fragments. A committed log hands its handler no entry of a poll after
+   * one the handler never saw, and counts those in `undelivered` too: `undeliveredAt` is the
+   * position of the first, where the service opens the log again, or null when every entry
+   * reached the handler. */
+  constructor(fragments, raised, cause, undelivered = 0, committedLog = false, undeliveredAt = null) {
+    const one = committedLog ? "entry" : "fragment";
+    const many = committedLog ? "entries" : "fragments";
+    // The fault of a committed log's own image is reported by one poll and by no call after
+    // the next (clients/node/README.md, "The committed log").
+    const count = committedLog ? `the ${fragments} ${fragments === 1 ? one : many} this poll delivered` :
+      `the ${fragments} fragment(s) this poll delivered`;
+    const fault = committedLog ?
+      "the entries this poll delivered before it stopped on a fault, which this CommittedLog's fault() reads " +
+      "until its next poll and nothing reports after that, so read it and keep it before polling again" :
       "the fragments this poll delivered before it stopped on a fault, which subscription.fault() reads";
+    const delivered = fragments >= 0 ? count : fault;
     const what = undelivered === 0 ?
-      `the fragment handler threw on ${raised} of ${delivered}; every fragment reached the handler once, in ` +
+      `the ${one} handler threw on ${raised} of ${delivered}; every ${one} reached the handler once, in ` +
       `order. Fix the handler: its first exception, ${describe(cause)}, is this error's cause; polling again does ` +
-      `not deliver these fragments again.` :
-      `${undelivered} of ${delivered} never reached the fragment handler, and the handler threw on ${raised}; the ` +
+      `not deliver these ${many} again.` :
+      committedLog ?
+      `${undelivered} of ${delivered} never reached the entry handler, from the entry at position ` +
+      `${undeliveredAt} on, and the handler threw on ${raised} before it. The log's position() is past them, so ` +
+      `close this log and open a new one at position ${undeliveredAt}, or at the position of an earlier entry ` +
+      `the handler could not apply. The first failure, ${describe(cause)}, is this error's cause and says why.` :
+      `${undelivered} of ${delivered} never reached the ${one} handler, and the handler threw on ${raised}; the ` +
       `ABI consumed them, so polling again does not deliver them. The first failure, ${describe(cause)}, is this ` +
       `error's cause and says what to do.`;
     super(`${what} See clients/node/README.md#the-exception`, { cause });
@@ -370,6 +390,8 @@ class HandlerError extends Error {
     this.fragments = fragments;
     this.raised = raised;
     this.undelivered = undelivered;
+    this.committedLog = committedLog;
+    this.undeliveredAt = undeliveredAt;
   }
 }
 
@@ -478,6 +500,15 @@ class Client {
     return new Replay(handle);
   }
   stopReplay(replaySessionId) { check("cavalry_stop_replay", addon.cavalry_stop_replay(this.handle, replaySessionId)); }
+  /** The committed log of the cluster member on this client's driver, opened at `position`, 0
+   * or the `position()` an earlier `CommittedLog` reached: a `CommittedLog`, or null while the
+   * driver hosts no member that has a recording of its log, so a service started before its
+   * member asks again (spec/cluster.md, "The service"; spec/c-abi.md, "Functions"). */
+  committedLog(position) {
+    const [code, handle] = addon.cavalry_committed_log(this.handle, position);
+    check("cavalry_committed_log", code);
+    return handle === null ? null : new CommittedLog(handle, this);
+  }
 }
 if (typeof Symbol.dispose === "symbol") Client.prototype[Symbol.dispose] = function dispose() { this.close(); };
 
@@ -623,6 +654,108 @@ class Subscription {
   }
 }
 
+class CommittedLog {
+  /** A service's read of a cluster's committed log, beside the member on the client's driver:
+   * `poll(handler, fragmentLimit)` calls `handler(body, header, position)` for each entry a
+   * quorum has committed, in order and none at or past the member's commit position, `body` a
+   * Buffer into the log valid for the call, `header` the one `Header` this object keeps and
+   * `position` the entry's position in the log, and returns the entry count, or the ABI's -1
+   * when the poll stopped on a fault, which `fault()` reads until the next poll. A handler's
+   * exception is kept until the ABI has returned and then thrown as `HandlerError`, as a
+   * subscription's is; its entry was delivered and is not delivered again. `position()` is the
+   * position after the last entry delivered: where a service opens the log again. `isEnded`
+   * says when to stop reading and what tells a whole end from a short one. */
+  constructor(handle, client) {
+    this.handle = handle;
+    this._client = client;
+    this._header = new Header(null);
+    this._state = addon.registerCommittedLog(this._header);
+    this._header._state = this._state;
+    const c = new Struct("cavalry_committed_log_constants_t");
+    check("cavalry_committed_log_constants", addon.cavalry_committed_log_constants(handle, c.buffer));
+    this.recordingId = c.int64("recording_id");
+    this.memberId = c.int32("member_id");
+  }
+  /** One ABI call, and its result: the count of entries delivered, or -1 when the poll stopped
+   * on a fault. `fault()` then reads the fault, until the next poll: a code of
+   * CAVALRY_ERR_FAULT_IMAGE or CAVALRY_ERR_FAULT_IMAGES_FULL is the one report that the
+   * replay's image failed a check or could not join, the log is ended short of its entries, and
+   * the next poll returns 0 and clears the fault, so keep this answer (`isEnded`). The
+   * handler's exception, if any, is thrown after the ABI call returns, as `HandlerError`, whose
+   * `fragments` is this result, -1 included. An entry whose handler call threw was delivered
+   * and is not delivered again: `position()` is past it, and past every entry this poll
+   * delivered after it. An entry the runtime kept from the handler, and every later entry of
+   * the same poll, which the addon then hands the handler none of, were not delivered:
+   * `HandlerError`'s `undeliveredAt` is the first one's position, where the service opens the
+   * log again. From a handler of this log's own poll the ABI refuses the call: -1 with
+   * CAVALRY_ERR_POLLING, and nothing is touched. */
+  poll(handler, fragmentLimit) {
+    const result = addon.committedLogPoll(this._state, this.handle, handler, fragmentLimit);
+    if (typeof result === "number") return result;
+    throw new HandlerError(result[0], result[1], result[2], result[3], true, result[4]);
+  }
+  /** What the last poll stopped on: {code, sessionId, position}; code 0 when the last poll
+   * returned a count. A poll that returns a count clears it, so read it after a poll that
+   * returned -1 and before the next. */
+  fault() {
+    const f = new Struct("cavalry_fault_t");
+    check("cavalry_committed_log_fault", addon.cavalry_committed_log_fault(this.handle, f.buffer));
+    return { code: f.int32("code"), sessionId: f.int32("session_id"), position: f.int64("position") };
+  }
+  /** The position after the last entry delivered, or the position the log was opened at. */
+  position() { return addon.cavalry_committed_log_position(this.handle); }
+  /** The bound of the last poll: the highest commit position taken from the member's counter. */
+  commitPosition() { return addon.cavalry_committed_log_commit_position(this.handle); }
+  /** Whether this log has come to its end: no poll will deliver another entry. Stop reading when
+   * it is true, not when a poll returns 0. The log delivered every entry it was owed only when
+   * three things hold: `failedAt()` is null, `withdrawnAt()` is null, and no `poll` of this log
+   * returned -1 with the fault of the log's own image, CAVALRY_ERR_FAULT_IMAGE when the image
+   * failed a check or CAVALRY_ERR_FAULT_IMAGES_FULL when it could not join. That fault is
+   * reported once, by the poll that meets it: `fault()` answers it only until the next poll,
+   * which returns 0 and clears it, and both reports are null for such a log. So a service
+   * keeps that poll's answer, since nothing reports it later. In every case what the log
+   * delivered ends at `position()`, where a service opens the log again. */
+  get isEnded() { return addon.cavalry_committed_log_is_ended(this.handle); }
+  /** The position after the last frame the driver's replay of the member's recording played
+   * before it failed, or null for a log that is live or that ended because its member closed or
+   * left the recording. No entry from that position on is delivered. The entries below it may
+   * still be on their way when this first is a position, so read it once `isEnded` is true.
+   * They have all been delivered by then unless the driver withdrew the replay first, which it
+   * does 5 s after a replay ends, one that failed included: `withdrawnAt()` is then a position
+   * below this one, and the entries from there on, those below this position among them, were
+   * not delivered either. What the log delivered ends at `position()`. */
+  failedAt() {
+    const [failed, position] = addon.cavalry_committed_log_failed_at(this.handle);
+    return failed ? position : null;
+  }
+  /** The position at which the entries this log was not given begin, when the driver withdrew
+   * the replay before the polls had read it to its end, or null. The driver keeps a replay 5 s
+   * after it ends and then withdraws it, read or not: a service that did not poll for that long
+   * after its member closed or left the log, or whose handler took that long, ends so. The
+   * entries from that position on were played and not delivered. A replay that failed is
+   * withdrawn in the same way: `failedAt()` is then a position too, and this one is the lower.
+   * Read it once `isEnded` is true. */
+  withdrawnAt() {
+    const [withdrawn, position] = addon.cavalry_committed_log_withdrawn_at(this.handle);
+    return withdrawn ? position : null;
+  }
+  /** Stops the replay through the client and frees the handle; a second close does nothing.
+   * After the client's own close it frees the handle alone, and the driver ends the replay by
+   * itself. The handle is freed whatever the ABI answers. When the ABI could not stop the
+   * replay, through a client that the driver or a timeout closed or within the response
+   * timeout, this throws CavalryError after the handle is freed: the log is closed, a second
+   * close does nothing, and the driver ends the replay by itself. The one exception is a close
+   * from inside a handler of this log's own poll, which the ABI refuses: that throws
+   * CavalryError with CAVALRY_ERR_POLLING too, and leaves the log open. */
+  close() {
+    if (this.handle === null) return;
+    const result = addon.cavalry_committed_log_close(this.handle, this._client.handle);
+    if (result !== 0 && addon.cavalry_errcode() === constants.CAVALRY_ERR_POLLING) throw error("cavalry_committed_log_close");
+    this.handle = null;
+    check("cavalry_committed_log_close", result);
+  }
+}
+
 class Recording {
   /** A recording the driver makes; `close` frees the handle and stops nothing. */
   constructor(handle) {
@@ -675,6 +808,6 @@ function buffersHeld() { return addon.buffersHeld(); }
 module.exports = {
   ABI_VERSION, constants, LAYOUT, HEADER_FIELDS,
   NOT_CONNECTED, BACK_PRESSURED, ADMIN_ACTION, CLOSED, MAX_POSITION_EXCEEDED, ERROR, NULL_POSITION,
-  CavalryError, HandlerError, Client, Publication, Subscription, Header, Image, Recording, Replay,
+  CavalryError, HandlerError, Client, Publication, Subscription, CommittedLog, Header, Image, Recording, Replay,
   abiVersion, version, buffersHeld, addon,
 };
