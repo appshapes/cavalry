@@ -475,6 +475,9 @@ typedef struct {
   bool failed_frame;                 /* FIRST_FAILURE: whether the frame's two fields below were read */
   int32_t failed_session_id;
   int32_t failed_term_offset;
+  int64_t failed_position;           /* FIRST_FAILURE of a committed log: the entry's position, as the ABI gives it */
+  int64_t undelivered_at;            /* a committed log, while undelivered is above 0: the position of the poll's first
+                                      * entry the handler never saw, where the service opens the log again */
   const cavalry_header_t *current;   /* the frame's header during a handler call */
   cavalry_header_values_t values;    /* read once per fragment, on the first field read */
   bool values_read;
@@ -484,7 +487,8 @@ typedef struct {
 
 /* The first fragment of a poll that did not reach the handler cleanly for want of an N-API
  * call: what the addon could not do, the call's status and the frame, read through the ABI,
- * which needs no N-API, so that poll reports it once the ABI has returned. A later one is
+ * which needs no N-API, so that poll reports it once the ABI has returned; for a committed
+ * log's entry, its position too, which the ABI gives without N-API as well. A later one is
  * counted by the caller and not kept. */
 static void keep_failure(subscription_state_t *s, const cavalry_header_t *header, const char *what, napi_status status) {
   if (s->first != FIRST_NONE) return;
@@ -497,11 +501,15 @@ static void keep_failure(subscription_state_t *s, const cavalry_header_t *header
     s->failed_session_id = values.frame.session_id;
     s->failed_term_offset = values.frame.term_offset;
   }
+  s->failed_position = s->positions ? cavalry_committed_log_entry_position(header) : -1;
 }
 
 /* A fragment the handler never saw: the ABI has consumed it, so it is counted, and poll
- * reports it (invariant 1: a message is delivered once, or its absence is reported). */
+ * reports it (invariant 1: a message is delivered once, or its absence is reported). For a
+ * committed log the first such entry's position is kept too: the trampoline hands the handler
+ * no later entry of the poll, and the service opens the log again there. */
 static void undelivered(subscription_state_t *s, const cavalry_header_t *header, const char *what, napi_status status) {
+  if (s->positions && s->undelivered == 0) s->undelivered_at = cavalry_committed_log_entry_position(header);
   s->undelivered++;
   keep_failure(s, header, what, status);
 }
@@ -519,7 +527,7 @@ static void threw(subscription_state_t *s, const cavalry_header_t *header, napi_
     keep_failure(s, header, "read the holder of the handler's exception (napi_get_reference_value)",
                  status == napi_ok ? napi_generic_failure : status);
   } else if ((status = napi_set_element(s->env, holder, 0, exception)) != napi_ok) {
-    keep_failure(s, header, "keep the fragment handler's exception (napi_set_element)", status);
+    keep_failure(s, header, "keep the handler's exception (napi_set_element)", status);
   } else {
     s->first = FIRST_EXCEPTION;
   }
@@ -531,10 +539,17 @@ static void threw(subscription_state_t *s, const cavalry_header_t *header, napi_
  * every one is counted, and the handler goes on being called for the poll's later fragments.
  * A fragment the addon cannot hand to the handler, because N-API refused a step of the call,
  * is counted too, and the first such failure kept, so that no fragment is consumed unseen
- * and unreported (clients/node/README.md, "The exception"). The body is detached after the
- * call, so a kept body reads as empty. */
+ * and unreported (clients/node/README.md, "The exception"). A committed log's entry after
+ * such an entry is not handed to the handler either, and is counted the same way: a service
+ * applies every entry in order, so it must never apply one after a gap, and it opens the log
+ * again at the first entry it did not see (clients/node/README.md, "The committed log"). The
+ * body is detached after the call, so a kept body reads as empty. */
 static void trampoline(void *clientd, const uint8_t *buffer, size_t length, const cavalry_header_t *header) {
   subscription_state_t *s = clientd;
+  if (s->positions && s->undelivered != 0) {
+    s->undelivered++;
+    return;
+  }
   napi_env env = s->env;
   napi_handle_scope scope;
   napi_status status = napi_open_handle_scope(env, &scope);
@@ -549,7 +564,7 @@ static void trampoline(void *clientd, const uint8_t *buffer, size_t length, cons
     body = NULL;
     undelivered(s, header, "make the body's Buffer (napi_create_external_buffer)", status);
   } else if ((status = napi_get_reference_value(env, s->header_ref, &hdr)) != napi_ok || hdr == NULL) {
-    undelivered(s, header, "read the subscription's Header (napi_get_reference_value)",
+    undelivered(s, header, "read the Header the handler is handed (napi_get_reference_value)",
                 status == napi_ok ? napi_generic_failure : status);
   } else if ((status = napi_get_undefined(env, &undefined)) != napi_ok) {
     undelivered(s, header, "read undefined for the handler's this (napi_get_undefined)", status);
@@ -571,12 +586,12 @@ static void trampoline(void *clientd, const uint8_t *buffer, size_t length, cons
       napi_value exception;
       napi_status asked = napi_is_exception_pending(env, &pending);
       if (asked != napi_ok) {
-        undelivered(s, header, "learn whether the fragment handler threw (napi_is_exception_pending)", asked);
+        undelivered(s, header, "learn whether the handler threw (napi_is_exception_pending)", asked);
       } else if (!pending) {
-        undelivered(s, header, "call the fragment handler (napi_call_function)", status);
+        undelivered(s, header, "call the handler (napi_call_function)", status);
       } else if ((status = napi_get_and_clear_last_exception(env, &exception)) != napi_ok) {
         s->raised++;
-        keep_failure(s, header, "read the fragment handler's exception (napi_get_and_clear_last_exception)", status);
+        keep_failure(s, header, "read the handler's exception (napi_get_and_clear_last_exception)", status);
       } else {
         threw(s, header, exception);
       }
@@ -638,16 +653,34 @@ static napi_value fn_registerCommittedLog(napi_env env, napi_callback_info info)
 
 /* The Error a poll reports for its first fragment that N-API kept from the handler: what the
  * addon could not do, by which call, N-API's status by number and name, the frame's session
- * and term offset, and what to do; the three numbers are its properties too. NULL when N-API
- * cannot make it either. */
+ * and term offset, and what to do; the three numbers are its properties too. A committed
+ * log's names the entry by its position as well, its `position` property, and, when an entry
+ * of the poll never reached the handler, says to open the log again at the first such entry,
+ * since the trampoline handed the handler no later one. NULL when N-API cannot make it
+ * either. */
 static napi_value failure_error(napi_env env, const subscription_state_t *s) {
-  char frame[96];
-  char message[768];
-  if (s->failed_frame) {
+  char frame[160];
+  char reopen[224];
+  char message[1024];
+  const char *one = s->positions ? "entry" : "fragment";
+  if (s->positions && s->failed_frame) {
+    snprintf(frame, sizeof frame, "the entry at position %lld, of session %d at term offset %d",
+             (long long) s->failed_position, (int) s->failed_session_id, (int) s->failed_term_offset);
+  } else if (s->positions) {
+    snprintf(frame, sizeof frame, "the entry at position %lld, whose header cavalry_header_values could not read",
+             (long long) s->failed_position);
+  } else if (s->failed_frame) {
     snprintf(frame, sizeof frame, "the fragment of session %d at term offset %d", (int) s->failed_session_id,
              (int) s->failed_term_offset);
   } else {
     snprintf(frame, sizeof frame, "a fragment whose header cavalry_header_values could not read");
+  }
+  if (s->positions && s->undelivered != 0) {
+    snprintf(reopen, sizeof reopen, "The ABI consumed the entry, and the handler was handed no entry of this poll "
+             "from position %lld on: close the log and open a new one at position %lld", (long long) s->undelivered_at,
+             (long long) s->undelivered_at);
+  } else {
+    snprintf(reopen, sizeof reopen, "The ABI consumed the %s, so polling again does not deliver it", one);
   }
   int known = (int) (sizeof status_names / sizeof status_names[0]);
   const char *name = s->failed_status >= 0 && s->failed_status < known ? status_names[s->failed_status] :
@@ -658,9 +691,8 @@ static napi_value failure_error(napi_env env, const subscription_state_t *s) {
       "without the sandbox" :
       "the runtime refused a call the addon makes for every fragment: call poll on the thread that made the "
       "client, on a Node that package.json's engines admits";
-  snprintf(message, sizeof message, "the addon could not %s for %s: N-API status %d, %s; %s. The ABI consumed the "
-           "fragment, so polling again does not deliver it. See clients/node/README.md#the-exception", s->failed, frame,
-           s->failed_status, name, next);
+  snprintf(message, sizeof message, "the addon could not %s for %s: N-API status %d, %s; %s. %s. See "
+           "clients/node/README.md#the-exception", s->failed, frame, s->failed_status, name, next, reopen);
   napi_value text, error;
   if (napi_create_string_utf8(env, message, NAPI_AUTO_LENGTH, &text) != napi_ok ||
       napi_create_error(env, NULL, text, &error) != napi_ok) {
@@ -671,12 +703,15 @@ static napi_value failure_error(napi_env env, const subscription_state_t *s) {
     napi_set_named_property(env, error, "sessionId", make_int32(env, s->failed_session_id));
     napi_set_named_property(env, error, "termOffset", make_int32(env, s->failed_term_offset));
   }
+  if (s->positions) napi_set_named_property(env, error, "position", make_int64(env, s->failed_position));
   return error;
 }
 
 /* What poll returns when a fragment of the poll did not reach the handler cleanly:
- * [count, raised, first, undelivered], `first` the handler's first exception or the Error
- * failure_error makes, whichever came first; the state is cleared for the next poll. */
+ * [count, raised, first, undelivered, undeliveredAt], `first` the handler's first exception
+ * or the Error failure_error makes, whichever came first, and `undeliveredAt` a committed
+ * log's position of the poll's first entry the handler never saw, else null; the state is
+ * cleared for the next poll. */
 static napi_value report(napi_env env, subscription_state_t *s, int count) {
   napi_value tuple, first = NULL, holder = NULL;
   if (s->first == FIRST_EXCEPTION) {
@@ -689,11 +724,12 @@ static napi_value report(napi_env env, subscription_state_t *s, int count) {
     first = failure_error(env, s);
   }
   if (first == NULL) first = make_null(env);
-  napi_create_array_with_length(env, 4, &tuple);
+  napi_create_array_with_length(env, 5, &tuple);
   napi_set_element(env, tuple, 0, make_int32(env, count));
   napi_set_element(env, tuple, 1, make_int32(env, (int32_t) s->raised));
   napi_set_element(env, tuple, 2, first);
   napi_set_element(env, tuple, 3, make_int32(env, (int32_t) s->undelivered));
+  napi_set_element(env, tuple, 4, s->positions && s->undelivered != 0 ? make_int64(env, s->undelivered_at) : make_null(env));
   s->first = FIRST_NONE; s->raised = 0; s->undelivered = 0;
   return tuple;
 }
@@ -948,8 +984,11 @@ class HandlerError extends Error {
    * handler calls threw, `undelivered` how many fragments the handler never saw because the
    * runtime refused a step of the call, and `cause` the first of these, the handler's
    * exception as thrown or an Error naming the N-API call that failed. The ABI consumed every
-   * one of the poll's fragments. */
-  constructor(fragments, raised, cause, undelivered = 0, committedLog = false) {
+   * one of the poll's fragments. A committed log hands its handler no entry of a poll after
+   * one the handler never saw, and counts those in `undelivered` too: `undeliveredAt` is the
+   * position of the first, where the service opens the log again, or null when every entry
+   * reached the handler. */
+  constructor(fragments, raised, cause, undelivered = 0, committedLog = false, undeliveredAt = null) {
     const one = committedLog ? "entry" : "fragment";
     const many = committedLog ? "entries" : "fragments";
     // The fault of a committed log's own image is reported by one poll and by no call after
@@ -965,6 +1004,11 @@ class HandlerError extends Error {
       `the ${one} handler threw on ${raised} of ${delivered}; every ${one} reached the handler once, in ` +
       `order. Fix the handler: its first exception, ${describe(cause)}, is this error's cause; polling again does ` +
       `not deliver these ${many} again.` :
+      committedLog ?
+      `${undelivered} of ${delivered} never reached the entry handler, from the entry at position ` +
+      `${undeliveredAt} on, and the handler threw on ${raised} before it. The log's position() is past them, so ` +
+      `close this log and open a new one at position ${undeliveredAt}, or at the position of an earlier entry ` +
+      `the handler could not apply. The first failure, ${describe(cause)}, is this error's cause and says why.` :
       `${undelivered} of ${delivered} never reached the ${one} handler, and the handler threw on ${raised}; the ` +
       `ABI consumed them, so polling again does not deliver them. The first failure, ${describe(cause)}, is this ` +
       `error's cause and says what to do.`;
@@ -974,6 +1018,7 @@ class HandlerError extends Error {
     this.raised = raised;
     this.undelivered = undelivered;
     this.committedLog = committedLog;
+    this.undeliveredAt = undeliveredAt;
   }
 }
 
@@ -1266,12 +1311,15 @@ class CommittedLog {
    * handler's exception, if any, is thrown after the ABI call returns, as `HandlerError`, whose
    * `fragments` is this result, -1 included. An entry whose handler call threw was delivered
    * and is not delivered again: `position()` is past it, and past every entry this poll
-   * delivered after it. From a handler of this log's own poll the ABI refuses the call: -1
-   * with CAVALRY_ERR_POLLING, and nothing is touched. */
+   * delivered after it. An entry the runtime kept from the handler, and every later entry of
+   * the same poll, which the addon then hands the handler none of, were not delivered:
+   * `HandlerError`'s `undeliveredAt` is the first one's position, where the service opens the
+   * log again. From a handler of this log's own poll the ABI refuses the call: -1 with
+   * CAVALRY_ERR_POLLING, and nothing is touched. */
   poll(handler, fragmentLimit) {
     const result = addon.committedLogPoll(this._state, this.handle, handler, fragmentLimit);
     if (typeof result === "number") return result;
-    throw new HandlerError(result[0], result[1], result[2], result[3], true);
+    throw new HandlerError(result[0], result[1], result[2], result[3], true, result[4]);
   }
   /** What the last poll stopped on: {code, sessionId, position}; code 0 when the last poll
    * returned a count. A poll that returns a count clears it, so read it after a poll that
@@ -1423,12 +1471,16 @@ export class CavalryError extends Error {
  * reach the handler cleanly: the handler threw on `raised` of them, `undelivered` never reached
  * it, and `cause` is the first of these. `fragments` is the poll's result, -1 when the poll
  * also stopped on a fault, which the `fault()` of the object that was polled reads until its
- * next poll. */
+ * next poll. `undeliveredAt` is a committed log's position of the poll's first entry that
+ * never reached the handler, after which the handler was handed no entry of the poll, and
+ * where the service opens the log again; null when every entry reached it, and for a
+ * subscription. */
 export class HandlerError extends Error {
   fragments: number;
   raised: number;
   undelivered: number;
   committedLog: boolean;
+  undeliveredAt: number | null;
 }
 
 /** The body as a Buffer into the log, valid for the call, and the frame's header. */

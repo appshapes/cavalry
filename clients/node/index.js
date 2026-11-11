@@ -357,8 +357,11 @@ class HandlerError extends Error {
    * handler calls threw, `undelivered` how many fragments the handler never saw because the
    * runtime refused a step of the call, and `cause` the first of these, the handler's
    * exception as thrown or an Error naming the N-API call that failed. The ABI consumed every
-   * one of the poll's fragments. */
-  constructor(fragments, raised, cause, undelivered = 0, committedLog = false) {
+   * one of the poll's fragments. A committed log hands its handler no entry of a poll after
+   * one the handler never saw, and counts those in `undelivered` too: `undeliveredAt` is the
+   * position of the first, where the service opens the log again, or null when every entry
+   * reached the handler. */
+  constructor(fragments, raised, cause, undelivered = 0, committedLog = false, undeliveredAt = null) {
     const one = committedLog ? "entry" : "fragment";
     const many = committedLog ? "entries" : "fragments";
     // The fault of a committed log's own image is reported by one poll and by no call after
@@ -374,6 +377,11 @@ class HandlerError extends Error {
       `the ${one} handler threw on ${raised} of ${delivered}; every ${one} reached the handler once, in ` +
       `order. Fix the handler: its first exception, ${describe(cause)}, is this error's cause; polling again does ` +
       `not deliver these ${many} again.` :
+      committedLog ?
+      `${undelivered} of ${delivered} never reached the entry handler, from the entry at position ` +
+      `${undeliveredAt} on, and the handler threw on ${raised} before it. The log's position() is past them, so ` +
+      `close this log and open a new one at position ${undeliveredAt}, or at the position of an earlier entry ` +
+      `the handler could not apply. The first failure, ${describe(cause)}, is this error's cause and says why.` :
       `${undelivered} of ${delivered} never reached the ${one} handler, and the handler threw on ${raised}; the ` +
       `ABI consumed them, so polling again does not deliver them. The first failure, ${describe(cause)}, is this ` +
       `error's cause and says what to do.`;
@@ -383,6 +391,7 @@ class HandlerError extends Error {
     this.raised = raised;
     this.undelivered = undelivered;
     this.committedLog = committedLog;
+    this.undeliveredAt = undeliveredAt;
   }
 }
 
@@ -675,12 +684,15 @@ class CommittedLog {
    * handler's exception, if any, is thrown after the ABI call returns, as `HandlerError`, whose
    * `fragments` is this result, -1 included. An entry whose handler call threw was delivered
    * and is not delivered again: `position()` is past it, and past every entry this poll
-   * delivered after it. From a handler of this log's own poll the ABI refuses the call: -1
-   * with CAVALRY_ERR_POLLING, and nothing is touched. */
+   * delivered after it. An entry the runtime kept from the handler, and every later entry of
+   * the same poll, which the addon then hands the handler none of, were not delivered:
+   * `HandlerError`'s `undeliveredAt` is the first one's position, where the service opens the
+   * log again. From a handler of this log's own poll the ABI refuses the call: -1 with
+   * CAVALRY_ERR_POLLING, and nothing is touched. */
   poll(handler, fragmentLimit) {
     const result = addon.committedLogPoll(this._state, this.handle, handler, fragmentLimit);
     if (typeof result === "number") return result;
-    throw new HandlerError(result[0], result[1], result[2], result[3], true);
+    throw new HandlerError(result[0], result[1], result[2], result[3], true, result[4]);
   }
   /** What the last poll stopped on: {code, sessionId, position}; code 0 when the last poll
    * returned a count. A poll that returns a count clears it, so read it after a poll that

@@ -182,11 +182,12 @@ function main() {
     fail(`a throwing handler saw ${JSON.stringify(seen)}, threw ${thrown} from ${thrown.cause}, raised ` +
       `${thrown.raised}, undelivered ${thrown.undelivered}, and left the log at ${throwing.position()}`);
   }
-  // The error is the log's own: it counts entries and names no subscription.
-  if (thrown.fragments !== 1 || thrown.committedLog !== true ||
+  // The error is the log's own: it counts entries and names no subscription. The handler saw
+  // its entry, so no position is given to open the log again at.
+  if (thrown.fragments !== 1 || thrown.committedLog !== true || thrown.undeliveredAt !== null ||
       !thrown.message.includes("the entry handler threw on 1 of the 1 entry") || /subscription/i.test(thrown.message)) {
-    fail(`a committed log's HandlerError has fragments ${thrown.fragments}, committedLog ${thrown.committedLog} ` +
-      `and says: ${thrown.message}`);
+    fail(`a committed log's HandlerError has fragments ${thrown.fragments}, committedLog ${thrown.committedLog}, ` +
+      `undeliveredAt ${thrown.undeliveredAt} and says: ${thrown.message}`);
   }
   for (let i = 0; i < 50; i++) {
     if (throwing.poll(throws, 16) !== 0) fail("the entry whose handler threw was delivered again");

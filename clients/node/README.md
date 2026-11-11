@@ -68,25 +68,43 @@ as a whole one. In every case what the log delivered ends at `log.position()`.
 
 The addon reads a committed log through the trampoline a subscription's poll uses,
 with one step more for each entry: the number its position is handed to the handler
-as. A handler's exception goes where a subscription's goes ("The exception"): every
-entry the ABI delivers reaches the handler, and `poll` throws `HandlerError` once the
-ABI has returned, with the poll's result as its `fragments`, the −1 of a fault
-included. An entry whose handler call threw was delivered and is not delivered again:
-`log.position()` is past it, and past every entry the same poll delivered after it. A
-handler cannot stop a poll: the ABI goes on handing it entries up to the fragment
-limit. So a service that must apply every entry, in order, does this:
+as. A handler's exception goes where a subscription's goes ("The exception"): the
+poll goes on handing the handler its later entries, and `poll` throws `HandlerError`
+once the ABI has returned, with the poll's result as its `fragments`, the −1 of a
+fault included. An entry whose handler call threw was delivered and is not delivered
+again: `log.position()` is past it, and past every entry the same poll delivered after
+it. A handler cannot stop a poll: the ABI goes on handing it entries up to the
+fragment limit.
+
+The runtime can also keep an entry from the handler, when N-API refuses a step of the
+call ("The exception"). The ABI has consumed that entry, so it was not delivered. The
+addon then hands the handler no later entry of the same poll either, so that a
+service never applies an entry after one it did not see. `poll` throws `HandlerError`
+with `undelivered` counting these entries and `undeliveredAt` the position of the
+first. When no handler call of the poll threw before that entry, the `cause` is the
+addon's `Error` for it, which names it by its position, its `position` property too.
+`log.position()` is past them all, so polling the same log again does not deliver
+them. `undeliveredAt` is `null` when every entry reached the handler.
+
+So a service that must apply every entry, in order, does this:
 
 1. The handler catches its own exceptions. When it cannot apply an entry, it keeps
    that entry's `position` and sets a flag.
 2. While the flag is set the handler applies nothing and returns at once, for the rest
    of that poll: the poll still hands it the entries after the one that failed.
-3. After the poll, the service closes the log and opens a new one at the position it
-   kept.
+3. The service catches `HandlerError` from `log.poll`. Its `undeliveredAt`, when it is
+   not `null`, is where the entries begin that the handler was not handed.
+4. After the poll, when the handler kept a position or `undeliveredAt` is a position,
+   the service closes the log and opens a new one at the position the handler kept,
+   or, when it kept none, at `undeliveredAt`. A position the handler kept is always
+   the lower, since no entry from `undeliveredAt` on reached the handler.
 
 With entries at 0, 96 and 192 and a failure at 96, opening again at `log.position()`
 would lose the entry at 96, and applying 192 before opening again at 96 would apply
-192 twice. A `fragmentLimit` of 1 is the simple form: a poll then delivers at most one
-entry, and the service decides after each.
+192 twice. When the runtime kept the entry at 96 from the handler, `undeliveredAt` is
+96, the handler was not handed 192 either, and the service opens the log again at 96.
+A `fragmentLimit` of 1 is the simple form: a poll then delivers at most one entry, and
+the service decides after each.
 
 ## What it must never do
 
@@ -107,7 +125,9 @@ entry, and the service decides after each.
   keeps every later fragment of that poll reaching the handler, a fragment the runtime
   keeps from the handler is counted, and `poll` throws a `HandlerError` once the ABI
   has returned, with the first exception or failure as its `cause` and the counts, the
-  one throw the per-message path allows.
+  one throw the per-message path allows. Never hand a committed log's handler an entry
+  after one the runtime kept from it: the rest of that poll is counted too, and
+  `HandlerError.undeliveredAt` is where the service opens the log again.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `close()` forgets the handle once the ABI's close has returned. The one
   exception is a subscription's close from inside a handler of its own poll, which the
@@ -371,9 +391,24 @@ N-API call, its status, and the frame's session id and term offset, read through
 status and the frame and says what to do, with `napiStatus`, `sessionId` and
 `termOffset` as its properties. The `cause` is the poll's first failure or first
 exception, whichever came first, and `raised` and `undelivered` count every one.
+
+A committed log's poll differs in one way, because a service applies its entries in
+order. Once the runtime has kept an entry from the handler, the trampoline hands the
+handler no later entry of that poll. It counts each of them in `undelivered` and makes
+no N-API call for them. The trampoline keeps the first such entry's position, which
+`cavalry_committed_log_entry_position` gives without N-API, and `HandlerError` reports
+it as `undeliveredAt`. A committed log's `Error` for a failure names its entry by
+position, as its `position` property too, and when an entry of the poll did not reach
+the handler its message says to close the log and open a new one at `undeliveredAt`
+("The committed log").
+
 `clients/generate-test.py` compiles the generated trampoline against a stand-in for
 N-API that fails each of its calls in turn, and checks that every fragment the handler
-did not return from is counted once, with the first failure kept.
+did not return from is counted once, with the first failure kept. For a committed log
+it checks that the position kept is the one the ABI gave, and that a later entry of
+the same poll makes no N-API call and does not reach the handler. It compiles the
+addon's `failure_error` and `report` too, and checks the position each reports and the
+cause's message.
 
 ## What to read next
 
