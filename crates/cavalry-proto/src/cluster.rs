@@ -2239,7 +2239,8 @@ pub const fn log_at_least(term: i64, position: i64, other_term: i64, other_posit
 pub struct Ballot {
     /// Whether the candidate leads the term.
     pub leader: bool,
-    /// Whether every member voted for it, which decides at once.
+    /// Whether every member the candidate has heard voted for it and those votes make a
+    /// quorum, which decides at once.
     pub unanimous: bool,
 }
 
@@ -2253,32 +2254,52 @@ pub struct Vote {
 }
 
 /// A candidate's ballot for `candidate_term` among `members` members, `votes[i]` the
-/// vote of member `i`, `None` for one not yet cast (`spec/cluster.md`, "candidate
-/// ballot"): over the votes for the candidate's current candidate term alone, its own
-/// among them, leader at once when every member voted for, else leader once the
-/// election timeout has passed when a quorum voted for and none against; a vote for an
-/// older candidate term of the candidate's counts for nothing.
+/// vote of member `i`, `None` for one not yet cast, and `heard[i]` whether the
+/// candidate has read a consensus message from member `i` since its election began
+/// (`spec/cluster.md`, "candidate ballot"; ADR 0077). Over the votes for the
+/// candidate's current candidate term alone, its own among them: leader at once when
+/// they make a quorum, none is against and every member heard has cast one for; else
+/// leader once the election timeout has passed when a quorum voted for and none
+/// against. A vote for an older candidate term of the candidate's counts for nothing,
+/// and a member that has said nothing since the election began is not waited for. A
+/// member past the end of `heard` counts as not heard.
 pub fn ballot(
     members: usize,
     candidate_term: i64,
     votes: &[Option<Vote>],
+    heard: &[bool],
     timeout_passed: bool,
 ) -> Ballot {
-    let cast = votes
-        .iter()
-        .take(members)
-        .map(|v| v.filter(|v| v.term == candidate_term));
-    let for_ = cast.clone().filter(|v| v.is_some_and(|v| v.vote)).count();
-    let against = cast.clone().filter(|v| v.is_some_and(|v| !v.vote)).count();
-    let counted = cast.count();
-    if counted == members && for_ == members && members >= 1 {
+    let cast = |member: usize| {
+        votes
+            .get(member)
+            .copied()
+            .flatten()
+            .filter(|vote| vote.term == candidate_term)
+    };
+    // A member past the end of both slices has neither voted nor been heard, so the
+    // walk ends with the longer of them, whatever `members` is.
+    let known = members.min(votes.len().max(heard.len()));
+    let for_ = (0..known)
+        .filter(|&member| cast(member).is_some_and(|vote| vote.vote))
+        .count();
+    let against = (0..known)
+        .filter(|&member| cast(member).is_some_and(|vote| !vote.vote))
+        .count();
+    // A member heard that has cast no vote for the term is one the candidate waits
+    // for, until the election timeout.
+    let awaited = (0..known)
+        .filter(|&member| heard.get(member).copied().unwrap_or(false) && cast(member).is_none())
+        .count();
+    let quorate = members >= 1 && against == 0 && for_ >= quorum(members);
+    if quorate && awaited == 0 {
         return Ballot {
             leader: true,
             unanimous: true,
         };
     }
     Ballot {
-        leader: timeout_passed && against == 0 && for_ >= quorum(members),
+        leader: timeout_passed && quorate,
         unanimous: false,
     }
 }

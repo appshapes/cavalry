@@ -396,10 +396,17 @@ fn arithmetic_vector(name: &str, vector: &Value) {
                     term: int(vote, "term"),
                 });
             }
+            let mut heard = vec![false; members];
+            for member in inputs["heard"].as_array().expect("heard") {
+                let member =
+                    usize::try_from(member.as_i64().expect("heard member")).expect("heard member");
+                heard[member] = true;
+            }
             let Ballot { leader, unanimous } = ballot(
                 members,
                 int(inputs, "candidate_term"),
                 &votes,
+                &heard,
                 inputs["timeout_passed"].as_bool().expect("timeout_passed"),
             );
             json!({"leader": leader, "unanimous": unanimous})

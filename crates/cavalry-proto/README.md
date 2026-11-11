@@ -46,8 +46,8 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   caller's array of at most 8; and the rules of the election and the log as free
   functions (ADR 0058): `quorum` and `commit_position`; `log_at_least`, the order of
   two logs; `candidate`, a canvassing member's nomination; `request_vote`, a reader's
-  vote; `ballot`, a candidate's outcome; `canvass_position_action`, what a leader does
-  with a canvass position; `new_leadership_term_action` and `next_fields`, what a
+  vote; `ballot`, a candidate's outcome from the votes and the members it has heard
+  (ADR 0077); `canvass_position_action`, what a leader does with a canvass position; `new_leadership_term_action` and `next_fields`, what a
   reader does with new leadership term and what a leader writes into it;
   `replication_stop` and `replication_record`, where a follower's log replication
   stops and the terms it records there; `replay_end`, where a leader's replay begins
