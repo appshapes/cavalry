@@ -86,6 +86,6 @@ The members string of the cluster this driver is a member of: `id,ingress,consen
 - **Doctor check:** `cluster-member-id`
 - **Glossary:** member
 
-This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host. The member with the lowest id is the cluster's appointed leader (spec/cluster.md, The appointed leader).
+This driver's member id in cluster.members: which of the string's members `cavalry run` starts on this host, a whole number from 0 to 2147483647. -1, the default, is no member, the same as the key unset, so that a unit file may write the default out; any other value is refused before anything starts. The member with the lowest id is the cluster's appointed leader (spec/cluster.md, The appointed leader).
 
 **Why the default cannot always be right.** Every member of a cluster holds the same members string, so the id alone says which member a host is; no default is right on more than one of them.

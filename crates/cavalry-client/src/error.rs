@@ -92,11 +92,15 @@ pub enum ClientError {
         /// The directory looked in.
         dir: PathBuf,
     },
-    /// The driver at the directory closed, or its heartbeat is stale.
+    /// The driver at the directory closed, or its heartbeat is stale, or it stopped
+    /// while it created its files, which a connecting client concludes after waiting
+    /// the driver timeout for them (`spec/client-protocol.md`, "The driver directory";
+    /// ADR 0072).
     DriverGone {
         /// The directory.
         dir: PathBuf,
-        /// `driver-closed` or `driver-timeout`.
+        /// `driver-closed`, or `driver-timeout` for a stale heartbeat and for a driver
+        /// that stopped while it created its files.
         reason: Closed,
     },
     /// The client is closed: by the user, or by what the conductor found.
@@ -218,7 +222,7 @@ impl fmt::Display for ClientError {
             ClientError::DriverGone { dir, reason: why } => write!(
                 f,
                 "client refused ({reason}): the driver at {} is gone ({}); start one with \
-                 `cavalry run`, then connect again; see {DOC_LIVENESS}",
+                 `cavalry run`, then connect again; see {DOC_DIRECTORY}",
                 dir.display(),
                 why.reason()
             ),

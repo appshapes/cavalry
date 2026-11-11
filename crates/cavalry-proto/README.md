@@ -37,7 +37,7 @@ Wire types, zero-copy frames and version negotiation. Data plane.
   version 7 adds `add counter` and `remove counter` with their events, a key and a
   label checked against a counters file record's bounds (ADR 0062), and version 8
   adds `sync recording`, by which a client has the recorder sync a recording without
-  waiting for its sync once a second (ADR 0067).
+  waiting for its sync once a second (ADR 0069).
 - Encodes and decodes the cluster protocol, `spec/cluster.md`: the messages of the
   log, consensus, ingress and egress streams and the snapshot marker under the 8-byte
   message header of schema 1, version 0, in `cluster`, with the spec's checks in the

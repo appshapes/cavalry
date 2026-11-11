@@ -1,10 +1,11 @@
 # Set up a soak host
 
 A how-to page: one task, turning a stock Linux machine into the host that runs a
-driver recording a steady stream for days, with `doctor` and the counters file sampled
-every minute, so that what CI sees for seconds is seen for a week: bounded queues,
-counter reuse after the reuse timeout, the catalog's slots, the segment files under
-retention, and whatever else drifts. The soak is not a gate and blocks no merge. Why the
+driver recording a steady stream for days, with `doctor`, the counters file and the
+memory, threads and open descriptors of the soak's two processes sampled every minute,
+so that what CI sees for seconds is seen for a week: bounded queues, counter reuse
+after the reuse timeout, the catalog's slots, the segment files under retention, a
+process that grows, and whatever else drifts. The soak is not a gate and blocks no merge. Why the
 host is `kip` and not the gate's second host is
 [ADR 0034](../decisions/0034-run-the-gate-on-grip-and-the-soak-on-kip.md); what the
 retention commands the soak runs do is
@@ -78,7 +79,9 @@ retention commands the soak runs do is
 3. Install the service. It runs `scripts/soak.sh` as the administrative user from the
    clone, which starts the driver on `/dev/shm/cavalry-soak` with the log directory on
    the volume, the soak program, and a recording of the stream; then every minute it
-   writes `cavalry doctor`'s report and a copy of the counters file under `samples/`,
+   writes `cavalry doctor`'s report and a copy of the counters file under `samples/`
+   and adds one line for the driver and one for the program to the run's file of
+   process samples, `samples/processes-<start>.txt`,
    and every hour it stops the recording, starts a new one, purges the segments of the
    one it stopped before the middle of its hour and deletes every recording older than
    a day, so that retention runs on a host whose disk would otherwise fill. First let
@@ -145,7 +148,8 @@ retention commands the soak runs do is
    (+600000) behind 0 back-pressured 0 not-connected 0 position <p>`, where the two
    increments are the minute's messages and `behind` is how many it has sent that the
    subscription has not read yet. The first sample is written at once:
-   `ls /srv/cavalry-soak/samples` lists `doctor-<time>.txt` and `counters-<time>`.
+   `ls /srv/cavalry-soak/samples` lists `doctor-<time>.txt`, `counters-<time>` and
+   `processes-<start>.txt`.
 
 5. Read a sample. `cat /srv/cavalry-soak/samples/doctor-<time>.txt` is the report
    `cavalry doctor --dir /dev/shm/cavalry-soak --log-dir /srv/cavalry-soak/log` printed
@@ -155,9 +159,85 @@ retention commands the soak runs do is
    governor is what a soak host keeps on purpose, and exits 0. The `counters-<time>`
    file is the counters file's bytes at that minute, for a reader of the counters
    layout (`docs/reference/counters-file.md`) when a counter's course over the week is
-   wanted, which the week's close-out reads.
+   wanted, which the week's close-out reads. `processes-<start>.txt` is one file for
+   the whole run, named by the time the run started, so a service that is stopped
+   and started again leaves one file for each run. Each sample adds two lines to it,
+   one for the driver and one for the program, with the sample's `<time>`:
+   `<time> driver pid=<pid> rss_kib=<n> anon_kib=<n> file_kib=<n> shmem_kib=<n>
+   vsz_kib=<n> threads=<n> fds=<n>`. The values are the kernel's, read from
+   `/proc/<pid>/status` and `/proc/<pid>/fd`:
 
-6. Stop it, when the week is up or when something has to change:
+   | Field | What it is |
+   | --- | --- |
+   | `rss_kib` | The process's resident memory, in KiB: the pages of it that are in RAM. It is the sum of the next three. |
+   | `anon_kib` | The part that belongs to no file: the heap and the threads' stacks. |
+   | `file_kib` | The part mapped from files on a disk: the binary and its libraries among them. |
+   | `shmem_kib` | The part mapped from files on a tmpfs. The driver's directory, `/dev/shm/cavalry-soak`, is on one, so this is the driver's rings, its counters file and the stream's log buffer. |
+   | `vsz_kib` | The virtual size, in KiB: every mapping, in RAM or not. |
+   | `threads` | The process's threads. |
+   | `fds` | Its open file descriptors. |
+
+   A value the script could not read is `-`, never 0, and a process that ended before
+   the script looked has `<time> <name> pid=<pid> gone` for its line. On a machine
+   with no `/proc`, a macOS laptop, the script reads `rss_kib`, `vsz_kib` and
+   `threads` from `ps` and `fds` from `lsof`, and the three parts read `-`.
+
+6. Read a course, a value's readings in order across the run, from the first sample
+   and the last of each process:
+
+   ```sh
+   # ignore: run on the soak host, not in this repository
+   run=$(ls /srv/cavalry-soak/samples/processes-*.txt | tail -1)
+   grep ' driver ' "$run" | sed -n '1p;$p'
+   grep ' soak ' "$run" | sed -n '1p;$p'
+   du -sk /dev/shm/cavalry-soak
+   ```
+
+   `run` is the newest run's file. You will see two lines for the driver, two for
+   the program, and the size of the driver's directory in KiB. Read them in this order, since most of a driver's
+   resident memory is not growth:
+
+   - `shmem_kib` is mappings, not growth. The driver maps every file of its
+     directory and brings every page of a mapping into RAM at the moment it maps it
+     ([ADR 0027](../decisions/0027-pre-touch-shared-mappings-at-map-time.md)), so the
+     driver's `shmem_kib` is the directory's size from the first sample on: on `kip`
+     both read 204816, which is the stream's log buffer, 196612, the counters file,
+     6148, and the two rings. A client does the same with what it maps, and the
+     program maps the log buffer twice, as the publication and as the subscription's
+     image, and the counters file and the command ring twice, so its `shmem_kib` is
+     about twice the driver's. A `shmem_kib` that is the same on the first line and
+     the last is these mappings and nothing else. One that rose has a file behind
+     it: `ls -l /dev/shm/cavalry-soak/publications` lists one log buffer for each
+     publication, and a soak adds none after its start. A binary that is itself on a
+     tmpfs, as one built under `/tmp` is on a host whose `/tmp` is one, adds its own
+     pages to `shmem_kib` and takes them from `file_kib`.
+   - `anon_kib`, `threads` and `fds` are where growth shows. A driver allocates when
+     it starts and when a client adds or removes something, and never per message
+     (`CLAUDE.md`, invariant 2), so over a week of one stream these hold level. On
+     `kip` the driver read `anon_kib=600 threads=7 fds=8` on each of an hour's first
+     sixty samples and `anon_kib=616` on the sixty-first, the one after the hour's
+     rotation; and a driver of an earlier build, ten days into its run, read
+     `anon_kib=784 threads=5 fds=8` at every sample of an hour. A value
+     that is higher on the last line than on the first is read across the whole file
+     next, `awk '$2 == "driver" { print $1, $5, $9, $10 }' "$run"`: a step that
+     happened once has a cause
+     in `soak.log` at that minute, as the rotation is of those 16 KiB, and a value
+     that rises hour after hour is a finding, with a card as its next step.
+   - `rss_kib` and `vsz_kib` follow from the others. Use `rss_kib` alone only where
+     the parts read `-`, and expect it to rise there for a reason that is not growth.
+     On Linux the driver brings every page of a mapping in when it maps it. macOS has
+     no call for that, so there the driver reads each page once, and the process is
+     charged for a page of its command ring, its broadcast buffer or its counters file
+     only at the first write to that page. On a macOS laptop an hour's run added
+     224 KiB to the driver's 204416, one 16 KiB page about every six minutes, where
+     the same build on `kip` added the rotation's 16 KiB and nothing else; `vmmap`
+     showed each of those pages to be the command ring's, which a client's keepalives
+     fill at about 45 bytes a second, and the heap and the stacks unmoved (card 244).
+     The three files are 8240 KiB together, so a driver on macOS reads at most about
+     8 MiB above its first sample however long it runs. A rise beyond that is growth,
+     and `vmmap <pid>` names its region.
+
+7. Stop it, when the week is up or when something has to change:
 
    ```sh
    # ignore: run on the soak host, not in this repository
@@ -191,6 +271,12 @@ retention commands the soak runs do is
   `soak.log` says with which error.
 - The program's lines keep `behind 0` and `back-pressured 0` at the default rate; the
   samples' doctor reports keep exiting 0 with `host-governor` as their one finding.
+- After an hour, `grep -c ' driver ' /srv/cavalry-soak/samples/processes-*.txt` and
+  the same for `' soak '` each print 60 or 61 for the run's file: one line at the
+  start and one a minute, each a little more than a minute after the last. The first
+  and the last line of each process agree on `shmem_kib`, `threads` and `fds`. Their
+  `anon_kib` can differ by the rotation's step, 16 KiB for the driver on `kip`, and
+  step 6 says how to read a larger difference.
 
 ## When it does not work
 

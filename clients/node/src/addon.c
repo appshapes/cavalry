@@ -368,7 +368,7 @@ static napi_value fn_registerSubscription(napi_env env, napi_callback_info info)
 
 /* registerCommittedLog(header): a committed log's state, a subscription's state whose
  * trampoline hands the handler a third argument, the entry's position in the log
- * (spec/c-abi.md, "A frame's position"; ADR 0068). */
+ * (spec/c-abi.md, "A frame's position"; ADR 0070). */
 static napi_value fn_registerCommittedLog(napi_env env, napi_callback_info info) {
   return register_state(env, info, true);
 }
@@ -872,6 +872,19 @@ static napi_value fn_cavalry_committed_log_failed_at(napi_env env, napi_callback
   return tuple;
 }
 
+static napi_value fn_cavalry_committed_log_withdrawn_at(napi_env env, napi_callback_info info) {
+  size_t argc = 1; napi_value argv[1];
+  if (!read_args(env, info, 1, &argc, argv, "cavalry_committed_log_withdrawn_at")) return NULL;
+  cavalry_committed_log_t *log = (cavalry_committed_log_t *) external_arg(env, argv[0], "log");
+  if (arg_failed) return NULL;
+  int64_t position = 0;
+  bool result = cavalry_committed_log_withdrawn_at(log, &position);
+  napi_value tuple; napi_create_array_with_length(env, 2, &tuple);
+  napi_set_element(env, tuple, 0, make_bool(env, result));
+  napi_set_element(env, tuple, 1, make_int64(env, position));
+  return tuple;
+}
+
 static napi_value fn_cavalry_committed_log_constants(napi_env env, napi_callback_info info) {
   size_t argc = 2; napi_value argv[2];
   if (!read_args(env, info, 2, &argc, argv, "cavalry_committed_log_constants")) return NULL;
@@ -1312,6 +1325,7 @@ static napi_value init(napi_env env, napi_value exports) {
     { "cavalry_committed_log_commit_position", NULL, fn_cavalry_committed_log_commit_position, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_committed_log_is_ended", NULL, fn_cavalry_committed_log_is_ended, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_committed_log_failed_at", NULL, fn_cavalry_committed_log_failed_at, NULL, NULL, NULL, napi_default, NULL },
+    { "cavalry_committed_log_withdrawn_at", NULL, fn_cavalry_committed_log_withdrawn_at, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_committed_log_constants", NULL, fn_cavalry_committed_log_constants, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_committed_log_close", NULL, fn_cavalry_committed_log_close, NULL, NULL, NULL, napi_default, NULL },
     { "cavalry_context_init_v", NULL, fn_cavalry_context_init_v, NULL, NULL, NULL, napi_default, NULL },

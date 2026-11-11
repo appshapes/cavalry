@@ -1,9 +1,11 @@
 //! The committed log through the ABI (`spec/c-abi.md`, "Functions", committed log;
-//! ADR 0068): a driver that hosts no member answers the open with a null handle and
+//! ADR 0070): a driver that hosts no member answers the open with a null handle and
 //! no error; beside a cluster member in the test's process, the C handler is handed
 //! the entries a quorum committed and none past the commit position, each with its
 //! position; the calls from inside the handler answer as the page's table says; a
-//! subscription's header carries no position; and every null is refused.
+//! subscription's header carries no position; every null is refused; and a service
+//! whose replay the driver withdrew before it had read it is told where the entries it
+//! was not given begin.
 
 use std::ffi::{CStr, CString, c_void};
 use std::net::UdpSocket;
@@ -218,6 +220,9 @@ unsafe extern "C" fn collect(
         let failed = cavalry_committed_log_failed_at(log, &mut at);
         assert_eq!(at, 7, "a refused call writes nothing");
         answers.push(("failed_at", i64::from(failed), cavalry_errcode()));
+        let withdrawn = cavalry_committed_log_withdrawn_at(log, &mut at);
+        assert_eq!(at, 7, "a refused call writes nothing");
+        answers.push(("withdrawn_at", i64::from(withdrawn), cavalry_errcode()));
         answers.push((
             "close",
             i64::from(cavalry_committed_log_close(log, client)),
@@ -285,6 +290,9 @@ fn a_driver_with_no_member_answers_the_open_with_a_null_handle_and_no_error() {
         assert!(!cavalry_committed_log_is_ended(null));
         let mut at = 7;
         assert!(!cavalry_committed_log_failed_at(null, &mut at));
+        assert_eq!(at, 7);
+        assert!(!cavalry_committed_log_withdrawn_at(null, &mut at));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
         assert_eq!(at, 7);
         let mut fault = std::mem::zeroed::<cavalry_fault_t>();
         assert_eq!(cavalry_committed_log_fault(null, &mut fault), -1);
@@ -364,6 +372,13 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
         let mut at = 7;
         assert!(!cavalry_committed_log_failed_at(log, &mut at));
         assert_eq!(at, 7, "a live log writes nothing");
+        assert!(!cavalry_committed_log_withdrawn_at(log, &mut at));
+        assert_eq!(at, 7, "a live log writes nothing");
+        // A null pointer for the position is refused as any required pointer is.
+        assert!(!cavalry_committed_log_failed_at(log, ptr::null_mut()));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
+        assert!(!cavalry_committed_log_withdrawn_at(log, ptr::null_mut()));
+        assert_eq!(cavalry_errcode(), CAVALRY_ERR_NULL);
         let mut fault = std::mem::zeroed::<cavalry_fault_t>();
         assert_eq!(cavalry_committed_log_fault(log, &mut fault), 0);
         assert_eq!(
@@ -409,6 +424,7 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
                 ("commit_position", -1, CAVALRY_ERR_POLLING),
                 ("is_ended", 0, CAVALRY_ERR_POLLING),
                 ("failed_at", 0, CAVALRY_ERR_POLLING),
+                ("withdrawn_at", 0, CAVALRY_ERR_POLLING),
                 ("close", -1, CAVALRY_ERR_POLLING),
                 ("constants", 0, 0),
             ]
@@ -497,5 +513,123 @@ fn a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_posi
         assert_eq!(fault.code, CAVALRY_ERR_FAULT_CLOSED);
         assert_eq!(cavalry_committed_log_close(again, ptr::null_mut()), 0);
         assert_eq!(cavalry_context_close(context), 0);
+    }
+}
+
+/// A service that does not read for longer than the publication linger, 5 s, after its
+/// member's consensus module closes, with entries below its bound unread
+/// (`spec/c-abi.md`, "Functions", committed log; `spec/client-protocol.md`, "Events").
+/// The member's recording stops, the replay ends at the stop, and the driver withdraws
+/// the replay's image once the linger has passed, read or not. The handle is ended
+/// short of its bound, and it says so through the ABI as the Rust handle does:
+/// `cavalry_committed_log_withdrawn_at` writes where the entries it was not given
+/// begin, which is where the service had read to, and `cavalry_committed_log_failed_at`
+/// stays `false`, so that a service in C is never told it read what it did not.
+#[test]
+fn a_service_whose_replay_the_driver_withdrew_unread_is_told_where_its_entries_stop() {
+    let mut cluster = Cluster::start("service-withdrawn");
+    let (context, client) = connect(&cluster.members[2].2);
+    // SAFETY: the ABI's conventions, held by this test.
+    unsafe {
+        // The service opens its log before any entry is offered.
+        let mut log: *mut cavalry_committed_log_t = ptr::null_mut();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while log.is_null() {
+            assert!(Instant::now() < deadline, "the service opened its log");
+            assert_eq!(
+                cavalry_committed_log(&mut log, client, 0),
+                0,
+                "{}",
+                errmsg()
+            );
+            cluster.work();
+        }
+
+        // A thousand entries, committed and recorded on every member before the
+        // service reads any: the follower's recording holds them all, and flow control
+        // lets the replay run a window ahead of a service that has read one entry.
+        const ENTRIES: u32 = 1000;
+        cluster.offer(0, ENTRIES);
+        let end = 96 + i64::from(ENTRIES) * 96;
+        cluster.run_until(
+            "every member committed and appended every entry",
+            |cluster| {
+                cluster.members.iter().all(|(_, module, _)| {
+                    module.commit_position() == end && module.append_position() == end
+                })
+            },
+        );
+
+        // The service takes the member's commit position as its bound and reads at
+        // most one entry under it.
+        let mut collected = Collected::default();
+        let clientd = ptr::addr_of_mut!(collected).cast::<c_void>();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while cavalry_committed_log_commit_position(log) < end {
+            assert!(Instant::now() < deadline, "the service took its bound");
+            let delivered = cavalry_committed_log_poll(log, Some(collect), clientd, 1);
+            assert!((0..=1).contains(&delivered), "{}", errmsg());
+        }
+        assert!(cavalry_committed_log_position(log) <= 96);
+        assert!(!cavalry_committed_log_is_ended(log));
+
+        // Follower 2's consensus module closes. Its recording stops, the replay ends,
+        // and the service does not read: a poll with a fragment limit of 0 applies the
+        // events the subscription has and reads no frame, so the handle is ended only
+        // when the driver has withdrawn the image, the linger after the replay's end.
+        let (driver, module, _) = cluster.members.remove(2);
+        module.close().expect("the member closes");
+        let closed = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !cavalry_committed_log_is_ended(log) {
+            assert!(Instant::now() < deadline, "the service's log ended");
+            assert_eq!(
+                cavalry_committed_log_poll(log, Some(collect), clientd, 0),
+                0,
+                "{}",
+                errmsg()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            closed.elapsed() >= Duration::from_secs(5),
+            "the image went at the linger's end, not at its end of stream: {:?}",
+            closed.elapsed()
+        );
+
+        // Ended short of its bound, and the handle says where.
+        let position = cavalry_committed_log_position(log);
+        assert!(position < end, "{position} of {end}");
+        assert_eq!(cavalry_committed_log_commit_position(log), end);
+        let mut at = -7;
+        assert!(
+            cavalry_committed_log_withdrawn_at(log, &mut at),
+            "an ended handle short of its bound says so: {}",
+            errmsg()
+        );
+        assert_eq!(at, position);
+        let mut failed = -7;
+        assert!(!cavalry_committed_log_failed_at(log, &mut failed));
+        assert_eq!(failed, -7, "a replay that did not fail writes nothing");
+        // Nothing more is delivered, and the answer stays.
+        assert_eq!(
+            cavalry_committed_log_poll(log, Some(collect), clientd, 16),
+            0
+        );
+        assert!(cavalry_committed_log_withdrawn_at(log, &mut at));
+        assert_eq!(at, position);
+        // Every entry below the position was delivered, in order, and none past it.
+        assert_eq!(
+            i64::try_from(collected.entries.len()).expect("a count") * 96,
+            position
+        );
+        for (index, entry) in collected.entries.iter().enumerate() {
+            assert_eq!(entry.position, 96 * i64::try_from(index).expect("an index"));
+        }
+
+        assert_eq!(cavalry_committed_log_close(log, client), 0, "{}", errmsg());
+        assert_eq!(cavalry_close(client), 0);
+        assert_eq!(cavalry_context_close(context), 0);
+        driver.close().expect("the driver closes");
     }
 }

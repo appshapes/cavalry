@@ -32,6 +32,9 @@ pub struct Stub {
     pub fail_record: bool,
     /// Whether `append` is back-pressured.
     pub back_pressured: bool,
+    /// Whether `send` reports a message not sent, as a publication that is
+    /// back-pressured or not connected does.
+    pub refuse_send: bool,
 }
 
 impl Stub {
@@ -45,6 +48,7 @@ impl Stub {
             image: None,
             fail_record: false,
             back_pressured: false,
+            refuse_send: false,
         }
     }
 
@@ -85,7 +89,7 @@ impl Io for Stub {
             to: member,
             template: message.template(),
         });
-        true
+        !self.refuse_send
     }
 
     fn store_candidate_term(&mut self, term: i64) -> Result<(), Self::Fault> {

@@ -35,13 +35,18 @@ fragmentLimit)` calls `handler(body, header, position)` for each committed entry
 order, none at or past the member's commit position, and returns the entry count;
 `position` is the entry's position in the log, a number. `log.position()` is the
 position after the last entry delivered, the one a service keeps for its next start,
-and `log.commitPosition()` the bound of the last poll. `log.isEnded` says that the
-member closed or left its log: once a poll then returns 0, close the log and open
-another from `log.position()`. `log.failedAt()` is `null` unless the driver's replay of
-the member's recording failed. `log.close()` stops the driver's replay, and a second
+and `log.commitPosition()` the bound of the last poll. `log.isEnded` says that no poll
+will deliver another entry: stop reading when it is true, not when a poll returns 0,
+then close the log and open another from `log.position()`. Two reports say whether the
+log ended short of the entries it was owed, each `null` or a position, read once
+`log.isEnded` is true: `log.failedAt()`, where the driver's replay of the member's
+recording failed, and `log.withdrawnAt()`, where the entries begin that the log was
+not given because the driver withdrew the replay, 5 s after it ended, before the
+service had read it. The log delivered every committed entry it may read only when
+both are `null`. `log.close()` stops the driver's replay, and a second
 close does nothing; a log closed after its client is freed, and the driver ends the
 replay by itself. `log.memberId` and `log.recordingId` say whose log it is
-(`spec/c-abi.md`, "Functions", committed log; ADR 0068).
+(`spec/c-abi.md`, "Functions", committed log; ADR 0070).
 
 The addon reads a committed log through the trampoline a subscription's poll uses,
 with one step more for each entry: the number its position is handed to the handler

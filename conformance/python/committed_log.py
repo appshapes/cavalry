@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Python client's committed log round (spec/c-abi.md, version 2; ADR 0068):
+"""The Python client's committed log round (spec/c-abi.md, version 2; ADR 0070):
 `cavalry.Client.committed_log` and `cavalry.CommittedLog` beside a cluster member that
 `conformance/python/run.sh` started with `cavalry run`, one of three on the loopback.
 
@@ -80,6 +80,7 @@ def main():
         refusals.append(("commit_position", log.commit_position(), abi.cavalry_errcode()))
         refusals.append(("is_ended", log.is_ended, abi.cavalry_errcode()))
         refusals.append(("failed_at", log.failed_at(), abi.cavalry_errcode()))
+        refusals.append(("withdrawn_at", log.withdrawn_at(), abi.cavalry_errcode()))
         try:
             log.close()
             refusals.append(("close", 0, 0))
@@ -92,20 +93,23 @@ def main():
              f"{ENTRY_FRAME}, got {entries}")
     polling = _abi.CAVALRY_ERR_POLLING
     expected = [("poll", -1, polling), ("position", -1, polling), ("commit_position", -1, polling),
-                ("is_ended", False, polling), ("failed_at", None, polling), ("close", -1, polling)]
+                ("is_ended", False, polling), ("failed_at", None, polling), ("withdrawn_at", None, polling),
+                ("close", -1, polling)]
     if refusals != expected:
         fail(f"the calls from inside the log's own handler answered {refusals}, not {expected}")
     if (log.position(), log.commit_position()) != (NEXT, NEXT):
         fail(f"after the entry the log is at {log.position()} with bound {log.commit_position()}, not {NEXT} and {NEXT}")
-    if log.is_ended or log.failed_at() is not None or log.fault() != (0, 0, cavalry.NULL_POSITION):
-        fail(f"a live log read ended {log.is_ended}, failed at {log.failed_at()}, fault {log.fault()}")
+    if (log.is_ended or log.failed_at() is not None or log.withdrawn_at() is not None
+            or log.fault() != (0, 0, cavalry.NULL_POSITION)):
+        fail(f"a live log read ended {log.is_ended}, failed at {log.failed_at()}, withdrawn at "
+             f"{log.withdrawn_at()}, fault {log.fault()}")
     for _ in range(50):
         if log.poll(on_entry, 16) != 0:
             fail("an entry arrived with nothing more committed")
     if len(entries) != 1:
         fail(f"the refused poll, or a later one, delivered more: {entries}")
     print(f"conformance/python: committed log: member {log.member_id}'s entry at position 0 read once, next "
-          f"position {log.position()}, commit position {log.commit_position()}; six calls from inside the handler "
+          f"position {log.position()}, commit position {log.commit_position()}; seven calls from inside the handler "
           f"refused with CAVALRY_ERR_POLLING")
     log.close()
     log.close()  # idempotent
