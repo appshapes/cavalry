@@ -659,9 +659,19 @@ class NodePackage(unittest.TestCase):
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which subscription.fault() reads", body)
         self.assertIn("Fix the handler: its first exception, ${describe(cause)}, is this error's cause", body)
-        self.assertIn("never reached the fragment handler", body)
+        self.assertIn('const one = committedLog ? "entry" : "fragment";', body)
+        self.assertIn("never reached the ${one} handler", body)
         self.assertIn("The first failure, ${describe(cause)}, is this ` +\n      `error's cause and says what to do.", body)
         self.assertIn("super(`${what} See clients/node/README.md#the-exception`, { cause });", body)
+        # A committed log's poll names its own fault() and its entries: the fault of the
+        # log's image is reported once, so the message must not send the reader to a
+        # subscription's (clients/node/README.md, "The committed log").
+        self.assertIn("which this CommittedLog's fault() reads \" +\n      \"until its next poll and nothing reports "
+                      "after that, so read it and keep it before polling again", body)
+        log = files["index.js"].split("class CommittedLog {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("throw new HandlerError(result[0], result[1], result[2], result[3], true);", log)
+        subscription = files["index.js"].split("class Subscription {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("throw new HandlerError(result[0], result[1], result[2], result[3]);", subscription)
         failure = files["src/addon.c"].split("static napi_value failure_error(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("run the client on a Node built", failure)
         self.assertIn("polling again does not deliver it. See clients/node/README.md#the-exception", failure)
