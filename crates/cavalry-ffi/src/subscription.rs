@@ -106,7 +106,8 @@ pub struct cavalry_header_values_t {
     pub frame: cavalry_header_values_frame_t,
 }
 
-/// What the subscription's last poll stopped on; 0 when it returned a count.
+/// What the subscription's last poll stopped on, or the committed log's; 0 when it
+/// returned a count.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct cavalry_fault_t {

@@ -280,7 +280,11 @@ class Push(Event):
         self.runs_of(BEFORE, GREEN)
         answer, text = self.run_event("push", PUSH)
         self.assertEqual(answer, "bench=true")
-        self.assertEqual(self.api.paths(), [f"/repos/{REPO}/compare/{BEFORE}...{AFTER}"])
+        # The files are read once; then the one question a push that can move the bench
+        # is asked, whether a pull request's run measured this tree, which nothing did.
+        self.assertEqual(self.api.paths(), [f"/repos/{REPO}/compare/{BEFORE}...{AFTER}",
+                                            f"/repos/{REPO}/commits/{AFTER}/pulls"])
+        self.assertIn("no pull request's run measured this tree on the hosts", text)
 
     def test_pages_pushed_onto_a_commit_whose_run_was_replaced_while_it_waited_run_the_bench(self):
         # Runs of one branch go one at a time with one waiting; a newer push takes the
@@ -355,6 +359,184 @@ class Push(Event):
         answer, text = self.run_event("push", PUSH)
         self.assertEqual(answer, "bench=true")
         self.assertIn("HTTP 404", text)
+
+
+HEAD, TREE, OTHER_TREE, RUN = "c" * 40, "d" * 40, "e" * 40, 42957811545
+SOURCE = "177-bench-the-recorded-rows"
+HOST, HOSTED = ["self-hosted", "bench-linux"], ["blacksmith-4vcpu-ubuntu-2404"]
+
+
+class Merged(Event):
+    """A push that can move the bench, when it is the merge of a pull request whose run
+    measured the same tree on the hosts (ADR 0074): everything that makes it so, and
+    each thing whose absence runs the bench."""
+
+    def jobs_of(self, run, jobs=None):
+        if jobs is None:
+            jobs = [(name, "success", HOST) for name in needed.HOST_JOBS]
+            # The pair's other end is still uploading, and the gates ran on a hosted runner.
+            jobs += [("bench (udp peer)", None, HOST), ("gates (linux)", "success", HOSTED)]
+        self.api.routes[f"/repos/{REPO}/actions/runs/{run}/jobs?filter=latest&per_page=100"] = {
+            "jobs": [{"name": name, "conclusion": conclusion, "labels": labels} for name, conclusion, labels in jobs]}
+
+    def landing(self, *, merge_commit=AFTER, base="master", merged=True, pulls=1, repo=REPO, tree=TREE,
+                head_tree=TREE, status="ahead", siblings=("master",),
+                runs=(("pull_request", SOURCE, "in_progress", None, RUN),), jobs=None):
+        self.compare({"status": "ahead", "files": files("crates/cavalry-client/src/client.rs", "CHANGELOG.md")})
+        self.api.routes[f"/repos/{REPO}/commits/{AFTER}/pulls?per_page=100"] = [
+            {"number": 188 + n, "merge_commit_sha": merge_commit, "merged_at": "2026-11-11T04:52:49Z" if merged else None,
+             "base": {"ref": base}, "head": {"sha": HEAD, "ref": SOURCE, "repo": {"full_name": repo}}}
+            for n in range(pulls)]
+        self.api.routes[f"/repos/{REPO}/compare/{BEFORE}...{HEAD}?per_page=1"] = {"status": status}
+        self.api.routes[f"/repos/{REPO}/git/commits/{AFTER}"] = {"sha": AFTER, "tree": {"sha": tree}}
+        self.api.routes[f"/repos/{REPO}/git/commits/{HEAD}"] = {"sha": HEAD, "tree": {"sha": head_tree}}
+        self.api.routes[f"/repos/{REPO}/pulls?state=all&head=example-owner:{SOURCE}&per_page=100"] = [
+            {"number": 188 + n, "base": {"ref": ref}} for n, ref in enumerate(siblings)]
+        # A merged pull request's runs no longer name it: `pull_requests` is empty.
+        self.api.routes[f"/repos/{REPO}/actions/workflows/ci.yml/runs?head_sha={HEAD}&per_page=100"] = {
+            "workflow_runs": [{"event": event, "head_branch": branch, "status": state, "conclusion": conclusion,
+                               "id": run, "pull_requests": []} for event, branch, state, conclusion, run in runs]}
+        self.jobs_of(RUN, jobs)
+
+    def refused(self, why, **landing):
+        self.landing(**landing)
+        answer, text = self.run_event("push", PUSH)
+        self.assertEqual(answer, "bench=true", text)
+        self.assertIn("can move the bench, so it runs", text)
+        self.assertIn("no pull request's run measured this tree on the hosts", text)
+        self.assertIn(why, text)
+
+    def test_the_merge_of_a_pull_request_whose_run_measured_the_same_tree_reports_without_the_hosts(self):
+        # The run is still in progress, as it is when the merge is made on the last
+        # required check and a job that is not required has not ended.
+        self.landing()
+        answer, text = self.run_event("push", PUSH)
+        self.assertEqual(answer, "bench=false", text)
+        self.assertIn("the merge of pull request 188", text)
+        self.assertIn(f"head {HEAD[:7]}", text)
+        self.assertIn(f"run {RUN} passed its bench jobs on the hosts", text)
+        self.assertIn(f"\"before\" figures are run {RUN}'s", text)
+        self.assertIn("ADR 0074", text)
+        # The run of the commit before the push is not asked for: this tree was measured itself.
+        asked = [path for path, _ in self.api.seen]
+        self.assertFalse([path for path in asked if f"head_sha={BEFORE}" in path], asked)
+
+    def test_a_run_that_has_ended_green_is_taken_as_one_in_progress_is(self):
+        self.landing(runs=(("pull_request", SOURCE, "completed", "success", RUN),))
+        self.assertEqual(self.run_event("push", PUSH)[0], "bench=false")
+
+    def test_the_newest_run_of_the_head_that_passed_on_the_hosts_is_the_one_named(self):
+        # The newest reported without the hosts; an older one of the same head measured.
+        self.landing(runs=(("pull_request", SOURCE, "completed", "success", RUN + 7),
+                           ("pull_request", SOURCE, "completed", "success", RUN),
+                           ("pull_request", SOURCE, "completed", "success", RUN - 5)))
+        self.jobs_of(RUN + 7, [(name, "success", HOSTED) for name in needed.HOST_JOBS])
+        self.jobs_of(RUN - 5)
+        answer, text = self.run_event("push", PUSH)
+        self.assertEqual(answer, "bench=false", text)
+        self.assertIn(f"run {RUN} passed", text)
+        self.assertNotIn(f"/repos/{REPO}/actions/runs/{RUN - 5}/jobs", self.api.paths())
+
+    def test_a_tree_that_is_not_the_heads_runs_the_bench(self):
+        self.refused("has another tree than the pushed commit", head_tree=OTHER_TREE)
+
+    def test_a_head_that_does_not_hold_the_commit_before_the_push_runs_the_bench(self):
+        # The head's run was of its merge with the base of that hour, which the same
+        # tree now does not prove to have been the head's own.
+        for status in ("diverged", "behind", None):
+            with self.subTest(status):
+                self.refused("is not in pull request 188's head", status=status)
+
+    def test_a_head_with_no_run_by_a_pull_request_event_from_its_branch_runs_the_bench(self):
+        for runs in ((), (("push", SOURCE, "completed", "success", RUN),),
+                     (("workflow_dispatch", SOURCE, "completed", "success", RUN),),
+                     # Another branch at the same commit: its pull request may have had another base.
+                     (("pull_request", "another-branch", "completed", "success", RUN),)):
+            with self.subTest(runs):
+                self.refused("has no run of ci.yml by a pull request event from", runs=runs)
+
+    def test_a_branch_with_a_pull_request_into_another_base_runs_the_bench(self):
+        # A run of this head for that pull request would have been of another tree, and
+        # the runs do not say which pull request they were for.
+        self.refused("has a pull request into another branch than master", siblings=("master", "release"))
+
+    def test_a_pull_request_from_another_repository_runs_the_bench(self):
+        self.refused("is not from a branch of this repository", repo="a-stranger/cavalry")
+
+    def test_a_run_whose_bench_did_not_pass_on_the_hosts_runs_the_bench(self):
+        every = [(name, "success", HOST) for name in needed.HOST_JOBS]
+        for name in needed.HOST_JOBS:
+            others = [job for job in every if job[0] != name]
+            for what, jobs in (("reported without its host", others + [(name, "success", HOSTED)]),
+                               ("did not pass", others + [(name, "failure", HOST)]),
+                               ("has not ended", others + [(name, None, HOST)]),
+                               ("was skipped", others + [(name, "skipped", HOST)]),
+                               ("is not there", others),
+                               ("has no labels", others + [(name, "success", None)])):
+                with self.subTest(name, what=what):
+                    self.refused(f"run {RUN} has no `{name}` that passed on its host", jobs=jobs)
+
+    def test_only_the_five_newest_runs_of_a_head_are_read(self):
+        runs = tuple(("pull_request", SOURCE, "completed", "success", RUN + n) for n in range(7))
+        self.landing(runs=runs)
+        for n in range(7):
+            self.jobs_of(RUN + n, [(name, "success", HOSTED) for name in needed.HOST_JOBS])
+        self.jobs_of(RUN)                    # the oldest measured, and is not reached
+        answer, text = self.run_event("push", PUSH)
+        self.assertEqual(answer, "bench=true", text)
+        read = [path for path in self.api.paths() if path.endswith("/jobs")]
+        self.assertEqual(read, [f"/repos/{REPO}/actions/runs/{RUN + n}/jobs" for n in (6, 5, 4, 3, 2)])
+
+    def test_a_push_that_is_not_one_pull_requests_merge_into_this_branch_runs_the_bench(self):
+        for what, landing in (("no pull request", {"pulls": 0}), ("two", {"pulls": 2}),
+                              ("another commit's", {"merge_commit": BEFORE}), ("not merged", {"merged": False}),
+                              ("another branch's", {"base": "release"})):
+            with self.subTest(what):
+                self.refused("pull requests into master, not of one", **landing)
+
+    def test_any_read_the_api_refuses_runs_the_bench(self):
+        routes = (f"/repos/{REPO}/commits/{AFTER}/pulls?per_page=100", f"/repos/{REPO}/git/commits/{AFTER}",
+                  f"/repos/{REPO}/git/commits/{HEAD}", f"/repos/{REPO}/compare/{BEFORE}...{HEAD}?per_page=1",
+                  f"/repos/{REPO}/pulls?state=all&head=example-owner:{SOURCE}&per_page=100",
+                  f"/repos/{REPO}/actions/workflows/ci.yml/runs?head_sha={HEAD}&per_page=100",
+                  f"/repos/{REPO}/actions/runs/{RUN}/jobs?filter=latest&per_page=100")
+        for route in routes:
+            with self.subTest(route):
+                self.landing()
+                self.api.routes[route] = (500, {"message": "Server Error"})
+                answer, text = self.run_event("push", PUSH)
+                self.assertEqual(answer, "bench=true", text)
+                self.assertIn("answered HTTP 500", text)
+
+    def test_a_listing_of_another_shape_runs_the_bench(self):
+        for route, body in ((f"/repos/{REPO}/commits/{AFTER}/pulls?per_page=100", {"message": "no"}),
+                            (f"/repos/{REPO}/git/commits/{AFTER}", {"sha": AFTER}),
+                            (f"/repos/{REPO}/pulls?state=all&head=example-owner:{SOURCE}&per_page=100", {"items": []}),
+                            (f"/repos/{REPO}/pulls?state=all&head=example-owner:{SOURCE}&per_page=100",
+                             [{"number": n, "base": {"ref": "master"}} for n in range(100)]),
+                            (f"/repos/{REPO}/actions/workflows/ci.yml/runs?head_sha={HEAD}&per_page=100", []),
+                            (f"/repos/{REPO}/actions/runs/{RUN}/jobs?filter=latest&per_page=100", {"jobs": "none"})):
+            with self.subTest(route):
+                self.landing()
+                self.api.routes[route] = body
+                answer, text = self.run_event("push", PUSH)
+                self.assertEqual(answer, "bench=true", text)
+
+    def test_a_push_of_pages_alone_asks_for_no_pull_request(self):
+        self.landing()
+        self.compare({"status": "ahead", "files": files("docs/glossary.md")})
+        self.runs_of(BEFORE, GREEN)
+        answer, text = self.run_event("push", PUSH)
+        self.assertEqual(answer, "bench=false", text)
+        self.assertNotIn(f"/repos/{REPO}/commits/{AFTER}/pulls", self.api.paths())
+        self.assertIn("ADR 0071", text)
+
+    def test_a_pull_request_event_asks_for_no_merge(self):
+        self.landing()
+        self.pull(190, files("crates/cavalry-client/src/client.rs"))
+        answer, _ = self.run_event("pull_request", {"number": 190})
+        self.assertEqual(answer, "bench=true")
+        self.assertEqual(self.api.paths(), [f"/repos/{REPO}/pulls/190/files"])
 
 
 class Otherwise(Event):
@@ -453,6 +635,35 @@ class Workflow(unittest.TestCase):
 
     def test_the_changes_job_may_read_the_run_of_the_commit_before_a_push(self):
         self.assertRegex(self.jobs["changes"], r"\n      actions: read\b")
+
+    def test_the_jobs_whose_pass_on_a_host_proves_a_tree_measured_are_ci_ymls_and_take_a_host(self):
+        names = {name: job for job, name in self.BENCH.items()}
+        for name in needed.HOST_JOBS:
+            with self.subTest(name):
+                self.assertIn(name, names)
+                self.assertIn(f'fromJSON(\'["{needed.HOST_LABEL}", ', self.jobs[names[name]])
+        # The one bench job not asked for is the pair's other end, which fails with its own.
+        self.assertEqual(set(names) - set(needed.HOST_JOBS), {"bench (udp peer)"})
+
+    def test_the_changes_job_may_read_a_pull_requests_run_and_its_jobs(self):
+        block = self.jobs["changes"]
+        for permission in ("contents: read", "pull-requests: read", "actions: read"):
+            self.assertRegex(block, rf"\n      {permission}\b")
+
+    def test_the_gates_run_on_linux_for_every_event_and_on_macos_for_all_but_a_pull_request(self):
+        # ADR 0073. The job's name is built from the matrix, so the checks stay
+        # "gates (linux)" and "gates (macos)", and a pull request has only the first.
+        block = self.jobs["gates"]
+        self.assertIn("    name: gates (${{ matrix.name }})\n", block)
+        found = re.search(r"\n      matrix:\s*\$\{\{\s*fromJSON\(\s*github\.event_name\s*==\s*'pull_request'\s*&&\s*"
+                          r"'([^']+)'\s*\|\|\s*'([^']+)'\s*\)\s*\}\}\n", block)
+        self.assertIsNotNone(found, "the gates job's matrix is not chosen by the event")
+        pull_request, otherwise = (json.loads(text)["include"] for text in found.groups())
+        self.assertEqual([row["name"] for row in pull_request], ["linux"])
+        self.assertEqual([row["name"] for row in otherwise], ["linux", "macos"])
+        self.assertEqual(pull_request[0], otherwise[0])
+        self.assertIn("macos", otherwise[1]["runner"])
+        self.assertIn("    runs-on: ${{ matrix.runner }}\n", block)
 
     def test_the_pair_still_waits_on_both_single_host_jobs_having_passed(self):
         for job in ("bench-udp", "bench-udp-peer"):

@@ -322,8 +322,11 @@ pub unsafe extern "C" fn cavalry_committed_log_commit_position(
 /// Whether the handle has come to its end: no poll will deliver another entry. What
 /// an ended handle has delivered is said by `cavalry_committed_log_failed_at` and
 /// `cavalry_committed_log_withdrawn_at`, read after this returns `true`: it has
-/// delivered every entry it was owed only when both return `false`. In every case
-/// what it delivered ends at `cavalry_committed_log_position`.
+/// delivered every entry it was owed only when both return `false` and no poll of
+/// the handle returned −1 with `CAVALRY_ERR_FAULT_IMAGE` or
+/// `CAVALRY_ERR_FAULT_IMAGES_FULL`, the one report that the replay's image failed a
+/// check or could not join. In every case what it delivered ends at
+/// `cavalry_committed_log_position`.
 ///
 /// # Safety
 ///

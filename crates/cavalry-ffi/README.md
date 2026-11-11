@@ -160,7 +160,7 @@ Running it prints one line, such as `received "hello" from session -1716223105`.
 program built against another version of the header is refused at its first call:
 
 ```text
-cavalry_context_init refused (abi-version): the program was built against ABI version 1 and this library is version 0; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
+cavalry_context_init refused (abi-version): the program was built against ABI version 1 and this library is version 2; rebuild the program against this library's header; see docs/reference/c-abi.md#versions-and-what-a-reader-rejects
 ```
 
 ## What to read next
