@@ -383,7 +383,7 @@ impl CommittedLog {
     /// arrived yet. A replay plays no further than what the member's recorder has
     /// synced, which a member asks for as each entry is written, and a follower's
     /// commit position comes from its leader, so the bound may be ahead of the replay
-    /// by the entries of a sync that is still running; and when the member leaves the
+    /// by the entries that recorder has yet to sync; and when the member leaves the
     /// log or closes, the replay plays on to the recording's stop.
     ///
     /// The image's position is the one compared, not [`position`](Self::position): a

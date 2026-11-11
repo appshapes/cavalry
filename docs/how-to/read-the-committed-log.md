@@ -83,10 +83,11 @@ its services read what it appends in the same way.
    every case `log.position()` is where to open the log again. A poll can return 0
    while committed entries are still on their way: the service reads only what the
    member's recorder has synced. The member asks its recorder to sync as soon as an
-   entry is written, so the wait is the time that sync takes. Keep polling
-   until `log.is_ended()` is true: when the member closes or leaves the log, the
-   replay ends at the end of the member's recording, and the driver withdraws it 5 s
-   later, whether or not the service has read it.
+   entry is written, so the wait is the time that sync takes, or the time to the
+   recorder's own sync, once a second, when the driver refused the request. Keep
+   polling until `log.is_ended()` is true: when the member closes or leaves the log,
+   the replay ends at the end of the member's recording, and the driver withdraws it
+   5 s later, whether or not the service has read it.
 
 ## How to verify it worked
 
@@ -170,4 +171,7 @@ its services read what it appends in the same way.
 - A service can be given an entry a moment after the cluster commits it: an entry
   reaches a service once its own member's recorder has synced it, which the member
   asks for as soon as the entry is written, and a quorum of the other members can
-  have synced it first. No entry is lost or reordered by the wait.
+  have synced it first. A request the member's driver refuses, its recorder's queue
+  of requests full, is not made again until another entry is written, and the entry
+  then waits for the recorder's own sync, within a second. No entry is lost or
+  reordered by the wait.
