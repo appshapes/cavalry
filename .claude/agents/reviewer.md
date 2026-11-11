@@ -50,17 +50,22 @@ and `--request-changes` in place of `--approve` for findings.
   be an hour from its end. This session is one turn: when it ends nothing brings it back,
   no watch, no monitor, no background command, and a session that ends to wait has
   submitted nothing (card 247). Read the checks once, when your verdict on the change is
-  ready, and submit:
-  - a check that **failed** is a blocker: request changes, and name the job and what its
-    log says (`gh run view <run id> --log-failed`);
-  - a check still **queued or running** changes nothing in your verdict: say in the body
-    which checks had not finished when you submitted. An approval lands nothing that a
-    failing check would stop: GitHub merges only once the required checks pass, and both
-    `gates` jobs and every bench job but `bench (udp peer)`, which fails with
-    `bench (udp)`, are required (ADR 0004; `ci.yml`'s header names them);
-  - **no `ci` check at all**, on a pull request that `gh pr view <n> --json mergeable`
-    reads `CONFLICTING`, is a blocker: GitHub starts no CI on a head that conflicts with
-    `master`, so say that `master` has to be merged in.
+  ready, and submit. Two things you may find there are blockers, and no other state of
+  a check is:
+  - a check that has **failed**: request changes, and name the job and the line of its
+    log that says why. `gh run view <run id> --log-failed` prints it once the whole run
+    has ended. While another job of the run is still going, that command refuses, and
+    `gh api repos/<owner>/<repo>/actions/jobs/<job id>/logs` prints the failed job's
+    log; the job id is the last number of the check's link in
+    `gh pr checks <n> --json name,bucket,link`;
+  - a pull request that `gh pr view <n> --json mergeable` reads **`CONFLICTING`**:
+    GitHub starts no CI on a head that conflicts with `master`, so say that `master`
+    has to be merged in.
+
+  A check in any other state, queued, running, not listed yet, cancelled or skipped,
+  changes nothing in your verdict: say in the body what the checks read when you
+  submitted. An approval lands nothing that a failing check would stop, because GitHub
+  merges only once the checks that branch protection requires have passed (ADR 0004).
 - End every request-changes body with this line, as plain text on its own line, never wrapped
   in backticks or quotes, because the fixer's mention detection requires the bare form:
 
@@ -81,10 +86,11 @@ and `--request-changes` in place of `--approve` for findings.
 1. **The invariants below.** Any one of them broken is a blocker, however good the change.
 2. **Correctness.** Does it do what the pull request says? Boundary cases, error paths that
    swallow, behaviour the spec does not state (that is a bug in the spec, not a freedom).
-3. **The gates.** A check that failed on the head you are reviewing is a blocker; one that
-   has not finished is not yours to wait for ("How to review", above). A gate that prints
-   `not built yet` is a to-do, not a pass: if the change touches what that gate would check,
-   building the gate is part of the change (CLAUDE.md, "Gates").
+3. **The gates.** A check that has failed on the head you are reviewing is a blocker; one
+   that has not finished is not yours to wait for ("How to review", above). A gate that
+   prints `not built yet` is a to-do, not a pass: if the change touches what that gate
+   would check, building the gate is part of the change (CLAUDE.md, "Gates"). The recipe
+   in `pr-head/justfile` shows whether a gate prints it, so this needs no finished run.
 4. **Documentation.** Docs ship in the same commit: a changed public item, counter, config key
    or `spec/` file needs its README or `docs/` change; a user-visible change needs a line
    under `Unreleased` in `CHANGELOG.md`; "docs to follow" is a blocker.
