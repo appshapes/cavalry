@@ -132,6 +132,10 @@ Every counter Cavalry has, from `counters.toml`, the single source ([ADR 0012](.
 | 124 | `cluster.append_position` | gauge | client | One cluster member's append position: the end of the contiguous span its recordings of the log hold, as a sync has made it durable (spec/cluster.md, The log; ADR 0060); key: member id (i32), little-endian; label text: the member id in decimal. | An append position behind the leader's on one member is a recorder whose disk syncs slowly, or a member the log no longer reaches: compare its recording.synced_position and its cluster.election_state. |
 | 125 | `cluster.messages_rejected` | counter | client | Messages of the consensus stream one cluster member rejected, for any reason of spec/cluster.md, What a reader rejects; key: member id (i32), little-endian; label text: the member id in decimal. | A member sends consensus messages this member cannot read: check that every member runs the same version. |
 | 126 | `cluster.log_recording_id` | gauge | client | The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal. | A cluster.log_recording_id that stays at -1 on a member whose cluster.election_state is 17, its election closed, is a follower whose recording of the leader's image never started, so that its cluster.append_position does not move: its driver's recording.armed_failed counts the failure and names the counter of the step that failed. A member in an election holds -1 until it has joined the log. |
+| 127 | `cluster.candidacies` | counter | client | Ballots one cluster member began as a candidate: it stored candidate term + 1, voted for itself and asked every other member for its vote, going from nominate to candidate ballot (spec/cluster.md, Roles and the election, state 3; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 128 | `cluster.ballots_lost` | counter | client | Ballots that ended with no leader for one cluster member, which went back to canvass: its own, at the election timeout short of a quorum or with a vote against, or the ballot of the candidate it voted for, whose new leadership term did not come within the election timeout (spec/cluster.md, Roles and the election, states 3 and 4; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal. | A count that rises with cluster.candidacies on two members at once is a split vote: two candidates whose nomination delays ended within a round trip of each other each voted for themselves. The next canvass draws new delays, and the election takes one election timeout, 1 s, longer. A count that keeps rising with no cluster.terms_led on any member is a cluster with no member whose log a quorum will vote for: run cavalry doctor on each member's host and compare cluster.append_position. |
+| 129 | `cluster.votes_for` | counter | client | Votes one cluster member sent for a candidate: a request vote for a term above its candidate term from a candidate whose log is at least its own, read in canvass, nominate or a ballot state; it stored the term first and waits for that candidate in follower ballot (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal. |  |
+| 130 | `cluster.votes_against` | counter | client | Votes one cluster member sent against a candidate: a request vote for a term at or below its candidate term, in which it has voted, or for a higher term from a candidate whose log is behind its own (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal. |  |
 
 ## State machines
 
@@ -230,10 +234,14 @@ States: `follower`, `candidate`, `leader`.
 | From | To | Counter |
 | --- | --- | --- |
 | `follower` | `leader` | `cluster.terms_led` |
+| `follower` | `candidate` | `cluster.candidacies` |
+| `candidate` | `leader` | `cluster.terms_led` |
+| `candidate` | `follower` | `cluster.ballots_lost` |
+| `candidate` | `follower` | `cluster.votes_for` |
 
 ### `cluster_election`
 
-States: `init`, `canvass`, `leader_log_replication`, `leader_replay`, `leader_init`, `leader_ready`, `follower_replay`, `follower_log_init`, `follower_log_await`, `follower_ready`, `closed`.
+States: `init`, `canvass`, `nominate`, `candidate_ballot`, `follower_ballot`, `leader_log_replication`, `leader_replay`, `leader_init`, `leader_ready`, `follower_replay`, `follower_log_init`, `follower_log_await`, `follower_ready`, `closed`.
 
 | From | To | Counter |
 | --- | --- | --- |
@@ -257,3 +265,17 @@ States: `init`, `canvass`, `leader_log_replication`, `leader_replay`, `leader_in
 | `follower_ready` | `init` | `cluster.elections_failed` |
 | `closed` | `init` | `cluster.leader_heartbeat_timeouts` |
 | `closed` | `init` | `cluster.log_images_lost` |
+| `canvass` | `nominate` | `cluster.election_steps` |
+| `nominate` | `candidate_ballot` | `cluster.candidacies` |
+| `canvass` | `follower_ballot` | `cluster.votes_for` |
+| `nominate` | `follower_ballot` | `cluster.votes_for` |
+| `candidate_ballot` | `follower_ballot` | `cluster.votes_for` |
+| `nominate` | `follower_replay` | `cluster.election_steps` |
+| `candidate_ballot` | `follower_replay` | `cluster.election_steps` |
+| `follower_ballot` | `follower_replay` | `cluster.election_steps` |
+| `candidate_ballot` | `leader_log_replication` | `cluster.terms_led` |
+| `candidate_ballot` | `canvass` | `cluster.ballots_lost` |
+| `follower_ballot` | `canvass` | `cluster.ballots_lost` |
+| `nominate` | `init` | `cluster.elections_failed` |
+| `candidate_ballot` | `init` | `cluster.elections_failed` |
+| `follower_ballot` | `init` | `cluster.elections_failed` |

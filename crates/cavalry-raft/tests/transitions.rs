@@ -189,6 +189,45 @@ fn to_follower_log_await(
     ms + 4
 }
 
+/// A member of `[0, 1, 2]` with id 0 that elects, taken from init to nominate by the
+/// other two members' canvass positions, neither ahead of it, from `ms` on; returns the
+/// next millisecond.
+fn to_nominate(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) -> u64 {
+    watch.work(member, io, ms);
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    for other in [1, 2] {
+        watch.read(member, io, ms + 1, &canvass_position(other, -1, 0));
+    }
+    watch.work(member, io, ms + 2);
+    assert_eq!(member.election_state(), ElectionState::Nominate);
+    ms + 3
+}
+
+/// The same member taken on to candidate ballot: nominate's delay is below half the
+/// election timeout, 500 ms. Returns the millisecond its ballot began at.
+fn to_candidate_ballot(watch: &mut Watch, member: &mut Consensus, io: &mut Stub, ms: u64) -> u64 {
+    let ms = to_nominate(watch, member, io, ms) + 500;
+    watch.work(member, io, ms);
+    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+    ms
+}
+
+/// Member 1's request vote for `term`, with a log that holds no term.
+fn request_vote(term: i64) -> Message<'static> {
+    Message::RequestVote {
+        log_leadership_term_id: -1,
+        log_position: 0,
+        candidate_term_id: term,
+        candidate_member_id: 1,
+        protocol_version: 0,
+    }
+}
+
+/// A member that elects, with id 0 among `[0, 1, 2]` and a seed of its own.
+fn elector(seed: u64) -> Consensus {
+    Consensus::with_election(&[0, 1, 2], 0, seed).expect("a member")
+}
+
 #[test]
 fn every_transition_of_the_election_adds_one_to_a_counter_registered_for_it() {
     let mut watch = Watch::new();
@@ -301,6 +340,117 @@ fn every_transition_of_the_election_adds_one_to_a_counter_registered_for_it() {
     watch.work(&mut unheard, &mut io, ms + 1);
     watch.work(&mut unheard, &mut io, ms + 10_000);
     assert_eq!(unheard.election_state(), ElectionState::Init);
+
+    // A member that elects: canvass, nominate, candidate ballot, and the leader of term
+    // 0 on both votes, each from a member it heard.
+    let mut io = Stub::new();
+    let mut candidate = elector(1);
+    let ms = to_candidate_ballot(&mut watch, &mut candidate, &mut io, 1);
+    for voter in [1, 2] {
+        let vote = Message::Vote {
+            candidate_term_id: 0,
+            log_leadership_term_id: -1,
+            log_position: 0,
+            candidate_member_id: 0,
+            follower_member_id: voter,
+            vote: true,
+        };
+        watch.read(&mut candidate, &mut io, ms + 1, &vote);
+    }
+    watch.work(&mut candidate, &mut io, ms + 2);
+    assert_eq!(
+        candidate.election_state(),
+        ElectionState::LeaderLogReplication
+    );
+
+    // A candidate with no vote but its own canvasses again at the election timeout.
+    let mut io = Stub::new();
+    let mut unanswered = elector(2);
+    let ms = to_candidate_ballot(&mut watch, &mut unanswered, &mut io, 1);
+    watch.work(&mut unanswered, &mut io, ms + 1_000);
+    assert_eq!(unanswered.election_state(), ElectionState::Canvass);
+
+    // A candidate that reads a request vote for a higher term from a log at least its
+    // own votes for it and waits for it; its new leadership term then takes it to
+    // follower replay.
+    let mut io = Stub::new();
+    let mut outbid = elector(3);
+    let ms = to_candidate_ballot(&mut watch, &mut outbid, &mut io, 1);
+    watch.read(&mut outbid, &mut io, ms + 1, &request_vote(1));
+    assert_eq!(outbid.election_state(), ElectionState::FollowerBallot);
+    let mut term_one = new_leadership_term(1, 0);
+    if let Message::NewLeadershipTerm {
+        leadership_term_id,
+        next_leadership_term_id,
+        ..
+    } = &mut term_one
+    {
+        *leadership_term_id = 1;
+        *next_leadership_term_id = 1;
+    }
+    watch.read(&mut outbid, &mut io, ms + 2, &term_one);
+    assert_eq!(outbid.election_state(), ElectionState::FollowerReplay);
+
+    // A candidate that reads the new leadership term of its own candidate term from
+    // another member follows it.
+    let mut io = Stub::new();
+    let mut beaten = elector(4);
+    let ms = to_candidate_ballot(&mut watch, &mut beaten, &mut io, 1);
+    watch.read(&mut beaten, &mut io, ms + 1, &new_leadership_term(1, 0));
+    assert_eq!(beaten.election_state(), ElectionState::FollowerReplay);
+
+    // A candidate ahead of that leader's term base needs a truncation: it fails.
+    let mut io = Stub::new();
+    io.append_position = 64;
+    let mut ahead = elector(5);
+    let ms = to_candidate_ballot(&mut watch, &mut ahead, &mut io, 1);
+    watch.read(&mut ahead, &mut io, ms + 1, &new_leadership_term(1, 0));
+    assert_eq!(ahead.election_state(), ElectionState::Init);
+
+    // A member in canvass votes for a candidate and waits for it; with no new
+    // leadership term for the election timeout it canvasses again.
+    let mut io = Stub::new();
+    let mut voter = elector(6);
+    watch.work(&mut voter, &mut io, 1);
+    watch.read(&mut voter, &mut io, 2, &request_vote(0));
+    assert_eq!(voter.election_state(), ElectionState::FollowerBallot);
+    watch.work(&mut voter, &mut io, 2 + 1_000);
+    assert_eq!(voter.election_state(), ElectionState::Canvass);
+
+    // A member in nominate votes for a candidate, as one in canvass does.
+    let mut io = Stub::new();
+    let mut nominee = elector(7);
+    let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
+    watch.read(&mut nominee, &mut io, ms, &request_vote(0));
+    assert_eq!(nominee.election_state(), ElectionState::FollowerBallot);
+
+    // A member in nominate reads a leader's term as canvass does: it follows, or
+    // fails where it would need a truncation.
+    let mut io = Stub::new();
+    let mut nominee = elector(8);
+    let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
+    watch.read(&mut nominee, &mut io, ms, &new_leadership_term(1, 0));
+    assert_eq!(nominee.election_state(), ElectionState::FollowerReplay);
+    let mut io = Stub::new();
+    io.append_position = 64;
+    let mut nominee = elector(9);
+    let ms = to_nominate(&mut watch, &mut nominee, &mut io, 1);
+    watch.read(&mut nominee, &mut io, ms, &new_leadership_term(1, 0));
+    assert_eq!(nominee.election_state(), ElectionState::Init);
+
+    // A member in follower ballot ahead of its candidate's term base fails.
+    let mut io = Stub::new();
+    io.append_position = 64;
+    let mut voter = elector(10);
+    watch.work(&mut voter, &mut io, 1);
+    let mut longer = request_vote(0);
+    if let Message::RequestVote { log_position, .. } = &mut longer {
+        *log_position = 64;
+    }
+    watch.read(&mut voter, &mut io, 2, &longer);
+    assert_eq!(voter.election_state(), ElectionState::FollowerBallot);
+    watch.read(&mut voter, &mut io, 3, &new_leadership_term(1, 0));
+    assert_eq!(voter.election_state(), ElectionState::Init);
 
     let rows: BTreeSet<Row> = watch.rows.iter().cloned().collect();
     let unmade: Vec<&Row> = rows.difference(&watch.made).collect();
