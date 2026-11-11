@@ -2003,13 +2003,12 @@ user-visible change, added in the same commit as the change. The format follows
   member closed or left its log and that every entry below the last bound has been
   delivered, so a service stops on it and not on a poll of 0. The same call serves
   the leader's service and a follower's, and a service may start before, with or
-  after its member. The member's
-  consensus module names its recording of the log in a new counter,
-  `cluster.log_recording_id`, and a service takes a commit position as its bound only
-  while that counter still names the recording it replays, so a record the driver gave
-  to another counter, or a later member's commit position, is never a bound. `cavalry`
-  re-exports `CommittedLog`; `examples/cluster-service.rs` is a service that prints
-  each entry, and the how-to is
+  after its member. The service finds the recording to replay in its member's
+  `cluster.log_recording_id` counter, which the consensus module already keeps, and
+  takes a commit position as its bound only while that counter still names the
+  recording it replays, so a record the driver gave to another counter, or a later
+  member's commit position, is never a bound. `cavalry` re-exports `CommittedLog`;
+  `examples/cluster-service.rs` is a service that prints each entry, and the how-to is
   [Read a cluster's committed log from a service](docs/how-to/read-the-committed-log.md)
   ([ADR 0066](docs/decisions/0066-feed-the-committed-log-to-a-service-through-a-replay-of-the-members-recording.md);
   card 227).
