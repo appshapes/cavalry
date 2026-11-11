@@ -49,23 +49,38 @@ class CavalryError(Exception):
 
 
 class HandlerError(Exception):
-    """The user's fragment handler raised an `Exception` during a poll. The ABI's poll had
-    consumed every fragment it delivered, so the poll handed every one to the handler,
-    once and in order, the ones after a raise included: `fragments` is the poll's result,
-    the count, or -1 when the poll also stopped on a fault `Subscription.fault` reads;
-    `raised` is how many of the handler's calls raised; `__cause__` is the first of their
-    exceptions. A `KeyboardInterrupt`, `SystemExit` or any other exception that is not an
-    `Exception` is raised by poll as itself."""
+    """The user's handler raised an `Exception` during a poll: a subscription's fragment
+    handler, or a committed log's entry handler when `committed_log` is true. The ABI's
+    poll had consumed every fragment it delivered, so the poll handed every one to the
+    handler, once and in order, the ones after a raise included: `fragments` is the
+    poll's result, the count of fragments or of entries, or -1 when the poll also stopped
+    on a fault, which the `fault()` of the object that was polled reads until its next
+    poll, `Subscription.fault` or `CommittedLog.fault`; `raised` is how many of the
+    handler's calls raised; `__cause__` is the first of their exceptions. A
+    `KeyboardInterrupt`, `SystemExit` or any other exception that is not an `Exception`
+    is raised by poll as itself."""
 
-    def __init__(self, fragments, raised, cause):
-        delivered = (f"the {fragments} fragment(s) this poll delivered" if fragments >= 0 else
-                     "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads")
-        super().__init__(f"the fragment handler raised on {raised} of {delivered}; every fragment reached the handler "
+    def __init__(self, fragments, raised, cause, committed_log=False):
+        if committed_log:
+            one, many = "entry", "entries"
+            count = f"the {fragments} {one if fragments == 1 else many} this poll delivered"
+            # The fault of the log's own image is reported by this one poll and by no
+            # call after the next (clients/python/README.md, "The committed log").
+            fault = ("the entries this poll delivered before it stopped on a fault, which this CommittedLog's "
+                     "fault() reads until its next poll and nothing reports after that, so read it and keep it "
+                     "before polling again")
+        else:
+            one, many = "fragment", "fragments"
+            count = f"the {fragments} fragment(s) this poll delivered"
+            fault = "the fragments this poll delivered before it stopped on a fault, which Subscription.fault() reads"
+        delivered = count if fragments >= 0 else fault
+        super().__init__(f"the {one} handler raised on {raised} of {delivered}; every {one} reached the handler "
                          f"once, in order. Fix the handler: its first exception, {cause!r}, is this error's __cause__, "
                          f"whose traceback Python prints above this one; polling again does not deliver these "
-                         f"fragments again. See clients/python/README.md#the-exception")
+                         f"{many} again. See clients/python/README.md#the-exception")
         self.fragments = fragments
         self.raised = raised
+        self.committed_log = committed_log
         self.__cause__ = cause
 
 
@@ -222,6 +237,18 @@ class Client:
 
     def stop_replay(self, replay_session_id):
         self._command("cavalry_stop_replay", replay_session_id)
+
+    def committed_log(self, position):
+        """The committed log of the cluster member on this client's driver, opened at
+        `position`, 0 or the `position()` an earlier `CommittedLog` reached: a
+        `CommittedLog`, or None while the driver hosts no member that has a recording of
+        its log, so a service started before its member asks again (spec/cluster.md, "The
+        service"; spec/c-abi.md, "Functions", committed log)."""
+        handle = ctypes.c_void_p()
+        with self._lock:
+            _check(self._abi, "cavalry_committed_log",
+                   self._abi.cavalry_committed_log(ctypes.byref(handle), self._handle, position))
+        return CommittedLog(self._abi, handle.value, self) if handle.value else None
 
 
 class Publication:
@@ -564,6 +591,174 @@ class Replay:
         if self._handle is not None:
             _check(self._abi, "cavalry_replay_close", self._abi.cavalry_replay_close(self._handle))
             self._handle = None
+
+
+class CommittedLog:
+    """A service's read of a cluster's committed log, beside the member on the client's
+    driver (spec/cluster.md, "The service"): `poll(handler, fragment_limit)` calls
+    `handler(body, header, position)` for each entry a quorum has committed, in order and
+    none at or past the member's commit position, `body` a `memoryview` into the log valid
+    for the call, `header` the one `Header` this object keeps and `position` the entry's
+    position in the log, and returns the entry count, or the ABI's -1 when the poll
+    stopped on a fault, which `fault()` reads until the next poll. Every entry the ABI
+    delivers reaches the handler, whether or not an earlier call raised; the exceptions
+    are kept until the ABI has returned, then the first is raised as `HandlerError`, or
+    one that is not an `Exception` as itself, as a subscription's poll raises them.
+    `position()` is the position after the last entry delivered: where a service that has
+    applied every entry it was given opens the log again. `is_ended` says when to stop
+    reading and what tells a whole end from a short one."""
+
+    def __init__(self, abi, handle, client):
+        self._abi = abi
+        self._handle = handle
+        self._client = client
+        self._header = Header(abi)
+        self._handler = None
+        self._pending = None
+        self._interrupt = None
+        self._raised = 0
+        self._trampoline = _abi.cavalry_fragment_handler_t(self._on_fragment)
+        constants = _abi.cavalry_committed_log_constants_t()
+        _check(abi, "cavalry_committed_log_constants",
+               abi.cavalry_committed_log_constants(handle, ctypes.byref(constants)))
+        self.member_id = constants.member_id
+        self.recording_id = constants.recording_id
+
+    def _on_fragment(self, clientd, buffer, length, header):
+        # As a subscription's trampoline: once the handler returns, the header's pointer
+        # is cleared and the body's view released. The entry's position is read from the
+        # header before the handler runs, while the pointer is the ABI's.
+        try:
+            body = memoryview((ctypes.c_uint8 * length).from_address(buffer)).cast("B")
+            self._header._pointer = header
+            try:
+                self._handler(body, self._header, self._abi.cavalry_committed_log_entry_position(header))
+            finally:
+                self._header._pointer = None
+                body.release()
+        except BaseException as exc:  # kept for poll to raise once the ABI has returned
+            self._keep(exc)
+
+    def _keep(self, exc):
+        """Count a handler call that raised; keep the first `Exception` and the first
+        exception that is not one, a `KeyboardInterrupt` or a `SystemExit`."""
+        self._raised += 1
+        if isinstance(exc, Exception):
+            if self._pending is None:
+                self._pending = exc
+        elif self._interrupt is None:
+            self._interrupt = exc
+
+    def poll(self, handler, fragment_limit):
+        """One ABI call, and its result: the count of entries delivered, or -1 when the
+        poll stopped on a fault. `fault()` then reads the fault, until the next poll: a
+        code of `CAVALRY_ERR_FAULT_IMAGE` or `CAVALRY_ERR_FAULT_IMAGES_FULL` is the one
+        report that the replay's image failed a check or could not join, the log is ended
+        short of its entries, and the next poll returns 0 and clears the fault, so keep
+        this answer (`is_ended`). The handler's exceptions, if any, are raised after the
+        ABI call returns: one that is not an `Exception` as itself, else the first as
+        `HandlerError`, whose `fragments` is this result, -1 included. An entry whose
+        handler call raised was delivered and is not delivered again: `position()` is past
+        it, and past every entry this poll delivered after it. Called from a handler of
+        this log's own poll, it passes the call to the ABI, which refuses it with -1 and
+        `CAVALRY_ERR_POLLING`, and touches nothing (spec/c-abi.md, "Calls during a claim
+        or a poll")."""
+        if self._handler is not None:
+            return self._abi.cavalry_committed_log_poll(self._handle, self._trampoline, None, fragment_limit)
+        self._handler = handler
+        try:
+            entries = self._abi.cavalry_committed_log_poll(self._handle, self._trampoline, None, fragment_limit)
+        finally:
+            self._handler = None
+        if self._raised:
+            pending, interrupt, raised = self._pending, self._interrupt, self._raised
+            self._pending = self._interrupt = None
+            self._raised = 0
+            if interrupt is not None:
+                raise interrupt
+            raise HandlerError(entries, raised, pending, committed_log=True)
+        return entries
+
+    def fault(self):
+        """What the last poll stopped on: (code, session_id, position); code 0 when the last
+        poll returned a count. A poll that returns a count clears it, so read it after a
+        poll that returned -1 and before the next."""
+        fault = _abi.cavalry_fault_t()
+        _check(self._abi, "cavalry_committed_log_fault",
+               self._abi.cavalry_committed_log_fault(self._handle, ctypes.byref(fault)))
+        return fault.code, fault.session_id, fault.position
+
+    def position(self):
+        """The position after the last entry delivered, or the position the log was opened
+        at before the first."""
+        return self._abi.cavalry_committed_log_position(self._handle)
+
+    def commit_position(self):
+        """The bound of the last poll: the highest commit position taken from the member's
+        counter, 0 before the first poll."""
+        return self._abi.cavalry_committed_log_commit_position(self._handle)
+
+    @property
+    def is_ended(self):
+        """Whether this log has come to its end: no poll will deliver another entry. Stop
+        reading when it is true, not when a poll returns 0. The log delivered every entry
+        it was owed only when three things hold: `failed_at()` is None, `withdrawn_at()`
+        is None, and no `poll` of this log returned -1 with the fault of the log's own
+        image, `CAVALRY_ERR_FAULT_IMAGE` when the image failed a check or
+        `CAVALRY_ERR_FAULT_IMAGES_FULL` when it could not join. That fault is reported
+        once, by the poll that meets it: `fault()` answers it only until the next poll,
+        which returns 0 and clears it, and both reports are None for such a log. So a
+        service keeps that poll's answer, since nothing reports it later. In every case
+        what the log delivered ends at `position()`, where a service opens the log
+        again."""
+        return self._abi.cavalry_committed_log_is_ended(self._handle)
+
+    def failed_at(self):
+        """The position after the last frame the driver's replay of the member's recording
+        played before it failed, or None for a log that is live or that ended because its
+        member closed or left the recording. No entry from that position on is delivered.
+        The entries below it may still be on their way when this first is a position, so
+        read it once `is_ended` is true. They have all been delivered by then unless the
+        driver withdrew the replay first, which it does 5 s after a replay ends, one that
+        failed included: `withdrawn_at()` is then a position below this one, and the
+        entries from there on, those below this position among them, were not delivered
+        either. What the log delivered ends at `position()`."""
+        position = ctypes.c_int64()
+        failed = self._abi.cavalry_committed_log_failed_at(self._handle, ctypes.byref(position))
+        return position.value if failed else None
+
+    def withdrawn_at(self):
+        """The position at which the entries this log was not given begin, when the driver
+        withdrew the replay before the polls had read it to its end, or None. The driver
+        keeps a replay 5 s after it ends and then withdraws it, read or not: a service
+        that did not poll for that long after its member closed or left the log, or whose
+        handler took that long, ends so. The entries from that position on were played
+        and not delivered. A replay that failed is withdrawn in the same way: `failed_at()`
+        is then a position too, and this one is the lower. Read it once `is_ended` is
+        true."""
+        position = ctypes.c_int64()
+        withdrawn = self._abi.cavalry_committed_log_withdrawn_at(self._handle, ctypes.byref(position))
+        return position.value if withdrawn else None
+
+    def close(self):
+        """Stops the replay through the client and frees the handle; idempotent. After the
+        client's own close it frees the handle alone, and the driver ends the replay by
+        itself. The handle is freed whatever the ABI answers. When the ABI could not stop
+        the replay, through a client that the driver or a timeout closed or within the
+        response timeout, this raises `CavalryError` after the handle is freed: the log is
+        closed, a second close does nothing, and the driver ends the replay by itself. The
+        one exception is a close from inside this log's own handler, which the ABI refuses
+        with `CAVALRY_ERR_POLLING`: that raises `CavalryError` too, and the log stays
+        open."""
+        if self._handle is None:
+            return
+        with self._client._lock:
+            result = self._abi.cavalry_committed_log_close(self._handle, self._client._handle)
+            error = None if result == 0 else _error(self._abi, "cavalry_committed_log_close")
+        if error is None or error.code != _abi.CAVALRY_ERR_POLLING:
+            self._handle = None
+        if error is not None:
+            raise error
 
 
 def abi_version():

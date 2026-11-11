@@ -179,6 +179,31 @@ class Package(unittest.TestCase):
         self.assertLess(zeroed, freed)
         self.assertLess(close.index("self._release()"), zeroed)
 
+    def test_the_committed_log_reads_the_position_in_its_trampoline_and_keeps_a_refused_close_open(self):
+        """The Python committed log (ADR 0070): the trampoline asks the header for the
+        entry's position while the pointer is the ABI's, before the handler runs; the open
+        returns None for the null handle of a driver with no member; and `close` drops its
+        handle only when the ABI freed it, which a call refused from inside the log's own
+        handler did not (spec/c-abi.md, "Calls during a claim or a poll")."""
+        code = gen.write_python(self.header)["cavalry/__init__.py"]
+        log = code.split("class CommittedLog:", 1)[1].split("\ndef abi_version", 1)[0]
+        trampoline = log.split("    def _on_fragment(self, clientd, buffer, length, header):\n", 1)[1].split("    def _keep", 1)[0]
+        self.assertIn("self._handler(body, self._header, self._abi.cavalry_committed_log_entry_position(header))", trampoline)
+        self.assertLess(trampoline.index("self._header._pointer = header"),
+                        trampoline.index("cavalry_committed_log_entry_position(header)"))
+        self.assertEqual(log.count("self._abi.cavalry_committed_log_poll("), 2)  # the nested refusal and the poll itself
+        close = log.split("    def close(self):\n", 1)[1]
+        self.assertIn("if error is None or error.code != _abi.CAVALRY_ERR_POLLING:\n            self._handle = None", close)
+        # Both reports of a short end, each None unless the ABI answered true.
+        for report in ("failed_at", "withdrawn_at"):
+            body = log.split(f"    def {report}(self):\n", 1)[1].split("\n    def ", 1)[0]
+            self.assertIn(f"self._abi.cavalry_committed_log_{report}(self._handle, ctypes.byref(position))", body)
+            self.assertIn("return position.value if ", body)
+        client = code.split("class Client:", 1)[1].split("\nclass ", 1)[0]
+        self.assertIn("return CommittedLog(self._abi, handle.value, self) if handle.value else None", client)
+        for name in ("cavalry_committed_log_poll", "cavalry_committed_log_entry_position"):
+            self.assertIn(name, gen.PER_MESSAGE)
+
     def test_offer_takes_bytes_and_refuses_a_str(self):
         """`c_void_p` took a `str` as its `wchar_t` buffer, so `offer("hello")` published
         `h\\0\\0\\0e`; the binding's `c_char_p` refuses it, and every other non-bytes form,
@@ -279,6 +304,24 @@ class Package(unittest.TestCase):
             self.assertIn(delivered, message)
             self.assertIn(f"Fix the handler: its first exception, {cause!r}, is this error's __cause__", message)
             self.assertTrue(message.endswith("See clients/python/README.md#the-exception"), message)
+        # A committed log's poll names its own fault() and its entries: the fault of the
+        # log's image is reported once, so the message must not send the reader to a
+        # subscription's (clients/python/README.md, "The committed log").
+        for entries, delivered in ((1, "the entry handler raised on 1 of the 1 entry this poll delivered;"),
+                                   (3, "the entry handler raised on 1 of the 3 entries this poll delivered;"),
+                                   (-1, "before it stopped on a fault, which this CommittedLog's fault() reads until "
+                                        "its next poll and nothing reports after that, so read it and keep it "
+                                        "before polling again;")):
+            message = str(cavalry.HandlerError(entries, 1, cause, committed_log=True))
+            self.assertIn(delivered, message)
+            self.assertNotIn("Subscription", message)
+            self.assertNotIn("fragment", message)
+            self.assertIn(f"Fix the handler: its first exception, {cause!r}, is this error's __cause__", message)
+            self.assertTrue(message.endswith("See clients/python/README.md#the-exception"), message)
+        code = gen.write_python(self.header)["cavalry/__init__.py"]
+        log = code.split("class CommittedLog:", 1)[1].split("\ndef abi_version", 1)[0]
+        self.assertIn("raise HandlerError(entries, raised, pending, committed_log=True)", log)
+        self.assertIn("raise HandlerError(fragments, raised, pending)", code.split("class Subscription:", 1)[1])
         with open(os.path.join(gen.ROOT, "clients", "python", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}

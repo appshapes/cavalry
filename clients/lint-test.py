@@ -146,11 +146,14 @@ class Clients(unittest.TestCase):
         self.assertIn("raises", finding)
 
     def test_the_handlers_raise_after_the_poll_passes_and_before_it_fails(self):
+        """Both polls, the subscription's and the committed log's: the line is in each."""
         self.assertEqual(lint.findings(self.tmp), [])
-        self.edit("        self._handler = handler\n", "        self._handler = handler\n        raise RuntimeError('too early')\n")
-        [finding] = lint.findings(self.tmp)
-        self.assertIn("Subscription.poll", finding)
-        self.assertIn("raises", finding)
+        self.edit("        self._handler = handler\n", "        self._handler = handler\n        raise RuntimeError('too early')\n",
+                  count=2)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for poll in ("Subscription.poll", "CommittedLog.poll"):
+            self.assertTrue(any(poll in f and "raises" in f for f in found), found)
 
     def test_a_raise_between_polls_two_abi_calls_fails(self):
         """`poll` calls the ABI on two lines, the refused nested poll and its own; the raise
@@ -162,16 +165,30 @@ class Clients(unittest.TestCase):
         self.assertIn("Subscription.poll", finding)
         self.assertIn("raises", finding)
 
-    def test_a_raise_in_the_trampoline_fails(self):
-        self.edit("            self._keep(exc)\n", "            self._keep(exc)\n            raise\n")
+    def test_a_raise_between_the_committed_logs_two_abi_calls_fails(self):
+        """The committed log's `poll` calls the ABI on two lines as the subscription's
+        does, and the raise allowed is after the last of them."""
+        self.edit("        try:\n            entries = self._abi.cavalry_committed_log_poll(",
+                  "        raise RuntimeError('between')\n        try:\n"
+                  "            entries = self._abi.cavalry_committed_log_poll(")
         [finding] = lint.findings(self.tmp)
-        self.assertIn("Subscription._on_fragment", finding)
+        self.assertIn("CommittedLog.poll", finding)
+        self.assertIn("raises", finding)
+
+    def test_a_raise_in_the_trampoline_fails(self):
+        """Both trampolines, the subscription's and the committed log's."""
+        self.edit("            self._keep(exc)\n", "            self._keep(exc)\n            raise\n", count=2)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for trampoline in ("Subscription._on_fragment", "CommittedLog._on_fragment"):
+            self.assertTrue(any(trampoline in f for f in found), found)
 
     def test_a_raise_in_the_helper_the_trampoline_calls_fails(self):
-        self.edit("        self._raised += 1\n", "        self._raised += 1\n        raise exc\n")
-        [finding] = lint.findings(self.tmp)
-        self.assertIn("Subscription._on_fragment", finding)
-        self.assertIn("calls Subscription._keep", finding)
+        self.edit("        self._raised += 1\n", "        self._raised += 1\n        raise exc\n", count=2)
+        found = lint.findings(self.tmp)
+        self.assertEqual(len(found), 2, found)
+        for cls in ("Subscription", "CommittedLog"):
+            self.assertTrue(any(f"{cls}._on_fragment" in f and f"calls {cls}._keep" in f for f in found), found)
 
     def test_a_raise_in_set_reserved_value_fails(self):
         self.edit("    def set_reserved_value(self, value):\n",
@@ -216,7 +233,9 @@ class Clients(unittest.TestCase):
         for name in ("try_claim", "set_reserved_value", "offer", "commit", "abort", "poll", "_on_fragment", "values",
                      "session_id", "stream_id", "term_id", "term_offset", "frame_length", "flags", "type", "version",
                      "reserved_value"):
-            self.edit(f"    def {name}(self", f"    def renamed_{name}(self")
+            # The poll and its trampoline are in two classes, the subscription and the
+            # committed log.
+            self.edit(f"    def {name}(self", f"    def renamed_{name}(self", count=2 if name in ("poll", "_on_fragment") else 1)
         [finding] = lint.findings(self.tmp)
         self.assertIn("none of the per-message functions", finding)
 

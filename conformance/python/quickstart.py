@@ -653,6 +653,13 @@ def main():
         replay_sub.close()
         ipc_sub.close()
 
+        # This driver hosts no cluster member, so it has no committed log to open: None,
+        # and no error (spec/c-abi.md, version 2). The log beside a member is
+        # conformance/python/committed_log.py's round.
+        if client.committed_log(0) is not None:
+            fail("a driver that hosts no cluster member gave a committed log")
+        print("conformance/python: no committed log on a driver that hosts no cluster member")
+
     # The report, never gated: the laptop's or the runner's cost of this side of the
     # boundary (clients/python/README.md, "The runtime's side").
     p50, _ = percentile(latencies, 50, 100)
