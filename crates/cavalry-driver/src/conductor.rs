@@ -4994,7 +4994,7 @@ impl Conductor {
                     "a sync of recording {recording_id} failed, so the recording is given \
                      up at the position last synced and `recording stopped` follows; check \
                      the disk the log directory is on, and start a new recording once it \
-                     is sound; see {ERRORS_DOC}; the sync said: {error}"
+                     is sound; the sync said: {error}; see {ERRORS_DOC}"
                 ),
             ),
             SyncOutcome::AlreadyFailed => self.send_error(
@@ -13246,6 +13246,38 @@ mod replay {
         assert_eq!(successes(&events(&mut h)), vec![46]);
         assert_eq!(h.conductor.recorder.requests.len(), 0);
         drop(appender);
+    }
+
+    /// A failed sync's refusal ends with the page and section that explains it, as the
+    /// spec has every error message end (`spec/client-protocol.md`, "Events", error
+    /// message), after what the sync itself said: a client names the section once,
+    /// and the C ABI keeps it when it cuts a long message.
+    #[test]
+    fn a_failed_syncs_refusal_ends_with_its_docs_section() {
+        let mut h = Harness::new("sync-failed-message");
+        let _ = events(&mut h);
+        h.conductor.on_sync_done(
+            47,
+            3,
+            SyncOutcome::Failed("Input/output error (os error 5)".to_string()),
+        );
+        let refused = errors(&events(&mut h));
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        let (correlation_id, code, message) = &refused[0];
+        assert_eq!(
+            (*correlation_id, *code),
+            (47, ErrorCode::StorageSpace as i32)
+        );
+        assert!(
+            message.starts_with("a sync of recording 3 failed, so the recording is given up"),
+            "{message}"
+        );
+        assert!(
+            message.ends_with(&format!(
+                "; the sync said: Input/output error (os error 5); see {ERRORS_DOC}"
+            )),
+            "{message}"
+        );
     }
 
     /// A `sync recording` for a recording one of whose syncs has already failed is
