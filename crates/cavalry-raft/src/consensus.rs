@@ -29,7 +29,8 @@ use cavalry_shm::counters::generated::{
     CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED, CLUSTER_ELECTIONS_FAILED,
     CLUSTER_HIGHER_TERMS_SEEN, CLUSTER_JOIN_POSITION_MISMATCHES, CLUSTER_LEADER_HEARTBEAT_TIMEOUTS,
     CLUSTER_LEADER_QUORUM_LOSSES, CLUSTER_LEADER_STEP_DOWNS, CLUSTER_LEADERSHIP_TERMS_IGNORED,
-    CLUSTER_LOG_IMAGES_LOST, CLUSTER_TERMS_LED, CLUSTER_VOTES_AGAINST, CLUSTER_VOTES_FOR,
+    CLUSTER_LOG_IMAGES_LOST, CLUSTER_LOG_TRUNCATIONS, CLUSTER_TERMS_LED, CLUSTER_VOTES_AGAINST,
+    CLUSTER_VOTES_FOR,
 };
 
 /// The cluster session id of a session message of no session: one the leader's own
@@ -185,6 +186,18 @@ pub trait Io {
     /// image of the old one goes on (ADR 0082). The core calls it only for a member
     /// that holds a log, and not again once it returned `Ok`.
     fn remove_log(&mut self) -> Result<(), Self::Fault>;
+
+    /// Truncates the member's log to `position`, the base of a term in its leader's
+    /// log: every byte its recordings hold above the position is gone, and every term
+    /// recorded at a base above it leaves the record of terms, durably
+    /// (`spec/cluster.md`, "Messages during an election", new leadership term).
+    /// `Ok(Some(term))` once that is done, `term` the highest term the record then
+    /// holds, −1 for none, and [`Io::append_position`] is `position` from then on.
+    /// `Ok(None)` while a step is still under way: the core does nothing with the
+    /// message that asked, and the leader's next asks again. The core calls it only
+    /// for a member that is out of the log, with a position below its append position
+    /// and at or above the commit position it knows (ADR 0083).
+    fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault>;
 
     /// The member's append position: the end of the contiguous span its recordings of
     /// the log hold from position 0, as a sync has made it durable (ADR 0060). 0 for a
@@ -383,11 +396,15 @@ pub struct Counts {
     /// election on a request vote whose candidate term id or a commit position whose
     /// leadership term id was above its own term (ADR 0082).
     pub higher_terms_seen: u64,
+    /// `cluster.log_truncations`: a member that truncated its log to the base of the
+    /// term its leader's record holds next after its own, on a new leadership term:
+    /// the tail of an older term that no quorum recorded (ADR 0083).
+    pub log_truncations: u64,
 }
 
 impl Counts {
     /// How many counts a member keeps: one counter of `counters.toml` each.
-    pub const LEN: usize = 17;
+    pub const LEN: usize = 18;
 
     /// Each count with the id of its counter in `counters.toml`, the constant
     /// `cavalry-shm` generates from it: what the consensus module stores, each as a
@@ -436,6 +453,7 @@ impl Counts {
             (CLUSTER_VOTES_AGAINST, self.votes_against),
             (CLUSTER_LEADER_STEP_DOWNS, self.leader_step_downs),
             (CLUSTER_HIGHER_TERMS_SEEN, self.higher_terms_seen),
+            (CLUSTER_LOG_TRUNCATIONS, self.log_truncations),
         ]
     }
 }
@@ -939,6 +957,17 @@ impl Consensus {
                         term_base_log_position,
                     },
                 );
+                // The message is for this member's log term, and names a next term
+                // whose base is below this member's append position: the member holds
+                // a tail of its term that the leader's log does not, and truncates it
+                // first. Then it reads the message with what it holds. A member whose
+                // leader is appointed has no truncation, and fails below.
+                if action.truncate_to >= 0
+                    && self.election.is_some()
+                    && !self.truncate(action.truncate_to, clock, io)?
+                {
+                    return Ok(());
+                }
                 match action.action {
                     TermAction::Ignore => {
                         count(&mut self.counts.leadership_terms_ignored);
@@ -953,7 +982,7 @@ impl Consensus {
                         }
                         Ok(())
                     }
-                    TermAction::Replay if action.truncate_to < 0 => {
+                    TermAction::Replay if action.truncate_to < 0 || self.election.is_some() => {
                         // The term at its base, recorded before any position is
                         // reported for it; a term already in the record stays as it is.
                         if let Some((term, base)) = action.records
@@ -979,8 +1008,9 @@ impl Consensus {
                         self.step(ElectionState::FollowerReplay, clock);
                         Ok(())
                     }
-                    // A truncation, a replication, a wait or a log the leader's does
-                    // not reach: nothing this version can join with.
+                    // A replication, a wait or a log the leader's does not reach, and
+                    // where the leader is appointed a truncation: nothing this version
+                    // can join with.
                     TermAction::Replay
                     | TermAction::Replicate
                     | TermAction::Wait
@@ -1136,6 +1166,34 @@ impl Consensus {
         count(&mut self.counts.elections_failed);
         self.role = Role::Follower;
         self.enter(ElectionState::Init, clock);
+    }
+
+    /// Truncates this member's log to `position`, the base of the term its leader's
+    /// record holds next after this member's own, which a new leadership term named
+    /// (`spec/cluster.md`, "Messages during an election"; ADR 0083). Returns whether
+    /// the member goes on with that message. It does not while the truncation is under
+    /// way, and it does not when the position is below the commit position it knows:
+    /// a committed entry is never truncated, so no leader that holds what was
+    /// committed names such a base, and the member refuses and fails its election.
+    /// Once truncated, its append position is the position and its log term the
+    /// highest its record still holds, before anything is recorded or reported.
+    fn truncate<I: Io>(
+        &mut self,
+        position: i64,
+        clock: Clock,
+        io: &mut I,
+    ) -> Result<bool, I::Fault> {
+        if position < self.commit_position {
+            self.fail(clock);
+            return Ok(false);
+        }
+        let Some(log_term) = io.truncate_log(position)? else {
+            return Ok(false);
+        };
+        self.append_position = position;
+        self.log_term = log_term;
+        count(&mut self.counts.log_truncations);
+        Ok(true)
     }
 
     /// A member that elects and whose election had closed holds an election on a term
@@ -1519,7 +1577,8 @@ impl Consensus {
         self.term = term;
         self.term_base = self.append_position;
         self.leader_id = self.member_id();
-        self.log = None;
+        // No log is held here, as in `lead_elected`: an appointed leader leads once,
+        // from canvass or, alone, from init, and has added none before.
         count(&mut self.counts.terms_led);
         self.role = Role::Leader;
         self.quorate = true;

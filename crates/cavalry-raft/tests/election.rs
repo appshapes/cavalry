@@ -8,9 +8,10 @@
 //! leader committed is in the log of every leader after it, and that no two members
 //! lead one term.
 //!
-//! A member on this path has no truncation and no catch-up yet (the crate's README,
-//! "What the election does not do yet"), so the tests stop a leader when its
-//! followers are level with it, or say what the member that is not level does instead.
+//! A member on this path truncates a tail no quorum recorded, and has no replication
+//! and no catch-up yet (the crate's README, "What the election does not do yet"), so
+//! the tests stop a leader when its followers are level with it, or say what the
+//! member that is not level does instead.
 
 use cavalry_proto::cluster::quorum;
 use cavalry_raft::memory::Cluster;
@@ -451,9 +452,11 @@ fn payload_of_frame(frame: i64) -> Vec<u8> {
 /// The follower's log differs from the third leader's between the second term's base
 /// and the third's, so it must not join there. The new leadership term it reads names
 /// the second term, the next its leader's record holds after the follower's own, at
-/// that term's base. A member whose append position is above that base truncates to
-/// it, which this path does not do yet: its election fails, and it records no term at
-/// a base its log does not reach by the leader's bytes. With two members stopped and
+/// that term's base. The follower's append position is above that base, so it
+/// truncates to it, counted in `cluster.log_truncations`. It is then below the third
+/// leader's base and lacks the second term, which it would replicate (state 9), and
+/// this path does not do that yet: its election fails, and it records no term at a
+/// base its log does not reach by the leader's bytes. With two members stopped and
 /// this one not joined, the third leader has no quorum that recorded its term, and
 /// commits nothing: the cluster waits, where a leader that named its own term as the
 /// next would have counted the follower and committed over its bytes.
@@ -553,6 +556,15 @@ fn a_member_whose_tail_is_as_long_as_a_term_it_missed_does_not_join_on_it() {
         vec![(first_term, 0)],
         "it records no term at a base it does not reach by the leader's bytes"
     );
+    // It cut the entry no quorum recorded, once, and holds the log to the second
+    // term's base, byte for byte the third leader's.
+    assert_eq!(member.counts().log_truncations, 1);
+    assert_eq!(cluster.append_position(tailed), Some(second_base));
+    assert_eq!(
+        cluster.log(tailed),
+        cluster.log_to(third, second_base),
+        "what it holds is the leader's"
+    );
     // No quorum has recorded the third term, so nothing of it is committed.
     assert_eq!(
         cluster.election_state(third),
@@ -569,10 +581,12 @@ fn a_member_whose_tail_is_as_long_as_a_term_it_missed_does_not_join_on_it() {
 /// the same timeout and elect one of themselves, which commits with the other.
 ///
 /// When the cut ends the old leader canvasses to the new one and is told its term. It
-/// holds an entry the new leader's log does not, above the new term's base, and joins
-/// only by truncating it, which this step does not have: its elections fail, counted,
-/// and it stays a follower that commits nothing. What it appended while cut off is in
-/// no other member's log and is never committed.
+/// holds an entry the new leader's log does not, above the new term's base, and
+/// truncates it, counted in `cluster.log_truncations`: its log is then the new
+/// leader's up to that base, and it records the new term there. It is behind the new
+/// leader's log from there and joins only by catching up, which this step does not
+/// have: its elections fail, counted. What it appended while cut off was in no other
+/// member's log, was never committed, and is gone.
 #[test]
 fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() {
     let ids = [0, 1, 2];
@@ -655,8 +669,11 @@ fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() 
             );
         }
 
-        // The cut ends. The old leader is told the new term and cannot join it: it
-        // holds the entry no quorum recorded, above the term's base.
+        // The cut ends. The old leader is told the new term, whose base is below its
+        // append position: it truncates the entry no quorum recorded, once, and then
+        // holds the log to the new term's base and records the term there. It is
+        // behind the new leader's log by what the two appended, and joins only by
+        // catching up.
         cluster.heal(first);
         let failed = cluster.counts(first).expect("a member").elections_failed;
         safety.run(&mut cluster, 2_000);
@@ -669,9 +686,21 @@ fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() 
         );
         assert!(member.counts().elections_failed > failed, "seed {seed}");
         assert_eq!(member.counts().terms_led, 1, "seed {seed}");
+        assert_eq!(member.counts().log_truncations, 1, "seed {seed}");
         assert_eq!(
-            cluster.commit_position(first),
+            cluster.append_position(first),
             Some(committed),
+            "seed {seed}"
+        );
+        assert_eq!(cluster.log(first), before, "seed {seed}");
+        assert!(
+            !holds(&cluster.log(first), b"appended with no quorum"),
+            "seed {seed}"
+        );
+        let (terms, _) = cluster.record_of_terms(first).expect("a member");
+        assert_eq!(
+            terms,
+            vec![(first_term, 0), (first_term + 1, committed)],
             "seed {seed}"
         );
         assert_eq!(cluster.leader(), Some(second), "seed {seed}");

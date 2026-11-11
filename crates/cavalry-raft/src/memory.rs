@@ -378,6 +378,22 @@ impl Io for MemberIo<'_> {
         Ok(())
     }
 
+    fn truncate_log(&mut self, position: i64) -> Result<Option<i64>, Self::Fault> {
+        let Some(disk) = self.world.disks.get_mut(self.own) else {
+            return Ok(Some(-1));
+        };
+        // Every entry that ends above the position is gone, read or synced or
+        // neither, and every term recorded at a base above it: one step here, where
+        // a member over a driver truncates one recording and purges the ones after.
+        disk.log.retain(|entry| entry.position_after <= position);
+        disk.received = disk.received.min(position);
+        disk.synced = disk.synced.min(position);
+        disk.terms.retain(|&(_, base)| base <= position);
+        Ok(Some(
+            disk.terms.iter().map(|&(term, _)| term).max().unwrap_or(-1),
+        ))
+    }
+
     fn append_position(&mut self) -> i64 {
         self.world.disks.get(self.own).map_or(0, |disk| disk.synced)
     }

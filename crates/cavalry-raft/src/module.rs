@@ -525,6 +525,16 @@ impl Io for ClientIo {
         })
     }
 
+    /// Refused, as [`Io::remove_log`] is here: only a member that elects truncates,
+    /// and the module's member is appointed (ADR 0081, ADR 0083). The module's own,
+    /// `truncate recording`, `purge recording` and the `terms` file's
+    /// `truncate_above`, comes with the rest of its I/O for the election.
+    fn truncate_log(&mut self, _position: i64) -> Result<Option<i64>, Self::Fault> {
+        Err(RaftError::Unsupported {
+            what: "a member that truncates its log to join a leader",
+        })
+    }
+
     fn append_position(&mut self) -> i64 {
         if let Some(recording) = &self.log_recording {
             ask_sync(&mut self.client, recording, &mut self.sync_asked_at);
