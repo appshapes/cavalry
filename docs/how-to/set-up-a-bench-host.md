@@ -121,8 +121,11 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    conductor and, in the UDP rows, the sender and the receiver to: one per core, inside
    the isolated set, with the SMT siblings offline.
    The script prints the host's state, including the turbo switch and the idle states
-   the pinned CPUs may enter, how many timers are active and which interrupts a driver
-   bound itself and where, and ends with `check.sh: ok`; it fails when turbo is on or
+   the pinned CPUs may enter, how many timers are active, which interrupts a driver
+   bound itself and where, and how full `/dev/shm` is, where what killed bench
+   processes left stays until the next bench removes it at its start
+   ([Run the bench](run-the-bench.md#when-it-does-not-work)), and ends with
+   `check.sh: ok`; it fails when turbo is on or
    an idle state deeper than C1 is enabled, the two settings a host loses when the
    service or the kernel line did not apply, when one of the timers the set-up script
    masks is active, and when a driver-bound interrupt names an isolated CPU, the two
