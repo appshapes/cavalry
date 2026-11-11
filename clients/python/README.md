@@ -33,13 +33,18 @@ fragment_limit)` calls `handler(body, header, position)` for each committed entr
 order, none at or past the member's commit position, and returns the entry count;
 `position` is the entry's position in the log. `log.position()` is the position after
 the last entry delivered, the one a service keeps for its next start, and
-`log.commit_position()` the bound of the last poll. `log.is_ended` says that the member
-closed or left its log: once a poll then returns 0, close the log and open another
-from `log.position()`. `log.failed_at()` is `None` unless the driver's replay of the
-member's recording failed. `log.close()` stops the driver's replay and is idempotent;
+`log.commit_position()` the bound of the last poll. `log.is_ended` says that no poll
+will deliver another entry: stop reading when it is true, not when a poll returns 0,
+then close the log and open another from `log.position()`. Two reports say whether the
+log ended short of the entries it was owed, each `None` or a position, read once
+`log.is_ended` is true: `log.failed_at()`, where the driver's replay of the member's
+recording failed, and `log.withdrawn_at()`, where the entries begin that the log was
+not given because the driver withdrew the replay, 5 s after it ended, before the
+service had read it. The log delivered every committed entry it may read only when
+both are `None`. `log.close()` stops the driver's replay and is idempotent;
 a log closed after its client is freed, and the driver ends the replay by itself.
 `log.member_id` and `log.recording_id` say whose log it is (`spec/c-abi.md`,
-"Functions", committed log; ADR 0068).
+"Functions", committed log; ADR 0070).
 
 The handler's exceptions go where a subscription's go ("The exception"): every entry
 the ABI delivers reaches the handler, and `poll` raises `HandlerError` once the ABI has

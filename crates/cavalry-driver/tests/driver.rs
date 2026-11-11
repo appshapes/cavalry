@@ -1590,7 +1590,7 @@ fn recording_commands_get_the_spec_error_codes() {
     }
 
     // A reserved type id in Cavalry's range is code 6, as any reserved id: 0x0109, the
-    // first after version 8's `sync recording` (ADR 0067).
+    // first after version 8's `sync recording` (ADR 0069).
     let reserved = client.correlation_id();
     let mut message = [0u8; 16];
     message[..8].copy_from_slice(&client.id.to_le_bytes());

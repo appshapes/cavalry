@@ -4,8 +4,11 @@
 - **Date:** 2026-11-10
 - **Invariants affected:** 1, 2, 3, 5, 6
 - **Supersedes:** none. Amends ADR 0052, feature 3, and ADR 0060 in one clause, what
-  a service subscribes to, and `spec/cluster.md`, "The service", whose version stays
-  0: no field of a message changes.
+  a service subscribes to, and `spec/cluster.md`, whose version stays 0, since no
+  field of a message changes: "The service"; states 6 and 10 of "Roles and the
+  election", whose replays feed the consensus module's own state and no service;
+  and "The log" and "Counters", which say what a member's log is made of once the
+  member has joined the log again, and which recording the member names.
 
 ## Context
 
@@ -39,8 +42,8 @@ The durable log already gives the other path. A replay with a length of 2^63 −
 follows a live recording: it "reads up to the synced position and waits for it to
 move", and it ends at the recording's stop position when the recording stops
 (`spec/client-protocol.md`, "Commands"), which is a position a sync covered whatever
-ended the recording (ADR 0064). Every member records the log, the leader its
-publication and each follower the leader's image, at the same positions.
+ended the recording (ADR 0064, ADR 0065). Every member records the log, the leader
+its publication and each follower the leader's image, at the same positions.
 
 ## Decision
 
@@ -49,11 +52,19 @@ It reads the member's own recording of the log through a replay that follows it,
 a `cavalry:ipc` subscription of its own on stream 104, the service log stream, and it
 polls the replay's image no further than the member's commit position. The path is
 the same on the leader and on a follower, and a service may start at any time, from
-any position of an entry.
+any position of an entry that the recording its member names holds.
+
+The member's own replays of its log, states 6 and 10 of `spec/cluster.md`, leader
+replay and follower replay, feed the consensus module's own state, the open sessions
+and their ids, and no service. The page said "into its service" there, a mechanism
+nothing defines once a service reads the recording itself.
 
 The member says which recording holds its log in a counter, `cluster.log_recording_id`,
 one per member with the member id as its key like the member's other counters: −1
-until the member has a recording of the log, then the recording's id. The service's
+while the member records no live log, else the id of the recording it records the
+live log into, the leader's of its log publication or a follower's of the leader's
+image it joined last, and never the recording of a replicated or caught-up span. The
+service's
 bound is the member's `cluster.commit_position`. Two rules of order make the pair
 safe to read. A member adds `cluster.log_recording_id` and stores −1 in it before it
 adds `cluster.commit_position`, and a service reads the recording's id only of a
@@ -96,11 +107,24 @@ its bound. The second rule of order above is what makes the check enough: an id 
 is still the recording's, loaded after the commit position, says that commit position
 was stored while the member's log was that recording. The bound never falls.
 
-When the member's recording stops, because the member closed or, from card 228 on,
-left a term, the replay ends at the stop position. The service has read no further
+When the member's recording stops, because the member closed, left the log to begin
+its election again or, from card 228 on, left a term, the replay ends at the stop
+position. The service has read no further
 than the last commit position it took, `CommittedLog::is_ended()` says that the handle
 has come to its end, and the service opens the log again at its own position,
 `CommittedLog::position()`, when a member has a recording again.
+
+A member that left the log and joined it again names a new recording. An armed
+recording starts with the stream's next image, at its join position (ADR 0059), and
+a follower joins an image only at its append position (ADR 0063), so the new
+recording starts at the member's append position and holds nothing below it. A
+service whose position is that start reads on. A service whose position is below
+it is refused the replay, `start replay`'s code 23, and reports the refusal to its
+caller. The entries between are in the recording the member left, past the last
+commit position the service took. This version stops there: it names no earlier
+recording to a service, and it does not say when a service may take the entries of
+a recording its member has left as committed, which depends on what an election may
+truncate (To maintain).
 
 The C ABI's calls for this, and the five clients', come with the ABI's next version
 under an ADR of their own.
@@ -177,7 +201,11 @@ most the recorder's second behind the commit until the consensus module can ask 
 sync, which needs a command the client protocol does not have yet. Each service is
 one of the driver's 64 replays and a replay log of the recording's term length, three
 terms of 16 MiB of shared memory, and each entry is copied once from the file into
-that log by the replayer.
+that log by the replayer. A service on a member that left the log and joined it
+again reads on only if it had read to the end of the recording the member left;
+otherwise it is refused with code 23 and says so. In this version that member is a
+follower whose image was lost, or that heard nothing from its leader for the leader
+heartbeat timeout.
 
 To maintain. The reader's two counters by type and key, and the member's two rules of
 order. Card 228 decides how a reader passes from one term to the next. If a term's
@@ -187,7 +215,13 @@ recording, the id alone no longer says that the log changed under a reader, and 
 ADR gives the counter something that does. Card 228 also truncates a follower's
 uncommitted entries, which the driver refuses while a replay reads the recording
 (`spec/client-protocol.md`, code 24); the recording's stop ends this replay first, at
-the stop position. Services on one driver share stream 104 and each reads past the
+the stop position. Cards 228 and 230 also decide how a service reads a log of more
+than one recording: which recordings hold the positions below the one the member
+names, how a service finds them, when it may take their entries as committed, and so
+what it does where `start replay` answers code 23 today. A member has more than one
+recording after it joined the log again, which this version already has, after a
+later term (card 228) and after a replicated or caught-up span (card 230). Services
+on one driver share stream 104 and each reads past the
 others' replays: a subscription on one session, Aeron's `session-id` key, would end
 that, and is worth its change to the channel URI when a member hosts enough services
 for it to show in a measurement.
@@ -197,9 +231,12 @@ than one sync, or when a service needs the log sooner than its member's disk has
 
 ## References
 
-- ADR 0052, feature 3; ADR 0060; ADR 0063; ADR 0036 (a recording's counters after
-  its stop); ADR 0064 (the position a stop that failed is announced at).
-- `spec/cluster.md`, "The service" and "Counters"; `spec/log-buffer.md`, "Reading";
+- ADR 0052, feature 3; ADR 0060; ADR 0063; ADR 0059 (an armed recording starts with
+  the stream's next image); ADR 0036 (a recording's counters after
+  its stop); ADR 0064 (the position a stop that failed is announced at); ADR 0065
+  (a recording one of whose syncs failed is given up at the position last synced).
+- `spec/cluster.md`, "The service", "The log", "Counters" and states 6 and 10 of
+  "Roles and the election"; `spec/log-buffer.md`, "Reading";
   `spec/client-protocol.md`, "Commands", start replay.
 - Aeron: `Image.boundedPoll`, `BoundedLogAdapter`, `ClusteredServiceContainer`.
 - Card 227.

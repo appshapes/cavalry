@@ -6,9 +6,10 @@
 //! replayer reads the recording's catalog slot again, each once a second, several
 //! times, with messages published, recorded, replayed and read all the while, and no
 //! allocation at all. The catalog read is why this gate exists: it built the
-//! descriptor's two strings each time, an allocation a second on the replayer's
-//! thread for every such replay, which a cluster's service is (ADR 0064). Alone in its
-//! binary, so that no other test's threads are counted.
+//! descriptor's two strings each time, two allocations a second on the replayer's
+//! thread for every replay that follows a recording (ADR 0030 for the replay, ADR 0036
+//! for the catalog read once a second). Alone in its binary, so that no other test's
+//! threads are counted.
 
 use std::alloc::System;
 use std::path::{Path, PathBuf};

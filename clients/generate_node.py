@@ -190,7 +190,7 @@ def write_addon(header) -> str:
     out.append("")
     # The two polls take the C fragment handler, which no generic marshalling makes: the
     # subscription's is `poll` below and the committed log's `committedLogPoll`, each
-    # written by hand (spec/c-abi.md, version 2; ADR 0068).
+    # written by hand (spec/c-abi.md, version 2; ADR 0070).
     functions = [fn for fn in header.functions if fn.name not in HANDLER_FUNCTIONS]
     wrappers = []
     for fn in functions:
