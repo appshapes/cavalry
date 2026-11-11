@@ -572,7 +572,7 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
         log_position: 0,
         leader_member_id: 2,
     };
-    for message in [higher_canvass.clone(), request_vote(1), higher_commit] {
+    for message in [higher_canvass, request_vote(1), higher_commit] {
         let mut io = Stub::new();
         let mut leader = elector(11);
         let ms = to_closed_leader(&mut watch, &mut leader, &mut io, 1);
