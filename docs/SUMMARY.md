@@ -130,3 +130,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0080. Keep the fault that ended a committed log, and take the C ABI to version 3](decisions/0080-keep-the-fault-that-ended-a-committed-log-and-take-the-c-abi-to-version-3.md)
 - [0082. Give up the lead on a higher term or a lost quorum, and count a follower's election on a higher term](decisions/0082-give-up-the-lead-on-a-higher-term-or-a-lost-quorum.md)
 - [0083. Truncate to the next term's base, never below the commit position, and count both](decisions/0083-truncate-to-the-next-terms-base-and-never-below-the-commit-position.md)
+- [0084. Let the recorder trail a publisher it is keeping up with](decisions/0084-let-the-recorder-trail-a-publisher-it-is-keeping-up-with.md)

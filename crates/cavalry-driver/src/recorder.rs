@@ -14,6 +14,15 @@
 //! `cavalry-log`'s rule, so a failed write leaves the reader where it was. Nothing here
 //! allocates per block, locks, or logs; the syscalls are the recorder's own writes and
 //! syncs.
+//!
+//! One recording is not visited every duty cycle (ADR 0084). A block scan ends by
+//! reading the word of the first frame that is not committed, which is the cache line
+//! its publisher writes next, and a recorder that keeps up with a publisher would read
+//! it every duty cycle. So after a block that ended there the recorder leaves the
+//! recording alone for [`spec::RECORDER_TAIL_INTERVAL`]. A stop, a sync that was asked
+//! for, and the driver's close write what is committed first, within
+//! [`spec::RECORDER_REQUEST_BLOCKS`] blocks and one block's limit of bytes, so none of
+//! them leaves behind what the interval was holding back.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,7 +33,7 @@ use cavalry_log::layout::Recording;
 use cavalry_log::recorder::{RecorderError, RecordingWriter};
 use cavalry_proto::frame::FRAME_ALIGNMENT;
 use cavalry_shm::counters::Counter;
-use cavalry_shm::log::TermReader;
+use cavalry_shm::log::{LogError, TermReader};
 use cavalry_shm::spsc::{Consumer, Producer};
 
 use crate::conductor::now_nanos;
@@ -87,7 +96,8 @@ pub(crate) enum Request {
         /// roll (ADR 0031).
         bytes: Counter,
     },
-    /// Stop a recording at the position written; answered with [`Reply::Stopped`], or
+    /// Stop a recording at the position written, once what is committed has been
+    /// written (ADR 0084); answered with [`Reply::Stopped`], or
     /// [`Reply::StopIgnored`] when the recording already stopped on its own.
     Stop {
         /// The recording.
@@ -95,8 +105,9 @@ pub(crate) enum Request {
         /// The `stop recording` command's correlation id, when a command asked.
         correlation_id: Option<i64>,
     },
-    /// Sync what the recorder has written of a recording now, a `sync recording`
-    /// command's request (ADR 0069); answered with [`Reply::SyncDone`].
+    /// Write what is committed of a recording and sync what is written, now, a `sync
+    /// recording` command's request (ADR 0069, ADR 0084); answered with
+    /// [`Reply::SyncDone`].
     Sync {
         /// The recording.
         recording_id: i64,
@@ -263,6 +274,93 @@ struct Live {
     /// for one: the recording is stopped at the position written, as ADR 0025 has it,
     /// and counted here once whether or not its stop then succeeds.
     write_failed: bool,
+    /// When the recorder last wrote a block of this recording that ended at the
+    /// publisher's tail: it does not scan the recording again until
+    /// [`spec::RECORDER_TAIL_INTERVAL`] after it (ADR 0084). `i64::MIN` before the
+    /// first.
+    tail_read: i64,
+}
+
+/// What one attempt to take a block of a recording did ([`Live::take`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Taken {
+    /// No frame is committed at the position.
+    Nothing,
+    /// A block was written, and its scan ended at a frame that is not committed: the
+    /// recorder has reached its publisher, and has read the word the publisher writes
+    /// next.
+    Wrote,
+    /// A block was written, and it ended for its limit, at its term's end or at a
+    /// padding frame: more may be committed.
+    Filled,
+    /// The frame at the position is committed and fails a check of `spec/frame.md`.
+    Rejected,
+    /// The write failed; `sync_failed` says whether it was the sync of a segment the
+    /// write closed.
+    Failed,
+}
+
+impl Live {
+    /// Takes one block of at most `limit` bytes of committed frames at the position
+    /// and writes it: the position, its counter and the bytes gauge move when the
+    /// block was taken. A committed frame that fails a check of `spec/frame.md` fails
+    /// the whole scan, so the limit is halved until the block before that frame
+    /// checks, and when the frame is the next one it is [`Taken::Rejected`]
+    /// (invariant 1).
+    fn take(&mut self, limit: usize, now: i64) -> Taken {
+        let mut limit = limit;
+        let block = loop {
+            match self.reader.block(limit) {
+                Ok(block) => break block,
+                // A frame within the limit fails its check: the frames before it.
+                Err(LogError::Frame(_) | LogError::Mismatch { .. }) if limit > FRAME_ALIGNMENT => {
+                    limit = (limit / 2).max(FRAME_ALIGNMENT);
+                }
+                Err(_) => return Taken::Rejected,
+            }
+        };
+        if block.is_empty() {
+            return Taken::Nothing;
+        }
+        let reached = block.uncommitted;
+        let end = block.end();
+        let before = self.writer.position();
+        let written = self.writer.write(block.bytes, block.length, now);
+        // The block was taken exactly when the position moved, whatever `write`
+        // returned; a block not taken is scanned again next cycle.
+        let moved = self.writer.position() != before;
+        if moved {
+            // `end` is the end of a block of the reader's current term, a multiple of
+            // 32 at most the term's end, which `seek` accepts: it cannot fail without
+            // the reader and the writer disagreeing from here on.
+            let sought = self.reader.seek(end);
+            debug_assert!(sought.is_ok(), "the block's end is in the reader's term");
+            if let Some(position) = &self.position {
+                position.store_release(self.writer.position());
+            }
+            let segments = self.writer.segments_written();
+            if segments != self.segments_stored
+                && let Some(bytes) = &self.bytes
+            {
+                bytes.store_release(
+                    segments
+                        .saturating_mul(i64::from(self.writer.descriptor().segment_file_length())),
+                );
+                self.segments_stored = segments;
+            }
+        }
+        if written.is_err() {
+            // A write that failed in the sync of the segment it closed is a sync that
+            // failed.
+            self.sync_failed = self.writer.sync_failed();
+            return Taken::Failed;
+        }
+        match (moved, reached) {
+            (false, _) => Taken::Nothing,
+            (true, true) => Taken::Wrote,
+            (true, false) => Taken::Filled,
+        }
+    }
 }
 
 /// What one visit to a live recording did.
@@ -331,7 +429,7 @@ impl Recorder {
         let now = now_nanos();
         while let Some(last) = self.live.len().checked_sub(1) {
             self.flush_replies();
-            self.stop_at(last, now, None);
+            self.stop_at_tail(last, now, None);
         }
         self.flush_replies();
     }
@@ -441,6 +539,12 @@ impl Recorder {
                 recording_id,
                 correlation_id,
             } => {
+                // What is committed is written first (ADR 0084). A write that fails
+                // there stops the recording on its next visit, as one in `record`
+                // does; a frame that fails its check is met and counted there too.
+                if let Some(index) = self.index_of(recording_id) {
+                    self.write_blocks(index, now, spec::RECORDER_REQUEST_BLOCKS);
+                }
                 let outcome = self.sync_now(recording_id, now);
                 self.pending.push_back(Reply::SyncDone {
                     correlation_id,
@@ -451,19 +555,79 @@ impl Recorder {
             Request::Stop {
                 recording_id,
                 correlation_id,
-            } => match self
-                .live
-                .iter()
-                .position(|live| live.recording_id == recording_id)
-            {
+            } => match self.index_of(recording_id) {
                 Some(index) => {
-                    self.stop_at(index, now, correlation_id);
+                    self.stop_at_tail(index, now, correlation_id);
                 }
                 None => self
                     .pending
                     .push_back(Reply::StopIgnored { correlation_id }),
             },
         }
+    }
+
+    /// Where the live recording `recording_id` is in the list.
+    fn index_of(&self, recording_id: i64) -> Option<usize> {
+        self.live
+            .iter()
+            .position(|live| live.recording_id == recording_id)
+    }
+
+    /// Writes what is committed at the position of the recording at `index`, block
+    /// after block, until a scan finds no committed frame, `blocks` blocks or one
+    /// block's limit of bytes ([`spec::RECORDER_BLOCK_LIMIT`]) are written, a frame
+    /// fails its check, or a write fails: what a stop or a sync the recorder was asked
+    /// for does first, with [`spec::RECORDER_REQUEST_BLOCKS`], so that neither leaves
+    /// behind what the interval was holding back (ADR 0084). Several blocks, since a
+    /// block ends with its term and a padding frame is a block of its own; one
+    /// block's bytes, since that is what a duty cycle writes of a recording. Returns
+    /// what the last attempt did. A write that fails marks the recording, which
+    /// `record` or the stop that follows then stops; a recording so marked, or one of
+    /// whose syncs failed, is not written again (ADR 0065). When the last scan reached
+    /// the publisher the interval starts, as it does in `record`.
+    pub(crate) fn write_blocks(&mut self, index: usize, now: i64, blocks: usize) -> Taken {
+        let live = &mut self.live[index];
+        if live.sync_failed || live.write_failed {
+            return Taken::Nothing;
+        }
+        let from = live.writer.position();
+        let limit = i64::try_from(spec::RECORDER_BLOCK_LIMIT).unwrap_or(i64::MAX);
+        let mut last = Taken::Nothing;
+        for _ in 0..blocks {
+            let written = live.writer.position().saturating_sub(from);
+            let Some(left) = usize::try_from(limit.saturating_sub(written))
+                .ok()
+                .filter(|left| *left > 0)
+            else {
+                break;
+            };
+            last = live.take(left, now);
+            match last {
+                Taken::Wrote | Taken::Filled => {}
+                Taken::Nothing | Taken::Rejected => break,
+                Taken::Failed => {
+                    live.write_failed = true;
+                    break;
+                }
+            }
+        }
+        // The last scan read the word at the publisher's tail, and something was
+        // written: the recorder has just been where the interval keeps it from.
+        if live.writer.position() != from && matches!(last, Taken::Wrote | Taken::Nothing) {
+            live.tail_read = now;
+        }
+        last
+    }
+
+    /// A stop of the recording at `index` that first writes what is committed
+    /// ([`Recorder::write_blocks`]): a `stop recording`, and the driver's close. A
+    /// frame that fails its check there is counted here, since the recording is not
+    /// visited again.
+    fn stop_at_tail(&mut self, index: usize, now: i64, correlation_id: Option<i64>) -> Step {
+        if self.write_blocks(index, now, spec::RECORDER_REQUEST_BLOCKS) == Taken::Rejected {
+            self.rejected_frame.increment();
+        }
+        self.stop_at(index, now, correlation_id)
     }
 
     /// A `sync recording` request (ADR 0069): syncs what is written of the live
@@ -542,6 +706,7 @@ impl Recorder {
                     writer,
                     position: None,
                     synced: None,
+                    tail_read: i64::MIN,
                 });
                 self.pending.push_back(Reply::Ready {
                     publication_id,
@@ -568,75 +733,56 @@ impl Recorder {
     /// waits too, and is neither written nor synced again while it does.
     fn record(&mut self, index: usize, now: i64, may_stop: bool) -> Step {
         let live = &mut self.live[index];
-        if live.sync_failed {
+        // A sync that failed, or a write that failed while a `sync recording` was
+        // served: the recording is given up, or stopped, once there is room for the
+        // reply.
+        if live.sync_failed || live.write_failed {
             if !may_stop {
                 return Step::Idle;
             }
             return self.stop_at(index, now, None);
         }
         let mut worked = false;
-        // A committed frame that fails a check of spec/frame.md fails the whole scan,
-        // so the frames before it are taken one at a time until it is the next frame;
-        // then it is counted as a subscriber's report is, and the recording ends at the
-        // last frame that checked (invariant 1).
-        let block = match live.reader.block(spec::RECORDER_BLOCK_LIMIT) {
-            Ok(block) => block,
-            Err(_) => match live.reader.block(FRAME_ALIGNMENT) {
-                Ok(block) => block,
-                Err(_) => {
+        // ADR 0084. A scan reads the word at the publisher's tail, the cache line the
+        // publisher writes next, so after a block that ended there the recorder leaves
+        // the recording alone for `RECORDER_TAIL_INTERVAL`. A block that ended for its
+        // limit, its term or a padding frame did not reach the tail, and an empty
+        // scan wrote nothing: neither starts the interval. The clock is the wall's, so a difference below zero, a
+        // clock set back, counts as the interval passed.
+        let since = now.saturating_sub(live.tail_read);
+        if !(0..spec::RECORDER_TAIL_INTERVAL).contains(&since) {
+            match live.take(spec::RECORDER_BLOCK_LIMIT, now) {
+                Taken::Wrote => {
+                    live.tail_read = now;
+                    worked = true;
+                }
+                Taken::Filled => worked = true,
+                Taken::Nothing => {
+                    if live.reader.is_end_of_stream() {
+                        if !may_stop {
+                            return Step::Idle;
+                        }
+                        return self.stop_at(index, now, None);
+                    }
+                }
+                // The frame is counted as a subscriber's report is, and the recording
+                // ends at the last frame that checked (invariant 1).
+                Taken::Rejected => {
                     if !may_stop {
                         return Step::Idle;
                     }
                     self.rejected_frame.increment();
                     return self.stop_at(index, now, None);
                 }
-            },
-        };
-        if block.is_empty() {
-            if live.reader.is_end_of_stream() {
-                if !may_stop {
-                    return Step::Idle;
+                // A write that failed is tried again next cycle when there is no room
+                // for the stop's reply now.
+                Taken::Failed => {
+                    if !may_stop {
+                        return Step::Idle;
+                    }
+                    live.write_failed = true;
+                    return self.stop_at(index, now, None);
                 }
-                return self.stop_at(index, now, None);
-            }
-        } else {
-            let end = block.end();
-            let before = live.writer.position();
-            let written = live.writer.write(block.bytes, block.length, now);
-            // The block was taken exactly when the position moved, whatever `write`
-            // returned; a block not taken is scanned again next cycle.
-            if live.writer.position() != before {
-                // `end` is the end of a block of the reader's current term, a multiple
-                // of 32 at most the term's end, which `seek` accepts: it cannot fail
-                // without the reader and the writer disagreeing from here on.
-                let sought = live.reader.seek(end);
-                debug_assert!(sought.is_ok(), "the block's end is in the reader's term");
-                if let Some(position) = &live.position {
-                    position.store_release(live.writer.position());
-                }
-                let segments = live.writer.segments_written();
-                if segments != live.segments_stored
-                    && let Some(bytes) = &live.bytes
-                {
-                    bytes.store_release(
-                        segments.saturating_mul(i64::from(
-                            live.writer.descriptor().segment_file_length(),
-                        )),
-                    );
-                    live.segments_stored = segments;
-                }
-                worked = true;
-            }
-            if written.is_err() {
-                // A write that failed in the sync of the segment it closed is a sync
-                // that failed; any other is tried again next cycle when there is no
-                // room for the stop's reply now.
-                live.sync_failed = live.writer.sync_failed();
-                if !may_stop {
-                    return Step::Idle;
-                }
-                live.write_failed = true;
-                return self.stop_at(index, now, None);
             }
         }
         match live.writer.sync(now) {
