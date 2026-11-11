@@ -27,7 +27,8 @@ shared runner is
    just bench
    ```
 
-   It builds `cavalry-bench` in release, creates a log buffer and a counters file under
+   It builds `cavalry-bench` in release, removes what bench processes that were killed
+   left behind, creates a log buffer and a counters file under
    `/dev/shm` on Linux and the system's temporary directory elsewhere, and runs the
    benchmarks for one million messages each after a warm-up; CI runs five million. The
    warm-up is one rotation through all three terms, 196,608 messages for the default
@@ -874,6 +875,20 @@ shared runner is
 - The harness refuses to start: it needs to create files under `/dev/shm` or the
   system's temporary directory and at least two cores; the error names what it could
   not do.
+- `cavalry-bench: removed N entries under /dev/shm that bench processes no longer
+  running left`, before the table: not a failure. Each row keeps its files in
+  `/dev/shm/cavalry-bench-<pid>-<benchmark>`, with a `.log` and a `.probe` directory
+  beside it for some rows, and removes them when it ends, passed or failed. A process
+  that is killed first, a CI job cancelled by a newer push or stopped at its timeout,
+  or a run stopped with Ctrl-C, leaves them, and on `/dev/shm` they are memory. So
+  every run begins by removing the entries whose process no longer runs. An entry of a
+  running process is never removed, so two runs on one host do not disturb each other.
+- The same line ending `N more are another user's and were left`: the entries belong
+  to a process that has ended and to a user this run is not, the CI runner's when the
+  run is by hand. The next run as that user removes them. To remove them now, as that
+  user, for a process id that `ps -p <pid>` no longer finds:
+  `rm -r /dev/shm/cavalry-bench-<pid>-*`. `bench/host/check.sh` prints how full
+  `/dev/shm` is and how many such entries it holds.
 - `the recorded_purging benchmark failed: the purge removed no file of the pile in 60 s`:
   the replayer admitted the purge but removed nothing in a minute. Listing the largest
   pile takes the replayer a few seconds and no more; a replayer that removes nothing in

@@ -2044,3 +2044,10 @@ user-visible change, added in the same commit as the change. The format follows
   purge outlasted it, and the rows are reported until a baseline holds them. The client
   rows' log directory now sits beside the bench directory, as `cavalry-client`'s
   doctest places it ([Run the bench](docs/how-to/run-the-bench.md); card 177).
+- `just bench` removes, before its first row, the directories that bench processes
+  killed before their end left under `/dev/shm`, and says how many: a CI job cancelled
+  by a newer push left its rows' files there, 11 G on one gate host and nearly half
+  of the other's `/dev/shm`, and nothing removed them. An entry of a process that
+  still runs is never removed. `bench/host/check.sh` prints how full `/dev/shm` is
+  and how many such entries it holds
+  ([Run the bench](docs/how-to/run-the-bench.md#when-it-does-not-work); card 251).
