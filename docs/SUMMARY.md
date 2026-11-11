@@ -133,3 +133,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0085. Serve a replication from the leader's core, one replay a member, to the endpoint the members string names](decisions/0085-serve-a-replication-from-the-leaders-core-to-the-endpoint-the-members-string-names.md)
 - [0086. Record a term when its replication begins, and check each replay's image against the position last sent](decisions/0086-record-a-term-when-its-replication-begins-and-check-each-replays-image-against-the-position-last-sent.md)
 - [0087. Serve a catch-up from the leader's core, and stop it at the leader's own append position](decisions/0087-serve-a-catch-up-from-the-leaders-core-and-stop-it-at-the-leaders-own-append-position.md)
+- [0088. Catch up within a leader's term, and join the live log from the replay](decisions/0088-catch-up-within-a-leaders-term-and-join-the-live-log-from-the-replay.md)
