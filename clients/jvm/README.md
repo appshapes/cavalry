@@ -125,12 +125,12 @@ entry, and the service decides after each.
   raises there, an `OutOfMemoryError` as the body's segment is made, ends the process.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
   returns, so `close()` forgets the handle once the ABI's close has returned. The one
-  exception is a subscription's close from inside a handler of its own poll, which the
-  ABI refuses with `Abi.ERR_POLLING`, leaving the subscription open (`spec/c-abi.md`,
-  "Calls during a claim or a poll"). `close()` then throws `CavalryException` and keeps
-  the handle, so the subscription can be polled and closed after the poll. A call
-  after a close hands the ABI a null handle, as the Python and Go clients do, and the
-  ABI refuses it with `Abi.ERR_NULL`: a poll answers -1, a claim
+  exception is a subscription's or a committed log's close from inside a handler of its
+  own poll, which the ABI refuses with `Abi.ERR_POLLING`, leaving it open
+  (`spec/c-abi.md`, "Calls during a claim or a poll"). `close()` then throws
+  `CavalryException` and keeps the handle, so it can be polled and closed after the
+  poll. A call after a close hands the ABI a null handle, as the Python and Go clients
+  do, and the ABI refuses it with `Abi.ERR_NULL`: a poll answers -1, a claim
   `PUBLICATION_ERROR`, never a delivery and never a frame.
 - Never read a refusal as an answer. A `poll` from inside a handler of the same
   subscription returns −1 with `Abi.ERR_POLLING`, and the poll in progress goes on. A
