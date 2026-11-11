@@ -28,7 +28,9 @@ first one. Why the loop is built this way is in ADR 0004
      agent's commit messages and ending with `Closes #<issue>`;
    - a `dispatch review` run on the pull request starts a `review pr` run, listed on
      the Actions tab rather than among the pull request's checks because it runs on
-     `master`, which either approves or requests changes;
+     `master`, which either approves or requests changes. The reviewer starts when CI
+     does and does not wait for it: a check that has failed by then is a blocker, and
+     the review names the checks that had not finished;
    - on requested changes, a second `claude` run applies the blockers on the same
      branch, one commit per blocker, pushed as each lands; when it ends, the run
      approves the `ci` run GitHub held on its last push, deletes the runs held on its
@@ -39,7 +41,9 @@ first one. Why the loop is built this way is in ADR 0004
      times;
    - with `auto-merge`, an `auto merge` run arms the merge on the approval, and the
      pull request merges as one squash commit when `gates (linux)`, `gates (macos)`,
-     `bench (linux)` and `bench (grip)` pass, and the issue closes. For a change no
+     `bench (linux)`, `bench (grip)` and `bench (udp)` pass, and the issue closes, so
+     an approval given while a check still runs merges nothing that check would stop.
+     For a change no
      file of which can move the bench, a page or an ADR, the bench checks pass in
      seconds without their hosts
      ([ADR 0071](../decisions/0071-run-the-bench-jobs-only-for-a-change-that-can-move-the-bench.md)). A push after the
