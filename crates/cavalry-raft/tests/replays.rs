@@ -408,6 +408,60 @@ fn a_start_that_fails_is_tried_again_when_the_member_reports() {
     assert_eq!(leader.counts().log_replications, 2);
 }
 
+/// A replay's fault costs the leader nothing else. The leader looks after its replays
+/// after its state's own work, so in a cycle where a start faults its heartbeat has
+/// already left, its new leadership term and its commit position to both members, and
+/// the fault is returned from the cycle. A fault that lasts does not keep the leader
+/// from watching its quorum: when both members have been silent for the leader
+/// heartbeat timeout it holds its election, a follower, and serves nobody.
+#[test]
+fn a_replay_that_faults_costs_the_leader_no_heartbeat_and_no_watch_of_its_quorum() {
+    let (mut leader, mut io, ms) = leader();
+    io.fail_start = true;
+    assert_eq!(
+        leader.on_message(at(ms), &catchup_position(2, 2, 32), &mut io),
+        Err("the replay cannot be started")
+    );
+    // The member reports the position it asked from, so every cycle tries the start.
+    read(&mut leader, &mut io, ms, &replicated_to(2, 0, 32));
+    for cycle in [ms + 300, ms + 600] {
+        io.clear();
+        assert_eq!(
+            leader.do_work(at(cycle), &mut io),
+            Err("the replay cannot be started")
+        );
+        for member in [1, 2] {
+            for template in [Template::NewLeadershipTerm, Template::CommitPosition] {
+                assert_eq!(
+                    io.count(|call| *call
+                        == Call::Send {
+                            to: member,
+                            template
+                        }),
+                    1,
+                    "{template:?} to member {member} at {cycle}"
+                );
+            }
+        }
+        let heartbeat = io
+            .calls
+            .iter()
+            .rposition(|call| matches!(call, Some(Call::Send { .. })))
+            .expect("the heartbeat");
+        let start = io
+            .first(|call| matches!(call, Call::StartReplay(..)))
+            .expect("the start");
+        assert!(heartbeat < start, "the state's work comes first");
+    }
+    assert_eq!(leader.counts().log_replications, 0);
+
+    // Nothing from either member for the leader heartbeat timeout.
+    assert_eq!(leader.do_work(at(ms + 10_001), &mut io), Ok(1));
+    assert_eq!(leader.election_state(), ElectionState::Init);
+    assert_eq!(leader.role(), Role::Follower);
+    assert_eq!(leader.counts().leader_quorum_losses, 1);
+}
+
 /// A leader that holds an election serves no member from init on. Here its active
 /// members fall below a quorum in leader log replication, and it begins again: in
 /// init it gives its log up, stops the replay it ran, and forgets the one it owed. A

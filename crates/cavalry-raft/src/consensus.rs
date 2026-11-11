@@ -245,8 +245,13 @@ pub trait Io {
     /// `position`, purged by retention: nothing is started. `Ok(true)` once the
     /// replay is asked for: it runs from then until [`Io::replay_stopped`] says how
     /// it ended, and how any earlier replay to the member ended is forgotten. The
-    /// core calls it for a member with no replay running, and holds at most one
-    /// replay a member (ADR 0085).
+    /// core holds at most one replay a member (ADR 0085), and calls this for a member
+    /// it holds none for. One case is the I/O's to order: a member that led, asked a
+    /// replay to stop and held an election does not wait in init for that replay to
+    /// have stopped, and may lead again and call this for the same member while the
+    /// driver's `replay stopped` is still to come. The I/O then starts the new
+    /// replay once the old one has stopped, as the page has a leader keep a request
+    /// that arrives in that window.
     fn start_replay(&mut self, member: i32, position: i64, end: i64) -> Result<bool, Self::Fault>;
 
     /// Asks the replay running to `member` to stop, the driver's `stop replay`. The
@@ -635,9 +640,11 @@ enum Serving {
     /// The leader asked the replay to stop and waits for it to have stopped. `next`
     /// is the newest request the member has sent since: its position, and its end.
     Stopping { next: Option<(i64, i64)> },
-    /// The last replay ended by itself at `position`, a recording's end below `end`:
-    /// the next begins there once the member's reported append position has reached
-    /// it, so that the member's image of it joins at its append position.
+    /// A replay is owed from `position`, and begins once the member's reported
+    /// append position has reached it, so that the member's image of it joins at its
+    /// append position. Either the last replay ended by itself there, at a
+    /// recording's end below `end`, or the member asked from there and the start
+    /// faulted: the request is kept this way until a start succeeds.
     Next { position: i64, end: i64 },
 }
 
@@ -852,14 +859,7 @@ impl Consensus {
     /// it did, 0 for nothing, so that the caller's idle strategy can back off.
     pub fn do_work<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         self.append_position = self.append_position.max(io.append_position());
-        // A leader that elects looks after the replays it serves, in whichever of its
-        // states it is: one that ended, one it stopped, one that is due.
-        let served = if self.role == Role::Leader && self.election.is_some() {
-            self.serve_replays(io)?
-        } else {
-            0
-        };
-        let work = match self.state {
+        let stepped = match self.state {
             ElectionState::Init => self.init(clock, io),
             ElectionState::Canvass => self.canvass(clock, io),
             ElectionState::Nominate => self.nominate(clock, io),
@@ -877,8 +877,19 @@ impl Consensus {
                 Role::Leader => Ok(self.commit(clock, io)),
                 Role::Follower | Role::Candidate => self.follow(clock, io),
             },
-        }?;
-        Ok(work.max(served))
+        };
+        // A leader that elects looks after the replays it serves, in whichever of its
+        // states it is: one that ended, one it stopped, one that is due. It does so
+        // after its state's own work, so that a fault of a replay costs the cycle no
+        // heartbeat, no commit position and no watch of the quorum: the fault is
+        // returned once both have run, the state's own first.
+        let served = if self.role == Role::Leader && self.election.is_some() {
+            self.serve_replays(io)
+        } else {
+            Ok(0)
+        };
+        let work = stepped?;
+        Ok(work.max(served?))
     }
 
     /// One message of the consensus stream, read at `clock`. A member in init reads

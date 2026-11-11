@@ -89,7 +89,15 @@ own timer counts it, in the member's half.
 **Init stops every replay.** A leader that holds an election stops each replay it
 runs, in init, where it gives its log up (ADR 0082). It asks no more about one it
 had already asked to stop, and drops what it owed. A stop that fails is a fault:
-the member stays in init and the next cycle stops the replay again.
+the member stays in init and the next cycle stops the replay again. Init does not
+wait for a stopped replay's `replay stopped`. A member that leads again and is
+asked by the same follower before that event has come calls `start_replay` for it,
+and the I/O starts the new replay once the old one has stopped.
+
+**A replay's fault costs the leader nothing else.** The leader looks after its
+replays after its state's own work in a duty cycle. A `start_replay` or a
+`replay_stopped` that faults is returned from the cycle once the heartbeat, the
+commit position and the quorum's watch have run.
 
 **What does not serve yet.** The in-memory cluster's `start_replay` says `false`,
 as a leader whose recordings were purged does. Its replays come with the member's
@@ -122,7 +130,7 @@ appointed and its core never calls them.
 
 ## Evidence
 
-- `crates/cavalry-raft/tests/replays.rs`, twelve tests on one core through an `Io`
+- `crates/cavalry-raft/tests/replays.rs`, thirteen tests on one core through an `Io`
   that remembers what it was asked. The leader is member 0 of three, leading term 2
   from 96 over a record of terms (0, 0), (1, 64), (2, 96).
   - A position inside a term is replayed to that term's end, and one at a term's
@@ -146,6 +154,10 @@ appointed and its core never calls them.
   - A stop that fails is returned from the call and asked again.
   - A start that fails is returned, and the request is started on a later cycle
     once the member has reported its position, after a stop too.
+  - A start that fails in every cycle is returned from every cycle, after the
+    leader's heartbeat, its new leadership term and its commit position, has gone
+    to both members; and a leader whose members fall silent meanwhile still holds
+    its election.
   - A leader whose active members fall below a quorum stops its replay in init,
     again after a stop that failed, and serves nobody as a follower.
 - `crates/cavalry-raft/tests/next_term.rs` passes on the leader the new tests use,
@@ -158,6 +170,10 @@ appointed and its core never calls them.
 - `Io` has four more operations, sixteen. The module's I/O for the election
   implements the three of a replay over `start replay`, `stop replay` and the
   `replay stopped` event, and keeps the event until the core has asked for it once.
+  A fault that lasts, a `start replay` the driver refuses for a full registry or a
+  `catchup` host that does not resolve, is returned from every duty cycle of the
+  leader while the replay is owed. The module's `do_work` returns a fault before it
+  stores its counters, which is the module's to change when it serves replays.
 - `Counts` has twenty counts, and a member's module adds twenty client counters;
   nine of them stay 0 while the module's leader is appointed.
 - A replication whose follower's members string names another `catchup` endpoint
