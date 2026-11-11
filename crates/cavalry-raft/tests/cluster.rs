@@ -14,13 +14,14 @@ use std::time::{Duration, Instant};
 use cavalry_client::{Cavalry, ClientError, CommittedLog};
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
-use cavalry_proto::cluster::{Message, Stream};
+use cavalry_proto::cluster::{Message, SERVICE_LOG_STREAM_ID, Stream};
 use cavalry_raft::{ConsensusModule, ElectionState, NO_SESSION, RaftError, Refused, Role};
 use cavalry_shm::counters::CountersReader;
 use cavalry_shm::counters::generated::{
     CLUSTER_APPEND_POSITION, CLUSTER_COMMIT_POSITION, CLUSTER_ELECTION_STATE,
     CLUSTER_ELECTION_STEPS, CLUSTER_ELECTIONS, CLUSTER_ELECTIONS_CLOSED,
     CLUSTER_LEADERSHIP_TERM_ID, CLUSTER_LOG_RECORDING_ID, CLUSTER_ROLE, CLUSTER_TERMS_LED,
+    SUBSCRIPTION_POSITION,
 };
 
 struct TestDir(PathBuf);
@@ -916,6 +917,116 @@ fn has_member_counter(counters: &CountersReader, member_id: i32, type_id: i32) -
     })
 }
 
+/// A service on follower 2 whose handle has taken its bound, the commit position of
+/// [`BEHIND_ENTRIES`] entries and the term's first, and has read at most one entry
+/// under it: where the two tests below begin.
+struct BehindItsBound {
+    members: Vec<Member>,
+    client: Cavalry,
+    log: CommittedLog,
+    read: Read,
+    /// The bound the handle took: the position after the last entry.
+    end: i64,
+}
+
+/// The entries committed before [`BehindItsBound`]'s service reads any.
+const BEHIND_ENTRIES: i64 = 1000;
+
+impl BehindItsBound {
+    fn start(dir: &Path) -> Self {
+        let members_string = members_string();
+        let mut members = start(dir, &members_string);
+        run_until(&mut members, "every election closed", |members| {
+            members
+                .iter()
+                .all(|m| m.module.election_state() == ElectionState::Closed)
+        });
+        let mut client =
+            Cavalry::connect_to(&members[2].dir).expect("the service's client connects");
+        let mut opened = None;
+        run_until(&mut members, "the service opened its log", |_| {
+            if opened.is_none() {
+                opened = client.committed_log(0).expect("the driver answers");
+            }
+            opened.is_some()
+        });
+        let mut log = opened.expect("the member has its log");
+
+        // The entries, committed on every member, before the service reads any.
+        // Every member's append position is the end too, so the follower's recording
+        // holds them all; the replay plays them as its recorder syncs them, and flow
+        // control lets it run a window ahead of a service that has read one entry.
+        offer_entries(&mut members, BEHIND_ENTRIES);
+        let end = 96 + BEHIND_ENTRIES * 96;
+        run_until(
+            &mut members,
+            "every member committed and appended every entry",
+            |members| {
+                members
+                    .iter()
+                    .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
+            },
+        );
+
+        // The service takes the member's commit position as its bound and reads at
+        // most one entry under it.
+        let mut read = Read::new();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while log.commit_position() < end {
+            assert!(
+                Instant::now() < deadline,
+                "the service took its bound: {log:?}"
+            );
+            poll_log_at_most(&mut log, &mut read, 1);
+        }
+        assert_eq!(log.commit_position(), end);
+        assert!(log.position() <= 96, "{log:?}");
+        assert!(!log.is_ended());
+        Self {
+            members,
+            client,
+            log,
+            read,
+            end,
+        }
+    }
+
+    /// Follower 2's consensus module closes, and the driver frees its counters.
+    /// Returns its driver, still running, and the driver's directory.
+    fn close_follower(&mut self) -> (Driver, PathBuf) {
+        let Member {
+            driver,
+            module,
+            dir: driver_dir,
+            ..
+        } = self.members.remove(2);
+        module.close().expect("the member closes");
+        let counters = CountersReader::open(&driver_dir).expect("the counters file opens");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while has_member_counter(&counters, 2, CLUSTER_COMMIT_POSITION.0) {
+            assert!(Instant::now() < deadline, "the member's counters went");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        (driver, driver_dir)
+    }
+
+    fn close(self, driver: Driver) {
+        let Self {
+            members,
+            mut client,
+            log,
+            ..
+        } = self;
+        log.close(&mut client).expect("the log closes");
+        client.close().expect("the client closes");
+        driver.close().expect("the driver closes");
+        for member in members {
+            member.module.close().expect("the member closes");
+            member.driver.close().expect("the driver closes");
+        }
+    }
+}
+
 /// A service whose member's consensus module closes while entries below the bound the
 /// service took are still to be read (`spec/cluster.md`, "The service"). The handle
 /// stops taking the member's commit position at the first poll after the member's
@@ -928,97 +1039,124 @@ fn has_member_counter(counters: &CountersReader, member_id: i32, type_id: i32) -
 #[test]
 fn a_service_is_ended_only_once_it_has_read_every_entry_below_its_bound() {
     let dir = TestDir::new("service-ended");
-    let members_string = members_string();
-    let mut members = start(dir.path(), &members_string);
-    run_until(&mut members, "every election closed", |members| {
-        members
-            .iter()
-            .all(|m| m.module.election_state() == ElectionState::Closed)
-    });
-    let mut client = Cavalry::connect_to(&members[2].dir).expect("the service's client connects");
-    let mut opened = None;
-    run_until(&mut members, "the service opened its log", |_| {
-        if opened.is_none() {
-            opened = client.committed_log(0).expect("the driver answers");
-        }
-        opened.is_some()
-    });
-    let mut log = opened.expect("the member has its log");
-
-    // A thousand entries, committed and synced on every member, before the service
-    // reads any.
-    const ENTRIES: i64 = 1000;
-    offer_entries(&mut members, ENTRIES);
-    let end = 96 + ENTRIES * 96;
-    run_until(
-        &mut members,
-        "every member committed every entry",
-        |members| {
-            members
-                .iter()
-                .all(|m| m.module.commit_position() == end && m.module.append_position() == end)
-        },
-    );
-
-    // The service takes the member's commit position as its bound and reads at most
-    // one entry under it.
-    let mut read = Read::new();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while log.commit_position() < end {
-        assert!(
-            Instant::now() < deadline,
-            "the service took its bound: {log:?}"
-        );
-        poll_log_at_most(&mut log, &mut read, 1);
-    }
-    assert_eq!(log.commit_position(), end);
-    assert!(log.position() <= 96, "{log:?}");
-    assert!(!log.is_ended());
-
-    // The member's consensus module closes, and the driver frees its counters.
-    let Member {
-        driver,
-        module,
-        dir: driver_dir,
-        ..
-    } = members.remove(2);
-    module.close().expect("the member closes");
-    let counters = CountersReader::open(&driver_dir).expect("the counters file opens");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while has_member_counter(&counters, 2, CLUSTER_COMMIT_POSITION.0) {
-        assert!(Instant::now() < deadline, "the member's counters went");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    let mut service = BehindItsBound::start(dir.path());
+    let (driver, _) = service.close_follower();
 
     // The next poll finds the counter gone and keeps the bound it took. The handle
     // ends only once it has delivered every entry below that bound, and delivers
     // nothing after.
+    let BehindItsBound { log, read, end, .. } = &mut service;
+    let end = *end;
     let deadline = Instant::now() + Duration::from_secs(30);
     while !log.is_ended() {
         assert!(
             Instant::now() < deadline,
             "the service's log ended: {log:?}"
         );
-        poll_log(&mut log, &mut read);
+        poll_log(log, read);
     }
     assert_eq!(
         (log.position(), log.commit_position()),
         (end, end),
         "an ended handle has delivered every entry below its bound"
     );
-    assert_eq!(poll_log(&mut log, &mut read), 0);
-    assert_eq!(read.len(), usize::try_from(ENTRIES).expect("a count") + 1);
+    assert_eq!(log.withdrawn_at(), None, "{log:?}");
+    assert_eq!(log.failed_at(), None, "{log:?}");
+    assert_eq!(poll_log(log, read), 0);
+    assert_eq!(
+        read.len(),
+        usize::try_from(BEHIND_ENTRIES).expect("a count") + 1
+    );
     for (index, (position, _)) in read.iter().enumerate() {
         assert_eq!(*position, 96 * i64::try_from(index).expect("an index"));
     }
-    log.close(&mut client).expect("the log closes");
-    client.close().expect("the client closes");
-    driver.close().expect("the driver closes");
+    service.close(driver);
+}
 
-    for member in members {
-        member.module.close().expect("the member closes");
-        member.driver.close().expect("the driver closes");
+/// Whether `counters` holds a `subscription.position` counter of an image on
+/// `stream_id`: the key is the publication's registration id, eight bytes, its session
+/// id, four, and the stream id, four (`counters.toml`).
+fn has_image_on_stream(counters: &CountersReader, stream_id: i32) -> bool {
+    (0..counters.capacity()).any(|id| {
+        matches!(
+            counters.record(id),
+            Ok(Some(record)) if record.type_id() == SUBSCRIPTION_POSITION.0
+                && record.key().get(12..16) == Some(&stream_id.to_le_bytes()[..])
+        )
+    })
+}
+
+/// A service that does not poll for longer than the publication linger, 5 s, after its
+/// member's consensus module closes, with entries below its bound unread. The member's
+/// recording stops, the replay ends at the stop, and the driver withdraws the replay's
+/// image once the linger has passed, read or not (`spec/client-protocol.md`,
+/// "Events"). The handle is ended, short of its bound, and it says so:
+/// `withdrawn_at` is where the entries it was not given begin, which is where the
+/// service had read to, so that a service is never told it read what it did not.
+#[test]
+fn a_service_whose_image_was_withdrawn_unread_is_told_where_its_entries_stop() {
+    let dir = TestDir::new("service-withdrawn");
+    let mut service = BehindItsBound::start(dir.path());
+    let closed = Instant::now();
+    let (driver, driver_dir) = service.close_follower();
+
+    // The service does not poll. The driver withdraws the image the linger after the
+    // replay's end, and frees the image's `subscription.position` counter as it sends
+    // `unavailable image`.
+    let counters = CountersReader::open(&driver_dir).expect("the counters file opens");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while has_image_on_stream(&counters, SERVICE_LOG_STREAM_ID) {
+        assert!(
+            Instant::now() < deadline,
+            "the driver withdrew the replay's image"
+        );
+        std::thread::sleep(Duration::from_millis(10));
     }
+    assert!(
+        closed.elapsed() >= Duration::from_secs(5),
+        "the image went at the linger's end, not at its end of stream: {:?}",
+        closed.elapsed()
+    );
+    // The client's conductor hands the event to the subscription on its next duty
+    // cycle; a poll before that would read on from the image's log, which the client
+    // still maps, so the service waits a little longer before it polls again.
+    std::thread::sleep(Duration::from_millis(200));
+
+    // The polls apply the withdrawal: the handle is ended short of its bound, says
+    // where, and delivers nothing more.
+    let BehindItsBound { log, read, end, .. } = &mut service;
+    let end = *end;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !log.is_ended() {
+        assert!(
+            Instant::now() < deadline,
+            "the service's log ended: {log:?}"
+        );
+        poll_log_at_most(log, read, 1);
+    }
+    let position = log.position();
+    assert!(position < end, "{log:?}");
+    assert_eq!(log.commit_position(), end);
+    assert_eq!(
+        log.withdrawn_at(),
+        Some(position),
+        "an ended handle short of its bound says where: {log:?}"
+    );
+    assert_eq!(log.failed_at(), None, "{log:?}");
+    assert_eq!(poll_log(log, read), 0);
+    assert_eq!(log.withdrawn_at(), Some(position));
+    assert_eq!(
+        i64::try_from(read.len()).expect("a count") * 96,
+        position,
+        "every entry below the position was delivered, and none past it"
+    );
+    for (index, (entry_position, _)) in read.iter().enumerate() {
+        assert_eq!(
+            *entry_position,
+            96 * i64::try_from(index).expect("an index")
+        );
+    }
+    service.close(driver);
 }
 
 /// A service beside a follower that left the log and joined it again

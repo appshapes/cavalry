@@ -2013,11 +2013,13 @@ user-visible change, added in the same commit as the change. The format follows
   client's driver, or returns `None` while the driver has no member with a log, and
   `CommittedLog::poll(handler, fragment_limit)` hands over every committed entry, in
   order, each once, with its position; `position()` is where to open the log again,
-  `commit_position()` the bound of the last read, and `is_ended()` says that the
-  member closed or left its log and that every entry below the last bound has been
-  delivered, so a service stops on it and not on a poll of 0. The same call serves
-  the leader's service and a follower's, and a service may start before, with or
-  after its member. The service finds the recording to replay in its member's
+  `commit_position()` the bound of the last read, and `is_ended()` says that no poll
+  will deliver another entry, so a service stops on it and not on a poll of 0. Once it
+  is ended, `withdrawn_at()` is `None` when every entry below the last bound has been
+  delivered. It is the position the undelivered entries begin at when the driver
+  withdrew the replay's image unread, 5 s after the replay ended, from a service that
+  had stopped polling. The same call serves the leader's service and a follower's,
+  and a service may start before, with or after its member. The service finds the recording to replay in its member's
   `cluster.log_recording_id` counter, which the consensus module already keeps, and
   takes a commit position as its bound only while that counter still names the
   recording it replays, so a record the driver gave to another counter, or a later

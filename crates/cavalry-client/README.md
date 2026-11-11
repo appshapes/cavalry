@@ -63,6 +63,10 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   alike, and no further than the member's commit position, which is taken only while
   the member's counters say the log is still that recording (ADR 0066). A service may
   start before its member, with it or after it, at position 0 or where it stopped.
+  It reads until `CommittedLog::is_ended()`, and then `CommittedLog::withdrawn_at()`
+  says whether it was given every entry below its bound. If the driver removed the
+  replay's image, 5 s after the replay ended, before the service read it, that call
+  gives the position where the undelivered entries begin.
 - Holds a recording the driver arms: `Cavalry::arm_recording(channel, stream_id)`, on a
   `cavalry:udp` stream with a subscription and no publication or image yet, returns
   an `ArmedRecording`, and `ArmedRecording::poll()` returns the `Recording` once the

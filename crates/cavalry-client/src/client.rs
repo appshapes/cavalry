@@ -1257,13 +1257,17 @@ impl Cavalry {
     /// deliver another entry, and not until a poll returns 0: when its member closes or
     /// leaves the log, entries below the bound the handle took may still be on their
     /// way from the replay, and a service that stopped short of them would start again
-    /// at a position the member's next recording does not hold.
+    /// at a position the member's next recording does not hold. It keeps polling until
+    /// then: the driver withdraws the replay's image 5 s after the replay ends, read or
+    /// not, and a handle whose image went before it was read is ended short, which
+    /// [`CommittedLog::withdrawn_at`] says.
     ///
     /// ```
     /// use cavalry_client::{Cavalry, CommittedLog};
     ///
     /// /// A service's loop: every committed entry from `position` on, in order, each
-    /// /// once, until the member's log ends. Returns where to open the log again.
+    /// /// once, until the member's log ends. Returns where to open the log again, or
+    /// /// an error that says which entries it was not given.
     /// fn apply(client: &mut Cavalry, position: i64) -> Result<i64, Box<dyn std::error::Error>> {
     ///     // Ask until the member on this driver has its log.
     ///     let mut log: CommittedLog = loop {
@@ -1281,10 +1285,21 @@ impl Cavalry {
     ///             64,
     ///         )?;
     ///         if log.is_ended() {
+    ///             let next = log.position();
+    ///             let withdrawn = log.withdrawn_at();
+    ///             log.close(client)?;
+    ///             if let Some(unread) = withdrawn {
+    ///                 // The driver withdrew the replay's image before it was read: the
+    ///                 // entries from `unread` on were not delivered.
+    ///                 return Err(format!(
+    ///                     "entries from position {unread} were withdrawn unread, 5 s after \
+    ///                      the replay ended; open the log again from position {next}; see \
+    ///                      docs/how-to/read-the-committed-log.md#when-it-does-not-work"
+    ///                 )
+    ///                 .into());
+    ///             }
     ///             // The member closed or left its log, and every entry below the last
     ///             // commit position the handle took has been delivered.
-    ///             let next = log.position();
-    ///             log.close(client)?;
     ///             return Ok(next);
     ///         }
     ///         if entries == 0 {

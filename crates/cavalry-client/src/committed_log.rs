@@ -160,6 +160,12 @@ impl Bound {
 /// played up to the recording's stop when that is lower, the handle
 /// [is ended](Self::is_ended), and the service opens the log again from
 /// [`position`](Self::position).
+///
+/// The driver keeps the replay's image for the publication linger, 5 s, after the
+/// replay ends, and then withdraws it, read or not (`spec/client-protocol.md`,
+/// "Events"). A service that has not read the image to its end by then is ended short
+/// of its bound, and [`withdrawn_at`](Self::withdrawn_at) says where the entries it
+/// was not given begin.
 pub struct CommittedLog {
     subscription: Subscription,
     replay: Replay,
@@ -170,6 +176,13 @@ pub struct CommittedLog {
     bound: Bound,
     /// The position after the last entry delivered.
     position: i64,
+    /// The image's position after the last poll that held it: where the next frame it
+    /// reads begins, which is past [`position`](Self::position) by a padding frame
+    /// when one follows the last entry. The open position until the image joins.
+    read: i64,
+    /// The image is gone: the driver withdrew it, or it failed a check, or the replay
+    /// ended before it joined this subscription. Nothing more arrives through it.
+    gone: bool,
     /// The replay's image failed a check and was removed: nothing more is delivered.
     faulted: bool,
 }
@@ -197,8 +210,20 @@ impl CommittedLog {
             positions: None,
             bound,
             position,
+            read: position,
+            gone: false,
             faulted: false,
         }))
+    }
+
+    /// Whether `fault` is this log's own: its image failed a check or could not join.
+    /// Another session's is a fault of another service's replay, not of this log.
+    fn is_own(&self, fault: &Fault) -> bool {
+        matches!(
+            fault,
+            Fault::Image { session_id, .. } | Fault::ImagesFull { session_id }
+                if *session_id == self.session_id
+        )
     }
 
     /// Reads up to `fragment_limit` entries that begin below the member's commit
@@ -212,34 +237,37 @@ impl CommittedLog {
     /// session id and stream id are the replay's and not the leader's.
     ///
     /// Per poll: two acquire loads and two reads of a counter's record for the bound,
-    /// and the bounded read. Nothing here allocates, locks or makes a system call.
+    /// the bounded read, and a scan of at most the subscription's images for the
+    /// image's position after it. Nothing here allocates, locks or makes a system call.
     pub fn poll<F>(&mut self, mut handler: F, fragment_limit: usize) -> Result<usize, Fault>
     where
         F: FnMut(&[u8], &DataFrameHeader, i64),
     {
+        // Before the image has joined: whether the replay had ended before this poll
+        // applies the driver's events. The driver announces a replay's image before the
+        // replay can end, and the client's conductor hands the two over in that order,
+        // so an image that is still not held once every event is applied came and went
+        // before this handle saw it, or never came. One acquire load, and none once the
+        // image has joined.
+        let ended_before_join = self.positions.is_none() && self.replay.ended().is_some();
         // Another session on the stream is read past and dropped. One that fails a
         // check is removed by that read; it is not this log, so it is no fault here.
         // A fault of this log's own session is: its image could not join, and nothing
         // of the log will be delivered through this handle.
-        match self
+        let applied = match self
             .subscription
             .discard_others(self.session_id, DISCARD_LIMIT)
         {
-            Ok(_) => {}
+            Ok(_) => true,
             Err(Fault::Closed) => return Err(Fault::Closed),
-            Err(fault) => {
-                let session = match fault {
-                    Fault::Image { session_id, .. } | Fault::ImagesFull { session_id } => {
-                        Some(session_id)
-                    }
-                    Fault::Closed => None,
-                };
-                if session == Some(self.session_id) {
-                    self.faulted = true;
-                    return Err(fault);
-                }
+            Err(fault) if self.is_own(&fault) => {
+                self.faulted = true;
+                self.gone = true;
+                return Err(fault);
             }
-        }
+            // The events after another session's fault may not have been applied yet.
+            Err(_) => false,
+        };
         let positions = match self.positions {
             Some(positions) => positions,
             None => {
@@ -250,6 +278,9 @@ impl CommittedLog {
                     .find(|image| image.session_id() == self.session_id)
                     .map(Image::positions);
                 let Some(positions) = joined else {
+                    if ended_before_join && applied {
+                        self.gone = true;
+                    }
                     return Ok(0);
                 };
                 self.positions = Some(positions);
@@ -272,10 +303,29 @@ impl CommittedLog {
             fragment_limit,
         );
         self.position = next;
-        if let Err(Fault::Image { .. } | Fault::ImagesFull { .. }) = polled {
-            self.faulted = true;
+        // The image's position after the read, which `is_ended` and `withdrawn_at`
+        // compare. An image that joined and is no longer held has gone: the driver
+        // withdrew it, at its end or at the linger's, or a frame of it failed a check.
+        match self
+            .subscription
+            .images()
+            .iter()
+            .find(|image| image.session_id() == self.session_id)
+        {
+            Some(image) => self.read = image.position(),
+            None => self.gone = true,
         }
-        polled
+        match polled {
+            Err(fault) if self.is_own(&fault) => {
+                self.faulted = true;
+                Err(fault)
+            }
+            // Another session's image, announced since `discard_others` and refused as
+            // it joined, before this log's image was read: not this log's fault, and
+            // the next poll goes on.
+            Err(Fault::Image { .. } | Fault::ImagesFull { .. }) => Ok(0),
+            other => other,
+        }
     }
 
     /// The position after the last entry delivered, or the position the log was opened
@@ -295,11 +345,13 @@ impl CommittedLog {
     /// That is so once the polls have read the replay's image to
     /// [`commit_position`](Self::commit_position) after the member stopped naming the
     /// recording this handle replays, or its counters went; once the replay has ended,
-    /// its recording stopped, and the image has been read to where the replay ended; or
-    /// once the replay's image failed a check. An ended handle whose image passed every
-    /// check has delivered every entry below the bound it took, or below the recording's
-    /// stop when that is lower: open the log again from [`position`](Self::position)
-    /// when the member names a recording again.
+    /// its recording stopped, and the image has been read to where the replay ended;
+    /// once the replay's image failed a check; or once the driver has withdrawn the
+    /// image. An ended handle whose image passed every check and was not withdrawn
+    /// short, [`withdrawn_at`](Self::withdrawn_at) `None`, has delivered every entry
+    /// below the bound it took, or below the recording's stop when that is lower: open
+    /// the log again from [`position`](Self::position) when the member names a
+    /// recording again.
     ///
     /// Until then a poll that returns 0 says only that nothing below the bound has
     /// arrived yet. A replay plays no further than what the member's recorder has
@@ -308,25 +360,46 @@ impl CommittedLog {
     /// member leaves the log or closes, the replay plays on to the recording's stop.
     ///
     /// The image's position is the one compared, not [`position`](Self::position): a
-    /// padding frame at a term's end moves it and is handed to no handler. A call
-    /// scans at most the subscription's images for this replay's.
+    /// padding frame at a term's end moves it and is handed to no handler. The image's
+    /// position is the one the last poll left, so a call reads no shared memory but
+    /// the replay's end, one acquire load.
     pub fn is_ended(&self) -> bool {
-        if self.faulted {
-            return true;
+        self.faulted
+            || self.gone
+            || (self.bound.lost && self.read >= self.bound.commit_position)
+            || self.replay.ended().is_some_and(|(end, _)| self.read >= end)
+    }
+
+    /// Where the entries this handle was not given begin, when the driver withdrew the
+    /// replay's image before the polls had read it to its end, or to the bound once the
+    /// member stopped naming the recording, whichever is lower; `None` otherwise. The
+    /// driver keeps a replay's image for the publication linger, 5 s, after the replay
+    /// ends, and then withdraws it whether or not its subscriber has read it
+    /// (`spec/client-protocol.md`, "Events"): a service that did not poll for that long
+    /// after its member closed or left the log, or whose handler took that long, ends
+    /// so. [`is_ended`](Self::is_ended) is true by then, and the position is
+    /// [`position`](Self::position), or past it by a padding frame, which holds no
+    /// entry.
+    ///
+    /// The entries from there on were played and not delivered, and nothing else
+    /// delivers them. Open the log again from [`position`](Self::position): a member
+    /// that still names the same recording plays them again. A member that left the
+    /// log and joined it again names a new recording, which begins above them, and the
+    /// open is refused with code 23 ([`Cavalry::committed_log`]); they are in the
+    /// recording this handle replayed, [`recording_id`](Self::recording_id), and on
+    /// every member that has not left the log.
+    pub fn withdrawn_at(&self) -> Option<i64> {
+        if !self.gone || self.faulted {
+            return None;
         }
-        let image = self
-            .subscription
-            .images()
-            .iter()
-            .find(|image| image.session_id() == self.session_id);
-        if self.positions.is_some() && image.is_none() {
-            // The image joined and has gone: the replay ended and its image was read to
-            // the end or lingered out, and nothing more arrives through it.
-            return true;
+        // The replay's end is known by the time its image goes: the driver sends
+        // `replay stopped` first. An end not known is taken as no end at all, so that
+        // a short end is never taken for a whole one.
+        let mut end = self.replay.ended().map_or(i64::MAX, |(end, _)| end);
+        if self.bound.lost {
+            end = end.min(self.bound.commit_position);
         }
-        let read = image.map_or(self.position, Image::position);
-        (self.bound.lost && read >= self.bound.commit_position)
-            || self.replay.ended().is_some_and(|(end, _)| read >= end)
+        (self.read < end).then_some(self.read)
     }
 
     /// Where the driver's replay of the member's recording failed, when it did: a
@@ -384,6 +457,7 @@ impl std::fmt::Debug for CommittedLog {
             .field("commit_position", &self.bound.commit_position)
             .field("is_ended", &self.is_ended())
             .field("failed_at", &self.failed_at())
+            .field("withdrawn_at", &self.withdrawn_at())
             .finish()
     }
 }

@@ -161,6 +161,22 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .into());
             }
+            if let Some(position) = log.withdrawn_at() {
+                // The driver withdrew the replay's image 5 s after the replay ended,
+                // before this program had read it: the entries from there on were not
+                // read, and the next run starts where this one stopped.
+                return Err(format!(
+                    "the driver withdrew the replay of member {}'s recording {} before \
+                     this program read the entries from position {position}: it did not \
+                     read them within 5 s of its member closing or leaving its log; start \
+                     it again with --from {} once the member runs; see \
+                     docs/how-to/read-the-committed-log.md#when-it-does-not-work",
+                    log.member_id(),
+                    log.recording_id(),
+                    log.position()
+                )
+                .into());
+            }
             // The member left its log or closed, and every entry below the last commit
             // position the handle took has been read: the next run starts here.
             eprintln!(
