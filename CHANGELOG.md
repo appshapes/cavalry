@@ -2034,3 +2034,13 @@ user-visible change, added in the same commit as the change. The format follows
   reads the committed log while the 100,000 entries are committed and writes a line
   an entry, and the gate fails unless each service's lines are the lines of its
   member's replay: six equal hashes where there were three (card 227).
+- The reviewer no longer waits for CI, and submits its review in a form its
+  permissions always allow. A review starts when CI does, and a reviewer session that
+  chose to wait for a check and ended its turn was never resumed: both sessions for
+  one head of pull request 185 ended that way, with no review. The reviewer now gives
+  its verdict on the change when it is ready, treats a check that has failed as a
+  blocker, and names in the review the checks that had not finished; GitHub merges an
+  approved pull request only once the required checks pass. It passes the review's
+  body on standard input, because a body given on the command line was refused when a
+  line of it began with `#`, as a heading does
+  ([Ask the agent to make a change](docs/how-to/ask-the-agent.md); card 247).
