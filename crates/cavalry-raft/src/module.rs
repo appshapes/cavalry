@@ -266,6 +266,8 @@ struct ClientIo {
     scratch: Box<[u8; 1408]>,
     // The leader's log.
     log_publication: Option<Publication>,
+    /// The term `log_publication` was created for.
+    log_term: Option<i64>,
     destinations_added: usize,
     log_recording: Option<Recording>,
     // A follower's log.
@@ -396,21 +398,33 @@ impl Io for ClientIo {
         Ok(self.terms.append(term, base, NO_RECORDING)?)
     }
 
-    fn add_log(&mut self, _term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
+    fn add_log(&mut self, term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
+        // The publication held is the one of the term it was created for, at that
+        // term's base: a call for the same term is a step tried again, and one for
+        // another term would append that term's entries where the earlier term's
+        // publication stands. A member that led an earlier term in this process gives
+        // its publication and its recording up before it leads again, which is the
+        // step-down's to do (ADR 0077).
+        if self.log_term.is_some_and(|held| held != term) {
+            return Err(RaftError::Unsupported {
+                what: "a term led by a member that still holds the log publication of an \
+                       earlier term",
+            });
+        }
         if self.log_publication.is_none() {
             // A term's publication is created at the term's base, so that every frame
             // of the term lies at its position in the cluster's log, and the recording
             // started below begins there (`spec/cluster.md`, state 5; ADR 0059).
             let Some(channel) = log_channel_at(&self.log_control_channel, base) else {
                 return Err(RaftError::Unsupported {
-                    what: "a term whose base is past the last position a publication's log \
-                           begins at",
+                    what: "a term whose base no publication's position keys can name",
                 });
             };
             self.log_publication = Some(
                 self.client
                     .add_exclusive_publication(&channel, LOG_STREAM_ID)?,
             );
+            self.log_term = Some(term);
         }
         let Some(publication) = self.log_publication.as_ref() else {
             return Ok(None);
@@ -785,6 +799,7 @@ impl ConsensusModule {
                 log_endpoint_channel: endpoint_channel(&own.log),
                 scratch: Box::new([0u8; 1408]),
                 log_publication: None,
+                log_term: None,
                 destinations_added: 0,
                 log_recording: None,
                 log_subscription: None,

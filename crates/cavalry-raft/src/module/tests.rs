@@ -196,7 +196,65 @@ fn a_term_whose_base_is_not_zero_is_published_and_recorded_from_its_base() {
         followed.images().first().map(|image| image.position()),
         Some(after)
     );
+
+    // The same term again is a step tried again: the publication and the recording
+    // held are the term's. Another term is refused while they are held, whatever
+    // its base, since its entries would lie where this term's publication stands.
+    let again = module
+        .io
+        .add_log(1, base)
+        .expect("the same term")
+        .expect("the log");
+    assert_eq!(
+        (again.session_id, again.recording_id),
+        (log.session_id, log.recording_id)
+    );
+    for next_base in [after, 0] {
+        assert!(
+            matches!(
+                module.io.add_log(2, next_base),
+                Err(RaftError::Unsupported { .. })
+            ),
+            "a second term at {next_base}"
+        );
+    }
     drop(module);
     drop(follower);
+    drop(driver);
+}
+
+/// A base the position keys cannot name is refused before any command is sent.
+#[test]
+fn a_term_whose_base_the_keys_cannot_name_is_refused() {
+    let dir = TestDir::new("term-base-refused");
+    let driver_dir = dir.0.join("driver");
+    let log_dir = dir.0.join("log");
+    let ports = free_ports(5);
+    let endpoints: Vec<String> = ports
+        .iter()
+        .map(|port| format!("127.0.0.1:{port}"))
+        .collect();
+    let members = format!("0,{}", endpoints.join(","));
+    let driver = Driver::start(&driver_dir, &log_dir).expect("the driver starts");
+    let mut module =
+        ConsensusModule::start(&driver_dir, &log_dir, &members, 0).expect("the member starts");
+    for base in [
+        -32,
+        i64::from(i32::MAX) * i64::from(UDP_TERM_LENGTH) + i64::from(UDP_TERM_LENGTH),
+    ] {
+        let refused = module.io.add_log(0, base).expect_err("a base no key names");
+        assert!(matches!(refused, RaftError::Unsupported { .. }), "{base}");
+        assert!(refused.to_string().contains("position keys"), "{refused}");
+        assert!(module.io.log_publication.is_none(), "{base}");
+    }
+    // The member is as it was: a term at a base the keys name is then added.
+    assert!(
+        module
+            .io
+            .add_log(0, 0)
+            .expect("the driver takes the commands")
+            .is_some()
+    );
+    drop(module);
     drop(driver);
 }
