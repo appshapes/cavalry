@@ -73,14 +73,13 @@ commit path runs per message.
   replays, and the twenty-two counts of `Counts::by_counter`, of which the four of the
   ballot, the two of an election held on a higher term, the two of a truncation, the two
   of a replication and the one of a catch-up stay 0 while the leader is appointed. The
-  counters of sessions, of the service's version and of the member's side of a
-  catch-up in `spec/cluster.md`, "Counters", come with those features. One thread calls `do_work()`;
-  the leader's process appends with `offer(payload)`, up to 1,344 bytes an entry. A
-  follower that leaves the log holds its recording until the driver has said where it
-  stopped, and that stop is where its log ends. A stop that the driver refuses or does
-  not answer is a `client` error, and a stop position not read within 1 s is a
-  `stop-timeout` error. Either way the member stays in init with the recording held, and
-  the next `do_work()` stops it again.
+  counters of sessions and of the service's version in `spec/cluster.md`, "Counters",
+  come with those features. One thread calls `do_work()`; the leader's process appends
+  with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
+  holds its recording until the driver has said where it stopped, and that stop is where
+  its log ends. A stop that the driver refuses or does not answer is a `client` error,
+  and a stop position not read within 1 s is a `stop-timeout` error. Either way the
+  member stays in init with the recording held, and the next `do_work()` stops it again.
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,
