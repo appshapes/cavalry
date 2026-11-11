@@ -133,9 +133,10 @@ synced what it had written; it syncs nothing the recorder had not written yet, w
 is why the program waits for `position()` first. Once `stop_position()` is `Some`, the
 recording has stopped: `position()` and `synced_position()` return the stop position
 and never move again, so the program stops waiting for them, and `sync` is `Ok` with
-nothing done. After a sync that failed, on a failing or full disk, the stop position
-is the position last synced, below what was written, and the messages past it may not
-be on the disk; `recording-write-failed` below says why and what to do.
+nothing done. After a sync that failed, or a stop whose own writes failed, on a
+failing or full disk, the stop position is the position last synced, below what was
+written, and the messages past it may not be on the disk; `recording-write-failed`
+below says why and what to do.
 `recording.request_sync(&mut client)?` asks for the same sync and returns at once, for
 a program that polls `synced_position()` in a loop of its own
 ([ADR 0069](../decisions/0069-sync-a-recording-on-command-as-client-protocol-version-8.md)).
