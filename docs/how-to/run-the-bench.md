@@ -881,14 +881,21 @@ shared runner is
   beside it for some rows, and removes them when it ends, passed or failed. A process
   that is killed first, a CI job cancelled by a newer push or stopped at its timeout,
   or a run stopped with Ctrl-C, leaves them, and on `/dev/shm` they are memory. So
-  every run begins by removing the entries whose process no longer runs. An entry of a
-  running process is never removed, so two runs on one host do not disturb each other.
-- The same line ending `N more are another user's and were left`: the entries belong
-  to a process that has ended and to a user this run is not, the CI runner's when the
-  run is by hand. The next run as that user removes them. To remove them now, as that
-  user, for a process id that `ps -p <pid>` no longer finds:
+  every run begins by removing its own user's entries whose process no longer runs.
+  An entry of a running process is never removed, so two runs on one host do not
+  disturb each other. A process counts as running when this run can see it: a bench
+  in a container with its own process ids that shares this `/dev/shm` is not seen,
+  so give such a container a `/dev/shm` of its own.
+- The same line with `N more are another user's and were not touched`: the entries
+  belong to a process that has ended and to a user this run is not, the CI runner's
+  when the run is by hand. The next run as that user removes them. To remove them now,
+  as that user, for a process id that `ps -p <pid>` no longer finds:
   `rm -r /dev/shm/cavalry-bench-<pid>-*`. `bench/host/check.sh` prints how full
-  `/dev/shm` is and how many such entries it holds.
+  `/dev/shm` is.
+- The same line with `N could not be removed, the first: <path>: <error>`: an entry
+  of this user's would not go, and the error says why. It was renamed
+  `cavalry-bench-<pid>-swept-<n>` under this run's process id before the attempt, and
+  the next run tries it again; remove it by hand once the error's cause is gone.
 - `the recorded_purging benchmark failed: the purge removed no file of the pile in 60 s`:
   the replayer admitted the purge but removed nothing in a minute. Listing the largest
   pile takes the replayer a few seconds and no more; a replayer that removes nothing in

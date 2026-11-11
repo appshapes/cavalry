@@ -2134,79 +2134,195 @@ const BENCH_DIR_PREFIX: &str = "cavalry-bench-";
 /// What [`sweep_dead`] found under the bench directory.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Swept {
-    /// Entries of processes that no longer run, removed.
+    /// This user's entries of processes that no longer run, removed.
     removed: usize,
-    /// Entries of such processes that could not be removed: another user's.
-    refused: usize,
+    /// Another user's entries of such processes, left untouched.
+    others: usize,
+    /// This user's entries of such processes that could not be removed.
+    failed: usize,
+    /// The first of those, with the error.
+    first_failure: Option<String>,
 }
 
 /// The process id in an entry's name under the bench directory, `None` for a name
-/// the harness did not give: another prefix, or no number where the id goes.
+/// the harness did not give: another prefix, or anything but the id as the harness
+/// writes it where the id goes, so not `+77` and not `077`.
 fn bench_dir_owner(name: &str) -> Option<u32> {
-    let (pid, _row) = name.strip_prefix(BENCH_DIR_PREFIX)?.split_once('-')?;
-    pid.parse().ok()
+    let (field, _row) = name.strip_prefix(BENCH_DIR_PREFIX)?.split_once('-')?;
+    let pid: u32 = field.parse().ok()?;
+    (pid > 0 && pid.to_string() == field).then_some(pid)
 }
 
-/// Removes what bench processes that no longer run left under `dir`. A row removes its
-/// directory when it ends, passed or failed ([`with_bench_dir`]); a process killed
-/// before then, a job cancelled by a newer push or stopped at its timeout, leaves it,
-/// and on `/dev/shm` what it leaves is memory until something removes it (card 251).
-/// So every harness removes, before its first row, each entry named for a process for
-/// which `runs` answers no. An entry of a running process is never touched: the udp
-/// pair's two ends, and a run by hand beside a job, each keep theirs. A name the
-/// harness did not give is not read. The work has the directory's entries as its bound.
-fn sweep_dead(dir: &std::path::Path, runs: impl Fn(u32) -> bool) -> Swept {
+/// How this process tells a running process from one that has ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Processes {
+    /// Linux: `/proc/<pid>` is a directory while a process, or a thread, has the id.
+    Proc,
+    /// Elsewhere: `ps -p <pid>` exits 0 while one has.
+    Ps,
+    /// Neither finds this process itself, a `/proc` that is not mounted and a `ps`
+    /// that is missing or refused, so no process is known to have ended.
+    Unknown,
+}
+
+impl Processes {
+    /// The way that finds this process, which is the proof that it answers at all:
+    /// a `ps` that fails for every id must not read as every process having ended.
+    fn detect() -> Self {
+        let me = std::process::id();
+        if std::path::Path::new("/proc").join(me.to_string()).is_dir() {
+            Self::Proc
+        } else if ps_finds(me) {
+            Self::Ps
+        } else {
+            Self::Unknown
+        }
+    }
+
+    /// Whether a process with this id runs now, whoever's it is, as this process sees
+    /// processes: one in another PID namespace is not seen. An id whose process ended
+    /// may have been given to another; its entries then wait for a later sweep.
+    fn runs(self, pid: u32) -> bool {
+        match self {
+            Self::Proc => std::path::Path::new("/proc").join(pid.to_string()).is_dir(),
+            Self::Ps => ps_finds(pid),
+            Self::Unknown => true,
+        }
+    }
+}
+
+/// Whether `ps -p` finds a process with this id.
+fn ps_finds(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// The user that owns what this process creates under `dir`, read from a directory
+/// it creates there and removes: the standard library has no call for the process's
+/// own user. `None` where that cannot be told, and then nothing is swept.
+#[cfg(unix)]
+fn creating_user(dir: &std::path::Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    let probe = dir.join(format!("{BENCH_DIR_PREFIX}{}-sweep", std::process::id()));
+    let _ = std::fs::remove_dir_all(&probe);
+    std::fs::create_dir(&probe).ok()?;
+    let user = std::fs::symlink_metadata(&probe)
+        .map(|meta| meta.uid())
+        .ok();
+    let _ = std::fs::remove_dir(&probe);
+    user
+}
+
+/// The user that owns an entry, itself and not what a link names.
+#[cfg(unix)]
+fn owning_user(path: &std::path::Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).map(|meta| meta.uid()).ok()
+}
+
+/// Removes what this user's bench processes that no longer run left under `dir`. A
+/// row removes its directory when it ends, passed or failed ([`with_bench_dir`]); a
+/// process killed before then, a job cancelled by a newer push or stopped at its
+/// timeout, leaves it, and on `/dev/shm` what it leaves is memory until something
+/// removes it (card 251). So every harness removes, before its first row, each entry
+/// named for a process for which `runs` answers no and for which `mine` answers yes.
+///
+/// - An entry of a running process is never touched: the udp pair's two ends, and a
+///   run by hand beside a job, each keep theirs. `runs` is asked once for each id.
+/// - Another user's entry is counted and not touched, so none is left half removed,
+///   and a process this user cannot see, another's under `hidepid`, loses nothing.
+/// - A name the harness did not give is not read.
+/// - An entry is renamed under this process's own name before it is removed, in one
+///   step, so that a process that starts with the dead one's id and makes the same
+///   directory while the files go does not lose its own. What cannot be removed stays
+///   under that name and is the next run's to try, once this process has ended.
+///
+/// The work has the directory's entries as its bound.
+fn sweep_dead(
+    dir: &std::path::Path,
+    mine: impl Fn(&std::path::Path) -> bool,
+    runs: impl Fn(u32) -> bool,
+) -> Swept {
     let mut swept = Swept::default();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return swept;
     };
+    let mut asked: BTreeMap<u32, bool> = BTreeMap::new();
     for entry in entries.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(bench_dir_owner) else {
             continue;
         };
-        if runs(pid) {
+        if *asked.entry(pid).or_insert_with(|| runs(pid)) {
             continue;
         }
         let path = entry.path();
-        let gone = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        // Another harness that started with this one may have removed it first.
-        if gone.is_ok() || !path.exists() {
-            swept.removed += 1;
-        } else {
-            swept.refused += 1;
+        if !mine(&path) {
+            swept.others += 1;
+            continue;
+        }
+        let taken = dir.join(format!(
+            "{BENCH_DIR_PREFIX}{}-swept-{}",
+            std::process::id(),
+            swept.removed + swept.failed
+        ));
+        let gone = std::fs::rename(&path, &taken).and_then(|()| {
+            if taken.is_dir() {
+                std::fs::remove_dir_all(&taken)
+            } else {
+                std::fs::remove_file(&taken)
+            }
+        });
+        match gone {
+            Ok(()) => swept.removed += 1,
+            // Another harness that started with this one took it first.
+            Err(_) if !path.exists() && !taken.exists() => swept.removed += 1,
+            Err(error) => {
+                swept.failed += 1;
+                let left = if taken.exists() { &taken } else { &path };
+                swept
+                    .first_failure
+                    .get_or_insert_with(|| format!("{}: {error}", left.display()));
+            }
         }
     }
     swept
 }
 
-/// Whether a process with this id runs now, whoever's it is: `/proc` has a directory
-/// for it on Linux, and `ps -p` finds it elsewhere. An id whose process ended may be
-/// given to another; its entries then wait for a later sweep, which is the safe side.
-fn process_runs(pid: u32) -> bool {
-    if pid == std::process::id() {
-        return true;
+/// The sweep the harness runs before its first row: this user's entries of processes
+/// that have ended, under the bench directory. Nothing is swept where the user or the
+/// state of a process cannot be told.
+fn sweep_bench_dir(dir: &std::path::Path) -> Swept {
+    #[cfg(unix)]
+    {
+        let processes = Processes::detect();
+        let Some(user) = creating_user(dir) else {
+            return Swept::default();
+        };
+        if processes == Processes::Unknown {
+            return Swept::default();
+        }
+        sweep_dead(
+            dir,
+            |path| owning_user(path) == Some(user),
+            |pid| processes.runs(pid),
+        )
     }
-    let proc_dir = std::path::Path::new("/proc");
-    if proc_dir.join("self").exists() {
-        return proc_dir.join(pid.to_string()).exists();
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Swept::default()
     }
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        // With no `ps` to ask, nothing is known to be dead, so nothing is removed.
-        .map_or(true, |status| status.success())
 }
 
-/// The sweep's line, when it removed or was refused anything: what went, and what is
-/// left for the user it belongs to.
+/// The sweep's line, when it found anything: what went, what is another user's, and
+/// what would not go.
 fn swept_line(swept: &Swept, dir: &std::path::Path) -> Option<String> {
-    if swept.removed == 0 && swept.refused == 0 {
+    if swept.removed == 0 && swept.others == 0 && swept.failed == 0 {
         return None;
     }
     let mut line = format!(
@@ -2214,14 +2330,23 @@ fn swept_line(swept: &Swept, dir: &std::path::Path) -> Option<String> {
         swept.removed,
         dir.display()
     );
-    if swept.refused > 0 {
-        line.push_str(&format!(
-            "; {} more are another user's and were left: a bench run as that user removes them, \
-             or `rm -r {}/{BENCH_DIR_PREFIX}<pid>-*` as that user for a process that has ended \
-             (docs/how-to/run-the-bench.md, \"When it does not work\")",
-            swept.refused,
-            dir.display()
-        ));
+    if swept.others > 0 {
+        let _ = write!(
+            line,
+            "; {} more are another user's and were not touched: a bench run as that user \
+             removes them",
+            swept.others
+        );
+    }
+    if let Some(first) = swept.first_failure.as_ref() {
+        let _ = write!(
+            line,
+            "; {} could not be removed, the first: {first}",
+            swept.failed
+        );
+    }
+    if swept.others > 0 || swept.failed > 0 {
+        line.push_str(" (docs/how-to/run-the-bench.md, \"When it does not work\")");
     }
     Some(line)
 }
@@ -3458,8 +3583,8 @@ fn main() -> ExitCode {
     // What killed bench processes left under the bench directory goes before the first
     // row, and before this thread is pinned, so that the file work is on no measured
     // CPU (card 251).
-    let swept = sweep_dead(&bench_dir(), process_runs);
-    if let Some(line) = swept_line(&swept, &bench_dir()) {
+    let scratch = bench_dir();
+    if let Some(line) = swept_line(&sweep_bench_dir(&scratch), &scratch) {
         println!("{line}");
     }
     // The publisher is this thread, and so are the timer and the slot-padding loads,
@@ -4321,7 +4446,24 @@ mod tests {
         dir
     }
 
-    /// A name is the harness's when the process id stands where the harness puts it.
+    /// The names left in a scratch directory, sorted.
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("the scratch directory")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .into_string()
+                    .expect("a name")
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A name is the harness's when the process id stands where the harness puts it,
+    /// written as the harness writes it.
     #[test]
     fn a_bench_directorys_owner_is_read_from_its_name_and_no_other_name_has_one() {
         assert_eq!(
@@ -4339,6 +4481,10 @@ mod tests {
             "cavalry-bench-77",
             "cavalry-bench--77-link",
             "cavalry-bench-77x-link",
+            "cavalry-bench-+77-link",
+            "cavalry-bench-077-link",
+            "cavalry-bench-0-link",
+            "cavalry-bench-4294967296-link",
             "cavalry-77-link",
             "cavalry-driver-77",
             "",
@@ -4350,6 +4496,7 @@ mod tests {
     /// What a killed process left goes, whole: its row's directory with the files in
     /// it, the log directory and the probe beside it, and a file under its name. What a
     /// running process keeps stays, and so does every name the harness did not give.
+    /// Each process is asked for once, however many entries it has.
     #[test]
     fn a_sweep_removes_a_dead_processs_entries_and_leaves_a_running_ones_and_other_names() {
         let dir = sweep_scratch("dead");
@@ -4361,6 +4508,7 @@ mod tests {
             format!("cavalry-bench-{running}-udp"),
             format!("cavalry-bench-{running}-udp.log"),
             "cavalry-bench-pile-4000001".to_string(),
+            "cavalry-bench-+4000001-link".to_string(),
             "cavalry-driver".to_string(),
         ] {
             std::fs::create_dir_all(dir.join(&name).join("nested")).expect("an entry");
@@ -4368,80 +4516,109 @@ mod tests {
         }
         std::fs::write(dir.join(format!("cavalry-bench-{dead}-file")), b"left").expect("a file");
         std::fs::write(dir.join("other.log"), b"kept").expect("a file");
+        let mut kept = vec![
+            format!("cavalry-bench-{running}-udp"),
+            format!("cavalry-bench-{running}-udp.log"),
+            "cavalry-bench-+4000001-link".to_string(),
+            "cavalry-bench-pile-4000001".to_string(),
+            "cavalry-driver".to_string(),
+            "other.log".to_string(),
+        ];
+        kept.sort();
 
-        let swept = sweep_dead(&dir, |pid| pid != dead);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let runs = |pid: u32| {
+            asked.borrow_mut().push(pid);
+            pid != dead
+        };
+        let swept = sweep_dead(&dir, |_| true, runs);
         assert_eq!(
             swept,
             Swept {
                 removed: 4,
-                refused: 0
+                ..Swept::default()
             }
         );
-        let mut left: Vec<String> = std::fs::read_dir(&dir)
-            .expect("the scratch directory")
-            .map(|entry| {
-                entry
-                    .expect("an entry")
-                    .file_name()
-                    .into_string()
-                    .expect("a name")
-            })
-            .collect();
-        left.sort();
-        assert_eq!(
-            left,
-            [
-                format!("cavalry-bench-{running}-udp"),
-                format!("cavalry-bench-{running}-udp.log"),
-                "cavalry-bench-pile-4000001".to_string(),
-                "cavalry-driver".to_string(),
-                "other.log".to_string(),
-            ]
-        );
+        assert_eq!(names_in(&dir), kept);
         assert!(
             dir.join(format!("cavalry-bench-{running}-udp/nested/file"))
                 .exists()
         );
-        // A second sweep finds nothing to do, and says nothing.
-        let again = sweep_dead(&dir, |pid| pid != dead);
-        assert_eq!(again, Swept::default());
-        assert_eq!(swept_line(&again, &dir), None);
+        let mut asked = asked.into_inner();
+        asked.sort_unstable();
+        assert_eq!(asked, [dead, running]);
         let line = swept_line(&swept, &dir).expect("a line");
         assert!(
-            line.contains("removed 4 entries") && !line.contains("another user's"),
+            line.contains("removed 4 entries") && !line.contains("docs/"),
+            "{line}"
+        );
+        // A second sweep finds nothing to do, and says nothing.
+        let again = sweep_dead(&dir, |_| true, |pid| pid != dead);
+        assert_eq!(again, Swept::default());
+        assert_eq!(swept_line(&again, &dir), None);
+        std::fs::remove_dir_all(&dir).expect("removing the scratch directory");
+    }
+
+    /// Another user's entry of a process that has ended is counted and not touched,
+    /// not a file of it, and the line says whose it is to remove.
+    #[test]
+    fn a_sweep_does_not_touch_another_users_entries_and_says_so() {
+        let dir = sweep_scratch("others");
+        let theirs = dir.join("cavalry-bench-4000001-link");
+        let ours = dir.join("cavalry-bench-4000001-udp");
+        for entry in [&theirs, &ours] {
+            std::fs::create_dir_all(entry.join("nested")).expect("an entry");
+            std::fs::write(entry.join("nested").join("file"), b"left").expect("a file");
+        }
+        let swept = sweep_dead(&dir, |path| path != theirs, |_| false);
+        assert_eq!(
+            swept,
+            Swept {
+                removed: 1,
+                others: 1,
+                ..Swept::default()
+            }
+        );
+        assert_eq!(names_in(&dir), ["cavalry-bench-4000001-link"]);
+        assert!(theirs.join("nested").join("file").exists());
+        let line = swept_line(&swept, &dir).expect("a line");
+        assert!(
+            line.contains("removed 1 entries")
+                && line.contains("1 more are another user's and were not touched")
+                && line.contains("docs/how-to/run-the-bench.md"),
             "{line}"
         );
         std::fs::remove_dir_all(&dir).expect("removing the scratch directory");
     }
 
-    /// An entry the sweep may not remove, as another user's is under `/dev/shm`, is
-    /// counted and left, and the line says who removes it. Removal is refused here by a
-    /// directory that cannot be written; a user that file modes do not hold, root, is
-    /// refused nothing, and the test then has nothing to see.
+    /// An entry of this user's that will not go, here a directory in it that cannot be
+    /// written, is counted with its error and is not called another user's. It stays
+    /// under the sweeping process's name. A user that file modes do not hold, root,
+    /// removes it, and the test then has only that to see.
     #[cfg(unix)]
     #[test]
-    fn a_sweep_counts_what_it_may_not_remove_and_says_whose_it_is() {
+    fn a_sweep_reports_what_it_could_not_remove_with_the_error() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = sweep_scratch("refused");
+        let dir = sweep_scratch("failed");
         let entry = dir.join("cavalry-bench-4000001-link");
-        std::fs::create_dir_all(&entry).expect("an entry");
-        std::fs::write(entry.join("file"), b"left").expect("a file");
-        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o555)).expect("modes");
+        std::fs::create_dir_all(entry.join("locked")).expect("an entry");
+        std::fs::write(entry.join("locked").join("file"), b"left").expect("a file");
+        let lock = |path: &std::path::Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("modes");
+        };
+        lock(&entry.join("locked"), 0o555);
 
-        let swept = sweep_dead(&dir, |_| false);
-        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).expect("modes");
-        if entry.exists() {
-            assert_eq!(
-                swept,
-                Swept {
-                    removed: 0,
-                    refused: 1
-                }
-            );
+        let swept = sweep_dead(&dir, |_| true, |_| false);
+        let taken = dir.join(format!("cavalry-bench-{}-swept-0", std::process::id()));
+        if taken.exists() {
+            lock(&taken.join("locked"), 0o755);
+            assert_eq!((swept.removed, swept.others, swept.failed), (0, 0, 1));
             let line = swept_line(&swept, &dir).expect("a line");
             assert!(
                 line.contains("removed 0 entries")
-                    && line.contains("1 more are another user's")
+                    && line.contains("1 could not be removed, the first: ")
+                    && line.contains("-swept-0")
+                    && !line.contains("another user's")
                     && line.contains("docs/how-to/run-the-bench.md"),
                 "{line}"
             );
@@ -4450,30 +4627,65 @@ mod tests {
                 swept,
                 Swept {
                     removed: 1,
-                    refused: 0
+                    ..Swept::default()
                 }
             );
         }
         std::fs::remove_dir_all(&dir).expect("removing the scratch directory");
     }
 
-    /// This process runs, and so does its parent; an id no process can have does not.
+    /// The way to ask finds this process, or it is `Unknown` and says every process
+    /// runs. Where it can tell, an id no process has does not run, and neither does a
+    /// child that has ended and been waited for.
     #[test]
-    fn a_process_is_told_running_from_ended() {
-        assert!(process_runs(std::process::id()));
+    fn a_running_process_is_told_from_an_ended_one_or_nothing_is_called_ended() {
+        let processes = Processes::detect();
+        assert!(processes.runs(std::process::id()));
+        assert!(Processes::Unknown.runs(u32::MAX - 1));
+        if processes == Processes::Unknown {
+            return;
+        }
         #[cfg(unix)]
-        assert!(process_runs(std::os::unix::process::parent_id()));
-        assert!(!process_runs(u32::MAX - 1));
-        // A child that has ended and been waited for is no longer a process.
+        assert!(processes.runs(std::os::unix::process::parent_id()));
+        assert!(!processes.runs(u32::MAX - 1));
         let mut child =
             std::process::Command::new(std::env::current_exe().expect("this test binary"))
                 .arg("--list")
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
                 .expect("a child process");
         let pid = child.id();
         child.wait().expect("the child's end");
-        assert!(!process_runs(pid), "{pid}");
+        assert!(!processes.runs(pid), "{pid}");
+    }
+
+    /// The harness's own sweep takes this user's entry of an ended process and leaves
+    /// one named for this process, and its probe for the user leaves nothing behind.
+    #[cfg(unix)]
+    #[test]
+    fn the_harnesss_sweep_removes_this_users_dead_entries_and_keeps_this_processs() {
+        let dir = sweep_scratch("own");
+        if Processes::detect() == Processes::Unknown {
+            return;
+        }
+        let dead = format!("cavalry-bench-{}-recorded", u32::MAX - 1);
+        let alive = format!("cavalry-bench-{}-udp", std::process::id());
+        for name in [&dead, &alive] {
+            std::fs::create_dir_all(dir.join(name).join("nested")).expect("an entry");
+        }
+        assert_eq!(creating_user(&dir), owning_user(&dir.join(&dead)));
+        let swept = sweep_bench_dir(&dir);
+        assert_eq!(
+            swept,
+            Swept {
+                removed: 1,
+                ..Swept::default()
+            }
+        );
+        assert_eq!(names_in(&dir), [alive]);
+        std::fs::remove_dir_all(&dir).expect("removing the scratch directory");
     }
 
     /// The recorded benchmark of [`Benchmark::ALL`], wherever it stands there.

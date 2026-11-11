@@ -122,8 +122,8 @@ the harness and read its table is [Run the bench](run-the-bench.md).
    the isolated set, with the SMT siblings offline.
    The script prints the host's state, including the turbo switch and the idle states
    the pinned CPUs may enter, how many timers are active, which interrupts a driver
-   bound itself and where, and how full `/dev/shm` is with how many entries killed
-   bench processes left there, which the next bench removes at its start
+   bound itself and where, and how full `/dev/shm` is, where what killed bench
+   processes left stays until the next bench removes it at its start
    ([Run the bench](run-the-bench.md#when-it-does-not-work)), and ends with
    `check.sh: ok`; it fails when turbo is on or
    an idle state deeper than C1 is enabled, the two settings a host loses when the
