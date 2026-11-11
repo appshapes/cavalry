@@ -163,13 +163,14 @@ cannot join without it. A leader reads no new leadership term and holds no elect
   `cluster_role`, and checks after every call into a core that each move it made, of
   the election and of the role, is a registered row and that a counter registered
   for it rose.
-- `crates/cavalry-raft/tests/ballot.rs`, nine tests on one core: a term is stored
+- `crates/cavalry-raft/tests/ballot.rs`, eleven tests on one core: a term is stored
   before the request vote or the vote it allows; a member votes once in a term; a
   ballot closes at once when every member heard has voted for the candidate, waits
   the election timeout for a member heard that has not, and is lost on a vote
-  against; a candidate whose term rose during its ballot leads no term; a member
-  records no term and takes no leader from an id that is no other member's, in
-  canvass or as a candidate.
+  against; a candidate whose term rose during its ballot leads no term, asks no
+  member for a vote in the raised term, and, in a cluster of five, does not lead it
+  on a quorum of votes cast in it; a member records no term and takes no leader from
+  an id that is no other member's, in canvass or as a candidate.
 - Every test that was on `master` passes unchanged: `replication` 18, `core` 5,
   `cluster` 10 over drivers, the two allocation tests.
 - On the branch this was written on, the in-memory cluster elects with this core,

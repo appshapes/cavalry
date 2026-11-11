@@ -1286,13 +1286,20 @@ impl Consensus {
         Ok(self.enter(ElectionState::CandidateBallot, clock))
     }
 
-    /// State 3. Request vote to every member not yet sent one, then the ballot: the
-    /// candidate leads its candidate term at once when the votes for that term make a
-    /// quorum and every member it has heard has cast one of them, or at the election
-    /// timeout with a quorum for and none against (ADR 0077). At the election timeout
-    /// with no such ballot it canvasses again.
+    /// State 3. Request vote for the term the candidate nominated itself for to every
+    /// member not yet sent one, then the ballot: the candidate leads its candidate term
+    /// at once when the votes for that term, its own among them, make a quorum and every
+    /// member it has heard has cast one of them, or at the election timeout with a
+    /// quorum for and none against (ADR 0077). At the election timeout with no such
+    /// ballot it canvasses again.
     fn candidate_ballot<I: Io>(&mut self, clock: Clock, io: &mut I) -> Result<usize, I::Fault> {
         let mut work = 0;
+        // A candidate whose term rose during its ballot, by a request vote for a
+        // higher term from a log behind its own, holds no vote for that term, its own
+        // included (`spec/cluster.md`, state 3). It asks no member for a vote in it,
+        // which would spend that member's one vote in the term on a candidate that
+        // cannot win it, and no votes cast in it make it the leader.
+        let own_vote = self.holds_own_vote();
         let request = Message::RequestVote {
             log_leadership_term_id: self.log_term,
             log_position: self.append_position,
@@ -1302,7 +1309,7 @@ impl Consensus {
         };
         for index in 0..self.count {
             let unsent = self.requested.get(index).is_some_and(|sent| !sent);
-            if index != self.own && unsent && io.send(self.peer(index).id, &request) {
+            if own_vote && index != self.own && unsent && io.send(self.peer(index).id, &request) {
                 if let Some(sent) = self.requested.get_mut(index) {
                     *sent = true;
                 }
@@ -1319,13 +1326,24 @@ impl Consensus {
             &self.heard,
             timeout_passed,
         );
-        if outcome.leader {
+        if outcome.leader && own_vote {
             return self.lead_elected(clock, io);
         }
         if timeout_passed {
             return Ok(self.lose_ballot(clock));
         }
         Ok(work)
+    }
+
+    /// Whether this member, a candidate, holds its own vote for its candidate term: from
+    /// nominate, until a request vote for a higher term raises that term during its
+    /// ballot.
+    fn holds_own_vote(&self) -> bool {
+        self.votes
+            .get(self.own)
+            .copied()
+            .flatten()
+            .is_some_and(|own| own.vote && own.term == self.candidate_term)
     }
 
     /// The winner of a ballot leads its candidate term, which it stored when it

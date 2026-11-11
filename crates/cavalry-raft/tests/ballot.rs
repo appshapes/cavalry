@@ -342,6 +342,75 @@ fn a_candidate_whose_term_rose_during_its_ballot_leads_no_term() {
     );
 }
 
+/// A candidate asks for votes for the term it nominated itself for and no other. Its
+/// requests are refused on its ballot's first cycle; then a request vote for a higher
+/// term from a log behind its own raises its candidate term, in which it holds no vote,
+/// its own included (`spec/cluster.md`, state 3). Its next cycle sends no request vote:
+/// one for the raised term would spend the other member's one vote in that term on a
+/// candidate that cannot win it.
+#[test]
+fn a_candidate_whose_term_rose_asks_no_member_for_a_vote_in_it() {
+    let mut io = Stub::new();
+    io.append_position = 64;
+    let mut member = elector(11);
+    let ms = to_candidate_ballot(&mut member, &mut io, &[1, 2]);
+    io.refuse_send = true;
+    member.do_work(at(ms + 1), &mut io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+    io.refuse_send = false;
+    member
+        .on_message(at(ms + 2), &request_vote(1, 5, 0), &mut io)
+        .expect("no fault");
+    assert_eq!(member.counts().votes_against, 1);
+    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+    io.clear();
+    member.do_work(at(ms + 3), &mut io).expect("no fault");
+    assert_eq!(sends(&io, Template::RequestVote), 0);
+    member.do_work(at(ms + 1_000), &mut io).expect("no fault");
+    assert_eq!(sends(&io, Template::RequestVote), 0);
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    assert_eq!(member.counts().ballots_lost, 1);
+}
+
+/// In a cluster of five, the case where a request for the raised term could win it. The
+/// candidate's requests to all four members are refused on its first cycle, and member
+/// 1's request vote from a log behind raises its term to 5. It asks nobody for a vote
+/// in term 5, and votes for term 5 from the three others, a quorum, do not make it the
+/// leader: the votes for a term make a candidate the leader with its own among them
+/// (`spec/cluster.md`, state 3). It canvasses again at the election timeout.
+#[test]
+fn a_candidate_whose_term_rose_leads_no_term_on_votes_cast_in_it() {
+    let mut io = Stub::new();
+    io.append_position = 64;
+    let mut member = Consensus::with_election(&[0, 1, 2, 3, 4], 0, 12).expect("a member");
+    let ms = to_candidate_ballot(&mut member, &mut io, &[1, 2, 3, 4]);
+    io.refuse_send = true;
+    member.do_work(at(ms + 1), &mut io).expect("no fault");
+    io.refuse_send = false;
+    member
+        .on_message(at(ms + 2), &request_vote(1, 5, 0), &mut io)
+        .expect("no fault");
+    io.clear();
+    member.do_work(at(ms + 3), &mut io).expect("no fault");
+    assert_eq!(sends(&io, Template::RequestVote), 0);
+    for voter in [2, 3, 4] {
+        member
+            .on_message(at(ms + 4), &vote(voter, 5, true), &mut io)
+            .expect("no fault");
+    }
+    member.do_work(at(ms + 999), &mut io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+    member.do_work(at(ms + 1_000), &mut io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Canvass);
+    assert_eq!(member.role(), Role::Follower);
+    let counts = member.counts();
+    assert_eq!((counts.ballots_lost, counts.terms_led), (1, 0));
+    assert!(
+        io.first(|call| matches!(call, Call::RecordTerm(..)))
+            .is_none()
+    );
+}
+
 /// A member that elects takes no term from an id that is no other member's: id 7, a
 /// host started with another members string, or its own id. In canvass it records no
 /// term, takes no leader and canvasses on; a candidate stays in its ballot. A new
