@@ -776,7 +776,20 @@ answered with code 6 and keeps running.
 
 The driver sends `unavailable image` for an image once the publication's end of stream
 position is stored and every subscriber of the image has reached it or the linger has
-passed, then removes the log (`spec/log-buffer.md`, "Closing"). It sends `unavailable
+passed, then removes the log (`spec/log-buffer.md`, "Closing"). It keeps the log and
+the position counter an `available image` names for the counter reuse timeout after
+it sends the event, unless the image's subscription is removed first or the
+subscriber has moved the position, which shows that its client has both ("Liveness
+and timeouts"; ADR 0078). A client that reads an `available image` for a subscription of
+its own opens the log and takes the counter. When the log is not there, or the
+counter is not allocated or its key names another image, the image is `gone`
+(`spec/log-buffer.md`, "What a reader rejects"): the client's own `remove
+subscription` was on its way, or the client read the event more than the counter
+reuse timeout after the driver sent it. The client does not add the image and does
+not close. It tells the subscription, whose next poll reports the image with the
+reason `gone`: frames its publisher published after the join, if any, were not
+delivered to that subscription. A log that is there and fails another check is
+`corrupt`, as before. It sends `unavailable
 counter` for a counter a client added before it frees the counter's record, when the
 counter's owner removes it, closes or is timed out, so that a client reading the
 counter stops before the record can be allocated again. It sends `client timeout`
@@ -831,7 +844,7 @@ values and keeps 100 and above for its own (`spec/c-abi.md`, "Error codes").
 | command ring unblock timeout | 10 s | the driver | the client liveness timeout, as `spec/command-ring.md` says |
 | publication unblock timeout | 15 s | the driver | `spec/log-buffer.md`, "Unblocking" |
 | publication linger | 5 s | the driver | `spec/log-buffer.md`, "Closing" |
-| counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`) |
+| counter reuse timeout | 1 s | the driver | how long a freed counter's record stays reclaimed before it is allocated again (`spec/counters-file.md`); and how long after an `available image` the driver keeps the log and the position counter it names, unless the subscription is removed or the subscriber has moved the position ("Events"; ADR 0078) |
 | recording sync interval | 1 s | the driver | how long after a recording's last sync, or its start, the recorder syncs it again when it has written bytes no sync covers; a `sync recording` syncs at once, and the interval then runs from that sync (ADR 0025, ADR 0069) |
 | replay connect timeout | 5 s | the driver | a replay whose publication has had no subscriber, or over `cavalry:udp` has not been connected as `spec/udp.md`, "The sender", defines it, for this long ends with reason 2: measured from the replay's start, from the moment its last subscriber went, or over `cavalry:udp` from the moment the connection timeout passed |
 | closing endpoint wait | 5 s | the driver | an `add subscription` that has waited this long for its channel's previous receive endpoint to close, measured from the moment the driver read it, is answered with code 4 and registers nothing ("Commands"); half the response timeout, so that the answer reaches the client before the client reports the add lost |
