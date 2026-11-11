@@ -1508,10 +1508,11 @@ fn member_findings(
                 "the leader, member {id}, has appended to position {append} and a quorum has \
                  recorded to {commit}: {} bytes wait for a quorum. Each member asks its \
                  recorder to sync an entry as soon as it is written, so what waits at any \
-                 moment is what was appended since the syncs now running began; if the \
-                 commit position stays while the append position moves, a quorum of members \
-                 is not reporting or their disks are not syncing: run doctor on each \
-                 member's host",
+                 moment is what was appended since the syncs now running began, or up to a \
+                 second of entries where a member's driver refused the request, which its \
+                 driver.registry_full counts; if the commit position stays while the append \
+                 position moves, a quorum of members is not reporting or their disks are \
+                 not syncing: run doctor on each member's host",
                 append - commit
             ),
             doc: DOC_CLUSTER,
@@ -5311,5 +5312,22 @@ mod tests {
                 .contains("the leader in term 0, election closed")
         );
         assert!(findings[2].message.contains("4800 bytes wait for a quorum"));
+        // The note explains the gap by what the members do now: each asks for its sync,
+        // and a refused request is the recorder's own sync, within a second.
+        assert!(
+            findings[2].message.contains(
+                "Each member asks its recorder to sync an entry as soon as it is written"
+            ),
+            "{}",
+            findings[2].message
+        );
+        assert!(
+            findings[2]
+                .message
+                .contains("up to a second of entries where a member's driver refused the request"),
+            "{}",
+            findings[2].message
+        );
+        assert!(!findings[2].message.contains("syncs once a second"));
     }
 }
