@@ -1389,24 +1389,52 @@ impl LogPath {
 
 /// The election states, by their codes in `spec/cluster.md`, in which this version's
 /// member has taken a leader and joins its log before it closes: follower replay,
-/// follower log init, follower log await and follower ready. Each lasts at most the
-/// leader heartbeat timeout before the election fails.
+/// follower log init, follower log await and follower ready. The leader heartbeat
+/// timeout bounds the last two: past it, the election fails. Follower log init lasts
+/// one step. Follower replay has no timeout of its own in the spec; in this version it
+/// too is one step, which replays nothing and fails the election where the member's
+/// log is behind the leader's (`cavalry-raft`'s `follower_replay`), so `doctor` finds a
+/// member in either of the first two only by chance.
 const JOINING_STATES: [i64; 4] = [10, 14, 15, 16];
 
 /// What `cluster-joining` says of member `id`, its election in `state`: the leader it
 /// has taken, what the steps left wait for, and the path they need, so that a member
-/// whose log port is closed is told so before its election fails.
+/// whose log port is closed is told so before its election fails. It names what is
+/// still to come in that state (`spec/cluster.md`, the election's states 10, 14, 15
+/// and 16). In follower replay: the member's own replay, which no timeout bounds and
+/// which fails the election where it leaves the member's log behind the leader's, and
+/// then the two steps. In follower log init, which a member is in for one step, and
+/// in follower log await: the leader's image and the append position. In follower
+/// ready, where the image has arrived: the append position alone, and the one
+/// direction of the path it needs.
 fn joining_message(id: i32, state: i64, cluster: Option<&Cluster>) -> String {
     let timeout = LEADER_HEARTBEAT_TIMEOUT_NS / 1_000_000_000;
     let path = LogPath::of(id, cluster);
-    format!(
-        "member {id} has taken its leader, {}, and joins its log: its election is in {}. \
-         An image of the leader's log must arrive, over UDP, on {} and this member's append \
-         position must reach the leader, each within the leader heartbeat timeout, \
-         {timeout} s. If not, the election fails and doctor reports cluster-joined-late; \
-         then check {}",
+    let lead = format!(
+        "member {id} has taken its leader, {}, and joins its log: its election is in {}.",
         path.leader,
-        election_state_name(state),
+        election_state_name(state)
+    );
+    let late = "If not, the election fails and doctor reports cluster-joined-late; then check";
+    if state == 16 {
+        return format!(
+            "{lead} The image of the leader's log has arrived on {} and what is left is \
+             this member's append position, which must reach the leader within the leader \
+             heartbeat timeout, {timeout} s. {late} that this host reaches {}",
+            path.own_log, path.leader_consensus
+        );
+    }
+    let first = if state == 10 {
+        "This member replays its own log first, for as long as that takes. If its log then \
+         ends behind the leader's, the election fails: this version has no catch-up. \
+         Otherwise an image"
+    } else {
+        "An image"
+    };
+    format!(
+        "{lead} {first} of the leader's log must arrive, over UDP, on {} and this member's \
+         append position must reach the leader, each within the leader heartbeat timeout, \
+         {timeout} s. {late} {}",
         path.own_log,
         path.check()
     )
@@ -1470,8 +1498,9 @@ fn member_findings(
             doc: DOC_CLUSTER,
         });
     } else if !leads && JOINING_STATES.contains(&state) {
-        // A leader taken, and a step of at most 10 s left before the election closes or
-        // fails: not a member with no leader.
+        // A leader taken, and only the steps of joining its log left before the election
+        // closes or fails, `JOINING_STATES` saying what bounds each: not a member with no
+        // leader.
         findings.push(Finding {
             check: "cluster-joining",
             level: Level::Note,
@@ -5089,6 +5118,31 @@ mod tests {
                 "{}",
                 findings[1].message
             );
+            // Each state names what is still to come and nothing that has happened.
+            let message = &findings[1].message;
+            let (replays, arrives, arrived) = (
+                message.contains(
+                    "This member replays its own log first, for as long as that takes. If its \
+                     log then ends behind the leader's, the election fails: this version has \
+                     no catch-up. Otherwise an image of the leader's log must arrive",
+                ),
+                message.contains("of the leader's log must arrive, over UDP, on"),
+                message.contains("The image of the leader's log has arrived on"),
+            );
+            assert_eq!(
+                (replays, arrives, arrived),
+                match state {
+                    10 => (true, true, false),
+                    16 => (false, false, true),
+                    _ => (false, true, false),
+                },
+                "state {state}: {message}"
+            );
+            assert!(message.contains("append position"), "{message}");
+            assert!(
+                message.contains("within the leader heartbeat timeout, 10 s."),
+                "{message}"
+            );
         }
         let (_, findings) = cluster_findings(
             "cluster-joining-failed",
@@ -5230,6 +5284,47 @@ mod tests {
             findings[1].message,
             "member 2 has taken its leader, member 0, the appointed leader, and joins its log: \
              its election is in follower log await. An image of the leader's log must arrive, \
+             over UDP, on this member's log endpoint in CAVALRY_CLUSTER_MEMBERS, [::1]:9022, \
+             and this member's append position must reach the leader, each within the leader \
+             heartbeat timeout, 10 s. If not, the election fails and doctor reports \
+             cluster-joined-late; then check that member 0's host, the appointed leader's, \
+             reaches this member's log endpoint over UDP, and that this host reaches member \
+             0's consensus endpoint, 127.0.0.1:9001"
+        );
+
+        // In follower ready the image has arrived: what is left is the append position,
+        // and the path to check is the one to the leader's consensus endpoint alone.
+        let (_, findings) = cluster_findings_in(
+            "cluster-joining-ready-named",
+            2,
+            Some(&cluster),
+            &[(CLUSTER_ROLE, 0), (CLUSTER_ELECTION_STATE, 16)],
+        );
+        assert_eq!(
+            findings[1].message,
+            "member 2 has taken its leader, member 0, the appointed leader, and joins its log: \
+             its election is in follower ready. The image of the leader's log has arrived on \
+             this member's log endpoint in CAVALRY_CLUSTER_MEMBERS, [::1]:9022, and what is \
+             left is this member's append position, which must reach the leader within the \
+             leader heartbeat timeout, 10 s. If not, the election fails and doctor reports \
+             cluster-joined-late; then check that this host reaches member 0's consensus \
+             endpoint, 127.0.0.1:9001"
+        );
+
+        // In follower replay the member's own replay comes first, with no bound of its
+        // own, and a log that ends behind the leader's fails the election there.
+        let (_, findings) = cluster_findings_in(
+            "cluster-joining-replay-named",
+            2,
+            Some(&cluster),
+            &[(CLUSTER_ROLE, 0), (CLUSTER_ELECTION_STATE, 10)],
+        );
+        assert_eq!(
+            findings[1].message,
+            "member 2 has taken its leader, member 0, the appointed leader, and joins its log: \
+             its election is in follower replay. This member replays its own log first, for as \
+             long as that takes. If its log then ends behind the leader's, the election fails: \
+             this version has no catch-up. Otherwise an image of the leader's log must arrive, \
              over UDP, on this member's log endpoint in CAVALRY_CLUSTER_MEMBERS, [::1]:9022, \
              and this member's append position must reach the leader, each within the leader \
              heartbeat timeout, 10 s. If not, the election fails and doctor reports \
