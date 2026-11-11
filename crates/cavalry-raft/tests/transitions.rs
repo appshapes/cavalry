@@ -1,5 +1,6 @@
 //! Every move of the election and of the role, checked against `counters.toml`
-//! (CLAUDE.md, invariant 4; ADR 0067, ADR 0081, ADR 0082, ADR 0086). One call into a core, a duty cycle or
+//! (CLAUDE.md, invariant 4; ADR 0067, ADR 0081, ADR 0082, ADR 0086, ADR 0088). One call into a core, a
+//! duty cycle or
 //! a message read, moves its election at most once and its role at most once. After
 //! every call the test checks that each move it made is a `[[transition]]` of its
 //! machine, `cluster_election` or `cluster_role`, and that a counter registered for it
@@ -700,6 +701,80 @@ fn every_transition_of_the_election_and_the_role_adds_one_to_a_counter_registere
         replica.election_state(),
         ElectionState::FollowerLogReplication
     );
+
+    // The catch-up within a leader's term (ADR 0088). A member with no term is told
+    // term 0, which begins at 0, by a leader whose log is at 96: level with the
+    // term's base and behind the leader's log, it goes from follower replay to
+    // follower catch-up init, asks, takes the replay's image where it asked from,
+    // adds the live log, and when the leader has said stop and it holds the log to
+    // where the live image joined, goes through follower log init, already
+    // subscribed, to follower ready and closes.
+    let stop = Message::StopCatchup {
+        leadership_term_id: 0,
+        follower_member_id: 0,
+    };
+    let mut io = Stub::new();
+    let mut behind = elector(30);
+    watch.work(&mut behind, &mut io, 1);
+    watch.read(&mut behind, &mut io, 2, &new_leadership_term(1, 96));
+    assert_eq!(behind.election_state(), ElectionState::FollowerReplay);
+    watch.work(&mut behind, &mut io, 3);
+    assert_eq!(behind.election_state(), ElectionState::FollowerCatchupInit);
+    watch.work(&mut behind, &mut io, 4);
+    assert_eq!(behind.election_state(), ElectionState::FollowerCatchupAwait);
+    io.catchup_image = Some(0);
+    watch.work(&mut behind, &mut io, 5);
+    assert_eq!(behind.election_state(), ElectionState::FollowerCatchup);
+    io.append_position = 96;
+    io.image = Some(64);
+    watch.work(&mut behind, &mut io, 6);
+    watch.read(&mut behind, &mut io, 7, &stop);
+    watch.work(&mut behind, &mut io, 8);
+    assert_eq!(behind.election_state(), ElectionState::FollowerLogInit);
+    watch.work(&mut behind, &mut io, 9);
+    assert_eq!(behind.election_state(), ElectionState::FollowerReady);
+    watch.work(&mut behind, &mut io, 10);
+    assert_eq!(behind.election_state(), ElectionState::Closed);
+    assert_eq!(behind.counts().catchups, 1);
+
+    // Its catch-up position does not leave for the leader heartbeat timeout: its
+    // election fails in follower catch-up init.
+    let mut io = Stub::new();
+    let mut behind = elector(31);
+    watch.work(&mut behind, &mut io, 1);
+    watch.read(&mut behind, &mut io, 2, &new_leadership_term(1, 96));
+    watch.work(&mut behind, &mut io, 3);
+    io.refuse_send = true;
+    watch.work(&mut behind, &mut io, 4);
+    watch.work(&mut behind, &mut io, 3 + 10_000);
+    assert_eq!(behind.election_state(), ElectionState::Init);
+
+    // The replay's image joins somewhere else than where it asked from: its election
+    // fails in follower catch-up await.
+    let mut io = Stub::new();
+    let mut behind = elector(32);
+    watch.work(&mut behind, &mut io, 1);
+    watch.read(&mut behind, &mut io, 2, &new_leadership_term(1, 96));
+    watch.work(&mut behind, &mut io, 3);
+    watch.work(&mut behind, &mut io, 4);
+    io.catchup_image = Some(32);
+    watch.work(&mut behind, &mut io, 5);
+    assert_eq!(behind.election_state(), ElectionState::Init);
+    assert_eq!(behind.counts().join_position_mismatches, 1);
+
+    // Nothing arrives for the leader heartbeat timeout: its election fails in
+    // follower catch-up.
+    let mut io = Stub::new();
+    let mut behind = elector(33);
+    watch.work(&mut behind, &mut io, 1);
+    watch.read(&mut behind, &mut io, 2, &new_leadership_term(1, 96));
+    watch.work(&mut behind, &mut io, 3);
+    watch.work(&mut behind, &mut io, 4);
+    io.catchup_image = Some(0);
+    watch.work(&mut behind, &mut io, 5);
+    assert_eq!(behind.election_state(), ElectionState::FollowerCatchup);
+    watch.work(&mut behind, &mut io, 4 + 10_000);
+    assert_eq!(behind.election_state(), ElectionState::Init);
 
     // A leader that elects, its election closed, holds an election on a term above its
     // own, a follower from the same call: on a canvass position, a request vote and a

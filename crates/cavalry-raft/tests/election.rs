@@ -8,10 +8,9 @@
 //! leader committed is in the log of every leader after it, and that no two members
 //! lead one term.
 //!
-//! A member on this path truncates a tail no quorum recorded and replicates a term it
-//! missed, and has no catch-up yet (the crate's README, "What the election does not
-//! do yet"), so the tests stop a leader when its followers are level with it, or say
-//! what the member that is behind its leader's log does instead.
+//! A member on this path truncates a tail no quorum recorded, replicates a term it
+//! missed and catches up within its leader's term (ADR 0083, ADR 0086, ADR 0088), so
+//! a member that comes back behind its leader ends each test on the leader's log.
 
 use cavalry_proto::cluster::quorum;
 use cavalry_raft::memory::Cluster;
@@ -688,9 +687,9 @@ fn a_member_whose_tail_is_as_long_as_a_term_it_missed_replicates_that_term() {
 /// holds an entry the new leader's log does not, above the new term's base, and
 /// truncates it, counted in `cluster.log_truncations`: its log is then the new
 /// leader's up to that base, and it records the new term there. It is behind the new
-/// leader's log from there and joins only by catching up, which this step does not
-/// have: its elections fail, counted. What it appended while cut off was in no other
-/// member's log, was never committed, and is gone.
+/// leader's log from there, catches up with it from the leader's live recording, and
+/// joins: the three commit. What it appended while cut off was in no other member's
+/// log, was never committed, and is gone.
 #[test]
 fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() {
     let ids = [0, 1, 2];
@@ -838,8 +837,8 @@ fn a_leader_cut_off_from_its_followers_gives_up_the_lead_and_the_others_elect() 
 ///
 /// It then canvasses to the new leader and is told the new term, whose base is its
 /// own append position. It records the term there, and is behind the new leader's log
-/// by the entries appended since: it joins only by catching up, which this step does
-/// not have, so its elections fail, counted, until that step.
+/// by the entries appended since: it catches up with them and joins, and the three
+/// commit.
 #[test]
 fn a_leader_that_stood_still_gives_up_the_lead_when_it_runs_again() {
     let ids = [0, 1, 2];
@@ -942,8 +941,7 @@ fn a_leader_that_stood_still_gives_up_the_lead_when_it_runs_again() {
 /// it heard to the last, counts `cluster.higher_terms_seen`. The follower then
 /// canvasses to the new leader and joins it, level with the new term's base. The old
 /// leader stays in canvass while it is not heard, and when the partition ends it is
-/// told the new term and is behind the new leader's log, which it joins only by
-/// catching up.
+/// told the new term, is behind the new leader's log, catches up with it and joins.
 ///
 /// The UDP transport holds a partition that cuts one way for the connection timeout,
 /// 5 s, at most ([`Cluster::cut_one_way`]). The in-memory cluster holds it for the ten
@@ -1078,7 +1076,8 @@ fn a_leader_that_three_of_five_cannot_hear_steps_down_on_their_request_vote() {
 /// The append positions are read at the time it runs, so by them its followers
 /// report, and it would lose no quorum; the request vote, of a term above its own,
 /// is what makes it give up the lead, counted in `cluster.leader_step_downs`. It
-/// reads nothing after that in init, and canvasses.
+/// reads nothing after that in init, and canvasses; told the new term, it catches up
+/// with the new leader's log and joins.
 #[test]
 fn a_leader_whose_module_stood_still_steps_down_on_the_request_vote_that_waited() {
     let ids = [0, 1, 2];
