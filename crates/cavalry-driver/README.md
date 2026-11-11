@@ -24,7 +24,10 @@ The daemon: conductor, sender, receiver and idle strategies. Data plane.
   every publication's positions, cleaning, unblocking and closing as
   `spec/log-buffer.md`, "The driver" says, loading a publication's producer position
   at most once every two milliseconds so that the publisher's cache line is not read on every
-  cycle (ADR 0022). The connected flag the publisher reads is raised in the limit pass
+  cycle (ADR 0022). A closed publication's log, and an image's over UDP, stay for the
+  counter reuse timeout, 1 s, after the last `available image` that named them,
+  unless that subscription is removed, so that a client's conductor finds what the
+  event names (ADR 0078). The connected flag the publisher reads is raised in the limit pass
   after the limit's raise, and lowered where the last subscriber, receiver or recording
   goes, before the limit pass lowers the limit. So a claim reads `back pressured` only
   while a subscriber, a recording or a receiver reads the stream, and `not connected`

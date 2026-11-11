@@ -32,6 +32,14 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   anything is reserved, so no frame lands past the stream's end, and every poll of a
   subscription is `Fault::Closed`. A subscription the client cannot hold is refused with
   `subscriptions-full`; it is never left open without its images.
+- Stays open when an image comes and goes before its conductor has read the image's
+  announcement. The driver keeps an announced image's log and position counter for
+  1 s, so a publication added and removed at once, or a replay that fails at its
+  first frame, reaches the subscription as an image that came and ended. A client
+  that reads the announcement later than that does not add the image: the
+  subscription's next poll returns `Fault::Image` with the reason `Fault::GONE` and
+  `NULL_POSITION`, once, which says that frames published after the join, if any,
+  were not delivered, and the subscription and the client go on (ADR 0078).
 - Gives a publication on a control channel,
   `cavalry:udp?control=<host>:<port>|control-mode=manual`, its destinations:
   `Cavalry::add_destination(publication.registration_id(), "cavalry:udp?endpoint=<host>:<port>")`

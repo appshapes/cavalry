@@ -116,7 +116,8 @@ pub struct cavalry_fault_t {
     /// The image's session id for 120 and 121, else 0.
     pub session_id: i32,
     /// The reader's position when the check failed, for 120, else
-    /// `CAVALRY_NULL_POSITION`.
+    /// `CAVALRY_NULL_POSITION`. A 120 with `CAVALRY_NULL_POSITION` is an image that
+    /// was gone before the client read its announcement: it had no reader (ADR 0078).
     pub position: i64,
 }
 

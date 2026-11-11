@@ -9,7 +9,7 @@
 //! two atomics with the user's thread and nothing else: the state and the time of the
 //! last command sent. It idles with a backoff, so a quiet client costs a sleeping thread.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,7 +19,8 @@ use cavalry_shm::broadcast::{BroadcastError, Receiver};
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
 use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
 use cavalry_shm::counters::CountersWriter;
-use cavalry_shm::log::{LogBuffers, LogDirectory};
+use cavalry_shm::counters::generated::SUBSCRIPTION_POSITION;
+use cavalry_shm::log::{LogBuffers, LogDirectory, LogError};
 use cavalry_shm::spsc;
 
 use crate::error::Closed;
@@ -512,13 +513,12 @@ impl Conductor {
         Ok(received)
     }
 
-    /// `available image`: opens the log read-only and takes the owner's handle on the
-    /// position counter the driver allocated, then hands both to the subscription. An
-    /// image for a subscription this client no longer holds is dropped, as the driver
-    /// will withdraw it on the remove. A log that cannot be opened or a counter that is
-    /// not allocated is the driver saying one thing and the directory another: corrupt.
-    /// A subscription whose queue is full has not polled while the driver announced a
-    /// queue's worth of images: `overrun`.
+    /// `available image`: hands the subscription what [`announced`] makes of the event,
+    /// the image's log and position counter or the word that the image is gone. An
+    /// image for a subscription this client no longer holds, or whose handle is gone
+    /// and only waits to be swept, is dropped, as the driver will withdraw it on the
+    /// remove: nothing would ever read it. A subscription whose queue is full has not
+    /// polled while the driver announced a queue's worth of images: `overrun`.
     fn image_available(
         &mut self,
         correlation_id: i64,
@@ -531,22 +531,21 @@ impl Conductor {
         let Some(registration) = self.registry.get(subscriber_registration_id) else {
             return Ok(());
         };
-        let (directory, log_id) = log_name;
-        let log = LogBuffers::open_named(&self.dir, directory, log_id, false)
-            .map_err(|_| Closed::Corrupt)?;
-        let position = u32::try_from(position_counter_id)
-            .ok()
-            .and_then(|id| self.counters.counter(id).ok())
-            .ok_or(Closed::Corrupt)?;
+        if registration.images.peer_dropped() {
+            return Ok(());
+        }
+        let event = announced(
+            &self.dir,
+            &self.counters,
+            correlation_id,
+            session_id,
+            position_counter_id,
+            log_name,
+            source_identity,
+        )?;
         registration
             .images
-            .offer(ImageEvent::Available {
-                correlation_id,
-                session_id,
-                log,
-                position,
-                source_identity,
-            })
+            .offer(event)
             .map_err(|_| Closed::Overrun)
     }
 
@@ -565,6 +564,71 @@ impl Conductor {
             .offer(ImageEvent::Unavailable { correlation_id })
             .map_err(|_| Closed::Overrun)
     }
+}
+
+/// What an `available image` is to its subscription: the image's log, opened
+/// read-only, with the owner's handle on the position counter the driver allocated,
+/// or the word that the image is gone.
+///
+/// The driver keeps the log and the counter for the counter reuse timeout after the
+/// event, unless the subscription is removed first (`spec/client-protocol.md`,
+/// "Events"; ADR 0078). So a log that is not there, or a record that holds no counter
+/// or another image's, is an image that is `gone`: this client's own `remove
+/// subscription` was on its way, or its conductor read the event more than that time
+/// late. The image is not added, the subscription's next poll reports the fault, and
+/// the client stays open. A log that is there and fails a check, or a record id no
+/// counters file has, is the driver saying one thing and the directory another:
+/// corrupt.
+fn announced(
+    dir: &Path,
+    counters: &CountersWriter,
+    correlation_id: i64,
+    session_id: i32,
+    position_counter_id: i32,
+    log_name: (LogDirectory, i64),
+    source_identity: String,
+) -> Result<ImageEvent, Closed> {
+    let (directory, log_id) = log_name;
+    let log = match LogBuffers::open_named(dir, directory, log_id, false) {
+        Ok(log) => Some(log),
+        Err(LogError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(Closed::Corrupt),
+    };
+    let record = u32::try_from(position_counter_id).map_err(|_| Closed::Corrupt)?;
+    // The record is this image's while its key begins with the image's correlation id
+    // and session id (`spec/log-buffer.md`, "Counters"): freed, it holds no counter,
+    // and allocated again to another image it holds that image's key. The key is the
+    // image's and not the subscription's, so a record allocated again to another
+    // subscription on this same image is not told apart here. The driver frees a
+    // record while its image lives only when the record's subscription is removed, so
+    // the event then names a subscription this client has removed, whose handle is
+    // gone or on its way out: `image_available` drops the event for one that is gone,
+    // and nothing polls, or stores a position through, one on its way out.
+    let named = match counters.record(record) {
+        Ok(Some(fields)) => {
+            let key = fields.key();
+            fields.type_id() == SUBSCRIPTION_POSITION.0
+                && key[..8] == correlation_id.to_le_bytes()
+                && key[8..12] == session_id.to_le_bytes()
+        }
+        Ok(None) => false,
+        Err(_) => return Err(Closed::Corrupt),
+    };
+    let position = if named {
+        counters.counter(record).ok()
+    } else {
+        None
+    };
+    Ok(match (log, position) {
+        (Some(log), Some(position)) => ImageEvent::Available {
+            correlation_id,
+            session_id,
+            log,
+            position,
+            source_identity,
+        },
+        _ => ImageEvent::Gone { session_id },
+    })
 }
 
 /// The subscriptions one client holds, by registration id, with the queues to each:
@@ -1125,15 +1189,110 @@ mod tests {
     use cavalry_shm::spsc;
 
     use super::{
-        Event, LogDirectory, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome,
+        CountersWriter, Event, LogDirectory, MAX_REPLAYS, MAX_SUBSCRIPTIONS, NO_PENDING, Outcome,
         RECORDING_REGISTRY, RecordingRegistration, RecordingRegistry, Registry, ReplayRegistration,
-        ReplayRegistry, event, log_name,
+        ReplayRegistry, SUBSCRIPTION_POSITION, announced, event, log_name,
     };
     use crate::error::Closed;
     use crate::recording::RecordingStop;
     use crate::replay::ReplayEnd;
     use crate::response::Response;
     use crate::subscription::{ImageEvent, Registration, Retired};
+
+    /// What [`announced`] makes of an `available image`, against a real driver's
+    /// directory: the image when its log and its position counter are there; `gone`
+    /// when the log is not there, or the record holds no counter, or another image's
+    /// by its key; and `corrupt` only when a check fails, a record id no counters file
+    /// has or a log that is there and is no log (ADR 0078).
+    #[test]
+    fn an_announced_image_is_its_log_and_counter_or_gone_and_corrupt_only_on_a_failed_check() {
+        let dir = std::env::temp_dir().join(format!(
+            "cavalry-client-conductor-announced-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let driver = cavalry_driver::Driver::start(&dir, dir.join("log")).expect("the driver");
+        let mut client = crate::Cavalry::connect_to(&dir).expect("connects");
+        let subscription = client
+            .add_subscription("cavalry:ipc", 2412)
+            .expect("a subscription");
+        let publication = client
+            .add_publication("cavalry:ipc", 2412)
+            .expect("a publication");
+        let (image, session) = (publication.registration_id(), publication.session_id());
+        let counters = CountersWriter::open(&dir).expect("the counters file opens");
+        let capacity = counters.capacity();
+        // The image's position counter, found by its type and its key's first field.
+        let position = |counters: &CountersWriter| {
+            (0..capacity).find(|id| {
+                matches!(counters.record(*id), Ok(Some(fields))
+                    if fields.type_id() == SUBSCRIPTION_POSITION.0
+                        && fields.key()[..8] == image.to_le_bytes())
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let record = loop {
+            if let Some(record) = position(&counters) {
+                break i32::try_from(record).expect("a counter id");
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the driver made the image"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        };
+        let free = (0..capacity)
+            .rev()
+            .find(|id| matches!(counters.record(*id), Ok(None)))
+            .and_then(|id| i32::try_from(id).ok())
+            .expect("a record with no counter");
+        let log = (LogDirectory::Publications, image);
+        let of = |correlation_id, session_id, record, log| {
+            announced(
+                &dir,
+                &counters,
+                correlation_id,
+                session_id,
+                record,
+                log,
+                String::new(),
+            )
+        };
+        let gone = |made: Result<ImageEvent, Closed>| matches!(made, Ok(ImageEvent::Gone { session_id }) if session_id == session);
+
+        assert!(matches!(
+            of(image, session, record, log),
+            Ok(ImageEvent::Available { correlation_id, session_id, .. })
+                if correlation_id == image && session_id == session
+        ));
+        // Gone: no log by that name; a record that holds no counter; and a record
+        // that holds a counter whose key names another image, or another session.
+        let no_log = (LogDirectory::Publications, image + 1_000_000);
+        assert!(gone(of(image, session, record, no_log)));
+        assert!(gone(of(image, session, free, log)));
+        assert!(gone(of(image + 1, session, record, log)));
+        assert!(matches!(
+            of(image, session.wrapping_add(1), record, log),
+            Ok(ImageEvent::Gone { .. })
+        ));
+        // Corrupt: a record id no counters file has, and a log that is there and is
+        // no log.
+        assert_eq!(of(image, session, -1, log).err(), Some(Closed::Corrupt));
+        let past = i32::try_from(capacity).expect("a capacity");
+        assert_eq!(of(image, session, past, log).err(), Some(Closed::Corrupt));
+        std::fs::write(dir.join("publications/999999.logbuffer"), b"not a log").expect("a file");
+        let not_a_log = (LogDirectory::Publications, 999_999);
+        assert_eq!(
+            of(image, session, record, not_a_log).err(),
+            Some(Closed::Corrupt)
+        );
+
+        drop(subscription);
+        drop(publication);
+        drop(client);
+        drop(driver);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A replay registration and the handle's half of its end.
     fn replay(replay_session_id: i64) -> (ReplayRegistration, Arc<ReplayEnd>) {

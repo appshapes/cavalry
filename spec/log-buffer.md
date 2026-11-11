@@ -213,7 +213,10 @@ length, a reader being one of the image's subscriptions or a recording of it
 that no recorded byte is cleaned before the recorder has written it (ADR 0042); it
 stores the end of stream position when the stream ends, and is connected is 1 while the
 image is live. A recorded image's log is removed only once its recording has stopped,
-as "Closing" says of a publication's.
+as "Closing" says of a publication's, and no image's log is removed, nor a
+`subscription.position` on it freed, less than the counter reuse timeout after an
+`available image` named it while that position stands where the subscription
+joined, unless the subscription has been removed, as "Closing" says too (ADR 0078).
 
 ## The driver
 
@@ -275,7 +278,17 @@ is no subscriber.
   file once every subscriber has reached that position or the publication's linger has
   passed, and, for a recorded publication, once its recording has stopped: the recorder
   has written up to the end of stream position and the catalog holds the stop
-  (`spec/client-protocol.md`, "Commands").
+  (`spec/client-protocol.md`, "Commands"). It removes no file, and frees no
+  `subscription.position`, that an `available image` named less than the counter reuse
+  timeout ago while that position stands where the image joined, unless the image's
+  subscription has been removed. A position that has moved is the subscriber's own
+  store, which shows that its client has the file and the counter. So the file of a
+  publication that is closed with a subscriber still at its join position, as one
+  closed with nothing published is, stays for what is left of that time, and a
+  client whose conductor reads its events within the counter reuse timeout finds the
+  file and the counter each `available image` names. `unavailable image` does not
+  wait: it is sent when every subscriber has reached the end of stream or the linger
+  has passed (`spec/client-protocol.md`, "Events"; ADR 0078).
 - **Checks.** Before it uses a value a client wrote, a subscriber position or a tail, it
   checks the bound the tables name; a value outside it adds one to
   `log_buffer.rejected_position` or `log_buffer.rejected_tail`, and the client is
@@ -308,6 +321,7 @@ fails, by the name in the first column.
 
 | Reason | Check |
 | --- | --- |
+| `gone` | The file is not there, or, for an image, the `subscription.position` its `available image` named is not allocated or is another image's by its key: the driver removed the log before this reader attached (`spec/client-protocol.md`, "Events"; ADR 0078). |
 | `too-short` | The file is shorter than 4096 bytes, or fewer than 128 header bytes were given. |
 | `not-ready` | Magic is eight zero bytes: the creator has not finished. Wait and read again. |
 | `magic` | Magic is any other value than `CVLYLOGB`. |
