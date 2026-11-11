@@ -58,11 +58,15 @@ commit path runs per message.
   `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
   0066).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one
-  process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
+  process on a clock the caller steps, with loss, delay, a member cut from every
+  other, two members parted from each other (`cut_between`), paused syncs and a
   member started again on an empty log directory to set: what the example below and
-  most of the crate's tests run. It is a test double and allocates; its consensus
-  stream holds at most 4,096 messages in flight and loses, and counts, one sent
-  while it is full, and its log holds every entry offered for the cluster's life.
+  most of the crate's tests run. Every member holds a log of its own, the entries
+  that reached it, so `log(member)` is that member's bytes and a test can find two
+  members that hold different bytes at one position. It is a test double and
+  allocates; its consensus stream holds at most 4,096 messages in flight and loses,
+  and counts, one sent while it is full, and a leader's log publication and each
+  member's log hold every entry appended or received for the cluster's life.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), the election and mixed
   versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots

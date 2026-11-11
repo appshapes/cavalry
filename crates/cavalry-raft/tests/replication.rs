@@ -1,8 +1,10 @@
 //! The replicated log with an appointed leader, three cores at a time in memory
 //! (`spec/cluster.md`, "The appointed leader"; ADR 0063): what a cluster does when it
 //! starts together, when a member starts late, when syncs lag, when the leader loses
-//! its quorum and when the consensus stream loses and delays messages. Every test
-//! checks, at every step, that nothing uncommitted is called committed.
+//! its quorum, when two members are parted and when the consensus stream loses and
+//! delays messages. Every test checks, at every step, that nothing uncommitted is
+//! called committed and that every member's log is the leader's as far as it reaches;
+//! the last test is the history on which that check fails.
 
 use cavalry_proto::cluster::{MAX_MEMBERS, Message, Stream, TimeUnit, quorum};
 use cavalry_raft::memory::{Cluster, IN_FLIGHT_CAPACITY, MAX_DELAY_MS};
@@ -762,4 +764,149 @@ fn a_cluster_of_one_leads_from_init_and_commits_alone() {
     let entry = cluster.offer(b"alone").expect("the leader appends");
     safety.run(&mut cluster, 20);
     assert_eq!(cluster.commit_position(5), Some(entry));
+}
+
+/// A partition between two followers parts nobody from the leader: the log reaches
+/// both, both report, and an entry is committed on all three.
+#[test]
+fn a_partition_between_two_followers_leaves_the_log_whole() {
+    let ids = [0, 1, 2];
+    let mut cluster = Cluster::new(&ids).expect("three members");
+    let mut safety = Safety::new(&ids);
+    safety.run(&mut cluster, 1_000);
+    cluster.cut_between(1, 2);
+    // A second cut of the same two, either way round, and a cut of a member from
+    // itself or from an id no member has, are nothing more.
+    cluster.cut_between(2, 1);
+    cluster.cut_between(1, 1);
+    cluster.cut_between(1, 9);
+    let entry = cluster
+        .offer(b"the followers are parted")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 11_000);
+    for id in ids {
+        assert_eq!(cluster.commit_position(id), Some(entry), "member {id}");
+        assert_eq!(cluster.log(id), cluster.log(0), "member {id}");
+        assert_eq!(
+            cluster.election_state(id),
+            Some(ElectionState::Closed),
+            "member {id}"
+        );
+        assert_eq!(
+            cluster.counts(id).expect("a member").elections,
+            1,
+            "member {id}"
+        );
+    }
+}
+
+/// A partition between the leader and one follower stops the log and the consensus
+/// messages between those two alone. The leader commits with the other follower. The
+/// parted follower holds what it held, hears nothing from its leader for the leader
+/// heartbeat timeout and holds an election; when the partition ends its canvass
+/// reaches the leader again, whose log has moved on, and with no catch-up in this
+/// version it fails that election and stays out (`spec/cluster.md`, "The appointed
+/// leader").
+#[test]
+fn a_partition_between_the_leader_and_a_follower_parts_those_two_alone() {
+    let ids = [0, 1, 2];
+    let mut cluster = Cluster::new(&ids).expect("three members");
+    let mut safety = Safety::new(&ids);
+    safety.run(&mut cluster, 1_000);
+    let held = cluster.append_position(2).expect("a member");
+    let held_log = cluster.log(2);
+
+    cluster.cut_between(0, 2);
+    let entry = cluster
+        .offer(b"member 2 is parted from the leader")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 1_000);
+    assert_eq!(cluster.commit_position(0), Some(entry));
+    assert_eq!(cluster.commit_position(1), Some(entry));
+    assert_eq!(cluster.log(1), cluster.log(0));
+    assert_eq!(cluster.append_position(2), Some(held));
+    assert_eq!(cluster.log(2), held_log);
+    assert_eq!(cluster.election_state(2), Some(ElectionState::Closed));
+
+    // The leader's last word reached member 2 before the partition.
+    safety.run(&mut cluster, 10_000);
+    let counts = cluster.counts(2).expect("a member");
+    assert_eq!(counts.leader_heartbeat_timeouts, 1, "{counts:?}");
+    assert_eq!(counts.elections_failed, 0, "{counts:?}");
+    assert_eq!(cluster.election_state(2), Some(ElectionState::Canvass));
+    assert_eq!(
+        cluster.election_state(1),
+        Some(ElectionState::Closed),
+        "member 1 reaches the leader"
+    );
+
+    cluster.heal_between(2, 0);
+    safety.run(&mut cluster, 1_000);
+    let counts = cluster.counts(2).expect("a member");
+    assert!(
+        counts.elections_failed > 0,
+        "the leader's new leadership term reached member 2: {counts:?}"
+    );
+    assert_eq!(cluster.append_position(2), Some(held));
+    assert_eq!(cluster.log(2), held_log);
+}
+
+/// The safety check can fail. Every member holds the bytes that reached it, so two
+/// members can hold different bytes at one position, and the check finds them. The
+/// history here is the one divergence this version's protocol does not prevent (ADR
+/// 0063, "Consequences"): a quorum loses its log directories while the member that
+/// kept its own is silent. The appointed leader, with no member ahead of it that it
+/// can hear, leads term 0 a second time and writes a second history. Its log
+/// position is the silent member's append position when that member returns, the
+/// term ids are equal, so the member joins, and its log below that position is the
+/// first history.
+#[test]
+#[should_panic(expected = "member 2's log is not a prefix of the leader's")]
+fn a_member_that_joins_a_second_history_fails_the_safety_check() {
+    let ids = [0, 1, 2];
+    let mut cluster = Cluster::new(&ids).expect("three members");
+    let mut safety = Safety::new(&ids);
+    safety.run(&mut cluster, 1_000);
+    cluster
+        .offer(b"the first history, entry 1")
+        .expect("the leader appends");
+    let end = cluster
+        .offer(b"the first history, entry 2")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 1_000);
+    assert_eq!(cluster.commit_position(2), Some(end));
+    let first = cluster.log(2);
+
+    // Member 2 goes silent, and the other two start again on empty log directories.
+    cluster.cut(2);
+    cluster.wipe(0);
+    cluster.wipe(1);
+    // The appointed leader hears no member ahead of it: at the startup canvass
+    // timeout, 60 s, it leads term 0 again with member 1.
+    cluster.run_ms(62_000);
+    assert_eq!(cluster.election_state(0), Some(ElectionState::Closed));
+    assert_eq!(cluster.member(0).expect("a member").leadership_term_id(), 0);
+    // The second history: entries of the first one's lengths, so its positions are
+    // the first one's.
+    cluster
+        .offer(b"the other history, entry 1")
+        .expect("the leader appends");
+    let other_end = cluster
+        .offer(b"the other history, entry 2")
+        .expect("the leader appends");
+    assert_eq!(other_end, end);
+    cluster.run_ms(1_000);
+    assert_eq!(cluster.commit_position(0), Some(end));
+
+    // Member 2 returns with term 0 in its record and its append position at the
+    // leader's log position, and joins.
+    cluster.heal(2);
+    cluster.run_ms(1_000);
+    assert_eq!(cluster.election_state(2), Some(ElectionState::Closed));
+    assert_eq!(cluster.append_position(2), Some(end));
+    assert_eq!(cluster.log(2), first, "member 2 kept the first history");
+    assert_eq!(cluster.log(2).len(), cluster.log(0).len());
+    assert_ne!(cluster.log(2), cluster.log(0));
+
+    Safety::new(&ids).check(&cluster);
 }

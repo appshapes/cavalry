@@ -1,16 +1,19 @@
 //! A cluster in memory: every member's [`Consensus`] with its I/O played by one
 //! struct, on a clock the caller steps a millisecond at a time. No driver, no socket
-//! and no file: the consensus stream is a queue, the log is a list of entries, a
-//! member's recording is how far the log has reached it and its sync is a flag. It is
-//! what the crate's example and its tests run, and what a test of a service can run
-//! before it runs on three drivers.
+//! and no file: the consensus stream is a queue, a leader's log publication is a list
+//! of entries, a member's recording is the entries that have reached it, a log of its
+//! own, and its sync is a flag. It is what the crate's example and its tests run, and
+//! what a test of a service can run before it runs on three drivers.
 //!
 //! It is a test double, not a transport: it allocates, and nothing of it is on a
 //! message's path in a running member. What it plays faithfully is what the core
 //! depends on: a consensus message arrives whole, late or never; a follower's image of
 //! the log joins at the position the leader's publication is at when the follower
-//! subscribes; a member's append position is what its recording has synced; and the
-//! leader's own append position rises by its own sync, like any member's.
+//! subscribes; a member's append position is what its recording has synced; the
+//! leader's own append position rises by its own sync, like any member's; and every
+//! member holds the bytes that reached it and no others, so two members can hold
+//! different bytes at one position, which a test of the cluster's safety must be able
+//! to find.
 //!
 //! Its bounds, and what it does at each:
 //!
@@ -21,9 +24,10 @@
 //!   interval, so a loss delays the cluster and never stops it.
 //! - A message is late by at most [`MAX_DELAY_MS`], the leader heartbeat timeout;
 //!   [`Cluster::set_delivery`] holds a longer delay to it.
-//! - The log and the records of terms have no bound: the log holds every entry offered
-//!   for the cluster's life, and a member's record of terms holds every term it
-//!   records. A test that offers a million entries holds a million entries in memory.
+//! - The logs and the records of terms have no bound: a log publication holds every
+//!   entry appended to it for the cluster's life, each member's log holds every entry
+//!   that reached it, and a member's record of terms holds every term it records. A
+//!   test that offers a million entries to three members holds four million.
 
 use std::collections::VecDeque;
 
@@ -64,10 +68,44 @@ struct Flight {
     bytes: Vec<u8>,
 }
 
-/// One entry of the leader's log: its bytes and the position after it.
+/// One entry of a log: its bytes and the positions it lies between.
+#[derive(Clone)]
 struct Entry {
+    position: i64,
     position_after: i64,
     bytes: Vec<u8>,
+}
+
+/// A leader's log publication, one for each term a member leads: what
+/// [`Io::add_log`] makes.
+struct Publication {
+    session_id: i32,
+    /// The member that added it, by its place among the members.
+    leader: usize,
+    /// The position after its last entry: the term's base before the first.
+    position: i64,
+    /// Every entry appended to it, for the cluster's life.
+    entries: Vec<Entry>,
+    /// Gone with the member that added it.
+    closed: bool,
+}
+
+/// A member's image of a log publication.
+#[derive(Clone, Copy)]
+struct Image {
+    /// The publication's place in the world's list.
+    publication: usize,
+    /// Where the image joined: the publication's position when the member first saw it.
+    join_position: i64,
+    /// The next of the publication's entries to reach the member.
+    next: usize,
+}
+
+/// A partition between two members, by their places among the members.
+struct Cut {
+    a: usize,
+    b: usize,
+    since_ns: u64,
 }
 
 /// What the world holds for one member: what its `terms` file and its recording would.
@@ -78,9 +116,13 @@ struct Disk {
     terms: Vec<(i64, i64)>,
     /// Subscribed to the log, with a recording armed.
     joined: bool,
-    /// Where its image of the log joined, once it has one.
-    join_position: Option<i64>,
-    /// The position up to which the log has reached its recording.
+    /// Its image of the leader's log publication, once it has one.
+    image: Option<Image>,
+    /// The log it holds: every entry that has reached its recordings, in position
+    /// order.
+    log: Vec<Entry>,
+    /// The position up to which the log has reached its recording: the position
+    /// after the last entry of `log`.
     received: i64,
     /// The position up to which its recording is synced: its append position.
     synced: i64,
@@ -100,7 +142,8 @@ impl Disk {
             candidate_term: -1,
             terms: Vec::new(),
             joined: false,
-            join_position: None,
+            image: None,
+            log: Vec::new(),
             received: 0,
             synced: 0,
             sync_paused: false,
@@ -108,10 +151,6 @@ impl Disk {
             image_lost: false,
             halted: false,
         }
-    }
-
-    fn cut(&self) -> bool {
-        self.cut_since_ns.is_some()
     }
 }
 
@@ -124,10 +163,11 @@ struct World {
     net: VecDeque<Flight>,
     /// The messages lost because `net` was full.
     full_queue_losses: u64,
-    /// Every entry offered, for the cluster's life.
-    log: Vec<Entry>,
-    log_session_id: Option<i32>,
-    log_position: i64,
+    /// Every log publication a member added, for the cluster's life, in the order
+    /// added.
+    publications: Vec<Publication>,
+    /// The partitions between two members that are set now.
+    cuts: Vec<Cut>,
     back_pressured: bool,
     loss_one_in: u64,
     max_delay_ms: u64,
@@ -142,6 +182,28 @@ impl World {
         self.random ^= self.random << 17;
         self.random
     }
+
+    /// The log publication the member at `leader` appends to: the last it added that
+    /// is not gone.
+    fn publication_of(&self, leader: usize) -> Option<usize> {
+        self.publications
+            .iter()
+            .rposition(|publication| publication.leader == leader && !publication.closed)
+    }
+}
+
+/// Since when nothing sent by one of the members at `a` and `b` reaches the other:
+/// the earliest of the cuts set now that part them, a cut of either from everyone
+/// or a partition between the two. `None` while they reach each other.
+fn parted_since(disks: &[Disk], cuts: &[Cut], a: usize, b: usize) -> Option<u64> {
+    let own = [a, b]
+        .into_iter()
+        .filter_map(|index| disks.get(index).and_then(|disk| disk.cut_since_ns));
+    let between = cuts
+        .iter()
+        .filter(|cut| (cut.a == a && cut.b == b) || (cut.a == b && cut.b == a))
+        .map(|cut| cut.since_ns);
+    own.chain(between).min()
 }
 
 /// One member's [`Io`], for the length of one call into its core.
@@ -162,11 +224,13 @@ impl Io for MemberIo<'_> {
             return false;
         };
         // A cut or halted member's messages leave it and arrive nowhere, as a
-        // datagram's do; so do the ones the delivery setting loses.
+        // datagram's do, and so do the ones between two members a partition parts
+        // and the ones the delivery setting loses.
+        let halted = [self.own, to]
+            .into_iter()
+            .any(|index| self.world.disks.get(index).is_none_or(|disk| disk.halted));
         let cut =
-            self.world.disks.iter().enumerate().any(|(index, disk)| {
-                (index == self.own || index == to) && (disk.cut() || disk.halted)
-            });
+            halted || parted_since(&self.world.disks, &self.world.cuts, self.own, to).is_some();
         let lost = self.world.loss_one_in > 0
             && self
                 .world
@@ -216,8 +280,13 @@ impl Io for MemberIo<'_> {
 
     fn add_log(&mut self, term: i64, base: i64) -> Result<Option<Log>, Self::Fault> {
         let session_id = 1_000 + i32::try_from(term).unwrap_or(0);
-        self.world.log_session_id = Some(session_id);
-        self.world.log_position = base;
+        self.world.publications.push(Publication {
+            session_id,
+            leader: self.own,
+            position: base,
+            entries: Vec::new(),
+            closed: false,
+        });
         Ok(Some(Log {
             session_id,
             recording_id: 0,
@@ -232,32 +301,54 @@ impl Io for MemberIo<'_> {
     }
 
     fn log_image(&mut self, session_id: i32) -> Result<Option<i64>, Self::Fault> {
-        let position = self.world.log_position;
         let now_ns = self.world.clock.now_ns;
-        let exists = self.world.log_session_id == Some(session_id);
+        // The publication with this session id that is not gone, the last added.
+        let Some((index, publication)) = self
+            .world
+            .publications
+            .iter()
+            .enumerate()
+            .rfind(|(_, publication)| publication.session_id == session_id && !publication.closed)
+        else {
+            return Ok(None);
+        };
+        let (leader, position, entries) = (
+            publication.leader,
+            publication.position,
+            publication.entries.len(),
+        );
+        let parted = parted_since(&self.world.disks, &self.world.cuts, self.own, leader);
         let Some(disk) = self.world.disks.get_mut(self.own) else {
             return Ok(None);
         };
-        if !exists || !disk.joined || disk.image_lost {
+        if !disk.joined || disk.image_lost {
             return Ok(None);
         }
-        if let Some(since_ns) = disk.cut_since_ns {
+        let image = disk.image.filter(|image| image.publication == index);
+        if let Some(since_ns) = parted {
             // Nothing of the log arrives: no image comes, and one already there is
             // gone when the image liveness timeout has passed.
             if now_ns.saturating_sub(since_ns) >= IMAGE_LIVENESS_TIMEOUT_NS {
-                disk.image_lost = disk.join_position.is_some();
+                disk.image_lost = image.is_some();
                 return Ok(None);
             }
-            return Ok(disk.join_position);
+            return Ok(image.map(|image| image.join_position));
         }
-        // The image joins where the publication is when the subscriber first sees it.
-        Ok(Some(*disk.join_position.get_or_insert(position)))
+        // The image joins where the publication is when the subscriber first sees it,
+        // and the entries appended from then on are the ones that reach it.
+        let image = image.unwrap_or(Image {
+            publication: index,
+            join_position: position,
+            next: entries,
+        });
+        disk.image = Some(image);
+        Ok(Some(image.join_position))
     }
 
     fn leave_log(&mut self) -> Result<(), Self::Fault> {
         if let Some(disk) = self.world.disks.get_mut(self.own) {
             disk.joined = false;
-            disk.join_position = None;
+            disk.image = None;
             disk.image_lost = false;
         }
         Ok(())
@@ -275,16 +366,27 @@ impl Io for MemberIo<'_> {
         let Ok(length) = entry.write(&mut bytes) else {
             return Ok(false);
         };
-        let Some(after) = entry_position(self.world.log_position, length, MTU) else {
+        // The leader's own publication, and its own recording of it.
+        let Some(publication) = self
+            .world
+            .publication_of(self.own)
+            .and_then(|index| self.world.publications.get_mut(index))
+        else {
             return Ok(false);
         };
-        self.world.log_position = after.position_after;
-        self.world.log.push(Entry {
+        let Some(after) = entry_position(publication.position, length, MTU) else {
+            return Ok(false);
+        };
+        let entry = Entry {
+            position: publication.position,
             position_after: after.position_after,
             bytes,
-        });
+        };
+        publication.position = after.position_after;
+        publication.entries.push(entry.clone());
         if let Some(disk) = self.world.disks.get_mut(self.own) {
             disk.received = after.position_after;
+            disk.log.push(entry);
         }
         Ok(true)
     }
@@ -316,9 +418,8 @@ impl Cluster {
                 disks,
                 net: VecDeque::with_capacity(IN_FLIGHT_CAPACITY),
                 full_queue_losses: 0,
-                log: Vec::new(),
-                log_session_id: None,
-                log_position: 0,
+                publications: Vec::new(),
+                cuts: Vec::new(),
                 back_pressured: false,
                 loss_one_in: 0,
                 max_delay_ms: 0,
@@ -341,19 +442,48 @@ impl Cluster {
     pub fn step(&mut self) {
         self.world.clock.now_ns = self.world.clock.now_ns.saturating_add(STEP_NS);
         self.world.clock.time_ms = self.world.clock.time_ms.saturating_add(1);
-        let log_position = self.world.log_position;
-        for disk in &mut self.world.disks {
-            // A recording holds the image from its join position: only one that joined
-            // at the end of what the member held extends its contiguous log.
-            if disk.joined
-                && !disk.cut()
-                && !disk.halted
-                && !disk.image_lost
-                && disk.join_position.is_some_and(|join| join <= disk.received)
+        for index in 0..self.world.disks.len() {
+            // The image a recording extends the member's log from. A recording holds
+            // the image from its join position: only one that joined at or below the
+            // end of what the member held extends its contiguous log.
+            let image = self.world.disks.get(index).and_then(|disk| {
+                disk.image.filter(|image| {
+                    disk.joined
+                        && !disk.halted
+                        && !disk.image_lost
+                        && image.join_position <= disk.received
+                })
+            });
+            let reaches = image.and_then(|image| {
+                let publication = self.world.publications.get(image.publication)?;
+                let parted = parted_since(
+                    &self.world.disks,
+                    &self.world.cuts,
+                    index,
+                    publication.leader,
+                );
+                (!publication.closed && parted.is_none()).then_some(image)
+            });
+            if let Some(mut image) = reaches
+                && let Some(publication) = self.world.publications.get(image.publication)
+                && let Some(disk) = self.world.disks.get_mut(index)
             {
-                disk.received = disk.received.max(log_position);
+                // Every entry appended since the last step, each one at the end of what
+                // the member holds; an entry that begins below it is one the member
+                // holds already, in whatever bytes it has there.
+                for entry in publication.entries.iter().skip(image.next) {
+                    if entry.position >= disk.received {
+                        disk.received = entry.position_after;
+                        disk.log.push(entry.clone());
+                    }
+                }
+                image.next = publication.entries.len();
+                disk.image = Some(image);
             }
-            if !disk.sync_paused && !disk.halted {
+            if let Some(disk) = self.world.disks.get_mut(index)
+                && !disk.sync_paused
+                && !disk.halted
+            {
                 disk.synced = disk.received;
             }
         }
@@ -456,22 +586,19 @@ impl Cluster {
             .map(|disk| (disk.terms.clone(), disk.candidate_term))
     }
 
-    /// The bytes of the log the member's recording holds: every entry up to the
-    /// position the log has reached it at, encoded as `spec/cluster.md` gives it, one
-    /// after another. Empty for a member that holds none.
+    /// The bytes of the log the member's recordings hold: every entry that has reached
+    /// the member, encoded as `spec/cluster.md` gives it, one after another in position
+    /// order. They are the member's own: two members that were sent different entries
+    /// at one position return different bytes. Empty for a member that holds none.
     pub fn log(&self, member: i32) -> Vec<u8> {
-        let received = self
+        let mut bytes = Vec::new();
+        if let Some(disk) = self
             .index(member)
             .and_then(|index| self.world.disks.get(index))
-            .map_or(0, |disk| disk.received);
-        let mut bytes = Vec::new();
-        for entry in self
-            .world
-            .log
-            .iter()
-            .take_while(|entry| entry.position_after <= received)
         {
-            bytes.extend_from_slice(&entry.bytes);
+            for entry in &disk.log {
+                bytes.extend_from_slice(&entry.bytes);
+            }
         }
         bytes
     }
@@ -493,7 +620,12 @@ impl Cluster {
             own,
         };
         let Ok(outcome) = core.offer(clock, payload, &mut io);
-        outcome.map(|()| self.world.log_position)
+        outcome.map(|()| {
+            self.world
+                .publication_of(own)
+                .and_then(|index| self.world.publications.get(index))
+                .map_or(0, |publication| publication.position)
+        })
     }
 
     /// Cuts the member off: its consensus messages, sent and to come, arrive nowhere,
@@ -512,6 +644,37 @@ impl Cluster {
         if let Some(disk) = self.disk_mut(member) {
             disk.cut_since_ns = None;
         }
+    }
+
+    /// Parts two members from each other and from nobody else: the consensus messages
+    /// between them, sent and to come, arrive nowhere, and when one of them leads, its
+    /// log stops reaching the other, whose image of it stays for the image liveness
+    /// timeout as it does in a [`Cluster::cut`]. Each still reaches every other
+    /// member. Parting a member from itself, or naming an id no member has, does
+    /// nothing.
+    pub fn cut_between(&mut self, member: i32, other: i32) {
+        let (Some(a), Some(b)) = (self.index(member), self.index(other)) else {
+            return;
+        };
+        let parted = self
+            .world
+            .cuts
+            .iter()
+            .any(|cut| (cut.a == a && cut.b == b) || (cut.a == b && cut.b == a));
+        if a != b && !parted {
+            let since_ns = self.world.clock.now_ns;
+            self.world.cuts.push(Cut { a, b, since_ns });
+        }
+    }
+
+    /// Ends the partition between two members.
+    pub fn heal_between(&mut self, member: i32, other: i32) {
+        let (Some(a), Some(b)) = (self.index(member), self.index(other)) else {
+            return;
+        };
+        self.world
+            .cuts
+            .retain(|cut| !((cut.a == a && cut.b == b) || (cut.a == b && cut.b == a)));
     }
 
     /// Starts the member again on an empty log directory, as a container whose volume
@@ -536,9 +699,13 @@ impl Cluster {
             *disk = Disk::empty(member);
         }
         if led {
-            self.world.log_session_id = None;
+            for publication in &mut self.world.publications {
+                if publication.leader == index {
+                    publication.closed = true;
+                }
+            }
             for disk in &mut self.world.disks {
-                disk.image_lost = disk.join_position.is_some();
+                disk.image_lost = disk.image.is_some();
             }
         }
     }
@@ -548,7 +715,7 @@ impl Cluster {
     /// has left the log and joined it again.
     pub fn lose_image(&mut self, member: i32) {
         if let Some(disk) = self.disk_mut(member) {
-            disk.image_lost = disk.join_position.is_some();
+            disk.image_lost = disk.image.is_some();
         }
     }
 
@@ -617,7 +784,14 @@ impl core::fmt::Debug for Cluster {
         f.debug_struct("Cluster")
             .field("now_ns", &self.world.clock.now_ns)
             .field("members", &self.cores.len())
-            .field("log_position", &self.world.log_position)
+            .field(
+                "log_position",
+                &self
+                    .world
+                    .publications
+                    .last()
+                    .map_or(0, |publication| publication.position),
+            )
             .field("in_flight", &self.world.net.len())
             .finish()
     }
