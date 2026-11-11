@@ -50,4 +50,10 @@ int64_t cavalry_go_offer(cavalry_publication_t *publication, const uint8_t *buff
 int cavalry_go_poll(cavalry_subscription_t *subscription, uintptr_t index, size_t fragment_limit,
                     cavalry_go_error_t *error);
 
+/* Polls the committed log `log` for up to `fragment_limit` entries, as cavalry_go_poll
+ * polls a subscription: the same trampoline, with `index` the log's slot in the client's
+ * table. The ABI's result: the count, or -1, with `error` written. */
+int cavalry_go_committed_log_poll(cavalry_committed_log_t *log, uintptr_t index, size_t fragment_limit,
+                                  cavalry_go_error_t *error);
+
 #endif

@@ -1125,7 +1125,7 @@ class GoPackage(unittest.TestCase):
             ["Client.IsClosed", "Client.Closed", "Client.Close", "Client.AddPublication", "Client.AddExclusivePublication",
              "Client.AddSubscription", "Client.StartRecording", "Client.StopRecording", "Client.TruncateRecording",
              "Client.PurgeSegments", "Client.PurgeRecording", "Client.StartReplay", "Client.StopReplay",
-             "Client.AddDestination", "Client.RemoveDestination"]))
+             "Client.AddDestination", "Client.RemoveDestination", "Client.CommittedLog"]))
         for label in methods:
             body = module.functions[label][2]
             self.assertTrue(body.startswith("{\n\tc.mu.Lock()\n\tdefer c.mu.Unlock()\n"), label)
@@ -1153,6 +1153,16 @@ class GoPackage(unittest.TestCase):
         self.assertIn("before it stopped on a fault, which Subscription.Fault reads", body)
         self.assertIn("Fix the handler: its first panic's value, %v, is this error's Cause", body)
         self.assertIn("See clients/go/README.md#the-panic", body)
+        # A committed log's poll names its own Fault and Err and its entries: the fault of
+        # the log's image is reported once, so the message must not send the reader to a
+        # subscription's (clients/go/README.md, "The committed log").
+        self.assertIn('one, many = "entry", "entries"', body)
+        self.assertIn("which this CommittedLog's Fault \" +\n\t\t\t\"reads until its next poll and its Err until its next "
+                      "failure, and nothing reports after that, so read \" +\n\t\t\t\"it and keep it before polling again", body)
+        log = code.split("func (l *CommittedLog) Poll(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("&HandlerError{Fragments: count, Raised: s.raised, Cause: first, CommittedLog: true}", log)
+        subscription = code.split("func (s *Subscription) Poll(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("&HandlerError{Fragments: count, Raised: s.raised, Cause: first}", subscription)
         with open(os.path.join(gen.ROOT, "clients", "go", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}

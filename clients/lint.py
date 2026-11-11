@@ -4,8 +4,8 @@ boundary's second part): the per-message functions a generator writes, the wrapp
 of the ABI's seven per-message functions of a publication and a subscription
 (`crates/cavalry-ffi/README.md`: the claim, the reserved value, the commit and abort, the
 offer, the poll and the header's values), the wrapper of the committed log's two, its poll
-and an entry's position, where a package has a committed log object, Python's and Node's
-so far (ADR 0070), and the trampoline that calls the user's handler, hold no lock, no `await` and no
+and an entry's position, where a package has a committed log object, Python's, Node's and
+Go's so far (ADR 0070), and the trampoline that calls the user's handler, hold no lock, no `await` and no
 raise, in the language's forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
 `raise`, and building one of the package's own exceptions. For JavaScript, read from
@@ -172,15 +172,17 @@ RULES = {
             "Publication.Offer",
             "Subscription.Poll",
             "Subscription.deliver",
+            "CommittedLog.Poll",
             "Header.Values",
             "cavalryGoFragment",
         ],
-        "raise_after": ("Subscription.Poll", "C.cavalry_go_poll"),
+        "raise_after": [("Subscription.Poll", "C.cavalry_go_poll"),
+                        ("CommittedLog.Poll", "C.cavalry_go_committed_log_poll")],
         # The C of shim.c: the trampoline the ABI calls, the poll that installs it, and the
         # per-message calls that copy the thread's error into the handle when they fail.
         "shim": {
             "file": "shim.c",
-            "functions": ["cavalry_go_trampoline", "cavalry_go_poll", "cavalry_go_try_claim",
+            "functions": ["cavalry_go_trampoline", "cavalry_go_poll", "cavalry_go_committed_log_poll", "cavalry_go_try_claim",
                           "cavalry_go_set_reserved_value", "cavalry_go_commit", "cavalry_go_abort",
                           "cavalry_go_offer"],
             "readers": [],
@@ -359,6 +361,14 @@ class Package:
         return found
 
 
+def raise_after_of(rules: dict) -> dict[str, str]:
+    """{poll: the ABI call after whose last line it may raise}, from a rule's
+    `raise_after`: one pair, or a list of pairs where a package has a committed log's poll
+    beside its subscription's (ADR 0070)."""
+    pairs = rules["raise_after"]
+    return dict(pairs if isinstance(pairs, list) else [pairs])
+
+
 def python_findings(language: str, path: str, rules: dict) -> list[str]:
     with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=path)
@@ -374,7 +384,7 @@ def python_findings(language: str, path: str, rules: dict) -> list[str]:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
     # Each poll and the ABI call after which it may raise: a subscription's, and since
     # ABI version 2 a committed log's.
-    raise_after = dict(rules["raise_after"])
+    raise_after = raise_after_of(rules)
     for name in present:
         node = found[name]
         where = f"{language}: {name} ({os.path.relpath(path, ROOT)}:{node.lineno})"
@@ -723,7 +733,7 @@ def node_findings(language: str, path: str, rules: dict) -> list[str]:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
     # Each poll and the addon call after which it may throw: a subscription's and a
     # committed log's.
-    raise_after = dict(rules["raise_after"])
+    raise_after = raise_after_of(rules)
     for name in present:
         line, _, body, start = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(path, ROOT)}:{line})"
@@ -890,12 +900,13 @@ def go_findings(language: str, path: str, rules: dict) -> list[str]:
     for name in rules["functions"]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {path}; {HELP}")
-    allowed_in, abi_call = rules["raise_after"]
+    raise_after = raise_after_of(rules)
     for name in present:
         file, line, body, start, code = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
         abi_line = None
-        if name == allowed_in:  # the last line that calls the ABI through the shim
+        if name in raise_after:  # the last line that calls the ABI through the shim
+            abi_call = raise_after[name]
             base = line_of(code, start) - 1
             for m in re.finditer(re.escape(abi_call) + r"\s*\(", body):
                 at = base + body.count("\n", 0, m.start()) + 1
@@ -1157,12 +1168,13 @@ def jvm_findings(language: str, path: str, rules: dict) -> list[str]:
     for name in rules["functions"]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {os.path.relpath(package, ROOT)}; {HELP}")
-    allowed_in, abi_call = rules["raise_after"]
+    raise_after = raise_after_of(rules)
     for name in present:
         file, line, head, body, start, code = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
         abi_line = None
-        if name == allowed_in:  # the last line that calls the ABI's poll
+        if name in raise_after:  # the last line that calls the ABI's poll
+            abi_call = raise_after[name]
             base = line_of(code, start) - 1
             for m in re.finditer(re.escape(abi_call) + r"\s*\(", body):
                 at = base + body.count("\n", 0, m.start()) + 1
@@ -1415,12 +1427,13 @@ def dotnet_findings(language: str, path: str, rules: dict) -> list[str]:
     for name in rules["functions"]:
         if name not in module.functions:
             findings.append(f"{language}: the per-message function {name} is not in {os.path.relpath(package, ROOT)}; {HELP}")
-    allowed_in, abi_call = rules["raise_after"]
+    raise_after = raise_after_of(rules)
     for name in present:
         file, line, head, body, start, code = module.functions[name]
         where = f"{language}: {name} ({os.path.relpath(file, ROOT)}:{line})"
         abi_line = None
-        if name == allowed_in:  # the last line that calls the ABI's poll
+        if name in raise_after:  # the last line that calls the ABI's poll
+            abi_call = raise_after[name]
             base = line_of(code, start) - 1
             for m in re.finditer(re.escape(abi_call) + r"\s*\(", body):
                 at = base + body.count("\n", 0, m.start()) + 1

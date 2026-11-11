@@ -9,7 +9,8 @@ against the header and linked with `cavalry-ffi`'s static library, and gives the
 handles the forms a Go user expects. A `Client` closes with `Close`; a `Publication`
 claims a slice of the log as a `[]byte` over it or offers a `[]byte`; a `Subscription`
 polls with a fragment handler function that receives the body as a `[]byte` into the
-log and the frame's `Header`; a `Recording` and a `Replay` wrap the driver's archive.
+log and the frame's `Header`; a `Recording` and a `Replay` wrap the driver's archive; a
+`CommittedLog` is a service's read of a cluster's committed log beside a member (below).
 Every message the client sends or receives goes through one `extern "C"` call on the
 caller's goroutine, as the ABI's page promises (ADR 0046's boundary; ADR 0051). The
 module has no dependency beyond Go's standard library: cgo is part of the Go toolchain,
@@ -25,13 +26,83 @@ caller's bytes is passed to `cavalry_publication_offer` as the address of its fi
 element, which cgo allows because the bytes hold no Go pointer and the ABI copies them
 before it returns.
 
+### The committed log
+
+A service is a program beside a cluster member that applies the entries the cluster
+has committed (`docs/how-to/read-the-committed-log.md`). `client.CommittedLog(position)`
+opens the log of the member on the client's driver at a position, 0 or the `Position`
+an earlier run reached, and returns `nil` and no error while the driver hosts no
+member with a log, so a service started before its member asks again. `log.Poll(handler,
+fragmentLimit)` calls `handler(body, header, position)` for each committed entry, in
+order, none at or past the member's commit position; `position` is the entry's
+position in the log. It returns the entry count and an error. The count is −1 when the
+ABI's poll stopped on a fault, and the error is then `nil`: the error `Poll` returns
+is a handler's panic alone, so check the count. After a −1, `log.Err()` is the
+failure, an `*Error` whose `Code` is the fault's, kept until the log's next failure,
+and `log.Fault()` gives the fault's code, session and position until the next poll.
+`log.Position()` is the position after the last entry delivered, the one a service
+keeps for its next start, and `log.CommitPosition()` the bound of the last poll.
+`log.IsEnded()` says that no poll will deliver another entry: stop reading when it is
+true, not when a poll returns 0, then close the log and open another from
+`log.Position()`. `log.Close()` stops the driver's replay and is idempotent; a log
+closed after its client is freed, and the driver ends the replay by itself. When the
+ABI could not stop the replay, `log.Close()` returns the `*Error` after it has freed
+the log and its slot, and a second `Close` returns `nil`. `log.MemberID` and
+`log.RecordingID` say whose log it is (`spec/c-abi.md`, "Functions", committed log;
+ADR 0070).
+
+An ended log delivered every committed entry it may read only when three things hold:
+
+- `log.FailedAt()` is 0 and `false`. A position and `true` is where the driver's
+  replay of the member's recording failed, and no entry from it on was delivered.
+- `log.WithdrawnAt()` is 0 and `false`. A position and `true` is where the entries
+  begin that the log was not given, because the driver withdrew the replay, 5 s after
+  it ended, before the service had read it.
+- No `log.Poll` returned −1 with the fault of the log's own image: a `log.Err()` whose
+  `Code` is `ErrFaultImage`, the replay's image failed a check, or
+  `ErrFaultImagesFull`, the image could not join.
+
+Read the two reports once `log.IsEnded()` is true. The driver withdraws a replay that
+failed as it does any other, so both can be `true`: the position of `log.WithdrawnAt()`
+is then the lower, and the entries from it on, those below the position of
+`log.FailedAt()` among them, were not delivered. The fault of the image is reported
+once. The poll that meets it returns −1, `log.Fault()` answers it only until the next
+poll, the next poll returns 0 and clears it, `log.Err()` keeps it only until the log's
+next failure, and both reports are `false` for such a log. So a service keeps that −1
+and its `Err` when it gets them: nothing reports them later, and without them this
+end reads as a whole one. In every case what the log delivered ends at
+`log.Position()`.
+
+A committed log is polled through the trampoline a subscription is polled through, so
+an open log holds one slot of the table of 4,096 ("Threads"), which its `Close` frees,
+and `Registered` counts it. A handler's panic goes where a subscription's goes ("The
+panic"): every entry the ABI delivers reaches the handler, and `Poll` returns a
+`*HandlerError` once the ABI has returned, with the poll's count as its `Fragments`,
+the −1 of a fault included. An entry whose handler call panicked was delivered and is
+not delivered again: `log.Position()` is past it, and past every entry the same poll
+delivered after it. A handler cannot stop a poll: the ABI goes on handing it entries
+up to the fragment limit. So a service that must apply every entry, in order, does
+this:
+
+1. The handler recovers its own panics and handles its own errors. When it cannot
+   apply an entry, it keeps that entry's `position` and sets a flag.
+2. While the flag is set the handler applies nothing and returns at once, for the rest
+   of that poll: the poll still hands it the entries after the one that failed.
+3. After the poll, the service closes the log and opens a new one at the position it
+   kept.
+
+With entries at 0, 96 and 192 and a failure at 96, opening again at `log.Position()`
+would lose the entry at 96, and applying 192 before opening again at 96 would apply
+192 twice. A `fragmentLimit` of 1 is the simple form: a poll then delivers at most one
+entry, and the service decides after each.
+
 ## What it must never do
 
 - Never run a message through anything but one ABI call: no lock, no goroutine, no
   channel, no allocation, no copy of a fragment for the handler. `clients/lint.py`
   reads the per-message functions of `cavalry.go` and `trampoline.go`, the claim, the
-  reserved value, the commit, the abort, the offer, the poll, the header's values and
-  the trampoline, for Go's forms of each (`sync`, a lock or a wait through a variable
+  reserved value, the commit, the abort, the offer, a subscription's and a committed
+  log's poll, the header's values and the trampoline, for Go's forms of each (`sync`, a lock or a wait through a variable
   or a field, such as `registryMu.Lock()`, which names no `sync.`, a `go` statement, a
   channel send or receive, `select`, `panic`, and `make`, `new` and `append`), and
   those of `shim.c`, the C trampoline and the poll, for C's (`pthread_mutex_*`,
@@ -66,6 +137,14 @@ before it returns.
   and `AddSubscription` returns `ErrSubscriptionsFull`. The close zeroes the claim struct too, so `Commit`, `Abort` and `SetReservedValue` after it answer -1 with
   `ErrNoClaim` in `Err` and the ABI reads no freed handle through the struct's
   `publication` (`spec/c-abi.md`, "Which claim a struct names").
+- Never read a refusal as an answer. A `Poll` from inside a handler of the same
+  subscription returns −1 with `ErrPolling` in `Err`, and the poll in progress goes
+  on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
+  the same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()`
+  is `false`, `log.FailedAt()` and `log.WithdrawnAt()` are 0 and `false`, and
+  `log.Fault()` and `log.Close()` return an `*Error`, each with `ErrPolling`, and the
+  log stays open. The three `false` are refusals there, not answers: read the three
+  after the poll has returned. The handler has each entry's own `position`.
 - Never edit a generated file by hand: `just lint` regenerates the module and fails
   when the committed files differ. `example/main.go` is the one file written by hand,
   and it is this README's program.
@@ -173,8 +252,8 @@ making on it, an add or a command for up to 10 s; no message passes through a
 `Client`, so the mutex is never on a message's path. `conformance/go/quickstart`
 shares one client among eight goroutines that add and close at once.
 
-A `Publication`, `Subscription`, `Recording`, `Replay` or `Image` is used from one
-goroutine at a time, as the Rust API's handles are: the client adds no lock to them.
+A `Publication`, `Subscription`, `CommittedLog`, `Recording`, `Replay` or `Image` is
+used from one goroutine at a time, as the Rust API's handles are: the client adds no lock to them.
 A program with several goroutines gives each its own `Publication` and
 `Subscription`. Two handles may be used from two goroutines at once, a client and its
 publications and subscriptions among them. `Client.AddDestination` and
@@ -182,9 +261,9 @@ publications and subscriptions among them. `Client.AddDestination` and
 may run beside that publication's `Offer` or `TryClaim` in another goroutine, but not
 beside its `Close` (`spec/c-abi.md`, "Threads"; ADR 0057).
 
-The table the trampoline reads subscriptions from holds 4,096 subscriptions:
-`AddSubscription` above that returns an `*Error` with `ErrSubscriptionsFull`, and
-each `Subscription.Close` frees a slot. The table is written under a lock when a
+The table the trampoline reads subscriptions from holds 4,096 subscriptions and
+committed logs together: `AddSubscription` or `CommittedLog` above that returns an
+`*Error` with `ErrSubscriptionsFull`, and each `Close` frees a slot. The table is written under a lock when a
 subscription is added or closed, never on a message's path, and read with one atomic
 load per fragment. The package's own test, `cavalry_test.go`, which
 `conformance/go/run.sh` runs with `go test` and which needs no driver, fills the
@@ -211,11 +290,12 @@ read another thread's failure, or none. The client never reads the error that wa
 - A per-message call goes through a function of `shim.c`. When the ABI call failed,
   the shim copies the code, the message and the ABI function's name into the one
   `cavalry_go_error_t` the handle keeps, in the same C call, so on the same thread.
-  `Publication.Err` and `Subscription.Err` return that copy as an `*Error`, kept until
-  the handle's next failure, as the ABI keeps a thread's; they return `nil` before
-  the first failure. The copy is bounded by the struct, 48 bytes of function name and
-  512 bytes of message, the size of the ABI's own buffer; it allocates nothing, and a
-  call that succeeds copies nothing. `Err` builds the `*Error` when it is called.
+  `Publication.Err`, `Subscription.Err` and `CommittedLog.Err` return that copy as an
+  `*Error`, kept until the handle's next failure, as the ABI keeps a thread's; they
+  return `nil` before the first failure. The copy is bounded by the struct, 48 bytes
+  of function name and 512 bytes of message, the size of the ABI's own buffer; it
+  allocates nothing, and a call that succeeds copies nothing. `Err` builds the
+  `*Error` when it is called.
 - `Errcode` and `Errmsg` are the ABI's two functions as they are: they read the
   calling thread's error. They describe the goroutine's own failure in two places
   only. One is inside a fragment handler, where cgo holds the goroutine to the poll's
@@ -235,7 +315,10 @@ Go's stack copier ends the process on a value below 4,096 in a pointer's place. 
 makes the body's `[]byte` over the log's bytes with `unsafe.Slice`, no copy and no
 allocation, points the subscription's one `Header` at the frame, and calls the
 handler inside a function that recovers a panic ("The panic"). By construction, no
-object per received message.
+object per received message. For a committed log's entry the Go trampoline makes one
+cgo call more before the handler: `cavalry_committed_log_entry_position` on the
+header, for the position it hands the handler. That call is not through `shim.c`, and
+it allocates nothing.
 
 Each call-back crosses the boundary twice more, in Go's runtime (`cgocallbackg` in
 `runtime/cgocall.go`). The runtime first holds the goroutine to the polling thread
@@ -244,8 +327,10 @@ the thread, not a lock and not a syscall. It then calls `exitsyscall` to take ba
 goroutine's P, the runtime's processor, which Go code needs in order to run and which
 the poll's cgo call gave up in `entersyscall`. After the handler, `reentersyscall`
 gives the P up again for the rest of the poll. A poll of n fragments is therefore one
-`entersyscall` and `exitsyscall` pair for the call and n more for the call-backs. The
-client's own `runtime.LockOSThread` ("The thread's error") is on none of them.
+`entersyscall` and `exitsyscall` pair for the call and n more for the call-backs. A
+committed log's poll of n entries has n more again, for the position's call inside
+each call-back. The client's own `runtime.LockOSThread` ("The thread's error") is on
+none of them.
 
 `exitsyscall` has a fast path and a slow one (`runtime/proc.go`):
 
@@ -324,8 +409,12 @@ inside a function that recovers, keeps the first panic's value, counts every one
 goes on calling the handler for every later fragment of the poll, so that no fragment
 is consumed unseen; `Poll` returns the count and a `*HandlerError` once the ABI has
 returned, with `Fragments`, `Raised`, the first value as `Cause`, and a message that
-says what to do. The value is kept as it was panicked, an `error`, a string or
-anything else, and stays the first when an `error` follows it in the same poll.
+says what to do. `Fragments` is the poll's count, −1 when the poll also stopped on a
+fault. A committed log's `*HandlerError` has `CommittedLog` true and speaks of entries,
+and when `Fragments` is −1 it names the log's `Fault` and `Err`, to read before the
+next poll ("The committed log"). The value is kept as it was panicked, an `error`, a
+string or anything else, and stays the first when an `error` follows it in the same
+poll.
 `runtime.Goexit` in a handler is not a panic and is not recovered; a program that
 calls it from a handler ends the goroutine that called `Poll` inside the ABI, which
 the ABI's page does not allow.
