@@ -1271,12 +1271,24 @@ class DotnetPackage(unittest.TestCase):
     def test_handler_exceptions_message_says_what_to_do_and_names_a_heading_of_the_readme(self):
         files = gen_dotnet.write_dotnet(self.header)
         code = files["HandlerException.cs"]
-        body = code.split("public HandlerException(int fragments, int raised, Exception cause)", 1)[1].split("\n    {\n", 1)[0]
+        self.assertIn("    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false)\n"
+                      "        : base(Describe(fragments, raised, cause, committedLog), cause)\n", code)
+        body = code.split("private static string Describe(int fragments, int raised, Exception cause, bool committedLog)",
+                          1)[1].split("\n    }\n", 1)[0]
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which Subscription.GetFault() reads", body)
         self.assertIn("    public Fault GetFault()\n", files["Subscription.cs"])
         self.assertIn("Fix the handler: its first exception, ", body)
         self.assertIn("See clients/dotnet/README.md#the-exception", body)
+        # A committed log's poll names its own GetFault() and its entries: the fault of the
+        # log's image is reported once, so the message must not send the reader to a
+        # subscription's (clients/dotnet/README.md, "The committed log").
+        self.assertIn('string one = committedLog ? "entry" : "fragment";', body)
+        self.assertIn("which this CommittedLog's GetFault() reads\"\n                    + \" until its next poll and nothing "
+                      "reports after that, so read it and keep it before polling again\"", body)
+        self.assertIn("    public Subscription.Fault GetFault()\n", files["CommittedLog.cs"])
+        self.assertIn("throw new HandlerException(count, raised, cause, committedLog: true);", files["CommittedLog.cs"])
+        self.assertIn("throw new HandlerException(count, raised, cause);", files["Subscription.cs"])
         with open(os.path.join(gen.ROOT, "clients", "dotnet", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}

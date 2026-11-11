@@ -38,28 +38,60 @@ opens the log of the member on the client's driver at a position, 0 or the
 `Position()` an earlier run reached, and returns `null` while the driver hosts no
 member with a log, so a service started before its member asks again. `log.Poll(handler,
 fragmentLimit)` calls the `EntryHandler`, `handler(body, header, position)`, for each
-committed entry, in order, none at or past the member's commit position, and returns
-the entry count; `position` is the entry's position in the log. `log.Position()` is
-the position after the last entry delivered, the one a service keeps for its next
-start, and `log.CommitPosition()` the bound of the last poll. `log.IsEnded()` says that
-no poll will deliver another entry: stop reading when it is true, not when a poll
-returns 0, then close the log and open another from `log.Position()`. Two reports say
-whether the log ended short of the entries it was owed, each `null` or a position,
-read once `log.IsEnded()` is true: `log.FailedAt()`, where the driver's replay of the
-member's recording failed, and `log.WithdrawnAt()`, where the entries begin that the
-log was not given because the driver withdrew the replay, 5 s after it ended, before
-the service had read it. The log delivered every committed entry it may read only
-when both are `null`. `log.Close()`, or `using`, stops the driver's replay
-and is idempotent; a log closed after its client is freed, and the driver ends the
-replay by itself. `log.MemberId` and `log.RecordingId` say whose log it is
-(`spec/c-abi.md`, "Functions", committed log; ADR 0070).
+committed entry, in order, none at or past the member's commit position; `position` is
+the entry's position in the log. It returns the entry count, or −1 when the ABI's poll
+stopped on a fault, which `log.GetFault()` gives, its `Code`, `SessionId` and
+`Position`, until the next poll. `log.Position()` is the position after the last entry
+delivered, the one a service keeps for its next start, and `log.CommitPosition()` the
+bound of the last poll. `log.IsEnded()` says that no poll will deliver another entry:
+stop reading when it is true, not when a poll returns 0, then close the log and open
+another from `log.Position()`. `log.Close()`, or `using`, stops the driver's replay and
+is idempotent; a log closed after its client is freed, and the driver ends the replay
+by itself. When the ABI could not stop the replay, `log.Close()` throws
+`CavalryException` after it has freed the log, and a second close does nothing.
+`log.MemberId` and `log.RecordingId` say whose log it is (`spec/c-abi.md`,
+"Functions", committed log; ADR 0070).
+
+An ended log delivered every committed entry it may read only when three things hold:
+
+- `log.FailedAt()` is `null`. A position is where the driver's replay of the member's
+  recording failed, and no entry from it on was delivered.
+- `log.WithdrawnAt()` is `null`. A position is where the entries begin that the log
+  was not given, because the driver withdrew the replay, 5 s after it ended, before
+  the service had read it.
+- No `log.Poll` returned −1 with the fault of the log's own image: a `log.GetFault()`
+  whose `Code` is `Abi.ERR_FAULT_IMAGE`, the replay's image failed a check, or
+  `Abi.ERR_FAULT_IMAGES_FULL`, the image could not join.
+
+Read the two reports once `log.IsEnded()` is true. The driver withdraws a replay that
+failed as it does any other, so both can be positions: `log.WithdrawnAt()` is then the
+lower, and the entries from it on, those below `log.FailedAt()` among them, were not
+delivered. The fault of the image is reported once. The poll that meets it returns −1,
+`log.GetFault()` answers it only until the next poll, the next poll returns 0 and
+clears it, and both reports are `null` for such a log. So a service keeps that −1 and
+its fault when it gets them: nothing reports them later, and without them this end
+reads as a whole one. In every case what the log delivered ends at `log.Position()`.
 
 A committed log has an `UnmanagedCallersOnly` trampoline of its own, as a subscription
 has. A handler's exception goes where a subscription's goes ("The exception"): every
 entry the ABI delivers reaches the handler, and `Poll` throws `HandlerException` once
-the ABI has returned. An entry whose handler call threw was delivered and is not
-delivered again, so a service that must apply every entry catches its own exceptions
-and stops there, with the entry's `position` in hand to open the log at again.
+the ABI has returned, with the poll's result as its `Fragments`, the −1 of a fault
+included. An entry whose handler call threw was delivered and is not delivered again:
+`log.Position()` is past it, and past every entry the same poll delivered after it. A
+handler cannot stop a poll: the ABI goes on handing it entries up to the fragment
+limit. So a service that must apply every entry, in order, does this:
+
+1. The handler catches its own exceptions. When it cannot apply an entry, it keeps
+   that entry's `position` and sets a flag.
+2. While the flag is set the handler applies nothing and returns at once, for the rest
+   of that poll: the poll still hands it the entries after the one that failed.
+3. After the poll, the service closes the log and opens a new one at the position it
+   kept.
+
+With entries at 0, 96 and 192 and a failure at 96, opening again at `log.Position()`
+would lose the entry at 96, and applying 192 before opening again at 96 would apply
+192 twice. A `fragmentLimit` of 1 is the simple form: a poll then delivers at most one
+entry, and the service decides after each.
 
 ## What it must never do
 
@@ -102,6 +134,14 @@ and stops there, with the entry's `position` in hand to open the log at again.
   struct too, so `Commit`, `Abort` and `SetReservedValue` after it answer -1 with
   `Abi.ERR_NO_CLAIM` and the ABI reads no freed handle through the struct's
   `publication` (`spec/c-abi.md`, "Which claim a struct names").
+- Never read a refusal as an answer. A `Poll` from inside a handler of the same
+  subscription returns −1 with `Abi.ERR_POLLING`, and the poll in progress goes on. A
+  committed log's handler is held to the same rule. From inside it, a `Poll` of the
+  same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()` is
+  `false`, `log.FailedAt()` and `log.WithdrawnAt()` are `null`, and `log.GetFault()`
+  and `log.Close()` throw `CavalryException`, each with `Abi.ERR_POLLING`, and the log
+  stays open. The `false` and the two `null` are refusals there, not answers: read the
+  three after the poll has returned. The handler has each entry's own `position`.
 - Never edit a generated file by hand: `just lint` regenerates the library and fails
   when the committed files differ. `example/Program.cs` and `example/Example.csproj`
   are the files written by hand, and the program is this README's.
@@ -218,7 +258,10 @@ subscription back from the handle, one lookup in the handle table and one cast, 
 allocation, then calls `Subscription.Deliver`, which makes a `ReadOnlySpan<byte>` over
 the log's bytes, a struct on the stack, no copy and no allocation, points the
 subscription's one `Header` at the frame and calls the handler, a delegate
-invocation, inside a `try`/`catch (Exception)` ("The exception"). By construction, no
+invocation, inside a `try`/`catch (Exception)` ("The exception"). A committed log's
+trampoline does the same through `CommittedLog.Deliver`, which makes one call more
+per entry before the handler: `cavalry_committed_log_entry_position` on the header,
+for the position it hands the handler, a `long`, no object. By construction, no
 object per received message. There is no one view per subscription reused across
 messages, as the card asked: a span is made per fragment, on the stack, which costs
 nothing a collection would see.
@@ -269,8 +312,12 @@ calls the handler inside a `try`/`catch (Exception)`, keeps the first exception,
 counts every one, and goes on calling the handler for every later fragment of the
 poll, so that no fragment is consumed unseen; `Poll` throws `HandlerException` once
 the ABI has returned, with `Fragments`, `Raised`, the first exception as its
-`InnerException`, and a message that says what to do. The exception is kept as
-thrown and stays the first when another follows it in the same poll.
+`InnerException`, and a message that says what to do. `Fragments` is the poll's
+result: the count, or −1 when the poll also stopped on a fault, which `GetFault()`
+reads. A committed log's `HandlerException` has `CommittedLog` true and speaks of
+entries, and when `Fragments` is −1 it names `log.GetFault()`, to read before the next
+poll ("The committed log"). The exception is kept as thrown and stays the first when
+another follows it in the same poll.
 
 ## What to read next
 

@@ -6,24 +6,55 @@ using System;
 namespace Cavalry;
 
 /// <summary>
-/// The fragment handler threw during a poll: <see cref="Fragments"/> is the count the poll
-/// returned once the ABI was done, <see cref="Raised"/> how many handler calls threw, and
+/// The handler threw during a poll, a subscription's fragment handler or, when
+/// <see cref="CommittedLog"/> is true, a committed log's entry handler:
+/// <see cref="Fragments"/> is the count the poll returned once the ABI was done, of
+/// fragments or of entries, or -1 when the poll also stopped on a fault, which the
+/// <c>GetFault()</c> of the object that was polled reads until its next poll;
+/// <see cref="Raised"/> how many handler calls threw, and
 /// <see cref="Exception.InnerException"/> the first exception, kept as thrown.
 /// </summary>
 public sealed class HandlerException : Exception
 {
     public int Fragments { get; }
     public int Raised { get; }
+    public bool CommittedLog { get; }
 
-    public HandlerException(int fragments, int raised, Exception cause)
-        : base("the fragment handler threw on " + raised + " of " + (fragments >= 0
-            ? "the " + fragments + " fragment(s) this poll delivered"
-            : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads")
-            + "; every fragment reached the handler once, in order. Fix the handler: its first exception, " + cause.GetType().Name
-            + ", is this exception's InnerException; polling again does not deliver these fragments again."
-            + " See clients/dotnet/README.md#the-exception", cause)
+    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false)
+        : base(Describe(fragments, raised, cause, committedLog), cause)
     {
         Fragments = fragments;
         Raised = raised;
+        CommittedLog = committedLog;
+    }
+
+    /// <summary>The message: what the handler threw on, the fragments of a subscription's
+    /// poll or the entries of a committed log's, and what to do. The fault of a committed
+    /// log's own image is reported by one poll (clients/dotnet/README.md, "The committed
+    /// log"), so its message names the log's own <c>GetFault()</c>.</summary>
+    private static string Describe(int fragments, int raised, Exception cause, bool committedLog)
+    {
+        string one = committedLog ? "entry" : "fragment";
+        string many = committedLog ? "entries" : "fragments";
+        string delivered;
+        if (fragments < 0)
+        {
+            delivered = committedLog
+                ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's GetFault() reads"
+                    + " until its next poll and nothing reports after that, so read it and keep it before polling again"
+                : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads";
+        }
+        else if (committedLog)
+        {
+            delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll delivered";
+        }
+        else
+        {
+            delivered = "the " + fragments + " fragment(s) this poll delivered";
+        }
+        return "the " + one + " handler threw on " + raised + " of " + delivered
+            + "; every " + one + " reached the handler once, in order. Fix the handler: its first exception, " + cause.GetType().Name
+            + ", is this exception's InnerException; polling again does not deliver these " + many + " again."
+            + " See clients/dotnet/README.md#the-exception";
     }
 }
