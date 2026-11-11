@@ -129,12 +129,12 @@ the service decides after each.
   after one the runtime kept from it: the rest of that poll is counted too, and
   `HandlerError.undeliveredAt` is where the service opens the log again.
 - Never lose a handle the ABI keeps open. Every close frees its handle, whatever it
-  returns, so `close()` forgets the handle once the ABI's close has returned. The one
-  exception is a subscription's close from inside a handler of its own poll, which the
-  ABI refuses with `CAVALRY_ERR_POLLING`, leaving the subscription open
-  (`spec/c-abi.md`, "Calls during a claim or a poll"). `close()` then throws
-  `CavalryError` and keeps the handle, so the subscription can be polled and closed
-  after the poll. The close zeroes the claim struct too, so `commit`, `abort` and `setReservedValue` after it answer -1 with
+  returns, so `close()` forgets the handle once the ABI's close has returned. There
+  are two exceptions: a subscription's close from inside a handler of its own poll,
+  and a committed log's close from inside a handler of its own poll. The ABI refuses
+  each with `CAVALRY_ERR_POLLING` and leaves the handle open (`spec/c-abi.md`, "Calls
+  during a claim or a poll"). `close()` then throws `CavalryError` and keeps the
+  handle, so the subscription or the log can be polled and closed after the poll. The close zeroes the claim struct too, so `commit`, `abort` and `setReservedValue` after it answer -1 with
   `CAVALRY_ERR_NO_CLAIM` and the ABI reads no freed handle through the struct's
   `publication` (`spec/c-abi.md`, "Which claim a struct names").
 - Never read a refusal as an answer. A `poll` from inside a handler of the same

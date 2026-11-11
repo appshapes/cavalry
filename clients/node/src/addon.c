@@ -356,36 +356,47 @@ static void free_state(napi_env env, void *data, void *hint) {
  * root the Header, and with it the state, for the life of the process. The Subscription
  * holds its Header for every poll, so the weak reference reads it whenever a poll runs; once
  * the program drops the Subscription, a collection frees the Header and the external, whose
- * finalizer, free_state, frees the state. */
-static napi_value register_state(napi_env env, napi_callback_info info, bool positions) {
+ * finalizer, free_state, frees the state. `function` is the addon function's own name, and
+ * `owner` whose state it is, for the errors it throws. */
+static napi_value register_state(napi_env env, napi_callback_info info, bool positions, const char *function,
+                                 const char *owner) {
   size_t argc = 1; napi_value argv[1];
-  if (!read_args(env, info, 1, &argc, argv, "registerSubscription")) return NULL;
+  char message[192];
+  if (!read_args(env, info, 1, &argc, argv, function)) return NULL;
   subscription_state_t *s = calloc(1, sizeof *s);
-  if (s == NULL) { napi_throw_error(env, NULL, "registerSubscription: out of memory"); return NULL; }
+  if (s == NULL) {
+    snprintf(message, sizeof message, "%s: out of memory", function);
+    napi_throw_error(env, NULL, message);
+    return NULL;
+  }
   s->positions = positions;
   if (napi_create_reference(env, argv[0], 0, &s->header_ref) != napi_ok) {
-    free(s); type_error(env, "header", "the subscription's Header object"); return NULL;
+    free(s);
+    snprintf(message, sizeof message, "%s Header object", owner);
+    type_error(env, "header", message);
+    return NULL;
   }
   napi_value holder, v;
   if (napi_create_object(env, &holder) != napi_ok || napi_create_reference(env, holder, 1, &s->holder_ref) != napi_ok ||
       napi_create_external(env, s, free_state, NULL, &v) != napi_ok) {
     free_state(env, s, NULL);
-    napi_throw_error(env, NULL, "registerSubscription: N-API could not make the subscription's state; the runtime is "
-                     "out of memory or shutting down");
+    snprintf(message, sizeof message, "%s: N-API could not make %s state; the runtime is out of memory or shutting "
+             "down", function, owner);
+    napi_throw_error(env, NULL, message);
     return NULL;
   }
   return v;
 }
 
 static napi_value fn_registerSubscription(napi_env env, napi_callback_info info) {
-  return register_state(env, info, false);
+  return register_state(env, info, false, "registerSubscription", "the subscription's");
 }
 
 /* registerCommittedLog(header): a committed log's state, a subscription's state whose
  * trampoline hands the handler a third argument, the entry's position in the log
  * (spec/c-abi.md, "A frame's position"; ADR 0070). */
 static napi_value fn_registerCommittedLog(napi_env env, napi_callback_info info) {
-  return register_state(env, info, true);
+  return register_state(env, info, true, "registerCommittedLog", "the committed log's");
 }
 
 /* The Error a poll reports for its first fragment that N-API kept from the handler: what the
