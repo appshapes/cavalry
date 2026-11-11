@@ -255,13 +255,22 @@ What Node does for those calls, per received message, as Node v24.x's source has
 - When the event loop next turns, Node runs the queued callback. The callback calls
   the addon's finalizer, `buffer_freed`, and frees the `CallbackInfo`, the
   `BufferFinalizer` and itself ("The runtime's queue").
+- For a committed log's entry, the position: `napi_create_int64` is
+  `v8::Number::New(isolate, (double) value)`. V8 keeps a small integer in the handle
+  scope's slot and not on its heap: one below 2^31 on Node's own builds, which do not
+  compress V8's pointers, and one below 2^30 on a build that does. From there on it
+  makes a `HeapNumber` on V8's heap, freed by a collection. So once a log passes
+  2 GiB, each entry makes one more object on V8's heap, the number its position is
+  handed to the handler as.
 
 So a received message costs, on the runtime's side, at least five native
 allocations, two mutex lock and unlock pairs, and a share of one `write` system call
-per turn of the event loop. The mutexes are contended only when another thread queues
-work for the same environment at the same moment. None of this is code Cavalry
-writes; ADR 0046 leaves it outside the per-message rules, and this README records it.
-The addon's own share is one counter increment per `Buffer`, for `buffersHeld`.
+per turn of the event loop, and a committed log's entry at a position of 2^31 or more
+one object more on V8's heap. The mutexes are contended only when another thread
+queues work for the same environment at the same moment. None of this is code
+Cavalry writes; ADR 0046 leaves it outside the per-message rules, and this README
+records it. The addon's own share is one counter increment per `Buffer`, for
+`buffersHeld`.
 
 The `Header`'s getters each call the addon's `headerField`, which reads
 `cavalry_header_values` once per fragment, on the first getter, into the one
