@@ -329,7 +329,7 @@ impl Subscription {
     ///
     /// The bound is for a stream that may be read only as far as something else has
     /// got: a cluster's service reads its log no further than the commit position
-    /// (`spec/cluster.md`, "The service"). A bound cannot be applied in the
+    /// ([`CommittedLog`](crate::CommittedLog)). A bound cannot be applied in the
     /// handler instead, since a frame the handler was given is behind the image's
     /// position and cannot be handed back.
     ///
@@ -359,6 +359,43 @@ impl Subscription {
             return Ok(0);
         };
         self.bounded_poll_at(index, limit_position, fragment_limit, &mut handler)
+    }
+
+    /// Reads every image but the first of `session_id` with no bound, up to
+    /// `fragment_limit` fragments in all, and drops what it reads: for a reader of one
+    /// session on a stream others may publish on, whose images would otherwise hold
+    /// their publishers at this subscription's position (`spec/log-buffer.md`, "The
+    /// driver": a publication's limit follows its slowest subscriber).
+    pub(crate) fn discard_others(
+        &mut self,
+        session_id: i32,
+        fragment_limit: usize,
+    ) -> Result<usize, Fault> {
+        if self.shared.closed().is_some() {
+            return Err(Fault::Closed);
+        }
+        self.apply_events()?;
+        let kept = self
+            .images
+            .iter()
+            .position(|image| image.session_id == session_id);
+        let mut dropped = 0;
+        let mut index = 0;
+        while index < self.images.len() && dropped < fragment_limit {
+            if Some(index) == kept {
+                index += 1;
+                continue;
+            }
+            // A fault removes the image at `index` and returns: the next call goes on.
+            dropped += self.bounded_poll_at(
+                index,
+                i64::MAX,
+                fragment_limit - dropped,
+                &mut |_: &[u8], _: &DataFrameHeader| {},
+            )?;
+            index += 1;
+        }
+        Ok(dropped)
     }
 
     /// The bounded read of the image at `index`, its position stored after it; a frame

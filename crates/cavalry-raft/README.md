@@ -41,17 +41,24 @@ commit path runs per message.
   error, and a stop position not read within 1 s is a `stop-timeout` error. Either
   way the member stays in init with the recording held, and the next `do_work()`
   stops it again.
+- Tells a service where the log is: `cluster.log_recording_id` holds the id of the
+  recording the member records the live log into, −1 while it records none, stored
+  before the member's commit position exists and changed before a commit position
+  the recording does not hold is stored. A service is a client of the same driver that replays that
+  recording and reads it no further than `cluster.commit_position`:
+  `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
+  0066).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one
   process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
   member started again on an empty log directory to set: what the example below and
   most of the crate's tests run. It is a test double and allocates; its consensus
   stream holds at most 4,096 messages in flight and loses, and counts, one sent
   while it is full, and its log holds every entry offered for the cluster's life.
-- To come, each with its card: `cavalry run` starting the module from two
-  configuration keys, the service's bounded poll and `doctor`'s checks (card 227), the
-  election and mixed versions in a rolling upgrade (card 228), the cluster client (card
-  229), snapshots and catch-up (card 230), and standby members, which follow the log
-  without voting, in the open core.
+- To come, each with its card: the C ABI's calls for a service, so that a service is
+  a program in any of the five client languages (card 227), the election and mixed
+  versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots
+  and catch-up (card 230), and standby members, which follow the log without voting,
+  in the open core.
 
 In Aeron, this is Cluster, with Cluster Standby as a paid component
 ([glossary](../../docs/glossary.md)).
