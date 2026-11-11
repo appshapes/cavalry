@@ -34,7 +34,8 @@ use std::collections::VecDeque;
 use cavalry_proto::cluster::{LEADER_HEARTBEAT_TIMEOUT_NS, Message, Stream, entry_position};
 
 use crate::consensus::{
-    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, Role, terms_above,
+    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, ReplayStopped, Role,
+    base_above, terms_above,
 };
 
 /// The MTU length the cluster's log positions are computed with: the UDP transport's
@@ -401,6 +402,32 @@ impl Io for MemberIo<'_> {
     fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2] {
         let record = self.world.disks.get(self.own).map(|disk| &disk.terms);
         terms_above(record.into_iter().flatten().copied(), term)
+    }
+
+    fn term_base_above(&mut self, position: i64) -> Option<i64> {
+        let record = self.world.disks.get(self.own).map(|disk| &disk.terms);
+        base_above(record.into_iter().flatten().copied(), position)
+    }
+
+    /// Nothing is started: this cluster has no replays yet, so a leader in it answers
+    /// a catch-up position as one whose recordings do not hold the position. They
+    /// come with the member's side of a replication, state 9 (ADR 0085), and until
+    /// then no member in this cluster asks.
+    fn start_replay(
+        &mut self,
+        _member: i32,
+        _position: i64,
+        _end: i64,
+    ) -> Result<bool, Self::Fault> {
+        Ok(false)
+    }
+
+    fn stop_replay(&mut self, _member: i32) -> Result<(), Self::Fault> {
+        Ok(())
+    }
+
+    fn replay_stopped(&mut self, _member: i32) -> Result<Option<ReplayStopped>, Self::Fault> {
+        Ok(None)
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {

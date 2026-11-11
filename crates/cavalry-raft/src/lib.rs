@@ -6,6 +6,7 @@ pub mod memory;
 pub mod module;
 
 pub use consensus::{
-    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, NO_SESSION, Refused, Role,
+    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, NO_SESSION, Refused,
+    ReplayStopped, Role,
 };
 pub use module::{ConsensusModule, MAX_PAYLOAD_LENGTH, RaftError};
