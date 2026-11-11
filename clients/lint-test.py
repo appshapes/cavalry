@@ -863,6 +863,23 @@ class Clients(unittest.TestCase):
         self.assertIn("Subscription.Poll", finding)
         self.assertIn("builds HandlerException", finding)
 
+    def test_building_handler_exception_before_the_committed_logs_call_in_dotnet_fails(self):
+        """The committed log's Poll in the .NET client is held as the subscription's is."""
+        self.edit_dotnet("        int count = Abi.cavalry_committed_log_poll(handle, &OnEntry, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);\n",
+                         "        HandlerException early = new HandlerException(0, 0, first!);\n"
+                         "        int count = Abi.cavalry_committed_log_poll(handle, &OnEntry, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);\n",
+                         file="CommittedLog.cs")
+        [finding] = lint.findings(self.tmp)
+        self.assertIn("CommittedLog.Poll", finding)
+        self.assertIn("builds HandlerException", finding)
+
+    def test_a_throw_in_the_committed_logs_catch_fails(self):
+        self.edit_dotnet("        catch (Exception e)\n        {\n            raised++;\n",
+                         "        catch (Exception e)\n        {\n            raised++;\n            throw;\n", file="CommittedLog.cs")
+        found = lint.findings(self.tmp)
+        self.assertTrue(any(f.startswith("dotnet: CommittedLog.Deliver ") and "throws" in f for f in found), found)
+        self.assertTrue(any(f.startswith("dotnet: CommittedLog.OnEntry ") and "calls CommittedLog.Deliver" in f for f in found), found)
+
     def test_a_throw_in_the_trampolines_catch_fails(self):
         self.edit_dotnet("        catch (Exception e)\n        {\n            raised++;\n",
                          "        catch (Exception e)\n        {\n            raised++;\n            throw;\n", file="Subscription.cs")
@@ -899,7 +916,7 @@ class Clients(unittest.TestCase):
         self.assertIn("builds CavalryException", finding)
 
     def test_a_dotnet_package_without_the_per_message_members_fails(self):
-        for name in ("Publication", "Subscription", "Header"):
+        for name in ("Publication", "Subscription", "CommittedLog", "Header"):
             with open(os.path.join(self.dotnet, name + ".cs"), "w", encoding="utf-8") as f:
                 f.write(f"namespace Cavalry;\n\npublic sealed class {name}\n{{\n    internal int Here()\n    {{\n"
                         f"        return 1;\n    }}\n}}\n")

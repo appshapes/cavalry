@@ -214,4 +214,29 @@ public sealed class Client : IDisposable
             Abi.Check("cavalry_stop_replay", Abi.cavalry_stop_replay(handle, replaySessionId));
         }
     }
+
+    /// <summary>Opens the committed log of the cluster member on this client's driver at
+    /// <paramref name="position"/>, 0 or the <see cref="CommittedLog.Position"/> an earlier log
+    /// reached. Null while the driver hosts no member that has a recording of its log, so a
+    /// service started before its member asks again (spec/cluster.md, "The service";
+    /// spec/c-abi.md, "Functions", committed log).</summary>
+    public CommittedLog? CommittedLog(long position)
+    {
+        lock (gate)
+        {
+            Abi.Check("cavalry_committed_log", Abi.cavalry_committed_log(out nint log, handle, position));
+            return log == 0 ? null : new CommittedLog(log, this);
+        }
+    }
+
+    /// <summary>A committed log's close, under the client's lock: the ABI's result, with the
+    /// thread's error for the caller to read. After this client's own close the handle is
+    /// null, and the ABI frees the log and leaves the replay to the driver.</summary>
+    internal int CloseCommittedLog(nint log)
+    {
+        lock (gate)
+        {
+            return Abi.cavalry_committed_log_close(log, handle);
+        }
+    }
 }

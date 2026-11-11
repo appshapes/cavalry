@@ -11,3 +11,10 @@ namespace Cavalry;
 /// call.
 /// </summary>
 public delegate void FragmentHandler(ReadOnlySpan<byte> body, Header header);
+
+/// <summary>
+/// Receives each entry a committed log's poll delivers: <paramref name="body"/> and
+/// <paramref name="header"/> as a fragment's, and <paramref name="position"/> the entry's
+/// position in the log.
+/// </summary>
+public delegate void EntryHandler(ReadOnlySpan<byte> body, Header header, long position);

@@ -37,7 +37,8 @@ CALLBACK = "delegate* unmanaged[Cdecl]<void*, byte*, nuint, void*, void>"
 # The per-message methods of the generated C#, which clients/lint.py reads.
 PER_MESSAGE_DOTNET = ("Publication.TryClaim", "Publication.SetReservedValue", "Publication.Commit", "Publication.Abort",
                       "Publication.Offer", "Publication.Claim", "Subscription.Poll", "Subscription.OnFragment",
-                      "Subscription.Deliver", "Header.FrameLength", "Header.Version", "Header.Flags", "Header.Type",
+                      "Subscription.Deliver", "CommittedLog.Poll", "CommittedLog.OnEntry", "CommittedLog.Deliver",
+                      "Header.FrameLength", "Header.Version", "Header.Flags", "Header.Type",
                       "Header.TermOffset", "Header.SessionId", "Header.StreamId", "Header.TermId", "Header.ReservedValue")
 
 
@@ -166,6 +167,7 @@ def write_dotnet(header) -> dict[str, str]:
         "Client.cs": CLIENT,
         "Publication.cs": PUBLICATION,
         "Subscription.cs": SUBSCRIPTION,
+        "CommittedLog.cs": COMMITTED_LOG,
         "Header.cs": HEADER,
         "Image.cs": IMAGE,
         "Recording.cs": RECORDING,
@@ -368,25 +370,56 @@ using System;
 namespace Cavalry;
 
 /// <summary>
-/// The fragment handler threw during a poll: <see cref="Fragments"/> is the count the poll
-/// returned once the ABI was done, <see cref="Raised"/> how many handler calls threw, and
+/// The handler threw during a poll, a subscription's fragment handler or, when
+/// <see cref="CommittedLog"/> is true, a committed log's entry handler:
+/// <see cref="Fragments"/> is the count the poll returned once the ABI was done, of
+/// fragments or of entries, or -1 when the poll also stopped on a fault, which the
+/// <c>GetFault()</c> of the object that was polled reads until its next poll;
+/// <see cref="Raised"/> how many handler calls threw, and
 /// <see cref="Exception.InnerException"/> the first exception, kept as thrown.
 /// </summary>
 public sealed class HandlerException : Exception
 {
     public int Fragments { get; }
     public int Raised { get; }
+    public bool CommittedLog { get; }
 
-    public HandlerException(int fragments, int raised, Exception cause)
-        : base("the fragment handler threw on " + raised + " of " + (fragments >= 0
-            ? "the " + fragments + " fragment(s) this poll delivered"
-            : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads")
-            + "; every fragment reached the handler once, in order. Fix the handler: its first exception, " + cause.GetType().Name
-            + ", is this exception's InnerException; polling again does not deliver these fragments again."
-            + " See clients/dotnet/README.md#the-exception", cause)
+    public HandlerException(int fragments, int raised, Exception cause, bool committedLog = false)
+        : base(Describe(fragments, raised, cause, committedLog), cause)
     {
         Fragments = fragments;
         Raised = raised;
+        CommittedLog = committedLog;
+    }
+
+    /// <summary>The message: what the handler threw on, the fragments of a subscription's
+    /// poll or the entries of a committed log's, and what to do. The fault of a committed
+    /// log's own image is reported by one poll (clients/dotnet/README.md, "The committed
+    /// log"), so its message names the log's own <c>GetFault()</c>.</summary>
+    private static string Describe(int fragments, int raised, Exception cause, bool committedLog)
+    {
+        string one = committedLog ? "entry" : "fragment";
+        string many = committedLog ? "entries" : "fragments";
+        string delivered;
+        if (fragments < 0)
+        {
+            delivered = committedLog
+                ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's GetFault() reads"
+                    + " until its next poll and nothing reports after that, so read it and keep it before polling again"
+                : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads";
+        }
+        else if (committedLog)
+        {
+            delivered = "the " + fragments + " " + (fragments == 1 ? one : many) + " this poll delivered";
+        }
+        else
+        {
+            delivered = "the " + fragments + " fragment(s) this poll delivered";
+        }
+        return "the " + one + " handler threw on " + raised + " of " + delivered
+            + "; every " + one + " reached the handler once, in order. Fix the handler: its first exception, " + cause.GetType().Name
+            + ", is this exception's InnerException; polling again does not deliver these " + many + " again."
+            + " See clients/dotnet/README.md#the-exception";
     }
 }
 '''
@@ -402,6 +435,13 @@ namespace Cavalry;
 /// call.
 /// </summary>
 public delegate void FragmentHandler(ReadOnlySpan<byte> body, Header header);
+
+/// <summary>
+/// Receives each entry a committed log's poll delivers: <paramref name="body"/> and
+/// <paramref name="header"/> as a fragment's, and <paramref name="position"/> the entry's
+/// position in the log.
+/// </summary>
+public delegate void EntryHandler(ReadOnlySpan<byte> body, Header header, long position);
 '''
 
 CLIENT = HEADING + r'''
@@ -616,6 +656,31 @@ public sealed class Client : IDisposable
         lock (gate)
         {
             Abi.Check("cavalry_stop_replay", Abi.cavalry_stop_replay(handle, replaySessionId));
+        }
+    }
+
+    /// <summary>Opens the committed log of the cluster member on this client's driver at
+    /// <paramref name="position"/>, 0 or the <see cref="CommittedLog.Position"/> an earlier log
+    /// reached. Null while the driver hosts no member that has a recording of its log, so a
+    /// service started before its member asks again (spec/cluster.md, "The service";
+    /// spec/c-abi.md, "Functions", committed log).</summary>
+    public CommittedLog? CommittedLog(long position)
+    {
+        lock (gate)
+        {
+            Abi.Check("cavalry_committed_log", Abi.cavalry_committed_log(out nint log, handle, position));
+            return log == 0 ? null : new CommittedLog(log, this);
+        }
+    }
+
+    /// <summary>A committed log's close, under the client's lock: the ABI's result, with the
+    /// thread's error for the caller to read. After this client's own close the handle is
+    /// null, and the ABI frees the log and leaves the replay to the driver.</summary>
+    internal int CloseCommittedLog(nint log)
+    {
+        lock (gate)
+        {
+            return Abi.cavalry_committed_log_close(log, handle);
         }
     }
 }
@@ -954,6 +1019,241 @@ public sealed unsafe class Subscription : IDisposable
         if (result != 0)
         {
             CavalryException error = Abi.LastError("cavalry_subscription_close");
+            if (error.Code == Abi.ERR_POLLING)
+            {
+                throw error;
+            }
+            handle = 0;
+            self.Free();
+            throw error;
+        }
+        handle = 0;
+        self.Free();
+    }
+
+    public void Dispose()
+    {
+        Close();
+    }
+}
+'''
+
+COMMITTED_LOG = HEADING + r'''
+using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+namespace Cavalry;
+
+/// <summary>
+/// A service's read of a cluster's committed log, beside the member on the client's driver
+/// (spec/cluster.md, "The service"): <see cref="Poll"/> calls the handler for each entry a
+/// quorum has committed, in order and none at or past the member's commit position, with the
+/// entry's position in the log, and returns the count, or the ABI's -1 when the poll stopped
+/// on a fault, which <see cref="GetFault"/> reads until the next poll, throwing a
+/// <see cref="HandlerException"/> once the ABI has returned when a handler call threw; the
+/// entry was delivered and is not delivered again. <see cref="Position"/> is the position
+/// after the last entry delivered: where a service opens the log again.
+/// <see cref="IsEnded"/> says when to stop reading and what tells a whole end from a short
+/// one. The handler is
+/// reached through an <c>UnmanagedCallersOnly</c> trampoline of the log's own, which finds
+/// the log by the <c>GCHandle</c> it hands the ABI as its <c>clientd</c>.
+/// </summary>
+public sealed unsafe class CommittedLog : IDisposable
+{
+    private nint handle;
+    private GCHandle self;
+    private readonly Client client;
+    private readonly Header header = new();
+    private EntryHandler? handler;
+    private bool polling;
+    private int raised;
+    private Exception? first;
+    private readonly int memberId;
+    private readonly long recordingId;
+
+    internal CommittedLog(nint handle, Client client)
+    {
+        this.handle = handle;
+        this.client = client;
+        self = GCHandle.Alloc(this);
+        Abi.cavalry_committed_log_constants_t k = default;
+        try
+        {
+            Abi.Check("cavalry_committed_log_constants", Abi.cavalry_committed_log_constants(handle, ref k));
+        }
+        catch
+        {
+            self.Free();
+            throw;
+        }
+        memberId = k.member_id;
+        recordingId = k.recording_id;
+    }
+
+    /// <summary>The id of the member whose log this is.</summary>
+    public int MemberId => memberId;
+
+    /// <summary>The id of the member's recording of the log that this handle replays.</summary>
+    public long RecordingId => recordingId;
+
+    /// <summary>Delivers up to <paramref name="fragmentLimit"/> entries to the handler: one ABI
+    /// call, the count it returned (or -1, with <see cref="Abi.Errcode"/> saying why: a
+    /// fault, which <see cref="GetFault"/> reads until the next poll, or
+    /// <see cref="Abi.ERR_POLLING"/> for a poll from inside a handler of this log, which the ABI
+    /// refuses and which touches nothing here), and a <see cref="HandlerException"/> when a
+    /// handler call threw, whose <c>Fragments</c> is that count, -1 included. A fault code of
+    /// <see cref="Abi.ERR_FAULT_IMAGE"/> or <see cref="Abi.ERR_FAULT_IMAGES_FULL"/> is the one
+    /// report that the replay's image failed a check or could not join: the log is ended
+    /// short of its entries, and the next poll returns 0 and clears the fault, so keep this
+    /// answer (<see cref="IsEnded"/>). An entry whose handler call threw was delivered and
+    /// is not delivered again: <see cref="Position"/> is past it, and past every entry this
+    /// poll delivered after it. After a close, the ABI is handed a null handle and answers
+    /// -1 with <see cref="Abi.ERR_NULL"/>.</summary>
+    public int Poll(EntryHandler handler, int fragmentLimit)
+    {
+        if (polling)
+        {
+            return Abi.cavalry_committed_log_poll(handle, &OnEntry, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);
+        }
+        this.handler = handler;
+        polling = true;
+        raised = 0;
+        first = null;
+        int count = Abi.cavalry_committed_log_poll(handle, &OnEntry, GCHandle.ToIntPtr(self), (nuint) fragmentLimit);
+        polling = false;
+        this.handler = null;
+        if (raised == 0)
+        {
+            return count;
+        }
+        Exception cause = first!;
+        first = null;
+        throw new HandlerException(count, raised, cause, committedLog: true);
+    }
+
+    /// <summary>The trampoline the ABI reaches, once per entry: the log from the
+    /// <c>GCHandle</c> in <paramref name="clientd"/>, then <see cref="Deliver"/>, which catches
+    /// every exception, since none may unwind through an <c>UnmanagedCallersOnly</c> frame
+    /// (clients/dotnet/README.md, "The exception").</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void OnEntry(void* clientd, byte* buffer, nuint length, void* frame)
+    {
+        ((CommittedLog) GCHandle.FromIntPtr((nint) clientd).Target!).Deliver(buffer, length, frame);
+    }
+
+    /// <summary>The body as a span over the log's bytes, no copy, the log's one
+    /// <see cref="Header"/> pointed at the frame, the entry's position, which the ABI gives
+    /// for the header its own poll handed over, and the handler called inside a catch that
+    /// keeps its first exception and counts every one, so that every entry of the poll
+    /// reaches the handler.</summary>
+    private void Deliver(byte* buffer, nuint length, void* frame)
+    {
+        try
+        {
+            header.Set((nint) frame);
+            handler!(new ReadOnlySpan<byte>(buffer, (int) length), header,
+                Abi.cavalry_committed_log_entry_position((nint) frame));
+        }
+        catch (Exception e)
+        {
+            raised++;
+            first ??= e;
+        }
+        finally
+        {
+            header.Clear();
+        }
+    }
+
+    /// <summary>What the last poll stopped on; its code is 0 when the last poll returned a
+    /// count. A poll that returns a count clears it, so read it after a poll that returned
+    /// -1 and before the next.</summary>
+    public Subscription.Fault GetFault()
+    {
+        Abi.cavalry_fault_t f = default;
+        Abi.Check("cavalry_committed_log_fault", Abi.cavalry_committed_log_fault(handle, ref f));
+        return new Subscription.Fault(f.code, f.session_id, f.position);
+    }
+
+    /// <summary>The position after the last entry delivered, or the position the log was
+    /// opened at before the first; -1 from inside a handler of this log's own poll.</summary>
+    public long Position()
+    {
+        return Abi.cavalry_committed_log_position(handle);
+    }
+
+    /// <summary>The bound of the last poll: the highest commit position taken from the
+    /// member's counter, 0 before the first poll.</summary>
+    public long CommitPosition()
+    {
+        return Abi.cavalry_committed_log_commit_position(handle);
+    }
+
+    /// <summary>Whether this log has come to its end: no poll will deliver another entry.
+    /// Stop reading when it is true, not when a poll returns 0. The log delivered every entry
+    /// it was owed only when three things hold: <see cref="FailedAt"/> is null,
+    /// <see cref="WithdrawnAt"/> is null, and no <see cref="Poll"/> of this log returned -1
+    /// with the fault of the log's own image, <see cref="Abi.ERR_FAULT_IMAGE"/> when the
+    /// image failed a check or <see cref="Abi.ERR_FAULT_IMAGES_FULL"/> when it could not
+    /// join. That fault is reported once, by the poll that meets it:
+    /// <see cref="GetFault"/> answers it only until the next poll, which returns 0 and
+    /// clears it, and both reports are null for such a log. So a service keeps that poll's
+    /// answer, since nothing reports it later. In every case what the log delivered ends at
+    /// <see cref="Position"/>, where a service opens the log again.</summary>
+    public bool IsEnded()
+    {
+        return Abi.cavalry_committed_log_is_ended(handle);
+    }
+
+    /// <summary>The position after the last frame the driver's replay of the member's
+    /// recording played before it failed, or null for a log that is live or that ended
+    /// because its member closed or left the recording. No entry from that position on is
+    /// delivered. The entries below it may still be on their way when this first is a
+    /// position, so read it once <see cref="IsEnded"/> is true. They have all been delivered
+    /// by then unless the driver withdrew the replay first, which it does 5 s after a replay
+    /// ends, one that failed included: <see cref="WithdrawnAt"/> is then a position below
+    /// this one, and the entries from there on, those below this position among them, were
+    /// not delivered either. What the log delivered ends at <see cref="Position"/>.</summary>
+    public long? FailedAt()
+    {
+        return Abi.cavalry_committed_log_failed_at(handle, out long position) ? position : null;
+    }
+
+    /// <summary>The position at which the entries this log was not given begin, when the
+    /// driver withdrew the replay before the polls had read it to its end, or null. The
+    /// driver keeps a replay 5 s after it ends and then withdraws it, read or not: a service
+    /// that did not poll for that long after its member closed or left the log, or whose
+    /// handler took that long, ends so. The entries from that position on were played and
+    /// not delivered. A replay that failed is withdrawn in the same way:
+    /// <see cref="FailedAt"/> is then a position too, and this one is the lower. Read it once
+    /// <see cref="IsEnded"/> is true.</summary>
+    public long? WithdrawnAt()
+    {
+        return Abi.cavalry_committed_log_withdrawn_at(handle, out long position) ? position : null;
+    }
+
+    /// <summary>Stops the replay through the client and frees the handle and its
+    /// <c>GCHandle</c>. Idempotent. After the client's own close it frees the handle alone,
+    /// and the driver ends the replay by itself. The handle is freed whatever the ABI
+    /// answers. When the ABI could not stop the replay, through a client that the driver or a
+    /// timeout closed or within the response timeout, this throws the
+    /// <see cref="CavalryException"/> after the handle and the <c>GCHandle</c> are freed:
+    /// the log is closed, a second close does nothing, and the driver ends the replay by
+    /// itself. The one exception is a close from inside a handler of this log's
+    /// own poll, which the ABI refuses with <see cref="Abi.ERR_POLLING"/> and which leaves
+    /// the log open (spec/c-abi.md, "Calls during a claim or a poll"): it then throws the
+    /// <see cref="CavalryException"/> and keeps the handle and the <c>GCHandle</c>.</summary>
+    public void Close()
+    {
+        if (handle == 0)
+        {
+            return;
+        }
+        int result = client.CloseCommittedLog(handle);
+        if (result != 0)
+        {
+            CavalryException error = Abi.LastError("cavalry_committed_log_close");
             if (error.Code == Abi.ERR_POLLING)
             {
                 throw error;

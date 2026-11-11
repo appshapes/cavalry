@@ -898,6 +898,12 @@ public static class Quickstart
             replay.Close();
             replaySub.Close();
             ipcSub.Close();
+
+            // This driver hosts no cluster member, so it has no committed log to open: null,
+            // and no error (spec/c-abi.md, version 2). The log beside a member is
+            // conformance/dotnet/CommittedLog's round.
+            if (client.CommittedLog(0) != null) Fail("a driver that hosts no cluster member gave a committed log");
+            Say("no committed log on a driver that hosts no cluster member");
         }
 
         // The report, never gated: the laptop's or the runner's cost of this side of the

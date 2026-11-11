@@ -4,8 +4,8 @@ boundary's second part): the per-message functions a generator writes, the wrapp
 of the ABI's seven per-message functions of a publication and a subscription
 (`crates/cavalry-ffi/README.md`: the claim, the reserved value, the commit and abort, the
 offer, the poll and the header's values), the wrapper of the committed log's two, its poll
-and an entry's position, where a package has a committed log object, Python's, Node's and
-Go's so far (ADR 0070), and the trampoline that calls the user's handler, hold no lock, no `await` and no
+and an entry's position, where a package has a committed log object, Python's, Node's,
+Go's and .NET's so far (ADR 0070), and the trampoline that calls the user's handler, hold no lock, no `await` and no
 raise, in the language's forms, and so does every function of the package they call. For Python those
 forms are `threading`'s locks and anything else of `threading`, `async def`, `await`,
 `raise`, and building one of the package's own exceptions. For JavaScript, read from
@@ -237,8 +237,9 @@ RULES = {
     # before the ABI is reached.
     "dotnet": {
         "file": "Publication.cs",
-        "files": ["Abi.cs", "CavalryException.cs", "Client.cs", "FragmentHandler.cs", "HandlerException.cs", "Header.cs",
-                  "Image.cs", "Publication.cs", "Recording.cs", "Replay.cs", "Subscription.cs"],
+        "files": ["Abi.cs", "CavalryException.cs", "Client.cs", "CommittedLog.cs", "FragmentHandler.cs",
+                  "HandlerException.cs", "Header.cs", "Image.cs", "Publication.cs", "Recording.cs", "Replay.cs",
+                  "Subscription.cs"],
         "functions": [
             "Publication.TryClaim",
             "Publication.SetReservedValue",
@@ -249,6 +250,9 @@ RULES = {
             "Subscription.Poll",
             "Subscription.OnFragment",
             "Subscription.Deliver",
+            "CommittedLog.Poll",
+            "CommittedLog.OnEntry",
+            "CommittedLog.Deliver",
             "Header.FrameLength",
             "Header.Version",
             "Header.Flags",
@@ -259,7 +263,8 @@ RULES = {
             "Header.TermId",
             "Header.ReservedValue",
         ],
-        "raise_after": ("Subscription.Poll", "Abi.cavalry_subscription_poll"),
+        "raise_after": [("Subscription.Poll", "Abi.cavalry_subscription_poll"),
+                        ("CommittedLog.Poll", "Abi.cavalry_committed_log_poll")],
         "guards": ["Header.Ensure"],
     },
 }

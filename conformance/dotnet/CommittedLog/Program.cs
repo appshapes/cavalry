@@ -1,0 +1,364 @@
+// The .NET client's committed log round (spec/c-abi.md, version 2; ADR 0070):
+// Client.CommittedLog and CommittedLog beside a cluster member that
+// conformance/dotnet/run.sh started with `cavalry run`, one of three on the loopback, as
+// conformance/python/committed_log.py runs it through clients/python.
+//
+//     CommittedLog <the member's driver directory> <the member's id>
+//
+// A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
+// bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
+// that entry through the handler, with its position, its header and the handle's reads;
+// makes each call the ABI refuses from inside the log's own handler, each after it has set
+// the thread's error to another code, so that a refusal that answers what a live log
+// answers is told from an answer; checks where a handler's exception goes and that its
+// entry is not delivered again; opens the log again at 96, where nothing is committed yet,
+// beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
+// had the time a replay's image takes to join; closes twice; and closes a log after its
+// client. Every wait is bounded at 30 s and sleeps a millisecond after a poll that
+// delivered nothing. It exits 1 with what it found when a check fails. The .NET base
+// library only (ADR 0003).
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using Cavalry;
+
+public static class CommittedLogRound
+{
+    const int WAIT_SECONDS = 30;
+    const int IDLE_MILLISECONDS = 1; // after a poll that delivered nothing: three drivers share the host
+    const int ENTRY_FRAME = 88; // the term's first entry: 32 bytes of header and 56 of message
+    const long NEXT = 96; // the frame, rounded up to a multiple of 32
+
+    static void Fail(string what)
+    {
+        Console.Error.WriteLine("conformance/dotnet: committed log: " + what);
+        Environment.Exit(1);
+    }
+
+    static void Say(string what)
+    {
+        Console.WriteLine("conformance/dotnet: committed log: " + what);
+    }
+
+    static long Deadline()
+    {
+        return Stopwatch.GetTimestamp() + Stopwatch.Frequency * WAIT_SECONDS;
+    }
+
+    /// <summary>The member's committed log at the position, asked for until the member has one.</summary>
+    static CommittedLog OpenLog(Client client, long position)
+    {
+        long until = Deadline();
+        while (true)
+        {
+            CommittedLog? log = client.CommittedLog(position);
+            if (log != null)
+            {
+                return log;
+            }
+            if (Stopwatch.GetTimestamp() > until)
+            {
+                Fail($"the driver at {client.Dir} hosted no member with a log within {WAIT_SECONDS} s");
+            }
+            Thread.Sleep(50);
+        }
+    }
+
+    public static int Main(string[] args)
+    {
+        if (args.Length != 2)
+        {
+            Fail("usage: CommittedLog <the member's driver directory> <the member's id>");
+        }
+        try
+        {
+            Round(args[0], int.Parse(args[1]));
+        }
+        catch (CavalryException error)
+        {
+            Fail($"{error.Function} failed with error {error.Code}: {error.AbiMessage}");
+        }
+        catch (HandlerException error)
+        {
+            Fail($"the handler threw: {error.InnerException}");
+        }
+        return 0;
+    }
+
+    static void Round(string memberDir, int memberId)
+    {
+        var client = new Client(memberDir);
+        // A closed log, for the refusals below: its Position() hands the ABI a null handle,
+        // which answers -1 with ERR_NULL. The package's bindings of the ABI are internal, so
+        // the round cannot ask for the position of a null header: this is its call that sets
+        // the thread's error to another code. The log reads its entry before it is closed,
+        // as every log of this round does: a log closed at once after its open, before its
+        // replay's image had joined, closed its client as corrupt in 8 of 60 tries on the
+        // laptop, which is not this round's check.
+        CommittedLog spent = OpenLog(client, 0);
+        int spentEntries = 0;
+        long until = Deadline();
+        while (spentEntries == 0)
+        {
+            int count = spent.Poll((body, header, position) => spentEntries++, 16);
+            if (count < 0)
+            {
+                Fail($"the first log's poll stopped on fault {spent.GetFault()}");
+            }
+            if (Stopwatch.GetTimestamp() > until)
+            {
+                Fail($"the first log read no entry within {WAIT_SECONDS} s");
+            }
+            if (count == 0)
+            {
+                Thread.Sleep(IDLE_MILLISECONDS);
+            }
+        }
+        spent.Close();
+        CommittedLog log = OpenLog(client, 0);
+        if (log.MemberId != memberId || log.RecordingId != 0)
+        {
+            Fail($"the log is member {log.MemberId}'s recording {log.RecordingId}, not member {memberId}'s recording 0");
+        }
+        if (log.Position() != 0 || log.CommitPosition() != 0)
+        {
+            Fail($"a log opened at 0 began at {log.Position()} with bound {log.CommitPosition()}");
+        }
+
+        // The entry, with what each call on the log answers from inside its own handler.
+        var entries = new List<string>();
+        var refusals = new List<string>();
+        bool inside = false;
+        // Sets the thread's error to one no refusal gives, ERR_NULL, through the closed log's
+        // Position(). A success clears nothing (spec/c-abi.md, "Error codes"), and a refused
+        // IsEnded(), FailedAt() or WithdrawnAt() answers what a live log answers, false or
+        // null, so the code alone tells that refusal from an answer: it must have changed
+        // from this one to ERR_POLLING. Without this the code would be ERR_POLLING already,
+        // left by the call before.
+        Action setAnotherError = () =>
+        {
+            if (spent.Position() != -1 || Abi.Errcode() != Abi.ERR_NULL)
+            {
+                Fail($"a closed log's Position() did not answer -1 with ERR_NULL: error {Abi.Errcode()}");
+            }
+        };
+        EntryHandler onEntry = null!;
+        onEntry = (body, header, position) =>
+        {
+            entries.Add($"{position} {body.Length} {header.FrameLength} {header.Flags} {header.Type}");
+            if (inside)
+            {
+                return;
+            }
+            inside = true;
+            setAnotherError();
+            refusals.Add($"Poll {log.Poll(onEntry, 1)} {Abi.Errcode()}");
+            setAnotherError();
+            refusals.Add($"Position {log.Position()} {Abi.Errcode()}");
+            setAnotherError();
+            refusals.Add($"CommitPosition {log.CommitPosition()} {Abi.Errcode()}");
+            setAnotherError();
+            refusals.Add($"IsEnded {log.IsEnded()} {Abi.Errcode()}");
+            setAnotherError();
+            refusals.Add($"FailedAt {log.FailedAt()?.ToString() ?? "null"} {Abi.Errcode()}");
+            setAnotherError();
+            refusals.Add($"WithdrawnAt {log.WithdrawnAt()?.ToString() ?? "null"} {Abi.Errcode()}");
+            setAnotherError();
+            try
+            {
+                log.Close();
+                refusals.Add($"Close 0 {Abi.Errcode()}");
+            }
+            catch (CavalryException error)
+            {
+                refusals.Add($"Close -1 {error.Code}");
+            }
+        };
+        until = Deadline();
+        while (entries.Count == 0)
+        {
+            int count = log.Poll(onEntry, 16);
+            if (count < 0)
+            {
+                Fail($"the term's first entry: the poll stopped on fault {log.GetFault()}");
+            }
+            if (Stopwatch.GetTimestamp() > until)
+            {
+                Fail($"the term's first entry: not within {WAIT_SECONDS} s; position {log.Position()}, commit position " +
+                     $"{log.CommitPosition()}, ended {log.IsEnded()}");
+            }
+            if (count == 0)
+            {
+                Thread.Sleep(IDLE_MILLISECONDS);
+            }
+        }
+        string expectedEntry = $"0 {ENTRY_FRAME - 32} {ENTRY_FRAME} {Abi.FLAGS_UNFRAGMENTED} {Abi.FRAME_TYPE_DATA}";
+        if (entries.Count != 1 || entries[0] != expectedEntry)
+        {
+            Fail($"expected one entry \"{expectedEntry}\" (position, bytes, frame length, flags, type), got " +
+                 string.Join("; ", entries) + ". One cause of more than one entry is a new term: a cluster that " +
+                 "elected again between its formation and this read holds that term's first entry after this one; " +
+                 "the members' output, which run.sh prints, says whether it did");
+        }
+        int polling = Abi.ERR_POLLING;
+        string[] expected =
+        {
+            $"Poll -1 {polling}", $"Position -1 {polling}", $"CommitPosition -1 {polling}", $"IsEnded False {polling}",
+            $"FailedAt null {polling}", $"WithdrawnAt null {polling}", $"Close -1 {polling}",
+        };
+        if (string.Join("; ", refusals) != string.Join("; ", expected))
+        {
+            Fail($"the calls from inside the log's own handler answered {string.Join("; ", refusals)}, not " +
+                 string.Join("; ", expected));
+        }
+        if (log.Position() != NEXT || log.CommitPosition() != NEXT)
+        {
+            Fail($"after the entry the log is at {log.Position()} with bound {log.CommitPosition()}, not {NEXT} and {NEXT}");
+        }
+        Subscription.Fault fault = log.GetFault();
+        if (log.IsEnded() || log.FailedAt() != null || log.WithdrawnAt() != null || fault.Code != 0 ||
+            fault.SessionId != 0 || fault.Position != Abi.NULL_POSITION)
+        {
+            Fail($"a live log read ended {log.IsEnded()}, failed at {log.FailedAt()}, withdrawn at " +
+                 $"{log.WithdrawnAt()}, fault {fault}");
+        }
+        for (int i = 0; i < 50; i++)
+        {
+            if (log.Poll(onEntry, 16) != 0)
+            {
+                Fail("an entry arrived with nothing more committed");
+            }
+        }
+        if (entries.Count != 1)
+        {
+            Fail("the refused poll, or a later one, delivered more: " + string.Join("; ", entries));
+        }
+        Say($"member {log.MemberId}'s entry at position 0 read once, next position {log.Position()}, commit position " +
+            $"{log.CommitPosition()}; seven calls from inside the handler refused with ERR_POLLING, each made " +
+            "with the thread's error at ERR_NULL");
+        log.Close();
+        log.Close(); // idempotent
+
+        // A handler that throws: the entry was delivered, the exception is thrown after the
+        // ABI has returned, and the log's position is past the entry, so it is not delivered
+        // again.
+        CommittedLog throwing = OpenLog(client, 0);
+        var seen = new List<long>();
+        EntryHandler throws = (body, header, position) =>
+        {
+            seen.Add(position);
+            throw new InvalidOperationException("the handler's own");
+        };
+        HandlerException? thrown = null;
+        until = Deadline();
+        while (thrown == null)
+        {
+            try
+            {
+                if (throwing.Poll(throws, 16) < 0)
+                {
+                    Fail($"the second log's poll stopped on fault {throwing.GetFault()}");
+                }
+            }
+            catch (HandlerException error)
+            {
+                thrown = error;
+            }
+            if (thrown == null && Stopwatch.GetTimestamp() > until)
+            {
+                Fail("the second log read no entry");
+            }
+            if (thrown == null)
+            {
+                Thread.Sleep(IDLE_MILLISECONDS);
+            }
+        }
+        if (seen.Count != 1 || seen[0] != 0 || thrown!.InnerException is not InvalidOperationException ||
+            thrown.Raised != 1 || throwing.Position() != NEXT)
+        {
+            Fail($"a throwing handler saw {string.Join(",", seen)}, threw {thrown}, and left the log at {throwing.Position()}");
+        }
+        // The exception is the log's own: it counts entries and names no subscription.
+        if (thrown!.Fragments != 1 || !thrown.CommittedLog ||
+            !thrown.Message.Contains("the entry handler threw on 1 of the 1 entry") || thrown.Message.Contains("Subscription"))
+        {
+            Fail($"a committed log's HandlerException has Fragments {thrown.Fragments}, CommittedLog {thrown.CommittedLog} " +
+                 $"and says: {thrown.Message}");
+        }
+        for (int i = 0; i < 50; i++)
+        {
+            if (throwing.Poll(throws, 16) != 0)
+            {
+                Fail("the entry whose handler threw was delivered again");
+            }
+        }
+        throwing.Close();
+
+        // From the next position nothing is committed yet: no entry, and no entry before it.
+        // A replay's image joins a moment after the open, so polls made at once would pass
+        // before the image is there, whatever the open did with the position. So a second
+        // log is opened at 0 beside this one, on the same client, and both are polled until
+        // that one has delivered the entry at 0 and this one has taken the member's commit
+        // position as its bound, which a poll does once the log's image has joined
+        // (`CommittedLog::poll`, crates/cavalry-client/src/committed_log.rs): by then this
+        // log's replay, asked for first, has had the time the other's took to join and
+        // deliver.
+        CommittedLog rest = OpenLog(client, NEXT);
+        if (rest.Position() != NEXT)
+        {
+            Fail($"a log opened at {NEXT} began at {rest.Position()}");
+        }
+        CommittedLog beside = OpenLog(client, 0);
+        var atNext = new List<long>();
+        var atStart = new List<long>();
+        EntryHandler onNext = (body, header, position) => atNext.Add(position);
+        EntryHandler onStart = (body, header, position) => atStart.Add(position);
+        until = Deadline();
+        while (atStart.Count == 0 || rest.CommitPosition() < NEXT)
+        {
+            int restCount = rest.Poll(onNext, 16);
+            int besideCount = beside.Poll(onStart, 16);
+            if (restCount < 0 || besideCount < 0)
+            {
+                Fail($"the polls of the logs at {NEXT} and at 0 returned {restCount} and {besideCount}: faults " +
+                     $"{rest.GetFault()} and {beside.GetFault()}");
+            }
+            if (Stopwatch.GetTimestamp() > until)
+            {
+                Fail($"the log at 0 beside the log at {NEXT} delivered {string.Join(",", atStart)} and the log at {NEXT} " +
+                     $"took the bound {rest.CommitPosition()}, not the entry at 0 and {NEXT}, within {WAIT_SECONDS} s");
+            }
+            if (restCount == 0 && besideCount == 0)
+            {
+                Thread.Sleep(IDLE_MILLISECONDS);
+            }
+        }
+        for (int i = 0; i < 50; i++)
+        {
+            if (rest.Poll(onNext, 16) < 0)
+            {
+                Fail($"the poll of the log at {NEXT} stopped on fault {rest.GetFault()}");
+            }
+        }
+        if (atStart[0] != 0 || atNext.Count != 0 || rest.Position() != NEXT)
+        {
+            Fail($"a log opened at {NEXT} delivered the entries at {string.Join(",", atNext)} and is at {rest.Position()}, " +
+                 $"while a log opened at 0 beside it delivered the entries at {string.Join(",", atStart)}. An entry below " +
+                 $"{NEXT} is one the open did not start past; one at {NEXT} or above is a new term's, of a cluster that " +
+                 "elected again, which the members' output, printed by run.sh, shows");
+        }
+        beside.Close();
+        // A log that outlives its client: its poll stops on the closed fault, and its close
+        // frees it with no client to stop the replay through.
+        client.Close();
+        if (rest.Poll(onEntry, 16) != -1 || rest.GetFault().Code != Abi.ERR_FAULT_CLOSED)
+        {
+            Fail($"a poll after the client's close did not stop on the closed fault: {rest.GetFault()}");
+        }
+        rest.Close();
+        Say($"a throwing handler's entry is not delivered again; nothing at position {NEXT} while a log at 0 beside " +
+            "it read the entry at 0; a log closed after its client");
+    }
+}
