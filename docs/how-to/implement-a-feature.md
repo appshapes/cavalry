@@ -37,7 +37,8 @@ feature that followed this page, commit by commit.
    2. Write the `spec/` page and its vectors as [`spec/README.md`](../../spec/README.md)
       says, and the one-line page under `docs/reference/` that includes it into the
       book, listed in `docs/SUMMARY.md`. Add a row to `docs/glossary.md` for every new
-      term and a line under Unreleased in `CHANGELOG.md`.
+      term and the change's changelog entry, a file of its own under `changelog.d/`
+      ([how](../../changelog.d/README.md)).
    3. Commit (step 4), with the decision as the subject: `80: Adopt Aeron's data frame
       header`.
 
@@ -60,8 +61,8 @@ feature that followed this page, commit by commit.
    4. Tests: the full case before the happy path; one test per `spec/` vector; a
       no-panic test over generated input for any parser.
    5. Docs in the same commit: the README example and its reading list, a how-to or
-      tutorial page when a user does something new, glossary rows, a `CHANGELOG.md`
-      line. Reference pages are generated, never written by hand.
+      tutorial page when a user does something new, glossary rows, a changelog entry
+      under `changelog.d/`. Reference pages are generated, never written by hand.
    6. If a gate prints `not built yet` and would check this change, building it is
       part of this commit. ADR 0007 names which feature builds which gate.
    7. One crate per commit; data plane and control plane in separate commits. Under a

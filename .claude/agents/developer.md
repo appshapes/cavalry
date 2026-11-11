@@ -126,5 +126,7 @@ what the list below denies stays denied. Everything else, do and show the eviden
 - **`#[allow]`** of a workspace lint, or an edit to `clippy.toml` or `Cargo.toml` lints.
 - **Secrets.** Nothing on argv, in a log, or in a file under the repository.
 - **"Docs to follow."** Docs ship in the same commit: the README or `docs/` page, the
-  `CHANGELOG.md` line under `Unreleased`, and the ADR when CLAUDE.md requires one.
+  changelog entry, and the ADR when CLAUDE.md requires one. The entry is a file of its
+  own, `changelog.d/<card>-<a few words>.md` (`changelog.d/README.md`; ADR 0075): never
+  a line appended to `CHANGELOG.md`, which two pull requests cannot both append to.
 - **A synonym for an Aeron name.** Use Aeron's vocabulary where the concept matches.

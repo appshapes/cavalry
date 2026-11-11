@@ -48,6 +48,8 @@ CANNOT = [
     "clients/python/cavalry/__init__.py",
     "conformance/go/quickstart/main.go",
     "CHANGELOG.md",
+    "changelog.d/255-changelog-entries-as-files.md",
+    "changelog.d/README.md",
     "CLAUDE.md",
     "README.md",
     "LICENSE",
