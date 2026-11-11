@@ -364,7 +364,10 @@ heartbeat.
 ### Catch-up position, template 56
 
 Block length 20; then the catch-up endpoint (ASCII), the follower's `catchup` endpoint
-as `host:port`. A follower's request to the leader for the log from a position.
+as `host:port`. A follower's request to the leader for the log from a position. A
+leader of this version does not read the endpoint: its replay goes to the `catchup`
+endpoint its own members string gives the follower, which is the same where every
+member was started with one string (ADR 0085).
 
 | Offset | Size | Field | Type | Meaning |
 | --- | --- | --- | --- | --- |
@@ -629,7 +632,9 @@ Commit position from the reader's leader raises the commit position it was told.
 **Messages outside an election, and the leader's in states 5 to 8.** A leader reads
 append position and records it; catch-up position and starts a replay, a `start
 replay` of a recording of its own on stream 100 to `cavalry:udp?endpoint=<the
-follower's catchup endpoint>`, when the follower has none running, a replay counting
+follower's catchup endpoint>`, the endpoint the leader's members string gives that
+follower and not the one the message carries (ADR 0085), when the follower has none
+running, a replay counting
 as running from its `replay ready` until its `replay stopped`
 (`spec/client-protocol.md`, "Events"); a catch-up position that arrives while a replay
 the leader has stopped still counts as running is kept, one per follower, the newest

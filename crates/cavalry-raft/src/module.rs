@@ -34,7 +34,8 @@ use cavalry_shm::counters::generated::{
 };
 
 use crate::consensus::{
-    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, Role, terms_above,
+    Clock, Consensus, Counts, ElectionState, Io, Log, MembersRefused, Refused, ReplayStopped, Role,
+    base_above, terms_above,
 };
 
 /// The longest payload [`ConsensusModule::offer`] takes: what one frame of the log
@@ -558,6 +559,45 @@ impl Io for ClientIo {
                 .map(|entry| (entry.leadership_term_id, entry.term_base_log_position)),
             term,
         )
+    }
+
+    fn term_base_above(&mut self, position: i64) -> Option<i64> {
+        // From the same entries in memory, as `terms_after` reads them.
+        base_above(
+            self.terms
+                .terms()
+                .map(|entry| (entry.leadership_term_id, entry.term_base_log_position)),
+            position,
+        )
+    }
+
+    /// Refused, as [`Io::remove_log`] is here: only a leader that elects serves a
+    /// replication, and the module's member is appointed (ADR 0081, ADR 0085). The
+    /// module's own, `start replay` of the recording that holds the position to the
+    /// member's `catchup` endpoint, comes with the rest of its I/O for the election.
+    fn start_replay(
+        &mut self,
+        _member: i32,
+        _position: i64,
+        _end: i64,
+    ) -> Result<bool, Self::Fault> {
+        Err(RaftError::Unsupported {
+            what: "a leader that replays its recordings to a member that replicates",
+        })
+    }
+
+    /// Refused, as [`Io::start_replay`] is here.
+    fn stop_replay(&mut self, _member: i32) -> Result<(), Self::Fault> {
+        Err(RaftError::Unsupported {
+            what: "a leader that stops a replay to a member that replicates",
+        })
+    }
+
+    /// Refused, as [`Io::start_replay`] is here.
+    fn replay_stopped(&mut self, _member: i32) -> Result<Option<ReplayStopped>, Self::Fault> {
+        Err(RaftError::Unsupported {
+            what: "a leader that follows a replay to a member that replicates",
+        })
     }
 
     fn append(&mut self, entry: &Message<'_>) -> Result<bool, Self::Fault> {

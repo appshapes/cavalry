@@ -34,10 +34,15 @@ commit path runs per message.
   an election on a request vote or a commit position of a higher term too (ADR 0082). A
   member told a next term whose base is below its append position truncates to that base
   first, the tail of an older term that no quorum recorded, and never below the commit
-  position it knows: told to, it keeps its log and fails its election (ADR 0083). The
-  consensus module does not use this path yet: a member over a driver is appointed until
-  the election can do what the next section lists, and then the module moves to it in
-  one change (ADR 0081).
+  position it knows: told to, it keeps its log and fails its election (ADR 0083). A
+  leader answers a member that asks for a term it missed, with a catch-up position below
+  the leader's term base: it replays its own recordings from the position asked to the
+  end of the term that holds it, through `Io::start_replay`, one replay a member at a
+  time, the next recording's once the member has reported the end of the last. It stops
+  the replay of a member that canvasses or asks again, and every replay when it holds an
+  election (ADR 0085). The consensus module does not use this path yet: a member over a
+  driver is appointed until the election can do what the next section lists, and then
+  the module moves to it in one change (ADR 0081).
 - Counts every move of the election. `ElectionState` is the state machine
   `cluster_election` of `counters.toml`, and each of its transitions adds one to a
   count of `Counts`, the counter registered for it; `Counts::by_counter` pairs each
@@ -48,26 +53,24 @@ commit path runs per message.
 - Runs a member over a driver: `ConsensusModule::start(dir, log_dir, members,
   member_id)` is a client of the driver in `dir`. It sends the consensus messages on a
   publication to each peer, adds the leader's log as a publication with every other
-  member as a destination and records it, the publication created at the term's base
-  log position so that the recording begins there and every frame of the term lies
-  at its position in the cluster's log (ADR 0059), or subscribes to the leader's log
-  and arms the recording that holds it from its first frame, keeps the record of
-  terms in the `terms` file of `log_dir`, and stores what it counts in the driver's
-  counters file:
+  member as a destination and records it, the publication created at the term's base log
+  position so that the recording begins there and every frame of the term lies at its
+  position in the cluster's log (ADR 0059), or subscribes to the leader's log and arms
+  the recording that holds it from its first frame, keeps the record of terms in the
+  `terms` file of `log_dir`, and stores what it counts in the driver's counters file:
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
-  replays, and the nineteen counts of `Counts::by_counter`, of which the four of the
-  ballot, the two of an election held on a higher term and the two of a truncation
-  stay 0 while the leader is appointed. The counters of sessions, of
-  the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
-  with those features. One thread calls `do_work()`; the leader's process appends
-  with `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log
-  holds its recording until the driver has said where it stopped, and that stop is
-  where its log ends. A stop that the driver refuses or does not answer is a `client`
-  error, and a stop position not read within 1 s is a `stop-timeout` error. Either
-  way the member stays in init with the recording held, and the next `do_work()`
-  stops it again.
+  replays, and the twenty counts of `Counts::by_counter`, of which the four of the
+  ballot, the two of an election held on a higher term, the two of a truncation and the
+  one of a replication stay 0 while the leader is appointed. The counters of sessions,
+  of the service's version and of the catch-up in `spec/cluster.md`, "Counters", come
+  with those features. One thread calls `do_work()`; the leader's process appends with
+  `offer(payload)`, up to 1,344 bytes an entry. A follower that leaves the log holds its
+  recording until the driver has said where it stopped, and that stop is where its log
+  ends. A stop that the driver refuses or does not answer is a `client` error, and a
+  stop position not read within 1 s is a `stop-timeout` error. Either way the member
+  stays in init with the recording held, and the next `do_work()` stops it again.
 - Asks for the sync a commit waits for: a member's append position is its
   recording's synced position, and the driver's recorder syncs a recording by itself
   once a second. So the module asks its driver to sync its recording of the log,
@@ -111,9 +114,15 @@ In Aeron, this is Cluster, with Cluster Standby as a paid component
 ### What the election does not do yet
 
 A member made with `Consensus::with_election` has nominate, the two ballots, the
-elections a leader holds and the truncation of `spec/cluster.md`. Where the page's
-election does more, it does this instead, until the step that builds it (ADR 0081):
+elections a leader holds, the truncation and the leader's side of a replication of
+`spec/cluster.md`. Where the page's election does more, it does this instead, until
+the step that builds it (ADR 0081):
 
+- A leader answers a replication that no member asks for yet: the member's side,
+  follower log replication, is the next step. In the in-memory cluster a leader's
+  `start_replay` starts nothing until then, as a leader whose recordings were purged
+  starts nothing. A leader does not serve a catch-up within its own term, a position
+  at or above its term base.
 - A member replicates nothing and catches up with nothing. Where a new leadership
   term leaves it below the leader's term base, or its append position is behind the
   leader's log position, it fails its election, counted in
@@ -124,9 +133,10 @@ election does more, it does this instead, until the step that builds it (ADR 008
   term's base, behind the new leader's log by what was appended since, which it would
   catch up with. It fails an election every election status interval, 100 ms, until
   that step, and the other members commit without it.
-- Over a driver a leader cannot give its log up and a member cannot truncate: the
-  module's `Io` refuses `remove_log` and `truncate_log` as `unsupported`. The
-  module's member is appointed and never asks (ADR 0082, ADR 0083).
+- Over a driver a leader cannot give its log up, a member cannot truncate and a
+  leader cannot replay: the module's `Io` refuses `remove_log`, `truncate_log`,
+  `start_replay`, `stop_replay` and `replay_stopped` as `unsupported`. The module's
+  member is appointed and never asks (ADR 0082, ADR 0083, ADR 0085).
 - Leader ready waits for every member the leader has heard, as the appointed leader's
   does, since a follower that misses a term's first entry cannot catch up with it.
 - A member starts with no term: its record of terms and its candidate term are not

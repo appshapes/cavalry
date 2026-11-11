@@ -5,13 +5,16 @@
 #![allow(dead_code)]
 
 use cavalry_proto::cluster::{Message, Template};
-use cavalry_raft::consensus::terms_above;
-use cavalry_raft::{Clock, Consensus, ElectionState, Io, Log};
+use cavalry_raft::consensus::{base_above, terms_above};
+use cavalry_raft::{Clock, Consensus, ElectionState, Io, Log, ReplayStopped, Role};
 
 /// One call the core made, in the order it made it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Call {
-    Send { to: i32, template: Template },
+    Send {
+        to: i32,
+        template: Template,
+    },
     StoreCandidateTerm(i64),
     RecordTerm(i64, i64),
     AddLog(i64, i64),
@@ -20,6 +23,9 @@ pub enum Call {
     RemoveLog,
     TruncateLog(i64),
     Append(Template),
+    /// A replay started: the member it is to, its position and its end.
+    StartReplay(i32, i64, i64),
+    StopReplay(i32),
 }
 
 /// The world of one core, as the test sets it.
@@ -47,11 +53,22 @@ pub struct Stub {
     /// The last new leadership term sent: who it was for, the log leadership term id
     /// it answers, and its three next fields.
     pub last_term: Option<(i32, i64, [i64; 3])>,
+    /// Whether the member's recordings hold no position a replay is asked from, as
+    /// after a purge: `start_replay` starts nothing.
+    pub purged: bool,
+    /// Whether `start_replay` fails.
+    pub fail_start: bool,
+    /// Whether `stop_replay` fails.
+    pub fail_stop: bool,
+    /// How the replay to each member ended, by the member's id, once the test has
+    /// said so: `replay_stopped` hands it over once.
+    pub stopped: [Option<ReplayStopped>; Stub::MEMBERS],
 }
 
 impl Stub {
     pub const CALLS: usize = 64;
     pub const TERMS: usize = 8;
+    pub const MEMBERS: usize = 8;
 
     pub fn new() -> Self {
         Self {
@@ -66,6 +83,10 @@ impl Stub {
             refuse_send: false,
             terms: [None; Stub::TERMS],
             last_term: None,
+            purged: false,
+            fail_start: false,
+            fail_stop: false,
+            stopped: [None; Stub::MEMBERS],
         }
     }
 
@@ -209,6 +230,33 @@ impl Io for Stub {
     fn terms_after(&mut self, term: i64) -> [Option<(i64, i64)>; 2] {
         terms_above(self.terms.iter().flatten().copied(), term)
     }
+
+    fn term_base_above(&mut self, position: i64) -> Option<i64> {
+        base_above(self.terms.iter().flatten().copied(), position)
+    }
+
+    fn start_replay(&mut self, member: i32, position: i64, end: i64) -> Result<bool, Self::Fault> {
+        self.call(Call::StartReplay(member, position, end));
+        if self.fail_start {
+            return Err("the replay cannot be started");
+        }
+        Ok(!self.purged)
+    }
+
+    fn stop_replay(&mut self, member: i32) -> Result<(), Self::Fault> {
+        self.call(Call::StopReplay(member));
+        if self.fail_stop {
+            return Err("the replay cannot be stopped");
+        }
+        Ok(())
+    }
+
+    fn replay_stopped(&mut self, member: i32) -> Result<Option<ReplayStopped>, Self::Fault> {
+        let slot = usize::try_from(member)
+            .ok()
+            .and_then(|index| self.stopped.get_mut(index));
+        Ok(slot.and_then(Option::take))
+    }
 }
 
 /// A clock at `milliseconds` since the test began.
@@ -334,4 +382,56 @@ pub fn lose_the_leader(
     member.do_work(at(ms + 1), io).expect("no fault");
     assert_eq!(member.election_state(), ElectionState::Canvass);
     ms + 2
+}
+
+/// A member that elects, member 0 of three, taken by hand to the lead of its third
+/// term: it follows term 0, led by member 1 from 0, and term 1, led by member 2 from
+/// 64, each recorded at its base, then wins the ballot of term 2 and leads it from
+/// 96, in leader log replication with its log publication added. Its record of terms
+/// is (0, 0), (1, 64), (2, 96). Returns the member and the next millisecond.
+pub fn leader_of_term_two(io: &mut Stub) -> (Consensus, u64) {
+    let mut member = Consensus::with_election(&[0, 1, 2], 0, 1).expect("a member");
+    // Term 0, led by member 1 from 0.
+    member.do_work(at(1), io).expect("no fault");
+    let closed = follow_term(&mut member, io, 2, &new_leadership_term(1, 0), 0);
+    // Term 1, led by member 2 from 64, after 64 bytes of term 0.
+    let ms = lose_the_leader(&mut member, io, closed, 64);
+    let term_one = leadership_term(2, 1, 64, 64, 0, [1, 64, -1]);
+    let closed = follow_term(&mut member, io, ms, &term_one, 64);
+    assert_eq!(member.leader_member_id(), 2);
+    // Term 2, its own, from 96, after 32 bytes of term 1.
+    let ms = lose_the_leader(&mut member, io, closed, 96);
+    for other in [1, 2] {
+        member
+            .on_message(at(ms), &canvass_position(other, 1, 96), io)
+            .expect("no fault");
+    }
+    member.do_work(at(ms + 1), io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::Nominate);
+    member.do_work(at(ms + 501), io).expect("no fault");
+    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
+    for voter in [1, 2] {
+        let vote = Message::Vote {
+            candidate_term_id: 2,
+            log_leadership_term_id: 1,
+            log_position: 96,
+            candidate_member_id: 0,
+            follower_member_id: voter,
+            vote: true,
+        };
+        member
+            .on_message(at(ms + 502), &vote, io)
+            .expect("no fault");
+    }
+    member.do_work(at(ms + 503), io).expect("no fault");
+    assert_eq!(member.role(), Role::Leader);
+    assert_eq!(member.leadership_term_id(), 2);
+    member.do_work(at(ms + 504), io).expect("no fault");
+    assert_eq!(
+        io.terms.iter().flatten().copied().collect::<Vec<_>>(),
+        vec![(0, 0), (1, 64), (2, 96)],
+        "its record of terms"
+    );
+    assert_eq!(member.election_state(), ElectionState::LeaderLogReplication);
+    (member, ms + 505)
 }

@@ -9,11 +9,8 @@
 mod common;
 
 use cavalry_proto::cluster::Message;
-use cavalry_raft::{Consensus, ElectionState, Role};
-use common::{
-    Stub, append_position, at, canvass_position, follow_term, leadership_term, lose_the_leader,
-    new_leadership_term,
-};
+use cavalry_raft::{Consensus, ElectionState};
+use common::{Stub, append_position, at, canvass_position, leader_of_term_two};
 
 fn work(member: &mut Consensus, io: &mut Stub, ms: u64) {
     member.do_work(at(ms), io).expect("no fault");
@@ -35,68 +32,29 @@ fn reports(member: i32, term: i64, position: i64) -> Message<'static> {
 #[test]
 fn a_leader_names_the_term_its_record_holds_next_after_the_members_own() {
     let mut io = Stub::new();
-    let mut member = Consensus::with_election(&[0, 1, 2], 0, 1).expect("a member");
-
-    // Term 0, led by member 1 from 0.
-    work(&mut member, &mut io, 1);
-    let closed = follow_term(&mut member, &mut io, 2, &new_leadership_term(1, 0), 0);
-    // Term 1, led by member 2 from 64, after 64 bytes of term 0.
-    let ms = lose_the_leader(&mut member, &mut io, closed, 64);
-    let term_one = leadership_term(2, 1, 64, 64, 0, [1, 64, -1]);
-    let closed = follow_term(&mut member, &mut io, ms, &term_one, 64);
-    assert_eq!(member.leader_member_id(), 2);
-    // Term 2, its own, from 96, after 32 bytes of term 1.
-    let ms = lose_the_leader(&mut member, &mut io, closed, 96);
-    for other in [1, 2] {
-        read(&mut member, &mut io, ms, &reports(other, 1, 96));
-    }
-    work(&mut member, &mut io, ms + 1);
-    assert_eq!(member.election_state(), ElectionState::Nominate);
-    work(&mut member, &mut io, ms + 501);
-    assert_eq!(member.election_state(), ElectionState::CandidateBallot);
-    for voter in [1, 2] {
-        let vote = Message::Vote {
-            candidate_term_id: 2,
-            log_leadership_term_id: 1,
-            log_position: 96,
-            candidate_member_id: 0,
-            follower_member_id: voter,
-            vote: true,
-        };
-        read(&mut member, &mut io, ms + 502, &vote);
-    }
-    work(&mut member, &mut io, ms + 503);
-    assert_eq!(member.role(), Role::Leader);
-    assert_eq!(member.leadership_term_id(), 2);
-    work(&mut member, &mut io, ms + 504);
-    assert_eq!(
-        io.terms.iter().flatten().copied().collect::<Vec<_>>(),
-        vec![(0, 0), (1, 64), (2, 96)],
-        "its record of terms"
-    );
-    assert_eq!(member.election_state(), ElectionState::LeaderLogReplication);
+    let (mut member, ms) = leader_of_term_two(&mut io);
 
     // A member whose log is of term 0, at 64 or anywhere: term 1 is next, from 64 to
     // 96. Naming term 2 at 96 here is the fault this test is for.
     io.last_term = None;
-    read(&mut member, &mut io, ms + 505, &reports(2, 0, 96));
+    read(&mut member, &mut io, ms, &reports(2, 0, 96));
     assert_eq!(io.last_term, Some((2, 0, [1, 64, 96])));
     // A member whose log is of term 1: this leader's term is next, with no end.
-    read(&mut member, &mut io, ms + 506, &reports(2, 1, 96));
+    read(&mut member, &mut io, ms + 1, &reports(2, 1, 96));
     assert_eq!(io.last_term, Some((2, 1, [2, 96, -1])));
     // A member with no term: term 0 is next, from 0 to 64.
-    read(&mut member, &mut io, ms + 507, &reports(1, -1, 0));
+    read(&mut member, &mut io, ms + 2, &reports(1, -1, 0));
     assert_eq!(io.last_term, Some((1, -1, [0, 0, 64])));
 
     // A member that has joined the leader's term is told no next term, in the
     // leader's heartbeat.
     io.last_term = None;
-    read(&mut member, &mut io, ms + 508, &reports(2, 2, 96));
+    read(&mut member, &mut io, ms + 3, &reports(2, 2, 96));
     assert_eq!(io.last_term, None, "one at its own term is not answered");
     read(
         &mut member,
         &mut io,
-        ms + 508,
+        ms + 3,
         &Message::AppendPosition {
             leadership_term_id: 2,
             log_position: 96,
@@ -104,7 +62,7 @@ fn a_leader_names_the_term_its_record_holds_next_after_the_members_own() {
             flags: 0,
         },
     );
-    work(&mut member, &mut io, ms + 1_000);
+    work(&mut member, &mut io, ms + 495);
     assert_eq!(io.last_term, Some((2, 2, [-1, -1, -1])));
 }
 
