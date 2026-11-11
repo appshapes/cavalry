@@ -72,7 +72,7 @@ pub struct cavalry_header_t {
     /// The position in its stream at which the frame begins, when the poll that made
     /// the header knows it: a committed log's poll does, and a subscription's does
     /// not and writes `CAVALRY_NULL_POSITION` (`spec/c-abi.md`, "A frame's position";
-    /// ADR 0068).
+    /// ADR 0070).
     pub(crate) position: i64,
 }
 

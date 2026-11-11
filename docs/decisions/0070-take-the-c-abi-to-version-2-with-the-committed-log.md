@@ -1,10 +1,10 @@
-# 0068. Take the C ABI to version 2 with the committed log
+# 0070. Take the C ABI to version 2 with the committed log
 
 - **Status:** Accepted
 - **Date:** 2026-11-10
 - **Invariants affected:** 1, 2, 6
 - **Supersedes:** none. Amends `spec/c-abi.md` to version 2 with one opaque type, one
-  struct, the ten functions of a new "committed log" group, one constant and one error
+  struct, the eleven functions of a new "committed log" group, one constant and one error
   code; every declaration of version 1 is unchanged (ADR 0051; ADR 0057; ADR 0066)
 
 ## Context
@@ -25,7 +25,7 @@ number is free to move.
 
 Card 227 also gave the Rust client an armed recording, a recording's stop position, a
 client's counter, the bounded poll and the sync of a recording on command (ADR 0059,
-ADR 0062, ADR 0066, ADR 0067). Each is used by a consensus module, which is Rust and
+ADR 0062, ADR 0066, ADR 0069). Each is used by a consensus module, which is Rust and
 runs beside the driver. None is something a service needs.
 
 The Rust `CommittedLog::poll` hands its handler three things: the entry's bytes, its
@@ -53,10 +53,21 @@ header from a subscription's poll carries none, and the function then returns âˆ
 a new error code, 138, `CAVALRY_ERR_NO_POSITION`, never a number.
 
 The reads are the Rust handle's: `_position`, `_commit_position`, `_is_ended`,
-`_failed_at`, which writes the position through a pointer as `cavalry_replay_ended`
-does, `_fault` with the subscription's `cavalry_fault_t`, and `_constants` with the
-member id and the recording id. `CAVALRY_SERVICE_LOG_STREAM_ID`, 104, is the Rust
-constant.
+`_failed_at` and `_withdrawn_at`, each of which writes its position through a pointer
+as `cavalry_replay_ended` does, `_fault` with the subscription's `cavalry_fault_t`,
+and `_constants` with the member id and the recording id.
+`CAVALRY_SERVICE_LOG_STREAM_ID`, 104, is the Rust constant.
+
+The two reports of a short end are both in the ABI because invariant 1 holds at
+this boundary as it does in Rust: an ended handle has delivered every entry it was
+owed only when the replay did not fail and the driver did not withdraw its image
+unread, and a service in C that could read `_is_ended` alone would take a short end
+for a whole one. `_failed_at` is where the driver's replay of the recording failed.
+`_withdrawn_at` is where the entries begin that the handle was not given because the
+driver withdrew the replay's image, the publication linger after the replay ended,
+before the service had read it (pull request 185 gave the Rust handle the same
+report). The page says of `_is_ended` what the Rust rustdoc says: read the two once
+it returns `true`, and what the handle delivered ends at `_position` in every case.
 
 The rules are the subscription's where the thing is the same. A poll holds the log
 for the run of the handler, and the page's table says what each call from inside it
@@ -127,7 +138,7 @@ recording and a client's counter stay out, and "Out of this version" names each.
 ## Evidence
 
 - `spec/c-abi.md` at version 2 and `spec/vectors/c-abi.json`: 9 opaque types, 10
-  structs, 70 functions and 73 defines, against which `cavalry-ffi`'s conformance
+  structs, 71 functions and 73 defines, against which `cavalry-ffi`'s conformance
   test holds the generated header.
 - `cavalry-ffi`, `tests/committed_log.rs`, beside three cluster members in the test's
   process. `a_service_reads_the_committed_log_through_the_c_handler_with_each_entrys_position`:
@@ -143,6 +154,12 @@ recording and a client's counter stay out, and "Out of this version" names each.
   with a null client, which returns 0.
   `a_driver_with_no_member_answers_the_open_with_a_null_handle_and_no_error`, with
   every null argument that is required refused.
+  `a_service_whose_replay_the_driver_withdrew_unread_is_told_where_its_entries_stop`:
+  a service that has read at most one entry of a thousand and one does not read for
+  the publication linger after its member's consensus module closes; the handle is
+  ended at its position, short of its bound, `cavalry_committed_log_withdrawn_at`
+  writes that position, `cavalry_committed_log_failed_at` is `false` and writes
+  nothing, and a further poll delivers nothing.
 - `cavalry-ffi`, `tests/allocations.rs`: a second window, two thousand entries
   appended, committed by three members whose duty cycles run inside the window, and
   handed to the C handler with their header's values and positions, with no

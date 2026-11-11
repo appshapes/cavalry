@@ -462,6 +462,64 @@ fn a_bounded_poll_stops_at_the_end_of_a_term_and_goes_on_in_the_next() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn a_bounded_poll_reports_a_corrupt_frame_below_its_limit_and_never_reads_one_at_it() {
+    // The bounded read is a loop of its own beside `poll`'s, with a frame check of its
+    // own (`spec/frame.md`): a stream that cannot be read is reported, never guessed
+    // at. Three frames of 64 bytes, the third's version byte 1, as
+    // `a_reader_checks_positions_and_frames` makes them for `poll`.
+    let dir = Dir::new("bounded-corrupt");
+    let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();
+    log.set_connected(true).unwrap();
+    let mut appender = log.appender().unwrap();
+    for _ in 0..3 {
+        appender.try_claim(8, unlimited()).unwrap().commit();
+    }
+    let path = dir.file(CORRELATION);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[128 + 4] = 1;
+    fs::write(&path, &bytes).unwrap();
+    let log = LogBuffers::open(dir.path(), CORRELATION, false).unwrap();
+    let mut delivered = 0;
+
+    // The corrupt frame at the limit: the read stops before it, so it is never checked.
+    let mut reader = log.reader(0).unwrap();
+    let poll = reader.bounded_poll(128, 8, |_, _| delivered += 1).unwrap();
+    assert_eq!((poll.fragments, poll.position, delivered), (2, 128, 2));
+    // A limit at or below the position reads nothing, whatever frame is there.
+    for limit in [i64::MIN, 0, 64, 128] {
+        let poll = reader
+            .bounded_poll(limit, 8, |_, _| delivered += 1)
+            .unwrap();
+        assert_eq!((poll.fragments, poll.position, delivered), (0, 128, 2));
+    }
+
+    // The corrupt frame below the limit, by one byte or by all of them: the read
+    // reports it and the position stays at it.
+    for limit in [129, i64::MAX] {
+        let error = reader
+            .bounded_poll(limit, 8, |_, _| delivered += 1)
+            .unwrap_err();
+        assert!(matches!(error, LogError::Frame(_)), "{error}");
+        assert_eq!(error.reason(), "frame");
+        assert!(
+            error.to_string().contains("frame rejected (version)"),
+            "{error}"
+        );
+        assert_eq!((reader.position(), delivered), (128, 2));
+    }
+
+    // From the start, the two good frames are delivered before the report, as `poll`
+    // delivers them.
+    let mut reader = log.reader(0).unwrap();
+    let error = reader
+        .bounded_poll(i64::MAX, 8, |_, _| delivered += 1)
+        .unwrap_err();
+    assert!(matches!(error, LogError::Frame(_)), "{error}");
+    assert_eq!((reader.position(), delivered), (128, 4));
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn an_offer_fragments_a_long_message_and_the_reader_reassembles_it() {
     let dir = Dir::new("offer");
     let log = LogBuffers::create(dir.path(), &fields(LogType::Concurrent)).unwrap();

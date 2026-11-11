@@ -17,7 +17,7 @@ external. Nine functions are the addon's own, not the header's: `registerSubscri
 `cavalry_header_values_t` it fills), `poll` (the one `cavalry_subscription_poll` call with
 the trampoline and the handler), `registerCommittedLog` and `committedLogPoll` (the same
 state and the same trampoline for a committed log, whose handler is handed the entry's
-position as a third argument, and the one `cavalry_committed_log_poll` call; ADR 0068),
+position as a third argument, and the one `cavalry_committed_log_poll` call; ADR 0070),
 `headerField` (a field of the current frame's header, read
 through `cavalry_header_values` once per fragment on the first read), `view` (a `Buffer`
 over the slice a claim reserved), `detach` (a view released), `stringAt` (the C string a
@@ -190,7 +190,7 @@ def write_addon(header) -> str:
     out.append("")
     # The two polls take the C fragment handler, which no generic marshalling makes: the
     # subscription's is `poll` below and the committed log's `committedLogPoll`, each
-    # written by hand (spec/c-abi.md, version 2; ADR 0068).
+    # written by hand (spec/c-abi.md, version 2; ADR 0070).
     functions = [fn for fn in header.functions if fn.name not in HANDLER_FUNCTIONS]
     wrappers = []
     for fn in functions:
@@ -631,7 +631,7 @@ static napi_value fn_registerSubscription(napi_env env, napi_callback_info info)
 
 /* registerCommittedLog(header): a committed log's state, a subscription's state whose
  * trampoline hands the handler a third argument, the entry's position in the log
- * (spec/c-abi.md, "A frame's position"; ADR 0068). */
+ * (spec/c-abi.md, "A frame's position"; ADR 0070). */
 static napi_value fn_registerCommittedLog(napi_env env, napi_callback_info info) {
   return register_state(env, info, true);
 }
@@ -1259,14 +1259,28 @@ class CommittedLog {
   position() { return addon.cavalry_committed_log_position(this.handle); }
   /** The bound of the last poll: the highest commit position taken from the member's counter. */
   commitPosition() { return addon.cavalry_committed_log_commit_position(this.handle); }
-  /** Whether the member closed or left its log: once a poll then returns 0, close this log and
-   * open another from `position()`. */
+  /** Whether this log has come to its end: no poll will deliver another entry. Stop reading when
+   * it is true, not when a poll returns 0. Then read `failedAt()` and `withdrawnAt()`: the log
+   * delivered every entry it was owed only when both are null. In every case what it delivered
+   * ends at `position()`, where a service opens the log again. */
   get isEnded() { return addon.cavalry_committed_log_is_ended(this.handle); }
-  /** The position after the last frame the driver's replay played before it failed, or null for
-   * a log that is live or that ended because its member closed or left the recording. */
+  /** The position after the last frame the driver's replay of the member's recording played
+   * before it failed, or null for a log that is live or that ended because its member closed or
+   * left the recording. No entry from that position on is delivered. Read it once `isEnded` is
+   * true: the entries below it may still be on their way before. */
   failedAt() {
     const [failed, position] = addon.cavalry_committed_log_failed_at(this.handle);
     return failed ? position : null;
+  }
+  /** The position at which the entries this log was not given begin, when the driver withdrew
+   * the replay before the polls had read it to its end, or null. The driver keeps a replay 5 s
+   * after it ends and then withdraws it, read or not: a service that did not poll for that long
+   * after its member closed or left the log, or whose handler took that long, ends so. The
+   * entries from that position on were played and not delivered. Read it once `isEnded` is
+   * true. */
+  withdrawnAt() {
+    const [withdrawn, position] = addon.cavalry_committed_log_withdrawn_at(this.handle);
+    return withdrawn ? position : null;
   }
   /** Stops the replay through the client and frees the handle; a second close does nothing.
    * After the client's own close it frees the handle alone, and the driver ends the replay by
@@ -1472,6 +1486,7 @@ export class CommittedLog {
   commitPosition(): number;
   readonly isEnded: boolean;
   failedAt(): number | null;
+  withdrawnAt(): number | null;
   close(): void;
 }
 

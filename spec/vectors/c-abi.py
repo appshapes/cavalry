@@ -59,7 +59,7 @@ STRUCTS = {
         ("const char *", "channel"), ("int64_t", "replay_session_id"), ("int64_t", "recording_id"),
         ("int64_t", "start_position"), ("int32_t", "session_id"), ("int32_t", "stream_id"),
     ],
-    # Version 2: the committed log (ADR 0068).
+    # Version 2: the committed log (ADR 0070).
     "cavalry_committed_log_constants_t": [("int64_t", "recording_id"), ("int32_t", "member_id")],
 }
 
@@ -166,7 +166,7 @@ FUNCTIONS = [
     fn("int64_t", "cavalry_replay_position", REPLAY),
     fn("bool", "cavalry_replay_ended", REPLAY, ("int64_t *", "position"), ("int32_t *", "reason")),
     fn("int", "cavalry_replay_close", ("cavalry_replay_t *", "replay")),
-    # Version 2: the committed log (ADR 0068).
+    # Version 2: the committed log (ADR 0070).
     fn("int", "cavalry_committed_log", ("cavalry_committed_log_t **", "log"), CLIENT,
        ("int64_t", "position")),
     fn("int", "cavalry_committed_log_poll", LOG, ("cavalry_fragment_handler_t", "handler"),
@@ -177,6 +177,7 @@ FUNCTIONS = [
     fn("int64_t", "cavalry_committed_log_commit_position", CLOG),
     fn("bool", "cavalry_committed_log_is_ended", CLOG),
     fn("bool", "cavalry_committed_log_failed_at", CLOG, ("int64_t *", "position")),
+    fn("bool", "cavalry_committed_log_withdrawn_at", CLOG, ("int64_t *", "position")),
     fn("int", "cavalry_committed_log_constants", CLOG,
        ("cavalry_committed_log_constants_t *", "constants")),
     fn("int", "cavalry_committed_log_close", LOG, CLIENT),

@@ -8,7 +8,7 @@
 //! live recording, takes one block of whole committed frames with
 //! [`TermReader::block`], writes it with one positional write, stores the recording's
 //! position with a release store, syncs once per second, or at once when a `sync
-//! recording` command asks (ADR 0067), and stops a recording whose
+//! recording` command asks (ADR 0069), and stops a recording whose
 //! publication reached its end of stream, whose write failed, or whose block scan found
 //! a frame that fails a check. A block is taken exactly when the writer's position moved,
 //! `cavalry-log`'s rule, so a failed write leaves the reader where it was. Nothing here
@@ -96,7 +96,7 @@ pub(crate) enum Request {
         correlation_id: Option<i64>,
     },
     /// Sync what the recorder has written of a recording now, a `sync recording`
-    /// command's request (ADR 0067); answered with [`Reply::SyncDone`].
+    /// command's request (ADR 0069); answered with [`Reply::SyncDone`].
     Sync {
         /// The recording.
         recording_id: i64,
@@ -153,7 +153,7 @@ pub(crate) enum StartFailure {
 }
 
 /// What a `sync recording` request came to (`spec/client-protocol.md`, "Commands"; ADR
-/// 0067).
+/// 0069).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SyncOutcome {
     /// Everything the recorder had written of the recording when it took the request
@@ -466,7 +466,7 @@ impl Recorder {
         }
     }
 
-    /// A `sync recording` request (ADR 0067): syncs what is written of the live
+    /// A `sync recording` request (ADR 0069): syncs what is written of the live
     /// recording `recording_id` and not yet synced, and stores the synced position. A
     /// recording the recorder no longer holds has stopped, and nothing is done. One
     /// whose sync has already failed is not synced again (ADR 0065). A sync that fails

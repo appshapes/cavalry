@@ -7,7 +7,7 @@
 //! with `stats_alloc`, allocations and reallocations both, over a window after the
 //! image has joined, with none at all. The committed log's two have a window of their
 //! own, beside three cluster members in this process whose duty cycles run inside it
-//! (ADR 0068). Alone in its binary, so that no other test's threads are counted.
+//! (ADR 0070). Alone in its binary, so that no other test's threads are counted.
 
 use std::alloc::System;
 use std::ffi::{CString, c_void};

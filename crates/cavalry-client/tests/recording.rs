@@ -193,7 +193,7 @@ fn offer(publication: &mut cavalry_client::Publication, count: u8) -> i64 {
 }
 
 /// `sync recording` through the client (`spec/client-protocol.md`, "Commands"; ADR
-/// 0067). Twenty rounds of ten messages: once the recorder has written a round,
+/// 0069). Twenty rounds of ten messages: once the recorder has written a round,
 /// `Recording::sync` returns with the synced position at the position, with no wait
 /// after the call. The recorder's own sync runs once a second, so it could make a
 /// round or two pass by itself and never twenty in a row. Then the answers: an id the
@@ -253,7 +253,7 @@ fn a_sync_on_request_covers_what_the_recorder_has_written_when_it_returns() {
 }
 
 /// `Recording::request_sync` writes the command and does not wait, and the driver
-/// acts on it (ADR 0067). Two recordings, one that takes the messages and one that
+/// acts on it (ADR 0069). Two recordings, one that takes the messages and one that
 /// stays idle. In each of twenty rounds the first is asked to sync without waiting,
 /// and then the second is synced with the call that waits: the recorder handles its
 /// requests in the order the conductor handed them over, so when the second call

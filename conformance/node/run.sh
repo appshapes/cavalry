@@ -6,7 +6,7 @@
 # clients/node/README.md's example through conformance/node/readme.js; then starts three
 # cluster members on the loopback, each a `cavalry run` in a member's role, and runs
 # conformance/node/committed_log.js beside member 1, the client's committed log against a
-# cluster (spec/c-abi.md, version 2; ADR 0068); and cleans up.
+# cluster (spec/c-abi.md, version 2; ADR 0070); and cleans up.
 # `just conformance` runs this after conformance/python (clients/README.md; ADR 0046, card
 # 206). The runner takes `--expose-gc` so that its allocation round can read the heap after
 # a full collection.
