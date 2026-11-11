@@ -632,6 +632,12 @@ impl Cluster {
     /// and the log stops reaching it. Its duty cycle still runs. An image of the log it
     /// holds stays for the image liveness timeout, 10 s, and what the cut kept from it
     /// arrives when the cut ends sooner, as a retransmission would bring it.
+    ///
+    /// When the member leads, its log stops reaching every follower too: what it
+    /// appends while cut extends its own log and no other member's, and each
+    /// follower's image of it stays for the image liveness timeout, as in a
+    /// [`Cluster::cut_between`], and is brought what the cut kept from it when the cut
+    /// ends sooner.
     pub fn cut(&mut self, member: i32) {
         let now_ns = self.world.clock.now_ns;
         if let Some(disk) = self.disk_mut(member) {

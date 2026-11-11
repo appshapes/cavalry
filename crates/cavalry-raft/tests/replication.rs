@@ -1,8 +1,8 @@
 //! The replicated log with an appointed leader, three cores at a time in memory
 //! (`spec/cluster.md`, "The appointed leader"; ADR 0063): what a cluster does when it
 //! starts together, when a member starts late, when syncs lag, when the leader loses
-//! its quorum, when two members are parted and when the consensus stream loses and
-//! delays messages. Every test checks, at every step, that nothing uncommitted is
+//! its quorum, when two members are parted, when the leader is cut and when the
+//! consensus stream loses and delays messages. Every test checks, at every step, that nothing uncommitted is
 //! called committed and that every member's log is the leader's as far as it reaches;
 //! the last test is the history on which that check fails.
 
@@ -849,6 +849,54 @@ fn a_partition_between_the_leader_and_a_follower_parts_those_two_alone() {
     );
     assert_eq!(cluster.append_position(2), Some(held));
     assert_eq!(cluster.log(2), held_log);
+}
+
+/// A cut leader's log reaches no follower: what it appends while cut extends its own
+/// log alone, so a quorum has not synced it and it is not committed. When the cut ends
+/// inside the image liveness timeout, each follower's image of the log is still there,
+/// what the cut kept from it arrives, and the entry is committed on all three.
+#[test]
+fn a_cut_leaders_log_reaches_no_follower_until_the_cut_ends() {
+    let ids = [0, 1, 2];
+    let mut cluster = Cluster::new(&ids).expect("three members");
+    let mut safety = Safety::new(&ids);
+    safety.run(&mut cluster, 1_000);
+    let before = cluster.commit_position(0).expect("the leader");
+    let held: Vec<(i64, Vec<u8>)> = [1, 2]
+        .into_iter()
+        .map(|id| {
+            let position = cluster.append_position(id).expect("a member");
+            (position, cluster.log(id))
+        })
+        .collect();
+
+    cluster.cut(0);
+    let entry = cluster
+        .offer(b"the leader is cut")
+        .expect("the leader appends");
+    safety.run(&mut cluster, 1_000);
+    for (id, (position, log)) in [1, 2].into_iter().zip(&held) {
+        assert_eq!(cluster.append_position(id), Some(*position), "member {id}");
+        assert_eq!(&cluster.log(id), log, "member {id}");
+        assert_eq!(cluster.commit_position(id), Some(before), "member {id}");
+    }
+    assert_eq!(cluster.append_position(0), Some(entry));
+    assert!(
+        cluster.log(0).len() > held[0].1.len(),
+        "the leader's own log grew"
+    );
+    assert_eq!(cluster.commit_position(0), Some(before), "not committed");
+
+    cluster.heal(0);
+    safety.run(&mut cluster, 1_000);
+    for id in ids {
+        assert_eq!(cluster.log(id), cluster.log(0), "member {id}");
+        assert_eq!(cluster.append_position(id), Some(entry), "member {id}");
+        assert_eq!(cluster.commit_position(id), Some(entry), "member {id}");
+        let counts = cluster.counts(id).expect("a member");
+        assert_eq!(counts.elections, 1, "member {id}: {counts:?}");
+        assert_eq!(counts.log_images_lost, 0, "member {id}: {counts:?}");
+    }
 }
 
 /// The safety check can fail. Every member holds the bytes that reached it, so two
