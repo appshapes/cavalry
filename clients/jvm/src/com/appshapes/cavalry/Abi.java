@@ -38,7 +38,7 @@ public final class Abi {
     }
 
     public static final String DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public static final int ABI_VERSION = 2; // CAVALRY_ABI_VERSION
+    public static final int ABI_VERSION = 3; // CAVALRY_ABI_VERSION
     public static final int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public static final int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public static final int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
@@ -246,6 +246,7 @@ public final class Abi {
     static final MethodHandle cavalry_committed_log_is_ended;
     static final MethodHandle cavalry_committed_log_failed_at;
     static final MethodHandle cavalry_committed_log_withdrawn_at;
+    static final MethodHandle cavalry_committed_log_faulted;
     static final MethodHandle cavalry_committed_log_constants;
     static final MethodHandle cavalry_committed_log_close;
     static final MethodHandle cavalry_context_init_v;
@@ -333,6 +334,7 @@ public final class Abi {
         cavalry_committed_log_is_ended = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_is_ended"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS));
         cavalry_committed_log_failed_at = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_failed_at"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS, ADDRESS));
         cavalry_committed_log_withdrawn_at = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_withdrawn_at"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS, ADDRESS));
+        cavalry_committed_log_faulted = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_faulted"), FunctionDescriptor.of(JAVA_BOOLEAN, ADDRESS, ADDRESS));
         cavalry_committed_log_constants = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_constants"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_committed_log_close = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_committed_log_close"), FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
         cavalry_context_init_v = LINKER.downcallHandle(LOOKUP.findOrThrow("cavalry_context_init_v"), FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));

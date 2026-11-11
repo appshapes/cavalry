@@ -9,11 +9,13 @@
 // bytes in a frame of 88 at position 0, so the log's next position is 96. The round opens
 // twenty logs and closes each with no poll between, which leaves its client open (ADR
 // 0078); reads that entry through the handler, with its position, its header and the
-// handle's reads; makes each of the eight calls the ABI refuses from inside the log's own
+// handle's reads; makes each of the nine calls the ABI refuses from inside the log's own
 // handler, each after it has set the thread's error to another code, so that a refusal
-// that answers what a live log answers is told from an answer; checks where a handler's
-// exception goes and that its entry is not delivered again; opens the log again at 96,
-// where nothing is committed yet,
+// that answers what a live log answers is told from an answer; makes a log's own image
+// fault, by one byte of the frame its replay wrote, and reads the fault from the poll that
+// meets it and from faulted() for as long as the log is held (ADR 0080); checks where a
+// handler's exception goes and that its entry is not delivered again; opens the log again
+// at 96, where nothing is committed yet,
 // beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
 // had the time a replay's image takes to join; closes twice; and closes a log after its
 // client. Every wait is bounded at 30 s and sleeps a millisecond after a poll that
@@ -28,8 +30,17 @@ import com.appshapes.cavalry.EntryHandler;
 import com.appshapes.cavalry.HandlerException;
 import com.appshapes.cavalry.Subscription;
 
+import java.io.RandomAccessFile;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.stream.Stream;
 
 public final class CommittedLogRound {
     static final long WAIT_NANOS = 30_000_000_000L;
@@ -74,6 +85,15 @@ public final class CommittedLogRound {
             fail(error.function() + " failed with error " + error.code() + ": " + error.abiMessage());
         } catch (HandlerException error) {
             fail("the handler threw: " + error.getCause());
+        }
+    }
+
+    /** The names under a directory. */
+    static Set<String> names(Path directory) throws Exception {
+        try (Stream<Path> files = Files.list(directory)) {
+            Set<String> names = new TreeSet<>();
+            files.forEach(file -> names.add(file.getFileName().toString()));
+            return names;
         }
     }
 
@@ -141,6 +161,8 @@ public final class CommittedLogRound {
             setAnotherError.run();
             refusals.add("withdrawnAt " + log.withdrawnAt().isPresent() + " " + Abi.errcode());
             setAnotherError.run();
+            refusals.add("faulted " + log.faulted().isPresent() + " " + Abi.errcode());
+            setAnotherError.run();
             try {
                 log.fault();
                 refusals.add("fault 0 " + Abi.errcode());
@@ -181,6 +203,7 @@ public final class CommittedLogRound {
         int polling = Abi.ERR_POLLING;
         List<String> expected = List.of("poll -1 " + polling, "position -1 " + polling, "commitPosition -1 " + polling,
             "isEnded false " + polling, "failedAt false " + polling, "withdrawnAt false " + polling,
+            "faulted false " + polling,
             "fault -1 " + polling, "close -1 " + polling);
         if (!refusals.equals(expected)) {
             fail("the calls from inside the log's own handler answered " + refusals + ", not " + expected);
@@ -190,10 +213,10 @@ public final class CommittedLogRound {
                 + " and " + NEXT);
         }
         Subscription.Fault fault = log.fault();
-        if (log.isEnded() || log.failedAt().isPresent() || log.withdrawnAt().isPresent() || fault.code() != 0
-            || fault.sessionId() != 0 || fault.position() != Abi.NULL_POSITION) {
+        if (log.isEnded() || log.failedAt().isPresent() || log.withdrawnAt().isPresent() || log.faulted().isPresent()
+            || fault.code() != 0 || fault.sessionId() != 0 || fault.position() != Abi.NULL_POSITION) {
             fail("a live log read ended " + log.isEnded() + ", failed at " + log.failedAt() + ", withdrawn at "
-                + log.withdrawnAt() + ", fault " + fault);
+                + log.withdrawnAt() + ", faulted " + log.faulted() + ", fault " + fault);
         }
         for (int i = 0; i < 50; i++) {
             if (log.poll(onEntry, 16) != 0) {
@@ -204,10 +227,87 @@ public final class CommittedLogRound {
             fail("the refused poll, or a later one, delivered more: " + entries);
         }
         say("member " + log.memberId() + "'s entry at position 0 read once, next position " + log.position()
-            + ", commit position " + log.commitPosition() + "; eight calls from inside the handler refused with "
+            + ", commit position " + log.commitPosition() + "; nine calls from inside the handler refused with "
             + "ERR_POLLING, each made with the thread's error at ERR_NULL");
         log.close();
         log.close(); // idempotent
+
+        // A log whose own image faults (ADR 0080). The log's replay plays into a log buffer of
+        // its own, the one file that appears under the member's `publications/` when the log is
+        // opened. Before any poll of the log, the round changes one byte of the entry the
+        // replay wrote there, its frame's version, to one no reader accepts (spec/frame.md,
+        // "What a reader rejects"). The poll that reads the frame returns -1 with the fault,
+        // once; fault() answers it until the next poll; and faulted() answers it from that
+        // poll on, the same code, session and position, whatever is polled after.
+        Path publications = Path.of(memberDir, "publications");
+        Set<String> before = names(publications);
+        CommittedLog damaged = openLog(client, 0);
+        Set<String> replayed = names(publications);
+        replayed.removeAll(before);
+        if (replayed.size() != 1) {
+            fail("opening a log made " + replayed + " under " + publications + ", not the replay's one log buffer");
+        }
+        if (damaged.faulted().isPresent()) {
+            fail("a log that has not polled reads a fault: " + damaged.faulted());
+        }
+        String replayLogName = replayed.iterator().next();
+        try (RandomAccessFile replayLog = new RandomAccessFile(publications.resolve(replayLogName).toFile(), "rw")) {
+            byte[] frameLength = new byte[4];
+            until = System.nanoTime() + WAIT_NANOS;
+            while (true) {
+                replayLog.seek(0);
+                replayLog.readFully(frameLength);
+                if (ByteBuffer.wrap(frameLength).order(ByteOrder.LITTLE_ENDIAN).getInt() >= 32) {
+                    break;
+                }
+                if (System.nanoTime() > until) {
+                    fail("the replay wrote no frame at position 0 of " + replayLogName + " within 30 s");
+                }
+                Thread.sleep(IDLE_MILLIS);
+            }
+            replayLog.seek(4);
+            replayLog.write(9); // the frame's version byte
+        }
+        List<Long> delivered = new ArrayList<>();
+        EntryHandler counted = (body, header, position) -> delivered.add(position);
+        until = System.nanoTime() + WAIT_NANOS;
+        while (true) {
+            int polled = damaged.poll(counted, 16);
+            if (polled < 0) {
+                break;
+            }
+            if (polled > 0 || !delivered.isEmpty()) {
+                fail("a frame that fails its check was delivered: " + delivered);
+            }
+            if (System.nanoTime() > until) {
+                fail("no poll met the damaged frame within 30 s");
+            }
+            Thread.sleep(IDLE_MILLIS);
+        }
+        Subscription.Fault met = damaged.fault();
+        if (met.code() != Abi.ERR_FAULT_IMAGE || met.position() != 0) {
+            fail("the poll that met the damaged frame stopped on fault " + met + ", not ERR_FAULT_IMAGE at position 0");
+        }
+        for (int polls = 0; polls < 20; polls++) {
+            Optional<Subscription.Fault> kept = damaged.faulted();
+            if (kept.isEmpty() || !kept.get().equals(met)) {
+                fail("after " + polls + " more polls faulted() is " + kept + ", not the fault the poll met, " + met);
+            }
+            if (damaged.poll(counted, 16) != 0 || damaged.fault().code() != 0) {
+                fail("a poll after the fault did not return 0 and clear fault(): " + damaged.fault());
+            }
+        }
+        if (!damaged.isEnded() || damaged.failedAt().isPresent() || damaged.withdrawnAt().isPresent()
+            || !delivered.isEmpty()) {
+            fail("the faulted log read ended " + damaged.isEnded() + ", failed at " + damaged.failedAt()
+                + ", withdrawn at " + damaged.withdrawnAt() + ", and delivered " + delivered);
+        }
+        damaged.close();
+        if (client.isClosed()) {
+            fail("a log whose image faulted closed its client: " + client.closed());
+        }
+        say("a log whose image faulted at position 0 read fault " + met + " from the poll that met it and from "
+            + "faulted() after twenty more polls");
 
         // A handler that throws: the entry was delivered, the exception is thrown after the
         // ABI has returned, and the log's position is past the entry, so it is not delivered

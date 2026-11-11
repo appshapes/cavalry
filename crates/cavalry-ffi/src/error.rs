@@ -167,13 +167,18 @@ pub(crate) fn set_client(error: &ClientError) {
     set(code, format_args!("{error}"));
 }
 
-/// Sets the thread's error from a poll's fault and returns its code.
-pub(crate) fn set_fault(fault: &Fault) -> c_int {
-    let code = match fault {
+/// A fault's code, with nothing set.
+pub(crate) const fn fault_code(fault: &Fault) -> c_int {
+    match fault {
         Fault::Image { .. } => CAVALRY_ERR_FAULT_IMAGE,
         Fault::ImagesFull { .. } => CAVALRY_ERR_FAULT_IMAGES_FULL,
         Fault::Closed => CAVALRY_ERR_FAULT_CLOSED,
-    };
+    }
+}
+
+/// Sets the thread's error from a poll's fault and returns its code.
+pub(crate) fn set_fault(fault: &Fault) -> c_int {
+    let code = fault_code(fault);
     set(code, format_args!("{fault}"));
     code
 }

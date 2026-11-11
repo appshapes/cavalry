@@ -1320,11 +1320,15 @@ impl Cavalry {
     /// not, and a handle whose image went before it was read is ended short, which
     /// [`CommittedLog::withdrawn_at`] says. A handle is ended short too when the
     /// driver's replay of the recording failed, which [`CommittedLog::failed_at`]
-    /// says. A service reads both once the handle is ended, and has been given every
-    /// entry it was owed only when both are `None`.
+    /// says, and when this client's read of the replay's image stopped on a fault,
+    /// which the poll that met it returned and [`CommittedLog::faulted`] says from
+    /// then on. A service reads the three once the handle is ended, and has been
+    /// given every entry it was owed only when all three are `None`. It reads the
+    /// replay's failure first: a replay that failed can leave an image that faults
+    /// too, and the failure is then the cause.
     ///
     /// ```
-    /// use cavalry_client::{Cavalry, CommittedLog};
+    /// use cavalry_client::{Cavalry, CommittedLog, Fault};
     ///
     /// /// A service's loop: every committed entry from `position` on, in order, each
     /// /// once, until the member's log ends. Returns where to open the log again, or
@@ -1338,17 +1342,26 @@ impl Cavalry {
     ///         std::thread::sleep(std::time::Duration::from_millis(100));
     ///     };
     ///     loop {
-    ///         let entries = log.poll(
+    ///         let polled = log.poll(
     ///             |entry, _header, entry_position| {
     ///                 // Apply `entry`, in `spec/cluster.md`'s encoding, at its position.
     ///                 let _ = (entry, entry_position);
     ///             },
     ///             64,
-    ///         )?;
+    ///         );
+    ///         let entries = match polled {
+    ///             Ok(entries) => entries,
+    ///             // The fault of the log's own image: the handle is ended, and keeps
+    ///             // the fault, which is read below after the other two reports.
+    ///             Err(Fault::Image { .. } | Fault::ImagesFull { .. }) => 0,
+    ///             // The client is closed, and `Cavalry::closed` says why.
+    ///             Err(closed) => return Err(closed.into()),
+    ///         };
     ///         if log.is_ended() {
     ///             let next = log.position();
     ///             let failed = log.failed_at();
     ///             let withdrawn = log.withdrawn_at();
+    ///             let faulted = log.faulted();
     ///             log.close(client)?;
     ///             if let Some(failed) = failed {
     ///                 // The driver could not play the member's recording on from
@@ -1374,8 +1387,18 @@ impl Cavalry {
     ///                 )
     ///                 .into());
     ///             }
-    ///             // Neither: the member closed or left its log, and every entry below
-    ///             // the last commit position the handle took has been delivered.
+    ///             if let Some(fault) = faulted {
+    ///                 // This client's read of the replay's image stopped: the entries
+    ///                 // from `next` on were not delivered through this handle.
+    ///                 return Err(format!(
+    ///                     "the read of the member's log stopped before position {next} \
+    ///                      was read; open the log again from there: {fault}"
+    ///                 )
+    ///                 .into());
+    ///             }
+    ///             // None of the three: the member closed or left its log, and every
+    ///             // entry below the last commit position the handle took has been
+    ///             // delivered.
     ///             return Ok(next);
     ///         }
     ///         if entries == 0 {

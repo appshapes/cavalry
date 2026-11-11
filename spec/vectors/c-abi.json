@@ -1,6 +1,6 @@
 {
   "spec": "spec/c-abi.md",
-  "version": 2,
+  "version": 3,
   "generated_by": "spec/vectors/c-abi.py; do not edit by hand",
   "opaque_types": [
     "cavalry_context_t",
@@ -1076,6 +1076,20 @@
       ]
     },
     {
+      "name": "cavalry_committed_log_faulted",
+      "returns": "bool",
+      "params": [
+        [
+          "const cavalry_committed_log_t *",
+          "log"
+        ],
+        [
+          "cavalry_fault_t *",
+          "fault"
+        ]
+      ]
+    },
+    {
       "name": "cavalry_committed_log_constants",
       "returns": "int",
       "params": [
@@ -1140,7 +1154,7 @@
     }
   ],
   "defines": {
-    "CAVALRY_ABI_VERSION": 2,
+    "CAVALRY_ABI_VERSION": 3,
     "CAVALRY_DIR_ENV": "CAVALRY_DIR",
     "CAVALRY_MAX_IMAGES": 256,
     "CAVALRY_SERVICE_LOG_STREAM_ID": 104,

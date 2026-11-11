@@ -13,7 +13,8 @@ use crate::codes::*;
 use crate::error::{self, DOC};
 use crate::handle;
 use crate::subscription::{
-    NO_FAULT, cavalry_fault_t, cavalry_fragment_handler_t, cavalry_header_t, fault_struct,
+    NO_FAULT, cavalry_fault_t, cavalry_fragment_handler_t, cavalry_header_t, fault_fields,
+    fault_struct,
 };
 
 /// Whether a poll runs: the state word every function of the handle reads first.
@@ -320,12 +321,10 @@ pub unsafe extern "C" fn cavalry_committed_log_commit_position(
 }
 
 /// Whether the handle has come to its end: no poll will deliver another entry. What
-/// an ended handle has delivered is said by `cavalry_committed_log_failed_at` and
-/// `cavalry_committed_log_withdrawn_at`, read after this returns `true`: it has
-/// delivered every entry it was owed only when both return `false` and no poll of
-/// the handle returned −1 with `CAVALRY_ERR_FAULT_IMAGE` or
-/// `CAVALRY_ERR_FAULT_IMAGES_FULL`, the one report that the replay's image failed a
-/// check or could not join. In every case what it delivered ends at
+/// an ended handle has delivered is said by `cavalry_committed_log_failed_at`,
+/// `cavalry_committed_log_withdrawn_at` and `cavalry_committed_log_faulted`, read
+/// after this returns `true`: it has delivered every entry it was owed only when all
+/// three return `false`. In every case what it delivered ends at
 /// `cavalry_committed_log_position`.
 ///
 /// # Safety
@@ -431,6 +430,53 @@ pub unsafe extern "C" fn cavalry_committed_log_withdrawn_at(
     // SAFETY: `position` is non-null, checked above, and writable, by the caller's
     // convention.
     unsafe { *position = at };
+    true
+}
+
+/// Whether the replay's image, the log's own, faulted; when it did, the fault is
+/// written through `fault` as `cavalry_committed_log_fault` wrote it for the poll that
+/// met it: the code, `CAVALRY_ERR_FAULT_IMAGE` or `CAVALRY_ERR_FAULT_IMAGES_FULL`, the
+/// image's session id, and the reader's position when the check failed, or
+/// `CAVALRY_NULL_POSITION` where the fault has none. The poll that meets the fault
+/// returns −1 once and later polls return 0; this answers from that poll on, for the
+/// life of the handle, so a service that did not keep the poll's answer still tells
+/// this end from a whole one (ADR 0080). `false`, with nothing written, for a log
+/// whose image has not faulted. Read it once `cavalry_committed_log_is_ended` returns
+/// `true`. A null `fault` is refused as any null required pointer is, with
+/// `CAVALRY_ERR_NULL` and `false`. An answer sets no error.
+///
+/// # Safety
+///
+/// `log` is null or a live handle not in use by another call; `fault` is null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cavalry_committed_log_faulted(
+    log: *const cavalry_committed_log_t,
+    fault: *mut cavalry_fault_t,
+) -> bool {
+    if log.is_null() {
+        error::null("cavalry_committed_log_faulted", "log");
+        return false;
+    }
+    if fault.is_null() {
+        error::null("cavalry_committed_log_faulted", "fault");
+        return false;
+    }
+    // SAFETY: the caller's convention above.
+    let faulted = unsafe {
+        read(
+            "cavalry_committed_log_faulted",
+            log,
+            None,
+            CommittedLog::faulted,
+        )
+    };
+    let Some(kept) = faulted else {
+        return false;
+    };
+    // SAFETY: `fault` is non-null, checked above, and writable, by the caller's
+    // convention.
+    unsafe { *fault = fault_fields(&kept) };
     true
 }
 

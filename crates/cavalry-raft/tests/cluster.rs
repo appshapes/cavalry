@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cavalry_client::{Cavalry, ClientError, CommittedLog};
+use cavalry_client::{Cavalry, ClientError, CommittedLog, Fault};
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
 use cavalry_proto::cluster::{Message, SERVICE_LOG_STREAM_ID, Stream};
@@ -1331,6 +1331,176 @@ fn a_service_reads_on_where_the_recording_its_member_joined_again_on_begins() {
     });
     assert_eq!(after.len(), usize::try_from(ENTRIES).expect("a count"));
     assert_eq!(after[0].0, first);
+    log.close(&mut client).expect("the handle closes");
+    client.close().expect("the service's client closes");
+
+    for member in members {
+        member.module.close().expect("the member closes");
+        member.driver.close().expect("the driver closes");
+    }
+}
+
+/// The log buffers under a driver directory's `publications/`, by name.
+fn publication_logs(dir: &Path) -> Vec<PathBuf> {
+    let mut logs: Vec<PathBuf> = std::fs::read_dir(dir.join("publications"))
+        .expect("the driver's publications")
+        .map(|entry| entry.expect("an entry").path())
+        .collect();
+    logs.sort();
+    logs
+}
+
+/// A service whose read of the replay's image stops on a fault is told so by the poll
+/// that meets it, once, and can ask again for as long as it holds the handle
+/// (`CommittedLog::faulted`; ADR 0080). Before that read, a service that did not keep
+/// the one poll's answer took this end for a whole one: `failed_at` and `withdrawn_at`
+/// are both `None` for it.
+///
+/// The test makes the fault. The service's replay plays into a log buffer of its own
+/// in the member's driver directory, the one file that appears under `publications/`
+/// when the log is opened. The service reads five of eleven committed entries, and the
+/// test then changes one byte of the sixth as the replay wrote it, its frame's version,
+/// to one no reader accepts (`spec/frame.md`, "What a reader rejects"), which a log's
+/// reader reports under the reason `frame`. The frame is below the service's bound, so
+/// the next poll reads it, fails the check and retires the image. The member's
+/// recording is as it was, so a log opened again where the handle ended reads on.
+#[test]
+fn a_service_whose_image_faulted_reads_the_fault_for_the_life_of_its_handle() {
+    use std::os::unix::fs::FileExt;
+
+    const ENTRIES: u32 = 10;
+    const READ_FIRST: usize = 5;
+    let dir = TestDir::new("service-faulted");
+    let members_string = members_string();
+    let mut members = start(dir.path(), &members_string);
+    run_until(&mut members, "every election closed", |members| {
+        members
+            .iter()
+            .all(|m| m.module.election_state() == ElectionState::Closed)
+    });
+    let member_dir = members[1].dir.clone();
+    let mut client = Cavalry::connect_to(&member_dir).expect("the service's client connects");
+    let before = publication_logs(&member_dir);
+    let mut opened = None;
+    run_until(&mut members, "the service opened its log", |_| {
+        if opened.is_none() {
+            opened = client.committed_log(0).expect("the driver answers");
+        }
+        opened.is_some()
+    });
+    let mut log = opened.expect("the member has its log");
+    let replayed: Vec<PathBuf> = publication_logs(&member_dir)
+        .into_iter()
+        .filter(|path| !before.contains(path))
+        .collect();
+    assert_eq!(replayed.len(), 1, "the replay's one log: {replayed:?}");
+    let replay_log = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&replayed[0])
+        .expect("the replay's log opens");
+
+    // The term's first entry and ten more, committed on every member. The service
+    // reads the first five of the eleven and takes the commit position as its bound.
+    offer(&mut members, &[0, 1, 2], 0, ENTRIES);
+    let end = 96 + i64::from(ENTRIES) * 96;
+    let stopped = 96 * i64::try_from(READ_FIRST).expect("a count");
+    let mut read = Read::new();
+    let mut session_id = None;
+    run_until(
+        &mut members,
+        "the service read five entries under its bound",
+        |_| {
+            let limit = READ_FIRST - read.len();
+            log.poll(
+                |entry, header, position| {
+                    session_id = Some(header.session_id());
+                    read.push((position, entry.to_vec()));
+                },
+                limit,
+            )
+            .expect("the committed log polls");
+            read.len() == READ_FIRST && log.commit_position() == end
+        },
+    );
+    let session_id = session_id.expect("an entry's header");
+    assert_eq!(log.position(), stopped);
+    assert_eq!(log.faulted(), None, "a live log has no fault: {log:?}");
+    assert!(!log.is_ended());
+
+    // The sixth entry's frame, once the replay has written it: term 0 is the file's
+    // first bytes, and the frame begins at the position the service stopped at. Its
+    // length is the frame's first field and its version the byte after.
+    let at = u64::try_from(stopped).expect("a position");
+    // The replay plays what the member's recorder has synced, which the member asks
+    // for in its duty cycle, so the members run while the test waits for the frame.
+    run_until(&mut members, "the replay wrote the sixth entry", |_| {
+        let mut length = [0u8; 4];
+        replay_log
+            .read_exact_at(&mut length, at)
+            .expect("the frame's length");
+        i32::from_le_bytes(length) >= 32
+    });
+    replay_log
+        .write_all_at(&[9], at + 4)
+        .expect("the version byte");
+
+    // The poll that meets it says so, once.
+    let fault = log
+        .poll(
+            |_, _, position| panic!("an entry at {position} from a frame that fails its check"),
+            64,
+        )
+        .expect_err("the image's fault");
+    assert_eq!(
+        fault,
+        Fault::Image {
+            session_id,
+            position: stopped,
+            reason: "frame",
+        }
+    );
+    // And the handle says so for as long as it is held, whatever is polled after.
+    assert_eq!(log.faulted(), Some(fault));
+    assert!(log.is_ended(), "{log:?}");
+    assert_eq!(
+        (log.failed_at(), log.withdrawn_at()),
+        (None, None),
+        "{log:?}"
+    );
+    for _ in 0..50 {
+        assert_eq!(
+            log.poll(
+                |_, _, position| panic!("an entry at {position} after the fault"),
+                64
+            ),
+            Ok(0)
+        );
+        assert_eq!(log.faulted(), Some(fault));
+    }
+    assert_eq!(
+        log.position(),
+        stopped,
+        "what it delivered ends where it read to"
+    );
+    assert_eq!(client.closed(), None, "the client is open");
+
+    // The service opens the log again where the handle ended and reads on, the six
+    // entries it was not given and five the member commits now, with no fault.
+    log.close(&mut client).expect("the handle closes");
+    let mut log = client
+        .committed_log(stopped)
+        .expect("the driver answers")
+        .expect("the member has its log");
+    offer(&mut members, &[0, 1, 2], ENTRIES, 5);
+    let mut after = Read::new();
+    run_until(&mut members, "the service read what came after", |_| {
+        poll_log(&mut log, &mut after);
+        log.position() == end + 5 * 96
+    });
+    assert_eq!(after.len(), 11 - READ_FIRST + 5);
+    assert_eq!(after[0].0, stopped);
+    assert_eq!(log.faulted(), None);
     log.close(&mut client).expect("the handle closes");
     client.close().expect("the service's client closes");
 
