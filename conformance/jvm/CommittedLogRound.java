@@ -3,18 +3,20 @@
 // started with `cavalry run`, one of three on the loopback, as
 // conformance/python/committed_log.py runs it through clients/python.
 //
-//     CommittedLogRound members
 //     CommittedLogRound <the member's driver directory> <the member's id>
 //
-// `members` prints a members string for three members with five free loopback UDP ports
-// each, for run.sh to start the cluster with. The round: a cluster started with
-// `cavalry run` holds one entry, the first of its leader's term, 56 bytes in a frame of 88
-// at position 0, so the log's next position is 96. It reads that entry through the
-// handler, with its position, its header and the handle's reads; makes each call the ABI
-// refuses from inside the log's own handler; checks where a handler's exception goes and
-// that its entry is not delivered again; opens the log again at 96, where nothing is
-// committed yet; closes twice; and closes a log after its client. Every wait is bounded at
-// 30 s. It exits 1 with what it found when a check fails. The JDK alone (ADR 0003).
+// A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
+// bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
+// that entry through the handler, with its position, its header and the handle's reads;
+// makes each call the ABI refuses from inside the log's own handler, each after it has set
+// the thread's error to another code, so that a refusal that answers what a live log
+// answers is told from an answer; checks where a handler's exception goes and that its
+// entry is not delivered again; opens the log again at 96, where nothing is committed yet,
+// beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
+// had the time a replay's image takes to join; closes twice; and closes a log after its
+// client. Every wait is bounded at 30 s and sleeps a millisecond after a poll that
+// delivered nothing. It exits 1 with what it found when a check fails. The JDK alone
+// (ADR 0003).
 
 import com.appshapes.cavalry.Abi;
 import com.appshapes.cavalry.CavalryException;
@@ -24,13 +26,12 @@ import com.appshapes.cavalry.EntryHandler;
 import com.appshapes.cavalry.HandlerException;
 import com.appshapes.cavalry.Subscription;
 
-import java.net.DatagramSocket;
-import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
 
 public final class CommittedLogRound {
     static final long WAIT_NANOS = 30_000_000_000L;
+    static final long IDLE_MILLIS = 1; // after a poll that delivered nothing: three drivers share the host
     static final int ENTRY_FRAME = 88; // the term's first entry: 32 bytes of header and 56 of message
     static final long NEXT = 96; // the frame, rounded up to a multiple of 32
 
@@ -44,30 +45,6 @@ public final class CommittedLogRound {
 
     static void say(String what) {
         System.out.println("conformance/jvm: committed log: " + what);
-    }
-
-    /** A members string for three members, each with five free loopback UDP ports, the
-     * fifteen sockets held until every port is chosen so that none repeats. */
-    static String members() throws Exception {
-        List<DatagramSocket> sockets = new ArrayList<>();
-        List<Integer> ports = new ArrayList<>();
-        for (int i = 0; i < 15; i++) {
-            DatagramSocket socket = new DatagramSocket(0, InetAddress.getLoopbackAddress());
-            sockets.add(socket);
-            ports.add(socket.getLocalPort());
-        }
-        for (DatagramSocket socket : sockets) {
-            socket.close();
-        }
-        List<String> members = new ArrayList<>();
-        for (int member = 0; member < 3; member++) {
-            List<String> endpoints = new ArrayList<>();
-            for (int i = 0; i < 5; i++) {
-                endpoints.add("127.0.0.1:" + ports.get(member * 5 + i));
-            }
-            members.add(member + "," + String.join(",", endpoints));
-        }
-        return String.join("|", members);
     }
 
     /** The member's committed log at the position, asked for until the member has one. */
@@ -86,12 +63,8 @@ public final class CommittedLogRound {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length == 1 && args[0].equals("members")) {
-            System.out.println(members());
-            return;
-        }
         if (args.length != 2) {
-            fail("usage: CommittedLogRound members | CommittedLogRound <the member's driver directory> <the member's id>");
+            fail("usage: CommittedLogRound <the member's driver directory> <the member's id>");
         }
         try {
             round(args[0], Integer.parseInt(args[1]));
@@ -104,6 +77,29 @@ public final class CommittedLogRound {
 
     static void round(String memberDir, int memberId) throws Exception {
         Client client = new Client(memberDir);
+        // A closed log, for the refusals below: its position() hands the ABI a null handle,
+        // which answers -1 with ERR_NULL. The package's bindings of the ABI are not public,
+        // so the round cannot ask for the position of a null header: this is its call that
+        // sets the thread's error to another code. The log reads its entry before it is
+        // closed, as every log of this round does: a log closed at once after its open,
+        // before its replay's image had joined, closed its client as corrupt in 8 of 60
+        // tries on the laptop, which is not this round's check.
+        CommittedLog spent = openLog(client, 0);
+        int[] spentEntries = new int[1];
+        long until = System.nanoTime() + WAIT_NANOS;
+        while (spentEntries[0] == 0) {
+            int count = spent.poll((body, header, position) -> spentEntries[0]++, 16);
+            if (count < 0) {
+                fail("the first log's poll stopped on fault " + spent.fault());
+            }
+            if (System.nanoTime() > until) {
+                fail("the first log read no entry within 30 s");
+            }
+            if (count == 0) {
+                Thread.sleep(IDLE_MILLIS);
+            }
+        }
+        spent.close();
         CommittedLog log = openLog(client, 0);
         if (log.memberId() != memberId || log.recordingId() != 0) {
             fail("the log is member " + log.memberId() + "'s recording " + log.recordingId() + ", not member " + memberId
@@ -116,41 +112,68 @@ public final class CommittedLogRound {
         // The entry, with what each call on the log answers from inside its own handler.
         List<String> entries = new ArrayList<>();
         List<String> refusals = new ArrayList<>();
+        boolean[] inside = new boolean[1];
+        // Sets the thread's error to one no refusal gives, ERR_NULL, through the closed log's
+        // position(). A success clears nothing (spec/c-abi.md, "Error codes"), and a refused
+        // isEnded(), failedAt() or withdrawnAt() answers what a live log answers, false or
+        // empty, so the code alone tells that refusal from an answer: it must have changed
+        // from this one to ERR_POLLING. Without this the code would be ERR_POLLING already,
+        // left by the call before.
+        Runnable setAnotherError = () -> {
+            if (spent.position() != -1 || Abi.errcode() != Abi.ERR_NULL) {
+                fail("a closed log's position() did not answer -1 with ERR_NULL: error " + Abi.errcode());
+            }
+        };
         EntryHandler[] self = new EntryHandler[1];
         EntryHandler onEntry = (body, header, position) -> {
             entries.add(position + " " + body.byteSize() + " " + header.frameLength() + " " + header.flags() + " "
                 + header.type());
-            if (!refusals.isEmpty()) {
+            if (inside[0]) {
                 return;
             }
+            inside[0] = true;
+            setAnotherError.run();
             refusals.add("poll " + log.poll(self[0], 1) + " " + Abi.errcode());
+            setAnotherError.run();
             refusals.add("position " + log.position() + " " + Abi.errcode());
+            setAnotherError.run();
             refusals.add("commitPosition " + log.commitPosition() + " " + Abi.errcode());
+            setAnotherError.run();
             refusals.add("isEnded " + log.isEnded() + " " + Abi.errcode());
+            setAnotherError.run();
             refusals.add("failedAt " + log.failedAt().isPresent() + " " + Abi.errcode());
+            setAnotherError.run();
             refusals.add("withdrawnAt " + log.withdrawnAt().isPresent() + " " + Abi.errcode());
+            setAnotherError.run();
             try {
                 log.close();
-                refusals.add("close 0 0");
+                refusals.add("close 0 " + Abi.errcode());
             } catch (CavalryException error) {
                 refusals.add("close -1 " + error.code());
             }
         };
         self[0] = onEntry;
-        long until = System.nanoTime() + WAIT_NANOS;
+        until = System.nanoTime() + WAIT_NANOS;
         while (entries.isEmpty()) {
-            if (log.poll(onEntry, 16) < 0) {
+            int count = log.poll(onEntry, 16);
+            if (count < 0) {
                 fail("the term's first entry: the poll stopped on fault " + log.fault());
             }
             if (System.nanoTime() > until) {
                 fail("the term's first entry: not within 30 s; position " + log.position() + ", commit position "
                     + log.commitPosition() + ", ended " + log.isEnded());
             }
+            if (count == 0) {
+                Thread.sleep(IDLE_MILLIS);
+            }
         }
         String expectedEntry = "0 " + (ENTRY_FRAME - 32) + " " + ENTRY_FRAME + " " + Abi.FLAGS_UNFRAGMENTED + " "
             + Abi.FRAME_TYPE_DATA;
         if (entries.size() != 1 || !entries.get(0).equals(expectedEntry)) {
-            fail("expected one entry \"" + expectedEntry + "\" (position, bytes, frame length, flags, type), got " + entries);
+            fail("expected one entry \"" + expectedEntry + "\" (position, bytes, frame length, flags, type), got " + entries
+                + ". One cause of more than one entry is a new term: a cluster that elected again between its formation "
+                + "and this read holds that term's first entry after this one; the members' output, which run.sh "
+                + "prints, says whether it did");
         }
         int polling = Abi.ERR_POLLING;
         List<String> expected = List.of("poll -1 " + polling, "position -1 " + polling, "commitPosition -1 " + polling,
@@ -178,7 +201,8 @@ public final class CommittedLogRound {
             fail("the refused poll, or a later one, delivered more: " + entries);
         }
         say("member " + log.memberId() + "'s entry at position 0 read once, next position " + log.position()
-            + ", commit position " + log.commitPosition() + "; seven calls from inside the handler refused with ERR_POLLING");
+            + ", commit position " + log.commitPosition() + "; seven calls from inside the handler refused with "
+            + "ERR_POLLING, each made with the thread's error at ERR_NULL");
         log.close();
         log.close(); // idempotent
 
@@ -204,10 +228,20 @@ public final class CommittedLogRound {
             if (thrown == null && System.nanoTime() > until) {
                 fail("the second log read no entry");
             }
+            if (thrown == null) {
+                Thread.sleep(IDLE_MILLIS);
+            }
         }
         if (!seen.equals(List.of(0L)) || !(thrown.getCause() instanceof IllegalStateException) || thrown.raised() != 1
             || throwing.position() != NEXT) {
             fail("a throwing handler saw " + seen + ", threw " + thrown + ", and left the log at " + throwing.position());
+        }
+        // The exception is the log's own: it counts entries and names no subscription.
+        if (thrown.fragments() != 1 || !thrown.committedLog()
+            || !thrown.getMessage().contains("the entry handler threw on 1 of the 1 entry")
+            || thrown.getMessage().contains("Subscription")) {
+            fail("a committed log's HandlerException has fragments " + thrown.fragments() + ", committedLog "
+                + thrown.committedLog() + " and says: " + thrown.getMessage());
         }
         for (int i = 0; i < 50; i++) {
             if (throwing.poll(throwsAlways, 16) != 0) {
@@ -217,15 +251,51 @@ public final class CommittedLogRound {
         throwing.close();
 
         // From the next position nothing is committed yet: no entry, and no entry before it.
+        // A replay's image joins a moment after the open, so polls made at once would pass
+        // before the image is there, whatever the open did with the position. So a second
+        // log is opened at 0 beside this one, on the same client, and both are polled until
+        // that one has delivered the entry at 0 and this one has taken the member's commit
+        // position as its bound, which a poll does once the log's image has joined
+        // (`CommittedLog::poll`, crates/cavalry-client/src/committed_log.rs): by then this
+        // log's replay, asked for first, has had the time the other's took to join and
+        // deliver.
         CommittedLog rest = openLog(client, NEXT);
         if (rest.position() != NEXT) {
             fail("a log opened at " + NEXT + " began at " + rest.position());
         }
-        for (int i = 0; i < 100; i++) {
-            if (rest.poll(onEntry, 16) != 0) {
-                fail("a log opened at " + NEXT + " delivered an entry: " + entries);
+        CommittedLog beside = openLog(client, 0);
+        List<Long> atNext = new ArrayList<>();
+        List<Long> atStart = new ArrayList<>();
+        EntryHandler onNext = (body, header, position) -> atNext.add(position);
+        EntryHandler onStart = (body, header, position) -> atStart.add(position);
+        until = System.nanoTime() + WAIT_NANOS;
+        while (atStart.isEmpty() || rest.commitPosition() < NEXT) {
+            int restCount = rest.poll(onNext, 16);
+            int besideCount = beside.poll(onStart, 16);
+            if (restCount < 0 || besideCount < 0) {
+                fail("the polls of the logs at " + NEXT + " and at 0 returned " + restCount + " and " + besideCount
+                    + ": faults " + rest.fault() + " and " + beside.fault());
+            }
+            if (System.nanoTime() > until) {
+                fail("the log at 0 beside the log at " + NEXT + " delivered " + atStart + " and the log at " + NEXT
+                    + " took the bound " + rest.commitPosition() + ", not the entry at 0 and " + NEXT + ", within 30 s");
+            }
+            if (restCount == 0 && besideCount == 0) {
+                Thread.sleep(IDLE_MILLIS);
             }
         }
+        for (int i = 0; i < 50; i++) {
+            if (rest.poll(onNext, 16) < 0) {
+                fail("the poll of the log at " + NEXT + " stopped on fault " + rest.fault());
+            }
+        }
+        if (atStart.get(0) != 0 || !atNext.isEmpty() || rest.position() != NEXT) {
+            fail("a log opened at " + NEXT + " delivered the entries at " + atNext + " and is at " + rest.position()
+                + ", while a log opened at 0 beside it delivered the entries at " + atStart + ". An entry below " + NEXT
+                + " is one the open did not start past; one at " + NEXT + " or above is a new term's, of a cluster that "
+                + "elected again, which the members' output, printed by run.sh, shows");
+        }
+        beside.close();
         // A log that outlives its client: its poll stops on the closed fault, and its close
         // frees it with no client to stop the replay through.
         client.close();
@@ -234,6 +304,6 @@ public final class CommittedLogRound {
         }
         rest.close();
         say("a throwing handler's entry is not delivered again; nothing at position " + NEXT
-            + "; a log closed after its client");
+            + " while a log at 0 beside it read the entry at 0; a log closed after its client");
     }
 }
