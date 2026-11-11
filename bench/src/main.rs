@@ -1017,15 +1017,43 @@ struct LogRun {
     purged: Option<Purged>,
 }
 
-/// What a purge running through a measured loop did (card 177): the segment files it
-/// removed while the loop ran, read from `recording.segments_purged` at the loop's two
-/// ends, the files it had to remove, and whether it was still removing them when the
-/// loop ended.
+/// What a purge running through a measured loop did (card 177), for one run or, after
+/// [`merge_purged`], over a benchmark's runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Purged {
+    /// The segment files the replayer removed while the loop ran, read from
+    /// `recording.segments_purged` at the loop's two ends; over the runs, the fewest.
     during: u64,
+    /// The files the purge had to remove, the run's pile; over the runs, the pile of
+    /// the run that removed the fewest, since each run sizes its pile by its own probe.
     pile: u64,
+    /// Whether the purge was still removing files when the loop ended; over the runs,
+    /// whether it was in every one.
     outlasted: bool,
+}
+
+impl Purged {
+    /// The figures over the runs so far, `self`, and the next run, `run`: the fewer
+    /// files removed during a loop with the pile of the run that removed them, the
+    /// earlier run's on a tie, and whether the purge outlasted both.
+    fn and_run(self, run: Purged) -> Purged {
+        let fewest = if run.during < self.during { run } else { self };
+        Purged {
+            outlasted: self.outlasted && run.outlasted,
+            ..fewest
+        }
+    }
+}
+
+/// Adds a pass's purge figures to those of the runs before it, by benchmark name, as
+/// the line under the table and the result's `segments_purged` report them (card 177).
+fn merge_purged(by_benchmark: &mut BTreeMap<String, Purged>, pass: BTreeMap<String, Purged>) {
+    for (name, run) in pass {
+        by_benchmark
+            .entry(name)
+            .and_modify(|runs| *runs = runs.and_run(run))
+            .or_insert(run);
+    }
 }
 
 /// A publisher, a subscriber and a conductor over a real log buffer and counters file
@@ -1291,26 +1319,33 @@ impl Pile {
 /// The sparse files a second the file system that will hold `log_dir` removes: the
 /// probe creates [`PILE_PROBE`] files of a segment's length beside it, never written,
 /// as the pile's are, and times their removal alone. The replayer removes the pile's
-/// files with the same call, one per duty cycle, so this is the most it can do.
+/// files with the same call, one per duty cycle, so this is the most it can do. The
+/// probe's directory is removed whatever the probe returns: a failure part way leaves
+/// up to [`PILE_PROBE`] files, on `/dev/shm` inodes held in memory, and the next run's
+/// process id names another directory.
 fn removal_rate(log_dir: &std::path::Path) -> Result<f64, String> {
     let probe = log_dir.with_extension("probe");
     let _ = std::fs::remove_dir_all(&probe);
-    std::fs::create_dir_all(&probe).map_err(|e| format!("creating {}: {e}", probe.display()))?;
-    let length = SEGMENT_FILE_LENGTH as u64;
-    let paths: Vec<PathBuf> = (0..PILE_PROBE).map(|k| probe.join(k.to_string())).collect();
-    for path in &paths {
-        std::fs::File::create(path)
-            .and_then(|file| file.set_len(length))
-            .map_err(|e| format!("creating the probe's {}: {e}", path.display()))?;
-    }
-    let started = Instant::now();
-    for path in &paths {
-        std::fs::remove_file(path)
-            .map_err(|e| format!("removing the probe's {}: {e}", path.display()))?;
-    }
-    let seconds = started.elapsed().as_secs_f64();
+    let measured = (|| -> Result<f64, String> {
+        std::fs::create_dir_all(&probe)
+            .map_err(|e| format!("creating {}: {e}", probe.display()))?;
+        let length = SEGMENT_FILE_LENGTH as u64;
+        let paths: Vec<PathBuf> = (0..PILE_PROBE).map(|k| probe.join(k.to_string())).collect();
+        for path in &paths {
+            std::fs::File::create(path)
+                .and_then(|file| file.set_len(length))
+                .map_err(|e| format!("creating the probe's {}: {e}", path.display()))?;
+        }
+        let started = Instant::now();
+        for path in &paths {
+            std::fs::remove_file(path)
+                .map_err(|e| format!("removing the probe's {}: {e}", path.display()))?;
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        Ok(PILE_PROBE as f64 / seconds.max(f64::EPSILON))
+    })();
     let _ = std::fs::remove_dir_all(&probe);
-    Ok(PILE_PROBE as f64 / seconds.max(f64::EPSILON))
+    measured
 }
 
 /// The files of a pile for a file system that removes `rate` files a second: what it
@@ -1376,7 +1411,8 @@ fn build_pile(log_dir: &std::path::Path, segments: u64) -> Result<Pile, String> 
 /// thread keeps its client open after the reply and closes it only once it is
 /// released, which the publisher does after its counting window: a client that closes
 /// sends the driver's conductor a command, and what the conductor does for a command
-/// allocates and would be counted (card 176).
+/// allocates and would be counted (card 176). A purge that failed ends the thread at
+/// once, so that its message is the run's and not a wait's timeout.
 struct Purger {
     thread: Option<JoinHandle<Result<(), String>>>,
     release: Arc<AtomicBool>,
@@ -1398,14 +1434,18 @@ impl Purger {
             .spawn(move || {
                 pin_to(housekeeping)?;
                 let mut client = Cavalry::connect_to(&dir).map_err(|e| e.to_string())?;
-                let purged = client
+                // A purge that failed, refused or unanswered, ends the thread here and
+                // not at the release, its client closing as it drops: before the loop
+                // `failed` then has the refusal's own message while the run waits for
+                // the first file, and inside it `finish` has it after the loop, so the
+                // run fails with it and never reports the window that close was in.
+                client
                     .purge_segments(recording_id, position)
-                    .map_err(|e| format!("purging the pile: {e}"));
+                    .map_err(|e| format!("purging the pile: {e}"))?;
                 while !released.load(Ordering::Acquire) {
                     thread::sleep(Duration::from_millis(1));
                 }
-                client.close().map_err(|e| e.to_string())?;
-                purged.map(|_| ())
+                client.close().map_err(|e| e.to_string())
             })
             .map_err(|e| format!("spawning the purger: {e}"))?;
         Ok(Self {
@@ -1415,7 +1455,7 @@ impl Purger {
     }
 
     /// The purger's own error when its thread has ended, which before the release is
-    /// only ever a failure: a connect or a purge the driver refused.
+    /// only ever a failure: a connect, or a purge the driver refused or did not answer.
     fn failed(&mut self) -> Option<String> {
         if !self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
             return None;
@@ -2114,8 +2154,9 @@ fn with_bench_dir<T>(
     benchmark: impl FnOnce(&std::path::Path) -> Result<T, String>,
 ) -> Result<T, String> {
     let dir = bench_dir().join(format!("{BENCH_DIR_PREFIX}{}-{suffix}", std::process::id()));
-    // The client rows keep the driver's log directory beside the bench directory, as
-    // `dir.with_extension("log")`, so that goes too.
+    // The client rows alone keep the driver's log directory beside the bench
+    // directory, as `dir.with_extension("log")`, so that goes too; the other rows with
+    // a driver keep theirs under it, as `dir.join("log")`, which goes with `dir`.
     let log_dir = dir.with_extension("log");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&log_dir);
@@ -3775,8 +3816,8 @@ fn main() -> ExitCode {
     // Each benchmark's allocations under its name, summed over the runs, `link` for the
     // link rows; the sum over the names is the count the exit code is decided on.
     let mut allocations_by_benchmark: BTreeMap<String, usize> = BTreeMap::new();
-    // The purge's figures over the runs: the fewest files removed during a loop, and
-    // whether it outlasted every loop (card 177).
+    // The purge's figures over the runs: the fewest files removed during a loop, of
+    // that run's pile, and whether it outlasted every loop (card 177; `merge_purged`).
     let mut purged_by_benchmark: BTreeMap<String, Purged> = BTreeMap::new();
     let mut messages_measured: u64 = 0;
     let mut below_zero: u64 = 0;
@@ -3845,15 +3886,7 @@ fn main() -> ExitCode {
         for (name, count) in pass.allocations {
             *allocations_by_benchmark.entry(name).or_insert(0) += count;
         }
-        for (name, purged) in pass.purged {
-            purged_by_benchmark
-                .entry(name)
-                .and_modify(|worst| {
-                    worst.during = worst.during.min(purged.during);
-                    worst.outlasted &= purged.outlasted;
-                })
-                .or_insert(purged);
-        }
+        merge_purged(&mut purged_by_benchmark, pass.purged);
         messages_measured += pass.messages_measured;
     }
     let mut benchmarks: BTreeMap<String, Summary> = BTreeMap::new();
@@ -3924,7 +3957,7 @@ fn main() -> ExitCode {
     }
     for (name, purged) in &purged_by_benchmark {
         println!(
-            "  segment files the replayer removed during {name}'s measured loop, the fewest of any run: {} of a pile of {}; the purge {} the loop in every run",
+            "  segment files the replayer removed during {name}'s measured loop, the fewest of any run: {} of that run's pile of {}; the purge {} the loop in every run",
             purged.during,
             purged.pile,
             if purged.outlasted {
@@ -3998,7 +4031,7 @@ fn main() -> ExitCode {
             (
                 name.clone(),
                 format!(
-                    "{{\"during_least\": {}, \"pile\": {}, \"outlasted_every_run\": {}}}",
+                    "{{\"during_least\": {}, \"pile_of_that_run\": {}, \"outlasted_every_run\": {}}}",
                     purged.during, purged.pile, purged.outlasted
                 ),
             )
@@ -4958,6 +4991,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("removing the scratch directory");
     }
 
+    /// A purge the driver refuses ends the purger at once: while the run waits for the
+    /// first file, `failed` has the refusal's own code and message, and not nothing
+    /// until the release, which would have the run report a stuck replayer after a
+    /// minute. A recording the catalog does not hold is code 21.
+    #[test]
+    fn a_purge_the_driver_refuses_is_the_purgers_failure_at_once() {
+        let dir =
+            std::env::temp_dir().join(format!("cavalry-bench-refused-{}", std::process::id()));
+        let log_dir = dir.with_extension("log");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
+        let driver = Driver::start(&dir, &log_dir).expect("the driver");
+        // The log directory is new, so its catalog holds no recording 7.
+        let pile = Pile {
+            recording_id: 7,
+            segments: 1,
+            segment_length: i64::from(SEGMENT_FILE_LENGTH),
+        };
+        let mut purger = Purger::spawn(&dir, &pile, None).expect("the purger");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let message = loop {
+            if let Some(message) = purger.failed() {
+                break message;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the refused purge is not the purger's failure after 5 s"
+            );
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert!(
+            message.starts_with("purging the pile: command refused"),
+            "{message}"
+        );
+        assert!(message.contains("error code 21"), "{message}");
+        drop(purger);
+        drop(driver);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
     /// The recorded benchmark of [`Benchmark::ALL`], wherever it stands there.
     fn recorded_benchmark() -> Benchmark {
         *Benchmark::ALL
@@ -5049,6 +5123,68 @@ mod tests {
         assert_eq!(
             pass.purged,
             BTreeMap::from([("recorded_purging".to_string(), purged)])
+        );
+    }
+
+    /// Over runs whose piles differ, the figures are the fewest files any run removed
+    /// during its loop with that run's own pile, never another run's, the earlier
+    /// run's on a tie, and whether the purge outlasted the loop in every run.
+    #[test]
+    fn the_purge_figures_over_runs_keep_the_pile_of_the_run_that_removed_fewest() {
+        let over = |runs: &[Purged]| {
+            let mut by_benchmark = BTreeMap::new();
+            for run in runs {
+                merge_purged(
+                    &mut by_benchmark,
+                    BTreeMap::from([("recorded_purging".to_string(), *run)]),
+                );
+            }
+            by_benchmark
+                .remove("recorded_purging")
+                .expect("the figures")
+        };
+        let purged = |during, pile, outlasted| Purged {
+            during,
+            pile,
+            outlasted,
+        };
+        assert_eq!(
+            over(&[
+                purged(60_000, 509_189, true),
+                purged(51_009, 498_000, true),
+                purged(70_000, 520_000, true),
+            ]),
+            purged(51_009, 498_000, true)
+        );
+        // A later run that did not outlast its loop is every run's, whichever removed
+        // fewest; a tie keeps the earlier run's pile.
+        assert_eq!(
+            over(&[
+                purged(51_009, 509_189, true),
+                purged(60_000, 498_000, false),
+                purged(51_009, 520_000, true),
+            ]),
+            purged(51_009, 509_189, false)
+        );
+        // Another benchmark's figures stay its own.
+        let mut by_benchmark = BTreeMap::new();
+        merge_purged(
+            &mut by_benchmark,
+            BTreeMap::from([
+                ("a".to_string(), purged(1, 10, true)),
+                ("b".to_string(), purged(2, 20, true)),
+            ]),
+        );
+        merge_purged(
+            &mut by_benchmark,
+            BTreeMap::from([("b".to_string(), purged(1, 30, true))]),
+        );
+        assert_eq!(
+            by_benchmark,
+            BTreeMap::from([
+                ("a".to_string(), purged(1, 10, true)),
+                ("b".to_string(), purged(1, 30, true)),
+            ])
         );
     }
 }
