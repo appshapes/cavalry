@@ -1065,8 +1065,8 @@ impl Consensus {
     /// A request vote, read by a member that elects (`spec/cluster.md`, "Messages
     /// during an election"). The candidate term the request raises is stored before
     /// the vote is sent, so that a restart between the two loses the vote and never
-    /// the term; a vote for moves the member to follower ballot, to wait for that
-    /// candidate.
+    /// the term; a vote for that is sent moves the member to follower ballot, to wait
+    /// for that candidate.
     fn on_request_vote<I: Io>(
         &mut self,
         clock: Clock,
@@ -1111,8 +1111,10 @@ impl Consensus {
                 &mut self.counts.votes_against
             });
         }
-        // A vote for is the member's whether or not it left: the term is stored, and
-        // the member votes for no other candidate in it. It waits for this one.
+        // A vote for that left moves the member to follower ballot, to wait for this
+        // candidate. One that did not leave moves nothing and counts nothing: the term
+        // is stored all the same, so the member votes for no other candidate in it,
+        // and it waits for no one, since no candidate has its vote.
         if vote && sent {
             self.role = Role::Follower;
             self.enter(ElectionState::FollowerBallot, clock);

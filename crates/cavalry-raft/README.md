@@ -96,8 +96,11 @@ the step that builds it (ADR 0081):
 
 - A leader holds no election. One whose active members fall below a quorum stays the
   leader of its term and commits nothing, and one that reads a higher term in a
-  message ignores it. So a leader that was cut off and returns is a second leader of
-  an older term, which no member follows.
+  message ignores it, with one exception. A leader whose election has not closed, in
+  leader log replication to leader ready, may read a request vote for a higher term
+  from a log behind its own. It takes that term as its candidate term, stores it,
+  votes against, and still leads its own term. So a leader that was cut off and
+  returns is a second leader of an older term, which no member follows.
 - A member truncates nothing, replicates nothing and catches up with nothing. Where a
   new leadership term asks it to, or its append position is behind the leader's log
   position, it fails its election, counted in `cluster.elections_failed`, and
