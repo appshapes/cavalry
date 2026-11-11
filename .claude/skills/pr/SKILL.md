@@ -213,11 +213,20 @@ gh pr checks <number>
 
 - **Merged.** `git fetch --quiet origin` and `git log --oneline -1 origin/master` show
   the squash commit with the pull request's title; `gh run list --branch master
-  --workflow ci --limit 1` is its CI run, and the pull request is not done until that
-  run is green. It is the first run of `gates (macos)` for the change, which a pull
-  request does not have (ADR 0073): a red one there is yours to fix forward, before
-  the card and before any other work. Its bench jobs report in seconds when the pull
-  request's own run measured the same tree (ADR 0074). Then comment the commit hash on the card and archive it, and run
+  --workflow ci --commit <the squash's hash>` is its CI run, and the pull request is
+  not done until a run on `master` whose commit holds the squash is green. That is
+  the squash's own run unless another change landed while it waited: runs on
+  `master` go one at a time with one waiting, and a newer landing takes the waiting
+  one's place (`docs/how-to/run-the-bench.md`, "When the bench jobs run"). The
+  squash's run then reads `cancelled` with no job run, and the run to watch is the
+  next one on `master` that starts, `gh run list --branch master --workflow ci
+  --limit 5`, whose tree holds the squash; it runs the bench for the commits before
+  it that had no run. Name that run in the landing comment and say which landings it
+  covers, since a run that did not happen cannot be linked. The run is the first of
+  `gates (macos)` for the change, which a pull request does not have (ADR 0073): a
+  red one there is yours to fix forward, before the card and before any other work.
+  Its bench jobs report in seconds when the pull request's own run measured the same
+  tree (ADR 0074). Then comment the commit hash on the card and archive it, and run
   `just tidy`: it retires the branch locally, with its worktree, and GitHub has already
   deleted it on origin.
 
