@@ -125,3 +125,4 @@ under `docs/` is listed here; `just lint-docs` fails on one that is not.
 - [0076. Let the changelog grow by a fold's lines and a correction's alone](decisions/0076-let-the-changelog-grow-by-a-folds-lines-and-a-corrections-alone.md)
 - [0078. Keep an announced image's log for the counter reuse timeout, and report one that is gone as a fault](decisions/0078-keep-an-announced-images-log-for-the-counter-reuse-timeout.md)
 - [0079. Hold the driver directory by a lock for the driver's life](decisions/0079-hold-the-driver-directory-by-a-lock-for-the-drivers-life.md)
+- [0077. Elect the leader by vote, close a ballot on the members heard, and build in the election's card what a lost leader needs](decisions/0077-elect-the-leader-by-vote-and-close-a-ballot-on-the-members-heard.md)

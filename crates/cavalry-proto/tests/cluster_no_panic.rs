@@ -263,7 +263,16 @@ fn no_extreme_input_panics_the_election_arithmetic() {
                 })
             })
             .collect();
-        let outcome = ballot(members, r.extreme(), &votes, r.next().is_multiple_of(2));
+        let heard: Vec<bool> = (0..members.min(MAX_MEMBERS + 2))
+            .map(|_| r.next().is_multiple_of(2))
+            .collect();
+        let outcome = ballot(
+            members,
+            r.extreme(),
+            &votes,
+            &heard,
+            r.next().is_multiple_of(2),
+        );
         assert!(!outcome.unanimous || outcome.leader);
 
         let reports: Vec<Option<LogReport>> = (0..members.min(MAX_MEMBERS + 1))
