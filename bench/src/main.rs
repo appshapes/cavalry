@@ -1319,26 +1319,33 @@ impl Pile {
 /// The sparse files a second the file system that will hold `log_dir` removes: the
 /// probe creates [`PILE_PROBE`] files of a segment's length beside it, never written,
 /// as the pile's are, and times their removal alone. The replayer removes the pile's
-/// files with the same call, one per duty cycle, so this is the most it can do.
+/// files with the same call, one per duty cycle, so this is the most it can do. The
+/// probe's directory is removed whatever the probe returns: a failure part way leaves
+/// up to [`PILE_PROBE`] files, on `/dev/shm` inodes held in memory, and the next run's
+/// process id names another directory.
 fn removal_rate(log_dir: &std::path::Path) -> Result<f64, String> {
     let probe = log_dir.with_extension("probe");
     let _ = std::fs::remove_dir_all(&probe);
-    std::fs::create_dir_all(&probe).map_err(|e| format!("creating {}: {e}", probe.display()))?;
-    let length = SEGMENT_FILE_LENGTH as u64;
-    let paths: Vec<PathBuf> = (0..PILE_PROBE).map(|k| probe.join(k.to_string())).collect();
-    for path in &paths {
-        std::fs::File::create(path)
-            .and_then(|file| file.set_len(length))
-            .map_err(|e| format!("creating the probe's {}: {e}", path.display()))?;
-    }
-    let started = Instant::now();
-    for path in &paths {
-        std::fs::remove_file(path)
-            .map_err(|e| format!("removing the probe's {}: {e}", path.display()))?;
-    }
-    let seconds = started.elapsed().as_secs_f64();
+    let measured = (|| -> Result<f64, String> {
+        std::fs::create_dir_all(&probe)
+            .map_err(|e| format!("creating {}: {e}", probe.display()))?;
+        let length = SEGMENT_FILE_LENGTH as u64;
+        let paths: Vec<PathBuf> = (0..PILE_PROBE).map(|k| probe.join(k.to_string())).collect();
+        for path in &paths {
+            std::fs::File::create(path)
+                .and_then(|file| file.set_len(length))
+                .map_err(|e| format!("creating the probe's {}: {e}", path.display()))?;
+        }
+        let started = Instant::now();
+        for path in &paths {
+            std::fs::remove_file(path)
+                .map_err(|e| format!("removing the probe's {}: {e}", path.display()))?;
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        Ok(PILE_PROBE as f64 / seconds.max(f64::EPSILON))
+    })();
     let _ = std::fs::remove_dir_all(&probe);
-    Ok(PILE_PROBE as f64 / seconds.max(f64::EPSILON))
+    measured
 }
 
 /// The files of a pile for a file system that removes `rate` files a second: what it
@@ -2147,8 +2154,9 @@ fn with_bench_dir<T>(
     benchmark: impl FnOnce(&std::path::Path) -> Result<T, String>,
 ) -> Result<T, String> {
     let dir = bench_dir().join(format!("cavalry-bench-{}-{suffix}", std::process::id()));
-    // The client rows keep the driver's log directory beside the bench directory, as
-    // `dir.with_extension("log")`, so that goes too.
+    // The client rows alone keep the driver's log directory beside the bench
+    // directory, as `dir.with_extension("log")`, so that goes too; the other rows with
+    // a driver keep theirs under it, as `dir.join("log")`, which goes with `dir`.
     let log_dir = dir.with_extension("log");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&log_dir);
