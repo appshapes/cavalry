@@ -304,6 +304,24 @@ class Package(unittest.TestCase):
             self.assertIn(delivered, message)
             self.assertIn(f"Fix the handler: its first exception, {cause!r}, is this error's __cause__", message)
             self.assertTrue(message.endswith("See clients/python/README.md#the-exception"), message)
+        # A committed log's poll names its own fault() and its entries: the fault of the
+        # log's image is reported once, so the message must not send the reader to a
+        # subscription's (clients/python/README.md, "The committed log").
+        for entries, delivered in ((1, "the entry handler raised on 1 of the 1 entry this poll delivered;"),
+                                   (3, "the entry handler raised on 1 of the 3 entries this poll delivered;"),
+                                   (-1, "before it stopped on a fault, which this CommittedLog's fault() reads until "
+                                        "its next poll and nothing reports after that, so read it and keep it "
+                                        "before polling again;")):
+            message = str(cavalry.HandlerError(entries, 1, cause, committed_log=True))
+            self.assertIn(delivered, message)
+            self.assertNotIn("Subscription", message)
+            self.assertNotIn("fragment", message)
+            self.assertIn(f"Fix the handler: its first exception, {cause!r}, is this error's __cause__", message)
+            self.assertTrue(message.endswith("See clients/python/README.md#the-exception"), message)
+        code = gen.write_python(self.header)["cavalry/__init__.py"]
+        log = code.split("class CommittedLog:", 1)[1].split("\ndef abi_version", 1)[0]
+        self.assertIn("raise HandlerError(entries, raised, pending, committed_log=True)", log)
+        self.assertIn("raise HandlerError(fragments, raised, pending)", code.split("class Subscription:", 1)[1])
         with open(os.path.join(gen.ROOT, "clients", "python", "README.md"), encoding="utf-8") as f:
             slugs = {re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
                      for line in f if line.startswith("#")}
@@ -641,9 +659,19 @@ class NodePackage(unittest.TestCase):
         self.assertIn("fragment(s) this poll delivered", body)
         self.assertIn("before it stopped on a fault, which subscription.fault() reads", body)
         self.assertIn("Fix the handler: its first exception, ${describe(cause)}, is this error's cause", body)
-        self.assertIn("never reached the fragment handler", body)
+        self.assertIn('const one = committedLog ? "entry" : "fragment";', body)
+        self.assertIn("never reached the ${one} handler", body)
         self.assertIn("The first failure, ${describe(cause)}, is this ` +\n      `error's cause and says what to do.", body)
         self.assertIn("super(`${what} See clients/node/README.md#the-exception`, { cause });", body)
+        # A committed log's poll names its own fault() and its entries: the fault of the
+        # log's image is reported once, so the message must not send the reader to a
+        # subscription's (clients/node/README.md, "The committed log").
+        self.assertIn("which this CommittedLog's fault() reads \" +\n      \"until its next poll and nothing reports "
+                      "after that, so read it and keep it before polling again", body)
+        log = files["index.js"].split("class CommittedLog {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("throw new HandlerError(result[0], result[1], result[2], result[3], true);", log)
+        subscription = files["index.js"].split("class Subscription {", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("throw new HandlerError(result[0], result[1], result[2], result[3]);", subscription)
         failure = files["src/addon.c"].split("static napi_value failure_error(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("run the client on a Node built", failure)
         self.assertIn("polling again does not deliver it. See clients/node/README.md#the-exception", failure)
