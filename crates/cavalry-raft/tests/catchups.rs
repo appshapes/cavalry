@@ -270,6 +270,74 @@ fn a_stop_of_a_catch_up_that_fails_is_returned_and_asked_again() {
     assert_eq!(stop_catchups(&io, 2), 1);
 }
 
+/// A catch-up position the leader cannot serve, above its own append position, still
+/// says that the member left what it was in: the replay the leader ran to it is
+/// stopped, and no replay follows when it has stopped. One the leader owed is
+/// dropped: the report that would have started it starts nothing.
+#[test]
+fn a_request_the_leader_cannot_serve_ends_what_it_held_for_the_member() {
+    let (mut leader, mut io, ms) = leading();
+    read(&mut leader, &mut io, ms, &catchup_position(2, 2, 96));
+    read(&mut leader, &mut io, ms + 1, &catchup_position(2, 2, 192));
+    assert_eq!(stops(&io, 2), 1);
+    io.stopped[2] = Some(ReplayStopped {
+        position: 128,
+        ended: false,
+    });
+    work(&mut leader, &mut io, ms + 2);
+    assert_eq!(started(&io), vec![(2, 96, None)]);
+
+    // To member 1 the next recording's replay of a replication is owed.
+    read(&mut leader, &mut io, ms + 3, &catchup_position(1, 2, 0));
+    io.stopped[1] = Some(ReplayStopped {
+        position: 32,
+        ended: true,
+    });
+    work(&mut leader, &mut io, ms + 4);
+    read(&mut leader, &mut io, ms + 5, &catchup_position(1, 2, -1));
+    read(&mut leader, &mut io, ms + 6, &appended(1, 0, 32, false));
+    work(&mut leader, &mut io, ms + 7);
+    assert_eq!(started(&io), vec![(2, 96, None), (1, 0, Some(64))]);
+    assert_eq!(stops(&io, 1), 0, "nothing ran to member 1");
+}
+
+/// One member's fault does not starve another. A start to member 1 faults in every
+/// cycle. In the same cycles member 2, later in the leader's table, has the next
+/// recording's replay started and its catch-up served: the fault is returned from
+/// each cycle after every member has had its turn.
+#[test]
+fn a_start_that_faults_for_one_member_does_not_starve_the_next() {
+    let (mut leader, mut io, ms) = leading();
+    io.fail_start_to = Some(1);
+    assert_eq!(
+        leader.on_message(at(ms), &catchup_position(1, 2, 96), &mut io),
+        Err("the replay cannot be started")
+    );
+    read(&mut leader, &mut io, ms, &appended(1, 2, 96, true));
+    // Member 2 replicates term 0, which lies in two recordings.
+    read(&mut leader, &mut io, ms + 1, &catchup_position(2, 2, 0));
+    io.stopped[2] = Some(ReplayStopped {
+        position: 32,
+        ended: true,
+    });
+    assert_eq!(
+        leader.do_work(at(ms + 2), &mut io),
+        Err("the replay cannot be started")
+    );
+    read(&mut leader, &mut io, ms + 3, &appended(2, 0, 32, false));
+    assert_eq!(
+        leader.do_work(at(ms + 4), &mut io),
+        Err("the replay cannot be started")
+    );
+    let to_two: Vec<_> = started(&io)
+        .into_iter()
+        .filter(|&(member, ..)| member == 2)
+        .collect();
+    assert_eq!(to_two, vec![(2, 0, Some(64)), (2, 32, Some(64))]);
+    assert_eq!(leader.counts().log_replications, 2);
+    assert_eq!(leader.counts().catchups, 0);
+}
+
 /// The appointed leader serves no catch-up and sends no stop catch-up.
 #[test]
 fn an_appointed_leader_serves_no_catch_up() {

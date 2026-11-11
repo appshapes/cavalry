@@ -59,7 +59,17 @@ is followed by nothing, however it ended.
 **The position tells the two apart, and bounds both.** Below the leader's term base
 log position it is a replication. From the base to the leader's own append position
 it is a catch-up. Above that the leader holds nothing to replay: it starts nothing,
-and the member's own timer counts it.
+and the member's own timer counts it. A request the leader does not serve, above
+its append position or below 0, still says that the member left what it was in: the
+leader ends what it held for that member, the replay stopped and the one owed
+dropped, as a canvass position ends it. The review of pull request 226 noted that
+the page has every new catch-up position do so.
+
+**One member's fault does not starve another.** The leader serves every member in
+every duty cycle, and returns the first fault after all have had their turn. Before,
+the first fault ended the cycle's serving, so a start that faulted for one member in
+every cycle kept the members after it in the table from their replays; the same
+review noted it.
 
 **The catch-up ends at the leader's own append position.** When a member reports,
 with the catch-up flag and for the leader's term, an append position at or past the
@@ -104,7 +114,7 @@ brings the in-memory one.
 
 ## Evidence
 
-- `crates/cavalry-raft/tests/catchups.rs`, eight tests on one core through an `Io`
+- `crates/cavalry-raft/tests/catchups.rs`, ten tests on one core through an `Io`
   that remembers what it was asked. The leader is member 0 of three, leading term 2
   from 96 with its append position at 160.
   - A catch-up position at 96 and one at 160 each start a replay with no end,
@@ -122,6 +132,11 @@ brings the in-memory one.
     catch-up as a follower.
   - A stop that fails is returned, stop catch-up is not sent, and the next report
     asks again and sends it.
+  - A catch-up position above the leader's append position stops the replay the
+    leader ran to that member, and one below 0 drops the replay it owed another.
+  - With a start to member 1 faulting in every cycle, member 2, after it in the
+    table, has the next recording's replay started in the same cycles, and the fault
+    is returned from each.
   - An appointed leader serves no catch-up.
 - `crates/cavalry-raft/tests/replays.rs` passes with one case moved: a position at
   the leader's term base is a catch-up now, and no longer starts nothing.

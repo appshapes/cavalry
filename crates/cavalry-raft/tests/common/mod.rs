@@ -63,6 +63,8 @@ pub struct Stub {
     pub purged: bool,
     /// Whether `start_replay` fails.
     pub fail_start: bool,
+    /// The member a `start_replay` fails for, the others' succeeding.
+    pub fail_start_to: Option<i32>,
     /// Whether `stop_replay` fails.
     pub fail_stop: bool,
     /// How the replay to each member ended, by the member's id, once the test has
@@ -96,6 +98,7 @@ impl Stub {
             last_term: None,
             purged: false,
             fail_start: false,
+            fail_start_to: None,
             fail_stop: false,
             stopped: [None; Stub::MEMBERS],
             catchup_image: None,
@@ -264,7 +267,7 @@ impl Io for Stub {
         end: Option<i64>,
     ) -> Result<bool, Self::Fault> {
         self.call(Call::StartReplay(member, position, end));
-        if self.fail_start {
+        if self.fail_start || self.fail_start_to == Some(member) {
             return Err("the replay cannot be started");
         }
         Ok(!self.purged)
