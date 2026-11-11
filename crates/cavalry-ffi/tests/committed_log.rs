@@ -617,9 +617,14 @@ fn a_service_whose_replay_the_driver_withdrew_unread_is_told_where_its_entries_s
         // and the service does not read: a poll with a fragment limit of 0 applies the
         // events the subscription has and reads no frame, so the handle is ended only
         // when the driver has withdrawn the image, the linger after the replay's end.
+        //
+        // The linger runs from the replay's end, which is inside the member's close.
+        // The time below is taken before the close begins, so that it is at or before
+        // the replay's end and the five seconds are a lower bound: taken after the
+        // close returned, it read 4.993 s on a run of `master`.
         let (driver, module, _) = cluster.members.remove(2);
-        module.close().expect("the member closes");
         let closed = Instant::now();
+        module.close().expect("the member closes");
         let deadline = Instant::now() + Duration::from_secs(30);
         while !cavalry_committed_log_is_ended(log) {
             assert!(Instant::now() < deadline, "the service's log ended");
