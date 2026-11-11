@@ -58,7 +58,8 @@ commit and fix later.
   separate commits. If the diff mixes them, propose the split.
 - Docs ship in the same commit as the code they describe. A new or changed public
   item, counter, config key or `spec/` file needs a matching change under `docs/` or a
-  README. A user-visible change needs a line under `Unreleased` in `CHANGELOG.md`. A
+  README. A user-visible change needs its changelog entry, a file of its own under
+  `changelog.d/` (`changelog.d/README.md`; ADR 0075), and no line in `CHANGELOG.md`. A
   message that says "docs to follow" gets reverted.
 - A change under a data-plane crate needs `just bench` before and after, and both
   histograms go in the commit message. A performance claim without a histogram is not

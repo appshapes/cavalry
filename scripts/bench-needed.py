@@ -124,6 +124,7 @@ CANNOT = (
     (r"scripts/.*", "a script the bench jobs do not run"),
     (r"clients/.*", "a client generated over the C ABI"),
     (r"conformance/.*", "the conformance suite"),
+    (r"changelog\.d/.*", "a change's changelog entry, as the root's CHANGELOG.md is (ADR 0075)"),
     (r"[^/]+\.md", "the root's markdown"),
     (r"LICENSE", "the licence"),
 )

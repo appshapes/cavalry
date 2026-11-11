@@ -4,6 +4,12 @@ All notable changes to Cavalry are recorded here, in the reader's words, one lin
 user-visible change, added in the same commit as the change. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+Since 2026-11-11 a change's entry is a file of its own under
+[`changelog.d/`](changelog.d/README.md), so that two changes never edit this file at
+once; a release folds those files in below, in the order they landed
+([ADR 0075](docs/decisions/0075-keep-each-changes-changelog-entry-in-a-file-of-its-own.md)).
+Until then the newest entries are there.
+
 ## Unreleased
 
 ### Added
