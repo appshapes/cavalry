@@ -196,10 +196,15 @@ so. Leader ready still waits for every member heard (ADR 0081).
   and none reports to it.
 - In a cluster of three in memory, every leader that gives up the lead does so by the
   loss of its quorum. A quorum elects without a leader only after ten seconds of its
-  silence, and the in-memory cluster's partitions cut both ways, so the leader's own
-  check comes first. A partition that cuts one way, a leader that hears and is not
-  heard, is the fault that brings it a request vote first. The step-down on a higher
-  term is tested on one core until the in-memory cluster has that fault.
+  silence, the in-memory cluster's partitions cut both ways, and its stopped member
+  loses what is sent to it, so the leader's own check comes first. Two faults bring
+  a leader a request vote first. One is a leader whose consensus module stood still
+  under a driver that kept receiving: it reads what waited for it, its followers'
+  old reports before the request vote. The other is a partition that cuts one way,
+  which the UDP transport holds for the connection timeout, 5 s, at most, since a
+  sender that hears no status message disconnects its publication. The step-down on
+  a higher term is tested on one core until the in-memory cluster has those faults,
+  in the change after this one.
 - `Counts` has seventeen counts, and a member's module adds seventeen client
   counters; six of them stay 0 while the module's leader is appointed.
 - The in-memory cluster takes a follower's image away in the step in which its leader
