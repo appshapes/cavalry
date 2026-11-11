@@ -10,13 +10,17 @@
 //! tests in parallel).
 
 use std::alloc::System;
-use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, DataFrameHeader, Offer, Publication, Subscription};
 use cavalry_driver::Driver;
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
+
+// This test's ports, from the one file that says how they are taken and why, which is
+// `cavalry-raft`'s: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../cavalry-raft/tests/ports/mod.rs"]
+mod ports;
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
@@ -121,11 +125,7 @@ fn the_receive_path_allocates_nothing_per_message() {
     let dir = TestDir::new("allocations");
     let driver = Driver::start(dir.path(), dir.path().join("log")).expect("the driver starts");
     let mut client = Cavalry::connect_to(dir.path()).expect("connects");
-    let port = UdpSocket::bind("127.0.0.1:0")
-        .expect("a socket")
-        .local_addr()
-        .expect("bound")
-        .port();
+    let port = ports::free_port();
     let channel = format!("cavalry:udp?endpoint=127.0.0.1:{port}");
     let mut subscription = client
         .add_subscription(&channel, 7)
