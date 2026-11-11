@@ -194,12 +194,18 @@ its services read what it appends in the same way.
   and its recording are not at fault. The message says which of three it was. A
   frame of the replay's image failed a check: the replay's log buffer in the driver
   directory is damaged, so run `cavalry doctor` on the member's directory and check
-  the memory the directory is on. The replay's image was gone before the client
-  read of it: the service's process was held for over a second just after it opened
+  the memory the directory is on. The replay's image was gone before this client
+  read it: the service's process was held for over a second just after it opened
   the log, by a stopped process, a debugger or a host short of CPU. The image could
-  not join: 256 other streams' images were already on the service log stream of this
-  client. In each case the service has read every entry below the position in the
-  message and none from it on, and the member's recording still holds the rest.
+  not join: the log's subscription already held 256 images, each another session on
+  the service log stream, stream 104 on `cavalry:ipc` of the member's driver. The
+  replays of other committed logs are such sessions, but the driver holds at most 128
+  replay publications
+  ([`spec/client-protocol.md`, "Sizes"](../reference/client-protocol.md#sizes)), so
+  the others are publications a program added on stream 104. Move those
+  publications to another stream id: stream 104 carries the service log. In each
+  case the service has read every entry below the position in the message and none
+  from it on, and the member's recording still holds the rest.
   Start the service again with the `--from` value the message gives. In your own
   program, `log.faulted()` returns the fault once `log.is_ended()` is true, however
   many polls were made after the one that returned it.
