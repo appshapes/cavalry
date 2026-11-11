@@ -6,7 +6,9 @@
   asks for it, so a replication that fails midway is carried on from where it
   stopped. Its election fails when its append position does not move for the leader
   heartbeat timeout, counted in the new `cluster.log_replications_unavailable`, or
-  when a replay joins somewhere else than where its log ends. `cavalry_raft::Io` has
+  when a replay joins somewhere else than where its log ends, counted in
+  `cluster.join_position_mismatches`, whose `doctor` text now says what to check
+  for that case and not only for a late start. `cavalry_raft::Io` has
   four more methods, `add_catchup`, `send_catchup_position`, `catchup_image` and
   `remove_catchup`, and `ElectionState` has `FollowerLogReplication`. A member that
   is then behind its leader's log within the leader's term still cannot join: that
