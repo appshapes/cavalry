@@ -72,16 +72,18 @@ its services read what it appends in the same way.
    committed entry to the handler with its position and returns how many it read.
    `log.position()` is the next position, the one to keep for the next start.
    `log.is_ended()` says that no poll of this handle will deliver another entry. Stop
-   reading when it returns true, not when a poll returns 0. Then read two things, each
-   `None` or a position. `log.failed_at()`: a position means the driver could not play
-   the member's recording past it, and the entries from it on were not delivered,
-   though the member may have committed them. `log.withdrawn_at()`: a position means
-   the driver withdrew the replay before the service had read it, and the entries
-   from that position on were not delivered. When both are `None`, and no poll
-   returned the fault of the log's own image, `Fault::Image` or `Fault::ImagesFull`,
-   the member closed or left its log and the handle delivered every committed entry
-   it may read. "When it does not work", below, has an entry for each of the two
-   that are not `None`. In
+   reading when it returns true, not when a poll returns 0. Then read three things,
+   each `None` or what went wrong. `log.failed_at()`: a position means the driver
+   could not play the member's recording past it, and the entries from it on were not
+   delivered, though the member may have committed them. `log.withdrawn_at()`: a
+   position means the driver withdrew the replay before the service had read it, and
+   the entries from that position on were not delivered. `log.faulted()`: a fault,
+   `Fault::Image` or `Fault::ImagesFull`, means this client's own read of the replay
+   stopped there. One poll returned that fault as its error, and the handle keeps it
+   for as long as it is held, so a service that polled on can still read it. When all
+   three are `None`, the member closed or left its log and the handle delivered every
+   committed entry it may read. "When it does not work", below, has an entry for
+   each of the three. In
    every case `log.position()` is where to open the log again. A poll can return 0
    while committed entries are still on their way: the service reads only what the
    member's recorder has synced. The member asks its recorder to sync as soon as an
@@ -99,15 +101,16 @@ its services read what it appends in the same way.
    handler, and inside the handler `cavalry_committed_log_entry_position(header)` is
    the entry's position. `cavalry_committed_log_position(log)` is the next position.
    `cavalry_committed_log_is_ended(log)` says that no poll will deliver another
-   entry, and then `cavalry_committed_log_failed_at(log, &position)` and
-   `cavalry_committed_log_withdrawn_at(log, &position)` are `log.failed_at()` and
-   `log.withdrawn_at()` above: each returns `true` and writes the position when the
-   entries from it on were not delivered, and both return `false` when the member
-   closed or left its log and the handle delivered every committed entry it may
-   read, unless a poll returned −1 with `CAVALRY_ERR_FAULT_IMAGE` or
-   `CAVALRY_ERR_FAULT_IMAGES_FULL`: that poll is the one report that the replay's
-   image failed a check or could not join, and the handle is ended short of its
-   entries then too. `cavalry_committed_log_close(log, client)` ends the read.
+   entry, and then `cavalry_committed_log_failed_at(log, &position)`,
+   `cavalry_committed_log_withdrawn_at(log, &position)` and
+   `cavalry_committed_log_faulted(log, &fault)` are `log.failed_at()`,
+   `log.withdrawn_at()` and `log.faulted()` above: each returns `true` and writes
+   what it found when the handle ended short of its entries, and all three return
+   `false` when the member closed or left its log and the handle delivered every
+   committed entry it may read. The fault is the one a poll returned as −1 with
+   `CAVALRY_ERR_FAULT_IMAGE` or `CAVALRY_ERR_FAULT_IMAGES_FULL`; the third function
+   answers it from that poll on. `cavalry_committed_log_close(log, client)` ends the
+   read.
 
 ## How to verify it worked
 
@@ -186,6 +189,20 @@ its services read what it appends in the same way.
   To avoid this, keep the service polling until `log.is_ended()` is true, and make
   each poll's work much shorter than 5 s: a handler that blocks, or a service that is
   paused or throttled for 5 s after its member stops, ends this way.
+- `cluster-service: the read of member 1's recording 0 stopped on a fault: ...`, and
+  the program exits 1: the service's own read of its replay stopped, and the member
+  and its recording are not at fault. The message says which of three it was. A
+  frame of the replay's image failed a check: the replay's log buffer in the driver
+  directory is damaged, so run `cavalry doctor` on the member's directory and check
+  the memory the directory is on. The replay's image was gone before the client
+  read of it: the service's process was held for over a second just after it opened
+  the log, by a stopped process, a debugger or a host short of CPU. The image could
+  not join: 256 other streams' images were already on the service log stream of this
+  client. In each case the service has read every entry below the position in the
+  message and none from it on, and the member's recording still holds the rest.
+  Start the service again with the `--from` value the message gives. In your own
+  program, `log.faulted()` returns the fault once `log.is_ended()` is true, however
+  many polls were made after the one that returned it.
 - A service can be given an entry a moment after the cluster commits it: an entry
   reaches a service once its own member's recorder has synced it, which the member
   asks for as soon as the entry is written, and a quorum of the other members can

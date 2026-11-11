@@ -362,7 +362,7 @@ pub const CLUSTER_LEADERSHIP_TERMS_IGNORED: CounterId = CounterId(117);
 /// `cluster.join_position_mismatches`, a client counter: Images of the log that joined one cluster follower at a position other than its append position, so that it failed its election and left the image (spec/cluster.md, Roles and the election, state 15); key and label as cluster.elections.
 pub const CLUSTER_JOIN_POSITION_MISMATCHES: CounterId = CounterId(118);
 
-/// `cluster.election_steps`, a client counter: Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (ADR 0067); and, for a member that elects, canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving cluster.role from candidate to follower (ADR 0081) (spec/cluster.md, Counters). With no ballot lost, an election that closes makes three on its leader and four on a follower where the leader is appointed, and four on its leader and four or five on a follower where it is elected, five when the follower went through nominate; a member that nominates itself again after a ballot lost counts canvass to nominate again; key and label as cluster.elections.
+/// `cluster.election_steps`, a client counter: Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (spec/cluster.md, Counters; ADR 0067). An election that closes makes three on its leader and four on a follower; key and label as cluster.elections.
 pub const CLUSTER_ELECTION_STEPS: CounterId = CounterId(119);
 
 /// `cluster.elections_closed`, a client counter: Elections one cluster member closed: leader ready to closed, its term's first entry appended, or follower ready to closed, its append position sent to its leader (spec/cluster.md, Counters; ADR 0067); key and label as cluster.elections.
@@ -385,18 +385,6 @@ pub const CLUSTER_MESSAGES_REJECTED: CounterId = CounterId(125);
 
 /// `cluster.log_recording_id`, a client gauge: The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal.
 pub const CLUSTER_LOG_RECORDING_ID: CounterId = CounterId(126);
-
-/// `cluster.candidacies`, a client counter: Ballots one cluster member began as a candidate: it stored candidate term + 1, voted for itself and asked every other member for its vote, going from nominate to candidate ballot (spec/cluster.md, Roles and the election, state 3; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal.
-pub const CLUSTER_CANDIDACIES: CounterId = CounterId(127);
-
-/// `cluster.ballots_lost`, a client counter: Ballots that ended with no leader for one cluster member, which went back to canvass: a candidate at the election timeout short of a quorum or with a vote against, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that read a new leadership term for a log term it did not report. A candidate that follows another member's new leadership term for its own candidate term has a leader and counts none (spec/cluster.md, Roles and the election, states 3 and 4, and Counters; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal.
-pub const CLUSTER_BALLOTS_LOST: CounterId = CounterId(128);
-
-/// `cluster.votes_for`, a client counter: Votes one cluster member sent for a candidate: a request vote for a term above its candidate term from a candidate whose log is at least its own, read in canvass, nominate or a ballot state; it stored the term first and waits for that candidate in follower ballot (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal.
-pub const CLUSTER_VOTES_FOR: CounterId = CounterId(129);
-
-/// `cluster.votes_against`, a client counter: Votes one cluster member sent against a candidate: a request vote for a term at or below its candidate term, in which it has voted, or for a higher term from a candidate whose log is behind its own (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal.
-pub const CLUSTER_VOTES_AGAINST: CounterId = CounterId(130);
 
 /// Every entry of `counters.toml`, in the file's order.
 pub const COUNTERS: &[CounterDef] = &[
@@ -1357,7 +1345,7 @@ pub const COUNTERS: &[CounterDef] = &[
         name: "cluster.election_steps",
         kind: Kind::Counter,
         scope: Scope::Client,
-        doc: "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (ADR 0067); and, for a member that elects, canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving cluster.role from candidate to follower (ADR 0081) (spec/cluster.md, Counters). With no ballot lost, an election that closes makes three on its leader and four on a follower where the leader is appointed, and four on its leader and four or five on a follower where it is elected, five when the follower went through nominate; a member that nominates itself again after a ballot lost counts canvass to nominate again; key and label as cluster.elections.",
+        doc: "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (spec/cluster.md, Counters; ADR 0067). An election that closes makes three on its leader and four on a follower; key and label as cluster.elections.",
         doctor: "",
     },
     CounterDef {
@@ -1415,37 +1403,5 @@ pub const COUNTERS: &[CounterDef] = &[
         scope: Scope::Client,
         doc: "The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal.",
         doctor: "A cluster.log_recording_id that stays at -1 on a member whose cluster.election_state is 17, its election closed, is a follower whose recording of the leader's image never started, so that its cluster.append_position does not move: its driver's recording.armed_failed counts the failure and names the counter of the step that failed. A member in an election holds -1 until it has joined the log.",
-    },
-    CounterDef {
-        id: CLUSTER_CANDIDACIES,
-        name: "cluster.candidacies",
-        kind: Kind::Counter,
-        scope: Scope::Client,
-        doc: "Ballots one cluster member began as a candidate: it stored candidate term + 1, voted for itself and asked every other member for its vote, going from nominate to candidate ballot (spec/cluster.md, Roles and the election, state 3; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "",
-    },
-    CounterDef {
-        id: CLUSTER_BALLOTS_LOST,
-        name: "cluster.ballots_lost",
-        kind: Kind::Counter,
-        scope: Scope::Client,
-        doc: "Ballots that ended with no leader for one cluster member, which went back to canvass: a candidate at the election timeout short of a quorum or with a vote against, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that read a new leadership term for a log term it did not report. A candidate that follows another member's new leadership term for its own candidate term has a leader and counts none (spec/cluster.md, Roles and the election, states 3 and 4, and Counters; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "A count that rises with cluster.candidacies on two members at once is a split vote: two candidates whose nomination delays ended within a round trip of each other each voted for itself. The next canvass draws new delays, and the election takes one election timeout, 1 s, longer. A cluster.candidacies that rises on a member with neither this count nor cluster.terms_led is a candidate that followed another member that won the same term, and its election took no longer. A count that keeps rising with no cluster.terms_led on any member is a cluster with no member whose log a quorum will vote for: run cavalry doctor on each member's host and compare cluster.append_position.",
-    },
-    CounterDef {
-        id: CLUSTER_VOTES_FOR,
-        name: "cluster.votes_for",
-        kind: Kind::Counter,
-        scope: Scope::Client,
-        doc: "Votes one cluster member sent for a candidate: a request vote for a term above its candidate term from a candidate whose log is at least its own, read in canvass, nominate or a ballot state; it stored the term first and waits for that candidate in follower ballot (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "",
-    },
-    CounterDef {
-        id: CLUSTER_VOTES_AGAINST,
-        name: "cluster.votes_against",
-        kind: Kind::Counter,
-        scope: Scope::Client,
-        doc: "Votes one cluster member sent against a candidate: a request vote for a term at or below its candidate term, in which it has voted, or for a higher term from a candidate whose log is behind its own (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal.",
-        doctor: "",
     },
 ];

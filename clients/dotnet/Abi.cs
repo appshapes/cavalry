@@ -23,7 +23,7 @@ public static unsafe partial class Abi
     internal const string Library = "cavalry_ffi";
 
     public const string DIR_ENV = "CAVALRY_DIR"; // CAVALRY_DIR_ENV
-    public const int ABI_VERSION = 2; // CAVALRY_ABI_VERSION
+    public const int ABI_VERSION = 3; // CAVALRY_ABI_VERSION
     public const int MAX_IMAGES = 256; // CAVALRY_MAX_IMAGES
     public const int SERVICE_LOG_STREAM_ID = 104; // CAVALRY_SERVICE_LOG_STREAM_ID
     public const int NULL_POSITION = -1; // CAVALRY_NULL_POSITION
@@ -284,6 +284,10 @@ public static unsafe partial class Abi
     [LibraryImport(Library)]
     [return: MarshalAs(UnmanagedType.U1)]
     internal static partial bool cavalry_committed_log_withdrawn_at(nint log, out long position);
+
+    [LibraryImport(Library)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    internal static partial bool cavalry_committed_log_faulted(nint log, ref cavalry_fault_t fault);
 
     [LibraryImport(Library)]
     internal static partial int cavalry_committed_log_constants(nint log, ref cavalry_committed_log_constants_t constants);

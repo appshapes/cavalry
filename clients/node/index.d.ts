@@ -213,6 +213,7 @@ export class CommittedLog {
   readonly isEnded: boolean;
   failedAt(): number | null;
   withdrawnAt(): number | null;
+  faulted(): { code: number; sessionId: number; position: number } | null;
   close(): void;
 }
 

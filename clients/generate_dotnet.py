@@ -405,7 +405,7 @@ public sealed class HandlerException : Exception
         {
             delivered = committedLog
                 ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's GetFault() reads"
-                    + " until its next poll and nothing reports after that, so read it and keep it before polling again"
+                    + " until its next poll, and its Faulted() from then on when the fault is the log's own image's"
                 : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads";
         }
         else if (committedLog)
@@ -1117,8 +1117,8 @@ public sealed unsafe class CommittedLog : IDisposable
     /// handler call threw, whose <c>Fragments</c> is that count, -1 included. A fault code of
     /// <see cref="Abi.ERR_FAULT_IMAGE"/> or <see cref="Abi.ERR_FAULT_IMAGES_FULL"/> is the one
     /// report that the replay's image failed a check or could not join: the log is ended
-    /// short of its entries, and the next poll returns 0 and clears the fault, so keep this
-    /// answer (<see cref="IsEnded"/>). An entry whose handler call threw was delivered and
+    /// short of its entries, and the next poll returns 0 and clears the fault here;
+    /// <see cref="Faulted"/> keeps it. An entry whose handler call threw was delivered and
     /// is not delivered again: <see cref="Position"/> is past it, and past every entry this
     /// poll delivered after it. After a close, the ABI is handed a null handle and answers
     /// -1 with <see cref="Abi.ERR_NULL"/>.</summary>
@@ -1204,15 +1204,9 @@ public sealed unsafe class CommittedLog : IDisposable
 
     /// <summary>Whether this log has come to its end: no poll will deliver another entry.
     /// Stop reading when it is true, not when a poll returns 0. The log delivered every entry
-    /// it was owed only when three things hold: <see cref="FailedAt"/> is null,
-    /// <see cref="WithdrawnAt"/> is null, and no <see cref="Poll"/> of this log returned -1
-    /// with the fault of the log's own image, <see cref="Abi.ERR_FAULT_IMAGE"/> when the
-    /// image failed a check or <see cref="Abi.ERR_FAULT_IMAGES_FULL"/> when it could not
-    /// join. That fault is reported once, by the poll that meets it:
-    /// <see cref="GetFault"/> answers it only until the next poll, which returns 0 and
-    /// clears it, and both reports are null for such a log. So a service keeps that poll's
-    /// answer, since nothing reports it later. In every case what the log delivered ends at
-    /// <see cref="Position"/>, where a service opens the log again.</summary>
+    /// it was owed only when its three reports are all null: <see cref="FailedAt"/>,
+    /// <see cref="WithdrawnAt"/> and <see cref="Faulted"/>. In every case what the log
+    /// delivered ends at <see cref="Position"/>, where a service opens the log again.</summary>
     public bool IsEnded()
     {
         return Abi.cavalry_committed_log_is_ended(handle);
@@ -1243,6 +1237,30 @@ public sealed unsafe class CommittedLog : IDisposable
     public long? WithdrawnAt()
     {
         return Abi.cavalry_committed_log_withdrawn_at(handle, out long position) ? position : null;
+    }
+
+    /// <summary>The fault of the log's own image, the replay's, or null for a log whose image
+    /// has not faulted. Its code is <see cref="Abi.ERR_FAULT_IMAGE"/> when a frame of the
+    /// image failed a check, with the reader's position, or when the image was gone before
+    /// this client read of it, with <see cref="Abi.NULL_POSITION"/>; it is
+    /// <see cref="Abi.ERR_FAULT_IMAGES_FULL"/> when the image could not join. The poll that
+    /// meets the fault returns -1 once, <see cref="GetFault"/> answers it until the next
+    /// poll, and this answers it from that poll on, for as long as the log is held: a
+    /// service that did not keep the poll's answer reads it here, once
+    /// <see cref="IsEnded"/> is true, and tells this end from a whole one. No entry from the
+    /// fault on was delivered. <see cref="WithdrawnAt"/> is null for such a log, and
+    /// <see cref="FailedAt"/> is a position only when the driver's replay failed as well.
+    /// From inside a
+    /// handler of this log's own poll the ABI refuses the call with
+    /// <see cref="Abi.ERR_POLLING"/>, and this is null, a refusal and not an answer.</summary>
+    public Subscription.Fault? Faulted()
+    {
+        Abi.cavalry_fault_t f = default;
+        if (!Abi.cavalry_committed_log_faulted(handle, ref f))
+        {
+            return null;
+        }
+        return new Subscription.Fault(f.code, f.session_id, f.position);
     }
 
     /// <summary>Stops the replay through the client and frees the handle and its

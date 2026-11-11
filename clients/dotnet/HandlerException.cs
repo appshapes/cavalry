@@ -41,7 +41,7 @@ public sealed class HandlerException : Exception
         {
             delivered = committedLog
                 ? "the entries this poll delivered before it stopped on a fault, which this CommittedLog's GetFault() reads"
-                    + " until its next poll and nothing reports after that, so read it and keep it before polling again"
+                    + " until its next poll, and its Faulted() from then on when the fault is the log's own image's"
                 : "the fragments this poll delivered before it stopped on a fault, which Subscription.GetFault() reads";
         }
         else if (committedLog)

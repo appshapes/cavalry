@@ -640,8 +640,8 @@ func (e *HandlerError) Error() string {
 			delivered = "the 1 entry this poll delivered"
 		}
 		fault = "the entries this poll delivered before it stopped on a fault, which this CommittedLog's Fault " +
-			"reads until its next poll and its Err until its next failure, and nothing reports after that, so read " +
-			"it and keep it before polling again"
+			"reads until its next poll and its Err until its next failure, and its Faulted from then on when " +
+			"the fault is the log's own image's"
 	}
 	if e.Fragments < 0 {
 		delivered = fault
@@ -1432,7 +1432,7 @@ type CommittedLog struct {
 // so check the count. An Err whose Code is ErrFaultImage or ErrFaultImagesFull is the one
 // report that the replay's image failed a check or could not join: the log is ended
 // short of its entries, the next poll returns 0 and clears Fault, and Err keeps the
-// failure only until the log's next one, so keep this answer (IsEnded). An entry whose
+// failure only until the log's next one; Faulted keeps it (IsEnded). An entry whose
 // handler call panicked was delivered and is not delivered again: Position is past it,
 // and past every entry this poll delivered after it.
 func (l *CommittedLog) Poll(handler EntryHandler, fragmentLimit int) (int, error) {
@@ -1486,14 +1486,9 @@ func (l *CommittedLog) CommitPosition() int64 {
 
 // IsEnded is whether this log has come to its end: no poll will deliver another entry.
 // Stop reading when it is true, not when a poll returns 0. The log delivered every entry
-// it was owed only when three things hold: FailedAt is false, WithdrawnAt is false, and
-// no Poll of this log returned -1 with the fault of the log's own image, an Err whose
-// Code is ErrFaultImage when the image failed a check or ErrFaultImagesFull when it could
-// not join. That fault is reported once, by the poll that meets it: Fault answers it only
-// until the next poll, which returns 0 and clears it, Err only until the log's next
-// failure, and both reports are false for such a log. So a service keeps that poll's
-// answer, since nothing reports it later. In every case what the log delivered ends at
-// Position, where a service opens the log again.
+// it was owed only when its three reports are all false: FailedAt, WithdrawnAt and
+// Faulted. In every case what the log delivered ends at Position, where a service opens
+// the log again.
 func (l *CommittedLog) IsEnded() bool { return bool(C.cavalry_committed_log_is_ended(l.handle)) }
 
 // FailedAt is the position after the last frame the driver's replay of the member's
@@ -1526,6 +1521,26 @@ func (l *CommittedLog) WithdrawnAt() (int64, bool) {
 		return 0, false
 	}
 	return int64(position), true
+}
+
+// Faulted is the fault of the log's own image, the replay's, and true: the code, the
+// image's session and the position; or zeros and false for a log whose image has not
+// faulted. The code is ErrFaultImage when a frame of the image failed a check, with the
+// reader's position, or when the image was gone before this client read of it, with
+// NullPosition; it is ErrFaultImagesFull when the image could not join. The poll that
+// meets the fault returns -1 once, Fault answers it until the next poll and Err until the
+// log's next failure, and this answers it from that poll on, for as long as the log is
+// held: a service that did not keep the poll's answer reads it here, once IsEnded is
+// true, and tells this end from a whole one. No entry from the fault on was delivered.
+// WithdrawnAt is false for such a log, and FailedAt is true only when the driver's
+// replay failed as well. From inside a handler of this log's own
+// poll the ABI refuses the call, and this is false, a refusal and not an answer.
+func (l *CommittedLog) Faulted() (code int32, sessionID int32, position int64, faulted bool) {
+	var f C.cavalry_fault_t
+	if !bool(C.cavalry_committed_log_faulted(l.handle, &f)) {
+		return 0, 0, 0, false
+	}
+	return int32(f.code), int32(f.session_id), int64(f.position), true
 }
 
 // Close stops the replay through the client and frees the handle and the log's slot in

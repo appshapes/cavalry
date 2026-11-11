@@ -58,20 +58,22 @@ An ended log delivered every committed entry it may read only when three things 
 - `log.WithdrawnAt()` is 0 and `false`. A position and `true` is where the entries
   begin that the log was not given, because the driver withdrew the replay, 5 s after
   it ended, before the service had read it.
-- No `log.Poll` returned −1 with the fault of the log's own image: a `log.Err()` whose
-  `Code` is `ErrFaultImage`, the replay's image failed a check, or
-  `ErrFaultImagesFull`, the image could not join.
+- `log.Faulted()` is zeros and `false`. A code, a session, a position and `true` is
+  where this client's read of the replay's image, the log's own, stopped: the code is
+  `ErrFaultImage` when a frame of the image failed a check, or when the image was gone
+  before the client read of it, and `ErrFaultImagesFull` when the image could not
+  join. No entry from the fault on was delivered.
 
-Read the two reports once `log.IsEnded()` is true. The driver withdraws a replay that
-failed as it does any other, so both can be `true`: the position of `log.WithdrawnAt()`
-is then the lower, and the entries from it on, those below the position of
-`log.FailedAt()` among them, were not delivered. The fault of the image is reported
-once. The poll that meets it returns −1, `log.Fault()` answers it only until the next
-poll, the next poll returns 0 and clears it, `log.Err()` keeps it only until the log's
-next failure, and both reports are `false` for such a log. So a service keeps that −1
-and its `Err` when it gets them: nothing reports them later, and without them this
-end reads as a whole one. In every case what the log delivered ends at
-`log.Position()`.
+Read the three reports once `log.IsEnded()` is true. The driver withdraws a replay
+that failed as it does any other, so the first two can both be `true`: the position of
+`log.WithdrawnAt()` is then the lower, and the entries from it on, those below the
+position of `log.FailedAt()` among them, were not delivered. The poll that meets the
+image's fault returns −1 once, `log.Fault()` answers it until the next poll, which
+returns 0 and clears it there, and `log.Err()` until the log's next failure.
+`log.Faulted()` answers it from that poll on, for as long as the log is held
+(ADR 0080). `log.WithdrawnAt()` is `false` for such a log, and `log.FailedAt()` is
+`true` only when the driver's replay failed as well, which is then the cause to look
+at first. In every case what the log delivered ends at `log.Position()`.
 
 A committed log is found by its poll's call-back as a subscription is, by its slot in
 the table, so an open log holds one slot of the table of 4,096 ("Threads"), which its
@@ -144,10 +146,11 @@ entry, and the service decides after each.
   subscription returns −1 with `ErrPolling` in `Err`, and the poll in progress goes
   on. A committed log's handler is held to the same rule. From inside it, a `Poll` of
   the same log, `log.Position()` and `log.CommitPosition()` return −1, `log.IsEnded()`
-  is `false`, `log.FailedAt()` and `log.WithdrawnAt()` are 0 and `false`, and
-  `log.Fault()` and `log.Close()` return an `*Error`, each with `ErrPolling`, and the
-  log stays open. The three `false` are refusals there, not answers: read the three
-  after the poll has returned. The handler has each entry's own `position`.
+  is `false`, `log.FailedAt()`, `log.WithdrawnAt()` and `log.Faulted()` are zeros and
+  `false`, and `log.Fault()` and `log.Close()` return an `*Error`, each with
+  `ErrPolling`, and the log stays open. The four `false` are refusals there, not
+  answers: read the four after the poll has returned. The handler has each entry's own
+  `position`.
 - Never edit a generated file by hand: `just lint` regenerates the module and fails
   when the committed files differ. `example/main.go` is the one file written by hand,
   and it is this README's program.

@@ -107,7 +107,8 @@ pub struct cavalry_header_values_t {
 }
 
 /// What the subscription's last poll stopped on, or the committed log's; 0 when it
-/// returned a count.
+/// returned a count. Also the fault that ended a committed log, as
+/// `cavalry_committed_log_faulted` writes it.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct cavalry_fault_t {
@@ -168,7 +169,14 @@ pub(crate) const NO_FAULT: cavalry_fault_t = cavalry_fault_t {
 /// The fault a poll stopped on, as the struct `cavalry_subscription_fault` and
 /// `cavalry_committed_log_fault` fill, with the thread's error set to it.
 pub(crate) fn fault_struct(fault: &cavalry_client::Fault) -> cavalry_fault_t {
-    let code = error::set_fault(fault);
+    error::set_fault(fault);
+    fault_fields(fault)
+}
+
+/// A fault as the struct holds it, with nothing set: what
+/// `cavalry_committed_log_faulted` writes, which is an answer and not a failure.
+pub(crate) fn fault_fields(fault: &cavalry_client::Fault) -> cavalry_fault_t {
+    let code = error::fault_code(fault);
     let (session_id, position) = match *fault {
         cavalry_client::Fault::Image {
             session_id,

@@ -1002,13 +1002,13 @@ class HandlerError extends Error {
   constructor(fragments, raised, cause, undelivered = 0, committedLog = false, undeliveredAt = null) {
     const one = committedLog ? "entry" : "fragment";
     const many = committedLog ? "entries" : "fragments";
-    // The fault of a committed log's own image is reported by one poll and by no call after
-    // the next (clients/node/README.md, "The committed log").
+    // The fault of a committed log's own image is one poll's to return; the log keeps it
+    // (clients/node/README.md, "The committed log").
     const count = committedLog ? `the ${fragments} ${fragments === 1 ? one : many} this poll delivered` :
       `the ${fragments} fragment(s) this poll delivered`;
     const fault = committedLog ?
       "the entries this poll delivered before it stopped on a fault, which this CommittedLog's fault() reads " +
-      "until its next poll and nothing reports after that, so read it and keep it before polling again" :
+      "until its next poll, and its faulted() from then on when the fault is the log's own image's" :
       "the fragments this poll delivered before it stopped on a fault, which subscription.fault() reads";
     const delivered = fragments >= 0 ? count : fault;
     const what = undelivered === 0 ?
@@ -1326,7 +1326,7 @@ class CommittedLog {
    * on a fault. `fault()` then reads the fault, until the next poll: a code of
    * CAVALRY_ERR_FAULT_IMAGE or CAVALRY_ERR_FAULT_IMAGES_FULL is the one report that the
    * replay's image failed a check or could not join, the log is ended short of its entries, and
-   * the next poll returns 0 and clears the fault, so keep this answer (`isEnded`). The
+   * the next poll returns 0 and clears the fault here; `faulted()` keeps it (`isEnded`). The
    * handler's exception, if any, is thrown after the ABI call returns, as `HandlerError`, whose
    * `fragments` is this result, -1 included. An entry whose handler call threw was delivered
    * and is not delivered again: `position()` is past it, and past every entry this poll
@@ -1354,13 +1354,8 @@ class CommittedLog {
   commitPosition() { return addon.cavalry_committed_log_commit_position(this.handle); }
   /** Whether this log has come to its end: no poll will deliver another entry. Stop reading when
    * it is true, not when a poll returns 0. The log delivered every entry it was owed only when
-   * three things hold: `failedAt()` is null, `withdrawnAt()` is null, and no `poll` of this log
-   * returned -1 with the fault of the log's own image, CAVALRY_ERR_FAULT_IMAGE when the image
-   * failed a check or CAVALRY_ERR_FAULT_IMAGES_FULL when it could not join. That fault is
-   * reported once, by the poll that meets it: `fault()` answers it only until the next poll,
-   * which returns 0 and clears it, and both reports are null for such a log. So a service
-   * keeps that poll's answer, since nothing reports it later. In every case what the log
-   * delivered ends at `position()`, where a service opens the log again. */
+   * its three reports are all null: `failedAt()`, `withdrawnAt()` and `faulted()`. In every
+   * case what the log delivered ends at `position()`, where a service opens the log again. */
   get isEnded() { return addon.cavalry_committed_log_is_ended(this.handle); }
   /** The position after the last frame the driver's replay of the member's recording played
    * before it failed, or null for a log that is live or that ended because its member closed or
@@ -1384,6 +1379,23 @@ class CommittedLog {
   withdrawnAt() {
     const [withdrawn, position] = addon.cavalry_committed_log_withdrawn_at(this.handle);
     return withdrawn ? position : null;
+  }
+  /** The fault of the log's own image, the replay's, as {code, sessionId, position}, or null
+   * for a log whose image has not faulted. The code is CAVALRY_ERR_FAULT_IMAGE when a frame of
+   * the image failed a check, with the reader's position, or when the image was gone before
+   * this client read of it, with NULL_POSITION; it is CAVALRY_ERR_FAULT_IMAGES_FULL when the
+   * image could not join. The poll that meets the fault returns -1 once, `fault()` answers it
+   * until the next poll, and this answers it from that poll on, for as long as the log is
+   * held: a service that did not keep the poll's answer reads it here, once `isEnded` is
+   * true, and tells this end from a whole one. No entry from the fault on was delivered.
+   * `withdrawnAt()` is null for such a log, and `failedAt()` is a position only when the
+   * driver's replay failed as well. From inside a handler of this log's own poll the
+   * ABI refuses the call with CAVALRY_ERR_POLLING, and this is null, a refusal and not an
+   * answer. */
+  faulted() {
+    const f = new Struct("cavalry_fault_t");
+    if (!addon.cavalry_committed_log_faulted(this.handle, f.buffer)) return null;
+    return { code: f.int32("code"), sessionId: f.int32("session_id"), position: f.int64("position") };
   }
   /** Stops the replay through the client and frees the handle; a second close does nothing.
    * After the client's own close it frees the handle alone, and the driver ends the replay by
@@ -1602,6 +1614,7 @@ export class CommittedLog {
   readonly isEnded: boolean;
   failedAt(): number | null;
   withdrawnAt(): number | null;
+  faulted(): { code: number; sessionId: number; position: number } | null;
   close(): void;
 }
 

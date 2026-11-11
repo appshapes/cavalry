@@ -21,7 +21,7 @@
  `cavalry_context_init` passes to `cavalry_context_init_v` and the library compares
  with its own.
  */
-#define CAVALRY_ABI_VERSION 2
+#define CAVALRY_ABI_VERSION 3
 
 /*
  The images a subscription holds at most.
@@ -448,7 +448,8 @@ typedef void (*cavalry_fragment_handler_t)(void *clientd,
 
 /*
  What the subscription's last poll stopped on, or the committed log's; 0 when it
- returned a count.
+ returned a count. Also the fault that ended a committed log, as
+ `cavalry_committed_log_faulted` writes it.
  */
 typedef struct {
   /*
@@ -980,12 +981,10 @@ int64_t cavalry_committed_log_commit_position(const cavalry_committed_log_t *log
 
 /*
  Whether the handle has come to its end: no poll will deliver another entry. What
- an ended handle has delivered is said by `cavalry_committed_log_failed_at` and
- `cavalry_committed_log_withdrawn_at`, read after this returns `true`: it has
- delivered every entry it was owed only when both return `false` and no poll of
- the handle returned −1 with `CAVALRY_ERR_FAULT_IMAGE` or
- `CAVALRY_ERR_FAULT_IMAGES_FULL`, the one report that the replay's image failed a
- check or could not join. In every case what it delivered ends at
+ an ended handle has delivered is said by `cavalry_committed_log_failed_at`,
+ `cavalry_committed_log_withdrawn_at` and `cavalry_committed_log_faulted`, read
+ after this returns `true`: it has delivered every entry it was owed only when all
+ three return `false`. In every case what it delivered ends at
  `cavalry_committed_log_position`.
 
  # Safety
@@ -1029,6 +1028,27 @@ bool cavalry_committed_log_failed_at(const cavalry_committed_log_t *log,
  */
 bool cavalry_committed_log_withdrawn_at(const cavalry_committed_log_t *log,
                                         int64_t *position);
+
+/*
+ Whether the replay's image, the log's own, faulted; when it did, the fault is
+ written through `fault` as `cavalry_committed_log_fault` wrote it for the poll that
+ met it: the code, `CAVALRY_ERR_FAULT_IMAGE` or `CAVALRY_ERR_FAULT_IMAGES_FULL`, the
+ image's session id, and the reader's position when the check failed, or
+ `CAVALRY_NULL_POSITION` where the fault has none. The poll that meets the fault
+ returns −1 once and later polls return 0; this answers from that poll on, for the
+ life of the handle, so a service that did not keep the poll's answer still tells
+ this end from a whole one (ADR 0080). `false`, with nothing written, for a log
+ whose image has not faulted. Read it once `cavalry_committed_log_is_ended` returns
+ `true`. A null `fault` is refused as any null required pointer is, with
+ `CAVALRY_ERR_NULL` and `false`. An answer sets no error.
+
+ # Safety
+
+ `log` is null or a live handle not in use by another call; `fault` is null or
+ writable.
+ */
+bool cavalry_committed_log_faulted(const cavalry_committed_log_t *log,
+                                   cavalry_fault_t *fault);
 
 /*
  Fills `constants` from the handle's copy.

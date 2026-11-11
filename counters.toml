@@ -1247,7 +1247,7 @@ id = 119
 name = "cluster.election_steps"
 kind = "counter"
 scope = "client"
-doc = "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (ADR 0067); and, for a member that elects, canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving cluster.role from candidate to follower (ADR 0081) (spec/cluster.md, Counters). With no ballot lost, an election that closes makes three on its leader and four on a follower where the leader is appointed, and four on its leader and four or five on a follower where it is elected, five when the follower went through nominate; a member that nominates itself again after a ballot lost counts canvass to nominate again; key and label as cluster.elections."
+doc = "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (spec/cluster.md, Counters; ADR 0067). An election that closes makes three on its leader and four on a follower; key and label as cluster.elections."
 doctor = ""
 
 [[counter]]
@@ -1312,46 +1312,9 @@ scope = "client"
 doc = "The id of the recording one cluster member records the live log into, -1 while it records none: the leader's recording of its log publication, or a follower's recording of the leader's image it joined last; the recording its service replays (spec/cluster.md, The service; ADR 0066). The member's consensus module adds the counter and stores -1 in it before it adds cluster.commit_position, and stores a new value in it before it stores a commit position the recording does not hold; key: member id (i32), little-endian; label text: the member id in decimal."
 doctor = "A cluster.log_recording_id that stays at -1 on a member whose cluster.election_state is 17, its election closed, is a follower whose recording of the leader's image never started, so that its cluster.append_position does not move: its driver's recording.armed_failed counts the failure and names the counter of the step that failed. A member in an election holds -1 until it has joined the log."
 
-[[counter]]
-id = 127
-name = "cluster.candidacies"
-kind = "counter"
-scope = "client"
-doc = "Ballots one cluster member began as a candidate: it stored candidate term + 1, voted for itself and asked every other member for its vote, going from nominate to candidate ballot (spec/cluster.md, Roles and the election, state 3; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = ""
-
-[[counter]]
-id = 128
-name = "cluster.ballots_lost"
-kind = "counter"
-scope = "client"
-doc = "Ballots that ended with no leader for one cluster member, which went back to canvass: a candidate at the election timeout short of a quorum or with a vote against, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that read a new leadership term for a log term it did not report. A candidate that follows another member's new leadership term for its own candidate term has a leader and counts none (spec/cluster.md, Roles and the election, states 3 and 4, and Counters; ADR 0081); key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = "A count that rises with cluster.candidacies on two members at once is a split vote: two candidates whose nomination delays ended within a round trip of each other each voted for itself. The next canvass draws new delays, and the election takes one election timeout, 1 s, longer. A cluster.candidacies that rises on a member with neither this count nor cluster.terms_led is a candidate that followed another member that won the same term, and its election took no longer. A count that keeps rising with no cluster.terms_led on any member is a cluster with no member whose log a quorum will vote for: run cavalry doctor on each member's host and compare cluster.append_position."
-
-[[counter]]
-id = 129
-name = "cluster.votes_for"
-kind = "counter"
-scope = "client"
-doc = "Votes one cluster member sent for a candidate: a request vote for a term above its candidate term from a candidate whose log is at least its own, read in canvass, nominate or a ballot state; it stored the term first and waits for that candidate in follower ballot (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = ""
-
-[[counter]]
-id = 130
-name = "cluster.votes_against"
-kind = "counter"
-scope = "client"
-doc = "Votes one cluster member sent against a candidate: a request vote for a term at or below its candidate term, in which it has voted, or for a higher term from a candidate whose log is behind its own (spec/cluster.md, Messages during an election); key: member id (i32), little-endian; label text: the member id in decimal."
-doctor = ""
-
 # A cluster member's role (spec/cluster.md, "Roles and the election"; ADR 0052, feature
-# 3). A member whose leader is appointed becomes the leader from follower, and no
-# member is a candidate (ADR 0063). A member that elects (ADR 0077, ADR 0081) is a
-# candidate from its nomination until it leads, loses its ballot, votes for another,
-# follows another member that won its candidate term, or fails its election on such a
-# member's term when it cannot join it. Candidate to follower is listed with the
-# counter of each of those four causes. No leader stops leading yet: the step-down
-# comes with card 228's next change.
+# 3). In this version a follower becomes the leader by appointment and no member is a
+# candidate or stops leading (ADR 0063).
 
 [[state_machine]]
 name = "cluster_role"
@@ -1363,51 +1326,14 @@ from = "follower"
 to = "leader"
 counter = "cluster.terms_led"
 
-[[transition]]
-machine = "cluster_role"
-from = "follower"
-to = "candidate"
-counter = "cluster.candidacies"
-
-[[transition]]
-machine = "cluster_role"
-from = "candidate"
-to = "leader"
-counter = "cluster.terms_led"
-
-[[transition]]
-machine = "cluster_role"
-from = "candidate"
-to = "follower"
-counter = "cluster.ballots_lost"
-
-[[transition]]
-machine = "cluster_role"
-from = "candidate"
-to = "follower"
-counter = "cluster.votes_for"
-
-[[transition]]
-machine = "cluster_role"
-from = "candidate"
-to = "follower"
-counter = "cluster.election_steps"
-
-[[transition]]
-machine = "cluster_role"
-from = "candidate"
-to = "follower"
-counter = "cluster.elections_failed"
-
 # The election as one member's core holds it, `cavalry_raft::ElectionState`: the states
 # of the appointed leader's path (spec/cluster.md, "Roles and the election" and "The
-# appointed leader"; ADR 0063, ADR 0067) and, for a member that elects, nominate and
-# the two ballots (ADR 0077, ADR 0081). Each transition the core makes is listed with
+# appointed leader"; ADR 0063, ADR 0067). Each transition the core makes is listed with
 # every counter it adds one to; a transition with two causes, closed to init, is listed
 # with the counter of each cause.
 [[state_machine]]
 name = "cluster_election"
-states = ["init", "canvass", "nominate", "candidate_ballot", "follower_ballot", "leader_log_replication", "leader_replay", "leader_init", "leader_ready", "follower_replay", "follower_log_init", "follower_log_await", "follower_ready", "closed"]
+states = ["init", "canvass", "leader_log_replication", "leader_replay", "leader_init", "leader_ready", "follower_replay", "follower_log_init", "follower_log_await", "follower_ready", "closed"]
 
 [[transition]]
 machine = "cluster_election"
@@ -1528,89 +1454,3 @@ machine = "cluster_election"
 from = "closed"
 to = "init"
 counter = "cluster.log_images_lost"
-
-# Nominate and the two ballots, which a member that elects enters (ADR 0077, ADR 0081).
-
-[[transition]]
-machine = "cluster_election"
-from = "canvass"
-to = "nominate"
-counter = "cluster.election_steps"
-
-[[transition]]
-machine = "cluster_election"
-from = "nominate"
-to = "candidate_ballot"
-counter = "cluster.candidacies"
-
-[[transition]]
-machine = "cluster_election"
-from = "canvass"
-to = "follower_ballot"
-counter = "cluster.votes_for"
-
-[[transition]]
-machine = "cluster_election"
-from = "nominate"
-to = "follower_ballot"
-counter = "cluster.votes_for"
-
-[[transition]]
-machine = "cluster_election"
-from = "candidate_ballot"
-to = "follower_ballot"
-counter = "cluster.votes_for"
-
-[[transition]]
-machine = "cluster_election"
-from = "nominate"
-to = "follower_replay"
-counter = "cluster.election_steps"
-
-[[transition]]
-machine = "cluster_election"
-from = "candidate_ballot"
-to = "follower_replay"
-counter = "cluster.election_steps"
-
-[[transition]]
-machine = "cluster_election"
-from = "follower_ballot"
-to = "follower_replay"
-counter = "cluster.election_steps"
-
-[[transition]]
-machine = "cluster_election"
-from = "candidate_ballot"
-to = "leader_log_replication"
-counter = "cluster.terms_led"
-
-[[transition]]
-machine = "cluster_election"
-from = "candidate_ballot"
-to = "canvass"
-counter = "cluster.ballots_lost"
-
-[[transition]]
-machine = "cluster_election"
-from = "follower_ballot"
-to = "canvass"
-counter = "cluster.ballots_lost"
-
-[[transition]]
-machine = "cluster_election"
-from = "nominate"
-to = "init"
-counter = "cluster.elections_failed"
-
-[[transition]]
-machine = "cluster_election"
-from = "candidate_ballot"
-to = "init"
-counter = "cluster.elections_failed"
-
-[[transition]]
-machine = "cluster_election"
-from = "follower_ballot"
-to = "init"
-counter = "cluster.elections_failed"

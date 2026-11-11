@@ -22,7 +22,7 @@ import threading
 from . import _abi
 from ._abi import *  # noqa: F401,F403  the header's constants, as the ABI names them
 
-ABI_VERSION = 2
+ABI_VERSION = 3
 
 # The result codes a message path returns instead of raising (spec/c-abi.md, "Result
 # codes"), under the names Aeron's C client uses without the prefix.
@@ -65,11 +65,11 @@ class HandlerError(Exception):
         if committed_log:
             one, many = "entry", "entries"
             count = f"the {fragments} {one if fragments == 1 else many} this poll delivered"
-            # The fault of the log's own image is reported by this one poll and by no
-            # call after the next (clients/python/README.md, "The committed log").
+            # The fault of the log's own image is this one poll's to return; the log
+            # keeps it (clients/python/README.md, "The committed log").
             fault = ("the entries this poll delivered before it stopped on a fault, which this CommittedLog's "
-                     "fault() reads until its next poll and nothing reports after that, so read it and keep it "
-                     "before polling again")
+                     "fault() reads until its next poll, and its faulted() from then on when the fault is the "
+                     "log's own image's")
         else:
             one, many = "fragment", "fragments"
             count = f"the {fragments} fragment(s) this poll delivered"
@@ -662,8 +662,8 @@ class CommittedLog:
         poll stopped on a fault. `fault()` then reads the fault, until the next poll: a
         code of `CAVALRY_ERR_FAULT_IMAGE` or `CAVALRY_ERR_FAULT_IMAGES_FULL` is the one
         report that the replay's image failed a check or could not join, the log is ended
-        short of its entries, and the next poll returns 0 and clears the fault, so keep
-        this answer (`is_ended`). The handler's exceptions, if any, are raised after the
+        short of its entries, and the next poll returns 0 and clears the fault here;
+        `faulted()` keeps it (`is_ended`). The handler's exceptions, if any, are raised after the
         ABI call returns: one that is not an `Exception` as itself, else the first as
         `HandlerError`, whose `fragments` is this result, -1 included. An entry whose
         handler call raised was delivered and is not delivered again: `position()` is past
@@ -710,15 +710,9 @@ class CommittedLog:
     def is_ended(self):
         """Whether this log has come to its end: no poll will deliver another entry. Stop
         reading when it is true, not when a poll returns 0. The log delivered every entry
-        it was owed only when three things hold: `failed_at()` is None, `withdrawn_at()`
-        is None, and no `poll` of this log returned -1 with the fault of the log's own
-        image, `CAVALRY_ERR_FAULT_IMAGE` when the image failed a check or
-        `CAVALRY_ERR_FAULT_IMAGES_FULL` when it could not join. That fault is reported
-        once, by the poll that meets it: `fault()` answers it only until the next poll,
-        which returns 0 and clears it, and both reports are None for such a log. So a
-        service keeps that poll's answer, since nothing reports it later. In every case
-        what the log delivered ends at `position()`, where a service opens the log
-        again."""
+        it was owed only when its three reports are all None: `failed_at()`,
+        `withdrawn_at()` and `faulted()`. In every case what the log delivered ends at
+        `position()`, where a service opens the log again."""
         return self._abi.cavalry_committed_log_is_ended(self._handle)
 
     def failed_at(self):
@@ -747,6 +741,25 @@ class CommittedLog:
         position = ctypes.c_int64()
         withdrawn = self._abi.cavalry_committed_log_withdrawn_at(self._handle, ctypes.byref(position))
         return position.value if withdrawn else None
+
+    def faulted(self):
+        """The fault of the log's own image, the replay's, as (code, session_id, position),
+        or None for a log whose image has not faulted. The code is
+        `CAVALRY_ERR_FAULT_IMAGE` when a frame of the image failed a check, with the
+        reader's position, or when the image was gone before this client read of it, with
+        `NULL_POSITION`; it is `CAVALRY_ERR_FAULT_IMAGES_FULL` when the image could not
+        join. The poll that meets the fault returns -1 once, `fault()` answers it until
+        the next poll, and this answers it from that poll on, for as long as the log is
+        held: a service that did not keep the poll's answer reads it here, once
+        `is_ended` is true, and tells this end from a whole one. No entry from the fault
+        on was delivered. `withdrawn_at()` is None for such a log, and `failed_at()` is a
+        position only when the driver's replay failed as well. From inside a
+        handler of this log's own poll the ABI refuses the call with
+        `CAVALRY_ERR_POLLING`, and this is None, a refusal and not an answer."""
+        fault = _abi.cavalry_fault_t()
+        if not self._abi.cavalry_committed_log_faulted(self._handle, ctypes.byref(fault)):
+            return None
+        return fault.code, fault.session_id, fault.position
 
     def close(self):
         """Stops the replay through the client and frees the handle; idempotent. After the

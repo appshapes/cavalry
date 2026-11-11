@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use cavalry::{Cavalry, CommittedLog};
+use cavalry::{Cavalry, CommittedLog, Fault};
 
 struct Args {
     dir: Option<PathBuf>,
@@ -131,6 +131,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         );
         let entries = match polled {
             Ok(entries) => entries,
+            // The fault of the log's own image, the replay's: the handle is ended, and
+            // keeps the fault, which is read below after the other two reports.
+            Err(Fault::Image { .. } | Fault::ImagesFull { .. }) => 0,
             Err(fault) => {
                 // A closed client says why: the driver went, or it timed this client
                 // out, or the client could not keep up with the driver's events.
@@ -191,6 +194,37 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                     log.member_id(),
                     log.recording_id(),
                     log.position()
+                )
+                .into());
+            }
+            if let Some(fault) = log.faulted() {
+                // This client's read of the replay's image stopped: no entry from the
+                // handle's position on was delivered, though the member may have
+                // committed more, and the next run starts there.
+                let next = log.position();
+                let what = match fault {
+                    Fault::Image { reason, .. } if reason == Fault::GONE => {
+                        "the replay's image was gone before this program's client read of \
+                         it, which takes the client being held for over a second"
+                            .to_string()
+                    }
+                    Fault::Image {
+                        position, reason, ..
+                    } => format!(
+                        "a frame of the replay's image failed the `{reason}` check at \
+                         position {position}"
+                    ),
+                    _ => "the replay's image could not join: the subscription already \
+                          held 256 images"
+                        .to_string(),
+                };
+                return Err(format!(
+                    "the read of member {}'s recording {} stopped on a fault: {what}; this \
+                     program read every entry below position {next} and none from it on; \
+                     start it again with --from {next}; see \
+                     docs/how-to/read-the-committed-log.md#when-it-does-not-work",
+                    log.member_id(),
+                    log.recording_id()
                 )
                 .into());
             }

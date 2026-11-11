@@ -8,6 +8,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.util.Optional;
 import java.util.OptionalLong;
 
 import static java.lang.foreign.ValueLayout.ADDRESS;
@@ -103,7 +104,7 @@ public final class CommittedLog implements AutoCloseable {
      * count, -1 included. A fault code of {@link Abi#ERR_FAULT_IMAGE} or
      * {@link Abi#ERR_FAULT_IMAGES_FULL} is the one report that the replay's image failed a
      * check or could not join: the log is ended short of its entries, and the next poll
-     * returns 0 and clears the fault, so keep this answer ({@link #isEnded()}). An entry
+     * returns 0 and clears the fault here; {@link #faulted()} keeps it. An entry
      * whose handler call threw was delivered and is not delivered again:
      * {@link #position()} is past it, and past every entry this poll delivered after it. */
     public int poll(EntryHandler handler, int fragmentLimit) {
@@ -205,14 +206,9 @@ public final class CommittedLog implements AutoCloseable {
 
     /** Whether this log has come to its end: no poll will deliver another entry. Stop reading
      * when it is true, not when a poll returns 0. The log delivered every entry it was owed
-     * only when three things hold: {@link #failedAt()} is empty, {@link #withdrawnAt()} is
-     * empty, and no {@link #poll} of this log returned -1 with the fault of the log's own
-     * image, {@link Abi#ERR_FAULT_IMAGE} when the image failed a check or
-     * {@link Abi#ERR_FAULT_IMAGES_FULL} when it could not join. That fault is reported once,
-     * by the poll that meets it: {@link #fault()} answers it only until the next poll, which
-     * returns 0 and clears it, and both reports are empty for such a log. So a service keeps
-     * that poll's answer, since nothing reports it later. In every case what the log
-     * delivered ends at {@link #position()}, where a service opens the log again. */
+     * only when its three reports are all empty: {@link #failedAt()},
+     * {@link #withdrawnAt()} and {@link #faulted()}. In every case what the log delivered
+     * ends at {@link #position()}, where a service opens the log again. */
     public boolean isEnded() {
         try {
             return (boolean) Abi.cavalry_committed_log_is_ended.invokeExact(handle);
@@ -254,6 +250,33 @@ public final class CommittedLog implements AutoCloseable {
             return withdrawn ? OptionalLong.of(position.get(JAVA_LONG, 0)) : OptionalLong.empty();
         } catch (Throwable t) {
             throw Abi.failed("cavalry_committed_log_withdrawn_at", t);
+        }
+    }
+
+    /** The fault of the log's own image, the replay's, or empty for a log whose image has not
+     * faulted. Its code is {@link Abi#ERR_FAULT_IMAGE} when a frame of the image failed a
+     * check, with the reader's position, or when the image was gone before this client read
+     * of it, with {@link Abi#NULL_POSITION}; it is {@link Abi#ERR_FAULT_IMAGES_FULL} when the
+     * image could not join. The poll that meets the fault returns -1 once, {@link #fault()}
+     * answers it until the next poll, and this answers it from that poll on, for as long as
+     * the log is held: a service that did not keep the poll's answer reads it here, once
+     * {@link #isEnded()} is true, and tells this end from a whole one. No entry from the
+     * fault on was delivered. {@link #withdrawnAt()} is empty for such a log, and
+     * {@link #failedAt()} is a position only when the driver's replay failed as well.
+     * From inside a
+     * handler of this log's own poll the ABI refuses the call with {@link Abi#ERR_POLLING},
+     * and this is empty, a refusal and not an answer. */
+    public Optional<Subscription.Fault> faulted() {
+        try (Arena scratch = Arena.ofConfined()) {
+            MemorySegment f = scratch.allocate(Abi.cavalry_fault_t);
+            boolean faulted = (boolean) Abi.cavalry_committed_log_faulted.invokeExact(handle, f);
+            if (!faulted) {
+                return Optional.empty();
+            }
+            return Optional.of(new Subscription.Fault(f.get(JAVA_INT, Abi.cavalry_fault_t_code),
+                f.get(JAVA_INT, Abi.cavalry_fault_t_session_id), f.get(JAVA_LONG, Abi.cavalry_fault_t_position)));
+        } catch (Throwable t) {
+            throw Abi.failed("cavalry_committed_log_faulted", t);
         }
     }
 
