@@ -8,6 +8,14 @@ The client API implementation, re-exported by the `cavalry` crate. Data plane.
   handle for writing one stream) and subscriptions (a handle for reading one stream,
   possibly from several publishers) on channels such as `cavalry:udp?endpoint=host:port`
   and `cavalry:ipc`. IPC and UDP are the same API.
+- Waits for a driver that is still starting. `Cavalry::connect` on a directory whose
+  command ring is there while one of the driver's three files is missing, empty or
+  `not-ready` reads the directory again every 10 ms, for up to the driver timeout,
+  10 s, so a client started right after its driver connects with no retry of its own.
+  A driver that died while it created its files is `driver-gone` at that bound. The
+  wait is for an unfinished file alone: a directory with no command ring is
+  `not-found` at once, and one a stopped driver left is `driver-gone` at once (ADR
+  0072).
 - Publishes by claim and commit: claim a slice of the log buffer, write into it in
   place, commit it. Nothing is allocated per message, and a codec encodes straight into
   the claimed slice.

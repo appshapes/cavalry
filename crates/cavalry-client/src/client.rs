@@ -1,6 +1,7 @@
 //! [`Cavalry`], a process's attachment to the driver (`spec/client-protocol.md`, "The
 //! driver directory"; ADR 0021).
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -8,11 +9,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cavalry_proto::client_protocol::{Command, ErrorCode};
-use cavalry_shm::broadcast::BroadcastBuffer;
+use cavalry_shm::broadcast::{BroadcastBuffer, BroadcastError};
 use cavalry_shm::command_ring::layout::DRIVER_CLOSED;
-use cavalry_shm::command_ring::{CommandRing, Producer};
+use cavalry_shm::command_ring::{CommandRing, CommandRingError, Producer};
 use cavalry_shm::counters::generated::REPLAY_POSITION;
-use cavalry_shm::counters::{CounterValue, CountersReader, CountersWriter};
+use cavalry_shm::counters::{CounterValue, CountersError, CountersReader, CountersWriter};
 use cavalry_shm::log::LogBuffers;
 use cavalry_shm::spsc;
 
@@ -34,6 +35,132 @@ use crate::subscription::{
 /// The environment variable that names the driver directory (`config.toml`, `dir`;
 /// ADR 0020). Clients read the same key the driver does.
 pub const DIR_ENV: &str = "CAVALRY_DIR";
+
+/// How long a connecting client sleeps between two reads of a directory whose driver is
+/// still creating its files: the interval at which a starting driver reads a
+/// `not-ready` command ring again (`spec/client-protocol.md`, "The driver directory";
+/// ADR 0072). Every read maps the files it finds whole anew, so the interval also
+/// bounds the work of a client that waits the whole driver timeout: a thousand reads.
+const ATTACH_POLL: Duration = Duration::from_millis(10);
+
+/// The driver directory's three files, each open and past its page's checks, beside a
+/// driver whose heartbeat is fresh: what one read of the directory gives a connecting
+/// client.
+struct Attached {
+    ring: CommandRing,
+    broadcast: BroadcastBuffer,
+    counters: CountersReader,
+}
+
+/// Why one read of the driver directory attached nothing.
+enum Unattached {
+    /// A file is as its creator leaves it on the way: the driver is creating its files
+    /// now, or stopped while it was. Read again, up to the driver timeout.
+    Creating(Unfinished),
+    /// Anything else, which no wait changes: no driver, a driver that is gone, a file
+    /// that fails a check of its page.
+    Refused(ClientError),
+}
+
+/// Which file a read found unfinished.
+enum Unfinished {
+    /// The command ring: at the bound a dead driver's, as it is to a starting driver.
+    CommandRing,
+    /// The broadcast buffer or the counters file, beside a finished command ring.
+    Other {
+        /// The file's own refusal: what the client answers with at the bound when the
+        /// driver has stored its heartbeat meanwhile.
+        error: ClientError,
+        /// The ring's heartbeat on this read. A driver that runs stores it again every
+        /// heartbeat interval; a creator that stopped after its ring never does.
+        heartbeat: i64,
+    },
+}
+
+/// Whether a refusal of the broadcast buffer is of a file its creator has not
+/// finished: `not-ready`, empty, or not there yet beside the command ring.
+fn broadcast_unfinished(error: &BroadcastError) -> bool {
+    match error {
+        BroadcastError::NotReady | BroadcastError::TooShort { given: 0 } => true,
+        BroadcastError::Io(source) => source.kind() == ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+/// As [`broadcast_unfinished`], of the counters file.
+fn counters_unfinished(error: &CountersError) -> bool {
+    match error {
+        CountersError::NotReady | CountersError::TooShort { given: 0 } => true,
+        CountersError::Io(source) => source.kind() == ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+impl Attached {
+    /// One read of the directory, in the order of `spec/client-protocol.md`, "The
+    /// driver directory": the command ring writable and its heartbeat, the broadcast
+    /// buffer read-only, the counters file read-only. A file that is missing, empty
+    /// or `not-ready` once the command ring is there is [`Unattached::Creating`]; a
+    /// directory with no command ring is no driver.
+    fn open(dir: &Path) -> Result<Self, Unattached> {
+        if !dir.join("command-ring").is_file() {
+            return Err(Unattached::Refused(ClientError::NotFound {
+                dir: dir.to_path_buf(),
+            }));
+        }
+        let ring = match CommandRing::open(dir, true) {
+            Ok(ring) => ring,
+            Err(CommandRingError::NotReady | CommandRingError::TooShort { given: 0 }) => {
+                return Err(Unattached::Creating(Unfinished::CommandRing));
+            }
+            // Gone between the look above and the open: a starting driver removes the
+            // directory a dead one left. No command ring is no driver.
+            Err(CommandRingError::Io(source)) if source.kind() == ErrorKind::NotFound => {
+                return Err(Unattached::Refused(ClientError::NotFound {
+                    dir: dir.to_path_buf(),
+                }));
+            }
+            Err(error) => return Err(Unattached::Refused(error.into())),
+        };
+        let heartbeat = ring.consumer_heartbeat();
+        if heartbeat == DRIVER_CLOSED {
+            return Err(Unattached::Refused(ClientError::DriverGone {
+                dir: dir.to_path_buf(),
+                reason: Closed::DriverClosed,
+            }));
+        }
+        if now_nanos().saturating_sub(heartbeat) > nanos(DRIVER_TIMEOUT) {
+            return Err(Unattached::Refused(ClientError::DriverGone {
+                dir: dir.to_path_buf(),
+                reason: Closed::DriverTimeout,
+            }));
+        }
+        let broadcast = BroadcastBuffer::open(dir, false).map_err(|error| {
+            Unattached::other(broadcast_unfinished(&error), error.into(), heartbeat)
+        })?;
+        let counters = CountersReader::open(dir).map_err(|error| {
+            Unattached::other(counters_unfinished(&error), error.into(), heartbeat)
+        })?;
+        Ok(Self {
+            ring,
+            broadcast,
+            counters,
+        })
+    }
+}
+
+impl Unattached {
+    /// A refusal of the broadcast buffer or the counters file, beside a command ring
+    /// that held `heartbeat`: to be read again when the file is `unfinished`, refused
+    /// for good otherwise.
+    fn other(unfinished: bool, error: ClientError, heartbeat: i64) -> Self {
+        if unfinished {
+            Unattached::Creating(Unfinished::Other { error, heartbeat })
+        } else {
+            Unattached::Refused(error)
+        }
+    }
+}
 
 /// A client: one process's attachment to one driver. [`Cavalry::connect`] opens the
 /// driver directory's files, takes a client id and starts the client conductor thread,
@@ -92,32 +219,62 @@ impl Cavalry {
     /// the first keepalive, so the driver knows the client; and starts the conductor.
     /// A directory with no command ring is [`ClientError::NotFound`]; a driver that
     /// closed or whose heartbeat is stale is [`ClientError::DriverGone`].
+    ///
+    /// A driver that is still creating its files is waited for: while the command ring
+    /// is there and one of the three files is missing, empty or `not-ready`, the call
+    /// reads the directory again every 10 ms, for up to the driver timeout, 10 s. A
+    /// driver takes a few milliseconds to create its files, so a client started right
+    /// after its driver connects and needs no retry of its own. At the bound the
+    /// driver is a dead one, [`ClientError::DriverGone`] with `driver-timeout`, when
+    /// its command ring is still unfinished, or is finished and its heartbeat was
+    /// never stored again while the client waited; another file still unfinished
+    /// beside a heartbeat the driver has stored meanwhile is refused with its own
+    /// check (`spec/client-protocol.md`, "The driver directory"; ADR 0072). The bound
+    /// is measured on a clock that never goes back, so a wall clock that is set
+    /// during the wait neither lengthens it nor changes its answer.
     pub fn connect_to(dir: impl AsRef<Path>) -> Result<Self, ClientError> {
         let dir = dir.as_ref().to_path_buf();
-        if !dir.join("command-ring").is_file() {
-            return Err(ClientError::NotFound { dir });
-        }
-        let ring = CommandRing::open(&dir, true)?;
-        let now = now_nanos();
-        let heartbeat = ring.consumer_heartbeat();
-        if heartbeat == DRIVER_CLOSED {
-            return Err(ClientError::DriverGone {
-                dir,
-                reason: Closed::DriverClosed,
+        let deadline = Instant::now() + DRIVER_TIMEOUT;
+        // The heartbeat on the first read that found the command ring finished and
+        // another file not.
+        let mut first_heartbeat = None;
+        let Attached {
+            ring,
+            broadcast,
+            counters,
+        } = loop {
+            let unfinished = match Attached::open(&dir) {
+                Ok(attached) => break attached,
+                Err(Unattached::Refused(error)) => return Err(error),
+                Err(Unattached::Creating(unfinished)) => unfinished,
+            };
+            if let Unfinished::Other { heartbeat, .. } = &unfinished {
+                first_heartbeat.get_or_insert(*heartbeat);
+            }
+            if Instant::now() < deadline {
+                std::thread::sleep(ATTACH_POLL);
+                continue;
+            }
+            return Err(match unfinished {
+                // The driver stored its heartbeat while the client waited: it runs, and
+                // a running driver finished its files before it ran. The directory is
+                // damaged, and the file's own check says how.
+                Unfinished::Other { error, heartbeat } if first_heartbeat != Some(heartbeat) => {
+                    error
+                }
+                // A ring never finished, or a heartbeat never stored again: the creator
+                // stopped on the way.
+                Unfinished::CommandRing | Unfinished::Other { .. } => ClientError::DriverGone {
+                    dir,
+                    reason: Closed::DriverTimeout,
+                },
             });
-        }
-        if now.saturating_sub(heartbeat) > nanos(DRIVER_TIMEOUT) {
-            return Err(ClientError::DriverGone {
-                dir,
-                reason: Closed::DriverTimeout,
-            });
-        }
+        };
         let mut producer = ring.producer(DRIVER_TIMEOUT)?;
         let conductor_producer = ring.producer(DRIVER_TIMEOUT)?;
         let client_id = producer.next_correlation_id();
-        let broadcast = BroadcastBuffer::open(&dir, false)?;
         let receiver = broadcast.receiver()?;
-        let counters = Arc::new(CountersReader::open(&dir)?);
+        let counters = Arc::new(counters);
 
         let mut scratch = vec![0u8; COMMAND_SCRATCH];
         let keepalive = Command::ClientKeepalive {
