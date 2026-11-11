@@ -4,9 +4,7 @@
 //! appointed leader"), so the test here drives the module's [`Io`] itself, over a
 //! driver.
 
-use std::net::UdpSocket;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use cavalry_driver::Driver;
 use cavalry_log::catalog::CatalogReader;
@@ -30,32 +28,11 @@ impl Drop for TestDir {
     }
 }
 
-/// Loopback ports for a member's endpoints, from 20000 to 31999, each free when it is
-/// chosen and chosen once in this process: below the range the operating system gives
-/// a socket bound to port 0, as `tests/cluster.rs` chooses its own and for its reason.
-fn free_ports(count: usize) -> Vec<u16> {
-    const FIRST: u32 = 20_000;
-    const SPAN: u32 = 12_000;
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    // Apart from where `tests/cluster.rs`, another process, starts its own choice.
-    let start = (std::process::id() % 60) * 200 + 100;
-    let mut sockets = Vec::with_capacity(count);
-    for _ in 0..SPAN {
-        if sockets.len() == count {
-            break;
-        }
-        let offset = (start + NEXT.fetch_add(1, Ordering::Relaxed)) % SPAN;
-        let port = u16::try_from(FIRST + offset).expect("below 32000");
-        if let Ok(socket) = UdpSocket::bind(("127.0.0.1", port)) {
-            sockets.push(socket);
-        }
-    }
-    assert_eq!(sockets.len(), count, "free loopback ports from {FIRST}");
-    sockets
-        .iter()
-        .map(|socket| socket.local_addr().expect("bound").port())
-        .collect()
-}
+// A member's ports, from the one file that says how they are taken and why, which the
+// crate's tests under `tests/` share: `crates/cavalry-raft/tests/ports/mod.rs`.
+#[path = "../../tests/ports/mod.rs"]
+mod ports;
+use ports::free_ports;
 
 /// Calls `step` until it returns a value, for at most ten seconds.
 fn wait_for<T>(what: &str, mut step: impl FnMut() -> Option<T>) -> T {

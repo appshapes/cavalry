@@ -6,9 +6,7 @@
 //! or the leader, and a follower leaves the log and joins it again: what a member that
 //! leaves the log holds as its log's end is where the recording it held stopped.
 
-use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use cavalry_client::{Cavalry, ClientError, CommittedLog};
@@ -44,43 +42,9 @@ impl Drop for TestDir {
     }
 }
 
-/// Loopback ports for a cluster's endpoints, from 20000 to 31999: below the range the
-/// operating system gives a socket bound to port 0, which starts at 32768 on Linux and
-/// at 49152 on macOS. A follower binds its `log` endpoint again when it leaves the log
-/// and joins it again (ADR 0068). While the endpoint is closed, a port from that range
-/// can be given to any socket bound to port 0: a member's send socket, or a socket of
-/// another test in this process. The bind then fails with `Address already in use`,
-/// code 4, and the member's duty cycle fails. Each port is free when it is chosen, and
-/// each is chosen once in this process, so that tests that run at once never share
-/// one. The process id picks where the choice starts, so that two test processes on
-/// one host start apart.
-fn free_ports(count: usize) -> Vec<u16> {
-    const FIRST: u32 = 20_000;
-    const SPAN: u32 = 12_000;
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let start = (std::process::id() % 60) * 200;
-    let mut sockets = Vec::with_capacity(count);
-    for _ in 0..SPAN {
-        if sockets.len() == count {
-            break;
-        }
-        let offset = (start + NEXT.fetch_add(1, Ordering::Relaxed)) % SPAN;
-        let port = u16::try_from(FIRST + offset).expect("below 32000");
-        if let Ok(socket) = UdpSocket::bind(("127.0.0.1", port)) {
-            sockets.push(socket);
-        }
-    }
-    assert_eq!(
-        sockets.len(),
-        count,
-        "free loopback ports from {FIRST} to {}",
-        FIRST + SPAN - 1
-    );
-    sockets
-        .iter()
-        .map(|socket| socket.local_addr().expect("bound").port())
-        .collect()
-}
+// A cluster's ports, taken as `ports/mod.rs` says and for its reason.
+mod ports;
+use ports::free_ports;
 
 /// The members string of three members on the loopback.
 fn members_string() -> String {
