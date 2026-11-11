@@ -23,6 +23,7 @@
 // library only (ADR 0003).
 
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -89,6 +90,11 @@ public static class CommittedLogRound
         catch (HandlerException error)
         {
             Fail($"the handler threw: {error.InnerException}");
+        }
+        catch (IOException error)
+        {
+            // The round reads and writes one file itself, the replay's log buffer.
+            Fail($"a file of the member's driver directory could not be read or written: {error.Message}");
         }
         return 0;
     }
@@ -272,15 +278,18 @@ public static class CommittedLogRound
         {
             Fail($"a log that has not polled reads a fault: {damaged.Faulted()}");
         }
-        using (var replayLog = new FileStream(replayed[0], FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+        // The file is read and written at a position, through its handle and with no buffer
+        // of this program's own. A FileStream keeps 4096 bytes it has read, and a Seek inside
+        // them does not read the file again: a first read that came before the replay wrote
+        // the frame would be read back, zeros, until the deadline, with the frame long there.
+        using (var replayLog = File.OpenHandle(replayed[0], FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
         {
             var frameLength = new byte[4];
             until = Deadline();
             while (true)
             {
-                replayLog.Seek(0, SeekOrigin.Begin);
-                replayLog.ReadExactly(frameLength);
-                if (BitConverter.ToInt32(frameLength, 0) >= 32)
+                if (RandomAccess.Read(replayLog, frameLength, 0) == 4
+                    && BinaryPrimitives.ReadInt32LittleEndian(frameLength) >= 32)
                 {
                     break;
                 }
@@ -290,9 +299,7 @@ public static class CommittedLogRound
                 }
                 Thread.Sleep(IDLE_MILLISECONDS);
             }
-            replayLog.Seek(4, SeekOrigin.Begin);
-            replayLog.WriteByte(9); // the frame's version byte
-            replayLog.Flush();
+            RandomAccess.Write(replayLog, new byte[] { 9 }, 4); // the frame's version byte
         }
         var delivered = new List<long>();
         until = Deadline();
