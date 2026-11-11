@@ -1310,7 +1310,15 @@ class CommittedLog {
     this._state = addon.registerCommittedLog(this._header);
     this._header._state = this._state;
     const c = new Struct("cavalry_committed_log_constants_t");
-    check("cavalry_committed_log_constants", addon.cavalry_committed_log_constants(handle, c.buffer));
+    if (addon.cavalry_committed_log_constants(handle, c.buffer) !== 0) {
+      // The log is open and no object will hold it: its error is read first, since the
+      // close sets the thread's own, and then the log is closed, as the Go client closes
+      // one it cannot return.
+      const failed = error("cavalry_committed_log_constants");
+      addon.cavalry_committed_log_close(handle, client.handle);
+      this.handle = null;
+      throw failed;
+    }
     this.recordingId = c.int64("recording_id");
     this.memberId = c.int32("member_id");
   }

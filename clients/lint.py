@@ -171,9 +171,11 @@ RULES = {
             "Publication.Offer",
             "Subscription.Poll",
             "Subscription.deliver",
+            "Subscription.deliverEntry",
             "CommittedLog.Poll",
             "Header.Values",
             "cavalryGoFragment",
+            "cavalryGoEntry",
         ],
         "raise_after": [("Subscription.Poll", "C.cavalry_go_poll"),
                         ("CommittedLog.Poll", "C.cavalry_go_committed_log_poll")],
@@ -181,7 +183,8 @@ RULES = {
         # per-message calls that copy the thread's error into the handle when they fail.
         "shim": {
             "file": "shim.c",
-            "functions": ["cavalry_go_trampoline", "cavalry_go_poll", "cavalry_go_committed_log_poll", "cavalry_go_try_claim",
+            "functions": ["cavalry_go_trampoline", "cavalry_go_entry_trampoline", "cavalry_go_poll",
+                          "cavalry_go_committed_log_poll", "cavalry_go_try_claim",
                           "cavalry_go_set_reserved_value", "cavalry_go_commit", "cavalry_go_abort",
                           "cavalry_go_offer"],
             "readers": [],

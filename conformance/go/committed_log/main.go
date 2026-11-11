@@ -6,12 +6,14 @@
 //	committed_log <the member's driver directory> <the member's id>
 //
 // A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
-// bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
-// that entry through the handler, with its position, its header and the handle's reads;
-// makes each call the ABI refuses from inside the log's own handler, each after it has set
-// the thread's error to another code, so that a refusal that answers what a live log
-// answers is told from an answer; checks where a handler's panic goes and that its entry
-// is not delivered again; opens the log again at 96, where nothing is committed yet,
+// bytes in a frame of 88 at position 0, so the log's next position is 96. The round opens
+// twenty logs and closes each with no poll between, which leaves its client open (ADR
+// 0078); reads that entry through the handler, with its position, its header and the
+// handle's reads; makes each of the eight calls the ABI refuses from inside the log's own
+// handler, each after it has set the thread's error to another code, so that a refusal
+// that answers what a live log answers is told from an answer; checks where a handler's
+// panic goes and that its entry is not delivered again; opens the log again at 96, where
+// nothing is committed yet,
 // beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has
 // had the time a replay's image takes to join; closes twice, with the log's slot in the
 // table freed; and closes a log after its client. Every wait is bounded at 30 s and sleeps
@@ -102,27 +104,20 @@ func main() {
 	mustOK(err)
 	// A closed log, for the refusals below: its Position hands the ABI a null handle, which
 	// answers -1 with ErrNull. The package exports no function of the ABI that takes a null
-	// header, so this is the round's call that sets the thread's error to another code. The
-	// log reads its entry before it is closed, as every log of this round does: a log
-	// closed at once after its open, before its replay's image had joined, closed its
-	// client as corrupt in 8 of 60 tries on the laptop, which is not this round's check.
+	// header, so this is the round's call that sets the thread's error to another code. It
+	// is closed with no poll between, and so are nineteen more: a log's replay's image may
+	// not have joined when it closes, and the client's conductor then reads of an image
+	// whose log is gone. The client stays open (ADR 0078; before it, card 241, this closed
+	// the client as corrupt in 8 of 60 tries), which the rest of the round shows.
 	spent := openLog(client, 0)
-	spentEntries := 0
-	until := time.Now().Add(wait)
-	for spentEntries == 0 {
-		count, err := spent.Poll(func(body []byte, header *cavalry.Header, position int64) { spentEntries++ }, 16)
-		mustOK(err)
-		if count < 0 {
-			fail("the first log's poll stopped: %v", spent.Err())
-		}
-		if time.Now().After(until) {
-			fail("the first log read no entry within %v", wait)
-		}
-		if count == 0 {
-			time.Sleep(idle)
-		}
-	}
 	mustOK(spent.Close())
+	for i := 0; i < 19; i++ {
+		mustOK(openLog(client, 0).Close())
+	}
+	if client.IsClosed() {
+		fail("a log opened and closed with no poll between closed its client: %d", client.Closed())
+	}
+	say("twenty logs opened and closed with no poll between left the client open")
 	held := cavalry.Registered()
 	log := openLog(client, 0)
 	if log.MemberID != int32(memberID) || log.RecordingID != 0 {
@@ -190,6 +185,13 @@ func main() {
 		}
 		refusals = append(refusals, refusal{"WithdrawnAt", at, cavalry.Errcode()})
 		setAnotherError()
+		faulted := int64(0)
+		_, _, _, faultErr := log.Fault()
+		if faultErr != nil {
+			faulted = -1
+		}
+		refusals = append(refusals, refusal{"Fault", faulted, codeOf(faultErr)})
+		setAnotherError()
 		closed := int64(0)
 		closeErr := log.Close()
 		if closeErr != nil {
@@ -197,7 +199,7 @@ func main() {
 		}
 		refusals = append(refusals, refusal{"Close", closed, codeOf(closeErr)})
 	}
-	until = time.Now().Add(wait)
+	until := time.Now().Add(wait)
 	for len(entries) == 0 {
 		count, err := log.Poll(onEntry, 16)
 		mustOK(err)
@@ -224,7 +226,8 @@ func main() {
 		fail("the poll refused from inside the log's own handler left Err %v, not ErrPolling", nested)
 	}
 	expected := []refusal{{"Poll", -1, polling}, {"Position", -1, polling}, {"CommitPosition", -1, polling},
-		{"IsEnded", 0, polling}, {"FailedAt", 0, polling}, {"WithdrawnAt", 0, polling}, {"Close", -1, polling}}
+		{"IsEnded", 0, polling}, {"FailedAt", 0, polling}, {"WithdrawnAt", 0, polling}, {"Fault", -1, polling},
+		{"Close", -1, polling}}
 	if !reflect.DeepEqual(refusals, expected) {
 		fail("the calls from inside the log's own handler answered %v, not %v", refusals, expected)
 	}
@@ -249,7 +252,7 @@ func main() {
 	if len(entries) != 1 {
 		fail("the refused poll, or a later one, delivered more: %v", entries)
 	}
-	say("member %d's entry at position 0 read once, next position %d, commit position %d; seven calls from inside the "+
+	say("member %d's entry at position 0 read once, next position %d, commit position %d; eight calls from inside the "+
 		"handler refused with ErrPolling, each made with the thread's error at ErrNull", log.MemberID, log.Position(),
 		log.CommitPosition())
 	mustOK(log.Close())

@@ -1215,8 +1215,12 @@ public final class CommittedLog implements AutoCloseable {
                     MemorySegment.class)).bindTo(this);
             stub = Abi.LINKER.upcallStub(target, FunctionDescriptor.ofVoid(ADDRESS, ADDRESS, JAVA_LONG, ADDRESS), arena);
         } catch (ReflectiveOperationException e) {
-            arena.close();
+            abandon();
             throw new CavalryException("cavalry_committed_log", 0, "the upcall stub could not be made: " + e);
+        } catch (RuntimeException e) {
+            // The linker's own refusals, an IllegalCallerException among them.
+            abandon();
+            throw e;
         }
         try (Arena scratch = Arena.ofConfined()) {
             MemorySegment k = scratch.allocate(Abi.cavalry_committed_log_constants_t);
@@ -1224,8 +1228,25 @@ public final class CommittedLog implements AutoCloseable {
             memberId = k.get(JAVA_INT, Abi.cavalry_committed_log_constants_t_member_id);
             recordingId = k.get(JAVA_LONG, Abi.cavalry_committed_log_constants_t_recording_id);
         } catch (Throwable t) {
-            arena.close();
+            // The log is closed first, whatever was thrown, an Error included, which
+            // `Abi.failed` throws on. A CavalryException already holds the constants'
+            // error, read when it was made, before this close set the thread's own.
+            abandon();
             throw Abi.failed("cavalry_committed_log_constants", t);
+        }
+    }
+
+    /** Closes a log this constructor cannot return: the log is open and no object will hold
+     * it, so it is closed here, as the Go client closes one it cannot return, and the
+     * arena with it. What the close answers is not the failure to report. */
+    private void abandon() {
+        try {
+            client.closeCommittedLog(handle);
+        } catch (RuntimeException ignored) {
+            // The constructor's own failure is the one to report.
+        } finally {
+            handle = MemorySegment.NULL;
+            arena.close();
         }
     }
 

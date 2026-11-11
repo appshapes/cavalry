@@ -11,10 +11,12 @@
  * A cluster started with `cavalry run` holds one entry, the first of its leader's term, 56
  * bytes in a frame of 88 at position 0, so the log's next position is 96. The round reads
  * that entry through the handler, with its position, its header and the handle's reads;
- * makes each call the ABI refuses from inside the log's own handler, each after it has set
- * the thread's error to another code, so that a refusal that answers what a live log
- * answers is told from an answer; checks where a handler's exception goes and that its
- * entry is not delivered again; opens the log again at 96, where nothing is committed yet,
+ * makes each of the eight calls the ABI refuses from inside the log's own handler, each
+ * after it has set the thread's error to another code, so that a refusal that answers what
+ * a live log answers is told from an answer; opens a log and closes it with no poll
+ * between, which leaves its client open (ADR 0078); checks where a handler's exception
+ * goes and that its entry is not delivered again; opens the log again at 96, where nothing
+ * is committed yet,
  * beside a log at 0 that it reads the entry through meanwhile, so that the log at 96 has had
  * the time a replay's image takes to join; closes twice; and closes a log after its client.
  * Every wait is bounded at 30 s and sleeps a millisecond after a poll that delivered
@@ -113,12 +115,14 @@ function main() {
       setAnotherError();
       refusals.push([name, call(), addon.cavalry_errcode()]);
     }
-    setAnotherError();
-    try {
-      log.close();
-      refusals.push(["close", 0, addon.cavalry_errcode()]);
-    } catch (thrown) {
-      refusals.push(["close", -1, thrown.code]);
+    for (const [name, call] of [["fault", () => log.fault()], ["close", () => log.close()]]) {
+      setAnotherError();
+      try {
+        call();
+        refusals.push([name, 0, addon.cavalry_errcode()]);
+      } catch (thrown) {
+        refusals.push([name, -1, thrown.code]);
+      }
     }
   };
   pollUntil(log, onEntry, () => entries.length > 0, "the term's first entry");
@@ -133,7 +137,7 @@ function main() {
   const polling = constants.CAVALRY_ERR_POLLING;
   const expected = [["poll", -1, polling], ["position", -1, polling], ["commitPosition", -1, polling],
     ["isEnded", false, polling], ["failedAt", null, polling], ["withdrawnAt", null, polling],
-    ["close", -1, polling]];
+    ["fault", -1, polling], ["close", -1, polling]];
   if (!same(refusals, expected)) {
     fail(`the calls from inside the log's own handler answered ${JSON.stringify(refusals)}, not ` +
       `${JSON.stringify(expected)}`);
@@ -152,10 +156,17 @@ function main() {
   }
   if (entries.length !== 1) fail(`the refused poll, or a later one, delivered more: ${JSON.stringify(entries)}`);
   say(`member ${log.memberId}'s entry at position 0 read once, next position ${log.position()}, commit position ` +
-    `${log.commitPosition()}; seven calls from inside the handler refused with CAVALRY_ERR_POLLING, each ` +
+    `${log.commitPosition()}; eight calls from inside the handler refused with CAVALRY_ERR_POLLING, each ` +
     `made with the thread's error at CAVALRY_ERR_NULL`);
   log.close();
   log.close(); // a second close does nothing
+
+  // A log opened and closed with no poll between: its replay's image may not have joined
+  // yet, and the client's conductor then reads of an image whose log is gone. The client
+  // stays open (ADR 0078; before it, card 241, this closed the client as corrupt in 8 of 60
+  // tries), which twenty in a row and a log opened after them show.
+  for (let i = 0; i < 20; i++) openLog(client, 0).close();
+  if (client.isClosed) fail(`a log opened and closed with no poll between closed its client: ${client.closed()}`);
 
   // A handler that throws: the entry was delivered, the exception is thrown after the ABI
   // has returned, and the log's position is past the entry, so it is not delivered again.
@@ -239,8 +250,9 @@ function main() {
     fail(`a poll after the client's close did not stop on the closed fault: ${JSON.stringify(rest.fault())}`);
   }
   rest.close();
-  say(`a throwing handler's entry is not delivered again; nothing at position ${NEXT} while a log at 0 beside it ` +
-    `read the entry at 0; a log closed after its client`);
+  say(`twenty logs opened and closed with no poll between left the client open; a throwing handler's entry is ` +
+    `not delivered again; nothing at position ${NEXT} while a log at 0 beside it read the entry at 0; a log ` +
+    `closed after its client`);
 }
 
 try {

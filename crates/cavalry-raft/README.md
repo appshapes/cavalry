@@ -26,9 +26,12 @@ commit path runs per message.
 - Runs a member over a driver: `ConsensusModule::start(dir, log_dir, members,
   member_id)` is a client of the driver in `dir`. It sends the consensus messages on a
   publication to each peer, adds the leader's log as a publication with every other
-  member as a destination and records it, or subscribes to the leader's log and arms
-  the recording that holds it from its first frame, keeps the record of terms in the
-  `terms` file of `log_dir`, and stores what it counts in the driver's counters file:
+  member as a destination and records it, the publication created at the term's base
+  log position so that the recording begins there and every frame of the term lies
+  at its position in the cluster's log (ADR 0059), or subscribes to the leader's log
+  and arms the recording that holds it from its first frame, keeps the record of
+  terms in the `terms` file of `log_dir`, and stores what it counts in the driver's
+  counters file:
   `cluster.role`, `cluster.election_state`, `cluster.leadership_term_id`,
   `cluster.append_position`, `cluster.commit_position`, `cluster.messages_rejected`,
   `cluster.log_recording_id`, the recording that holds its log, which its service
@@ -58,11 +61,15 @@ commit path runs per message.
   `cavalry-client`'s `Cavalry::committed_log` (`spec/cluster.md`, "The service"; ADR
   0066).
 - Runs the same core in memory: `memory::Cluster` is one to eight members in one
-  process on a clock the caller steps, with loss, delay, cuts, paused syncs and a
+  process on a clock the caller steps, with loss, delay, a member cut from every
+  other, two members parted from each other (`cut_between`), paused syncs and a
   member started again on an empty log directory to set: what the example below and
-  most of the crate's tests run. It is a test double and allocates; its consensus
-  stream holds at most 4,096 messages in flight and loses, and counts, one sent
-  while it is full, and its log holds every entry offered for the cluster's life.
+  most of the crate's tests run. Every member holds a log of its own, the entries
+  that reached it, so `log(member)` is that member's bytes and a test can find two
+  members that hold different bytes at one position. It is a test double and
+  allocates; its consensus stream holds at most 4,096 messages in flight and loses,
+  and counts, one sent while it is full, and a leader's log publication and each
+  member's log hold every entry appended or received for the cluster's life.
 - To come, each with its card: the C ABI's calls for a service, so that a service is
   a program in any of the five client languages (card 227), the election and mixed
   versions in a rolling upgrade (card 228), the cluster client (card 229), snapshots
