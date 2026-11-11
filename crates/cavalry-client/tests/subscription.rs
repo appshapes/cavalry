@@ -209,16 +209,15 @@ fn a_bounded_poll_reads_one_image_and_no_frame_at_or_past_its_limit() {
         assert_eq!(read(&mut subscription, a, limit, 10), []);
     }
     assert_eq!(position(&subscription, a), 192);
-    // A session the subscription holds no image of reads nothing.
-    assert_eq!(
-        read(
-            &mut subscription,
-            a.wrapping_add(b).wrapping_add(1),
-            i64::MAX,
-            10
-        ),
-        []
-    );
+    // A session the subscription holds no image of reads nothing. A driver's session
+    // ids start at a random `i32`, so the made-up one is chosen to be neither image's:
+    // the id after `a`, or the one after that when the first is `b`.
+    let neither = if a.wrapping_add(1) == b {
+        a.wrapping_add(2)
+    } else {
+        a.wrapping_add(1)
+    };
+    assert_eq!(read(&mut subscription, neither, i64::MAX, 10), []);
     // The fragment limit holds under the largest limit, which is no bound.
     assert_eq!(
         read(&mut subscription, b, i64::MAX, 2),
