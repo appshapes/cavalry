@@ -925,3 +925,12 @@ shared runner is
   purge's reply is handled inside the counting window, so such a run can also fail
   with `allocations per message` above 0, the conductor's answer to the command and
   not the path's.
+- `the recorded_purging benchmark failed: purging the pile: command lost
+  (response-timeout): no answer to purge segments within 10 s`: the replayer needed
+  longer than the client's response timeout to remove the pile. The pile is what a
+  probe removed in about 2.5 s just before the run, so the replayer removed files more
+  than four times slower than the probe did: something else was writing to the bench
+  directory's file system, or the replayer's CPU was busy. The message's advice is the
+  client's for any command and does not fit here: the driver is not stalled. Run the
+  row again with nothing else on that file system. If it repeats on an idle host, keep
+  the run's first line and report it.
