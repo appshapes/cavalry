@@ -6,9 +6,11 @@
 - **Supersedes:** none. Amends ADR 0077 in one clause: the paragraph "The appointed
   leader" of `spec/cluster.md` stays on the page until the consensus module elects,
   where ADR 0077 had it shrink with every pull request. Adds two rows to
-  `spec/cluster.md`, "Counters", and one clause to the row of state 2; the page's
-  version stays 0, since no message changes and no member over a driver takes a vote
-  yet.
+  `spec/cluster.md`, "Counters", and the four steps of the electing path to its row of
+  `cluster.election_steps`; one clause to the row of state 2; and nominate to the
+  states in which "Messages during an election" reads a new leadership term as canvass
+  does. The page's version stays 0, since no message changes and no member over a
+  driver takes a vote yet.
 
 ## Context
 
@@ -88,7 +90,12 @@ its four causes: a ballot lost, a vote for another candidate, a step to follower
 replay on the term of the member that won, and an election that fails on that term
 when the candidate cannot join it, after which it is a follower in init, never a
 candidate. Two members that each count a
-candidacy and a ballot lost in one election are a split vote.
+candidacy and a ballot lost in one election are a split vote. `cluster.election_steps`
+counts four more steps, each on the way to closed: canvass to nominate, and nominate,
+candidate ballot and follower ballot to follower replay. So, with no ballot lost, an
+elected leader makes four steps where an appointed one makes three, and a follower
+makes four, or five when it went through nominate; a member that nominates itself
+again after a ballot lost counts canvass to nominate again.
 
 **Nominate reads what canvass reads.** A member in nominate is a canvassing member
 with a delay running: it votes for a candidate as the page already says, and it

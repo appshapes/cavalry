@@ -1247,7 +1247,7 @@ id = 119
 name = "cluster.election_steps"
 kind = "counter"
 scope = "client"
-doc = "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (spec/cluster.md, Counters; ADR 0067). An election that closes makes three on its leader and four on a follower; key and label as cluster.elections."
+doc = "Steps of one cluster member's election from one state to the next that neither begin it, fail it, close it nor make the member a leader: canvass to follower replay, follower replay to follower log init, follower log init to follower log await, follower log await to follower ready, leader log replication to leader replay, leader replay to leader init and leader init to leader ready (ADR 0067); and, for a member that elects, canvass to nominate, and nominate, candidate ballot and follower ballot to follower replay, a candidate's step to follower replay also moving cluster.role from candidate to follower (ADR 0081) (spec/cluster.md, Counters). With no ballot lost, an election that closes makes three on its leader and four on a follower where the leader is appointed, and four on its leader and four or five on a follower where it is elected, five when the follower went through nominate; a member that nominates itself again after a ballot lost counts canvass to nominate again; key and label as cluster.elections."
 doctor = ""
 
 [[counter]]
