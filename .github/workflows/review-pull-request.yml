@@ -170,6 +170,16 @@ jobs:
           # Public repository: run logs are world readable. Keep the agent's output out,
           # but for the bounded excerpts "Verify a review was submitted" prints below.
           show_full_output: false
+          # The submit form and the paragraph on CI are card 247's, from the misses read
+          # in this workflow's own log. Both sessions for pull request 185's head 2db97b5
+          # (runs 42939808203 and 42940095714) ended with no review and the last words
+          # "waiting for CI", after a `Monitor` and a `gh run watch` the settings below
+          # denied: the review starts with CI, and a session that ends to wait is not
+          # resumed. And a body given as `--body '...'` is denied when a line of it begins
+          # with `#`, "Newline followed by # inside a quoted argument" in Claude Code's
+          # words (2.1.322; run 42926436534's first submit), while the same body in a
+          # quoted heredoc passes. `.claude/agents/reviewer.md` says the same two things;
+          # scripts/claude-workflow-test.py holds the two texts together and runs the form.
           prompt: |
             You are the reviewer agent. Read `.claude/agents/reviewer.md` for your
             operating instructions and review pull request
@@ -180,14 +190,29 @@ jobs:
             changed files and their surroundings there. `gh pr view`, `gh pr diff`
             and `gh pr checks` work from the working directory.
 
-            You MUST end your session by actually executing
-            `gh pr review ${{ inputs.pr_number }} --approve --body "<summary>"`
-            or
-            `gh pr review ${{ inputs.pr_number }} --request-changes --body "<findings>"`.
+            You MUST end your session by actually executing `gh pr review` with
+            the body on standard input, in a quoted heredoc:
+
+                gh pr review ${{ inputs.pr_number }} --approve --body-file - <<'EOF'
+                <summary>
+                EOF
+
+            or the same command with `--request-changes` in place of `--approve`
+            and your findings as the body. Use that form and no other: a body
+            given as `--body "..."` is refused by this session's permissions when
+            a line of it begins with `#`.
             Your final text response is discarded: a verdict not submitted via
             `gh pr review` does not exist, and this job fails if no review lands.
             If the submission command errors, retry it, and surface a persistent
             failure with `gh pr comment` before ending the session.
+
+            Do not wait for CI. It started when you did, so its checks may still
+            be queued or running when your verdict is ready: submit then, and say
+            in the body which checks had not finished. This session is one turn
+            and nothing resumes it: no watch, no monitor and no background
+            command brings it back, and a session that ends to wait for a check
+            has submitted nothing. A check that failed is a blocker. GitHub
+            merges an approved pull request only once the required checks pass.
 
             When requesting changes, end the review body with the following
             line, written as plain text on its own line. Do NOT wrap it in

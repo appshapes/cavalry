@@ -17,6 +17,13 @@ step's log only between a `::stop-commands::` line and the line that ends it, so
 line of it is read by the runner as a workflow command, and that it reaches the job
 summary whole.
 
+And of the two texts a reviewer session reads, that workflow's prompt and
+`.claude/agents/reviewer.md` (card 247's fix): both give one way to submit a review, the
+body on standard input in a quoted heredoc, and that form, read out of each text and
+run under bash with a fake `gh`, hands over a body with a heading, a backtick and a
+substitution as written; both say not to wait for a check that still runs. Whether a
+session's permissions allow the form is Claude Code's to decide and is not run here.
+
     python3 scripts/claude-workflow-test.py
 """
 import json
@@ -34,6 +41,7 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = Path(os.environ.get("CLAUDE_WORKFLOW", ROOT / ".github" / "workflows" / "claude.yml"))
 REVIEW_WORKFLOW = ROOT / ".github" / "workflows" / "review-pull-request.yml"
+REVIEWER_BRIEF = ROOT / ".claude" / "agents" / "reviewer.md"
 STEP = "Approve the runs GitHub held on the fixer's push"
 VERIFY = "Verify a review was submitted"
 REPO = "example-owner/cavalry"
@@ -483,6 +491,80 @@ class ReviewWorkflow(unittest.TestCase):
         self.assertIn("RUN_ID: ${{ github.run_id }}", block)
         self.assertIn("gh run view $RUN_ID --log", block)
         self.assertIn('## Reviewer session, attempt 1 of 2', block)
+
+
+# A review body with everything in it that a shell or the session's permissions read:
+# a heading, which is what a body given as `--body '...'` is denied for, a backtick, an
+# apostrophe, a substitution, a variable, a redirect, and the fixer's line.
+REVIEW_BODY = "\n".join([
+    "## Findings",
+    "",
+    "The client's wait has no bound: `connect_to` loops; $(date) and $HOME and a > b stay as written.",
+    "",
+    "# A second heading",
+    "@claude Read `.claude/agents/developer.md`, then address every blocker in this review.",
+])
+# The fake `gh` of a submit: it keeps its arguments, one to a line, and its standard input.
+FAKE_GH_SUBMIT = """#!/bin/sh
+printf '%s\\n' "$@" > "$FAKE_ARGS"
+cat > "$FAKE_STDIN"
+"""
+
+
+class ReviewerInstructions(unittest.TestCase):
+    """The two texts a reviewer session reads, the workflow's prompt and its brief: how a
+    review is submitted and what is done about a check that still runs (card 247)."""
+
+    @classmethod
+    def setUpClass(cls):
+        workflow = REVIEW_WORKFLOW.read_text(encoding="utf-8")
+        start = workflow.index("          prompt: |\n")
+        cls.texts = {"the workflow's prompt": workflow[start:workflow.index("          settings: |\n", start)],
+                     "the brief": REVIEWER_BRIEF.read_text(encoding="utf-8")}
+
+    def submit_form(self, text):
+        """The command a text gives for an approval: its three lines, without their indent."""
+        found = re.search(r"^( *)(gh pr review (?:<n>|\$\{\{ inputs\.pr_number \}\}) --approve --body-file - <<'EOF')\n"
+                          r"\1(<summary>)\n\1(EOF)\n", text, re.M)
+        self.assertIsNotNone(found, "no approval with its body on standard input, in a quoted heredoc")
+        return found.group(2), found.group(3), found.group(4)
+
+    def test_both_give_one_way_to_submit_and_it_is_the_body_on_standard_input(self):
+        for name, text in self.texts.items():
+            with self.subTest(name):
+                self.submit_form(text)
+                self.assertIn("`--request-changes` in place of `--approve`", text)
+                self.assertNotRegex(text, r"gh pr review \S+(?: \S+ \}\})? --(?:approve|request-changes) --body ")
+
+    def test_the_form_hands_gh_a_body_with_a_heading_a_backtick_and_a_substitution_as_written(self):
+        for name, text in self.texts.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                (tmp / "bin").mkdir()
+                gh = tmp / "bin" / "gh"
+                gh.write_text(FAKE_GH_SUBMIT, encoding="utf-8")
+                gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+                command, _, end = self.submit_form(text)
+                command = re.sub(r"<n>|\$\{\{ inputs\.pr_number \}\}", PR, command)
+                env = {"PATH": f"{tmp / 'bin'}{os.pathsep}{os.environ['PATH']}", "HOME": "/a/home/that/must/not/appear",
+                       "FAKE_ARGS": str(tmp / "args"), "FAKE_STDIN": str(tmp / "stdin")}
+                done = subprocess.run(["bash", "-c", "\n".join([command, REVIEW_BODY, end]) + "\n"], env=env,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual((tmp / "args").read_text(encoding="utf-8").split("\n")[:-1],
+                                 ["pr", "review", PR, "--approve", "--body-file", "-"])
+                self.assertEqual((tmp / "stdin").read_text(encoding="utf-8"), REVIEW_BODY + "\n")
+
+    def test_both_say_not_to_wait_for_a_check_that_still_runs_and_that_a_failed_one_is_a_blocker(self):
+        for name, text in self.texts.items():
+            with self.subTest(name):
+                self.assertIn("Do not wait for CI", text)
+                self.assertRegex(text, r"queued or\s+running")
+                self.assertRegex(text, r"nothing (?:resumes it|brings it back)")
+                self.assertRegex(text, r"failed\*{0,2} is a blocker")
+
+    def test_the_brief_no_longer_asks_for_a_green_ci_which_a_session_can_only_wait_for(self):
+        self.assertNotIn("CI must be green", self.texts["the brief"])
 
 
 if __name__ == "__main__":

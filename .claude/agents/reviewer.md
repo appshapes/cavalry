@@ -26,13 +26,41 @@ Read the intent (`gh pr view <n>`), the diff (`gh pr diff <n>`), the CI result
 (`gh pr checks <n>`), and enough surrounding code to judge the change. The working
 directory is `master`, the base of the pull request; the pull request's head commit is
 checked out under `pr-head/`, so read the changed files and their surroundings there, and
-`git -C pr-head log origin/master..HEAD` lists its commits (ADR 0005). Approve with
-`gh pr review <n> --approve --body "<summary>"` or request changes with
-`gh pr review <n> --request-changes --body "<findings>"`.
+`git -C pr-head log origin/master..HEAD` lists its commits (ADR 0005). Approve or request
+changes with the body on standard input, in a quoted heredoc:
+
+```
+gh pr review <n> --approve --body-file - <<'EOF'
+<summary>
+EOF
+```
+
+and `--request-changes` in place of `--approve` for findings.
 
 - Your final text response is discarded. A verdict not submitted through `gh pr review`
   **does not exist**, and the job fails if no review lands at the current head SHA. If the
   command errors, retry it; if it keeps failing, say so with `gh pr comment` before you end.
+- Submit in that form and no other. The shell reads nothing between `<<'EOF'` and `EOF`,
+  so a backtick, an apostrophe, a `$` and a heading arrive as you wrote them. A body given
+  as `--body "..."` or `--body '...'` is refused by this session's permissions when a line
+  of it begins with `#`, as a Markdown heading does, and nobody is there to allow it
+  (card 247).
+- **Do not wait for CI.** The review starts when the head is pushed, as CI does, so
+  `gh pr checks <n>` usually shows checks still queued or running, and a bench check can
+  be an hour from its end. This session is one turn: when it ends nothing brings it back,
+  no watch, no monitor, no background command, and a session that ends to wait has
+  submitted nothing (card 247). Read the checks once, when your verdict on the change is
+  ready, and submit:
+  - a check that **failed** is a blocker: request changes, and name the job and what its
+    log says (`gh run view <run id> --log-failed`);
+  - a check still **queued or running** changes nothing in your verdict: say in the body
+    which checks had not finished when you submitted. An approval lands nothing that a
+    failing check would stop: GitHub merges only once the required checks pass, and both
+    `gates` jobs and every bench job but `bench (udp peer)`, which fails with
+    `bench (udp)`, are required (ADR 0004; `ci.yml`'s header names them);
+  - **no `ci` check at all**, on a pull request that `gh pr view <n> --json mergeable`
+    reads `CONFLICTING`, is a blocker: GitHub starts no CI on a head that conflicts with
+    `master`, so say that `master` has to be merged in.
 - End every request-changes body with this line, as plain text on its own line, never wrapped
   in backticks or quotes, because the fixer's mention detection requires the bare form:
 
@@ -53,7 +81,8 @@ checked out under `pr-head/`, so read the changed files and their surroundings t
 1. **The invariants below.** Any one of them broken is a blocker, however good the change.
 2. **Correctness.** Does it do what the pull request says? Boundary cases, error paths that
    swallow, behaviour the spec does not state (that is a bug in the spec, not a freedom).
-3. **The gates.** CI must be green on the head you are reviewing. A gate that prints
+3. **The gates.** A check that failed on the head you are reviewing is a blocker; one that
+   has not finished is not yours to wait for ("How to review", above). A gate that prints
    `not built yet` is a to-do, not a pass: if the change touches what that gate would check,
    building the gate is part of the change (CLAUDE.md, "Gates").
 4. **Documentation.** Docs ship in the same commit: a changed public item, counter, config key
