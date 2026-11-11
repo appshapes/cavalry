@@ -44,6 +44,26 @@ The files come from the event (`GITHUB_EVENT_NAME`, `GITHUB_EVENT_PATH`):
   baseline's processes, or a look at a host, are had at a tree whose last change was
   a page.
 
+A push that can move the bench has one way left to report without the hosts (ADR
+0074): its tree was measured already. That is so when all of this holds:
+
+- the pushed commit is the merge commit of one merged pull request, from a branch of
+  this repository into the pushed branch;
+- the commit before the push is in the pull request's head, so that a run of that
+  head was of the head's own tree and not of a merge with a newer base, and the
+  head's tree is the pushed commit's;
+- no pull request from the same branch has another base, whose run at this head
+  would have been of another tree;
+- `ci.yml` has a run for that head, by a pull request event from that branch, in
+  which the bench jobs of [`HOST_JOBS`] each passed on a host. The run need not have
+  ended: a merge is made the moment the required checks pass, and `master`'s run
+  asks seconds later, while the pull request's run may still be finishing a job that
+  is not required.
+
+A landing then takes the hosts once, for the pull request, and not again for the
+same tree on `master`. The answer names the pull request and the run: the next
+change's "before" figures are that run's.
+
 It answers "the bench runs" whenever it cannot list the change: a push with no commit
 before it, a comparison whose two commits have diverged, a listing as long as the API
 returns at most (3,000 files of a pull request, 300 of a comparison), a request the API
@@ -77,6 +97,12 @@ PULL_FILES_MOST = 3000  # what `pulls/<n>/files` lists at most
 COMPARE_FILES_MOST = 300  # what `compare/<a>...<b>` lists at most
 SHOWN = 10              # files named in the answer
 DOCS = "docs/how-to/run-the-bench.md, \"When the bench jobs run\""
+# The bench jobs whose pass on a host is the proof that a tree was measured, by the
+# names ci.yml gives them, and the label a job on a host runs under. `bench (udp
+# peer)` is the other end of `bench (udp)` and fails with it.
+HOST_JOBS = ("bench (linux)", "bench (grip)", "bench (udp)")
+HOST_LABEL = "self-hosted"
+RUNS_READ = 5           # runs of a head whose jobs are read, newest first
 
 # The scripts the bench jobs and this decision run, by name, before the rule that the
 # rest of `scripts/` cannot move the bench.
@@ -142,6 +168,8 @@ class Api:
             if not env.get(name):
                 raise Unread(f"{name} is not set")
         self.base = f"{env['GITHUB_API_URL'].rstrip('/')}/repos/{env['GITHUB_REPOSITORY']}"
+        self.owner = env["GITHUB_REPOSITORY"].split("/")[0]
+        self.repository = env["GITHUB_REPOSITORY"]
         self._token = env["GH_TOKEN"]
         # https only: the job token rides on every request. Loopback is the exception the tests run on.
         if not (self.base.startswith("https://") or re.match(r"^http://(127\.0\.0\.1|localhost)(:\d+)?/", self.base)):
@@ -188,8 +216,7 @@ def pull_request_files(api, number):
 
 
 def push_files(api, before, after):
-    if not re.fullmatch(r"[0-9a-f]{40}", before or "") or not re.fullmatch(r"[0-9a-f]{40}", after or ""):
-        raise Unread("the push event names no commit before it or after it")
+    before, after = sha(before, "the push event's before"), sha(after, "the push event's after")
     if set(before) == {"0"}:
         raise Unread("the push has no commit before it, a new branch")
     compared = api.get(f"/compare/{before}...{after}?per_page={PER_PAGE}")
@@ -204,27 +231,112 @@ def push_files(api, before, after):
     return names(files)
 
 
+def sha(value, what):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise Unread(f"{what} names no commit")
+    return value
+
+
+def branch_of(ref):
+    if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+        raise Unread("the push event names no branch")
+    return ref[len("refs/heads/"):]
+
+
+def ci_runs(api, commit, what):
+    """ci.yml's runs for a commit, as the API lists them."""
+    listed = api.get(f"/actions/workflows/ci.yml/runs?head_sha={commit}&per_page={PER_PAGE}")
+    runs = listed.get("workflow_runs") if isinstance(listed, dict) else None
+    if not isinstance(runs, list):
+        raise Unread(f"the runs of {what} could not be listed")
+    return [run for run in runs if isinstance(run, dict)]
+
+
 def measured(api, before, ref):
     """Whether ci.yml has a completed, successful run for `before` on the push's branch,
     started by a push or by hand: the commit the push stands on was measured and passed,
     by its own run on the hosts or, for a push that was skipped, by this same test."""
-    if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
-        raise Unread("the push event names no branch")
-    branch = ref[len("refs/heads/"):]
-    listed = api.get(f"/actions/workflows/ci.yml/runs?head_sha={before}&per_page={PER_PAGE}")
-    runs = listed.get("workflow_runs") if isinstance(listed, dict) else None
-    if not isinstance(runs, list):
-        raise Unread("the runs of the commit before the push could not be listed")
-    return any(isinstance(run, dict) and run.get("head_branch") == branch
-               and run.get("event") in ("push", "workflow_dispatch")
+    branch = branch_of(ref)
+    return any(run.get("head_branch") == branch and run.get("event") in ("push", "workflow_dispatch")
                and run.get("status") == "completed" and run.get("conclusion") == "success"
-               for run in runs)
+               for run in ci_runs(api, before, "the commit before the push"))
+
+
+def tree_of(api, commit):
+    listed = api.get(f"/git/commits/{commit}")
+    return sha((listed.get("tree") or {}).get("sha") if isinstance(listed, dict) else None,
+               f"commit {commit[:7]}'s tree")
+
+
+def not_on_a_host(api, run):
+    """The first of the bench jobs that did not pass on a host in a run, or None."""
+    listed = api.get(f"/actions/runs/{run}/jobs?filter=latest&per_page={PER_PAGE}")
+    jobs = listed.get("jobs") if isinstance(listed, dict) else None
+    if not isinstance(jobs, list):
+        raise Unread(f"the jobs of run {run} could not be listed")
+    for name in HOST_JOBS:
+        if not any(isinstance(job, dict) and job.get("name") == name and job.get("conclusion") == "success"
+                   and isinstance(job.get("labels"), list) and HOST_LABEL in job["labels"] for job in jobs):
+            return name
+    return None
+
+
+def measured_as(api, before, after, ref):
+    """(number, head, run): the pull request whose run measured the pushed commit's
+    tree on the hosts, its head and that run's id. Unread, in words for the log, when
+    the push is not such a merge: the module's text has each condition."""
+    branch = branch_of(ref)
+    pulls = api.get(f"/commits/{after}/pulls?per_page={PER_PAGE}")
+    if not isinstance(pulls, list):
+        raise Unread("the pull requests of the pushed commit could not be listed")
+    merged = [pull for pull in pulls if isinstance(pull, dict) and pull.get("merge_commit_sha") == after
+              and pull.get("merged_at") and (pull.get("base") or {}).get("ref") == branch]
+    if len(merged) != 1:
+        raise Unread(f"the pushed commit is the merge commit of {len(merged)} pull requests into {branch}, not of one")
+    number, source = merged[0].get("number"), merged[0].get("head") or {}
+    if not isinstance(number, int):
+        raise Unread("the pull request of the pushed commit has no number")
+    head, source_branch = sha(source.get("sha"), f"pull request {number}'s head"), source.get("ref")
+    if (source.get("repo") or {}).get("full_name") != api.repository or not isinstance(source_branch, str):
+        raise Unread(f"pull request {number} is not from a branch of this repository")
+    # A pull request's run is of its head merged with its base as the base stood then.
+    # With the commit before the push in the head, every such base was in the head
+    # too, and the run was of the head's own tree.
+    compared = api.get(f"/compare/{before}...{head}?per_page=1")
+    status = compared.get("status") if isinstance(compared, dict) else None
+    if status not in ("ahead", "identical"):
+        raise Unread(f"the commit before the push, {before[:7]}, is not in pull request {number}'s head "
+                     f"({status}), so the head's run may have been of another tree")
+    if tree_of(api, after) != tree_of(api, head):
+        raise Unread(f"pull request {number}'s head {head[:7]} has another tree than the pushed commit")
+    # The runs of a head do not say which pull request they were for once it has
+    # merged, so no pull request from this branch may have had another base.
+    siblings = api.get(f"/pulls?state=all&head={api.owner}:{source_branch}&per_page={PER_PAGE}")
+    if not isinstance(siblings, list) or len(siblings) >= PER_PAGE:
+        raise Unread(f"the pull requests from {source_branch} could not be listed whole")
+    if any(not isinstance(pull, dict) or (pull.get("base") or {}).get("ref") != branch for pull in siblings):
+        raise Unread(f"{source_branch} has a pull request into another branch than {branch}, whose run at this "
+                     f"head would have been of another tree")
+    runs = sorted((run["id"] for run in ci_runs(api, head, f"pull request {number}'s head")
+                   if run.get("event") == "pull_request" and run.get("head_branch") == source_branch
+                   and isinstance(run.get("id"), int)), reverse=True)
+    if not runs:
+        raise Unread(f"pull request {number}'s head {head[:7]} has no run of ci.yml by a pull request event "
+                     f"from {source_branch}")
+    lacking = []
+    for run in runs[:RUNS_READ]:
+        name = not_on_a_host(api, run)
+        if name is None:
+            return number, head, run
+        lacking.append(f"run {run} has no `{name}` that passed on its host")
+    raise Unread(f"no run of pull request {number}'s head {head[:7]} passed its bench jobs on the hosts: "
+                 + "; ".join(lacking))
 
 
 def changed_files(env):
     """(files, base): the files of the event's change, and for a push what `measured`
-    needs to ask whether the commit before it has a green run, else None. Unread when
-    the event is one this does not list."""
+    and `measured_as` need, the API, the commits before and after and the branch, else
+    None. Unread when the event is one this does not list."""
     event = env.get("GITHUB_EVENT_NAME", "")
     if event not in ("pull_request", "push"):
         raise Unread(f"the event is {event or 'not named'}, which runs the bench whatever changed")
@@ -239,8 +351,8 @@ def changed_files(env):
         if not isinstance(number, int):
             raise Unread("the pull request event names no number")
         return pull_request_files(api, number), None
-    before = payload.get("before")
-    return push_files(api, before, payload.get("after")), (api, before, payload.get("ref"))
+    before, after = payload.get("before"), payload.get("after")
+    return push_files(api, before, after), (api, before, after, payload.get("ref"))
 
 
 def main(argv, env, out=print):
@@ -256,12 +368,27 @@ def main(argv, env, out=print):
     try:
         files, base = changed_files(env)
         runs, lines = decide(files)
-        # Asked only when the files alone would skip the bench: a push that runs it
-        # measures the commit before it as well, whatever became of that commit's run.
-        if not runs and base is not None and not measured(*base):
-            raise Unread(f"the commit before the push, {base[1][:7]}, has no completed, successful run of "
-                         f"ci.yml on its branch: its run was replaced while it waited, failed or is not "
-                         f"there, so this run measures both")
+        if base is not None:
+            api, before, after, ref = base
+            # Asked only when the files alone would skip the bench: a push that runs it
+            # measures the commit before it as well, whatever became of that commit's run.
+            if not runs and not measured(api, before, ref):
+                raise Unread(f"the commit before the push, {before[:7]}, has no completed, successful run of "
+                             f"ci.yml on its branch: its run was replaced while it waited, failed or is not "
+                             f"there, so this run measures both")
+            # A push that can move the bench does not, when its tree was measured
+            # already by the pull request it merged (ADR 0074).
+            if runs:
+                try:
+                    number, head, run = measured_as(api, before, after, ref)
+                except Unread as why:
+                    lines.append(f"and no pull request's run measured this tree on the hosts: {why}")
+                else:
+                    runs = False
+                    lines = [f"the push is the merge of pull request {number}, whose head {head[:7]} has this "
+                             f"commit's tree and whose run {run} passed its bench jobs on the hosts, so the "
+                             f"bench jobs report without their hosts (ADR 0074; {DOCS}): the next change's "
+                             f"\"before\" figures are run {run}'s"]
     except Unread as why:
         runs, lines = True, [f"the bench runs, since a skip needs every file read and the base measured: {why}"]
     for line in lines:
