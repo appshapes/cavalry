@@ -481,7 +481,9 @@ integer division: 2 of 3, 3 of 5, 4 of 7, and 1 of 1.
 **The commit position.** The leader keeps each member's last append position, the
 term it was reported for and the time it arrived, its own among them, set to its own
 append position and term on every duty cycle. A member is active while its last
-append position is younger than the leader heartbeat timeout. A member counts toward
+append position is younger than the leader heartbeat timeout: the position it last
+reported, in an append position or in a canvass position, which carries its append
+position too, so that either keeps it active (ADR 0083). A member counts toward
 the quorum position only when it is active, its last report was for the leader's
 term, and the position is at or past the leader's term base log position: a position
 below the base, a canvass position for an older term and an append position for an
@@ -602,7 +604,12 @@ recording that begins at or below the position and ends above it and `purge
 recording` on every recording that begins above it, every recorded term whose base is
 above the position leaving its record of terms with them, so that it votes as a
 member of no term it no longer holds, and a message whose next term base log
-position is −1 truncates nothing. A reader
+position is −1 truncates nothing. A truncation is counted in
+`cluster.log_truncations`. A reader that knows a commit position above the position
+it is told to truncate to truncates nothing and fails its election, counted in
+`cluster.truncations_refused` and `cluster.elections_failed`: a committed entry is
+never truncated, and a leader that holds what was committed names no such position
+(ADR 0083). A reader
 whose append position is then below the leader's term base log position does one of
 three things: it goes to follower log replication with the stop position the message
 gives, the next term base log position when its append position is below it, else the
@@ -917,6 +924,8 @@ that a reader of a counters file knows which transition it saw.
 | `cluster.leader_heartbeat_timeouts` | a follower that held an election for want of a leader's heartbeat |
 | `cluster.leader_step_downs` | a leader whose election had closed that held an election on a canvass position with either term, a request vote whose candidate term id or a commit position whose leadership term id above its own term |
 | `cluster.higher_terms_seen` | a follower whose election had closed that held an election on a request vote whose candidate term id or a commit position whose leadership term id above its own term: a term the cluster began without it (ADR 0082) |
+| `cluster.log_truncations` | a member that truncated its log to the next term base log position of a new leadership term: the tail of an older term that no quorum recorded ("Messages during an election"; ADR 0083) |
+| `cluster.truncations_refused` | a member told to truncate below the commit position it knows, which kept its log and failed its election ("Messages during an election"; ADR 0083) |
 | `cluster.votes_for`, `cluster.votes_against` | a vote sent, by its value |
 | `cluster.candidacies` | a ballot begun: a member in nominate that stored candidate term + 1, voted for itself and went to candidate ballot, `cluster.role` going to candidate (ADR 0081) |
 | `cluster.ballots_lost` | a ballot that ended with no leader for the member, which canvasses again: a candidate at the election timeout short of a quorum or with a vote against, a member in follower ballot whose candidate's new leadership term did not come within the election timeout, or either that reads a new leadership term for a log term it did not report; two members that count one with `cluster.candidacies` each are a split vote (ADR 0081) |

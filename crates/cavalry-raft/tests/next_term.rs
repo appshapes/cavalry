@@ -10,7 +10,10 @@ mod common;
 
 use cavalry_proto::cluster::Message;
 use cavalry_raft::{Consensus, ElectionState, Role};
-use common::{Stub, append_position, at, canvass_position, new_leadership_term};
+use common::{
+    Stub, append_position, at, canvass_position, follow_term, leadership_term, lose_the_leader,
+    new_leadership_term,
+};
 
 fn work(member: &mut Consensus, io: &mut Stub, ms: u64) {
     member.do_work(at(ms), io).expect("no fault");
@@ -18,55 +21,6 @@ fn work(member: &mut Consensus, io: &mut Stub, ms: u64) {
 
 fn read(member: &mut Consensus, io: &mut Stub, ms: u64, message: &Message<'_>) {
     member.on_message(at(ms), message, io).expect("no fault");
-}
-
-/// Member 2's new leadership term for term 1, which begins at 64, to a member whose
-/// log is of term 0.
-fn term_one() -> Message<'static> {
-    Message::NewLeadershipTerm {
-        log_leadership_term_id: 0,
-        next_leadership_term_id: 1,
-        next_term_base_log_position: 64,
-        next_log_position: -1,
-        leadership_term_id: 1,
-        term_base_log_position: 64,
-        log_position: 64,
-        leader_recording_id: 5,
-        timestamp: 1_700_000_000_000,
-        leader_member_id: 2,
-        log_session_id: 78,
-        app_version: 0,
-        is_startup: true,
-        commit_position: 64,
-    }
-}
-
-/// Follows the leader's term from canvass to closed, with the image of its log joining
-/// at `join`, from `ms` on; returns the millisecond its election closed at.
-fn follow(member: &mut Consensus, io: &mut Stub, ms: u64, term: &Message<'_>, join: i64) -> u64 {
-    assert_eq!(member.election_state(), ElectionState::Canvass);
-    read(member, io, ms, term);
-    assert_eq!(member.election_state(), ElectionState::FollowerReplay);
-    work(member, io, ms + 1);
-    work(member, io, ms + 2);
-    io.image = Some(join);
-    work(member, io, ms + 3);
-    work(member, io, ms + 4);
-    assert_eq!(member.election_state(), ElectionState::Closed);
-    ms + 4
-}
-
-/// The follower hears nothing for the leader heartbeat timeout after `closed_at` and
-/// canvasses again, with `appended` in its recordings; returns the next millisecond.
-fn lose_the_leader(member: &mut Consensus, io: &mut Stub, closed_at: u64, appended: i64) -> u64 {
-    let ms = closed_at + 10_000;
-    work(member, io, ms);
-    assert_eq!(member.election_state(), ElectionState::Init);
-    io.image = None;
-    io.append_position = appended;
-    work(member, io, ms + 1);
-    assert_eq!(member.election_state(), ElectionState::Canvass);
-    ms + 2
 }
 
 /// `member`'s canvass position, reporting a log of `term` that ends at `position`.
@@ -85,10 +39,11 @@ fn a_leader_names_the_term_its_record_holds_next_after_the_members_own() {
 
     // Term 0, led by member 1 from 0.
     work(&mut member, &mut io, 1);
-    let closed = follow(&mut member, &mut io, 2, &new_leadership_term(1, 0), 0);
+    let closed = follow_term(&mut member, &mut io, 2, &new_leadership_term(1, 0), 0);
     // Term 1, led by member 2 from 64, after 64 bytes of term 0.
     let ms = lose_the_leader(&mut member, &mut io, closed, 64);
-    let closed = follow(&mut member, &mut io, ms, &term_one(), 64);
+    let term_one = leadership_term(2, 1, 64, 64, 0, [1, 64, -1]);
+    let closed = follow_term(&mut member, &mut io, ms, &term_one, 64);
     assert_eq!(member.leader_member_id(), 2);
     // Term 2, its own, from 96, after 32 bytes of term 1.
     let ms = lose_the_leader(&mut member, &mut io, closed, 96);
